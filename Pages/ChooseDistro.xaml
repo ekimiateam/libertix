@@ -1,0 +1,37 @@
+﻿<Page x:Class="Libertix.ChooseDistro"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+      mc:Ignorable="d"
+      Title="Choose a Distribution">
+
+    <Grid Background="#232136">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Label Grid.Row="0" 
+               Content="Choose your flavor of Linux!" 
+               HorizontalAlignment="Center" 
+               Margin="20"
+               FontSize="48"
+               FontWeight="Light"
+               Foreground="#E0DEF4">
+            <Label.LayoutTransform>
+                <ScaleTransform x:Name="LabelScale" 
+                               ScaleX="1" 
+                               ScaleY="1"/>
+            </Label.LayoutTransform>
+        </Label>
+
+        <ScrollViewer Grid.Row="1" 
+                      VerticalScrollBarVisibility="Auto" 
+                      HorizontalScrollBarVisibility="Disabled">
+            <Grid>
+                <!-- Content will be added here later -->
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Page>
