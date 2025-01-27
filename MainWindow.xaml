@@ -1,0 +1,65 @@
+﻿<Window x:Class="Libertix.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:Libertix"
+        mc:Ignorable="d"
+        Title="Libertix" 
+        Height="450" Width="800"
+        MinHeight="450" MinWidth="650"
+        WindowStartupLocation="CenterScreen">
+    
+    <Window.Resources>
+        <Style x:Key="ModernButton" TargetType="Button">
+            <Setter Property="Background" Value="#2a273f"/>
+            <Setter Property="Foreground" Value="#E0DEF4"/>
+            <Setter Property="Padding" Value="20,10"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="8"
+                                BorderThickness="0"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" 
+                                            VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#EA9A97"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#eb6f92"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Frame x:Name="MainFrame" NavigationUIVisibility="Hidden">
+        <Frame.Content>
+            <Grid Background="#232136">
+                <StackPanel VerticalAlignment="Center">
+                    <Label Content="Welcome to Libertix!" 
+                           HorizontalAlignment="Center"
+                           Margin="0,0,0,40"
+                           FontSize="32"
+                           FontWeight="Light"
+                           Foreground="#E0DEF4"/>
+                    
+                    <Button Content="Get Started"
+                            Style="{StaticResource ModernButton}"
+                            Width="200"
+                            Height="50"
+                            HorizontalAlignment="Center"
+                            Click="Button_Click"/>
+                </StackPanel>
+            </Grid>
+        </Frame.Content>
+    </Frame>
+</Window>

@@ -1,0 +1,81 @@
+﻿<Page x:Class="Libertix.ChooseDistro"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+      mc:Ignorable="d"
+      Title="Choose a Distribution"
+      xmlns:local="clr-namespace:Libertix">
+
+    <Page.Resources>
+        <Style x:Key="DistroCard" TargetType="Border">
+            <Setter Property="Background" Value="#2a273f"/>
+            <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Margin" Value="10"/>
+            <Setter Property="Padding" Value="15"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#363252"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Page.Resources>
+
+    <Grid Background="#232136">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Label Grid.Row="0" 
+               Content="Choose your flavor of Linux!" 
+               HorizontalAlignment="Center" 
+               Margin="20"
+               FontSize="48"
+               FontWeight="Light"
+               Foreground="#E0DEF4">
+            <Label.LayoutTransform>
+                <ScaleTransform x:Name="LabelScale" 
+                               ScaleX="1" 
+                               ScaleY="1"/>
+            </Label.LayoutTransform>
+        </Label>
+
+        <ScrollViewer Grid.Row="1" 
+                      VerticalScrollBarVisibility="Auto" 
+                      HorizontalScrollBarVisibility="Disabled">
+            <ItemsControl x:Name="DistrosItemsControl">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Style="{StaticResource DistroCard}"
+                                Width="300"
+                                MouseLeftButtonDown="Border_MouseLeftButtonDown">
+                            <StackPanel>
+                                <Image Source="{Binding ImageUrl}" 
+                                       Height="150" 
+                                       Stretch="Uniform"
+                                       Margin="0,0,0,10"/>
+                                <TextBlock Text="{Binding Name}"
+                                           FontSize="24"
+                                           FontWeight="SemiBold"
+                                           Foreground="#E0DEF4"
+                                           Margin="0,0,0,5"/>
+                                <TextBlock Text="{Binding Description}"
+                                           Foreground="#E0DEF4"
+                                           TextWrapping="Wrap"/>
+                                <TextBlock Text="{Binding SizeInGB, StringFormat={}{0:N2} GB}"
+                                           Foreground="#908caa"
+                                           Margin="0,10,0,0"/>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </ScrollViewer>
+    </Grid>
+</Page>
