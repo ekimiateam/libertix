@@ -37,9 +37,6 @@ artifacts/
 .idea/
 *.sln.iml
 
-# Visual Studio Code
-.vscode/
-
 # Windows
 *.db
 *.DS_Store
