@@ -1,0 +1,192 @@
+﻿<Page x:Class="Libertix.Pages.ResizeDisk"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+      xmlns:local="clr-namespace:Libertix.Pages"
+      xmlns:controls="clr-namespace:Libertix.Controls"
+      mc:Ignorable="d"
+      Title="Resize Disk">
+
+    <Page.Resources>
+        <Style x:Key="SliderRepeatButton" TargetType="RepeatButton">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RepeatButton">
+                        <Border Height="4" CornerRadius="2" Background="{TemplateBinding Background}"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SliderThumb" TargetType="Thumb">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Grid>
+                            <Ellipse Width="20" Height="20" Fill="#eb6f92"/>
+                            <Ellipse Width="16" Height="16" Fill="#232136"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="CustomSlider" TargetType="Slider">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto" MinHeight="{TemplateBinding MinHeight}"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Track Grid.Row="1" x:Name="PART_Track">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="#eb6f92"/>
+                                </Track.DecreaseRepeatButton>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="#363252"/>
+                                </Track.IncreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource SliderThumb}"/>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Page.Resources>
+
+    <Grid Background="#232136">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Label Grid.Row="0" 
+               Content="Resize Your Disk" 
+               HorizontalAlignment="Center" 
+               Margin="20"
+               FontSize="48"
+               FontWeight="Light"
+               Foreground="#E0DEF4"/>
+
+        <!-- Disk visualization -->
+        <Border Grid.Row="1" 
+                Height="100" 
+                Margin="40,20"
+                BorderThickness="1"
+                BorderBrush="#908caa"
+                CornerRadius="4">
+            <Grid x:Name="DiskVisualization">
+                <Grid.ColumnDefinitions>
+                    <!-- Windows partition (used) -->
+                    <ColumnDefinition Width="{Binding WindowsUsedPercentage}"/>
+                    <!-- Windows partition (free) -->
+                    <ColumnDefinition Width="{Binding WindowsFreePercentage}"/>
+                    <!-- ISO partition (fixed) -->
+                    <ColumnDefinition Width="{Binding IsoPartitionPercentage}"/>
+                    <!-- Linux installation partition (adjustable) -->
+                    <ColumnDefinition Width="{Binding LinuxPartitionPercentage}"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Windows Used Space -->
+                <Rectangle Grid.Column="0" Fill="#3e8fb0"/>
+                
+                <!-- Windows Free Space -->
+                <Rectangle Grid.Column="1" Fill="#e0def4"/>
+                
+                <!-- ISO Partition -->
+                <Rectangle Grid.Column="2" Fill="#908caa"/>
+                
+                <!-- Linux Installation Partition -->
+                <Rectangle Grid.Column="3" Fill="#eb6f92"/>
+
+                <!-- Partition Labels -->
+                <TextBlock Grid.Column="0" Text="Windows" Foreground="#232136" 
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="2" Text="ISO" Foreground="#232136"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="3" Text="Linux" Foreground="#232136"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+        </Border>
+
+        <!-- Slider and size display -->
+        <StackPanel Grid.Row="2" Margin="40,20">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                
+                <Slider x:Name="PartitionSlider"
+                        Style="{StaticResource CustomSlider}"
+                        Minimum="{Binding MinimumSize}"
+                        Maximum="{Binding MaximumSize}"
+                        Value="{Binding SelectedSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        TickFrequency="1"
+                        IsSnapToTickEnabled="True"/>
+                
+                <TextBlock Grid.Column="1"
+                           Margin="20,0,0,0"
+                           Foreground="#E0DEF4"
+                           Text="{Binding SelectedSize, StringFormat={}{0:N0} GB}"/>
+            </Grid>
+
+            <!-- Size breakdown with updated bindings -->
+            <StackPanel Margin="0,20,0,0">
+                <TextBlock Foreground="#3e8fb0" 
+                           Text="{Binding WindowsUsedSpace, StringFormat=Windows Used: {0:N0} GB, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Foreground="#e0def4" 
+                           Text="{Binding WindowsFreeSpace, StringFormat=Windows Free: {0:N0} GB, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBlock Foreground="#908caa" 
+                           Text="{Binding IsoSize, StringFormat=ISO Partition: {0:N0} GB}"/>
+                <TextBlock Foreground="#eb6f92" 
+                           Text="{Binding LinuxSize, StringFormat=Linux Partition: {0:N0} GB, UpdateSourceTrigger=PropertyChanged}"/>
+            </StackPanel>
+        </StackPanel>
+
+        <!-- Error Panel -->
+        <controls:ErrorPanel x:Name="FallbackPanel"
+                           Grid.Row="1"
+                           Grid.RowSpan="2"
+                           Visibility="{Binding HasError, Converter={StaticResource BoolToVisibilityConverter}}"
+                           MaxWidth="800"
+                           Margin="40"
+                           Title="Not enough space available"
+                           Message="Your system needs more free space to install Linux. Please free up some space and try again."
+                           Details="{Binding SystemRequirements}"
+                           AdditionalDetails="{Binding AdditionalSpaceNeeded}"
+                           ActionButtonText="Open Disk Cleanup"
+                           ActionCommand="{Binding OpenDiskCleanupCommand}"/>
+
+        <Grid Grid.Row="3" Margin="20">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            
+            <Button Content="Back"
+                    Style="{StaticResource ModernButton}"
+                    Width="200"
+                    Height="50"
+                    HorizontalAlignment="Left"
+                    Click="BackButton_Click"/>
+                    
+            <Button Grid.Column="1"
+                    Content="Next"
+                    Style="{StaticResource ModernButton}"
+                    Width="200"
+                    Height="50"
+                    HorizontalAlignment="Right"
+                    Click="NextButton_Click"
+                    IsEnabled="{Binding ElementName=FallbackPanel, Path=Visibility, Converter={StaticResource VisibilityToBoolConverter}, ConverterParameter=Inverted}"/>
+        </Grid>
+    </Grid>
+</Page>
