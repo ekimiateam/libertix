@@ -55,6 +55,7 @@
       <Generator>MSBuild:Compile</Generator>
       <SubType>Designer</SubType>
     </ApplicationDefinition>
+    <Compile Include="Models\DistroInfo.cs" />
     <Compile Include="Pages\ChooseDistro.xaml.cs">
       <DependentUpon>ChooseDistro.xaml</DependentUpon>
     </Compile>

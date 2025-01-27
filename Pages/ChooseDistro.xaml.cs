@@ -1,23 +1,13 @@
-<<<<<<< HEAD
-﻿using System.Windows.Controls;
-=======
 ﻿using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using Libertix.Models;
-using System.Threading.Tasks;
->>>>>>> master
 
 namespace Libertix
 {
     public partial class ChooseDistro : Page
     {
-<<<<<<< HEAD
-        public ChooseDistro()
-        {
-            InitializeComponent();
-=======
         private readonly List<DistroInfo> _distros;
 
         public ChooseDistro()
@@ -31,21 +21,12 @@ namespace Libertix
                     Name = "Zorin OS 17.2 Core",
                     Description = "A powerful, secure and easy to use operating system designed for everyone",
                     ImageUrl = "https://assets.zorincdn.com/images/releases/17/desktop.jpg",
-                    IsoUrl = "https://mirrors.ircam.fr/pub/zorinos-isos/17/Zorin-OS-17.2-Core-64-bit.iso"
+                    IsoUrl = "https://mirrors.ircam.fr/pub/zorinos-isos/17/Zorin-OS-17.2-Core-64-bit.iso",
+                    SizeInGB = 3.2
                 }
-                // Add more distributions here
             };
 
-            LoadDistroSizes();
             DistrosItemsControl.ItemsSource = _distros;
-        }
-
-        private async void LoadDistroSizes()
-        {
-            foreach (var distro in _distros)
-            {
-                await distro.FetchSizeFromWeb();
-            }
         }
 
         private void Border_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -58,7 +39,6 @@ namespace Libertix
                 // TODO: Navigate to confirmation page
                 MessageBox.Show($"Selected {distro.Name}");
             }
->>>>>>> master
         }
     }
 }
