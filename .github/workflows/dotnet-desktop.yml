@@ -52,14 +52,12 @@ jobs:
       matrix:
         configuration: [Debug, Release]
 
-    runs-on: windows-latest  # For a list of available runner types, refer to
-                             # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
+    runs-on: windows-latest
 
     env:
-      Solution_Name: Libertix.sln                         # Updated solution name
-      Test_Project_Path: Libertix.Tests\Libertix.Tests.csproj  # Add if you have tests
-      Wap_Project_Directory: Libertix                    # Main project directory
-      Wap_Project_Path: Libertix\Libertix.csproj         # Project path
+      Solution_Name: Libertix.sln
+      Project_Directory: .
+      Project_Path: Libertix.csproj
 
     steps:
     - name: Checkout
@@ -67,38 +65,21 @@ jobs:
       with:
         fetch-depth: 0
 
-    # Install the .NET Core workload
-    - name: Install .NET Core
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 8.0.x
-
-    # Add  MSBuild to the PATH: https://github.com/microsoft/setup-msbuild
-    - name: Setup MSBuild.exe
+    - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    # Add NuGet restore step
     - name: Restore NuGet packages
-      run: nuget restore $env:Solution_Name
+      run: nuget restore ${{ env.Solution_Name }}
 
-    # Comment out or remove test step if you don't have tests yet
-    # - name: Execute unit tests
-    #   run: dotnet test
+    - name: Build
+      run: msbuild ${{ env.Solution_Name }} /p:Configuration=${{ matrix.configuration }} /p:Platform="Any CPU"
 
-    # Build the application
-    - name: Build the application
-      run: |
-        msbuild $env:Solution_Name /p:Configuration=$env:Configuration /p:Platform="Any CPU"
-      env:
-        Configuration: ${{ matrix.configuration }}
-
-    # Upload build artifacts
     - name: Upload build artifacts
       if: success()
       uses: actions/upload-artifact@v4
       with:
         name: Libertix-${{ matrix.configuration }}
         path: |
-          Libertix/bin/${{ matrix.configuration }}/net481/
-          !Libertix/bin/${{ matrix.configuration }}/net481/*.pdb
+          bin/${{ matrix.configuration }}/**
+          !bin/${{ matrix.configuration }}/**/*.pdb
         if-no-files-found: error
