@@ -1,10 +1,12 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using Libertix.Helpers;
 using Libertix.Models;
-using Libertix.Pages;  // Add this line
-using System;
+using Libertix.Pages;
 using System.ComponentModel;
 using System.Windows.Media.Animation;
 
@@ -12,7 +14,9 @@ namespace Libertix
 {
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
-        private readonly List<DistroInfo> _distros;
+        private const string STATE_KEY = "ChooseDistro";
+        private ObservableCollection<DistroInfo> _distros;
+        private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
 
         public bool IsDistroSelected
@@ -30,13 +34,20 @@ namespace Libertix
         public ChooseDistro()
         {
             InitializeComponent();
-            
-            _distros = new List<DistroInfo>
+            InitializeDistros();
+            LoadState();
+            DataContext = this;
+            IsDistroSelected = false;
+        }
+
+        private void InitializeDistros()
+        {
+            _distros = new ObservableCollection<DistroInfo>
             {
                 new DistroInfo 
                 {
                     Name = "Zorin OS 17.2 Core",
-                    Description = "A powerful, secure and easy to use operating system designed for everyone",
+                    DescriptionKey = "ZorinDescription",
                     ImageUrl = "https://assets.zorincdn.com/images/releases/17/desktop.jpg",
                     IsoUrl = "https://mirrors.ircam.fr/pub/zorinos-isos/17/Zorin-OS-17.2-Core-64-bit.iso",
                     SizeInGB = 3.2
@@ -44,38 +55,82 @@ namespace Libertix
                 new DistroInfo 
                 {
                     Name = "Ubuntu 24.04 LTS",
-                    Description = "Fast, free and full of new features. Ubuntu is the world’s favourite Linux operating system",
+                    DescriptionKey = "UbuntuDescription",
                     ImageUrl = "https://res.cloudinary.com/canonical/image/fetch/f_auto,q_auto,fl_sanitize,c_fill,w_720/https://lh7-us.googleusercontent.com/7-Wcy72kffGY3f_KhI4VNoDGow_nnsGwB10oSO2oACqBYORb5xRWuQSKwAkaLE0YWciUWlrf5Hk2yKNb66kdo7t3d8YQSu1yS1JaJiGliqn3aFDAG5Qy558ApHb_did8V0EGmWKaH2DzhOnGa8pR50I",
                     IsoUrl = "https://releases.ubuntu.com/noble/ubuntu-24.04.1-desktop-amd64.iso",
                     SizeInGB = 5.8
                 }
             };
-
             DistrosItemsControl.ItemsSource = _distros;
-            DataContext = this;
-            IsDistroSelected = false;
+        }
+
+        private void SaveState()
+        {
+            if (_selectedDistro != null)
+            {
+                var state = new PageState
+                {
+                    PageType = typeof(ChooseDistro),
+                    StateKey = STATE_KEY,
+                    State = _selectedDistro.Name // Save just the name of the selected distro
+                };
+                StateManager.SaveState(STATE_KEY, state);
+            }
+        }
+
+        private void LoadState()
+        {
+            var state = StateManager.GetState(STATE_KEY);
+            if (state?.State is string selectedDistroName)
+            {
+                // Find and select the previously selected distro
+                foreach (var distro in _distros)
+                {
+                    if (distro.Name == selectedDistroName)
+                    {
+                        SelectDistro(distro);
+                        break;
+                    }
+                }
+            }
+        }
+
+        private void SelectDistro(DistroInfo distro)
+        {
+            // Deselect previous selection
+            if (_selectedDistro != null)
+            {
+                _selectedDistro.IsSelected = false;
+            }
+
+            // Select new distro
+            _selectedDistro = distro;
+            _selectedDistro.IsSelected = true;
+            
+            // Enable next button
+            NextButton.IsEnabled = true;
         }
 
         private void Border_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            if (sender is Border border && border.DataContext is DistroInfo distro)
+            if (sender is FrameworkElement element && element.DataContext is DistroInfo distro)
             {
-                // Deselect previous selection
-                foreach (var item in _distros)
+                if (_selectedDistro != distro)
                 {
-                    item.IsSelected = false;
+                    StateManager.ClearDependentStates("ResizeDisk");
                 }
-                
-                distro.IsSelected = true;
-                App.Current.Properties["SelectedDistro"] = distro;
-                IsDistroSelected = true;
+                SelectDistro(distro);
             }
         }
 
         private void NextButton_Click(object sender, RoutedEventArgs e)
         {
-            var resizeDiskPage = new ResizeDisk();
-            NavigateWithAnimation(resizeDiskPage);
+            if (_selectedDistro != null)
+            {
+                SaveState();
+                App.Current.Properties["SelectedDistro"] = _selectedDistro;
+                NavigationHelper.NavigateWithAnimation(NavigationService, new ResizeDisk(), TimeSpan.FromSeconds(0.3));
+            }
         }
 
         private void NavigateWithAnimation(Page nextPage)

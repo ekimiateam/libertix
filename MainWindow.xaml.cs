@@ -1,7 +1,10 @@
 ﻿using System;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Navigation;
+using Libertix.Helpers;
 
 namespace Libertix
 {
@@ -10,59 +13,33 @@ namespace Libertix
         public MainWindow()
         {
             InitializeComponent();
+            LanguageComboBox.SelectedIndex = 0; // Default to English
         }
 
         private void Button_Click(object sender, RoutedEventArgs e)
         {
-            // Create new page instance
-            var secondPage = new ChooseDistro();
+            StateManager.ClearState("ChooseDistro"); // Clear state when starting fresh
+            NavigationHelper.NavigateWithAnimationInFrame(
+                MainFrame,
+                new ChooseDistro(),
+                TimeSpan.FromSeconds(0.3));
+        }
 
-            // Create fade out animation
-            var fadeOut = new DoubleAnimation
+        private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (LanguageComboBox.SelectedItem is ComboBoxItem item)
             {
-                From = 1.0,
-                To = 0.0,
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
+                string cultureName = item.Tag.ToString();
+                Localization.SetLanguage(cultureName);
+            }
+        }
 
-            // Create slide animation
-            var slideOut = new ThicknessAnimation
+        private void LanguageSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
             {
-                From = new Thickness(0),
-                To = new Thickness(-100, 0, 0, 0),
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
-
-            // When animations complete, navigate to new page and play entrance animations
-            fadeOut.Completed += (s, _) =>
-            {
-                MainFrame.Navigate(secondPage);
-
-                // Create fade in animation
-                var fadeIn = new DoubleAnimation
-                {
-                    From = 0.0,
-                    To = 1.0,
-                    Duration = TimeSpan.FromSeconds(0.3)
-                };
-
-                // Create slide in animation
-                var slideIn = new ThicknessAnimation
-                {
-                    From = new Thickness(100, 0, 0, 0),
-                    To = new Thickness(0),
-                    Duration = TimeSpan.FromSeconds(0.3)
-                };
-
-                secondPage.BeginAnimation(UIElement.OpacityProperty, fadeIn);
-                secondPage.BeginAnimation(FrameworkElement.MarginProperty, slideIn);
-            };
-
-            // Start exit animations - with proper casting
-            if (MainFrame.Content is UIElement currentPage)
-            {
-                currentPage.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-                currentPage.BeginAnimation(FrameworkElement.MarginProperty, slideOut);
+                string lang = (string)item.Tag;
+                Localization.SetLanguage(lang);
             }
         }
     }

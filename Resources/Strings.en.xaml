@@ -1,0 +1,35 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:system="clr-namespace:System;assembly=mscorlib">
+    
+    <!-- MainWindow -->
+    <system:String x:Key="Welcome">Welcome to Libertix!</system:String>
+    <system:String x:Key="Subtitle">A simple and modern Linux installer</system:String>
+    <system:String x:Key="GetStarted">Get Started</system:String>
+    <system:String x:Key="Language">Language</system:String>
+
+    <!-- ChooseDistro -->
+    <system:String x:Key="ChooseDistroTitle">Choose your flavor of Linux!</system:String>
+    
+    <!-- Distro Descriptions -->
+    <system:String x:Key="ZorinDescription">A powerful, secure and easy to use operating system designed for everyone.</system:String>
+    <system:String x:Key="UbuntuDescription">Fast, free and full of new features. Ubuntu is the world's favourite Linux operating system.</system:String>
+
+    <!-- ResizeDisk -->
+    <system:String x:Key="ResizeDiskTitle">Resize Your Disk</system:String>
+    <system:String x:Key="Windows">Windows</system:String>
+    <system:String x:Key="Linux">Linux</system:String>
+    <system:String x:Key="NotEnoughSpace">Not enough space available</system:String>
+    <system:String x:Key="FreeUpSpace">Your system needs more free space to install Linux. Please free up some space and try again.</system:String>
+    <system:String x:Key="OpenDiskCleanup">Open Disk Cleanup</system:String>
+
+    <!-- AccountCreation -->
+    <system:String x:Key="AccountCreationTitle">Create Your Linux Account</system:String>
+    <system:String x:Key="Username">Username</system:String>
+    <system:String x:Key="Password">Password</system:String>
+    <system:String x:Key="ComputerName">Computer Name</system:String>
+
+    <!-- Common -->
+    <system:String x:Key="Back">Back</system:String>
+    <system:String x:Key="Next">Next</system:String>
+</ResourceDictionary>

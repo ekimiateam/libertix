@@ -35,7 +35,7 @@
         </Grid.RowDefinitions>
 
         <Label Grid.Row="0" 
-               Content="Choose your flavor of Linux!" 
+               Content="{DynamicResource ChooseDistroTitle}" 
                HorizontalAlignment="Center" 
                Margin="20"
                FontSize="48"
@@ -109,7 +109,8 @@
         </ScrollViewer>
 
         <Button Grid.Row="2"
-                Content="Next"
+                x:Name="NextButton"
+                Content="{DynamicResource Next}"
                 Style="{StaticResource ModernButton}"
                 Width="200"
                 Height="50"

@@ -69,7 +69,7 @@
         </Grid.RowDefinitions>
 
         <Label Grid.Row="0" 
-               Content="Resize Your Disk" 
+               Content="{DynamicResource ResizeDiskTitle}" 
                HorizontalAlignment="Center" 
                Margin="20"
                FontSize="48"
@@ -97,6 +97,11 @@
 
                 <!-- Windows Used Space -->
                 <Rectangle Grid.Column="0" Fill="#3e8fb0"/>
+                <TextBlock Grid.Column="0" 
+                           Text="{DynamicResource Windows}" 
+                           Foreground="#232136" 
+                           HorizontalAlignment="Center" 
+                           VerticalAlignment="Center"/>
                 
                 <!-- Windows Free Space -->
                 <Rectangle Grid.Column="1" Fill="#e0def4"/>
@@ -106,14 +111,11 @@
                 
                 <!-- Linux Installation Partition -->
                 <Rectangle Grid.Column="3" Fill="#eb6f92"/>
-
-                <!-- Partition Labels -->
-                <TextBlock Grid.Column="0" Text="Windows" Foreground="#232136" 
-                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                <TextBlock Grid.Column="2" Text="ISO" Foreground="#232136"
-                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                <TextBlock Grid.Column="3" Text="Linux" Foreground="#232136"
-                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                <TextBlock Grid.Column="3" 
+                           Text="{DynamicResource Linux}" 
+                           Foreground="#232136"
+                           HorizontalAlignment="Center" 
+                           VerticalAlignment="Center"/>
             </Grid>
         </Border>
 
@@ -159,11 +161,11 @@
                            Visibility="{Binding HasError, Converter={StaticResource BoolToVisibilityConverter}}"
                            MaxWidth="800"
                            Margin="40"
-                           Title="Not enough space available"
-                           Message="Your system needs more free space to install Linux. Please free up some space and try again."
+                           Title="{DynamicResource NotEnoughSpace}"
+                           Message="{DynamicResource FreeUpSpace}"
                            Details="{Binding SystemRequirements}"
                            AdditionalDetails="{Binding AdditionalSpaceNeeded}"
-                           ActionButtonText="Open Disk Cleanup"
+                           ActionButtonText="{DynamicResource OpenDiskCleanup}"
                            ActionCommand="{Binding OpenDiskCleanupCommand}"/>
 
         <Grid Grid.Row="3" Margin="20">
@@ -172,7 +174,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             
-            <Button Content="Back"
+            <Button Content="{DynamicResource Back}"
                     Style="{StaticResource ModernButton}"
                     Width="200"
                     Height="50"
@@ -180,13 +182,13 @@
                     Click="BackButton_Click"/>
                     
             <Button Grid.Column="1"
-                    Content="Next"
+                    Content="{DynamicResource Next}"
                     Style="{StaticResource ModernButton}"
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Right"
                     Click="NextButton_Click"
-                    IsEnabled="{Binding ElementName=FallbackPanel, Path=Visibility, Converter={StaticResource VisibilityToBoolConverter}, ConverterParameter=Inverted}"/>
+                    IsEnabled="{Binding HasError, Converter={StaticResource InverseBoolConverter}}"/>
         </Grid>
     </Grid>
 </Page>

@@ -7,26 +7,52 @@
         mc:Ignorable="d"
         Title="Libertix" 
         Height="630" Width="1070"
-        MinHeight="450" MinWidth="650"
+        MinHeight="630" MinWidth="1070"
         WindowStartupLocation="CenterScreen">
 
-    <Frame x:Name="MainFrame" NavigationUIVisibility="Hidden">
+    <Frame x:Name="MainFrame" NavigationUIVisibility="Hidden" Background="#232136">
         <Frame.Content>
             <Grid Background="#232136">
                 <StackPanel VerticalAlignment="Center">
-                    <Label Content="Welcome to Libertix!" 
+                    <Label Content="{DynamicResource Welcome}" 
                            HorizontalAlignment="Center"
                            Margin="0,0,0,40"
                            FontSize="32"
                            FontWeight="Light"
                            Foreground="#E0DEF4"/>
                     
-                    <Button Content="Get Started"
+                    <Label Content="{DynamicResource Subtitle}"
+                           HorizontalAlignment="Center"
+                           Margin="0,0,0,20"
+                           FontSize="16"
+                           FontWeight="Light"
+                           Foreground="#908CAA"/>
+
+                    <Button Content="{DynamicResource GetStarted}"
                             Style="{StaticResource ModernButton}"
                             Width="200"
                             Height="50"
                             HorizontalAlignment="Center"
+                            Margin="0,0,0,40"
                             Click="Button_Click"/>
+
+                    <StackPanel Orientation="Horizontal" 
+                              HorizontalAlignment="Center">
+                        <TextBlock Text="{DynamicResource Language}"
+                                 Foreground="#E0DEF4"
+                                 FontSize="16"
+                                 VerticalAlignment="Center"
+                                 Margin="0,0,10,0"/>
+                        <ComboBox x:Name="LanguageComboBox"
+                                 Width="120"
+                                 Style="{StaticResource ModernComboBox}"
+                                 SelectionChanged="LanguageComboBox_SelectionChanged">
+                            <ComboBoxItem Content="English" Tag="en" IsSelected="True" Style="{StaticResource ModernComboBoxItem}"/>
+                            <ComboBoxItem Content="Français" Tag="fr" Style="{StaticResource ModernComboBoxItem}"/>
+                            <ComboBoxItem Content="Español" Tag="es" Style="{StaticResource ModernComboBoxItem}"/>
+                            <ComboBoxItem Content="日本語" Tag="ja" Style="{StaticResource ModernComboBoxItem}"/>
+                        </ComboBox>
+                    </StackPanel>
                 </StackPanel>
             </Grid>
         </Frame.Content>

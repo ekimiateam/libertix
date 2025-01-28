@@ -56,9 +56,17 @@
       <SubType>Designer</SubType>
     </ApplicationDefinition>
     <Compile Include="Models\DistroInfo.cs" />
+    <Compile Include="Models\AccountInfo.cs" />
+    <Compile Include="Models\PageState.cs" />
+    <Compile Include="Pages\AccountCreation.xaml.cs">
+      <DependentUpon>AccountCreation.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Pages\ChooseDistro.xaml.cs">
       <DependentUpon>ChooseDistro.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Helpers\NavigationHelper.cs" />
+    <Compile Include="Helpers\StateManager.cs" />
+    <Compile Include="Localization.cs" />
     <Page Include="MainWindow.xaml">
       <Generator>MSBuild:Compile</Generator>
       <SubType>Designer</SubType>
@@ -71,6 +79,7 @@
       <DependentUpon>MainWindow.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Compile>
+    <Page Include="Pages\AccountCreation.xaml" />
     <Page Include="Pages\ChooseDistro.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
@@ -122,6 +131,26 @@
     <Page Include="Controls\ErrorPanel.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
+    </Page>
+    <Page Include="Resources\Strings.en.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Page>
+    <Page Include="Resources\Strings.fr.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Page>
+    <Page Include="Resources\Strings.es.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Page>
+    <Page Include="Resources\Strings.ja.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Page>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

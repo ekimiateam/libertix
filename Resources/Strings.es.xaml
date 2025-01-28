@@ -1,0 +1,36 @@
+
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:system="clr-namespace:System;assembly=mscorlib">
+    
+    <!-- MainWindow -->
+    <system:String x:Key="Welcome">¡Bienvenido a Libertix!</system:String>
+    <system:String x:Key="Subtitle">Un instalador de Linux simple y moderno</system:String>
+    <system:String x:Key="GetStarted">Comenzar</system:String>
+    <system:String x:Key="Language">Idioma</system:String>
+
+    <!-- ChooseDistro -->
+    <system:String x:Key="ChooseDistroTitle">Elija su versión de Linux</system:String>
+    
+    <!-- Distro Descriptions -->
+    <system:String x:Key="ZorinDescription">Un sistema operativo potente, seguro y fácil de usar, diseñado para todos.</system:String>
+    <system:String x:Key="UbuntuDescription">Rápido, gratuito y lleno de nuevas características. Ubuntu es el sistema Linux preferido en el mundo.</system:String>
+
+    <!-- ResizeDisk -->
+    <system:String x:Key="ResizeDiskTitle">Redimensiona tu disco</system:String>
+    <system:String x:Key="Windows">Windows</system:String>
+    <system:String x:Key="Linux">Linux</system:String>
+    <system:String x:Key="NotEnoughSpace">Espacio insuficiente</system:String>
+    <system:String x:Key="FreeUpSpace">Tu sistema necesita más espacio libre para instalar Linux. Libera algo de espacio e inténtalo de nuevo.</system:String>
+    <system:String x:Key="OpenDiskCleanup">Abrir limpieza de disco</system:String>
+
+    <!-- AccountCreation -->
+    <system:String x:Key="AccountCreationTitle">Crea tu cuenta de Linux</system:String>
+    <system:String x:Key="Username">Nombre de usuario</system:String>
+    <system:String x:Key="Password">Contraseña</system:String>
+    <system:String x:Key="ComputerName">Nombre del equipo</system:String>
+
+    <!-- Common -->
+    <system:String x:Key="Back">Atrás</system:String>
+    <system:String x:Key="Next">Siguiente</system:String>
+</ResourceDictionary>

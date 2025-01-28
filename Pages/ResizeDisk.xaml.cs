@@ -1,17 +1,22 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.IO;
 using System.Diagnostics;
 using Libertix.Commands;
+using Libertix.Helpers;
+using Libertix.Models;
 
 namespace Libertix.Pages
 {
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {
+        private const string STATE_KEY = "ResizeDisk";
         private readonly double _totalSpace;
         private readonly double _initialFreeSpace;
         private double _selectedSize;
@@ -93,7 +98,7 @@ namespace Libertix.Pages
         private void UpdatePartitionSizes(double linuxSize)
         {
             LinuxSize = linuxSize;
-            WindowsFreeSpace = _initialFreeSpace - linuxSize;
+            WindowsFreeSpace = _initialFreeSpace - linuxSize;   
             CheckSpaceRequirements();
         }
 
@@ -132,11 +137,46 @@ namespace Libertix.Pages
 
             if (App.Current.Properties["SelectedDistro"] is Models.DistroInfo distro)
             {
-                IsoSize = distro.SizeInGB;
+                LoadState(distro);
             }
+        }
 
-            // Set initial Linux partition size
-            SelectedSize = MinimumSize;
+        private void SaveState(DistroInfo distro)
+        {
+            var stateKey = $"{STATE_KEY}_{distro.Name}";
+            var state = new PageState
+            {
+                PageType = typeof(ResizeDisk),
+                StateKey = stateKey,
+                State = new Dictionary<string, double>
+                {
+                    { "SelectedSize", SelectedSize },
+                    { "WindowsFreeSpace", WindowsFreeSpace },
+                    { "LinuxSize", LinuxSize }
+                }
+            };
+            StateManager.SaveState(stateKey, state);
+        }
+
+        private void LoadState(DistroInfo distro)
+        {
+            var stateKey = $"{STATE_KEY}_{distro.Name}";
+            var state = StateManager.GetState(stateKey);
+            
+            if (state?.State is Dictionary<string, double> savedState)
+            {
+                // Restore saved values
+                IsoSize = distro.SizeInGB;
+                SelectedSize = savedState["SelectedSize"];
+                WindowsFreeSpace = savedState["WindowsFreeSpace"];
+                LinuxSize = savedState["LinuxSize"];
+            }
+            else
+            {
+                // Initialize with default values
+                IsoSize = distro.SizeInGB;
+                SelectedSize = MinimumSize;
+            }
         }
 
         private void CheckSpaceRequirements()
@@ -151,59 +191,34 @@ namespace Libertix.Pages
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
-            var fadeOut = new DoubleAnimation
+            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro)
             {
-                From = 1.0,
-                To = 0.0,
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
-
-            var slideOut = new ThicknessAnimation
-            {
-                From = new Thickness(0),
-                To = new Thickness(100, 0, 0, 0),
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
-
-            fadeOut.Completed += (s, _) =>
-            {
-                var currentBackground = ((Grid)this.Content).Background;
-                
-                // Create and navigate to a new instance of ChooseDistro
-                var chooseDistroPage = new ChooseDistro();
-                NavigationService.Navigate(chooseDistroPage);
-                
-                // Apply background and animations to the new page
-                if (chooseDistroPage.Content is Grid grid)
-                {
-                    grid.Background = currentBackground;
-
-                    var fadeIn = new DoubleAnimation
-                    {
-                        From = 0.0,
-                        To = 1.0,
-                        Duration = TimeSpan.FromSeconds(0.3)
-                    };
-
-                    var slideIn = new ThicknessAnimation
-                    {
-                        From = new Thickness(-100, 0, 0, 0),
-                        To = new Thickness(0),
-                        Duration = TimeSpan.FromSeconds(0.3)
-                    };
-
-                    chooseDistroPage.BeginAnimation(UIElement.OpacityProperty, fadeIn);
-                    chooseDistroPage.BeginAnimation(FrameworkElement.MarginProperty, slideIn);
-                }
-            };
-
-            this.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-            this.BeginAnimation(FrameworkElement.MarginProperty, slideOut);
+                SaveState(distro);
+            }
+            NavigationHelper.NavigateWithAnimation(
+                NavigationService,
+                new ChooseDistro(),
+                TimeSpan.FromSeconds(0.3),
+                slideLeft: false);
         }
 
         private void NextButton_Click(object sender, RoutedEventArgs e)
         {
-            Console.WriteLine("Next button clicked");
+            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro)
+            {
+                SaveState(distro);
+            }
+            NavigationHelper.NavigateWithAnimation(
+                NavigationService,
+                new AccountCreation(),
+                TimeSpan.FromSeconds(0.3));
+        }
+
+        // In ChooseDistro when a different distro is selected
+        private void OnDistroSelected(DistroInfo distro)
+        {
+            StateManager.ClearDependentStates(STATE_KEY);
+            // ... rest of selection code
         }
     }
 }
