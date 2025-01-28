@@ -28,7 +28,7 @@ A modern, user-friendly Windows application that simplifies the process of dual-
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/libertix.git
+git clone https://github.com/ekimiateam/libertix.git
 ```
 
 2. Open the solution in Visual Studio 2022
