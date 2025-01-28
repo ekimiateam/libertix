@@ -77,26 +77,35 @@ jobs:
     - name: Setup MSBuild.exe
       uses: microsoft/setup-msbuild@v2
 
+    # Add NuGet restore step
+    - name: Restore NuGet packages
+      run: nuget restore $env:Solution_Name
+
     # Comment out or remove test step if you don't have tests yet
     # - name: Execute unit tests
     #   run: dotnet test
 
     # Restore the application to populate the obj folder with RuntimeIdentifiers
     - name: Restore the application
-      run: msbuild $env:Solution_Name /t:Restore /p:Configuration=$env:Configuration
+      run: |
+        msbuild $env:Solution_Name /t:Restore /p:Configuration=$env:Configuration /m:1 /nr:false
       env:
         Configuration: ${{ matrix.configuration }}
 
     # Build the application
     - name: Build the application
-      run: msbuild $env:Solution_Name /p:Configuration=$env:Configuration
+      run: |
+        msbuild $env:Solution_Name /p:Configuration=$env:Configuration /p:Platform="Any CPU" /m:1 /p:UseSharedCompilation=false /nr:false
       env:
         Configuration: ${{ matrix.configuration }}
 
     # Upload build artifacts
     - name: Upload build artifacts
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: Libertix-${{ matrix.configuration }}
-        path: Libertix/bin/${{ matrix.configuration }}/net481/
+        path: |
+          Libertix/bin/${{ matrix.configuration }}/net481/
+          !Libertix/bin/${{ matrix.configuration }}/net481/*.pdb
         if-no-files-found: error
