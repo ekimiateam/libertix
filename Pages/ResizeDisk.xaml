@@ -125,6 +125,7 @@
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 
                 <Slider x:Name="PartitionSlider"
@@ -135,11 +136,29 @@
                         TickFrequency="1"
                         IsSnapToTickEnabled="True"/>
                 
-                <TextBlock Grid.Column="1"
-                           Margin="20,0,0,0"
-                           Foreground="#E0DEF4"
-                           Text="{Binding SelectedSize, StringFormat={}{0:N0} GB}"/>
+                <TextBox Grid.Column="1"
+                         Width="80"
+                         Height="30"
+                         Margin="20,0,5,0"
+                         Background="#2a273f"
+                         Foreground="#E0DEF4"
+                         BorderBrush="#363252"
+                         TextAlignment="Center"
+                         VerticalContentAlignment="Center"
+                         Text="{Binding SelectedSize, StringFormat={}{0:F0}, UpdateSourceTrigger=PropertyChanged}"
+                         PreviewTextInput="NumberValidationTextBox"/>
+                
+                <TextBlock Grid.Column="2"
+                          VerticalAlignment="Center"
+                          Foreground="#E0DEF4"
+                          Text="GB"/>
             </Grid>
+
+            <!-- Size Error Message -->
+            <TextBlock Margin="0,5,0,0"
+                       Foreground="#eb6f92"
+                       Text="{Binding SizeErrorMessage}"
+                       Visibility="{Binding HasSizeError, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
             <!-- Size breakdown with updated bindings -->
             <StackPanel Margin="0,20,0,0">
@@ -183,12 +202,25 @@
                     
             <Button Grid.Column="1"
                     Content="{DynamicResource Next}"
-                    Style="{StaticResource ModernButton}"
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Right"
-                    Click="NextButton_Click"
-                    IsEnabled="{Binding HasError, Converter={StaticResource InverseBoolConverter}}"/>
+                    Click="NextButton_Click">
+                <Button.Style>
+                    <Style TargetType="Button" BasedOn="{StaticResource ModernButton}">
+                        <Setter Property="IsEnabled" Value="False"/>
+                        <Style.Triggers>
+                            <MultiDataTrigger>
+                                <MultiDataTrigger.Conditions>
+                                    <Condition Binding="{Binding HasError}" Value="False"/>
+                                    <Condition Binding="{Binding HasSizeError}" Value="False"/>
+                                </MultiDataTrigger.Conditions>
+                                <Setter Property="IsEnabled" Value="True"/>
+                            </MultiDataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Button.Style>
+            </Button>
         </Grid>
     </Grid>
 </Page>

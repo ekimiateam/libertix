@@ -25,6 +25,10 @@ namespace Libertix.Pages
         private double _isoSize;
         private double _linuxSize;
         private bool _hasError;
+        private double _recommendedSize;
+        private string _manualSize;
+        private string _sizeErrorMessage;
+        private bool _hasSizeError;
 
         public event PropertyChangedEventHandler PropertyChanged;
 
@@ -90,8 +94,50 @@ namespace Libertix.Pages
                 {
                     _selectedSize = value;
                     UpdatePartitionSizes(value);
+                    ManualSize = value.ToString("F0");
                     NotifyPropertyChanged(nameof(SelectedSize));
                 }
+            }
+        }
+
+        public double RecommendedSize
+        {
+            get => _recommendedSize;
+            private set
+            {
+                _recommendedSize = value;
+                NotifyPropertyChanged(nameof(RecommendedSize));
+            }
+        }
+
+        public string ManualSize
+        {
+            get => _manualSize;
+            set
+            {
+                _manualSize = value;
+                ValidateAndUpdateSize(value);
+                NotifyPropertyChanged(nameof(ManualSize));
+            }
+        }
+
+        public string SizeErrorMessage
+        {
+            get => _sizeErrorMessage;
+            set
+            {
+                _sizeErrorMessage = value;
+                NotifyPropertyChanged(nameof(SizeErrorMessage));
+            }
+        }
+
+        public bool HasSizeError
+        {
+            get => _hasSizeError;
+            set
+            {
+                _hasSizeError = value;
+                NotifyPropertyChanged(nameof(HasSizeError));
             }
         }
 
@@ -139,6 +185,8 @@ namespace Libertix.Pages
             {
                 LoadState(distro);
             }
+
+            ManualSize = RecommendedSize.ToString("F0");
         }
 
         private void SaveState(DistroInfo distro)
@@ -163,25 +211,85 @@ namespace Libertix.Pages
             var stateKey = $"{STATE_KEY}_{distro.Name}";
             var state = StateManager.GetState(stateKey);
             
+            // Initialize ISO size
+            IsoSize = distro.SizeInGB;
+            
+            // Calculate recommended size
+            RecommendedSize = CalculateRecommendedSize();
+            
             if (state?.State is Dictionary<string, double> savedState)
             {
                 // Restore saved values
-                IsoSize = distro.SizeInGB;
                 SelectedSize = savedState["SelectedSize"];
                 WindowsFreeSpace = savedState["WindowsFreeSpace"];
                 LinuxSize = savedState["LinuxSize"];
+                ManualSize = SelectedSize.ToString("F0");
             }
             else
             {
-                // Initialize with default values
-                IsoSize = distro.SizeInGB;
-                SelectedSize = MinimumSize;
+                // Initialize with recommended size
+                SelectedSize = RecommendedSize;
+                ManualSize = RecommendedSize.ToString("F0");
             }
+        }
+
+        private double CalculateRecommendedSize()
+        {
+            // Use 40% of available space or minimum 30GB, maximum 100GB
+            double recommendedSize = Math.Max(MinimumSize, _initialFreeSpace * 0.4);
+            return Math.Min(recommendedSize, 100);
         }
 
         private void CheckSpaceRequirements()
         {
-            HasError = WindowsFreeSpace < 0 || LinuxSize < MinimumSize;
+            // Only check if Windows has enough space left
+            HasError = WindowsFreeSpace < 0;
+        }
+
+        private void ValidateAndUpdateSize(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                HasSizeError = true;
+                SizeErrorMessage = "Size cannot be empty";
+                return;
+            }
+
+            if (double.TryParse(value, out double size))
+            {
+                if (size < MinimumSize)
+                {
+                    HasSizeError = true;
+                    SizeErrorMessage = $"Size must be at least {MinimumSize}GB";
+                    return;
+                }
+
+                if (size > MaximumSize)
+                {
+                    HasSizeError = true;
+                    SizeErrorMessage = $"Size cannot exceed {MaximumSize}GB";
+                    return;
+                }
+
+                HasSizeError = false;
+                SizeErrorMessage = string.Empty;
+                SelectedSize = size;
+            }
+            else
+            {
+                HasSizeError = true;
+                SizeErrorMessage = "Please enter a valid number";
+            }
+        }
+
+        private void NumberValidationTextBox(object sender, TextCompositionEventArgs e)
+        {
+            e.Handled = !IsTextAllowed(e.Text);
+        }
+
+        private static bool IsTextAllowed(string text)
+        {
+            return double.TryParse(text, out _) || text == ".";
         }
 
         private void NotifyPropertyChanged(string propertyName)
