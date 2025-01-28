@@ -97,9 +97,7 @@
     <Compile Include="Converters\StringToVisibilityConverter.cs" />
     <Compile Include="Commands\RelayCommand.cs" />
     <Compile Include="Converters\BoolToVisibilityConverter.cs" />
-    <Compile Include="Converters\InverseBoolConverter.cs" />
     <Compile Include="Converters\ScaleConverter.cs" />
-    <Compile Include="Converters\VisibilityToBoolConverter.cs" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Pages\ResizeDisk.xaml.cs">

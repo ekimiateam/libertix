@@ -56,10 +56,8 @@
 
                     <!-- Converters -->
                     <converters:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
-                    <converters:InverseBoolConverter x:Key="InverseBoolConverter"/>
                     <converters:ScaleConverter x:Key="ScaleConverter"/>
                     <converters:StringToVisibilityConverter x:Key="StringToVisibilityConverter"/>
-                    <converters:VisibilityToBoolConverter x:Key="VisibilityToBoolConverter"/>
 
                     <!-- ComboBox Style -->
                     <Style x:Key="ModernComboBox" TargetType="ComboBox">
