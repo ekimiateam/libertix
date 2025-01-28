@@ -9,7 +9,7 @@
     <system:String x:Key="Language">Langue</system:String>
 
     <!-- ChooseDistro -->
-    <system:String x:Key="ChooseDistroTitle">Choisissez votre saveur de Linux !</system:String>
+    <system:String x:Key="ChooseDistroTitle">Choisissez votre version de Linux !</system:String>
     
     <!-- Distro Descriptions -->
     <system:String x:Key="ZorinDescription">Un système d'exploitation puissant, sûr et facile à utiliser, conçu pour tous.</system:String>
