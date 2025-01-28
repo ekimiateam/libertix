@@ -13,7 +13,7 @@ namespace Libertix
             ResourceDictionary oldDict = null;
             foreach (ResourceDictionary dict in Application.Current.Resources.MergedDictionaries)
             {
-                if (dict.Source != null && dict.Source.OriginalString.StartsWith("/Resources/Strings."))
+                if (dict.Source != null && dict.Source.OriginalString.StartsWith("/Resources/Lang/Strings."))
                 {
                     oldDict = dict;
                     break;
@@ -28,7 +28,7 @@ namespace Libertix
             // Add the new language dictionary
             var newDict = new ResourceDictionary
             {
-                Source = new Uri($"pack://application:,,,/Libertix;component/Resources/Strings.{cultureName}.xaml", UriKind.Absolute)
+                Source = new Uri($"pack://application:,,,/Libertix;component/Resources/Lang/Strings.{cultureName}.xaml", UriKind.Absolute)
             };
             Application.Current.Resources.MergedDictionaries.Add(newDict);
 

@@ -175,7 +175,7 @@
                 </ResourceDictionary>
                 
                 <!-- Default language (English) -->
-                <ResourceDictionary Source="pack://application:,,,/Resources/Strings.en.xaml"/>
+                <ResourceDictionary Source="pack://application:,,,/Resources/Lang/Strings.en.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>
