@@ -39,6 +39,8 @@
                      Foreground="#E0DEF4"
                      BorderBrush="#363252"
                      BorderThickness="1"
+                     HorizontalContentAlignment="Center"
+                     VerticalContentAlignment="Center"
                      TextChanged="ValidateInput">
                 <TextBox.Style>
                     <Style TargetType="TextBox">
@@ -66,11 +68,13 @@
             <PasswordBox x:Name="PasswordBox"
                          Height="40"
                          FontSize="16"
-                         Padding="10,5"
+                         Padding="0,5"
                          Background="#2a273f"
                          Foreground="#E0DEF4"
                          BorderBrush="#363252"
                          BorderThickness="1"
+                         HorizontalContentAlignment="Center"
+                         VerticalContentAlignment="Center"
                          PasswordChanged="ValidateInput">
                 <PasswordBox.Style>
                     <Style TargetType="PasswordBox">
@@ -98,11 +102,13 @@
             <TextBox x:Name="HostnameBox"
                      Height="40"
                      FontSize="16"
-                     Padding="10,5"
+                     Padding="0,5"
                      Background="#2a273f"
                      Foreground="#E0DEF4"
                      BorderBrush="#363252"
                      BorderThickness="1"
+                     HorizontalContentAlignment="Center"
+                     VerticalContentAlignment="Center"
                      TextChanged="ValidateInput">
                 <TextBox.Style>
                     <Style TargetType="TextBox">

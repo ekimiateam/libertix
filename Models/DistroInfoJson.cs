@@ -15,8 +15,5 @@ namespace Libertix.Models
 
         [JsonPropertyName("isoUrl")]
         public string IsoUrl { get; set; }
-
-        [JsonPropertyName("sizeInGB")]
-        public double SizeInGB { get; set; }
     }
 }

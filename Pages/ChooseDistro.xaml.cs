@@ -61,14 +61,25 @@ namespace Libertix
                     _distros.Clear();
                     foreach (var distroJson in distroList)
                     {
-                        _distros.Add(new DistroInfo
+                        var newDistro = new DistroInfo
                         {
                             Name = distroJson.Name,
                             Description = distroJson.Description ?? "No description available",  // Add fallback text
                             ImageUrl = distroJson.ImageUrl,
-                            IsoUrl = distroJson.IsoUrl,
-                            SizeInGB = distroJson.SizeInGB
-                        });
+                            IsoUrl = distroJson.IsoUrl
+                        };
+                        // Attempt HEAD request
+                        if (!string.IsNullOrEmpty(newDistro.IsoUrl))
+                        {
+                            var headRequest = new HttpRequestMessage(HttpMethod.Head, newDistro.IsoUrl);
+                            var response = await client.SendAsync(headRequest, HttpCompletionOption.ResponseHeadersRead);
+                            if (response.IsSuccessStatusCode && response.Content.Headers.ContentLength.HasValue)
+                            {
+                                // Convert bytes to GB
+                                newDistro.SizeInGB = response.Content.Headers.ContentLength.Value / 1024.0 / 1024.0 / 1024.0;
+                            }
+                        }
+                        _distros.Add(newDistro);
                     }
                 }
                 DistrosItemsControl.ItemsSource = _distros;
