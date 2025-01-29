@@ -59,6 +59,8 @@
       <Generator>MSBuild:Compile</Generator>
       <SubType>Designer</SubType>
     </ApplicationDefinition>
+    <Compile Include="Converters\InverseBoolConverter.cs" />
+    <Compile Include="Converters\VisibilityToBoolConverter.cs" />
     <Compile Include="Models\DistroInfo.cs" />
     <Compile Include="Models\AccountInfo.cs" />
     <Compile Include="Models\PageState.cs" />
