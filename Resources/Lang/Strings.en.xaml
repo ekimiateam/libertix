@@ -32,4 +32,7 @@
     <!-- Common -->
     <system:String x:Key="Back">Back</system:String>
     <system:String x:Key="Next">Next</system:String>
+    
+    <!-- Errors -->
+    <system:String x:Key="DistroLoadError">Failed to load the list of distributions. Please check your internet connection and try again.</system:String>
 </ResourceDictionary>

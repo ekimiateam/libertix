@@ -9,12 +9,16 @@ using Libertix.Models;
 using Libertix.Pages;
 using System.ComponentModel;
 using System.Windows.Media.Animation;
+using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace Libertix
 {
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
         private const string STATE_KEY = "ChooseDistro";
+        private const string DISTROS_URL = "https://ekimia.fr/libertix.json";
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
@@ -34,34 +38,49 @@ namespace Libertix
         public ChooseDistro()
         {
             InitializeComponent();
-            InitializeDistros();
+            _distros = new ObservableCollection<DistroInfo>();
+            LoadDistrosAsync();
             LoadState();
             DataContext = this;
             IsDistroSelected = false;
         }
 
-        private void InitializeDistros()
+        private async void LoadDistrosAsync()
         {
-            _distros = new ObservableCollection<DistroInfo>
+            try
             {
-                new DistroInfo 
+                using (var client = new HttpClient())
                 {
-                    Name = "Zorin OS 17.2 Core",
-                    DescriptionKey = "ZorinDescription",
-                    ImageUrl = "https://assets.zorincdn.com/images/releases/17/desktop.jpg",
-                    IsoUrl = "https://mirrors.ircam.fr/pub/zorinos-isos/17/Zorin-OS-17.2-Core-64-bit.iso",
-                    SizeInGB = 3.2
-                },
-                new DistroInfo 
-                {
-                    Name = "Ubuntu 24.04 LTS",
-                    DescriptionKey = "UbuntuDescription",
-                    ImageUrl = "https://res.cloudinary.com/canonical/image/fetch/f_auto,q_auto,fl_sanitize,c_fill,w_720/https://lh7-us.googleusercontent.com/7-Wcy72kffGY3f_KhI4VNoDGow_nnsGwB10oSO2oACqBYORb5xRWuQSKwAkaLE0YWciUWlrf5Hk2yKNb66kdo7t3d8YQSu1yS1JaJiGliqn3aFDAG5Qy558ApHb_did8V0EGmWKaH2DzhOnGa8pR50I",
-                    IsoUrl = "https://releases.ubuntu.com/noble/ubuntu-24.04.1-desktop-amd64.iso",
-                    SizeInGB = 5.8
+                    var json = await client.GetStringAsync(DISTROS_URL);
+                    var options = new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true
+                    };
+                    var distroList = JsonSerializer.Deserialize<List<DistroInfoJson>>(json, options);
+                    
+                    _distros.Clear();
+                    foreach (var distroJson in distroList)
+                    {
+                        _distros.Add(new DistroInfo
+                        {
+                            Name = distroJson.Name,
+                            Description = distroJson.Description ?? "No description available",  // Add fallback text
+                            ImageUrl = distroJson.ImageUrl,
+                            IsoUrl = distroJson.IsoUrl,
+                            SizeInGB = distroJson.SizeInGB
+                        });
+                    }
                 }
-            };
-            DistrosItemsControl.ItemsSource = _distros;
+                DistrosItemsControl.ItemsSource = _distros;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    Application.Current.Resources["DistroLoadError"] as string ?? "Failed to load distributions",
+                    "Error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
         }
 
         private void SaveState()

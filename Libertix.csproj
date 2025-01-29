@@ -62,6 +62,7 @@
     <Compile Include="Converters\InverseBoolConverter.cs" />
     <Compile Include="Converters\VisibilityToBoolConverter.cs" />
     <Compile Include="Models\DistroInfo.cs" />
+    <Compile Include="Models\DistroInfoJson.cs" />
     <Compile Include="Models\AccountInfo.cs" />
     <Compile Include="Models\PageState.cs" />
     <Compile Include="Pages\AccountCreation.xaml.cs">
@@ -160,6 +161,14 @@
   <ItemGroup>
     <Folder Include="Resources\Images\" />
     <Resource Include="Resources\Images\Icon.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+    <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
+    <PackageReference Include="System.Memory" Version="4.5.5" />
+    <PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" />
+    <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.5.4" />
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

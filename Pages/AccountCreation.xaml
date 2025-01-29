@@ -34,7 +34,7 @@
             <TextBox x:Name="UsernameBox"
                      Height="40"
                      FontSize="16"
-                     Padding="10,5"
+                     Padding="0,5"
                      Background="#2a273f"
                      Foreground="#E0DEF4"
                      BorderBrush="#363252"
