@@ -318,7 +318,7 @@ namespace Libertix.Pages
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new AccountCreation(),
+                new ApplyChanges(),
                 TimeSpan.FromSeconds(0.3));
         }
 

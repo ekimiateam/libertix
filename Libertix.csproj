@@ -68,6 +68,9 @@
     <Compile Include="Pages\AccountCreation.xaml.cs">
       <DependentUpon>AccountCreation.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Pages\ApplyChanges.xaml.cs">
+      <DependentUpon>ApplyChanges.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Pages\ChooseDistro.xaml.cs">
       <DependentUpon>ChooseDistro.xaml</DependentUpon>
     </Compile>
@@ -87,6 +90,7 @@
       <SubType>Code</SubType>
     </Compile>
     <Page Include="Pages\AccountCreation.xaml" />
+    <Page Include="Pages\ApplyChanges.xaml" />
     <Page Include="Pages\ChooseDistro.xaml">
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
