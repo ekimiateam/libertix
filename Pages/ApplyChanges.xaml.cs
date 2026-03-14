@@ -213,7 +213,22 @@ namespace LinuxGate.Pages
             Log($"Step 4: Downloading ISO from {isoUrl}...");
 
             string tempIsoPath = Path.Combine(Path.GetTempPath(), "linuxgate_installer.iso");
-            bool downloadSuccess = await DownloadIsoAsync(isoUrl, tempIsoPath);
+            string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
+            string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
+            bool downloadSuccess = false;
+
+            if (File.Exists(localIsoPath))
+            {
+                Log($"Found local ISO: {localIsoName}, copying...");
+                await Task.Run(() => File.Copy(localIsoPath, tempIsoPath, true));
+                downloadSuccess = true;
+                UpdateProgress(80, "ISO copied from local folder");
+            }
+            else
+            {
+                downloadSuccess = await DownloadIsoAsync(isoUrl, tempIsoPath);
+            }
+
             if (!downloadSuccess)
             {
                 Log("ERROR: Failed to download ISO");
@@ -254,7 +269,21 @@ namespace LinuxGate.Pages
                 Log($"Step 6: Downloading Linux installer from {selectedDistro.IsoInstaller}...");
 
                 string installerPath = Path.Combine(@"C:\", selectedDistro.IsoInstallerFileName);
-                bool installerDownloadSuccess = await DownloadInstallerIsoAsync(selectedDistro.IsoInstaller, installerPath);
+                string localInstallerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, selectedDistro.IsoInstallerFileName);
+                bool installerDownloadSuccess = false;
+
+                if (File.Exists(localInstallerPath))
+                {
+                    Log($"Found local installer ISO: {selectedDistro.IsoInstallerFileName}, copying...");
+                    await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
+                    installerDownloadSuccess = true;
+                    UpdateProgress(95, "Linux installer copied from local folder");
+                }
+                else
+                {
+                    installerDownloadSuccess = await DownloadInstallerIsoAsync(selectedDistro.IsoInstaller, installerPath);
+                }
+
                 if (!installerDownloadSuccess)
                 {
                     Log("ERROR: Failed to download Linux installer ISO");
@@ -285,16 +314,37 @@ namespace LinuxGate.Pages
             {
                 string url = $"https://tpm28.com/filepool/{file}";
                 string destPath = Path.Combine(@"C:\", file);
-                bool downloaded = await DownloadFileAsync(url, destPath);
-                if (!downloaded)
+                string localFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
+                bool success = false;
+
+                if (File.Exists(localFile))
                 {
-                    Log($"ERROR: Failed to download {file}");
+                    Log($"Found local {file}, copying...");
+                    try
+                    {
+                        File.Copy(localFile, destPath, true);
+                        success = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"ERROR: Failed to copy local {file}: {ex.Message}");
+                    }
+                }
+
+                if (!success)
+                {
+                    success = await DownloadFileAsync(url, destPath);
+                }
+
+                if (!success)
+                {
+                    Log($"ERROR: Failed to obtain {file}");
                     UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
                     BackButton.IsEnabled = true;
                     _isRunning = false;
                     return;
                 }
-                Log($"Downloaded {file} to C:\\");
+                Log($"Ready: {file} at C:\\");
             }
 
             // Step 9: Configure boot entry with bcdedit
