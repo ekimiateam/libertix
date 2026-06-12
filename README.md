@@ -53,3 +53,13 @@ This project is licensed under the GNU General Public License 3.0 - see the [LIC
 
 - [Rose Pine](https://rosepinetheme.com/) for the color scheme
 - [WPF](https://github.com/dotnet/wpf) for the UI framework
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=ekimiateam%2Flibertix&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=ekimiateam/libertix&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=ekimiateam/libertix&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=ekimiateam/libertix&type=date&legend=top-left" />
+ </picture>
+</a>
