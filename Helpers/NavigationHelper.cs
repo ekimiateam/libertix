@@ -5,7 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Navigation;
 
-namespace Libertix.Helpers
+namespace LinuxGate.Helpers
 {
     public static class NavigationHelper
     {

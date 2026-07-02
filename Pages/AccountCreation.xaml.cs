@@ -2,10 +2,11 @@ using System;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
-using Libertix.Helpers;
-using Libertix.Models;
+using System.Windows.Input;
+using LinuxGate.Helpers;
+using LinuxGate.Models;
 
-namespace Libertix.Pages
+namespace LinuxGate.Pages
 {
     public partial class AccountCreation : Page
     {
@@ -24,19 +25,30 @@ namespace Libertix.Pages
         {
             // Get current Windows username and convert to lowercase
             string windowsUsername = Environment.UserName.ToLower();
-            
+
             // Remove any characters that don't match our regex
             string sanitizedUsername = Regex.Replace(windowsUsername, "[^a-z0-9-]", "");
-            
+
             // Ensure it starts with a letter
             if (!string.IsNullOrEmpty(sanitizedUsername) && char.IsLetter(sanitizedUsername[0]))
             {
                 UsernameBox.Text = sanitizedUsername;
             }
-            
-            // Set default hostname
-            HostnameBox.Text = "linux-" + sanitizedUsername;
-            
+
+            // Get Windows computer name and create Linux hostname
+            string windowsHostname = Environment.MachineName.ToLower();
+            string sanitizedHostname = Regex.Replace(windowsHostname, "[^a-z0-9-]", "");
+
+            // Ensure it starts with a letter
+            if (!string.IsNullOrEmpty(sanitizedHostname) && char.IsLetter(sanitizedHostname[0]))
+            {
+                HostnameBox.Text = sanitizedHostname + "-linux";
+            }
+            else
+            {
+                HostnameBox.Text = "linux-pc";
+            }
+
             // Validate the default values
             ValidateInput(null, null);
         }
@@ -50,7 +62,7 @@ namespace Libertix.Pages
                 State = new AccountInfo
                 {
                     Username = UsernameBox.Text,
-                    Hostname = HostnameBox.Text
+                    ComputerName = HostnameBox.Text
                     // Don't save password for security
                 }
             };
@@ -63,7 +75,7 @@ namespace Libertix.Pages
             if (state?.State is AccountInfo info)
             {
                 UsernameBox.Text = info.Username;
-                HostnameBox.Text = info.Hostname;
+                HostnameBox.Text = info.ComputerName;
                 ValidateInput(null, null);
             }
         }
@@ -88,20 +100,36 @@ namespace Libertix.Pages
                 UsernameError.Text = "";
             }
 
-            // Validate password
+            // Validate password (min 4 characters)
             if (string.IsNullOrEmpty(PasswordBox.Password))
             {
-                PasswordError.Text = "Password is required";
+                PasswordError.Text = Application.Current.Resources["PasswordRequired"] as string ?? "Password is required";
                 isValid = false;
             }
-            else if (PasswordBox.Password.Length < 8)
+            else if (PasswordBox.Password.Length < 4)
             {
-                PasswordError.Text = "Password must be at least 8 characters long";
+                PasswordError.Text = Application.Current.Resources["PasswordTooShort"] as string ?? "Password must be at least 4 characters";
                 isValid = false;
             }
             else
             {
                 PasswordError.Text = "";
+            }
+
+            // Validate confirm password
+            if (string.IsNullOrEmpty(ConfirmPasswordBox.Password))
+            {
+                ConfirmPasswordError.Text = "Please confirm your password";
+                isValid = false;
+            }
+            else if (PasswordBox.Password != ConfirmPasswordBox.Password)
+            {
+                ConfirmPasswordError.Text = "Passwords do not match";
+                isValid = false;
+            }
+            else
+            {
+                ConfirmPasswordError.Text = "";
             }
 
             // Validate hostname
@@ -139,13 +167,23 @@ namespace Libertix.Pages
             {
                 Username = UsernameBox.Text,
                 Password = PasswordBox.Password,
-                Hostname = HostnameBox.Text
+                ComputerName = HostnameBox.Text
             };
-            
+
             App.Current.Properties["AccountInfo"] = accountInfo;
             SaveState();
-            // Navigate to next page (Installation confirmation/summary)
-            // NavigationHelper.NavigateWithAnimation(NavigationService, new InstallationSummary(), TimeSpan.FromSeconds(0.3));
+            NavigationHelper.NavigateWithAnimation(NavigationService, new WarningConfirmation(), TimeSpan.FromSeconds(0.3));
+        }
+
+        private void PasswordBox_PreviewExecuted(object sender, ExecutedRoutedEventArgs e)
+        {
+            // Block paste and copy commands on password boxes
+            if (e.Command == ApplicationCommands.Paste ||
+                e.Command == ApplicationCommands.Copy ||
+                e.Command == ApplicationCommands.Cut)
+            {
+                e.Handled = true;
+            }
         }
     }
 }

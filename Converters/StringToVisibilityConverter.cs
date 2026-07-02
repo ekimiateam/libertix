@@ -2,7 +2,7 @@ using System;
 using System.Windows;
 using System.Windows.Data;
 
-namespace Libertix.Converters
+namespace LinuxGate.Converters
 {
     public class StringToVisibilityConverter : IValueConverter
     {

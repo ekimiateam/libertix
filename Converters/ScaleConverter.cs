@@ -2,7 +2,7 @@ using System;
 using System.Globalization;
 using System.Windows.Data;
 
-namespace Libertix.Converters
+namespace LinuxGate.Converters
 {
     public class ScaleConverter : IValueConverter
     {

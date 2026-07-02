@@ -1,9 +1,9 @@
-<UserControl x:Class="Libertix.Controls.ErrorPanel"
+<UserControl x:Class="LinuxGate.Controls.ErrorPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-             xmlns:converters="clr-namespace:Libertix.Converters"
+             xmlns:converters="clr-namespace:LinuxGate.Converters"
              mc:Ignorable="d">
     
     <UserControl.Resources>
@@ -69,7 +69,7 @@
             BorderThickness="1"
             CornerRadius="8"
             MaxWidth="{Binding MaxWidth, RelativeSource={RelativeSource AncestorType=UserControl}}"
-            MaxHeight="{Binding ActualHeight, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource ScaleConverter}, ConverterParameter=0.8}"
+            MaxHeight="500"
             MinWidth="300">
         
         <ScrollViewer Style="{StaticResource CustomScrollViewer}"

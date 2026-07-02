@@ -1,6 +1,6 @@
 using System;
 
-namespace Libertix.Models
+namespace LinuxGate.Models
 {
     public class PageState
     {

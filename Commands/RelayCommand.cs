@@ -1,7 +1,7 @@
 using System;
 using System.Windows.Input;
 
-namespace Libertix.Commands
+namespace LinuxGate.Commands
 {
     public class RelayCommand : ICommand
     {

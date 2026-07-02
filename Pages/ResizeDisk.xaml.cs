@@ -8,11 +8,11 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.IO;
 using System.Diagnostics;
-using Libertix.Commands;
-using Libertix.Helpers;
-using Libertix.Models;
+using LinuxGate.Commands;
+using LinuxGate.Helpers;
+using LinuxGate.Models;
 
-namespace Libertix.Pages
+namespace LinuxGate.Pages
 {
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {
@@ -33,13 +33,19 @@ namespace Libertix.Pages
         public event PropertyChangedEventHandler PropertyChanged;
 
         public double MinimumSize => 30; // Minimum 30GB for Linux
-        public double MaximumSize => _initialFreeSpace;
+        public double MinimumWindowsFree => 15; // Minimum 15GB free for Windows
+        public double MaximumSize => _initialFreeSpace - MinimumWindowsFree; // Reserve space for Windows
 
-        // These are now calculated as percentages of total disk space
-        public GridLength WindowsUsedPercentage => new GridLength(_windowsUsedSpace * 100 / _totalSpace, GridUnitType.Star);
-        public GridLength WindowsFreePercentage => new GridLength(_windowsFreeSpace * 100 / _totalSpace, GridUnitType.Star);
-        public GridLength IsoPartitionPercentage => new GridLength(_isoSize * 100 / _totalSpace, GridUnitType.Star);
+        // Windows total = Used + remaining free after Linux allocation
+        public double WindowsTotalSpace => _windowsUsedSpace + _windowsFreeSpace;
+
+        // Percentage calculations for the two-partition view (Windows vs Linux)
+        public GridLength WindowsPartitionPercentage => new GridLength(WindowsTotalSpace * 100 / _totalSpace, GridUnitType.Star);
         public GridLength LinuxPartitionPercentage => new GridLength(_linuxSize * 100 / _totalSpace, GridUnitType.Star);
+
+        // Used/Free ratio inside the Windows partition (for the usage indicator)
+        public GridLength WindowsUsedPercentage => new GridLength(_windowsUsedSpace, GridUnitType.Star);
+        public GridLength WindowsFreeInPartitionPercentage => new GridLength(_windowsFreeSpace > 0 ? _windowsFreeSpace : 0.001, GridUnitType.Star);
 
         public double WindowsUsedSpace
         {
@@ -59,7 +65,9 @@ namespace Libertix.Pages
             {
                 _windowsFreeSpace = value;
                 NotifyPropertyChanged(nameof(WindowsFreeSpace));
-                NotifyPropertyChanged(nameof(WindowsFreePercentage));
+                NotifyPropertyChanged(nameof(WindowsTotalSpace));
+                NotifyPropertyChanged(nameof(WindowsPartitionPercentage));
+                NotifyPropertyChanged(nameof(WindowsFreeInPartitionPercentage));
             }
         }
 
@@ -70,7 +78,6 @@ namespace Libertix.Pages
             {
                 _isoSize = value;
                 NotifyPropertyChanged(nameof(IsoSize));
-                NotifyPropertyChanged(nameof(IsoPartitionPercentage));
             }
         }
 
@@ -81,7 +88,6 @@ namespace Libertix.Pages
             {
                 _linuxSize = value;
                 NotifyPropertyChanged(nameof(LinuxSize));
-                NotifyPropertyChanged(nameof(LinuxPartitionPercentage));
             }
         }
 
@@ -144,7 +150,15 @@ namespace Libertix.Pages
         private void UpdatePartitionSizes(double linuxSize)
         {
             LinuxSize = linuxSize;
-            WindowsFreeSpace = _initialFreeSpace - linuxSize;   
+            WindowsFreeSpace = _initialFreeSpace - linuxSize;
+
+            // Force update of all percentage bindings for proper visual refresh
+            NotifyPropertyChanged(nameof(WindowsTotalSpace));
+            NotifyPropertyChanged(nameof(WindowsPartitionPercentage));
+            NotifyPropertyChanged(nameof(LinuxPartitionPercentage));
+            NotifyPropertyChanged(nameof(WindowsUsedPercentage));
+            NotifyPropertyChanged(nameof(WindowsFreeInPartitionPercentage));
+
             CheckSpaceRequirements();
         }
 
@@ -242,8 +256,8 @@ namespace Libertix.Pages
 
         private void CheckSpaceRequirements()
         {
-            // Only check if Windows has enough space left
-            HasError = WindowsFreeSpace < 0;
+            // Check if Windows has enough free space (minimum 15GB)
+            HasError = WindowsFreeSpace < MinimumWindowsFree;
         }
 
         private void ValidateAndUpdateSize(string value)
@@ -267,7 +281,7 @@ namespace Libertix.Pages
                 if (size > MaximumSize)
                 {
                     HasSizeError = true;
-                    SizeErrorMessage = $"Size cannot exceed {MaximumSize}GB";
+                    SizeErrorMessage = $"Size cannot exceed {MaximumSize:N0}GB (Windows needs {MinimumWindowsFree}GB free)";
                     return;
                 }
 
@@ -318,7 +332,7 @@ namespace Libertix.Pages
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new ApplyChanges(),
+                new AccountCreation(),
                 TimeSpan.FromSeconds(0.3));
         }
 
@@ -327,6 +341,11 @@ namespace Libertix.Pages
         {
             StateManager.ClearDependentStates(STATE_KEY);
             // ... rest of selection code
+        }
+
+        private void FallbackPanel_Loaded(object sender, RoutedEventArgs e)
+        {
+
         }
     }
 }

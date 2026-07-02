@@ -1,10 +1,10 @@
-﻿<Page x:Class="Libertix.Pages.ResizeDisk"
+﻿<Page x:Class="LinuxGate.Pages.ResizeDisk"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
       xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-      xmlns:local="clr-namespace:Libertix.Pages"
-      xmlns:controls="clr-namespace:Libertix.Controls"
+      xmlns:local="clr-namespace:LinuxGate.Pages"
+      xmlns:controls="clr-namespace:LinuxGate.Controls"
       mc:Ignorable="d"
       Title="Resize Disk">
 
@@ -24,7 +24,7 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
                         <Grid>
-                            <Ellipse Width="20" Height="20" Fill="#eb6f92"/>
+                            <Ellipse Width="20" Height="20" Fill="#3e8fb0"/>
                             <Ellipse Width="16" Height="16" Fill="#232136"/>
                         </Grid>
                     </ControlTemplate>
@@ -44,7 +44,7 @@
                             </Grid.RowDefinitions>
                             <Track Grid.Row="1" x:Name="PART_Track">
                                 <Track.DecreaseRepeatButton>
-                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="#eb6f92"/>
+                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="#3e8fb0"/>
                                 </Track.DecreaseRepeatButton>
                                 <Track.IncreaseRepeatButton>
                                     <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="#363252"/>
@@ -76,48 +76,91 @@
                FontWeight="Light"
                Foreground="#E0DEF4"/>
 
-        <!-- Disk visualization -->
-        <Border Grid.Row="1" 
-                Height="100" 
+        <!-- Disk visualization - GParted style -->
+        <Border Grid.Row="1"
+                Height="100"
                 Margin="40,20"
                 BorderThickness="1"
                 BorderBrush="#908caa"
-                CornerRadius="4">
+                CornerRadius="4"
+                ClipToBounds="True">
             <Grid x:Name="DiskVisualization">
                 <Grid.ColumnDefinitions>
-                    <!-- Windows partition (used) -->
-                    <ColumnDefinition Width="{Binding WindowsUsedPercentage}"/>
-                    <!-- Windows partition (free) -->
-                    <ColumnDefinition Width="{Binding WindowsFreePercentage}"/>
-                    <!-- ISO partition (fixed) -->
-                    <ColumnDefinition Width="{Binding IsoPartitionPercentage}"/>
-                    <!-- Linux installation partition (adjustable) -->
+                    <!-- Windows partition (total) -->
+                    <ColumnDefinition Width="{Binding WindowsPartitionPercentage}"/>
+                    <!-- Linux installation partition -->
                     <ColumnDefinition Width="{Binding LinuxPartitionPercentage}"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Windows Used Space -->
-                <Rectangle Grid.Column="0" Fill="#3e8fb0"/>
-                <TextBlock Grid.Column="0" 
-                           Text="{DynamicResource Windows}" 
-                           Foreground="#232136" 
-                           HorizontalAlignment="Center" 
-                           VerticalAlignment="Center"/>
-                
-                <!-- Windows Free Space -->
-                <Rectangle Grid.Column="1" Fill="#e0def4"/>
-                
-                <!-- ISO Partition -->
-                <Rectangle Grid.Column="2" Fill="#908caa"/>
-                
+                <!-- Windows Partition GParted style: 3 layers - ultra dark contour, dark used, light free -->
+                <Border Grid.Column="0" Background="#1e5570" CornerRadius="3" Padding="6">
+                    <Grid>
+                        <!-- Inner fill showing used/free space proportion -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="{Binding WindowsUsedPercentage}"/>
+                                <ColumnDefinition Width="{Binding WindowsFreeInPartitionPercentage}"/>
+                            </Grid.ColumnDefinitions>
+                            <!-- Used space - dark blue -->
+                            <Rectangle Grid.Column="0" Fill="#2d7090" RadiusX="2" RadiusY="2"/>
+                            <!-- Free space - light blue -->
+                            <Rectangle Grid.Column="1" Fill="#3e8fb0" RadiusX="2" RadiusY="2"/>
+                        </Grid>
+
+                        <!-- Windows label centered -->
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <TextBlock Text="{DynamicResource Windows}"
+                                       Foreground="#E0DEF4"
+                                       FontWeight="SemiBold"
+                                       HorizontalAlignment="Center"/>
+                            <TextBlock Text="{Binding WindowsFreeSpace, StringFormat={}{0:N0} GB free}"
+                                       Foreground="#E0DEF4"
+                                       FontSize="12"
+                                       Opacity="0.8"
+                                       HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
                 <!-- Linux Installation Partition -->
-                <Rectangle Grid.Column="3" Fill="#eb6f92"/>
-                <TextBlock Grid.Column="3" 
-                           Text="{DynamicResource Linux}" 
-                           Foreground="#232136"
-                           HorizontalAlignment="Center" 
-                           VerticalAlignment="Center"/>
+                <Grid Grid.Column="1">
+                    <Rectangle Fill="#eb6f92" RadiusX="3" RadiusY="3"/>
+                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <TextBlock Text="{DynamicResource Linux}"
+                                   Foreground="#232136"
+                                   FontWeight="SemiBold"
+                                   HorizontalAlignment="Center"/>
+                        <TextBlock Text="{Binding LinuxSize, StringFormat={}{0:N0} GB}"
+                                   Foreground="#232136"
+                                   FontSize="12"
+                                   HorizontalAlignment="Center"/>
+                    </StackPanel>
+                </Grid>
             </Grid>
         </Border>
+
+        <!-- Legend -->
+        <StackPanel Grid.Row="1"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Bottom"
+                    Margin="0,0,0,-5">
+            <StackPanel Orientation="Horizontal" Margin="10,0">
+                <Rectangle Width="16" Height="16" Fill="#1e5570" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                <TextBlock Text="{Binding WindowsUsedSpace, StringFormat=Windows used: {0:N0} GB}"
+                           Foreground="#908caa" FontSize="11" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="10,0">
+                <Rectangle Width="16" Height="16" Fill="#3e8fb0" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                <TextBlock Text="{Binding WindowsFreeSpace, StringFormat=Windows free: {0:N0} GB}"
+                           Foreground="#908caa" FontSize="11" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="10,0">
+                <Rectangle Width="16" Height="16" Fill="#eb6f92" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                <TextBlock Text="{Binding LinuxSize, StringFormat=Linux: {0:N0} GB}"
+                           Foreground="#908caa" FontSize="11" VerticalAlignment="Center"/>
+            </StackPanel>
+        </StackPanel>
 
         <!-- Slider and size display -->
         <StackPanel Grid.Row="2" Margin="40,20">
@@ -160,17 +203,29 @@
                        Text="{Binding SizeErrorMessage}"
                        Visibility="{Binding HasSizeError, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
-            <!-- Size breakdown with updated bindings -->
-            <StackPanel Margin="0,20,0,0">
-                <TextBlock Foreground="#3e8fb0" 
-                           Text="{Binding WindowsUsedSpace, StringFormat=Windows Used: {0:N0} GB, UpdateSourceTrigger=PropertyChanged}"/>
-                <TextBlock Foreground="#e0def4" 
-                           Text="{Binding WindowsFreeSpace, StringFormat=Windows Free: {0:N0} GB, UpdateSourceTrigger=PropertyChanged}"/>
-                <TextBlock Foreground="#908caa" 
-                           Text="{Binding IsoSize, StringFormat=ISO Partition: {0:N0} GB}"/>
-                <TextBlock Foreground="#eb6f92" 
-                           Text="{Binding LinuxSize, StringFormat=Linux Partition: {0:N0} GB, UpdateSourceTrigger=PropertyChanged}"/>
-            </StackPanel>
+            <!-- Size breakdown -->
+            <Grid Margin="0,20,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Windows info -->
+                <StackPanel Grid.Column="0">
+                    <TextBlock Foreground="#3e8fb0" FontWeight="SemiBold"
+                               Text="{Binding WindowsTotalSpace, StringFormat=Windows: {0:N0} GB}"/>
+                    <TextBlock Foreground="#908caa" FontSize="12" Margin="10,2,0,0"
+                               Text="{Binding WindowsUsedSpace, StringFormat=Used: {0:N0} GB}"/>
+                    <TextBlock Foreground="#908caa" FontSize="12" Margin="10,2,0,0"
+                               Text="{Binding WindowsFreeSpace, StringFormat=Free: {0:N0} GB}"/>
+                </StackPanel>
+
+                <!-- Linux info -->
+                <StackPanel Grid.Column="1">
+                    <TextBlock Foreground="#eb6f92" FontWeight="SemiBold"
+                               Text="{Binding LinuxSize, StringFormat=Linux: {0:N0} GB}"/>
+                </StackPanel>
+            </Grid>
         </StackPanel>
 
         <!-- Error Panel -->

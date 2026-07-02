@@ -3,7 +3,7 @@
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
     
     <!-- MainWindow -->
-    <system:String x:Key="Welcome">Welcome to Libertix!</system:String>
+    <system:String x:Key="Welcome">Welcome to LinuxGate!</system:String>
     <system:String x:Key="Subtitle">A simple and modern Linux installer</system:String>
     <system:String x:Key="GetStarted">Get Started</system:String>
     <system:String x:Key="Language">Language</system:String>
@@ -27,6 +27,7 @@
     <system:String x:Key="AccountCreationTitle">Create Your Linux Account</system:String>
     <system:String x:Key="Username">Username</system:String>
     <system:String x:Key="Password">Password</system:String>
+    <system:String x:Key="ConfirmPassword">Confirm Password</system:String>
     <system:String x:Key="ComputerName">Computer Name</system:String>
 
     <!-- Common -->
@@ -35,4 +36,48 @@
     
     <!-- Errors -->
     <system:String x:Key="DistroLoadError">Failed to load the list of distributions. Please check your internet connection and try again.</system:String>
+
+    <!-- Password Validation -->
+    <system:String x:Key="PasswordRequired">Password is required</system:String>
+    <system:String x:Key="PasswordTooShort">Password must be at least 4 characters</system:String>
+    <system:String x:Key="PasswordTooLong">Password must be 8 characters or less</system:String>
+
+    <!-- Partition Warning -->
+    <system:String x:Key="PartitionWarningTitle">WARNING: Non-standard partition configuration</system:String>
+    <system:String x:Key="PartitionWarningMessage">This installer has NOT been tested on this partition layout. Continuing is HIGHLY DISCOURAGED unless you know EXACTLY what you are doing.</system:String>
+    <system:String x:Key="PartitionWarningCheckbox">I understand</system:String>
+
+    <!-- Warning Confirmation -->
+    <system:String x:Key="WarningTitle">Warning</system:String>
+    <system:String x:Key="WarningMessage">You are about to make significant changes to your disk partitions. This operation will modify your hard drive and install a dual-boot system alongside Windows.</system:String>
+    <system:String x:Key="WarningRisks">RISKS:
+- Data loss if the operation fails or is interrupted
+- Potential corruption of existing Windows installation
+- Your computer may not boot if something goes wrong
+- This operation CANNOT be undone easily</system:String>
+    <system:String x:Key="WarningRecommendations">RECOMMENDATIONS:
+- Back up all your important data before proceeding
+- Ensure your laptop is plugged in (do not rely on battery)
+- Have a Windows recovery USB ready
+- Have someone with technical knowledge available if needed
+- Do NOT interrupt the installation process once started</system:String>
+    <system:String x:Key="WarningConfirmCheckbox">I understand the risks and have backed up my important data</system:String>
+    <system:String x:Key="WarningConfirmButton">I Understand</system:String>
+
+    <!-- Apply Changes -->
+    <system:String x:Key="ApplyChangesTitle">Apply Changes</system:String>
+    <system:String x:Key="ApplyChangesWaiting">Ready to start partitioning</system:String>
+    <system:String x:Key="ApplyChangesSummary">Installation Summary</system:String>
+    <system:String x:Key="ApplyChangesDistro">Distribution:</system:String>
+    <system:String x:Key="ApplyChangesLinuxSize">Linux Space:</system:String>
+    <system:String x:Key="ApplyChangesUsername">Username:</system:String>
+    <system:String x:Key="ApplyChangesStart">Start Installation</system:String>
+    <system:String x:Key="ApplyChangesStep1">Shrinking Windows partition (2GB for boot)...</system:String>
+    <system:String x:Key="ApplyChangesStep2">Creating FAT32 boot partition (Z:)...</system:String>
+    <system:String x:Key="ApplyChangesWaitDisk">Waiting for disk update...</system:String>
+    <system:String x:Key="ApplyChangesStep3">Shrinking Windows partition for Linux...</system:String>
+    <system:String x:Key="ApplyChangesComplete">Partitioning complete!</system:String>
+    <system:String x:Key="ApplyChangesError">An error occurred</system:String>
+    <system:String x:Key="ApplyChangesReboot">Reboot</system:String>
+    <system:String x:Key="ApplyChangesRebootConfirm">The computer will restart to complete the installation. Continue?</system:String>
 </ResourceDictionary>

@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace Libertix.Models
+namespace LinuxGate.Models
 {
     public class DistroInfoJson
     {
@@ -15,5 +15,11 @@ namespace Libertix.Models
 
         [JsonPropertyName("isoUrl")]
         public string IsoUrl { get; set; }
+
+        [JsonPropertyName("isoInstaller")]
+        public string IsoInstaller { get; set; }
+
+        [JsonPropertyName("isoInstallerFileName")]
+        public string IsoInstallerFileName { get; set; }
     }
 }

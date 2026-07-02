@@ -2,7 +2,7 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Controls;
 
-namespace Libertix.Controls
+namespace LinuxGate.Controls
 {
     public partial class ErrorPanel : UserControl
     {
