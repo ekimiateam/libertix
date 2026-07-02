@@ -303,6 +303,12 @@ class AutomationService:
                     "Erreur visible pendant le téléchargement ou l'installation",
                     details=context,
                 )
+            if verdict.blocking_problem_visible:
+                raise WorkflowError(
+                    "automation.monitor_iso",
+                    "Erreur bloquante détectée sur l'écran Libertix",
+                    details=context,
+                )
             if verdict.done:
                 result.ok(
                     "automation.iso_finished",

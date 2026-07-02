@@ -80,3 +80,19 @@ def test_install_progress_fallback_ignores_schema_instructions() -> None:
     assert verdict["still_in_progress"] is True
     assert verdict["iso_download_finished"] is False
     assert verdict["error_visible"] is False
+
+
+def test_install_progress_fallback_detects_insufficient_space_blocker() -> None:
+    reasoning = """
+    Image shows a modal saying Espace insuffisant.
+    Windows Free Space: 9,0 GB.
+    Required Linux Space: 30,0 GB.
+    Additional space needed: 21,0 GB.
+    The model accidentally writes iso_download_finished: true later in its reasoning.
+    error_visible: false
+    """
+
+    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
+
+    assert verdict["iso_download_finished"] is False
+    assert verdict["error_visible"] is True

@@ -114,6 +114,33 @@ class InstallProgressVerdict(BaseModel):
             self.iso_download_finished or self.installation_finished or self.reboot_prompt_visible
         )
 
+    @property
+    def blocking_problem_visible(self) -> bool:
+        """Return true for known Libertix blockers even if the LLM booleans are wrong."""
+
+        return _contains_install_blocker(f"{self.summary}\n{self.visible_text}")
+
+
+def _contains_install_blocker(content: str) -> bool:
+    """Detect concrete blocking UI text from Libertix installation screens."""
+
+    text = content.lower()
+    return any(
+        marker in text
+        for marker in (
+            "espace insuffisant",
+            "insufficient space",
+            "additional space needed",
+            "size cannot exceed",
+            "failed to download",
+            "failed to obtain",
+            "impossible de télécharger",
+            "impossible de charger",
+            "no iso url found",
+            "failed to copy iso",
+        )
+    )
+
 
 class VisionLLMClient:
     def __init__(
@@ -368,6 +395,8 @@ class VisionLLMClient:
             pattern = rf'(?<![a-z0-9_])["`]?{re.escape(name)}["`]?\s*[:=]\s*false\b'
             return re.search(pattern, text) is not None
 
+        blocking_problem = _contains_install_blocker(content)
+
         iso_finished = (
             conclusion_true("iso_download_finished")
             or "iso download completed" in text
@@ -402,7 +431,7 @@ class VisionLLMClient:
         ):
             reboot_prompt_visible = False
 
-        error_visible = any(
+        error_visible = blocking_problem or any(
             marker in text
             for marker in (
                 "erreur bloquante visible",
@@ -425,6 +454,11 @@ class VisionLLMClient:
             )
         ):
             error_visible = False
+
+        if blocking_problem:
+            error_visible = True
+            iso_finished = False
+            installation_finished = False
 
         still_in_progress = (
             conclusion_true("still_in_progress")

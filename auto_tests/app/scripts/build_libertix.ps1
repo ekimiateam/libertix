@@ -137,9 +137,15 @@ try {
     # tous les artefacts intermédiaires en fin de run.
     Copy-WithRobocopy -Source $config.source -Destination $srcLocal -ExtraArgs @("/XD", ".git", "bin", "obj")
 
+    # Le repo distant peut encore contenir les anciens noms LinuxGate tant que
+    # le renommage Libertix n'est pas poussé. On accepte les deux sans modifier
+    # la source clonée sur Samba.
     $solution = Join-Path $srcLocal "Libertix.sln"
     if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
-        throw "Libertix.sln absent dans la copie temporaire"
+        $solution = Join-Path $srcLocal "LinuxGate.sln"
+    }
+    if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
+        throw "Aucune solution Libertix.sln ou LinuxGate.sln trouvée dans la copie temporaire"
     }
 
     $msbuild = Find-VisualStudioMSBuild
@@ -170,13 +176,13 @@ try {
         -FailureMessage "Compilation Libertix échouée" |
         Out-Null
 
-    $exe = Get-ChildItem -LiteralPath $srcLocal -Recurse -Filter "Libertix.exe" |
-        Where-Object { $_.FullName -match "\\bin\\Release\\" } |
+    $exe = Get-ChildItem -LiteralPath $srcLocal -Recurse -Include "Libertix.exe", "LinuxGate.exe" |
+        Where-Object { -not $_.PSIsContainer -and $_.FullName -match "\\bin\\Release\\" } |
         Sort-Object FullName |
         Select-Object -First 1
 
     if (-not $exe) {
-        throw "Libertix.exe absent après compilation Release"
+        throw "Aucun exécutable Libertix.exe ou LinuxGate.exe trouvé après compilation Release"
     }
 
     if (Test-Path -LiteralPath $config.release) {
@@ -186,6 +192,21 @@ try {
 
     $buildDir = Split-Path -Parent $exe.FullName
     Copy-WithRobocopy -Source $buildDir -Destination $config.release
+
+    if ($exe.Name -eq "LinuxGate.exe") {
+        Copy-Item `
+            -LiteralPath (Join-Path $config.release "LinuxGate.exe") `
+            -Destination (Join-Path $config.release "Libertix.exe") `
+            -Force
+
+        $linuxGateConfig = Join-Path $config.release "LinuxGate.exe.config"
+        if (Test-Path -LiteralPath $linuxGateConfig -PathType Leaf) {
+            Copy-Item `
+                -LiteralPath $linuxGateConfig `
+                -Destination (Join-Path $config.release "Libertix.exe.config") `
+                -Force
+        }
+    }
 
     $finalExe = Join-Path $config.release "Libertix.exe"
     if (-not (Test-Path -LiteralPath $finalExe -PathType Leaf)) {

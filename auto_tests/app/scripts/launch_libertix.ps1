@@ -31,7 +31,7 @@ if ($mode -eq "prepare") {
         throw "Aucune session graphique admin active"
     }
 
-    Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
+    Get-Process -Name "Libertix", "LinuxGate" -ErrorAction SilentlyContinue |
         Where-Object { $_.SessionId -eq $interactive.SessionId } |
         Stop-Process -Force
 
@@ -67,14 +67,14 @@ if ($mode -eq "verify") {
         $deadline = (Get-Date).AddSeconds(20)
         do {
             Start-Sleep -Milliseconds 500
-            $process = Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
+            $process = Get-Process -Name "Libertix", "LinuxGate" -ErrorAction SilentlyContinue |
                 Where-Object { $_.SessionId -eq $sessionId } |
                 Sort-Object StartTime -Descending |
                 Select-Object -First 1
         } while ((-not $process) -and ((Get-Date) -lt $deadline))
 
         if (-not $process) {
-            throw "Libertix ne démarre pas dans la session graphique"
+            throw "Libertix/LinuxGate ne démarre pas dans la session graphique"
         }
 
         # MainWindowHandle vaut parfois 0 même quand la fenêtre est visible via VNC.
