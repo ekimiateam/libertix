@@ -72,7 +72,7 @@
     <system:String x:Key="ApplyChangesLinuxSize">Linux領域:</system:String>
     <system:String x:Key="ApplyChangesUsername">ユーザー名:</system:String>
     <system:String x:Key="ApplyChangesStart">インストール開始</system:String>
-    <system:String x:Key="ApplyChangesStep1">Windowsパーティションを縮小中（ブート用2GB）...</system:String>
+    <system:String x:Key="ApplyChangesStep1">Linux用にWindowsパーティションを縮小中...</system:String>
     <system:String x:Key="ApplyChangesStep2">FAT32ブートパーティションを作成中（Z:）...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">ディスク更新を待機中...</system:String>
     <system:String x:Key="ApplyChangesStep3">Linux用にWindowsパーティションを縮小中...</system:String>

@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LinuxGate Auto Tests</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 24px;
+        color: #111;
+      }
+      button,
+      input {
+        font: inherit;
+        padding: 8px;
+        margin: 4px 4px 4px 0;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.6;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin-top: 16px;
+      }
+      th,
+      td {
+        border: 1px solid #ccc;
+        padding: 8px;
+        vertical-align: top;
+        text-align: left;
+      }
+      th {
+        background: #f4f4f4;
+      }
+      pre {
+        white-space: pre-wrap;
+        margin: 0;
+        max-height: 220px;
+        overflow: auto;
+      }
+      .ok {
+        color: #087f23;
+        font-weight: 700;
+      }
+      .bad {
+        color: #b00020;
+        font-weight: 700;
+      }
+      .panel {
+        border: 1px solid #ddd;
+        padding: 12px;
+        margin: 12px 0;
+      }
+      .muted {
+        color: #666;
+      }
+      .danger {
+        background: #b00020;
+        color: white;
+        border: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>LinuxGate — validation automatisée</h1>
+    <p class="muted">
+      Interface locale simple pour lancer la validation, sélectionner des VM et suivre les étapes.
+    </p>
+
+    <section class="panel">
+      <label for="apiKey">Clé API</label><br />
+      <input id="apiKey" type="password" size="42" autocomplete="off" />
+      <button id="saveKey">Enregistrer localement</button>
+      <button id="loadVms">Charger les VM</button>
+    </section>
+
+    <section class="panel">
+      <h2>VM à tester</h2>
+      <div id="vmList" class="muted">Clique sur “Charger les VM”. Si aucune VM n’est cochée, la validation lance toutes les VM.</div>
+      <p>
+        <button id="validateAll">Valider toutes les VM</button>
+        <button id="validateSelected">Valider les VM cochées</button>
+        <button id="reset" class="danger">Reset /root/smb + snapshots clean2</button>
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>État</h2>
+      <div id="status">Prêt.</div>
+      <div id="summary" class="muted"></div>
+    </section>
+
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Étape</th>
+          <th>Statut</th>
+          <th>Message</th>
+          <th>Contexte / logs</th>
+        </tr>
+      </thead>
+      <tbody id="steps"></tbody>
+    </table>
+
+    <script>
+      const apiKeyInput = document.getElementById("apiKey");
+      const vmList = document.getElementById("vmList");
+      const statusBox = document.getElementById("status");
+      const summaryBox = document.getElementById("summary");
+      const stepsBody = document.getElementById("steps");
+      const buttons = [...document.querySelectorAll("button")];
+
+      apiKeyInput.value = localStorage.getItem("linuxgate_api_key") || "";
+
+      document.getElementById("saveKey").addEventListener("click", () => {
+        localStorage.setItem("linuxgate_api_key", apiKeyInput.value);
+        setStatus("Clé API enregistrée dans le navigateur.", false);
+      });
+      document.getElementById("loadVms").addEventListener("click", loadVms);
+      document.getElementById("validateAll").addEventListener("click", () => runValidation([]));
+      document.getElementById("validateSelected").addEventListener("click", () => {
+        runValidation(selectedVms());
+      });
+      document.getElementById("reset").addEventListener("click", () => {
+        if (confirm("Confirmer le reset : vider /root/smb et restaurer clean2 sur VM 500/501/502 ?")) {
+          runStream("/api/v1/reset/stream", "reset");
+        }
+      });
+
+      function apiHeaders() {
+        return { "X-API-Key": apiKeyInput.value };
+      }
+
+      function setBusy(value) {
+        buttons.forEach((button) => {
+          button.disabled = value;
+        });
+      }
+
+      function setStatus(text, isError) {
+        statusBox.textContent = text;
+        statusBox.className = isError ? "bad" : "";
+      }
+
+      function clearResults() {
+        stepsBody.innerHTML = "";
+        summaryBox.textContent = "";
+      }
+
+      function addStep(step) {
+        const row = document.createElement("tr");
+        const index = stepsBody.children.length + 1;
+        const statusClass = step.status === "ok" ? "ok" : "bad";
+        row.innerHTML = `
+          <td>${index}</td>
+          <td>${escapeHtml(step.step)}</td>
+          <td class="${statusClass}">${escapeHtml(step.status)}</td>
+          <td>${escapeHtml(step.message)}</td>
+          <td><pre>${escapeHtml(JSON.stringify(step.context || {}, null, 2))}</pre></td>
+        `;
+        stepsBody.appendChild(row);
+      }
+
+      async function loadVms() {
+        setBusy(true);
+        try {
+          const response = await fetch("/api/v1/vms", { headers: apiHeaders() });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+          }
+          const data = await response.json();
+          vmList.innerHTML = "";
+          data.vms.forEach((vm) => {
+            const label = document.createElement("label");
+            label.style.display = "block";
+            label.innerHTML = `
+              <input type="checkbox" name="vm" value="${escapeHtml(vm.name)}" />
+              ${escapeHtml(vm.name)} — ${escapeHtml(vm.os)} — ${escapeHtml(vm.host)} — VNC ${escapeHtml(vm.vnc)}
+            `;
+            vmList.appendChild(label);
+          });
+          setStatus("VM chargées.", false);
+        } catch (error) {
+          setStatus(`Impossible de charger les VM: ${error.message}`, true);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function selectedVms() {
+        return [...document.querySelectorAll('input[name="vm"]:checked')].map((input) => input.value);
+      }
+
+      function runValidation(vms) {
+        const query = vms.map((vm) => `vm=${encodeURIComponent(vm)}`).join("&");
+        const url = query ? `/api/v1/validation/stream?${query}` : "/api/v1/validation/stream";
+        runStream(url, "validation");
+      }
+
+      async function runStream(url, label) {
+        clearResults();
+        setBusy(true);
+        setStatus(`Opération ${label} en cours...`, false);
+        try {
+          const response = await fetch(url, { method: "POST", headers: apiHeaders() });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop();
+            for (const line of lines) {
+              handleEventLine(line);
+            }
+          }
+          if (buffer.trim()) {
+            handleEventLine(buffer);
+          }
+        } catch (error) {
+          setStatus(`Erreur interface: ${error.message}`, true);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      function handleEventLine(line) {
+        if (!line.trim()) return;
+        const event = JSON.parse(line);
+        if (event.event === "step") {
+          addStep(event.data);
+          setStatus(`Dernière étape: ${event.data.step}`, event.data.status !== "ok");
+          return;
+        }
+        if (event.event === "result") {
+          const result = event.data;
+          setStatus(result.message, result.status !== "ok");
+          summaryBox.textContent = `${result.operation} terminé avec statut: ${result.status}`;
+        }
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+    </script>
+  </body>
+</html>

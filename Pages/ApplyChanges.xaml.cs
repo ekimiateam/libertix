@@ -16,7 +16,9 @@ namespace LinuxGate.Pages
     {
         private double _linuxSizeGB;
         private const double FAT32_SIZE_GB = 2.0;
+        private const string FILEPOOL_BASE_URL = "http://192.168.1.170:8000/filepool";
         private bool _isRunning = false;
+        private bool _automaticRebootScheduled = false;
 
         public ApplyChanges()
         {
@@ -110,8 +112,10 @@ namespace LinuxGate.Pages
             double maxShrinkMB = await QueryShrinkSpaceAsync();
             Log($"Maximum shrinkable space: {maxShrinkMB / 1024:N1}GB ({maxShrinkMB:N0}MB)");
 
-            // We need at least 2GB for FAT32 + some space for Linux
-            double minRequiredMB = (FAT32_SIZE_GB + 5) * 1024; // 2GB FAT32 + 5GB minimum Linux
+            // The temporary FAT32 live partition is created at the final Linux size.
+            // The live system reformats this same slot as ext4, avoiding MBR delete/recreate.
+            double requestedLinuxMB = _linuxSizeGB * 1024;
+            double minRequiredMB = requestedLinuxMB;
             if (maxShrinkMB < minRequiredMB)
             {
                 Log($"ERROR: Not enough shrinkable space!");
@@ -123,12 +127,11 @@ namespace LinuxGate.Pages
                 return;
             }
 
-            // === NEW APPROACH ===
-            // Step 1: Shrink Windows by ONLY 2GB (for FAT32)
+            // Step 1: Shrink Windows by the full requested Linux size.
             UpdateProgress(10, Application.Current.Resources["ApplyChangesStep1"] as string ?? "Shrinking Windows partition...");
-            Log("Step 1: Shrinking Windows by 2GB for FAT32 partition...");
+            Log($"Step 1: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
 
-            bool step1Success = await ShrinkWindowsPartitionAsync(2048); // Only 2GB
+            bool step1Success = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
             if (!step1Success)
             {
                 Log("ERROR: Failed to shrink Windows partition (step 1)");
@@ -141,11 +144,12 @@ namespace LinuxGate.Pages
             Log("Waiting for disk to update...");
             await Task.Delay(3000);
 
-            // Step 2: Create FAT32 partition in the free space (no offset - goes right after Windows)
+            // Step 2: Create FAT32 partition in the free space (no offset - goes right after Windows).
+            // It is intentionally sized like the final Linux partition; the live installer reformats it.
             UpdateProgress(30, Application.Current.Resources["ApplyChangesStep2"] as string ?? "Creating FAT32 boot partition (Z:)...");
-            Log("Step 2: Creating FAT32 partition (will be placed right after Windows)...");
+            Log($"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
 
-            bool step2Success = await CreateFat32PartitionSimpleAsync();
+            bool step2Success = await CreateFat32PartitionSimpleAsync(requestedLinuxMB);
             if (!step2Success)
             {
                 Log("ERROR: Failed to create FAT32 partition");
@@ -158,35 +162,7 @@ namespace LinuxGate.Pages
             Log("Waiting for disk to update...");
             await Task.Delay(3000);
 
-            // Step 3: Now shrink Windows by the MAXIMUM available to create free space BEFORE FAT32
-            Log("Checking remaining shrink space...");
-            double remainingShrinkMB = await QueryShrinkSpaceAsync();
-            Log($"Remaining shrinkable space: {remainingShrinkMB / 1024:N1}GB ({remainingShrinkMB:N0}MB)");
-
-            // Calculate how much we need to shrink for Linux (user requested size)
-            double requestedLinuxMB = _linuxSizeGB * 1024;
-
-            if (remainingShrinkMB > 1024) // Only shrink if more than 1GB available
-            {
-                UpdateProgress(45, "Creating free space for Linux...");
-                // Use the MINIMUM between what's available and what user requested
-                double shrinkAmountMB = Math.Min(remainingShrinkMB - 512, requestedLinuxMB);
-                Log($"Step 3: Shrinking Windows by {shrinkAmountMB / 1024:N1}GB for Linux (user requested {_linuxSizeGB:N0}GB)...");
-
-                bool step3Success = await ShrinkWindowsPartitionAsync(shrinkAmountMB);
-                if (!step3Success)
-                {
-                    Log("WARNING: Could not shrink Windows further, Linux will use ntfsresize");
-                }
-                else
-                {
-                    Log("Successfully created free space for Linux");
-                }
-            }
-            else
-            {
-                Log("Not much space left to shrink, Linux will finish with ntfsresize if needed");
-            }
+            Log("Step 3: No second shrink needed; live partition will become the Linux partition.");
 
             // Wait for disk to update
             Log("Waiting for disk to update...");
@@ -268,7 +244,9 @@ namespace LinuxGate.Pages
                 UpdateProgress(85, "Downloading Linux installer ISO...");
                 Log($"Step 6: Downloading Linux installer from {selectedDistro.IsoInstaller}...");
 
-                string installerPath = Path.Combine(@"C:\", selectedDistro.IsoInstallerFileName);
+                string installerDir = Path.Combine(Path.GetTempPath(), "LinuxGate");
+                Directory.CreateDirectory(installerDir);
+                string installerPath = Path.Combine(installerDir, selectedDistro.IsoInstallerFileName);
                 string localInstallerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, selectedDistro.IsoInstallerFileName);
                 bool installerDownloadSuccess = false;
 
@@ -312,7 +290,7 @@ namespace LinuxGate.Pages
             string[] grubFiles = { "grldr", "grldr.mbr", "menu.lst" };
             foreach (var file in grubFiles)
             {
-                string url = $"https://tpm28.com/filepool/{file}";
+                string url = $"{FILEPOOL_BASE_URL}/{file}";
                 string destPath = Path.Combine(@"C:\", file);
                 string localFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
                 bool success = false;
@@ -365,14 +343,16 @@ namespace LinuxGate.Pages
             // Done
             UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
             Log("Installation preparation completed successfully!");
-            Log($"- FAT32 boot partition: Z: (2GB)");
-            Log($"- Desired Linux size: {_linuxSizeGB:N0}GB (Linux will finish shrinking if needed)");
+            Log($"- FAT32 live partition: Z: ({_linuxSizeGB:N0}GB, final Linux slot)");
+            Log("- The live installer will reformat Z: as ext4 instead of deleting/recreating the MBR entry");
             Log("- ISO contents copied to Z:");
             Log("- GRUB4DOS bootloader installed");
-            Log("- Boot entry 'Install Linux' added");
-            Log("- Layout: [Windows] [Free space] [FAT32 Z:] [Recovery]");
+            Log("- Boot entry 'Install Linux' added to the Windows Boot Manager menu");
+            Log("- Boot menu will be shown for 30 seconds; Windows remains the default");
+            Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
 
             RebootButton.Visibility = Visibility.Visible;
+            ScheduleAutomaticReboot();
         }
 
         private async Task<bool> DownloadFileAsync(string url, string destinationPath)
@@ -466,10 +446,25 @@ namespace LinuxGate.Pages
 
                 await Task.Delay(1000);
 
-                // Step 4: Add to boot menu
+                // Step 4: Add to boot menu. Windows stays the default entry so a
+                // timeout or a manual choice can safely return to Windows.
                 await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {guid} /addlast");
 
+                await Task.Delay(1000);
+
+                // Step 5: Always show the boot menu and wait before defaulting to Windows.
+                await RunBcdeditCommandAsync(bcdeditPath, "/set {bootmgr} displaybootmenu yes");
+
+                await Task.Delay(1000);
+
+                await RunBcdeditCommandAsync(bcdeditPath, "/timeout 30");
+
+                await Task.Delay(1000);
+
+                await RunBcdeditCommandAsync(bcdeditPath, "/default {current}");
+
                 Log("Boot entry configured successfully");
+                Log("Boot menu will be shown; Windows remains the default if no choice is made.");
                 return true;
             }
             catch (Exception ex)
@@ -544,6 +539,16 @@ namespace LinuxGate.Pages
                         isoFilename = distro.IsoInstallerFileName;
                     }
 
+                    string isoWindowsPath = isoFilename;
+                    if (App.Current.Properties["SelectedDistro"] is DistroInfo selectedInstaller &&
+                        !string.IsNullOrEmpty(selectedInstaller.IsoInstallerFileName))
+                    {
+                        isoWindowsPath = Path.Combine(
+                            Path.GetTempPath(),
+                            "LinuxGate",
+                            selectedInstaller.IsoInstallerFileName);
+                    }
+
                     // Build config content with user settings
                     var configLines = new List<string>
                     {
@@ -554,6 +559,7 @@ namespace LinuxGate.Pages
                         $"USERNAME=\"{username}\"",
                         $"PASSWORD=\"{password}\"",
                         $"ISO_FILENAME=\"{isoFilename}\"",
+                        $"ISO_WINDOWS_PATH=\"{isoWindowsPath}\"",
                         $"LINUX_SIZE_GB=\"{_linuxSizeGB:F0}\""
                     };
 
@@ -1019,7 +1025,7 @@ exit";
             }
         }
 
-        private async Task<bool> CreateFat32PartitionSimpleAsync()
+        private async Task<bool> CreateFat32PartitionSimpleAsync(double sizeMB)
         {
             string diskpartScript = Path.Combine(Path.GetTempPath(), $"create_fat32_{Guid.NewGuid()}.txt");
 
@@ -1027,15 +1033,15 @@ exit";
             {
                 // Create FAT32 partition in the first available free space (right after Windows)
                 // No offset specified - diskpart will place it at the beginning of free space
-                string script = @"rescan
+                string script = $@"rescan
 select disk 0
-create partition primary size=2048
+create partition primary size={sizeMB:F0}
 format fs=fat32 quick label=LINUXGATE
 assign letter=Z
 exit";
 
                 File.WriteAllText(diskpartScript, script);
-                Log("Diskpart command: create partition primary size=2048 (no offset)");
+                Log($"Diskpart command: create partition primary size={sizeMB:F0} (no offset)");
                 Log("Running diskpart to create FAT32 partition...");
 
                 var (success, output) = await RunDiskpartWithResultAsync(diskpartScript);
@@ -1116,6 +1122,16 @@ exit";
             {
                 Process.Start("shutdown", "/r /t 0");
             }
+        }
+
+        private void ScheduleAutomaticReboot()
+        {
+            if (_automaticRebootScheduled)
+                return;
+
+            _automaticRebootScheduled = true;
+            Log("Automatic reboot scheduled in 5 seconds...");
+            Process.Start("shutdown", "/r /t 5");
         }
 
         private void UpdateProgress(int percent, string step)

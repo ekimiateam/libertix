@@ -72,8 +72,8 @@
     <system:String x:Key="ApplyChangesLinuxSize">Espace Linux :</system:String>
     <system:String x:Key="ApplyChangesUsername">Nom d'utilisateur :</system:String>
     <system:String x:Key="ApplyChangesStart">Demarrer l'installation</system:String>
-    <system:String x:Key="ApplyChangesStep1">Reduction de la partition Windows (2Go pour le boot)...</system:String>
-    <system:String x:Key="ApplyChangesStep2">Creation de la partition FAT32 de boot (Z:)...</system:String>
+    <system:String x:Key="ApplyChangesStep1">Reduction de la partition Windows pour Linux...</system:String>
+    <system:String x:Key="ApplyChangesStep2">Creation de la partition FAT32 live/Linux (Z:)...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">Attente de la mise a jour du disque...</system:String>
     <system:String x:Key="ApplyChangesStep3">Reduction de la partition Windows pour Linux...</system:String>
     <system:String x:Key="ApplyChangesComplete">Partitionnement termine !</system:String>

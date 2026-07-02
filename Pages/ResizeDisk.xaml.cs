@@ -32,7 +32,7 @@ namespace LinuxGate.Pages
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        public double MinimumSize => 30; // Minimum 30GB for Linux
+        public double MinimumSize => 20; // Linux Mint requires 20GB minimum; 100GB is recommended.
         public double MinimumWindowsFree => 15; // Minimum 15GB free for Windows
         public double MaximumSize => _initialFreeSpace - MinimumWindowsFree; // Reserve space for Windows
 

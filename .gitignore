@@ -40,3 +40,16 @@ artifacts/
 # Windows
 *.db
 *.DS_Store
+
+# Local ISO/build artifacts
+*.iso
+
+# auto_tests runtime artifacts
+auto_tests/.env
+auto_tests/.venv/
+auto_tests/__pycache__/
+auto_tests/.pytest_cache/
+auto_tests/.ruff_cache/
+auto_tests/captures/
+auto_tests/*.log
+auto_tests/**/*.pyc

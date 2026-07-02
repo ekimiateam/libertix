@@ -1,0 +1,8 @@
+fastapi>=0.115,<1
+httpx>=0.27,<1
+paramiko>=3.4,<4
+pillow>=11,<13
+pydantic-settings>=2.6,<3
+python-json-logger>=2.0,<4
+uvicorn[standard]>=0.30,<1
+vncdotool>=1.2,<2

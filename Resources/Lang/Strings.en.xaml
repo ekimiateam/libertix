@@ -72,8 +72,8 @@
     <system:String x:Key="ApplyChangesLinuxSize">Linux Space:</system:String>
     <system:String x:Key="ApplyChangesUsername">Username:</system:String>
     <system:String x:Key="ApplyChangesStart">Start Installation</system:String>
-    <system:String x:Key="ApplyChangesStep1">Shrinking Windows partition (2GB for boot)...</system:String>
-    <system:String x:Key="ApplyChangesStep2">Creating FAT32 boot partition (Z:)...</system:String>
+    <system:String x:Key="ApplyChangesStep1">Shrinking Windows partition for Linux...</system:String>
+    <system:String x:Key="ApplyChangesStep2">Creating FAT32 live/Linux partition (Z:)...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">Waiting for disk update...</system:String>
     <system:String x:Key="ApplyChangesStep3">Shrinking Windows partition for Linux...</system:String>
     <system:String x:Key="ApplyChangesComplete">Partitioning complete!</system:String>
