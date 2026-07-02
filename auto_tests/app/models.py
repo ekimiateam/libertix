@@ -14,7 +14,7 @@ class StepResult(BaseModel):
 
 class OperationResult(BaseModel):
     status: Literal["ok", "problème"]
-    operation: Literal["validation", "reset"]
+    operation: Literal["validation", "reset", "automation"]
     message: str
     steps: list[StepResult] = Field(default_factory=list)
 
@@ -36,3 +36,15 @@ class ValidationRequest(BaseModel):
         if self.vms:
             values.extend(self.vms)
         return values or None
+
+
+class AutomationRequest(ValidationRequest):
+    """LinuxGate UI automation scope and safety options.
+
+    By default, the automation stops before the destructive final Apply click.
+    Set apply=true only when the test may really start the Linux installation.
+    """
+
+    apply: bool = Field(default=False, description="Click the final destructive Apply button")
+    linux_password: str = Field(default="linux", min_length=1)
+    monitor_iso: bool = Field(default=True)

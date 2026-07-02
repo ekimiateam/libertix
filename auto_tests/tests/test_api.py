@@ -18,12 +18,19 @@ def test_web_ui_is_served() -> None:
     assert response.status_code == 200
     assert "LinuxGate" in response.text
     assert "/api/v1/validation/stream" in response.text
+    assert "/api/v1/automation/stream" in response.text
     assert "/api/v1/reset/stream" in response.text
 
 
 def test_protected_endpoint_rejects_bad_key_without_running_workflow() -> None:
     with TestClient(create_app(settings())) as client:
         response = client.post("/api/v1/validation", headers={"X-API-Key": "wrong"})
+    assert response.status_code == 401
+
+
+def test_automation_endpoint_requires_auth() -> None:
+    with TestClient(create_app(settings())) as client:
+        response = client.post("/api/v1/automation", headers={"X-API-Key": "wrong"})
     assert response.status_code == 401
 
 

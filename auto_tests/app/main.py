@@ -12,10 +12,12 @@ from typing import Annotated, Literal
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
-from app.models import OperationResult, StepResult, ValidationRequest
+from app.models import AutomationRequest, OperationResult, StepResult, ValidationRequest
+from app.services.automation import AutomationService
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
 
@@ -39,6 +41,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     api.state.settings = configured
 
+    filepool_dir = Path(__file__).resolve().parent / "filepool"
+    api.mount("/filepool", StaticFiles(directory=filepool_dir), name="filepool")
+
     def authorize(x_api_key: str = Header(..., alias="X-API-Key")) -> None:
         expected = configured.api_access_token.get_secret_value()
         if not hmac.compare_digest(x_api_key, expected):
@@ -54,7 +59,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             selectors.extend(query_vms)
         return selectors or None
 
-    async def execute(operation: str, selectors: list[str] | None = None) -> OperationResult:
+    def automation_request(
+        body: AutomationRequest | None,
+        query_vms: list[str] | None,
+        query_apply: bool | None,
+    ) -> tuple[list[str] | None, AutomationRequest]:
+        request = body or AutomationRequest()
+        selectors = validation_selectors(request, query_vms)
+        if query_apply is not None:
+            request.apply = query_apply
+        return selectors, request
+
+    async def execute(
+        operation: str,
+        selectors: list[str] | None = None,
+        automation: AutomationRequest | None = None,
+    ) -> OperationResult:
         if not operation_lock.acquire(blocking=False):
             return OperationResult(
                 status="problème",
@@ -65,12 +85,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             if operation == "validation":
                 return await asyncio.to_thread(ValidationService(configured).run, selectors)
+            if operation == "automation":
+                request = automation or AutomationRequest()
+                return await asyncio.to_thread(
+                    AutomationService(configured).run,
+                    selectors,
+                    apply=request.apply,
+                    linux_password=request.linux_password,
+                    monitor_iso=request.monitor_iso,
+                )
             return await asyncio.to_thread(ResetService(configured).run)
         finally:
             operation_lock.release()
 
     def stream_operation(
-        operation: Literal["validation", "reset"], selectors: list[str] | None = None
+        operation: Literal["validation", "reset", "automation"],
+        selectors: list[str] | None = None,
+        automation: AutomationRequest | None = None,
     ):
         events: queue.Queue[dict | None] = queue.Queue()
         if not operation_lock.acquire(blocking=False):
@@ -91,6 +122,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     if operation == "validation":
                         result = ValidationService(configured).run(selectors, on_step=on_step)
+                    elif operation == "automation":
+                        request = automation or AutomationRequest()
+                        result = AutomationService(configured).run(
+                            selectors,
+                            apply=request.apply,
+                            linux_password=request.linux_password,
+                            monitor_iso=request.monitor_iso,
+                            on_step=on_step,
+                        )
                     else:
                         result = ResetService(configured).run(on_step=on_step)
                     events.put({"event": "result", "data": result.model_dump(mode="json")})
@@ -142,6 +182,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> OperationResult:
         return await execute("validation", validation_selectors(body, vm))
 
+    @api.post(
+        "/api/v1/automation", response_model=OperationResult, dependencies=[Depends(authorize)]
+    )
+    async def automation(
+        body: Annotated[AutomationRequest | None, Body()] = None,
+        vm: Annotated[list[str] | None, Query()] = None,
+        apply: Annotated[bool | None, Query()] = None,
+    ) -> OperationResult:
+        selectors, request = automation_request(body, vm, apply)
+        return await execute("automation", selectors, request)
+
     @api.post("/api/v1/validation/stream", dependencies=[Depends(authorize)])
     async def validation_stream(
         body: Annotated[ValidationRequest | None, Body()] = None,
@@ -149,6 +200,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> StreamingResponse:
         return StreamingResponse(
             stream_operation("validation", validation_selectors(body, vm)),
+            media_type="application/x-ndjson",
+        )
+
+    @api.post("/api/v1/automation/stream", dependencies=[Depends(authorize)])
+    async def automation_stream(
+        body: Annotated[AutomationRequest | None, Body()] = None,
+        vm: Annotated[list[str] | None, Query()] = None,
+        apply: Annotated[bool | None, Query()] = None,
+    ) -> StreamingResponse:
+        selectors, request = automation_request(body, vm, apply)
+        return StreamingResponse(
+            stream_operation("automation", selectors, request),
             media_type="application/x-ndjson",
         )
 
@@ -163,4 +226,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return api
 
 
-app = create_app()
+class LazyApp:
+    def __init__(self) -> None:
+        self._app: FastAPI | None = None
+
+    async def __call__(self, scope, receive, send) -> None:
+        if self._app is None:
+            self._app = create_app()
+        await self._app(scope, receive, send)
+
+
+app = LazyApp()

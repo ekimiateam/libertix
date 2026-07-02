@@ -46,6 +46,7 @@ artifacts/
 
 # auto_tests runtime artifacts
 auto_tests/.env
+auto_tests/README.md
 auto_tests/.venv/
 auto_tests/__pycache__/
 auto_tests/.pytest_cache/
@@ -53,3 +54,4 @@ auto_tests/.ruff_cache/
 auto_tests/captures/
 auto_tests/*.log
 auto_tests/**/*.pyc
+auto_tests/app/filepool/*.iso

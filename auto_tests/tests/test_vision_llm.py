@@ -63,3 +63,20 @@ def test_llm_retries_after_rate_limit(monkeypatch, tmp_path: Path) -> None:
     ).analyze(image, "vm1", "Windows")
     assert verdict.valid is True
     assert calls == 2
+
+
+def test_install_progress_fallback_ignores_schema_instructions() -> None:
+    reasoning = """
+    Le contrat dit: error_visible=true si une erreur bloquante est visible.
+    En observant l'écran, LinuxGate télécharge encore l'ISO avec une barre de progression.
+    Aucune erreur n'est visible.
+    still_in_progress: true
+    iso_download_finished: false
+    error_visible: false
+    """
+
+    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
+
+    assert verdict["still_in_progress"] is True
+    assert verdict["iso_download_finished"] is False
+    assert verdict["error_visible"] is False

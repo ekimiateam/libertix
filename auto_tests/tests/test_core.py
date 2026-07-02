@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from app.clients.vnc import VNCClient
 from app.config import Settings
+from app.services.automation import AutomationService
 from app.services.reset import RESET_SNAPSHOT, RESET_VM_IDS
 from app.services.validation import ValidationService
 
@@ -97,3 +98,26 @@ def test_validation_vm_selector_rejects_unknown() -> None:
 
     with pytest.raises(Exception, match="Sélecteur VM inconnu"):
         service._select_vms(["not-a-vm"])  # noqa: SLF001
+
+
+def test_automation_scope_accepts_only_vm500() -> None:
+    service = AutomationService(settings())
+    selected = service.validation._select_vms(["vm1"])  # noqa: SLF001
+
+    service._assert_autoclick_scope(selected, ["vm1"])  # noqa: SLF001
+
+
+def test_automation_scope_rejects_implicit_all_vms() -> None:
+    service = AutomationService(settings())
+    selected = service.validation._select_vms(None)  # noqa: SLF001
+
+    with pytest.raises(Exception, match="Auto-click LinuxGate refusé"):
+        service._assert_autoclick_scope(selected, None)  # noqa: SLF001
+
+
+def test_automation_scope_rejects_uefi_vm() -> None:
+    service = AutomationService(settings())
+    selected = service.validation._select_vms(["vm2"])  # noqa: SLF001
+
+    with pytest.raises(Exception, match="VM500"):
+        service._assert_autoclick_scope(selected, ["vm2"])  # noqa: SLF001

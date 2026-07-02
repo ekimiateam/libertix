@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import logging
+import re
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -31,6 +32,29 @@ VERDICT_SCHEMA = {
         "welcome_message_ok",
         "summary",
         "visible_problems",
+    ],
+    "additionalProperties": False,
+}
+
+INSTALL_PROGRESS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "iso_download_finished": {"type": "boolean"},
+        "installation_finished": {"type": "boolean"},
+        "reboot_prompt_visible": {"type": "boolean"},
+        "still_in_progress": {"type": "boolean"},
+        "error_visible": {"type": "boolean"},
+        "summary": {"type": "string", "minLength": 1},
+        "visible_text": {"type": "string"},
+    },
+    "required": [
+        "iso_download_finished",
+        "installation_finished",
+        "reboot_prompt_visible",
+        "still_in_progress",
+        "error_visible",
+        "summary",
+        "visible_text",
     ],
     "additionalProperties": False,
 }
@@ -73,6 +97,22 @@ class VisionVerdict(BaseModel):
     @property
     def valid(self) -> bool:
         return self.no_visible_problem and self.linuxgate_running and self.welcome_message_ok
+
+
+class InstallProgressVerdict(BaseModel):
+    iso_download_finished: bool
+    installation_finished: bool
+    reboot_prompt_visible: bool
+    still_in_progress: bool
+    error_visible: bool
+    summary: str = Field(min_length=1)
+    visible_text: str
+
+    @property
+    def done(self) -> bool:
+        return (
+            self.iso_download_finished or self.installation_finished or self.reboot_prompt_visible
+        )
 
 
 class VisionLLMClient:
@@ -176,6 +216,103 @@ class VisionLLMClient:
                 raise self._error(exc, vm_name, response, attempt) from exc
         raise WorkflowError("llm.analyze", "Nombre maximal de tentatives LLM dépassé")
 
+    def analyze_install_progress(
+        self, image_path: Path, vm_name: str, vm_os: str
+    ) -> InstallProgressVerdict:
+        logger.info(
+            "Analyse progression installation démarrée",
+            extra={"step": "llm.install_progress", "target": vm_name},
+        )
+        image = self._optimized_image(image_path)
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Tu surveilles visuellement LinuxGate pendant une installation. "
+                        "Réponds uniquement avec un objet JSON strict conforme au schéma. "
+                        "iso_download_finished=true si l'écran montre clairement que le "
+                        "téléchargement de l'ISO est terminé ou que l'étape suivante a commencé. "
+                        "installation_finished=true si l'installation est terminée. "
+                        "reboot_prompt_visible=true si un dialogue ou bouton de "
+                        "redémarrage final est visible. "
+                        "error_visible=true si une erreur bloquante est visible. "
+                        "En cas de doute, still_in_progress=true et explique dans summary."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Capture de {vm_name}, {vm_os}. Dis si le téléchargement ISO "
+                                "LinuxGate est fini, si l'installation est finie, "
+                                "ou si ça continue."
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{image}"},
+                        },
+                    ],
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 768,
+            "stream": False,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "linuxgate_install_progress",
+                    "strict": True,
+                    "schema": INSTALL_PROGRESS_SCHEMA,
+                },
+            },
+        }
+        response: httpx.Response | None = None
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                response = httpx.post(
+                    self.url,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                message = response.json()["choices"][0]["message"]
+                content = message.get("content") or message.get("reasoning")
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError("Le LLM n'a produit aucun JSON de progression")
+                try:
+                    data = self._load_json_object(content)
+                except json.JSONDecodeError:
+                    data = self._progress_from_reasoning_text(content)
+                return InstallProgressVerdict.model_validate(data)
+            except httpx.HTTPStatusError as exc:
+                if (
+                    exc.response.status_code in (429, 500, 502, 503, 504)
+                    and attempt < self.max_attempts
+                ):
+                    self._wait_before_retry(exc.response, attempt, vm_name)
+                    continue
+                raise self._progress_error(exc, vm_name, response, attempt) from exc
+            except (
+                httpx.HTTPError,
+                json.JSONDecodeError,
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+                ValidationError,
+            ) as exc:
+                if attempt < self.max_attempts:
+                    self._wait_before_retry(response, attempt, vm_name)
+                    continue
+                raise self._progress_error(exc, vm_name, response, attempt) from exc
+        raise WorkflowError("llm.install_progress", "Nombre maximal de tentatives LLM dépassé")
+
     @staticmethod
     def _optimized_image(image_path: Path) -> str:
         try:
@@ -191,6 +328,122 @@ class VisionLLMClient:
                 "Lecture ou optimisation de la capture impossible",
                 details={"path": str(image_path), "error": str(exc)},
             ) from exc
+
+    @staticmethod
+    def _load_json_object(content: str) -> object:
+        """Parse a JSON object, tolerating noisy local thinking-model output."""
+
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            start = content.find("{")
+            end = content.rfind("}")
+            if start == -1 or end <= start:
+                raise
+            return json.loads(content[start : end + 1])
+
+    @staticmethod
+    def _progress_from_reasoning_text(content: str) -> dict[str, object]:
+        """Derive the progress schema from thinking text when visible JSON is absent.
+
+        Some local thinking models put the useful visual conclusion in ``reasoning`` and leave the
+        visible ``content`` empty. This fallback intentionally ignores schema/tutorial phrases such
+        as ``error_visible=true si...`` because those describe the contract, not the screenshot.
+        """
+
+        text = content.lower()
+
+        def conclusion_true(name: str) -> bool:
+            """Accept only answer-like assignments, not prompt explanations like "true si/if"."""
+
+            pattern = rf'(?<![a-z0-9_])["`]?{re.escape(name)}["`]?\s*[:=]\s*true\b'
+            for match in re.finditer(pattern, text):
+                tail = text[match.end() : match.end() + 40]
+                if tail.lstrip().startswith(("si ", "if ", "when ", "lorsque ")):
+                    continue
+                return True
+            return False
+
+        def explicit_false(name: str) -> bool:
+            pattern = rf'(?<![a-z0-9_])["`]?{re.escape(name)}["`]?\s*[:=]\s*false\b'
+            return re.search(pattern, text) is not None
+
+        iso_finished = (
+            conclusion_true("iso_download_finished")
+            or "iso download completed" in text
+            or "téléchargement de l'iso est terminé" in text
+            or "téléchargement iso terminé" in text
+            or "étape suivante a commencé" in text
+            or "next step has begun" in text
+        ) and not explicit_false("iso_download_finished")
+
+        installation_finished = conclusion_true("installation_finished")
+        if any(
+            marker in text
+            for marker in (
+                "not finished",
+                "not complete",
+                "pas terminée",
+                "n'est pas terminée",
+                "installation_finished`: false",
+            )
+        ):
+            installation_finished = False
+
+        reboot_prompt_visible = conclusion_true("reboot_prompt_visible")
+        if any(
+            marker in text
+            for marker in (
+                "no reboot",
+                "aucune invite",
+                "no mention of a restart",
+                "reboot_prompt_visible`: false",
+            )
+        ):
+            reboot_prompt_visible = False
+
+        error_visible = any(
+            marker in text
+            for marker in (
+                "erreur bloquante visible",
+                "impossible de charger la liste",
+                "impossible de télécharger",
+                "failed to download",
+                "error dialog",
+                "message d'erreur",
+            )
+        )
+        if any(
+            marker in text
+            for marker in (
+                "no errors",
+                "aucune erreur",
+                "aucun message d'erreur",
+                "pas d'erreur",
+                "error_visible`: false",
+                '"error_visible": false',
+            )
+        ):
+            error_visible = False
+
+        still_in_progress = (
+            conclusion_true("still_in_progress")
+            or "downloading" in text
+            or "téléchargement" in text
+            or "progress" in text
+            or "en cours" in text
+        ) and not installation_finished
+
+        compact = content.replace("\n", " ").strip()
+        return {
+            "iso_download_finished": bool(iso_finished),
+            "installation_finished": bool(installation_finished),
+            "reboot_prompt_visible": bool(reboot_prompt_visible),
+            "still_in_progress": bool(still_in_progress),
+            "error_visible": bool(error_visible),
+            "summary": "Fallback depuis le raisonnement LLM: " + compact[:900],
+            "visible_text": compact[:1200],
+        }
 
     def _wait_before_retry(
         self, response: httpx.Response | None, attempt: int, vm_name: str
@@ -216,6 +469,23 @@ class VisionLLMClient:
         return WorkflowError(
             "llm.analyze",
             "Réponse LLM absente, invalide ou non conforme au schéma JSON strict",
+            details={
+                "vm": vm_name,
+                "attempt": attempt,
+                "http_status": response.status_code if response is not None else None,
+                "response_body": response.text[-4000:] if response is not None else "",
+                "exception_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+
+    @staticmethod
+    def _progress_error(
+        exc: Exception, vm_name: str, response: httpx.Response | None, attempt: int
+    ) -> WorkflowError:
+        return WorkflowError(
+            "llm.install_progress",
+            "Réponse LLM de progression absente, invalide ou non conforme",
             details={
                 "vm": vm_name,
                 "attempt": attempt,

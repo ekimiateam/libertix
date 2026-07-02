@@ -61,6 +61,8 @@ class Settings(BaseSettings):
 
     capture_dir: Path = Path("captures")
     launch_wait_seconds: float = 2
+    automation_monitor_interval_seconds: float = 30
+    automation_monitor_timeout_seconds: float = 1200
     log_level: str = "INFO"
     api_access_token: SecretStr
 

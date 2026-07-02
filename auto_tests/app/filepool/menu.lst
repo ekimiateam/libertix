@@ -1,0 +1,6 @@
+timeout 0
+default 0
+title Linux
+root (hd0,2)
+kernel /live/vmlinuz boot=live toram components quiet loglevel=3 systemd.show_status=0 console=tty1 console=ttyS0,115200n8
+initrd /live/initrd.img
