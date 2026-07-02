@@ -16,7 +16,6 @@ namespace LinuxGate.Pages
     {
         private double _linuxSizeGB;
         private const double FAT32_SIZE_GB = 2.0;
-        private const string FILEPOOL_BASE_URL = "http://192.168.1.170:8000/filepool";
         private bool _isRunning = false;
         private bool _automaticRebootScheduled = false;
 
@@ -290,7 +289,7 @@ namespace LinuxGate.Pages
             string[] grubFiles = { "grldr", "grldr.mbr", "menu.lst" };
             foreach (var file in grubFiles)
             {
-                string url = $"{FILEPOOL_BASE_URL}/{file}";
+                string url = $"{FilepoolConfig.BaseUrl}/{file}";
                 string destPath = Path.Combine(@"C:\", file);
                 string localFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
                 bool success = false;
@@ -446,13 +445,18 @@ namespace LinuxGate.Pages
 
                 await Task.Delay(1000);
 
-                // Step 4: Add to boot menu. Windows stays the default entry so a
-                // timeout or a manual choice can safely return to Windows.
-                await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {guid} /addlast");
+                // Step 4: Put Windows first and Linux second. This keeps the
+                // recovery path simple if the user lets the timeout expire.
+                await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {{current}} {guid}");
 
                 await Task.Delay(1000);
 
-                // Step 5: Always show the boot menu and wait before defaulting to Windows.
+                // Step 5: Ask Windows 10 for the modern boot selector, show it
+                // every boot, and wait before defaulting to Windows.
+                await RunBcdeditCommandAsync(bcdeditPath, "/set {current} bootmenupolicy Standard");
+
+                await Task.Delay(1000);
+
                 await RunBcdeditCommandAsync(bcdeditPath, "/set {bootmgr} displaybootmenu yes");
 
                 await Task.Delay(1000);
@@ -464,7 +468,7 @@ namespace LinuxGate.Pages
                 await RunBcdeditCommandAsync(bcdeditPath, "/default {current}");
 
                 Log("Boot entry configured successfully");
-                Log("Boot menu will be shown; Windows remains the default if no choice is made.");
+                Log("Boot menu will be shown; Windows remains first and default if no choice is made.");
                 return true;
             }
             catch (Exception ex)

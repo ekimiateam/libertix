@@ -121,16 +121,19 @@ HOSTNAME=<nom machine>
 
 8. LinuxGate installe GRUB4DOS sur la partition FAT32.
 9. LinuxGate cree une entree Windows Boot Manager `Install Linux`.
-10. LinuxGate ajoute cette entree au menu de boot, force l'affichage du selecteur, garde Windows par defaut et laisse 30 secondes pour choisir :
+10. LinuxGate ajoute cette entree au menu de boot, force l'affichage du selecteur, demande le menu moderne Windows 10, garde Windows en premier/par defaut et laisse 30 secondes pour choisir :
 
 ```text
-bcdedit /displayorder {guid} /addlast
+bcdedit /displayorder {current} {guid}
+bcdedit /set {current} bootmenupolicy Standard
 bcdedit /set {bootmgr} displaybootmenu yes
 bcdedit /timeout 30
 bcdedit /default {current}
 ```
 
 Il n'utilise plus `bcdedit /bootsequence {guid}`. Le choix `Install Linux` n'est donc pas force automatiquement. Si l'utilisateur ne choisit rien, Windows redemarre par defaut apres le timeout.
+
+`bootmenupolicy Standard` demande le selecteur graphique moderne de Windows 10. Sur certains boots BIOS/bootsector, Windows peut quand meme afficher le selecteur texte legacy ; dans ce cas le comportement fonctionnel reste le meme : Windows est l'entree par defaut et `Install Linux` doit etre choisi manuellement.
 
 11. Apres preparation reussie, LinuxGate programme un redemarrage automatique apres 5 secondes :
 
@@ -378,3 +381,37 @@ df
 ```
 
 Conclusion verifiee : la VM boote sur Mint installe dans `/dev/sda3`, la partition Windows reste `/dev/sda2`, et la partition Recovery `/dev/sda4` existe toujours. Le disque reste a quatre partitions primaires maximum.
+
+## Verification du selecteur Windows Boot Manager
+
+Verifie le 2026-07-02 sur VM Proxmox `500` apres ajout de `bootmenupolicy Standard` :
+
+- `ApplyChanges.xaml.cs` construit le filepool avec `FilepoolConfig.BaseUrl`.
+- `ChooseDistro.xaml.cs` construit `DISTROS_URL` avec `FilepoolConfig.DistrosUrl`.
+- LinuxGate affiche le menu Windows Boot Manager au reboot.
+- Windows est l'entree selectionnee par defaut.
+- `Install Linux` est disponible en deuxieme choix et doit etre choisi manuellement.
+- Si aucun choix n'est fait, Windows boote apres le timeout.
+
+Inspection BCD depuis Windows apres le test :
+
+```text
+{bootmgr}
+default                 {current}
+displayorder            {current}
+                        {Install Linux GUID}
+timeout                 30
+displaybootmenu         Yes
+
+{current}
+description             Windows 10
+bootmenupolicy          Standard
+```
+
+Capture de preuve locale :
+
+```text
+/home/tpm28/Documents/Ekimia/auto_tests/captures/vm500-visual-menu-5s.png
+```
+
+Observation importante : meme avec `bootmenupolicy Standard`, cette VM Windows 10 BIOS affiche le selecteur texte legacy. La commande est bien appliquee, mais le chemin BIOS/bootsector GRUB4DOS conserve l'affichage texte. Le comportement de securite attendu est neanmoins verifie : Windows reste le choix par defaut, et `Install Linux` n'est pas lance automatiquement.

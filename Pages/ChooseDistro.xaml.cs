@@ -21,7 +21,7 @@ namespace LinuxGate
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
         private const string STATE_KEY = "ChooseDistro";
-        private const string DISTROS_URL = "http://192.168.1.170:8000/filepool/distros.json";
+        private const string DISTROS_URL = FilepoolConfig.DistrosUrl;
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
