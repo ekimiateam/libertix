@@ -413,5 +413,3 @@ Capture de preuve locale :
 ```text
 /home/tpm28/Documents/Ekimia/auto_tests/captures/vm500-visual-menu-5s.png
 ```
-
-Observation importante : meme avec `bootmenupolicy Standard`, cette VM Windows 10 BIOS affiche le selecteur texte legacy. La commande est bien appliquee, mais le chemin BIOS/bootsector GRUB4DOS conserve l'affichage texte. Le comportement de securite attendu est neanmoins verifie : Windows reste le choix par defaut, et `Install Linux` n'est pas lance automatiquement.
