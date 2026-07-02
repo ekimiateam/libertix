@@ -39,7 +39,7 @@ class ValidationRequest(BaseModel):
 
 
 class AutomationRequest(ValidationRequest):
-    """LinuxGate UI automation scope and safety options.
+    """Libertix UI automation scope and safety options.
 
     By default, the automation stops before the destructive final Apply click.
     Set apply=true only when the test may really start the Linux installation.

@@ -1,8 +1,8 @@
-﻿<Application x:Class="LinuxGate.App"
+﻿<Application x:Class="Libertix.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:LinuxGate"
-             xmlns:converters="clr-namespace:LinuxGate.Converters"
+             xmlns:local="clr-namespace:Libertix"
+             xmlns:converters="clr-namespace:Libertix.Converters"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
         <ResourceDictionary>

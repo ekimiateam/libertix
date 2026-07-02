@@ -4,9 +4,9 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
-using LinuxGate.Pages;
+using Libertix.Helpers;
+using Libertix.Models;
+using Libertix.Pages;
 using System.ComponentModel;
 using System.Windows.Media.Animation;
 using System.Net.Http;
@@ -16,7 +16,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
 
-namespace LinuxGate
+namespace Libertix
 {
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {

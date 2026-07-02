@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace LinuxGate.Models
+namespace Libertix.Models
 {
     public class DistroInfoJson
     {

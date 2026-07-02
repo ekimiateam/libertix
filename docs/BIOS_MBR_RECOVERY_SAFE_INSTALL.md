@@ -24,7 +24,7 @@ La partition Recovery reste `/dev/sda4`. Elle ne doit pas etre supprimee, deplac
 L'idee initiale etait :
 
 1. Windows reduit `/dev/sda2`.
-2. LinuxGate cree une partition FAT32 temporaire `/dev/sda3`.
+2. Libertix cree une partition FAT32 temporaire `/dev/sda3`.
 3. Le live boote depuis `/dev/sda3` avec `toram`.
 4. Le live monte Windows pour lire `mint.iso`.
 5. Le live supprime `/dev/sda3`.
@@ -53,7 +53,7 @@ Windows cree directement la partition live FAT32 a la taille Linux finale, par e
 On garde donc toujours quatre entrees MBR maximum :
 
 ```text
-Avant LinuxGate :
+Avant Libertix :
 /dev/sda1  Windows System Reserved
 /dev/sda2  Windows NTFS
 /dev/sda4  Windows Recovery
@@ -81,14 +81,14 @@ FAT32 live boot -> ext4 Linux Mint
 
 Code principal : `Pages/ApplyChanges.xaml.cs`.
 
-1. LinuxGate lit l'espace reductible de Windows avec DiskPart.
-2. LinuxGate reduit la partition Windows de la taille Linux demandee :
+1. Libertix lit l'espace reductible de Windows avec DiskPart.
+2. Libertix reduit la partition Windows de la taille Linux demandee :
 
 ```text
 shrink desired=<linux_size_mb>
 ```
 
-3. LinuxGate cree une partition primaire FAT32 dans l'espace libre, avec la taille finale Linux :
+3. Libertix cree une partition primaire FAT32 dans l'espace libre, avec la taille finale Linux :
 
 ```text
 create partition primary size=<linux_size_mb>
@@ -96,32 +96,32 @@ format fs=fat32 quick label=LINUXGATE
 assign letter=Z
 ```
 
-4. LinuxGate telecharge l'ISO live custom depuis le filepool local :
+4. Libertix telecharge l'ISO live custom depuis le filepool local :
 
 ```text
 http://192.168.1.170:8000/filepool/libertix-installer-bios.iso
 ```
 
-5. LinuxGate telecharge l'ISO Mint dans le dossier temporaire Windows :
+5. Libertix telecharge l'ISO Mint dans le dossier temporaire Windows :
 
 ```text
-%TEMP%\LinuxGate\mint.iso
+%TEMP%\Libertix\mint.iso
 ```
 
-6. LinuxGate copie les fichiers de boot live sur `Z:`.
-7. LinuxGate ecrit `Z:\config.txt`, avec notamment :
+6. Libertix copie les fichiers de boot live sur `Z:`.
+7. Libertix ecrit `Z:\config.txt`, avec notamment :
 
 ```text
-ISO_WINDOWS_PATH="%TEMP%\LinuxGate\mint.iso"
+ISO_WINDOWS_PATH="%TEMP%\Libertix\mint.iso"
 ISO_FILENAME="mint.iso"
 LINUX_SIZE_GB=<taille demandee>
 USERNAME=<utilisateur>
 HOSTNAME=<nom machine>
 ```
 
-8. LinuxGate installe GRUB4DOS sur la partition FAT32.
-9. LinuxGate cree une entree Windows Boot Manager `Install Linux`.
-10. LinuxGate ajoute cette entree au menu de boot, force l'affichage du selecteur, demande le menu moderne Windows 10, garde Windows en premier/par defaut et laisse 30 secondes pour choisir :
+8. Libertix installe GRUB4DOS sur la partition FAT32.
+9. Libertix cree une entree Windows Boot Manager `Install Linux`.
+10. Libertix ajoute cette entree au menu de boot, force l'affichage du selecteur, demande le menu moderne Windows 10, garde Windows en premier/par defaut et laisse 30 secondes pour choisir :
 
 ```text
 bcdedit /displayorder {current} {guid}
@@ -135,7 +135,7 @@ Il n'utilise plus `bcdedit /bootsequence {guid}`. Le choix `Install Linux` n'est
 
 `bootmenupolicy Standard` demande le selecteur graphique moderne de Windows 10. Sur certains boots BIOS/bootsector, Windows peut quand meme afficher le selecteur texte legacy ; dans ce cas le comportement fonctionnel reste le meme : Windows est l'entree par defaut et `Install Linux` doit etre choisi manuellement.
 
-11. Apres preparation reussie, LinuxGate programme un redemarrage automatique apres 5 secondes :
+11. Apres preparation reussie, Libertix programme un redemarrage automatique apres 5 secondes :
 
 ```text
 shutdown /r /t 5
@@ -148,8 +148,8 @@ Le bouton `Redemarrer` reste visible comme fallback manuel, mais le chemin norma
 Code principal : `gen-iso.sh`.
 
 1. Le live boote avec `toram`.
-2. Systemd lance `linuxgate-install.service`.
-3. Le service lance `/install-mint.sh` et copie les logs vers la console et `/run/linuxgate/install.log`.
+2. Systemd lance `libertix-install.service`.
+3. Le service lance `/install-mint.sh` et copie les logs vers la console et `/run/libertix/install.log`.
 4. Le script lit `/run/live/medium/config.txt`.
 5. Le script identifie le disque cible :
 
@@ -184,7 +184,7 @@ mount -t ntfs-3g -o ro "$WINDOWS_PART" /mnt/windows
 Exemple :
 
 ```text
-/mnt/windows/Users/admin/AppData/Local/Temp/LinuxGate/mint.iso
+/mnt/windows/Users/admin/AppData/Local/Temp/Libertix/mint.iso
 ```
 
 10. Le script demonte Windows avant toute action sur la partition live :
@@ -285,24 +285,24 @@ Donc on evite :
 
 ## Automatisation UI de test
 
-Un outil local automatise le parcours LinuxGate sur la VM Windows 10 BIOS :
+Un outil local automatise le parcours Libertix sur la VM Windows 10 BIOS :
 
 ```bash
 cd /home/tpm28/Documents/Ekimia/auto_tests
-.venv/bin/python tools/automate_linuxgate_vm500_ui.py --apply
+.venv/bin/python tools/automate_libertix_vm500_ui.py --apply
 ```
 
 Par defaut, sans `--apply`, l'outil s'arrete avant l'action destructive :
 
 ```bash
-.venv/bin/python tools/automate_linuxgate_vm500_ui.py
+.venv/bin/python tools/automate_libertix_vm500_ui.py
 ```
 
 Garde-fous de l'outil :
 
 - il selectionne uniquement la VM `.env` dont l'OS contient `Windows 10 BIOS`;
 - il refuse si l'hote attendu n'est pas `192.168.1.240`;
-- il lance LinuxGate en mode eleve via tache planifiee interactive;
+- il lance Libertix en mode eleve via tache planifiee interactive;
 - il capture chaque ecran dans `auto_tests/captures/`;
 - il ne lance le partitionnement que si `--apply` est passe explicitement.
 
@@ -346,10 +346,10 @@ Verifie le 2026-07-02 sur VM Proxmox `500` (`Libertix-Win10-BIOS`, snapshot `cle
 - Build-id ISO verifie : `20260702-111523-nogit-dirty`.
 - Options boot verifiees dans `isolinux.cfg` : `toram`, `console=tty1`, `console=ttyS0,115200n8`.
 - Filepool HTTP local `192.168.1.170:8000` verifie avec `Content-Length: 236978176`.
-- Synchronisation de `gen-iso.sh` vers `/root/smb/LinuxGate-source` verifiee par `git diff --check`.
+- Synchronisation de `gen-iso.sh` vers `/root/smb/Libertix-source` verifiee par `git diff --check`.
 - Reset VM 500 sur snapshot `clean2`.
 - Validation API `win10-bios` : `FINAL_STATUS ok`.
-- Automatisation UI : LinuxGate a prepare Windows, cree `Z:` FAT32 20 GB, telecharge l'ISO live et `mint.iso`, installe GRUB4DOS, ajoute et programme l'entree BCD `Install Linux`.
+- Automatisation UI : Libertix a prepare Windows, cree `Z:` FAT32 20 GB, telecharge l'ISO live et `mint.iso`, installe GRUB4DOS, ajoute et programme l'entree BCD `Install Linux`.
 - Boot live avec build-id `20260702-111523-nogit-dirty`.
 - Stages live observes :
 
@@ -388,7 +388,7 @@ Verifie le 2026-07-02 sur VM Proxmox `500` apres ajout de `bootmenupolicy Standa
 
 - `ApplyChanges.xaml.cs` construit le filepool avec `FilepoolConfig.BaseUrl`.
 - `ChooseDistro.xaml.cs` construit `DISTROS_URL` avec `FilepoolConfig.DistrosUrl`.
-- LinuxGate affiche le menu Windows Boot Manager au reboot.
+- Libertix affiche le menu Windows Boot Manager au reboot.
 - Windows est l'entree selectionnee par defaut.
 - `Install Linux` est disponible en deuxieme choix et doit etre choisi manuellement.
 - Si aucun choix n'est fait, Windows boote apres le timeout.

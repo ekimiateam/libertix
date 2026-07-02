@@ -68,7 +68,7 @@ set -Eeuo pipefail
 
 [ "$EUID" -ne 0 ] && { echo "Run as root"; exit 1; }
 
-LOG_DIR="/run/linuxgate"
+LOG_DIR="/run/libertix"
 STAGE_FILE="$LOG_DIR/stage"
 FAIL_FILE="$LOG_DIR/failure"
 mkdir -p "$LOG_DIR"
@@ -266,9 +266,9 @@ assert_not_mounted_or_open() {
         return 1
     fi
 
-    if fuser -m "$part" >/tmp/linuxgate-fuser.txt 2>&1; then
+    if fuser -m "$part" >/tmp/libertix-fuser.txt 2>&1; then
         echo "ERROR: $part still has users"
-        cat /tmp/linuxgate-fuser.txt
+        cat /tmp/libertix-fuser.txt
         debug_partition_users "$part"
         return 1
     fi
@@ -355,7 +355,7 @@ find_live_partition_on_disk() {
     return 1
 }
 
-echo "LinuxGate build: $(cat /etc/linuxgate-build-id 2>/dev/null || echo unknown)"
+echo "Libertix build: $(cat /etc/libertix-build-id 2>/dev/null || echo unknown)"
 wait_for_prereqs
 
 # Read config.txt
@@ -477,7 +477,7 @@ ADDITIONAL_SHRINK_MB=$((LINUX_SIZE_MB - CURRENT_FREE_MB))
 
 if [ -n "$LIVE_PART" ] && [ "$(parent_disk_from_part "$LIVE_PART")" = "$DISK" ]; then
     echo "Live partition already exists at $LIVE_PART; skipping live-side Windows shrink."
-    echo "Windows/LinuxGate created this partition at the final Linux size."
+    echo "Windows/Libertix created this partition at the final Linux size."
     ADDITIONAL_SHRINK_MB=0
 fi
 
@@ -840,11 +840,11 @@ INSTALLSCRIPT
 
 chmod +x "$WORKDIR/chroot/install-mint.sh"
 
-cat > "$WORKDIR/chroot/usr/local/sbin/linuxgate-runner" << 'RUNNERSCRIPT'
+cat > "$WORKDIR/chroot/usr/local/sbin/libertix-runner" << 'RUNNERSCRIPT'
 #!/bin/bash
 set -u
 
-LOG_DIR="/run/linuxgate"
+LOG_DIR="/run/libertix"
 LOG="$LOG_DIR/install.log"
 DEBUG_LOG="$LOG_DIR/debug.log"
 STAGE_FILE="$LOG_DIR/stage"
@@ -861,22 +861,22 @@ tty_write() {
     {
         printf '\033c'
         printf '%s\n' "============================================================"
-        printf '%s\n' " LinuxGate / Libertix automatic installer"
+        printf '%s\n' " Libertix / Libertix automatic installer"
         printf '%s\n' "============================================================"
         printf 'Time: %s\n' "$(date -Is 2>/dev/null || date)"
-        printf 'Build: %s\n' "$(cat /etc/linuxgate-build-id 2>/dev/null || echo unknown)"
+        printf 'Build: %s\n' "$(cat /etc/libertix-build-id 2>/dev/null || echo unknown)"
         printf 'Stage: %s\n' "$(cat "$STAGE_FILE" 2>/dev/null || echo unknown)"
         printf '%s\n' "------------------------------------------------------------"
         printf '%s\n' "$@"
         printf '%s\n' "------------------------------------------------------------"
-        printf '%s\n' "Full log: /run/linuxgate/install.log"
+        printf '%s\n' "Full log: /run/libertix/install.log"
         printf '%s\n' "Debug shell: Alt-F2 / tty2"
     } > "$tty" 2>/dev/null || true
 }
 
 progress_screen() {
     local tail_lines
-    tail_lines="$(grep -E '^(STAGE|ERROR|OK:|rc=|Windows:|ISO found|Live partition|Setting MBR|Mounting|Extracting|LinuxGate build)' "$LOG" 2>/dev/null | tail -14 || true)"
+    tail_lines="$(grep -E '^(STAGE|ERROR|OK:|rc=|Windows:|ISO found|Live partition|Setting MBR|Mounting|Extracting|Libertix build)' "$LOG" 2>/dev/null | tail -14 || true)"
     [ -n "$tail_lines" ] || tail_lines="$(tail -12 "$LOG" 2>/dev/null || true)"
     tty_write /dev/tty1 "$tail_lines"
     tty_write /dev/ttyS0 "$tail_lines"
@@ -903,8 +903,8 @@ collect_debug() {
         losetup -a 2>/dev/null || true
         echo "--- dmesg tail ---"
         dmesg | tail -200 2>/dev/null || true
-        echo "--- journal linuxgate ---"
-        journalctl -b -u linuxgate-install.service --no-pager 2>/dev/null || true
+        echo "--- journal libertix ---"
+        journalctl -b -u libertix-install.service --no-pager 2>/dev/null || true
     } >> "$DEBUG_LOG" 2>&1
 }
 
@@ -922,25 +922,25 @@ copy_logs_to_windows_best_effort() {
     done
 
     [ -n "$win" ] || return 0
-    tmp="/mnt/linuxgate-logcopy"
+    tmp="/mnt/libertix-logcopy"
     mkdir -p "$tmp"
     if mount -t ntfs-3g "$win" "$tmp" 2>/dev/null; then
-        mkdir -p "$tmp/Windows/Temp/LinuxGate" 2>/dev/null || true
-        cp -f "$LOG" "$tmp/Windows/Temp/LinuxGate/live-install.log" 2>/dev/null || true
-        cp -f "$DEBUG_LOG" "$tmp/Windows/Temp/LinuxGate/live-debug.log" 2>/dev/null || true
-        cp -f "$STAGE_FILE" "$tmp/Windows/Temp/LinuxGate/live-stage.txt" 2>/dev/null || true
-        cp -f "$FAIL_FILE" "$tmp/Windows/Temp/LinuxGate/live-failure.txt" 2>/dev/null || true
+        mkdir -p "$tmp/Windows/Temp/Libertix" 2>/dev/null || true
+        cp -f "$LOG" "$tmp/Windows/Temp/Libertix/live-install.log" 2>/dev/null || true
+        cp -f "$DEBUG_LOG" "$tmp/Windows/Temp/Libertix/live-debug.log" 2>/dev/null || true
+        cp -f "$STAGE_FILE" "$tmp/Windows/Temp/Libertix/live-stage.txt" 2>/dev/null || true
+        cp -f "$FAIL_FILE" "$tmp/Windows/Temp/Libertix/live-failure.txt" 2>/dev/null || true
         sync
         umount "$tmp" 2>/dev/null || true
     fi
 }
 
-tty_write /dev/tty1 "Starting LinuxGate installer..."
-tty_write /dev/ttyS0 "Starting LinuxGate installer..."
+tty_write /dev/tty1 "Starting Libertix installer..."
+tty_write /dev/ttyS0 "Starting Libertix installer..."
 
 (
-    echo "===== linuxgate installer started $(date -Is 2>/dev/null || date) ====="
-    echo "build=$(cat /etc/linuxgate-build-id 2>/dev/null || echo unknown)"
+    echo "===== libertix installer started $(date -Is 2>/dev/null || date) ====="
+    echo "build=$(cat /etc/libertix-build-id 2>/dev/null || echo unknown)"
     /install-mint.sh
 ) >> "$LOG" 2>&1 &
 pid="$!"
@@ -969,7 +969,7 @@ copy_logs_to_windows_best_effort
 
 while true; do
     tail_lines="$(tail -18 "$LOG" 2>/dev/null || true)"
-    tty_write /dev/tty1 "ERROR: LinuxGate installer failed with rc=$rc
+    tty_write /dev/tty1 "ERROR: Libertix installer failed with rc=$rc
 
 Stage: $(cat "$STAGE_FILE" 2>/dev/null || echo unknown)
 
@@ -977,7 +977,7 @@ Last install log lines:
 $tail_lines
 
 The VM is intentionally paused here for screenshot/debug."
-    tty_write /dev/ttyS0 "ERROR: LinuxGate installer failed with rc=$rc
+    tty_write /dev/ttyS0 "ERROR: Libertix installer failed with rc=$rc
 
 Stage: $(cat "$STAGE_FILE" 2>/dev/null || echo unknown)
 
@@ -987,19 +987,19 @@ $tail_lines"
 done
 RUNNERSCRIPT
 
-chmod +x "$WORKDIR/chroot/usr/local/sbin/linuxgate-runner"
+chmod +x "$WORKDIR/chroot/usr/local/sbin/libertix-runner"
 
-cat > "$WORKDIR/chroot/etc/systemd/system/linuxgate-install.service" << 'SERVICEUNIT'
+cat > "$WORKDIR/chroot/etc/systemd/system/libertix-install.service" << 'SERVICEUNIT'
 [Unit]
-Description=LinuxGate automatic Mint installer
+Description=Libertix automatic Mint installer
 After=local-fs.target systemd-udev-settle.service
 Wants=local-fs.target systemd-udev-settle.service
-ConditionPathExists=/usr/local/sbin/linuxgate-runner
+ConditionPathExists=/usr/local/sbin/libertix-runner
 
 [Service]
 Type=simple
 ExecStartPre=/bin/udevadm settle
-ExecStart=/usr/local/sbin/linuxgate-runner
+ExecStart=/usr/local/sbin/libertix-runner
 StandardInput=null
 StandardOutput=journal
 StandardError=journal
@@ -1012,8 +1012,8 @@ WantedBy=multi-user.target
 SERVICEUNIT
 
 mkdir -p "$WORKDIR/chroot/etc/systemd/system/multi-user.target.wants"
-ln -sf /etc/systemd/system/linuxgate-install.service \
-    "$WORKDIR/chroot/etc/systemd/system/multi-user.target.wants/linuxgate-install.service"
+ln -sf /etc/systemd/system/libertix-install.service \
+    "$WORKDIR/chroot/etc/systemd/system/multi-user.target.wants/libertix-install.service"
 
 mkdir -p "$WORKDIR/chroot/etc/systemd/system/getty@tty2.service.d"
 cat > "$WORKDIR/chroot/etc/systemd/system/getty@tty2.service.d/override.conf" << 'TTY2SERVICE'
@@ -1032,10 +1032,10 @@ if ! git diff --quiet 2>/dev/null; then
     BUILD_GIT="${BUILD_GIT}-dirty"
 fi
 BUILD_ID="$(date -u +%Y%m%d-%H%M%S)-${BUILD_GIT}"
-echo "$BUILD_ID" > "$WORKDIR/chroot/etc/linuxgate-build-id"
-echo "$BUILD_ID" > "$WORKDIR/iso_build/linuxgate-build-id.txt"
+echo "$BUILD_ID" > "$WORKDIR/chroot/etc/libertix-build-id"
+echo "$BUILD_ID" > "$WORKDIR/iso_build/libertix-build-id.txt"
 cat > "$WORKDIR/chroot/etc/motd" << EOF
-LinuxGate build: $BUILD_ID
+Libertix build: $BUILD_ID
 EOF
 
 echo "=== Unmounting chroot ==="

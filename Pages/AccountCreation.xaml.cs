@@ -3,10 +3,10 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
+using Libertix.Helpers;
+using Libertix.Models;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public partial class AccountCreation : Page
     {

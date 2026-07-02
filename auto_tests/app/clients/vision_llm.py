@@ -21,14 +21,14 @@ VERDICT_SCHEMA = {
     "type": "object",
     "properties": {
         "no_visible_problem": {"type": "boolean"},
-        "linuxgate_running": {"type": "boolean"},
+        "libertix_running": {"type": "boolean"},
         "welcome_message_ok": {"type": "boolean"},
         "summary": {"type": "string", "minLength": 1},
         "visible_problems": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
         "no_visible_problem",
-        "linuxgate_running",
+        "libertix_running",
         "welcome_message_ok",
         "summary",
         "visible_problems",
@@ -59,14 +59,14 @@ INSTALL_PROGRESS_SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """Tu es un auditeur visuel strict chargé de valider l'écran de LinuxGate.
+SYSTEM_PROMPT = """Tu es un auditeur visuel strict chargé de valider l'écran de Libertix.
 
 CONTRAT DE SORTIE ABSOLU ET OBLIGATOIRE :
 - Ta réponse visible entière doit être UN SEUL objet JSON valide.
 - Elle doit respecter exactement le JSON Schema fourni par response_format.
 - N'ajoute aucun texte avant ou après l'objet JSON.
 - N'utilise jamais de bloc Markdown, de balises, de commentaire ou de clé supplémentaire.
-- Les cinq clés obligatoires sont : no_visible_problem, linuxgate_running,
+- Les cinq clés obligatoires sont : no_visible_problem, libertix_running,
   welcome_message_ok, summary et visible_problems.
 - Les trois premières valeurs sont obligatoirement des booléens JSON true ou false,
   jamais des chaînes.
@@ -79,24 +79,24 @@ question le prétend. Le raisonnement interne peut être détaillé, mais la ré
 rester exclusivement l'objet JSON demandé.
 
 PÉRIMÈTRE DE VALIDATION :
-- Le verdict concerne uniquement la fenêtre LinuxGate, son lancement et son écran de bienvenue.
+- Le verdict concerne uniquement la fenêtre Libertix, son lancement et son écran de bienvenue.
 - Ignore les icônes du bureau Windows, raccourcis, croix rouges sur icônes réseau, barre des tâches,
-  notifications système ou fond d'écran, sauf si ces éléments couvrent LinuxGate ou empêchent
+  notifications système ou fond d'écran, sauf si ces éléments couvrent Libertix ou empêchent
   clairement de lire/utiliser l'application.
-- no_visible_problem doit donc être false uniquement si un problème est visible dans LinuxGate
-  lui-même, si LinuxGate est masqué/illisible, ou si une erreur bloque son écran d'accueil."""
+- no_visible_problem doit donc être false uniquement si un problème est visible dans Libertix
+  lui-même, si Libertix est masqué/illisible, ou si une erreur bloque son écran d'accueil."""
 
 
 class VisionVerdict(BaseModel):
     no_visible_problem: bool
-    linuxgate_running: bool
+    libertix_running: bool
     welcome_message_ok: bool
     summary: str = Field(min_length=1)
     visible_problems: list[str]
 
     @property
     def valid(self) -> bool:
-        return self.no_visible_problem and self.linuxgate_running and self.welcome_message_ok
+        return self.no_visible_problem and self.libertix_running and self.welcome_message_ok
 
 
 class InstallProgressVerdict(BaseModel):
@@ -139,10 +139,10 @@ class VisionLLMClient:
         user_prompt = (
             f"Analyse la capture jointe de {vm_name}, système {vm_os}. Vérifie séparément : "
             "(1) qu'aucun problème, message d'erreur ou anomalie visuelle n'est visible "
-            "dans la fenêtre LinuxGate ; "
-            "(2) que l'application LinuxGate est réellement ouverte ; "
-            "(3) que le message de bienvenue LinuxGate est affiché correctement. "
-            "Ignore les problèmes du bureau Windows qui ne touchent pas LinuxGate. "
+            "dans la fenêtre Libertix ; "
+            "(2) que l'application Libertix est réellement ouverte ; "
+            "(3) que le message de bienvenue Libertix est affiché correctement. "
+            "Ignore les problèmes du bureau Windows qui ne touchent pas Libertix. "
             "RAPPEL FINAL : réponds uniquement avec l'objet JSON strict imposé, "
             "sans aucun autre texte."
         )
@@ -167,7 +167,7 @@ class VisionLLMClient:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "linuxgate_visual_verdict",
+                    "name": "libertix_visual_verdict",
                     "strict": True,
                     "schema": VERDICT_SCHEMA,
                 },
@@ -230,7 +230,7 @@ class VisionLLMClient:
                 {
                     "role": "system",
                     "content": (
-                        "Tu surveilles visuellement LinuxGate pendant une installation. "
+                        "Tu surveilles visuellement Libertix pendant une installation. "
                         "Réponds uniquement avec un objet JSON strict conforme au schéma. "
                         "iso_download_finished=true si l'écran montre clairement que le "
                         "téléchargement de l'ISO est terminé ou que l'étape suivante a commencé. "
@@ -248,7 +248,7 @@ class VisionLLMClient:
                             "type": "text",
                             "text": (
                                 f"Capture de {vm_name}, {vm_os}. Dis si le téléchargement ISO "
-                                "LinuxGate est fini, si l'installation est finie, "
+                                "Libertix est fini, si l'installation est finie, "
                                 "ou si ça continue."
                             ),
                         },
@@ -265,7 +265,7 @@ class VisionLLMClient:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "linuxgate_install_progress",
+                    "name": "libertix_install_progress",
                     "strict": True,
                     "schema": INSTALL_PROGRESS_SCHEMA,
                 },

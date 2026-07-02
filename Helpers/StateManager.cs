@@ -1,7 +1,7 @@
 using System.Collections.Generic;
-using LinuxGate.Models;
+using Libertix.Models;
 
-namespace LinuxGate.Helpers
+namespace Libertix.Helpers
 {
     public static class StateManager
     {

@@ -102,7 +102,7 @@ function Copy-WithRobocopy {
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $mapped = $false
-$temp = Join-Path $env:TEMP ("LinuxGate-build-" + [guid]::NewGuid().ToString("N"))
+$temp = Join-Path $env:TEMP ("Libertix-build-" + [guid]::NewGuid().ToString("N"))
 $srcLocal = Join-Path $temp "source"
 
 # Important pour la VM 192.168.1.138, utilisée aussi manuellement :
@@ -127,7 +127,7 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $config.source -PathType Container)) {
-        throw ("Source LinuxGate introuvable sur Samba: " + $config.source)
+        throw ("Source Libertix introuvable sur Samba: " + $config.source)
     }
 
     New-Item -ItemType Directory -Path $srcLocal -Force | Out-Null
@@ -137,9 +137,9 @@ try {
     # tous les artefacts intermédiaires en fin de run.
     Copy-WithRobocopy -Source $config.source -Destination $srcLocal -ExtraArgs @("/XD", ".git", "bin", "obj")
 
-    $solution = Join-Path $srcLocal "LinuxGate.sln"
+    $solution = Join-Path $srcLocal "Libertix.sln"
     if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
-        throw "LinuxGate.sln absent dans la copie temporaire"
+        throw "Libertix.sln absent dans la copie temporaire"
     }
 
     $msbuild = Find-VisualStudioMSBuild
@@ -167,16 +167,16 @@ try {
             "/v:minimal",
             "/nologo"
         ) `
-        -FailureMessage "Compilation LinuxGate échouée" |
+        -FailureMessage "Compilation Libertix échouée" |
         Out-Null
 
-    $exe = Get-ChildItem -LiteralPath $srcLocal -Recurse -Filter "LinuxGate.exe" |
+    $exe = Get-ChildItem -LiteralPath $srcLocal -Recurse -Filter "Libertix.exe" |
         Where-Object { $_.FullName -match "\\bin\\Release\\" } |
         Sort-Object FullName |
         Select-Object -First 1
 
     if (-not $exe) {
-        throw "LinuxGate.exe absent après compilation Release"
+        throw "Libertix.exe absent après compilation Release"
     }
 
     if (Test-Path -LiteralPath $config.release) {
@@ -187,9 +187,9 @@ try {
     $buildDir = Split-Path -Parent $exe.FullName
     Copy-WithRobocopy -Source $buildDir -Destination $config.release
 
-    $finalExe = Join-Path $config.release "LinuxGate.exe"
+    $finalExe = Join-Path $config.release "Libertix.exe"
     if (-not (Test-Path -LiteralPath $finalExe -PathType Leaf)) {
-        throw "LinuxGate.exe absent dans LinuxGate-release après copie"
+        throw "Libertix.exe absent dans Libertix-release après copie"
     }
 
     Write-Result -Name "MSBUILD" -Value $msbuild

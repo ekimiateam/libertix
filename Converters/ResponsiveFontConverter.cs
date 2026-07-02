@@ -2,7 +2,7 @@ using System;
 using System.Globalization;
 using System.Windows.Data;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public class ResponsiveFontConverter : IMultiValueConverter
     {

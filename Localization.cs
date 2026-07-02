@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Windows;
 
-namespace LinuxGate
+namespace Libertix
 {
     public static class Localization
     {
@@ -66,7 +66,7 @@ namespace LinuxGate
             // Add the new language dictionary
             var newDict = new ResourceDictionary
             {
-                Source = new Uri($"pack://application:,,,/LinuxGate;component/Resources/Lang/Strings.{cultureName}.xaml", UriKind.Absolute)
+                Source = new Uri($"pack://application:,,,/Libertix;component/Resources/Lang/Strings.{cultureName}.xaml", UriKind.Absolute)
             };
             Application.Current.Resources.MergedDictionaries.Add(newDict);
 

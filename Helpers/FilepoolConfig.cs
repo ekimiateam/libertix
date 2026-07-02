@@ -1,4 +1,4 @@
-namespace LinuxGate.Helpers
+namespace Libertix.Helpers
 {
     public static class FilepoolConfig
     {

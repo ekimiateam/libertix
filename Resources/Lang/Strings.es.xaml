@@ -3,7 +3,7 @@
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
     
     <!-- MainWindow -->
-    <system:String x:Key="Welcome">¡Bienvenido a LinuxGate!</system:String>
+    <system:String x:Key="Welcome">¡Bienvenido a Libertix!</system:String>
     <system:String x:Key="Subtitle">Un instalador de Linux simple y moderno</system:String>
     <system:String x:Key="GetStarted">Comenzar</system:String>
     <system:String x:Key="Language">Idioma</system:String>

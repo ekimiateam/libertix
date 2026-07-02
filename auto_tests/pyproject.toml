@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "linuxgate-auto-tests"
+name = "libertix-auto-tests"
 version = "0.1.0"
-description = "API de validation automatisée de LinuxGate"
+description = "API de validation automatisée de Libertix"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",

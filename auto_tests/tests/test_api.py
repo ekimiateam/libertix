@@ -16,7 +16,7 @@ def test_web_ui_is_served() -> None:
     with TestClient(create_app(settings())) as client:
         response = client.get("/")
     assert response.status_code == 200
-    assert "LinuxGate" in response.text
+    assert "Libertix" in response.text
     assert "/api/v1/validation/stream" in response.text
     assert "/api/v1/automation/stream" in response.text
     assert "/api/v1/reset/stream" in response.text

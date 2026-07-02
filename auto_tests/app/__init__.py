@@ -1,1 +1,1 @@
-"""LinuxGate automated validation API."""
+"""Libertix automated validation API."""

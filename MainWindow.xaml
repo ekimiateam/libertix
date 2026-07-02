@@ -1,11 +1,11 @@
-﻿<Window x:Class="LinuxGate.MainWindow"
+﻿<Window x:Class="Libertix.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:LinuxGate"
+        xmlns:local="clr-namespace:Libertix"
         mc:Ignorable="d"
-        Title="LinuxGate" 
+        Title="Libertix"
         Height="630" Width="1070"
         MinHeight="630" MinWidth="1070"
         WindowStartupLocation="CenterScreen">
@@ -14,13 +14,13 @@
         <Frame.Content>
             <Grid Background="#232136">
                 <StackPanel VerticalAlignment="Center">
-                    <Label Content="{DynamicResource Welcome}" 
+                    <Label Content="{DynamicResource Welcome}"
                            HorizontalAlignment="Center"
                            Margin="0,0,0,40"
                            FontSize="72"
                            FontWeight="Light"
                            Foreground="#E0DEF4"/>
-                    
+
                     <Label Content="{DynamicResource Subtitle}"
                            HorizontalAlignment="Center"
                            Margin="0,0,0,20"

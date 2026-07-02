@@ -8,11 +8,11 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.IO;
 using System.Diagnostics;
-using LinuxGate.Commands;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
+using Libertix.Commands;
+using Libertix.Helpers;
+using Libertix.Models;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {

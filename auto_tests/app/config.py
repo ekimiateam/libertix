@@ -42,8 +42,8 @@ class Settings(BaseSettings):
 
     repository_url: str
     smb_root: str
-    source_dir_name: str = "LinuxGate-source"
-    release_dir_name: str = "LinuxGate-release"
+    source_dir_name: str = "Libertix-source"
+    release_dir_name: str = "Libertix-release"
 
     llm_api_url: str
     llm_api_key: SecretStr

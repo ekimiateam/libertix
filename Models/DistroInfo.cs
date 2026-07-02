@@ -1,6 +1,6 @@
 using System.ComponentModel;
 
-namespace LinuxGate.Models
+namespace Libertix.Models
 {
     public class DistroInfo : INotifyPropertyChanged
     {

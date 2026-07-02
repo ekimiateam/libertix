@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Windows.Data;
-namespace LinuxGate.Converters
+namespace Libertix.Converters
 {
     public class InverseBoolConverter : IValueConverter
     {

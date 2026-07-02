@@ -35,7 +35,7 @@ class Point:
 
 
 class AutomationService:
-    """Automate the LinuxGate wizard through the real VNC desktop.
+    """Automate the Libertix wizard through the real VNC desktop.
 
     The old standalone VM500 script was useful for proving the path. This
     service is the API version: it works from configured VM metadata, reuses the
@@ -78,7 +78,7 @@ class AutomationService:
             windows_path = self.validation._to_windows_share_path(executable)  # noqa: SLF001
             result.ok(
                 "automation.release_path",
-                "Exécutable LinuxGate prêt pour automatisation UI",
+                "Exécutable Libertix prêt pour automatisation UI",
                 path=str(windows_path),
             )
             options = AutomationOptions(
@@ -101,7 +101,7 @@ class AutomationService:
                         )
             suffix = "avec Apply" if apply else "sans Apply destructif"
             return result.success(
-                f"Automatisation LinuxGate terminée sur {len(selected_vms)} VM(s) {suffix}"
+                f"Automatisation Libertix terminée sur {len(selected_vms)} VM(s) {suffix}"
             )
         except WorkflowError as exc:
             return result.failure(exc)
@@ -121,9 +121,9 @@ class AutomationService:
         """Keep the destructive UI automation restricted to the tested BIOS VM.
 
         Validation can target every configured VM, but the click coordinates and
-        LinuxGate installation flow have only been validated on VM500 / vm1.
+        Libertix installation flow have only been validated on VM500 / vm1.
         Refusing implicit "all VMs" avoids accidentally clicking through UEFI
-        VMs while their LinuxGate path is still considered untested.
+        VMs while their Libertix path is still considered untested.
         """
 
         allowed = [
@@ -136,7 +136,7 @@ class AutomationService:
             return
         raise WorkflowError(
             "automation.scope",
-            "Auto-click LinuxGate refusé: cette option est actuellement validée uniquement "
+            "Auto-click Libertix refusé: cette option est actuellement validée uniquement "
             "sur VM500 / vm1 / Windows 10 BIOS. Utilise ?vm=vm1. "
             "VM501 et VM502 seront supportées quand le parcours UEFI sera testé.",
             details={
@@ -162,7 +162,7 @@ class AutomationService:
             local_executable = self.validation._deploy_to_documents(vm, executable)  # noqa: SLF001
             result.ok(
                 "automation.deploy",
-                "Release LinuxGate copiée localement avant automatisation",
+                "Release Libertix copiée localement avant automatisation",
                 target=vm.host,
                 vm=vm.name,
                 executable=str(local_executable),
@@ -170,7 +170,7 @@ class AutomationService:
             launch = self._launch_elevated(vm, local_executable)
             result.ok(
                 "automation.launch_elevated",
-                "LinuxGate lancé en administrateur via tâche planifiée interactive",
+                "Libertix lancé en administrateur via tâche planifiée interactive",
                 target=vm.host,
                 vm=vm.name,
                 **launch,
@@ -181,13 +181,13 @@ class AutomationService:
             return result.failure(exc)
 
     def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:
-        task_name = f"LinuxGateAutoInstall_{vm.name}"
+        task_name = f"LibertixAutoInstall_{vm.name}"
         with self.validation._ssh(  # noqa: SLF001
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
             response = self.validation._run_windows_script(  # noqa: SLF001
                 ssh,
-                script_name="launch_linuxgate_elevated.ps1",
+                script_name="launch_libertix_elevated.ps1",
                 config={"executable": str(executable), "task_name": task_name},
                 step="automation.launch_elevated",
                 timeout=90,
@@ -198,7 +198,7 @@ class AutomationService:
         if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
             raise WorkflowError(
                 "automation.launch_elevated",
-                "Processus LinuxGate administrateur non confirmé",
+                "Processus Libertix administrateur non confirmé",
                 details={"vm": vm.name, "host": vm.host, "stdout": response.stdout[-4000:]},
             )
         return {

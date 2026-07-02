@@ -1,4 +1,4 @@
-namespace LinuxGate.Models
+namespace Libertix.Models
 {
     public class AccountInfo
     {

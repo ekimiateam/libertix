@@ -70,7 +70,7 @@ class VNCClient:
         except Exception as exc:
             raise WorkflowError(
                 "vnc.launch",
-                "Impossible d'activer le raccourci LinuxGate sur le bureau",
+                "Impossible d'activer le raccourci Libertix sur le bureau",
                 details={"address": address, "error": str(exc)},
             ) from exc
         finally:

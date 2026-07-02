@@ -34,7 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
 
     api = FastAPI(
-        title="LinuxGate Automated Validation",
+        title="Libertix Automated Validation",
         version="0.1.0",
         description="Validation SSH/VNC/LLM vision et reset contrôlé Proxmox.",
         lifespan=lifespan,

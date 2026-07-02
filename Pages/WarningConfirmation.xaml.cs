@@ -1,9 +1,9 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
-using LinuxGate.Helpers;
+using Libertix.Helpers;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public partial class WarningConfirmation : Page
     {

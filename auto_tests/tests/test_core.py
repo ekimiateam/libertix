@@ -22,7 +22,7 @@ def settings(**overrides: object) -> Settings:
         "build_vm_host": "192.168.1.138",
         "build_vm_user": "admin",
         "build_vm_password": "secret",
-        "repository_url": "https://github.com/felix068/LinuxGate.git",
+        "repository_url": "https://github.com/ekimiateam/libertix.git",
         "smb_root": "/root/smb",
         "llm_api_url": "http://192.168.1.247:8000/v1",
         "llm_api_key": "secret",
@@ -66,9 +66,9 @@ def settings(**overrides: object) -> Settings:
 def test_share_path_translation() -> None:
     service = ValidationService(settings())
     actual = service._to_windows_share_path(  # noqa: SLF001
-        PurePosixPath("/root/smb/LinuxGate-release/folder/LinuxGate.exe")
+        PurePosixPath("/root/smb/Libertix-release/folder/Libertix.exe")
     )
-    assert actual == PureWindowsPath("Z:/LinuxGate-release/folder/LinuxGate.exe")
+    assert actual == PureWindowsPath("Z:/Libertix-release/folder/Libertix.exe")
 
 
 def test_smb_root_is_strictly_guarded() -> None:
@@ -111,7 +111,7 @@ def test_automation_scope_rejects_implicit_all_vms() -> None:
     service = AutomationService(settings())
     selected = service.validation._select_vms(None)  # noqa: SLF001
 
-    with pytest.raises(Exception, match="Auto-click LinuxGate refusé"):
+    with pytest.raises(Exception, match="Auto-click Libertix refusé"):
         service._assert_autoclick_scope(selected, None)  # noqa: SLF001
 
 

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>LinuxGate Auto Tests</title>
+    <title>Libertix Auto Tests</title>
     <style>
       body {
         font-family: system-ui, sans-serif;
@@ -68,7 +68,7 @@
     </style>
   </head>
   <body>
-    <h1>LinuxGate — validation automatisée</h1>
+    <h1>Libertix — validation automatisée</h1>
     <p class="muted">
       Interface locale simple pour lancer la validation, sélectionner des VM et suivre les étapes.
     </p>
@@ -119,10 +119,10 @@
       const stepsBody = document.getElementById("steps");
       const buttons = [...document.querySelectorAll("button")];
 
-      apiKeyInput.value = localStorage.getItem("linuxgate_api_key") || "";
+      apiKeyInput.value = localStorage.getItem("libertix_api_key") || "";
 
       document.getElementById("saveKey").addEventListener("click", () => {
-        localStorage.setItem("linuxgate_api_key", apiKeyInput.value);
+        localStorage.setItem("libertix_api_key", apiKeyInput.value);
         setStatus("Clé API enregistrée dans le navigateur.", false);
       });
       document.getElementById("loadVms").addEventListener("click", loadVms);

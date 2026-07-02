@@ -7,10 +7,10 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
+using Libertix.Helpers;
+using Libertix.Models;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public partial class ApplyChanges : Page
     {
@@ -187,7 +187,7 @@ namespace LinuxGate.Pages
             UpdateProgress(55, "Downloading ISO...");
             Log($"Step 4: Downloading ISO from {isoUrl}...");
 
-            string tempIsoPath = Path.Combine(Path.GetTempPath(), "linuxgate_installer.iso");
+            string tempIsoPath = Path.Combine(Path.GetTempPath(), "libertix_installer.iso");
             string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
             string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
             bool downloadSuccess = false;
@@ -243,7 +243,7 @@ namespace LinuxGate.Pages
                 UpdateProgress(85, "Downloading Linux installer ISO...");
                 Log($"Step 6: Downloading Linux installer from {selectedDistro.IsoInstaller}...");
 
-                string installerDir = Path.Combine(Path.GetTempPath(), "LinuxGate");
+                string installerDir = Path.Combine(Path.GetTempPath(), "Libertix");
                 Directory.CreateDirectory(installerDir);
                 string installerPath = Path.Combine(installerDir, selectedDistro.IsoInstallerFileName);
                 string localInstallerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, selectedDistro.IsoInstallerFileName);
@@ -549,7 +549,7 @@ namespace LinuxGate.Pages
                     {
                         isoWindowsPath = Path.Combine(
                             Path.GetTempPath(),
-                            "LinuxGate",
+                            "Libertix",
                             selectedInstaller.IsoInstallerFileName);
                     }
 

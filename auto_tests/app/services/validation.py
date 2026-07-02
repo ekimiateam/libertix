@@ -256,7 +256,7 @@ class ValidationService:
             ssh.run(clone_script, step="server.clone", timeout=s.command_timeout_seconds)
             result.ok(
                 "server.clone",
-                "Clone LinuxGate présent et origine vérifiée",
+                "Clone Libertix présent et origine vérifiée",
                 target=s.main_ssh_host,
             )
 
@@ -279,7 +279,7 @@ class ValidationService:
         ) as ssh:
             response = self._run_windows_script(
                 ssh,
-                script_name="build_linuxgate.ps1",
+                script_name="build_libertix.ps1",
                 config=config,
                 step="build_vm.compile",
                 timeout=max(s.command_timeout_seconds, 900),
@@ -297,13 +297,13 @@ class ValidationService:
             )
         result.ok(
             "build_vm.compile",
-            "LinuxGate compilé sur la VM Windows et copié vers Samba",
+            "Libertix compilé sur la VM Windows et copié vers Samba",
             target=s.build_vm_host,
             msbuild=values.get("MSBUILD"),
             temp_build_dir=values.get("TEMP_BUILD_DIR"),
             cleanup="dossier temporaire, script et config supprimés en fin de commande",
         )
-        return PurePosixPath(f"{s.smb_root}/{s.release_dir_name}/LinuxGate.exe")
+        return PurePosixPath(f"{s.smb_root}/{s.release_dir_name}/Libertix.exe")
 
     def _to_windows_share_path(self, path: PurePosixPath) -> PureWindowsPath:
         root = PurePosixPath(self.settings.smb_root)
@@ -327,7 +327,7 @@ class ValidationService:
         launch = self._launch_interactive(vm, local_executable, result)
         result.ok(
             "vm.launch",
-            "LinuxGate lancé dans la session graphique et processus confirmé",
+            "Libertix lancé dans la session graphique et processus confirmé",
             target=vm.host,
             vm=vm.name,
             **launch,
@@ -395,7 +395,7 @@ class ValidationService:
         ) as ssh:
             response = self._run_windows_script(
                 ssh,
-                script_name="deploy_linuxgate.ps1",
+                script_name="deploy_libertix.ps1",
                 config=config,
                 step="vm.deploy",
                 timeout=max(self.settings.command_timeout_seconds, 300),
@@ -404,7 +404,7 @@ class ValidationService:
         if not values.get("LOCAL_EXE"):
             raise WorkflowError(
                 "vm.deploy",
-                "Le chemin local de LinuxGate n'a pas été confirmé",
+                "Le chemin local de Libertix n'a pas été confirmé",
                 details={"vm": vm.name, "host": vm.host},
             )
         return PureWindowsPath(values["LOCAL_EXE"])
@@ -422,7 +422,7 @@ class ValidationService:
         ) as ssh:
             prepared = self._run_windows_script(
                 ssh,
-                script_name="launch_linuxgate.ps1",
+                script_name="launch_libertix.ps1",
                 config=prepare_config,
                 step="vm.prepare_launch",
                 timeout=60,
@@ -437,11 +437,11 @@ class ValidationService:
             )
         result.ok(
             "vm.prepare_launch",
-            "Raccourci de lancement LinuxGate préparé dans la session graphique",
+            "Raccourci de lancement Libertix préparé dans la session graphique",
             target=vm.host,
             vm=vm.name,
             session_id=int(session_id),
-            launch_shortcut="Desktop\\LinuxGate.lnk",
+            launch_shortcut="Desktop\\Libertix.lnk",
             cleanup="raccourci et clé RUNASINVOKER supprimés après vérification",
         )
 
@@ -449,7 +449,7 @@ class ValidationService:
         self.vnc.launch_desktop_shortcut(vm.vnc, width=vm.screen_width, height=vm.screen_height)
         result.ok(
             "vnc.launch",
-            "Raccourci LinuxGate activé dans la session graphique via VNC",
+            "Raccourci Libertix activé dans la session graphique via VNC",
             target=vm.vnc,
             vm=vm.name,
         )
@@ -464,7 +464,7 @@ class ValidationService:
         ) as ssh:
             response = self._run_windows_script(
                 ssh,
-                script_name="launch_linuxgate.ps1",
+                script_name="launch_libertix.ps1",
                 config=verify_config,
                 step="vm.launch",
                 timeout=60,
@@ -476,7 +476,7 @@ class ValidationService:
         if not all(values.get(key, "").isdigit() for key in required):
             raise WorkflowError(
                 "vm.launch",
-                "PID ou session interactive LinuxGate non confirmé",
+                "PID ou session interactive Libertix non confirmé",
                 details={"vm": vm.name, "host": vm.host},
             )
         return {

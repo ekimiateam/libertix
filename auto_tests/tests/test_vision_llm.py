@@ -12,7 +12,7 @@ def test_llm_json_verdict(monkeypatch, tmp_path: Path) -> None:
     Image.new("RGB", (32, 32), "white").save(image)
     payload = {
         "no_visible_problem": True,
-        "linuxgate_running": True,
+        "libertix_running": True,
         "welcome_message_ok": True,
         "summary": "Tout est correct",
         "visible_problems": [],
@@ -46,7 +46,7 @@ def test_llm_retries_after_rate_limit(monkeypatch, tmp_path: Path) -> None:
         content = json.dumps(
             {
                 "no_visible_problem": True,
-                "linuxgate_running": True,
+                "libertix_running": True,
                 "welcome_message_ok": True,
                 "summary": "OK",
                 "visible_problems": [],
@@ -68,7 +68,7 @@ def test_llm_retries_after_rate_limit(monkeypatch, tmp_path: Path) -> None:
 def test_install_progress_fallback_ignores_schema_instructions() -> None:
     reasoning = """
     Le contrat dit: error_visible=true si une erreur bloquante est visible.
-    En observant l'écran, LinuxGate télécharge encore l'ISO avec une barre de progression.
+    En observant l'écran, Libertix télécharge encore l'ISO avec une barre de progression.
     Aucune erreur n'est visible.
     still_in_progress: true
     iso_download_finished: false
