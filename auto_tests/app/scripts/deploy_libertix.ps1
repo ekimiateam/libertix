@@ -66,11 +66,11 @@ $target = Join-Path $documents $config.release_dir_name
 
 # Relance propre : pas d'ancien processus, pas d'ancienne copie locale.
 Unregister-ScheduledTask -TaskName "LibertixAutoTest" -Confirm:$false -ErrorAction SilentlyContinue
-Get-Process -Name "Libertix", "LinuxGate" -ErrorAction SilentlyContinue |
+Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction Stop
 Start-Sleep -Milliseconds 500
-if (Get-Process -Name "Libertix", "LinuxGate" -ErrorAction SilentlyContinue) {
-    throw "Ancien processus Libertix/LinuxGate encore actif"
+if (Get-Process -Name "Libertix" -ErrorAction SilentlyContinue) {
+    throw "Ancien processus Libertix encore actif"
 }
 
 if (Test-Path -LiteralPath $target) {

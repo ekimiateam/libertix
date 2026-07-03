@@ -5,147 +5,370 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Libertix Auto Tests</title>
     <style>
+      :root {
+        color-scheme: light;
+        --border: #cfd5df;
+        --muted: #5b6472;
+        --ok: #096b2e;
+        --bad: #a01324;
+        --bg-soft: #f7f9fc;
+        --primary: #174ea6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
         font-family: system-ui, sans-serif;
         margin: 24px;
-        color: #111;
+        color: #111827;
+        background: #fff;
       }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0 0 10px;
+      }
+
+      h1 {
+        font-size: 28px;
+      }
+
+      h2 {
+        font-size: 18px;
+      }
+
+      h3 {
+        font-size: 15px;
+      }
+
       button,
-      input {
+      input,
+      select {
         font: inherit;
-        padding: 8px;
-        margin: 4px 4px 4px 0;
       }
+
       button {
+        min-height: 38px;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        background: #fff;
         cursor: pointer;
       }
+
+      button.primary {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: #fff;
+      }
+
+      button.danger {
+        background: var(--bad);
+        border-color: var(--bad);
+        color: #fff;
+      }
+
       button:disabled {
         cursor: wait;
         opacity: 0.6;
       }
+
+      input[type="password"],
+      input[type="text"] {
+        min-height: 38px;
+        padding: 8px;
+        border: 1px solid var(--border);
+      }
+
+      label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
       table {
         border-collapse: collapse;
         width: 100%;
         margin-top: 16px;
       }
+
       th,
       td {
-        border: 1px solid #ccc;
+        border: 1px solid var(--border);
         padding: 8px;
         vertical-align: top;
         text-align: left;
       }
+
       th {
-        background: #f4f4f4;
+        background: var(--bg-soft);
       }
+
       pre {
         white-space: pre-wrap;
         margin: 0;
-        max-height: 220px;
+        max-height: 260px;
         overflow: auto;
       }
-      .ok {
-        color: #087f23;
-        font-weight: 700;
+
+      a {
+        color: var(--primary);
       }
-      .bad {
-        color: #b00020;
-        font-weight: 700;
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+        gap: 16px;
+        align-items: start;
       }
+
       .panel {
-        border: 1px solid #ddd;
-        padding: 12px;
-        margin: 12px 0;
+        border: 1px solid var(--border);
+        padding: 14px;
+        margin: 0 0 14px;
+        background: #fff;
       }
+
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
       .muted {
-        color: #666;
+        color: var(--muted);
       }
-      .danger {
-        background: #b00020;
-        color: white;
-        border: 0;
+
+      .ok {
+        color: var(--ok);
+        font-weight: 700;
+      }
+
+      .bad {
+        color: var(--bad);
+        font-weight: 700;
+      }
+
+      .vm-row {
+        display: block;
+        padding: 8px 0;
+        border-bottom: 1px solid #edf0f5;
+      }
+
+      .vm-row:last-child {
+        border-bottom: 0;
+      }
+
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        margin-left: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg-soft);
+        font-size: 12px;
+      }
+
+      .endpoint-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 12px;
+      }
+
+      @media (max-width: 900px) {
+        body {
+          margin: 14px;
+        }
+
+        .layout {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
   </head>
   <body>
-    <h1>Libertix — validation automatisée</h1>
-    <p class="muted">
-      Interface locale simple pour lancer la validation, sélectionner des VM et suivre les étapes.
-    </p>
+    <h1>Libertix Auto Tests</h1>
+    <p class="muted">Interface locale pour lancer les endpoints API, suivre les streams et vérifier le filepool.</p>
 
-    <section class="panel">
-      <label for="apiKey">Clé API</label><br />
-      <input id="apiKey" type="password" size="42" autocomplete="off" />
-      <button id="saveKey">Enregistrer localement</button>
-      <button id="loadVms">Charger les VM</button>
-    </section>
+    <div class="layout">
+      <aside>
+        <section class="panel stack">
+          <h2>Accès</h2>
+          <label for="apiKey">Clé API</label>
+          <input id="apiKey" type="password" autocomplete="off" />
+          <div class="buttons">
+            <button id="saveKey">Enregistrer</button>
+            <button id="health">Tester /health</button>
+            <button id="loadVms">Charger les VM</button>
+          </div>
+        </section>
 
-    <section class="panel">
-      <h2>VM à tester</h2>
-      <div id="vmList" class="muted">Clique sur “Charger les VM”. Si aucune VM n’est cochée, la validation lance toutes les VM.</div>
-      <p>
-        <button id="validateAll">Valider toutes les VM</button>
-        <button id="validateSelected">Valider les VM cochées</button>
-        <button id="automateDry">Auto-click sans Apply</button>
-        <button id="automateApply" class="danger">Auto-click avec Apply</button>
-        <button id="reset" class="danger">Reset /root/smb + snapshots clean2</button>
-      </p>
-    </section>
+        <section class="panel stack">
+          <h2>VM</h2>
+          <div class="buttons">
+            <button id="selectAllVms">Tout cocher</button>
+            <button id="clearVms">Tout décocher</button>
+          </div>
+          <div id="vmList" class="muted">Clique sur Charger les VM.</div>
+        </section>
 
-    <section class="panel">
-      <h2>État</h2>
-      <div id="status">Prêt.</div>
-      <div id="summary" class="muted"></div>
-    </section>
+        <section class="panel stack">
+          <h2>Automation</h2>
+          <label>
+            Mot de passe Linux
+            <input id="linuxPassword" type="password" value="linux" autocomplete="off" />
+          </label>
+          <label>
+            <input id="monitorIso" type="checkbox" checked />
+            Surveiller la progression ISO avec le LLM
+          </label>
+          <p class="muted">L'automation est gardée côté API. Elle refuse les VM non autorisées.</p>
+        </section>
 
-    <table>
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Étape</th>
-          <th>Statut</th>
-          <th>Message</th>
-          <th>Contexte / logs</th>
-        </tr>
-      </thead>
-      <tbody id="steps"></tbody>
-    </table>
+        <section class="panel stack">
+          <h2>Filepool</h2>
+          <div class="buttons">
+            <button id="checkFilepool">Vérifier les fichiers</button>
+          </div>
+          <div>
+            <a href="/filepool/distros.json" target="_blank" rel="noreferrer">distros.json</a>
+            <span class="pill">JSON</span>
+          </div>
+          <div>
+            <a href="/filepool/libertix-installer-bios.iso" target="_blank" rel="noreferrer">libertix-installer-bios.iso</a>
+            <span class="pill">ISO boot</span>
+          </div>
+          <div>
+            <a href="/filepool/mint.iso" target="_blank" rel="noreferrer">mint.iso</a>
+            <span class="pill">ISO Mint</span>
+          </div>
+        </section>
+      </aside>
+
+      <main>
+        <section class="panel">
+          <h2>Actions API</h2>
+          <div class="endpoint-grid">
+            <div class="stack">
+              <h3>Validation</h3>
+              <button id="validationStream" class="primary">POST /validation/stream</button>
+              <button id="validationJson">POST /validation</button>
+            </div>
+            <div class="stack">
+              <h3>Automation dry-run</h3>
+              <button id="automationDryStream" class="primary">POST /automation/stream</button>
+              <button id="automationDryJson">POST /automation</button>
+            </div>
+            <div class="stack">
+              <h3>Automation Apply</h3>
+              <button id="automationApplyStream" class="danger">POST /automation/stream apply</button>
+              <button id="automationApplyJson" class="danger">POST /automation apply</button>
+            </div>
+            <div class="stack">
+              <h3>Reset</h3>
+              <button id="resetStream" class="danger">POST /reset/stream</button>
+              <button id="resetJson" class="danger">POST /reset</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>État</h2>
+          <div id="status">Prêt.</div>
+          <div id="summary" class="muted"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Résultat brut</h2>
+          <pre id="rawResult">{}</pre>
+        </section>
+
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Étape</th>
+              <th>Statut</th>
+              <th>Message</th>
+              <th>Contexte / logs</th>
+            </tr>
+          </thead>
+          <tbody id="steps"></tbody>
+        </table>
+      </main>
+    </div>
 
     <script>
       const apiKeyInput = document.getElementById("apiKey");
+      const linuxPasswordInput = document.getElementById("linuxPassword");
+      const monitorIsoInput = document.getElementById("monitorIso");
       const vmList = document.getElementById("vmList");
       const statusBox = document.getElementById("status");
       const summaryBox = document.getElementById("summary");
+      const rawResult = document.getElementById("rawResult");
       const stepsBody = document.getElementById("steps");
       const buttons = [...document.querySelectorAll("button")];
 
       apiKeyInput.value = localStorage.getItem("libertix_api_key") || "";
+      linuxPasswordInput.value = localStorage.getItem("libertix_linux_password") || "linux";
 
       document.getElementById("saveKey").addEventListener("click", () => {
         localStorage.setItem("libertix_api_key", apiKeyInput.value);
-        setStatus("Clé API enregistrée dans le navigateur.", false);
+        localStorage.setItem("libertix_linux_password", linuxPasswordInput.value);
+        setStatus("Paramètres enregistrés dans le navigateur.", false);
       });
+      document.getElementById("health").addEventListener("click", checkHealth);
       document.getElementById("loadVms").addEventListener("click", loadVms);
-      document.getElementById("validateAll").addEventListener("click", () => runValidation([]));
-      document.getElementById("validateSelected").addEventListener("click", () => {
-        runValidation(selectedVms());
-      });
-      document.getElementById("automateDry").addEventListener("click", () => {
-        runAutomation(selectedVms(), false);
-      });
-      document.getElementById("automateApply").addEventListener("click", () => {
-        if (confirm("Confirmer l'automatisation destructive avec Apply ?")) {
-          runAutomation(selectedVms(), true);
-        }
-      });
-      document.getElementById("reset").addEventListener("click", () => {
-        if (confirm("Confirmer le reset : vider /root/smb et restaurer clean2 sur VM 500/501/502 ?")) {
-          runStream("/api/v1/reset/stream", "reset");
-        }
-      });
+      document.getElementById("selectAllVms").addEventListener("click", () => setVmChecks(true));
+      document.getElementById("clearVms").addEventListener("click", () => setVmChecks(false));
+      document.getElementById("checkFilepool").addEventListener("click", checkFilepool);
 
-      function apiHeaders() {
-        return { "X-API-Key": apiKeyInput.value };
+      document.getElementById("validationStream").addEventListener("click", () => runValidation(true));
+      document.getElementById("validationJson").addEventListener("click", () => runValidation(false));
+      document.getElementById("automationDryStream").addEventListener("click", () => runAutomation(false, true));
+      document.getElementById("automationDryJson").addEventListener("click", () => runAutomation(false, false));
+      document.getElementById("automationApplyStream").addEventListener("click", () => confirmApply(() => runAutomation(true, true)));
+      document.getElementById("automationApplyJson").addEventListener("click", () => confirmApply(() => runAutomation(true, false)));
+      document.getElementById("resetStream").addEventListener("click", () => confirmReset(() => runReset(true)));
+      document.getElementById("resetJson").addEventListener("click", () => confirmReset(() => runReset(false)));
+
+      function apiHeaders(hasJsonBody = false) {
+        const headers = { "X-API-Key": apiKeyInput.value };
+        if (hasJsonBody) {
+          headers["Content-Type"] = "application/json";
+        }
+        return headers;
+      }
+
+      function selectedVms() {
+        return [...document.querySelectorAll('input[name="vm"]:checked')].map((input) => input.value);
+      }
+
+      function requestBody() {
+        const vms = selectedVms();
+        return vms.length ? { vms } : {};
+      }
+
+      function automationBody(apply) {
+        return {
+          ...requestBody(),
+          apply,
+          linux_password: linuxPasswordInput.value || "linux",
+          monitor_iso: monitorIsoInput.checked,
+        };
+      }
+
+      function setVmChecks(value) {
+        document.querySelectorAll('input[name="vm"]').forEach((input) => {
+          input.checked = value;
+        });
       }
 
       function setBusy(value) {
@@ -162,6 +385,7 @@
       function clearResults() {
         stepsBody.innerHTML = "";
         summaryBox.textContent = "";
+        rawResult.textContent = "{}";
       }
 
       function addStep(step) {
@@ -178,6 +402,22 @@
         stepsBody.appendChild(row);
       }
 
+      function showResult(result) {
+        rawResult.textContent = JSON.stringify(result, null, 2);
+        if (result.steps) {
+          stepsBody.innerHTML = "";
+          result.steps.forEach(addStep);
+        }
+        if (result.operation && result.status) {
+          summaryBox.textContent = `${result.operation} terminé avec statut: ${result.status}`;
+          setStatus(result.message || "Opération terminée.", result.status !== "ok");
+        }
+      }
+
+      async function checkHealth() {
+        await runJson("/health", { method: "GET" }, "health");
+      }
+
       async function loadVms() {
         setBusy(true);
         try {
@@ -186,13 +426,14 @@
             throw new Error(`HTTP ${response.status}: ${await response.text()}`);
           }
           const data = await response.json();
+          rawResult.textContent = JSON.stringify(data, null, 2);
           vmList.innerHTML = "";
           data.vms.forEach((vm) => {
             const label = document.createElement("label");
-            label.style.display = "block";
+            label.className = "vm-row";
             label.innerHTML = `
               <input type="checkbox" name="vm" value="${escapeHtml(vm.name)}" />
-              ${escapeHtml(vm.name)} — ${escapeHtml(vm.os)} — ${escapeHtml(vm.host)} — VNC ${escapeHtml(vm.vnc)}
+              <span>${escapeHtml(vm.name)} — ${escapeHtml(vm.os)} — ${escapeHtml(vm.host)} — VNC ${escapeHtml(vm.vnc)}</span>
             `;
             vmList.appendChild(label);
           });
@@ -204,29 +445,108 @@
         }
       }
 
-      function selectedVms() {
-        return [...document.querySelectorAll('input[name="vm"]:checked')].map((input) => input.value);
+      async function checkFilepool() {
+        clearResults();
+        setBusy(true);
+        setStatus("Vérification du filepool...", false);
+        const files = ["distros.json", "libertix-installer-bios.iso", "mint.iso"];
+        const result = { operation: "filepool", status: "ok", files: [] };
+        try {
+          for (const file of files) {
+            const response = await fetch(`/filepool/${file}`, { method: "HEAD" });
+            const item = {
+              file,
+              status: response.status,
+              ok: response.ok,
+              bytes: response.headers.get("content-length"),
+              content_type: response.headers.get("content-type"),
+            };
+            result.files.push(item);
+            addStep({
+              step: `filepool.${file}`,
+              status: response.ok ? "ok" : "problème",
+              message: response.ok ? "Fichier accessible" : `HTTP ${response.status}`,
+              context: item,
+            });
+            if (!response.ok) {
+              result.status = "problème";
+            }
+          }
+          rawResult.textContent = JSON.stringify(result, null, 2);
+          setStatus(result.status === "ok" ? "Filepool accessible." : "Filepool incomplet.", result.status !== "ok");
+        } catch (error) {
+          setStatus(`Erreur filepool: ${error.message}`, true);
+        } finally {
+          setBusy(false);
+        }
       }
 
-      function runValidation(vms) {
-        const query = vms.map((vm) => `vm=${encodeURIComponent(vm)}`).join("&");
-        const url = query ? `/api/v1/validation/stream?${query}` : "/api/v1/validation/stream";
-        runStream(url, "validation");
+      function runValidation(stream) {
+        const body = requestBody();
+        if (stream) {
+          runStream("/api/v1/validation/stream", body, "validation stream");
+          return;
+        }
+        runJson(
+          "/api/v1/validation",
+          { method: "POST", headers: apiHeaders(true), body: JSON.stringify(body) },
+          "validation",
+        );
       }
 
-      function runAutomation(vms, apply) {
-        const queryParts = vms.map((vm) => `vm=${encodeURIComponent(vm)}`);
-        queryParts.push(`apply=${apply ? "true" : "false"}`);
-        const url = `/api/v1/automation/stream?${queryParts.join("&")}`;
-        runStream(url, apply ? "automation avec Apply" : "automation dry-run");
+      function runAutomation(apply, stream) {
+        const body = automationBody(apply);
+        if (stream) {
+          runStream("/api/v1/automation/stream", body, apply ? "automation apply stream" : "automation dry-run stream");
+          return;
+        }
+        runJson(
+          "/api/v1/automation",
+          { method: "POST", headers: apiHeaders(true), body: JSON.stringify(body) },
+          apply ? "automation apply" : "automation dry-run",
+        );
       }
 
-      async function runStream(url, label) {
+      function runReset(stream) {
+        if (stream) {
+          runStream("/api/v1/reset/stream", {}, "reset stream");
+          return;
+        }
+        runJson("/api/v1/reset", { method: "POST", headers: apiHeaders() }, "reset");
+      }
+
+      async function runJson(url, options, label) {
         clearResults();
         setBusy(true);
         setStatus(`Opération ${label} en cours...`, false);
         try {
-          const response = await fetch(url, { method: "POST", headers: apiHeaders() });
+          const response = await fetch(url, options);
+          const text = await response.text();
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${text}`);
+          }
+          const result = text ? JSON.parse(text) : {};
+          showResult(result);
+          if (!result.operation) {
+            setStatus(`Réponse ${label} reçue.`, false);
+          }
+        } catch (error) {
+          setStatus(`Erreur interface: ${error.message}`, true);
+        } finally {
+          setBusy(false);
+        }
+      }
+
+      async function runStream(url, body, label) {
+        clearResults();
+        setBusy(true);
+        setStatus(`Opération ${label} en cours...`, false);
+        try {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: apiHeaders(true),
+            body: JSON.stringify(body),
+          });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${await response.text()}`);
           }
@@ -262,9 +582,19 @@
           return;
         }
         if (event.event === "result") {
-          const result = event.data;
-          setStatus(result.message, result.status !== "ok");
-          summaryBox.textContent = `${result.operation} terminé avec statut: ${result.status}`;
+          showResult(event.data);
+        }
+      }
+
+      function confirmApply(action) {
+        if (confirm("Confirmer l'automation avec Apply ? Cette action peut modifier le disque de la VM cible.")) {
+          action();
+        }
+      }
+
+      function confirmReset(action) {
+        if (confirm("Confirmer le reset : vider /root/smb et restaurer clean2 sur les VM configurées ?")) {
+          action();
         }
       }
 

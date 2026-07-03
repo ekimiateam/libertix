@@ -250,14 +250,19 @@ class ValidationService:
                 f"if [ -d {shlex.quote(source + '/.git')} ]; then "
                 f"git -C {shlex.quote(source)} remote get-url origin | "
                 f"grep -Fx {shlex.quote(s.repository_url)}; "
+                f"git -C {shlex.quote(source)} fetch origin {shlex.quote(s.repository_branch)}; "
+                f"git -C {shlex.quote(source)} checkout -B {shlex.quote(s.repository_branch)} "
+                f"origin/{shlex.quote(s.repository_branch)}; "
                 f"elif [ -e {shlex.quote(source)} ]; then exit 21; "
-                f"else git clone -- {shlex.quote(s.repository_url)} {shlex.quote(source)}; fi"
+                f"else git clone --branch {shlex.quote(s.repository_branch)} -- "
+                f"{shlex.quote(s.repository_url)} {shlex.quote(source)}; fi"
             )
             ssh.run(clone_script, step="server.clone", timeout=s.command_timeout_seconds)
             result.ok(
                 "server.clone",
-                "Clone Libertix présent et origine vérifiée",
+                "Clone Libertix présent, origine et branche vérifiées",
                 target=s.main_ssh_host,
+                branch=s.repository_branch,
             )
 
         return self._compile_release_on_build_vm(result)

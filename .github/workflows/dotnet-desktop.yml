@@ -40,9 +40,9 @@ name: .NET Core Desktop
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "DEV" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "DEV" ]
 
 jobs:
 
@@ -69,10 +69,15 @@ jobs:
       uses: microsoft/setup-msbuild@v2
 
     - name: Restore NuGet packages
-      run: nuget restore ${{ env.Solution_Name }}
+      run: |
+        if (-not (Test-Path -LiteralPath "${{ env.Solution_Name }}" -PathType Leaf)) {
+          Get-ChildItem -Force
+          throw "Solution file not found: ${{ env.Solution_Name }}"
+        }
+        nuget restore "${{ env.Solution_Name }}"
 
     - name: Build
-      run: msbuild ${{ env.Solution_Name }} /p:Configuration=${{ matrix.configuration }} /p:Platform="Any CPU"
+      run: msbuild "${{ env.Solution_Name }}" /p:Configuration=${{ matrix.configuration }} /p:Platform="Any CPU"
 
     - name: Upload build artifacts
       if: success()

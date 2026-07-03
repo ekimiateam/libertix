@@ -23,7 +23,7 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 # Le lancement administrateur interactif est nécessaire pour le parcours
 # d'installation. sshd seul démarre trop souvent le processus dans une session
 # invisible ; /IT force l'attachement à la session utilisateur active.
-Stop-Process -Name "Libertix", "LinuxGate" -Force -ErrorAction SilentlyContinue
+Stop-Process -Name "Libertix" -Force -ErrorAction SilentlyContinue
 
 # Supprimer l'ancienne tâche si elle existe. schtasks retourne une erreur native
 # quand la tâche n'existe pas ; ce cas est normal et ne doit pas interrompre le run.
@@ -60,12 +60,12 @@ if ($LASTEXITCODE -ne 0) {
 
 Start-Sleep -Seconds 5
 
-$process = Get-Process -Name "Libertix", "LinuxGate" -ErrorAction SilentlyContinue |
+$process = Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
     Sort-Object StartTime -Descending |
     Select-Object -First 1
 
 if (-not $process) {
-    throw "Libertix/LinuxGate ne tourne pas après lancement administrateur"
+    throw "Libertix ne tourne pas après lancement administrateur"
 }
 
 Write-Result -Name "PID" -Value $process.Id

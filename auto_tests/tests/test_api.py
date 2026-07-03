@@ -17,9 +17,19 @@ def test_web_ui_is_served() -> None:
         response = client.get("/")
     assert response.status_code == 200
     assert "Libertix" in response.text
+    assert "/health" in response.text
+    assert "/api/v1/vms" in response.text
+    assert "/api/v1/validation" in response.text
     assert "/api/v1/validation/stream" in response.text
+    assert "/api/v1/automation" in response.text
     assert "/api/v1/automation/stream" in response.text
+    assert "/api/v1/reset" in response.text
     assert "/api/v1/reset/stream" in response.text
+    assert "/filepool/distros.json" in response.text
+    assert "/filepool/libertix-installer-bios.iso" in response.text
+    assert "/filepool/mint.iso" in response.text
+    assert "monitor_iso" in response.text
+    assert "linux_password" in response.text
 
 
 def test_protected_endpoint_rejects_bad_key_without_running_workflow() -> None:

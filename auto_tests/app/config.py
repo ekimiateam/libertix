@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     command_timeout_seconds: float = 180
 
     repository_url: str
+    repository_branch: str = "DEV"
     smb_root: str
     source_dir_name: str = "Libertix-source"
     release_dir_name: str = "Libertix-release"
