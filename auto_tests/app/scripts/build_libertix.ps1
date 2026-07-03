@@ -100,8 +100,49 @@ function Copy-WithRobocopy {
     }
 }
 
+function Get-FreeDriveLetter {
+    $used = @{}
+    Get-PSDrive -PSProvider FileSystem | ForEach-Object { $used[$_.Name.ToUpperInvariant()] = $true }
+    Get-SmbMapping -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($_.LocalPath -match "^([A-Z]):$") {
+            $used[$Matches[1].ToUpperInvariant()] = $true
+        }
+    }
+
+    foreach ($letter in @("Y", "X", "W", "V", "U", "T", "S", "R", "Q", "P")) {
+        if (-not $used.ContainsKey($letter)) {
+            return ($letter + ":")
+        }
+    }
+
+    throw "Aucune lettre de lecteur libre pour monter le partage Samba"
+}
+
+function Convert-SharePathToMappedPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Share,
+        [Parameter(Mandatory = $true)]
+        [string]$Drive
+    )
+
+    $normalizedShare = $Share.TrimEnd("\")
+    if (-not $Path.StartsWith($normalizedShare, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ("Chemin hors partage Samba: " + $Path)
+    }
+
+    $suffix = $Path.Substring($normalizedShare.Length).TrimStart("\")
+    if ($suffix) {
+        return (Join-Path ($Drive + "\") $suffix)
+    }
+    return ($Drive + "\")
+}
+
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $mapped = $false
+$mappedDrive = $null
 $temp = Join-Path $env:TEMP ("Libertix-build-" + [guid]::NewGuid().ToString("N"))
 $srcLocal = Join-Path $temp "source"
 
@@ -110,24 +151,38 @@ $srcLocal = Join-Path $temp "source"
 $env:NUGET_PACKAGES = Join-Path $temp "nuget-packages"
 
 try {
+    $sourcePath = $config.source
+    $releasePath = $config.release
+
     # On ne crée pas de mapping persistant. Si le partage est déjà accessible,
     # on ne touche pas à la configuration existante de l'utilisateur.
     if (-not (Test-Path -LiteralPath $config.share)) {
-        Get-SmbMapping |
-            Where-Object { $_.RemotePath -eq $config.share } |
+        Get-SmbMapping -ErrorAction SilentlyContinue |
+            Where-Object { $_.RemotePath -eq $config.share -and $_.LocalPath } |
             Remove-SmbMapping -Force -UpdateProfile -ErrorAction SilentlyContinue
 
+        $mappedDrive = Get-FreeDriveLetter
         New-SmbMapping `
+            -LocalPath $mappedDrive `
             -RemotePath $config.share `
             -UserName $config.samba_username `
             -Password $config.samba_password `
             -Persistent $false |
             Out-Null
         $mapped = $true
+
+        $sourcePath = Convert-SharePathToMappedPath `
+            -Path $config.source `
+            -Share $config.share `
+            -Drive $mappedDrive
+        $releasePath = Convert-SharePathToMappedPath `
+            -Path $config.release `
+            -Share $config.share `
+            -Drive $mappedDrive
     }
 
-    if (-not (Test-Path -LiteralPath $config.source -PathType Container)) {
-        throw ("Source Libertix introuvable sur Samba: " + $config.source)
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
+        throw ("Source Libertix introuvable sur Samba: " + $sourcePath)
     }
 
     New-Item -ItemType Directory -Path $srcLocal -Force | Out-Null
@@ -135,7 +190,7 @@ try {
     # Le repo original reste sur Samba. On compile uniquement une copie locale
     # temporaire pour éviter les problèmes de locks et pour pouvoir supprimer
     # tous les artefacts intermédiaires en fin de run.
-    Copy-WithRobocopy -Source $config.source -Destination $srcLocal -ExtraArgs @("/XD", ".git", "bin", "obj")
+    Copy-WithRobocopy -Source $sourcePath -Destination $srcLocal -ExtraArgs @("/XD", ".git", "bin", "obj")
 
     $solution = Join-Path $srcLocal "Libertix.sln"
     if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
@@ -179,15 +234,15 @@ try {
         throw "Libertix.exe absent après compilation Release"
     }
 
-    if (Test-Path -LiteralPath $config.release) {
-        Remove-Item -LiteralPath $config.release -Recurse -Force
+    if (Test-Path -LiteralPath $releasePath) {
+        Remove-Item -LiteralPath $releasePath -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $config.release -Force | Out-Null
+    New-Item -ItemType Directory -Path $releasePath -Force | Out-Null
 
     $buildDir = Split-Path -Parent $exe.FullName
-    Copy-WithRobocopy -Source $buildDir -Destination $config.release
+    Copy-WithRobocopy -Source $buildDir -Destination $releasePath
 
-    $finalExe = Join-Path $config.release "Libertix.exe"
+    $finalExe = Join-Path $releasePath "Libertix.exe"
     if (-not (Test-Path -LiteralPath $finalExe -PathType Leaf)) {
         throw "Libertix.exe absent dans Libertix-release après copie"
     }
@@ -203,6 +258,11 @@ finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($mapped) {
-        Remove-SmbMapping -RemotePath $config.share -Force -UpdateProfile -ErrorAction SilentlyContinue
+        if ($mappedDrive) {
+            Remove-SmbMapping -LocalPath $mappedDrive -Force -UpdateProfile -ErrorAction SilentlyContinue
+        }
+        else {
+            Remove-SmbMapping -RemotePath $config.share -Force -UpdateProfile -ErrorAction SilentlyContinue
+        }
     }
 }

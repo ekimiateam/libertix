@@ -58,14 +58,20 @@ if ($LASTEXITCODE -ne 0) {
     throw ("Lancement tâche planifiée Libertix échoué; sortie=" + ($runOutput -join " | "))
 }
 
-Start-Sleep -Seconds 5
-
-$process = Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
-    Sort-Object StartTime -Descending |
-    Select-Object -First 1
+$process = $null
+for ($i = 0; $i -lt 15; $i++) {
+    Start-Sleep -Seconds 2
+    $process = Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
+        Sort-Object StartTime -Descending |
+        Select-Object -First 1
+    if ($process) {
+        break
+    }
+}
 
 if (-not $process) {
-    throw "Libertix ne tourne pas après lancement administrateur"
+    $taskState = schtasks.exe /Query /TN $taskName /V /FO LIST 2>&1
+    throw ("Libertix ne tourne pas après lancement administrateur; tâche=" + ($taskState -join " | "))
 }
 
 Write-Result -Name "PID" -Value $process.Id

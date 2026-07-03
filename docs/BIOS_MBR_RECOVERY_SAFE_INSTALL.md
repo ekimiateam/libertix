@@ -61,7 +61,7 @@ Avant Libertix :
 Apres preparation Windows :
 /dev/sda1  Windows System Reserved
 /dev/sda2  Windows NTFS reduite
-/dev/sda3  FAT32 LINUXGATE, taille finale Linux
+/dev/sda3  FAT32 LIBERTIX, taille finale Linux
 /dev/sda4  Windows Recovery
 
 Apres installation live :
@@ -92,7 +92,7 @@ shrink desired=<linux_size_mb>
 
 ```text
 create partition primary size=<linux_size_mb>
-format fs=fat32 quick label=LINUXGATE
+format fs=fat32 quick label=LIBERTIX
 assign letter=Z
 ```
 
@@ -285,26 +285,46 @@ Donc on evite :
 
 ## Automatisation UI de test
 
-Un outil local automatise le parcours Libertix sur la VM Windows 10 BIOS :
+L'API `auto_tests` automatise le parcours Libertix sur la cible BIOS validee.
+
+Le mode par defaut compile depuis la branche distante configuree :
 
 ```bash
-cd /home/tpm28/Documents/Ekimia/auto_tests
-.venv/bin/python tools/automate_libertix_vm500_ui.py --apply
+POST /api/v1/automation/stream?vm=vm1&apply=true&source=remote
 ```
 
-Par defaut, sans `--apply`, l'outil s'arrete avant l'action destructive :
+Pour tester le working tree local sans pousser sur GitHub, utiliser :
 
 ```bash
-.venv/bin/python tools/automate_libertix_vm500_ui.py
+POST /api/v1/automation/stream
 ```
+
+avec un corps JSON :
+
+```json
+{
+  "vms": ["vm1"],
+  "source": "local",
+  "apply": true,
+  "linux_password": "linux",
+  "monitor_iso": true
+}
+```
+
+`source=local` archive le working tree hote, exclut `.git`, `bin`, `obj`, les ISO,
+le filepool, les captures et les environnements virtuels, puis copie les sources
+vers `/root/smb/Libertix-source` avant compilation.
+
+Sans `apply=true`, l'API s'arrete avant l'action destructive.
 
 Garde-fous de l'outil :
 
 - il selectionne uniquement la VM `.env` dont l'OS contient `Windows 10 BIOS`;
-- il refuse si l'hote attendu n'est pas `192.168.1.240`;
+- il refuse les cibles hors du perimetre BIOS valide;
+- il restaure le snapshot Proxmox `clean2` de VM500 avant le build/deploiement;
 - il lance Libertix en mode eleve via tache planifiee interactive;
 - il capture chaque ecran dans `auto_tests/captures/`;
-- il ne lance le partitionnement que si `--apply` est passe explicitement.
+- il ne lance le partitionnement que si `apply=true` est passe explicitement.
 
 ## Probleme corrige pendant le test final
 
@@ -339,21 +359,20 @@ Correctif applique :
 
 ## Etat de verification
 
-Verifie le 2026-07-02 sur VM Proxmox `500` (`Libertix-Win10-BIOS`, snapshot `clean2`) :
+Verifie le 2026-07-03 sur cible BIOS/MBR apres rollback `clean2` :
 
 - Build ISO BIOS via Docker local.
-- ISO bootable BIOS verifiee par `file`.
-- Build-id ISO verifie : `20260702-111523-nogit-dirty`.
+- ISO BIOS reconstruite et copiee dans le filepool integre.
+- Build-id ISO observe au boot live : `20260703-142404-nogit-dirty`.
 - Options boot verifiees dans `isolinux.cfg` : `toram`, `console=tty1`, `console=ttyS0,115200n8`.
-- Filepool HTTP local `192.168.1.170:8000` verifie avec `Content-Length: 236978176`.
-- Synchronisation de `gen-iso.sh` vers `/root/smb/Libertix-source` verifiee par `git diff --check`.
-- Reset VM 500 sur snapshot `clean2`.
-- Validation API `win10-bios` : `FINAL_STATUS ok`.
-- Automatisation UI : Libertix a prepare Windows, cree `Z:` FAT32 20 GB, telecharge l'ISO live et `mint.iso`, installe GRUB4DOS, ajoute et programme l'entree BCD `Install Linux`.
-- Boot live avec build-id `20260702-111523-nogit-dirty`.
+- Automatisation UI `source=local` : copie working tree vers Samba, compilation sur VM build, deploiement local, lancement eleve, clics VNC, `Apply`, surveillance du telechargement ISO, puis clic sur `Redemarrer` apres verdict LLM.
+- Windows programme `Install Linux` en bootsequence pour un boot automatique unique vers le live.
+- La premiere action du live nettoie le boot temporaire Windows : suppression de l'entree BCD `Install Linux` et des fichiers `grldr`, `grldr.mbr`, `menu.lst`.
 - Stages live observes :
 
 ```text
+006-clean-windows-live-boot
+060-set-mbr-type-83
 070-wipefs-live-part
 080-mkfs-ext4
 090-mount-target
@@ -364,52 +383,42 @@ Verifie le 2026-07-02 sur VM Proxmox `500` (`Libertix-Win10-BIOS`, snapshot `cle
 ```
 
 - Boot final Linux Mint 22.2 Cinnamon 64-bit.
-- Login utilisateur `admin` reussi.
-- Verification depuis le terminal Mint :
+- Verification Windows apres reboot :
 
 ```text
-lsblk
-sda    64G disk
-|-sda1 50M part
-|-sda2 43,4G part /mnt/windows
-|-sda3 20G part /
-|-sda4 536M part
+ABSENT C:\grldr
+ABSENT C:\grldr.mbr
+ABSENT C:\menu.lst
+NO_MATCH Install Linux/grldr
 
-df
-/dev/sda3  20466256  7789148  11612148  41% /
-/dev/sda2  45534088 29049192  16484896  64% /mnt/windows
+Partition 1  Principale    50 M
+Partition 2  Principale    43 G
+Partition 3  Principale    20 G
+Partition 4  Recuperation  536 M
 ```
 
 Conclusion verifiee : la VM boote sur Mint installe dans `/dev/sda3`, la partition Windows reste `/dev/sda2`, et la partition Recovery `/dev/sda4` existe toujours. Le disque reste a quatre partitions primaires maximum.
 
-## Verification du selecteur Windows Boot Manager
+## Verification du boot temporaire Windows
 
-Verifie le 2026-07-02 sur VM Proxmox `500` apres ajout de `bootmenupolicy Standard` :
+Le boot temporaire utilise une entree BCD `Install Linux` et `grldr.mbr`, mais cette entree ne doit pas rester apres le demarrage du live.
 
 - `ApplyChanges.xaml.cs` construit le filepool avec `FilepoolConfig.BaseUrl`.
 - `ChooseDistro.xaml.cs` construit `DISTROS_URL` avec `FilepoolConfig.DistrosUrl`.
-- Libertix affiche le menu Windows Boot Manager au reboot.
-- Windows est l'entree selectionnee par defaut.
-- `Install Linux` est disponible en deuxieme choix et doit etre choisi manuellement.
-- Si aucun choix n'est fait, Windows boote apres le timeout.
+- Libertix ajoute `Install Linux` au BCD et configure `bootsequence` pour le prochain reboot uniquement.
+- Le live retire ensuite l'entree `Install Linux` du BCD.
+- Le live supprime `C:\grldr`, `C:\grldr.mbr` et `C:\menu.lst`.
+- Si l'installation echoue apres ce nettoyage, un reboot ne relance pas le boot temporaire.
 
 Inspection BCD depuis Windows apres le test :
 
 ```text
 {bootmgr}
-default                 {current}
-displayorder            {current}
-                        {Install Linux GUID}
-timeout                 30
-displaybootmenu         Yes
+displayorder            {default}
+toolsdisplayorder       {memdiag}
+timeout                 0
+displaybootmenu         No
 
-{current}
-description             Windows 10
-bootmenupolicy          Standard
-```
-
-Capture de preuve locale :
-
-```text
-/home/tpm28/Documents/Ekimia/auto_tests/captures/vm500-visual-menu-5s.png
+BCD scan:
+NO_MATCH Install Linux/grldr
 ```

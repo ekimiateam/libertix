@@ -10,12 +10,14 @@ from pathlib import Path, PureWindowsPath
 
 from vncdotool import api
 
+from app.clients.proxmox import ProxmoxClient
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
-from app.models import OperationResult, StepResult
+from app.models import OperationResult, SourceMode, StepResult
 from app.services.common import ResultBuilder
+from app.services.reset import RESET_SNAPSHOT
 from app.services.validation import ValidationService
 
 logger = logging.getLogger(__name__)
@@ -68,13 +70,15 @@ class AutomationService:
         apply: bool,
         linux_password: str,
         monitor_iso: bool,
+        source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
         result = ResultBuilder("automation", on_step=on_step)
         try:
             selected_vms = self.validation._select_vms(vm_selectors)  # noqa: SLF001
             self._assert_autoclick_scope(selected_vms, vm_selectors)
-            executable = self.validation._prepare_server(result)  # noqa: SLF001
+            self._restore_clean_snapshot(result)
+            executable = self.validation._prepare_server(result, source=source)  # noqa: SLF001
             windows_path = self.validation._to_windows_share_path(executable)  # noqa: SLF001
             result.ok(
                 "automation.release_path",
@@ -82,7 +86,9 @@ class AutomationService:
                 path=str(windows_path),
             )
             options = AutomationOptions(
-                apply=apply, linux_password=linux_password, monitor_iso=monitor_iso
+                apply=apply,
+                linux_password=linux_password,
+                monitor_iso=monitor_iso,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
                 futures = [
@@ -99,7 +105,7 @@ class AutomationService:
                             message=vm_result.message,
                             steps=result.steps,
                         )
-            suffix = "avec Apply" if apply else "sans Apply destructif"
+            suffix = "avec Apply" if apply else "lancement interface uniquement"
             return result.success(
                 f"Automatisation Libertix terminée sur {len(selected_vms)} VM(s) {suffix}"
             )
@@ -149,6 +155,38 @@ class AutomationService:
                 },
             },
         )
+
+    def _proxmox(self) -> ProxmoxClient:
+        s = self.settings
+        return ProxmoxClient(
+            s.proxmox_url,
+            s.proxmox_token_id,
+            s.proxmox_token_secret.get_secret_value(),
+            verify_tls=s.proxmox_verify_tls,
+            timeout=s.proxmox_timeout_seconds,
+            task_timeout=s.proxmox_task_timeout_seconds,
+        )
+
+    def _restore_clean_snapshot(self, result: ResultBuilder) -> None:
+        vmid = 500
+        with self._proxmox() as proxmox:
+            node = proxmox.locate_vm(vmid)
+            proxmox.assert_snapshot(node, vmid, RESET_SNAPSHOT)
+            result.ok(
+                "automation.rollback_preflight",
+                "VM et snapshot vérifiés avant automation",
+                target=str(vmid),
+                node=node,
+                snapshot=RESET_SNAPSHOT,
+            )
+            proxmox.rollback(node, vmid, RESET_SNAPSHOT)
+            result.ok(
+                "automation.reset_vm_done",
+                "Reset VM500 terminé: snapshot clean2 restauré et tâche Proxmox validée",
+                target=str(vmid),
+                node=node,
+                snapshot=RESET_SNAPSHOT,
+            )
 
     def _run_vm_isolated(
         self,
@@ -216,6 +254,15 @@ class AutomationService:
             time.sleep(1)
             self._capture_from_client(client, vm, "00-welcome", result)
 
+            if not options.apply:
+                result.ok(
+                    "automation.launch_only_stop",
+                    "Arrêt volontaire après lancement visible de l'interface",
+                    target=vm.vnc,
+                    vm=vm.name,
+                )
+                return
+
             self._click(client, vm, Point(512, 438), 2.0)
             self._capture_from_client(client, vm, "01-distro", result)
 
@@ -236,15 +283,6 @@ class AutomationService:
 
             self._click(client, vm, Point(919, 628), 2.0)
             self._capture_from_client(client, vm, "05-warning", result)
-
-            if not options.apply:
-                result.ok(
-                    "automation.safe_stop",
-                    "Arrêt volontaire avant le bouton Apply destructif",
-                    target=vm.vnc,
-                    vm=vm.name,
-                )
-                return
 
             self._click(client, vm, Point(221, 541), 0.5)
             self._click(client, vm, Point(919, 628), 10.0)
@@ -309,18 +347,66 @@ class AutomationService:
                     "Erreur bloquante détectée sur l'écran Libertix",
                     details=context,
                 )
-            if verdict.done:
+            if verdict.iso_download_finished:
                 result.ok(
-                    "automation.iso_finished",
-                    "Le LLM indique que le téléchargement ISO est terminé ou dépassé",
+                    "automation.iso_download_seen",
+                    "Téléchargement ISO terminé, attente de la fin de préparation",
                     **context,
                 )
+            if (
+                verdict.installation_finished or verdict.reboot_prompt_visible
+            ) and not verdict.active_install_progress_visible:
+                result.ok(
+                    "automation.preparation_finished",
+                    "Préparation Windows terminée",
+                    **context,
+                )
+                self._click_reboot_after_preparation(vm, result)
                 return
+            if verdict.installation_finished or verdict.reboot_prompt_visible:
+                result.ok(
+                    "automation.finish_ignored",
+                    "Verdict de fin ignoré car une progression active reste visible",
+                    **context,
+                )
         raise WorkflowError(
             "automation.monitor_iso",
             "Timeout en attendant la fin du téléchargement ISO",
             details=last_context or {"vm": vm.name, "target": vm.vnc},
         )
+
+    def _click_reboot_after_preparation(self, vm: VMConfig, result: ResultBuilder) -> None:
+        client = None
+        try:
+            client = api.connect(VNCClient._vncdotool_address(vm.vnc))
+            self._capture_from_client(client, vm, "reboot-ready", result)
+            time.sleep(2)
+            self._click(client, vm, Point(919, 628), 1.0)
+            self._capture_from_client(client, vm, "reboot-confirm", result)
+            time.sleep(1)
+            self._click(client, vm, Point(560, 446), 3.0)
+            self._capture_from_client(client, vm, "reboot-accepted", result)
+            result.ok(
+                "automation.reboot_clicked",
+                "Bouton de redémarrage validé après verdict LLM de fin",
+                target=vm.vnc,
+                vm=vm.name,
+            )
+        except Exception as exc:
+            raise WorkflowError(
+                "automation.reboot_click",
+                "Impossible de cliquer le redémarrage final",
+                details={"vm": vm.name, "target": vm.vnc, "error": str(exc)},
+            ) from exc
+        finally:
+            if client is not None:
+                try:
+                    client.disconnect()
+                except Exception:
+                    logger.warning(
+                        "Fermeture VNC imparfaite",
+                        extra={"step": "automation.vnc_close", "target": vm.vnc},
+                    )
 
     def _capture_from_client(
         self, client: object, vm: VMConfig, label: str, result: ResultBuilder

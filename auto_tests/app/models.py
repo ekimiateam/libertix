@@ -5,6 +5,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
+SourceMode = Literal["remote", "local"]
+
+
 class StepResult(BaseModel):
     step: str
     status: Literal["ok", "problème"]
@@ -28,6 +31,10 @@ class ValidationRequest(BaseModel):
 
     vms: list[str] | None = Field(default=None, description="VM selectors, e.g. vm2")
     vm: str | None = Field(default=None, description="Single VM selector shortcut")
+    source: SourceMode = Field(
+        default="remote",
+        description="Build source: remote clones origin/branch, local copies this working tree",
+    )
 
     def selectors(self) -> list[str] | None:
         values: list[str] = []
@@ -41,10 +48,10 @@ class ValidationRequest(BaseModel):
 class AutomationRequest(ValidationRequest):
     """Libertix UI automation scope and safety options.
 
-    By default, the automation stops before the destructive final Apply click.
+    By default, the automation only launches the visible Libertix interface.
     Set apply=true only when the test may really start the Linux installation.
     """
 
-    apply: bool = Field(default=False, description="Click the final destructive Apply button")
+    apply: bool = Field(default=False, description="Run the full installer UI and click Apply")
     linux_password: str = Field(default="linux", min_length=1)
     monitor_iso: bool = Field(default=True)

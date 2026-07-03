@@ -120,6 +120,12 @@ class InstallProgressVerdict(BaseModel):
 
         return _contains_install_blocker(f"{self.summary}\n{self.visible_text}")
 
+    @property
+    def active_install_progress_visible(self) -> bool:
+        """Return true when the screen still shows active download/copy/install work."""
+
+        return _contains_active_install_progress(f"{self.summary}\n{self.visible_text}")
+
 
 def _contains_install_blocker(content: str) -> bool:
     """Detect concrete blocking UI text from Libertix installation screens."""
@@ -138,6 +144,30 @@ def _contains_install_blocker(content: str) -> bool:
             "impossible de charger",
             "no iso url found",
             "failed to copy iso",
+        )
+    )
+
+
+def _contains_active_install_progress(content: str) -> bool:
+    """Detect concrete in-progress text that must block final reboot clicks."""
+
+    text = content.lower()
+    if re.search(r"\b(downloading|copying|extracting|copie|téléchargement).{0,80}\b[0-9]{1,2}\s*%", text):
+        return True
+    if re.search(r"\b[0-9][0-9\s]*/[0-9][0-9\s]*\s*mb\b", text) and any(
+        marker in text for marker in ("downloading", "télécharg", "linux iso", "mint.iso")
+    ):
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "downloading linux iso",
+            "downloading linux installer",
+            "copying iso contents",
+            "mounting iso and copying",
+            "extracting system",
+            "stage: 120-unsquashfs",
+            "stage: 130-target-system-config",
         )
     )
 
@@ -263,7 +293,11 @@ class VisionLLMClient:
                         "téléchargement de l'ISO est terminé ou que l'étape suivante a commencé. "
                         "installation_finished=true si l'installation est terminée. "
                         "reboot_prompt_visible=true si un dialogue ou bouton de "
-                        "redémarrage final est visible. "
+                        "redémarrage final est réellement visible. "
+                        "Si l'écran affiche encore un téléchargement, une copie, "
+                        "une extraction, une barre de progression active ou un statut "
+                        "du type x/y MB, alors reboot_prompt_visible=false, "
+                        "installation_finished=false et still_in_progress=true. "
                         "error_visible=true si une erreur bloquante est visible. "
                         "En cas de doute, still_in_progress=true et explique dans summary."
                     ),
@@ -316,6 +350,8 @@ class VisionLLMClient:
                     data = self._load_json_object(content)
                 except json.JSONDecodeError:
                     data = self._progress_from_reasoning_text(content)
+                if isinstance(data, dict) and "visible_text" not in data:
+                    data["visible_text"] = content.replace("\n", " ").strip()[:1200]
                 return InstallProgressVerdict.model_validate(data)
             except httpx.HTTPStatusError as exc:
                 if (
@@ -396,6 +432,15 @@ class VisionLLMClient:
             return re.search(pattern, text) is not None
 
         blocking_problem = _contains_install_blocker(content)
+        active_install_progress = _contains_active_install_progress(content)
+        active_iso_copy = any(
+            marker in text
+            for marker in (
+                "copying iso contents",
+                "mounting iso and copying",
+                "copie du contenu iso",
+            )
+        ) and not re.search(r"\b100\s*%", text)
 
         iso_finished = (
             conclusion_true("iso_download_finished")
@@ -405,6 +450,9 @@ class VisionLLMClient:
             or "étape suivante a commencé" in text
             or "next step has begun" in text
         ) and not explicit_false("iso_download_finished")
+
+        if active_iso_copy:
+            iso_finished = False
 
         installation_finished = conclusion_true("installation_finished")
         if any(
@@ -429,6 +477,10 @@ class VisionLLMClient:
                 "reboot_prompt_visible`: false",
             )
         ):
+            reboot_prompt_visible = False
+
+        if active_install_progress:
+            installation_finished = False
             reboot_prompt_visible = False
 
         error_visible = blocking_problem or any(
@@ -459,6 +511,7 @@ class VisionLLMClient:
             error_visible = True
             iso_finished = False
             installation_finished = False
+            reboot_prompt_visible = False
 
         still_in_progress = (
             conclusion_true("still_in_progress")
@@ -466,6 +519,8 @@ class VisionLLMClient:
             or "téléchargement" in text
             or "progress" in text
             or "en cours" in text
+            or active_iso_copy
+            or active_install_progress
         ) and not installation_finished
 
         compact = content.replace("\n", " ").strip()

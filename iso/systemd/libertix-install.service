@@ -1,0 +1,19 @@
+[Unit]
+Description=Libertix automatic Mint installer
+After=local-fs.target systemd-udev-settle.service
+Wants=local-fs.target systemd-udev-settle.service
+ConditionPathExists=/usr/local/sbin/libertix-runner
+
+[Service]
+Type=simple
+ExecStartPre=/bin/udevadm settle
+ExecStart=/usr/local/sbin/libertix-runner
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+Restart=no
+TimeoutStartSec=0
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

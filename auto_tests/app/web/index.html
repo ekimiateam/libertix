@@ -203,6 +203,11 @@
           <h2>Accès</h2>
           <label for="apiKey">Clé API</label>
           <input id="apiKey" type="password" autocomplete="off" />
+          <label for="sourceMode">Source build</label>
+          <select id="sourceMode">
+            <option value="remote">DEV distant</option>
+            <option value="local">Working tree local</option>
+          </select>
           <div class="buttons">
             <button id="saveKey">Enregistrer</button>
             <button id="health">Tester /health</button>
@@ -262,7 +267,7 @@
               <button id="validationJson">POST /validation</button>
             </div>
             <div class="stack">
-              <h3>Automation dry-run</h3>
+              <h3>Automation lancement UI</h3>
               <button id="automationDryStream" class="primary">POST /automation/stream</button>
               <button id="automationDryJson">POST /automation</button>
             </div>
@@ -307,6 +312,7 @@
 
     <script>
       const apiKeyInput = document.getElementById("apiKey");
+      const sourceModeInput = document.getElementById("sourceMode");
       const linuxPasswordInput = document.getElementById("linuxPassword");
       const monitorIsoInput = document.getElementById("monitorIso");
       const vmList = document.getElementById("vmList");
@@ -317,10 +323,12 @@
       const buttons = [...document.querySelectorAll("button")];
 
       apiKeyInput.value = localStorage.getItem("libertix_api_key") || "";
+      sourceModeInput.value = localStorage.getItem("libertix_source_mode") || "remote";
       linuxPasswordInput.value = localStorage.getItem("libertix_linux_password") || "linux";
 
       document.getElementById("saveKey").addEventListener("click", () => {
         localStorage.setItem("libertix_api_key", apiKeyInput.value);
+        localStorage.setItem("libertix_source_mode", sourceModeInput.value);
         localStorage.setItem("libertix_linux_password", linuxPasswordInput.value);
         setStatus("Paramètres enregistrés dans le navigateur.", false);
       });
@@ -353,7 +361,10 @@
 
       function requestBody() {
         const vms = selectedVms();
-        return vms.length ? { vms } : {};
+        return {
+          ...(vms.length ? { vms } : {}),
+          source: sourceModeInput.value || "remote",
+        };
       }
 
       function automationBody(apply) {
@@ -497,13 +508,13 @@
       function runAutomation(apply, stream) {
         const body = automationBody(apply);
         if (stream) {
-          runStream("/api/v1/automation/stream", body, apply ? "automation apply stream" : "automation dry-run stream");
+          runStream("/api/v1/automation/stream", body, apply ? "automation apply stream" : "automation launch-only stream");
           return;
         }
         runJson(
           "/api/v1/automation",
           { method: "POST", headers: apiHeaders(true), body: JSON.stringify(body) },
-          apply ? "automation apply" : "automation dry-run",
+          apply ? "automation apply" : "automation launch-only",
         );
       }
 

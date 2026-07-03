@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import tarfile
+import tempfile
 import shlex
 import time
 import uuid
@@ -16,7 +18,7 @@ from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
-from app.models import OperationResult, StepResult
+from app.models import OperationResult, SourceMode, StepResult
 from app.services.common import ResultBuilder
 
 logger = logging.getLogger(__name__)
@@ -38,12 +40,14 @@ class ValidationService:
     def run(
         self,
         vm_selectors: Sequence[str] | None = None,
+        *,
+        source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
         result = ResultBuilder("validation", on_step=on_step)
         try:
             selected_vms = self._select_vms(vm_selectors)
-            executable = self._prepare_server(result)
+            executable = self._prepare_server(result, source=source)
             windows_path = self._to_windows_share_path(executable)
             result.ok("release.path", "Chemin de l'exécutable résolu", path=str(windows_path))
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
@@ -208,10 +212,10 @@ class ValidationService:
         accepted = tuple(f"{prefix}=" for prefix in prefixes)
         return dict(line.split("=", 1) for line in stdout.splitlines() if line.startswith(accepted))
 
-    def _prepare_server(self, result: ResultBuilder) -> PurePosixPath:
+    def _prepare_server(self, result: ResultBuilder, *, source: SourceMode = "remote") -> PurePosixPath:
         s = self.settings
         password = s.main_ssh_password.get_secret_value()
-        source = f"{s.smb_root}/{s.source_dir_name}"
+        source_path = f"{s.smb_root}/{s.source_dir_name}"
         with self._ssh(s.main_ssh_host, s.main_ssh_user, password) as ssh:
             ssh.run(
                 "set -eu; "
@@ -229,43 +233,141 @@ class ValidationService:
                 target=s.main_ssh_host,
             )
 
+            if source == "remote":
+                ssh.run(
+                    "set -eu; missing=''; "
+                    'for tool in git; do command -v "$tool" >/dev/null 2>&1 || '
+                    "missing=1; done; "
+                    'if [ -n "$missing" ]; then export DEBIAN_FRONTEND=noninteractive; '
+                    "apt-get update; apt-get install -y --no-install-recommends git; fi; "
+                    'for tool in git; do command -v "$tool" >/dev/null; done',
+                    step="server.ensure_tools",
+                    timeout=max(s.command_timeout_seconds, 600),
+                )
+                result.ok(
+                    "server.ensure_tools",
+                    "Prérequis git installé ou déjà présent",
+                    target=s.main_ssh_host,
+                    source="remote",
+                )
+
+                clone_script = (
+                    "set -eu; "
+                    f"if [ -d {shlex.quote(source_path + '/.git')} ]; then "
+                    f"git -C {shlex.quote(source_path)} remote get-url origin | "
+                    f"grep -Fx {shlex.quote(s.repository_url)}; "
+                    f"git -C {shlex.quote(source_path)} fetch origin {shlex.quote(s.repository_branch)}; "
+                    f"git -C {shlex.quote(source_path)} checkout -B {shlex.quote(s.repository_branch)} "
+                    f"origin/{shlex.quote(s.repository_branch)}; "
+                    f"elif [ -e {shlex.quote(source_path)} ]; then exit 21; "
+                    f"else git clone --branch {shlex.quote(s.repository_branch)} -- "
+                    f"{shlex.quote(s.repository_url)} {shlex.quote(source_path)}; fi"
+                )
+                ssh.run(clone_script, step="server.clone", timeout=s.command_timeout_seconds)
+                result.ok(
+                    "server.clone",
+                    "Clone Libertix présent, origine et branche vérifiées",
+                    target=s.main_ssh_host,
+                    branch=s.repository_branch,
+                    source="remote",
+                )
+            else:
+                self._copy_local_source_to_server(ssh, result, source_path)
+
+        return self._compile_release_on_build_vm(result)
+
+    def _copy_local_source_to_server(
+        self, ssh: SSHClient, result: ResultBuilder, source_path: str
+    ) -> None:
+        s = self.settings
+        root = self._local_repository_root()
+        if not (root / "Libertix.sln").is_file() or not (root / "Libertix.csproj").is_file():
+            raise WorkflowError(
+                "server.copy_local_source",
+                "Le working tree local ne contient pas les fichiers projet Libertix attendus",
+                details={"path": str(root)},
+            )
+
+        with tempfile.NamedTemporaryFile(prefix="libertix-source-", suffix=".tar.gz", delete=False) as tmp:
+            archive = Path(tmp.name)
+        try:
+            with tarfile.open(archive, "w:gz") as tar:
+                for path in sorted(root.rglob("*")):
+                    if not self._include_local_source_path(root, path):
+                        continue
+                    tar.add(path, arcname=path.relative_to(root), recursive=False)
+
+            remote_archive = f"/tmp/{archive.name}"
+            ssh.upload_file(archive, remote_archive, step="server.copy_local_source.upload")
+            install_script = (
+                "set -eu; "
+                f"dest={shlex.quote(source_path)}; archive={shlex.quote(remote_archive)}; "
+                f"root={shlex.quote(s.smb_root)}; "
+                'case "$dest" in "$root"/*) ;; *) echo "Destination refusee: $dest" >&2; exit 22;; esac; '
+                'rm -rf "$dest"; mkdir -p "$dest"; '
+                'tar -xzf "$archive" -C "$dest"; rm -f "$archive"; '
+                'test -f "$dest/Libertix.sln"; test -f "$dest/Libertix.csproj"'
+            )
             ssh.run(
-                "set -eu; missing=''; "
-                'for tool in git; do command -v "$tool" >/dev/null 2>&1 || '
-                "missing=1; done; "
-                'if [ -n "$missing" ]; then export DEBIAN_FRONTEND=noninteractive; '
-                "apt-get update; apt-get install -y --no-install-recommends git; fi; "
-                'for tool in git; do command -v "$tool" >/dev/null; done',
-                step="server.ensure_tools",
+                install_script,
+                step="server.copy_local_source",
                 timeout=max(s.command_timeout_seconds, 600),
             )
             result.ok(
-                "server.ensure_tools",
-                "Prérequis git installé ou déjà présent",
+                "server.copy_local_source",
+                "Working tree local copié vers Samba",
                 target=s.main_ssh_host,
+                source="local",
+                local_path=str(root),
+                remote_path=source_path,
+                archive_size=archive.stat().st_size,
             )
+        finally:
+            archive.unlink(missing_ok=True)
 
-            clone_script = (
-                "set -eu; "
-                f"if [ -d {shlex.quote(source + '/.git')} ]; then "
-                f"git -C {shlex.quote(source)} remote get-url origin | "
-                f"grep -Fx {shlex.quote(s.repository_url)}; "
-                f"git -C {shlex.quote(source)} fetch origin {shlex.quote(s.repository_branch)}; "
-                f"git -C {shlex.quote(source)} checkout -B {shlex.quote(s.repository_branch)} "
-                f"origin/{shlex.quote(s.repository_branch)}; "
-                f"elif [ -e {shlex.quote(source)} ]; then exit 21; "
-                f"else git clone --branch {shlex.quote(s.repository_branch)} -- "
-                f"{shlex.quote(s.repository_url)} {shlex.quote(source)}; fi"
-            )
-            ssh.run(clone_script, step="server.clone", timeout=s.command_timeout_seconds)
-            result.ok(
-                "server.clone",
-                "Clone Libertix présent, origine et branche vérifiées",
-                target=s.main_ssh_host,
-                branch=s.repository_branch,
-            )
+    @staticmethod
+    def _local_repository_root() -> Path:
+        return Path(__file__).resolve().parents[3]
 
-        return self._compile_release_on_build_vm(result)
+    @staticmethod
+    def _include_local_source_path(root: Path, path: Path) -> bool:
+        relative = path.relative_to(root)
+        parts = set(relative.parts)
+        excluded_dirs = {
+            ".git",
+            ".venv",
+            ".pytest_cache",
+            ".ruff_cache",
+            "__pycache__",
+            "bin",
+            "obj",
+            "captures",
+            "filepool",
+        }
+        if parts & excluded_dirs:
+            return False
+        if len(relative.parts) >= 2 and relative.parts[:2] == ("auto_tests", "captures"):
+            return False
+        if len(relative.parts) >= 3 and relative.parts[:3] == ("auto_tests", "app", "filepool"):
+            return False
+        if path.is_dir():
+            return True
+        excluded_suffixes = {
+            ".cache",
+            ".dll",
+            ".exe",
+            ".iso",
+            ".pdb",
+            ".pyc",
+            ".tar",
+            ".gz",
+            ".zip",
+        }
+        if path.suffix.lower() in excluded_suffixes:
+            return False
+        if path.name in {"uv.lock"}:
+            return False
+        return True
 
     def _compile_release_on_build_vm(self, result: ResultBuilder) -> PurePosixPath:
         s = self.settings

@@ -1,11 +1,14 @@
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 from pydantic import ValidationError
 
 from app.clients.vnc import VNCClient
 from app.config import Settings
-from app.services.automation import AutomationService
+from app.models import ValidationRequest
+from app.services.common import ResultBuilder
+import app.services.automation as automation_module
+from app.services.automation import AutomationOptions, AutomationService
 from app.services.reset import RESET_SNAPSHOT, RESET_VM_IDS
 from app.services.validation import ValidationService
 
@@ -85,6 +88,14 @@ def test_vnc_display_is_converted_to_tcp_port() -> None:
     assert VNCClient._vncdotool_address("192.168.1.166:10") == "192.168.1.166::5910"
 
 
+def test_validation_source_defaults_to_remote() -> None:
+    assert ValidationRequest().source == "remote"
+
+
+def test_validation_source_accepts_local() -> None:
+    assert ValidationRequest(source="local").source == "local"
+
+
 def test_validation_vm_selector_accepts_aliases() -> None:
     service = ValidationService(settings())
 
@@ -121,3 +132,88 @@ def test_automation_scope_rejects_uefi_vm() -> None:
 
     with pytest.raises(Exception, match="VM500"):
         service._assert_autoclick_scope(selected, ["vm2"])  # noqa: SLF001
+
+
+def test_automation_logs_vm500_reset_before_ui(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, object, object | None]] = []
+
+    class FakeProxmox:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> "FakeProxmox":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def locate_vm(self, vmid: int) -> str:
+            calls.append(("locate", vmid, None))
+            return "node-a"
+
+        def assert_snapshot(self, node: str, vmid: int, snapshot: str) -> None:
+            calls.append(("assert", vmid, snapshot))
+
+        def rollback(self, node: str, vmid: int, snapshot: str) -> None:
+            calls.append(("rollback", vmid, snapshot))
+
+    monkeypatch.setattr(automation_module, "ProxmoxClient", FakeProxmox)
+    service = AutomationService(settings())
+
+    result = ResultBuilder("automation")
+    service._restore_clean_snapshot(result)  # noqa: SLF001
+
+    assert calls == [
+        ("locate", 500, None),
+        ("assert", 500, RESET_SNAPSHOT),
+        ("rollback", 500, RESET_SNAPSHOT),
+    ]
+    assert result.steps[-1].step == "automation.reset_vm_done"
+    assert "Reset VM500 terminé" in result.steps[-1].message
+
+
+def test_automation_apply_false_only_launches_ui(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.clicks = 0
+            self.keys = 0
+            self.disconnected = False
+
+        def captureScreen(self, path: str) -> None:
+            Path(path).write_bytes(b"fake-png")
+
+        def mouseMove(self, _x: int, _y: int) -> None:
+            pass
+
+        def mousePress(self, _button: int) -> None:
+            self.clicks += 1
+
+        def keyPress(self, _key: str) -> None:
+            self.keys += 1
+
+        def disconnect(self) -> None:
+            self.disconnected = True
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(automation_module.api, "connect", lambda _address: fake_client)
+    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    service = AutomationService(settings(capture_dir=tmp_path))
+    vm = service.validation._select_vms(["vm1"])[0]  # noqa: SLF001
+    result = ResultBuilder("automation")
+
+    service._click_wizard(  # noqa: SLF001
+        vm,
+        AutomationOptions(apply=False, linux_password="linux", monitor_iso=True),
+        result,
+    )
+
+    assert fake_client.clicks == 0
+    assert fake_client.keys == 0
+    assert fake_client.disconnected is True
+    assert [step.step for step in result.steps] == [
+        "automation.capture",
+        "automation.launch_only_stop",
+    ]
+    assert result.steps[0].context["label"] == "00-welcome"

@@ -17,7 +17,6 @@ namespace Libertix.Pages
         private double _linuxSizeGB;
         private const double FAT32_SIZE_GB = 2.0;
         private bool _isRunning = false;
-        private bool _automaticRebootScheduled = false;
 
         public ApplyChanges()
         {
@@ -346,12 +345,11 @@ namespace Libertix.Pages
             Log("- The live installer will reformat Z: as ext4 instead of deleting/recreating the MBR entry");
             Log("- ISO contents copied to Z:");
             Log("- GRUB4DOS bootloader installed");
-            Log("- Boot entry 'Install Linux' added to the Windows Boot Manager menu");
-            Log("- Boot menu will be shown for 30 seconds; Windows remains the default");
+            Log("- Boot entry 'Install Linux' added to Windows Boot Manager");
+            Log("- Next reboot will automatically boot the Linux installer");
             Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
 
             RebootButton.Visibility = Visibility.Visible;
-            ScheduleAutomaticReboot();
         }
 
         private async Task<bool> DownloadFileAsync(string url, string destinationPath)
@@ -445,30 +443,30 @@ namespace Libertix.Pages
 
                 await Task.Delay(1000);
 
-                // Step 4: Put Windows first and Linux second. This keeps the
-                // recovery path simple if the user lets the timeout expire.
-                await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {{current}} {guid}");
+                // Step 4: Keep the entry registered, but use bootsequence for a
+                // one-time automatic boot into the installer.
+                await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {guid} /addlast");
 
                 await Task.Delay(1000);
 
-                // Step 5: Ask Windows 10 for the modern boot selector, show it
-                // every boot, and wait before defaulting to Windows.
-                await RunBcdeditCommandAsync(bcdeditPath, "/set {current} bootmenupolicy Standard");
+                // Step 5: Do not show the Windows Boot Manager selector for this
+                // automated installation run.
+                await RunBcdeditCommandAsync(bcdeditPath, "/set {bootmgr} displaybootmenu no");
 
                 await Task.Delay(1000);
 
-                await RunBcdeditCommandAsync(bcdeditPath, "/set {bootmgr} displaybootmenu yes");
-
-                await Task.Delay(1000);
-
-                await RunBcdeditCommandAsync(bcdeditPath, "/timeout 30");
+                await RunBcdeditCommandAsync(bcdeditPath, "/timeout 0");
 
                 await Task.Delay(1000);
 
                 await RunBcdeditCommandAsync(bcdeditPath, "/default {current}");
 
+                await Task.Delay(1000);
+
+                await RunBcdeditCommandAsync(bcdeditPath, $"/bootsequence {guid}");
+
                 Log("Boot entry configured successfully");
-                Log("Boot menu will be shown; Windows remains first and default if no choice is made.");
+                Log("Next reboot will automatically boot Install Linux once.");
                 return true;
             }
             catch (Exception ex)
@@ -1040,7 +1038,7 @@ exit";
                 string script = $@"rescan
 select disk 0
 create partition primary size={sizeMB:F0}
-format fs=fat32 quick label=LINUXGATE
+format fs=fat32 quick label=LIBERTIX
 assign letter=Z
 exit";
 
@@ -1126,16 +1124,6 @@ exit";
             {
                 Process.Start("shutdown", "/r /t 0");
             }
-        }
-
-        private void ScheduleAutomaticReboot()
-        {
-            if (_automaticRebootScheduled)
-                return;
-
-            _automaticRebootScheduled = true;
-            Log("Automatic reboot scheduled in 5 seconds...");
-            Process.Start("shutdown", "/r /t 5");
         }
 
         private void UpdateProgress(int percent, string step)

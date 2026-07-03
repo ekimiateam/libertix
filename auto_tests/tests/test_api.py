@@ -1,4 +1,4 @@
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from app.main import create_app
 
@@ -30,6 +30,8 @@ def test_web_ui_is_served() -> None:
     assert "/filepool/mint.iso" in response.text
     assert "monitor_iso" in response.text
     assert "linux_password" in response.text
+    assert "source" in response.text
+    assert "Working tree local" in response.text
 
 
 def test_protected_endpoint_rejects_bad_key_without_running_workflow() -> None:

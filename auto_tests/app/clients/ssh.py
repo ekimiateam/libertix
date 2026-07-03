@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 import paramiko
 
@@ -137,3 +138,25 @@ class SSHClient:
                 },
             ) from exc
         logger.info("Upload texte SSH terminé", extra={"step": step, "target": self.host})
+
+    def upload_file(self, local_path: str | Path, remote_path: str, *, step: str) -> None:
+        if not self._client:
+            raise WorkflowError(step, "Client SSH non connecté", details={"host": self.host})
+        local = Path(local_path)
+        logger.info("Upload fichier SSH démarré", extra={"step": step, "target": self.host})
+        try:
+            with self._client.open_sftp() as sftp:
+                sftp.put(str(local), remote_path)
+        except (TimeoutError, paramiko.SSHException, OSError) as exc:
+            raise WorkflowError(
+                step,
+                "Upload fichier SSH impossible",
+                details={
+                    "host": self.host,
+                    "local_path": str(local),
+                    "remote_path": remote_path,
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            ) from exc
+        logger.info("Upload fichier SSH terminé", extra={"step": step, "target": self.host})

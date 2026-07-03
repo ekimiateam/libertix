@@ -16,7 +16,13 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
-from app.models import AutomationRequest, OperationResult, StepResult, ValidationRequest
+from app.models import (
+    AutomationRequest,
+    OperationResult,
+    SourceMode,
+    StepResult,
+    ValidationRequest,
+)
 from app.services.automation import AutomationService
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
@@ -59,15 +65,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             selectors.extend(query_vms)
         return selectors or None
 
+    def validation_request(
+        body: ValidationRequest | None,
+        query_vms: list[str] | None,
+        query_source: SourceMode | None,
+    ) -> tuple[list[str] | None, ValidationRequest]:
+        request = body or ValidationRequest()
+        selectors = validation_selectors(request, query_vms)
+        if query_source is not None:
+            request.source = query_source
+        return selectors, request
+
     def automation_request(
         body: AutomationRequest | None,
         query_vms: list[str] | None,
         query_apply: bool | None,
+        query_source: SourceMode | None,
     ) -> tuple[list[str] | None, AutomationRequest]:
         request = body or AutomationRequest()
         selectors = validation_selectors(request, query_vms)
         if query_apply is not None:
             request.apply = query_apply
+        if query_source is not None:
+            request.source = query_source
         return selectors, request
 
     async def execute(
@@ -84,7 +104,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         try:
             if operation == "validation":
-                return await asyncio.to_thread(ValidationService(configured).run, selectors)
+                request = automation or ValidationRequest()
+                return await asyncio.to_thread(
+                    ValidationService(configured).run,
+                    selectors,
+                    source=request.source,
+                )
             if operation == "automation":
                 request = automation or AutomationRequest()
                 return await asyncio.to_thread(
@@ -93,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     apply=request.apply,
                     linux_password=request.linux_password,
                     monitor_iso=request.monitor_iso,
+                    source=request.source,
                 )
             return await asyncio.to_thread(ResetService(configured).run)
         finally:
@@ -121,7 +147,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             def worker() -> None:
                 try:
                     if operation == "validation":
-                        result = ValidationService(configured).run(selectors, on_step=on_step)
+                        request = automation or ValidationRequest()
+                        result = ValidationService(configured).run(
+                            selectors, source=request.source, on_step=on_step
+                        )
                     elif operation == "automation":
                         request = automation or AutomationRequest()
                         result = AutomationService(configured).run(
@@ -129,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             apply=request.apply,
                             linux_password=request.linux_password,
                             monitor_iso=request.monitor_iso,
+                            source=request.source,
                             on_step=on_step,
                         )
                     else:
@@ -179,8 +209,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def validation(
         body: Annotated[ValidationRequest | None, Body()] = None,
         vm: Annotated[list[str] | None, Query()] = None,
+        source: Annotated[SourceMode | None, Query()] = None,
     ) -> OperationResult:
-        return await execute("validation", validation_selectors(body, vm))
+        selectors, request = validation_request(body, vm, source)
+        return await execute("validation", selectors, request)
 
     @api.post(
         "/api/v1/automation", response_model=OperationResult, dependencies=[Depends(authorize)]
@@ -189,17 +221,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: Annotated[AutomationRequest | None, Body()] = None,
         vm: Annotated[list[str] | None, Query()] = None,
         apply: Annotated[bool | None, Query()] = None,
+        source: Annotated[SourceMode | None, Query()] = None,
     ) -> OperationResult:
-        selectors, request = automation_request(body, vm, apply)
+        selectors, request = automation_request(body, vm, apply, source)
         return await execute("automation", selectors, request)
 
     @api.post("/api/v1/validation/stream", dependencies=[Depends(authorize)])
     async def validation_stream(
         body: Annotated[ValidationRequest | None, Body()] = None,
         vm: Annotated[list[str] | None, Query()] = None,
+        source: Annotated[SourceMode | None, Query()] = None,
     ) -> StreamingResponse:
+        selectors, request = validation_request(body, vm, source)
         return StreamingResponse(
-            stream_operation("validation", validation_selectors(body, vm)),
+            stream_operation("validation", selectors, request),
             media_type="application/x-ndjson",
         )
 
@@ -208,8 +243,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: Annotated[AutomationRequest | None, Body()] = None,
         vm: Annotated[list[str] | None, Query()] = None,
         apply: Annotated[bool | None, Query()] = None,
+        source: Annotated[SourceMode | None, Query()] = None,
     ) -> StreamingResponse:
-        selectors, request = automation_request(body, vm, apply)
+        selectors, request = automation_request(body, vm, apply, source)
         return StreamingResponse(
             stream_operation("automation", selectors, request),
             media_type="application/x-ndjson",
