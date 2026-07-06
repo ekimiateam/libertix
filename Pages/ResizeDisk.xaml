@@ -188,7 +188,7 @@
                          BorderBrush="#363252"
                          TextAlignment="Center"
                          VerticalContentAlignment="Center"
-                         Text="{Binding SelectedSize, StringFormat={}{0:F0}, UpdateSourceTrigger=PropertyChanged}"
+                         Text="{Binding ManualSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          PreviewTextInput="NumberValidationTextBox"/>
                 
                 <TextBlock Grid.Column="2"

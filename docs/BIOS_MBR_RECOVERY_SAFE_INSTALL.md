@@ -99,7 +99,7 @@ assign letter=Z
 4. Libertix telecharge l'ISO live custom depuis le filepool local :
 
 ```text
-http://192.168.1.170:8000/filepool/libertix-installer-bios.iso
+${FILEPOOL_BASE_URL}/libertix-installer-bios.iso
 ```
 
 5. Libertix telecharge l'ISO Mint dans le dossier temporaire Windows :

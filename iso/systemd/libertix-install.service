@@ -12,7 +12,7 @@ StandardInput=null
 StandardOutput=journal
 StandardError=journal
 Restart=no
-TimeoutStartSec=0
+TimeoutStartSec=3h
 KillMode=mixed
 
 [Install]

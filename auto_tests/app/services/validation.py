@@ -234,19 +234,19 @@ class ValidationService:
             )
 
             if source == "remote":
+                # Remote mode is the production-like path: clone the configured
+                # branch on the Samba host before compiling on the Windows build VM.
                 ssh.run(
-                    "set -eu; missing=''; "
-                    'for tool in git; do command -v "$tool" >/dev/null 2>&1 || '
-                    "missing=1; done; "
-                    'if [ -n "$missing" ]; then export DEBIAN_FRONTEND=noninteractive; '
-                    "apt-get update; apt-get install -y --no-install-recommends git; fi; "
-                    'for tool in git; do command -v "$tool" >/dev/null; done',
+                    "set -eu; "
+                    'command -v git >/dev/null 2>&1 || { '
+                    'echo "git is required on the Samba host; install it explicitly before remote-source builds" >&2; '
+                    "exit 127; }",
                     step="server.ensure_tools",
-                    timeout=max(s.command_timeout_seconds, 600),
+                    timeout=s.command_timeout_seconds,
                 )
                 result.ok(
                     "server.ensure_tools",
-                    "Prérequis git installé ou déjà présent",
+                    "Prérequis git disponible",
                     target=s.main_ssh_host,
                     source="remote",
                 )
@@ -272,6 +272,8 @@ class ValidationService:
                     source="remote",
                 )
             else:
+                # Local mode is for validating unpushed changes. It archives this
+                # working tree and expands it directly into the Samba source folder.
                 self._copy_local_source_to_server(ssh, result, source_path)
 
         return self._compile_release_on_build_vm(result)
@@ -299,6 +301,8 @@ class ValidationService:
 
             remote_archive = f"/tmp/{archive.name}"
             ssh.upload_file(archive, remote_archive, step="server.copy_local_source.upload")
+            # The destination is removed only inside the configured Samba root.
+            # This avoids accidentally deleting an arbitrary server path.
             install_script = (
                 "set -eu; "
                 f"dest={shlex.quote(source_path)}; archive={shlex.quote(remote_archive)}; "
@@ -475,6 +479,19 @@ class ValidationService:
             return result.success(f"Validation terminée avec succès sur {vm.name}")
         except WorkflowError as exc:
             return result.failure(exc)
+        except Exception as exc:
+            return result.failure(
+                WorkflowError(
+                    "vm.validation.internal_error",
+                    f"Erreur inattendue pendant la validation de {vm.name}",
+                    details={
+                        "vm": vm.name,
+                        "host": vm.host,
+                        "exception_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+            )
 
     def _deploy_to_documents(self, vm: VMConfig, executable: PureWindowsPath) -> PureWindowsPath:
         share_release = PureWindowsPath("Z:/") / self.settings.release_dir_name

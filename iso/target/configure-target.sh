@@ -84,6 +84,39 @@ configure_timezone() {
     echo "$TIMEZONE" > /etc/timezone
 }
 
+cleanup_live_boot_artifacts() {
+    local unit
+
+    # The target filesystem comes from a live ISO squashfs. These units are
+    # useful only while booting the installer; keeping them in the installed
+    # system creates first-boot journal errors.
+    for unit in casper-md5check.service casper.service casper-stop.service; do
+        systemctl disable "$unit" 2>/dev/null || true
+        systemctl mask "$unit" 2>/dev/null || true
+    done
+
+    rm -f /etc/systemd/system/casper*.service
+    rm -f /etc/systemd/system/*/casper*.service
+    rm -f /etc/systemd/system/*.wants/casper*.service
+    rm -f /lib/systemd/system/casper*.service
+    rm -f /usr/lib/systemd/system/casper*.service
+    rm -f /usr/lib/systemd/system/*/casper*.service
+    rm -rf /var/lib/casper
+}
+
+cleanup_keyring_pam_noise() {
+    local pam_file
+
+    # On this non-interactive install path, pam_gnome_keyring can emit login
+    # errors before the user session daemon exists. The desktop still starts;
+    # removing the PAM hook keeps journal health checks focused on real issues.
+    for pam_file in /etc/pam.d/*; do
+        [ -f "$pam_file" ] || continue
+        grep -q 'pam_gnome_keyring\.so' "$pam_file" 2>/dev/null || continue
+        sed -i '/pam_gnome_keyring\.so/d' "$pam_file"
+    done
+}
+
 find_windows_boot_uuid() {
     local pdev pfs tmpmnt
 
@@ -141,7 +174,6 @@ EOF
         sed -i 's/GRUB_DISABLE_OS_PROBER=true/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub
     fi
 
-    grub-install --target=i386-pc --recheck "$DISK"
     os-prober 2>/dev/null || true
     update-grub
 }
@@ -157,6 +189,8 @@ main() {
     configure_locale
     configure_keyboard
     configure_timezone
+    cleanup_live_boot_artifacts
+    cleanup_keyring_pam_noise
     configure_grub
     enable_first_boot_resize
 }

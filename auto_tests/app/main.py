@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import queue
 import threading
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
@@ -28,6 +30,7 @@ from app.services.reset import ResetService
 from app.services.validation import ValidationService
 
 operation_lock = Lock()
+logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -164,6 +167,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     else:
                         result = ResetService(configured).run(on_step=on_step)
                     events.put({"event": "result", "data": result.model_dump(mode="json")})
+                except Exception as exc:
+                    logger.exception("Erreur interne inattendue dans le flux %s", operation)
+                    result = OperationResult(
+                        status="problème",
+                        operation=operation,
+                        message=f"problème: erreur interne inattendue: {exc}",
+                        steps=[
+                            StepResult(
+                                step=f"{operation}.internal_error",
+                                status="problème",
+                                message=str(exc),
+                                context={
+                                    "exception_type": type(exc).__name__,
+                                    "python_traceback": traceback.format_exc()[-8000:],
+                                },
+                            )
+                        ],
+                    )
+                    events.put({"event": "result", "data": result.model_dump(mode="json")})
                 finally:
                     operation_lock.release()
                     events.put(None)
@@ -265,10 +287,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 class LazyApp:
     def __init__(self) -> None:
         self._app: FastAPI | None = None
+        self._lock = threading.Lock()
 
     async def __call__(self, scope, receive, send) -> None:
         if self._app is None:
-            self._app = create_app()
+            with self._lock:
+                if self._app is None:
+                    self._app = create_app()
         await self._app(scope, receive, send)
 
 

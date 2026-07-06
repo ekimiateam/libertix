@@ -77,6 +77,8 @@ class AutomationService:
         try:
             selected_vms = self.validation._select_vms(vm_selectors)  # noqa: SLF001
             self._assert_autoclick_scope(selected_vms, vm_selectors)
+            # Always restore the known clean snapshot before UI automation. The
+            # wizard can modify the disk, so retries must not inherit old state.
             self._restore_clean_snapshot(result)
             executable = self.validation._prepare_server(result, source=source)  # noqa: SLF001
             windows_path = self.validation._to_windows_share_path(executable)  # noqa: SLF001
@@ -220,6 +222,8 @@ class AutomationService:
 
     def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:
         task_name = f"LibertixAutoInstall_{vm.name}"
+        # The scheduled task launches into the interactive desktop session while
+        # keeping the process elevated. SSH alone would start a non-visible UI.
         with self.validation._ssh(  # noqa: SLF001
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
@@ -263,6 +267,8 @@ class AutomationService:
                 )
                 return
 
+            # Coordinates are relative to REFERENCE_WIDTH/HEIGHT and scaled in
+            # _click. They match the VM500 BIOS wizard path validated by VNC.
             self._click(client, vm, Point(512, 438), 2.0)
             self._capture_from_client(client, vm, "01-distro", result)
 
@@ -353,6 +359,8 @@ class AutomationService:
                     "Téléchargement ISO terminé, attente de la fin de préparation",
                     **context,
                 )
+            # The LLM can see "finished" text while a progress bar is still
+            # active. Only click Reboot after there is no active progress left.
             if (
                 verdict.installation_finished or verdict.reboot_prompt_visible
             ) and not verdict.active_install_progress_visible:
@@ -380,6 +388,8 @@ class AutomationService:
         try:
             client = api.connect(VNCClient._vncdotool_address(vm.vnc))
             self._capture_from_client(client, vm, "reboot-ready", result)
+            # Small delays keep the click sequence visible and avoid racing the
+            # confirmation dialog after the LLM declares the wizard complete.
             time.sleep(2)
             self._click(client, vm, Point(919, 628), 1.0)
             self._capture_from_client(client, vm, "reboot-confirm", result)
@@ -450,6 +460,8 @@ class AutomationService:
 
     @staticmethod
     def _type_text(client: object, text: str) -> None:
+        # Send keys one by one. Clipboard paste is not reliable across the VNC
+        # stack and can silently fail on login/password fields.
         for char in text:
             client.keyPress(char)
             time.sleep(0.05)

@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.IO;
 using System.Diagnostics;
+using System.Linq;
 using Libertix.Commands;
 using Libertix.Helpers;
 using Libertix.Models;
@@ -34,7 +35,8 @@ namespace Libertix.Pages
 
         public double MinimumSize => 20; // Linux Mint requires 20GB minimum; 100GB is recommended.
         public double MinimumWindowsFree => 15; // Minimum 15GB free for Windows
-        public double MaximumSize => _initialFreeSpace - MinimumWindowsFree; // Reserve space for Windows
+        private double AvailableLinuxSize => _initialFreeSpace - MinimumWindowsFree;
+        public double MaximumSize => Math.Max(MinimumSize, AvailableLinuxSize); // Keep slider range valid.
 
         // Windows total = Used + remaining free after Linux allocation
         public double WindowsTotalSpace => _windowsUsedSpace + _windowsFreeSpace;
@@ -188,8 +190,12 @@ namespace Libertix.Pages
             InitializeComponent();
             DataContext = this;
 
-            // Get system drive info
-            var systemDrive = DriveInfo.GetDrives()[0];
+            // Use the actual Windows system drive instead of relying on DriveInfo enumeration order.
+            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
+            var systemDrive = DriveInfo.GetDrives()
+                .FirstOrDefault(d => d.IsReady && string.Equals(d.Name, systemRoot, StringComparison.OrdinalIgnoreCase));
+            if (systemDrive == null)
+                throw new InvalidOperationException($"System drive not found: {systemRoot}");
             _totalSpace = Math.Round(systemDrive.TotalSize / 1024.0 / 1024.0 / 1024.0);
             WindowsUsedSpace = Math.Round((systemDrive.TotalSize - systemDrive.AvailableFreeSpace) / 1024.0 / 1024.0 / 1024.0);
             _initialFreeSpace = Math.Round(systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0);
@@ -257,7 +263,7 @@ namespace Libertix.Pages
         private void CheckSpaceRequirements()
         {
             // Check if Windows has enough free space (minimum 15GB)
-            HasError = WindowsFreeSpace < MinimumWindowsFree;
+            HasError = WindowsFreeSpace < MinimumWindowsFree || AvailableLinuxSize < MinimumSize;
         }
 
         private void ValidateAndUpdateSize(string value)
@@ -278,10 +284,17 @@ namespace Libertix.Pages
                     return;
                 }
 
-                if (size > MaximumSize)
+                if (AvailableLinuxSize < MinimumSize)
                 {
                     HasSizeError = true;
-                    SizeErrorMessage = $"Size cannot exceed {MaximumSize:N0}GB (Windows needs {MinimumWindowsFree}GB free)";
+                    SizeErrorMessage = $"Not enough free space. Windows needs {MinimumWindowsFree}GB free and Linux needs at least {MinimumSize}GB";
+                    return;
+                }
+
+                if (size > AvailableLinuxSize)
+                {
+                    HasSizeError = true;
+                    SizeErrorMessage = $"Size cannot exceed {AvailableLinuxSize:N0}GB (Windows needs {MinimumWindowsFree}GB free)";
                     return;
                 }
 
@@ -326,6 +339,17 @@ namespace Libertix.Pages
 
         private void NextButton_Click(object sender, RoutedEventArgs e)
         {
+            ValidateAndUpdateSize(ManualSize);
+            if (HasError || HasSizeError)
+            {
+                MessageBox.Show(
+                    SizeErrorMessage ?? "Not enough disk space for installation.",
+                    "Disk size error",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
             if (App.Current.Properties["SelectedDistro"] is DistroInfo distro)
             {
                 SaveState(distro);

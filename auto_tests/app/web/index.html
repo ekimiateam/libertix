@@ -561,6 +561,9 @@
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${await response.text()}`);
           }
+          if (!response.body) {
+            throw new Error("Streaming response body is unavailable in this browser.");
+          }
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";

@@ -21,5 +21,8 @@ namespace Libertix.Models
 
         [JsonPropertyName("isoInstallerFileName")]
         public string IsoInstallerFileName { get; set; }
+
+        [JsonPropertyName("sizeInGB")]
+        public double SizeInGB { get; set; }
     }
 }

@@ -57,13 +57,16 @@ install_live_installer_assets() {
     install -m 0755 "$ISO_DIR/live/install-mint.sh" "$WORKDIR/chroot/install-mint.sh"
     install -m 0755 -D "$ISO_DIR/live/libertix-runner.sh" \
         "$WORKDIR/chroot/usr/local/sbin/libertix-runner"
+    install -m 0755 -D "$ISO_DIR/live/libertix-gui.py" \
+        "$WORKDIR/chroot/usr/local/sbin/libertix-gui"
+    install -m 0755 -D "$ISO_DIR/live/cleanup-bcd.py" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/cleanup-bcd.py"
     install -m 0755 -D "$ISO_DIR/target/configure-target.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/configure-target.sh"
     install -m 0755 -D "$ISO_DIR/target/first-boot-resize.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/first-boot-resize.sh"
     install -m 0644 -D "$ISO_DIR/target/first-boot-resize.service" \
         "$WORKDIR/chroot/usr/local/lib/libertix/first-boot-resize.service"
-
     install -m 0644 -D "$ISO_DIR/systemd/libertix-install.service" \
         "$WORKDIR/chroot/etc/systemd/system/libertix-install.service"
     mkdir -p "$WORKDIR/chroot/etc/systemd/system/multi-user.target.wants"
@@ -93,16 +96,19 @@ EOF
 }
 
 write_live_config() {
+    shell_quote() {
+        printf '%q' "$1"
+    }
     cat > "$WORKDIR/iso_build/config.txt" <<CONFIGFILE
-SYSTEM_LANG="$SYSTEM_LANG"
-KEYBOARD_LAYOUT="$KEYBOARD_LAYOUT"
-KEYBOARD_MODEL="$KEYBOARD_MODEL"
-TIMEZONE="$TIMEZONE"
-USERNAME="$USERNAME"
-PASSWORD="$PASSWORD"
-COMPUTER_NAME="$COMPUTER_NAME"
-ISO_FILENAME="$ISO_FILENAME"
-LINUX_SIZE_GB="$LINUX_SIZE_GB"
+SYSTEM_LANG=$(shell_quote "$SYSTEM_LANG")
+KEYBOARD_LAYOUT=$(shell_quote "$KEYBOARD_LAYOUT")
+KEYBOARD_MODEL=$(shell_quote "$KEYBOARD_MODEL")
+TIMEZONE=$(shell_quote "$TIMEZONE")
+USERNAME=$(shell_quote "$USERNAME")
+PASSWORD=$(shell_quote "$PASSWORD")
+COMPUTER_NAME=$(shell_quote "$COMPUTER_NAME")
+ISO_FILENAME=$(shell_quote "$ISO_FILENAME")
+LINUX_SIZE_GB=$(shell_quote "$LINUX_SIZE_GB")
 CONFIGFILE
 }
 

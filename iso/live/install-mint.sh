@@ -11,6 +11,15 @@ mkdir -p "$LOG_DIR"
 CURRENT_STAGE="bootstrap"
 DISK=""
 LIVE_PART=""
+WINDOWS_PART=""
+NEW_PART=""
+NEW_PART_NUM=""
+INSTALL_SUCCESS=false
+INSTALL_COMMITTED=false
+BOOTLOADER_WRITE_STARTED=false
+MBR_BACKUP="$LOG_DIR/mbr-before-grub.bin"
+ROLLBACK_ATTEMPTED=false
+RECOVERY_GEOMETRY_BEFORE=""
 echo "$CURRENT_STAGE" > "$STAGE_FILE"
 
 mark() {
@@ -29,14 +38,15 @@ die() {
         echo "error=$msg"
         echo "time=$(date -Is 2>/dev/null || date)"
     } > "$FAIL_FILE"
-    exit 1
+    fail_and_exit 1 "$msg"
 }
 
 on_err() {
     local rc="$?"
     local line="${BASH_LINENO[0]:-unknown}"
     local cmd="${BASH_COMMAND:-unknown}"
-    echo "ERROR: stage=$CURRENT_STAGE rc=$rc line=$line cmd=$cmd"
+    local msg="stage=$CURRENT_STAGE rc=$rc line=$line cmd=$cmd"
+    echo "ERROR: $msg"
     {
         echo "stage=$CURRENT_STAGE"
         echo "rc=$rc"
@@ -44,7 +54,7 @@ on_err() {
         echo "cmd=$cmd"
         echo "time=$(date -Is 2>/dev/null || date)"
     } > "$FAIL_FILE"
-    exit "$rc"
+    fail_and_exit "$rc" "$msg"
 }
 trap on_err ERR
 
@@ -85,12 +95,62 @@ partition_count() {
     lsblk -nr -o NAME,TYPE "$1" | awk '$2=="part"{c++}END{print c+0}'
 }
 
+find_biggest_windows_partition() {
+    local disk="$1"
+    local best=""
+    local best_size=0
+    local pn pdev pfs psize
+    for pn in 1 2 3 4 5; do
+        pdev=$(partition_path "$disk" "$pn")
+        [ -b "$pdev" ] || continue
+        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
+        [ "$pfs" = "ntfs" ] || continue
+        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
+        if [ "$psize" -gt 1000 ] && [ "$psize" -gt "$best_size" ]; then
+            best="$pdev"
+            best_size="$psize"
+        fi
+    done
+    echo "$best"
+}
+
+find_live_partition_on_disk() {
+    local disk="$1"
+    local pn pdev label pfs psize legacy_label
+    legacy_label="$(printf '%s%s' 'LINUX' 'GATE')"
+    for pn in 1 2 3 4 5; do
+        pdev=$(partition_path "$disk" "$pn")
+        [ -b "$pdev" ] || continue
+        label=$(blkid -s LABEL -o value "$pdev" 2>/dev/null || echo "")
+        if [ "$label" = "LIBERTIX" ] || [ "$label" = "LIBERTIX_INSTALLER" ] || [ "$label" = "$legacy_label" ]; then
+            echo "$pdev"
+            return 0
+        fi
+    done
+    for pn in 1 2 3 4 5; do
+        pdev=$(partition_path "$disk" "$pn")
+        [ -b "$pdev" ] || continue
+        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
+        [ "$pfs" = "vfat" ] || [ "$pfs" = "fat32" ] || continue
+        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
+        if [ "$psize" -ge 1500 ] && [ "$psize" -le 3072 ]; then
+            echo "$pdev"
+            return 0
+        fi
+    done
+    return 1
+}
+
 print_disk_state() {
     echo "--- Disk state: $1 ---"
-    lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT "$DISK" || true
-    parted -s "$DISK" unit MiB print free || true
+    if [ -n "$DISK" ] && [ -b "$DISK" ]; then
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT "$DISK" || true
+        parted -s "$DISK" unit MiB print free || true
+    else
+        lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT || true
+    fi
     echo "Mounted from live partition:"
-    findmnt -rn -S "$LIVE_PART" || true
+    [ -n "$LIVE_PART" ] && findmnt -rn -S "$LIVE_PART" || true
 }
 
 debug_partition_users() {
@@ -126,9 +186,13 @@ debug_disk_state() {
     echo "--- /proc/cmdline ---"
     cat /proc/cmdline || true
     echo "--- lsblk full ---"
-    lsblk -e7 -o NAME,MAJ:MIN,PKNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS "$DISK" || true
+    if [ -n "$DISK" ] && [ -b "$DISK" ]; then
+        lsblk -e7 -o NAME,MAJ:MIN,PKNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS "$DISK" || true
+    else
+        lsblk -e7 -o NAME,MAJ:MIN,PKNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS || true
+    fi
     echo "--- parted sectors ---"
-    parted -s "$DISK" unit s print free || true
+    [ -n "$DISK" ] && [ -b "$DISK" ] && parted -s "$DISK" unit s print free || true
     echo "--- /proc/partitions ---"
     cat /proc/partitions || true
     echo "--- findmnt ---"
@@ -140,11 +204,251 @@ debug_disk_state() {
     echo "--- dmsetup tree ---"
     dmsetup ls --tree 2>/dev/null || true
     echo "--- relevant processes ---"
-    ps -ef | grep -E 'ntfs-3g|udisks|gvfs|blkid|parted|partprobe|mount|loop|systemd-udevd' | grep -v grep || true
+    if command -v ps >/dev/null 2>&1; then
+        ps -ef | grep -E 'ntfs-3g|udisks|gvfs|blkid|parted|partprobe|mount|loop|systemd-udevd' | grep -v grep || true
+    else
+        echo "ps unavailable"
+    fi
     echo "--- dmesg tail ---"
     dmesg | tail -20 || true
 }
 
+recovery_geometry() {
+    local disk="$1"
+    parted -sm "$disk" unit s print 2>/dev/null | awk -F: '$1=="4"{print $1":"$2":"$3":"$5":"$6; exit}'
+}
+
+assert_recovery_unchanged_or_die() {
+    local current
+    [ -n "$RECOVERY_GEOMETRY_BEFORE" ] || return 0
+    current="$(recovery_geometry "$DISK")"
+    if [ "$current" != "$RECOVERY_GEOMETRY_BEFORE" ]; then
+        echo "ERROR: Windows recovery partition geometry changed"
+        echo "before: $RECOVERY_GEOMETRY_BEFORE"
+        echo "after : $current"
+        die "Windows recovery partition changed"
+    fi
+}
+
+final_verify_or_die() {
+    local target_verify="/mnt/libertix-final-verify"
+    local windows_verify="/mnt/libertix-windows-final-verify"
+    local fs uuid count
+
+    mark "150-final-verify"
+    echo "FINAL VERIFY: checking installed system before success"
+
+    [ -n "$DISK" ] && [ -b "$DISK" ] || die "final verify: target disk missing"
+    [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] || die "final verify: Linux partition missing"
+    [ -n "$WINDOWS_PART" ] && [ -b "$WINDOWS_PART" ] || die "final verify: Windows partition missing"
+
+    assert_recovery_unchanged_or_die
+
+    count="$(partition_count "$DISK")"
+    [ "$count" -le 4 ] || die "final verify: MBR partition count is $count"
+
+    fs="$(blkid -s TYPE -o value "$NEW_PART" 2>/dev/null || true)"
+    [ "$fs" = "ext4" ] || die "final verify: $NEW_PART is not ext4"
+
+    uuid="$(blkid -s UUID -o value "$NEW_PART" 2>/dev/null || true)"
+    [ -n "$uuid" ] || die "final verify: Linux partition UUID missing"
+
+    mkdir -p "$target_verify"
+    mount -o ro "$NEW_PART" "$target_verify"
+    [ -f "$target_verify/etc/os-release" ] || die "final verify: target os-release missing"
+    [ -f "$target_verify/etc/fstab" ] || die "final verify: target fstab missing"
+    grep -q "$uuid" "$target_verify/etc/fstab" || die "final verify: root UUID missing from fstab"
+    [ -f "$target_verify/boot/grub/grub.cfg" ] || die "final verify: grub.cfg missing"
+    grep -q "menuentry" "$target_verify/boot/grub/grub.cfg" || die "final verify: grub menu missing"
+    [ -d "$target_verify/home/$USERNAME" ] || die "final verify: user home missing"
+    umount "$target_verify"
+
+    mkdir -p "$windows_verify"
+    mount -t ntfs-3g -o ro "$WINDOWS_PART" "$windows_verify"
+    [ ! -e "$windows_verify/grldr" ] || die "final verify: temporary grldr still present"
+    [ ! -e "$windows_verify/grldr.mbr" ] || die "final verify: temporary grldr.mbr still present"
+    [ ! -e "$windows_verify/menu.lst" ] || die "final verify: temporary menu.lst still present"
+    umount "$windows_verify"
+
+    echo "FINAL VERIFY: success"
+}
+
+# The runner copies stdout/stderr to the main install log. These result markers
+# make the final state machine-readable after the log is copied back to Windows.
+append_install_result() {
+    local success="$1"
+    local rc="${2:-0}"
+    local rollback="${3:-not-attempted}"
+
+    {
+        echo ""
+        echo "LIBERTIX_INSTALL_SUCCESS=$success"
+        echo "LIBERTIX_INSTALL_STAGE=$CURRENT_STAGE"
+        echo "LIBERTIX_INSTALL_RC=$rc"
+        echo "LIBERTIX_INSTALL_ROLLBACK=$rollback"
+        echo "LIBERTIX_INSTALL_TIME=$(date -Is 2>/dev/null || date)"
+    } || true
+}
+
+# Keep cleanup non-fatal: this is used from the error path, where preserving the
+# rollback attempt is more important than failing on a stale mountpoint.
+cleanup_live_mounts_best_effort() {
+    cd / 2>/dev/null || true
+    sync || true
+    umount /mnt/iso 2>/dev/null || true
+    umount /mnt/target/dev/pts 2>/dev/null || true
+    umount /mnt/target/dev 2>/dev/null || true
+    umount /mnt/target/proc 2>/dev/null || true
+    umount /mnt/target/sys 2>/dev/null || true
+    for mp in /mnt/target/mnt/win_*; do
+        [ -d "$mp" ] && umount "$mp" 2>/dev/null || true
+    done
+    umount /mnt/target 2>/dev/null || true
+    umount /mnt/windows 2>/dev/null || true
+    umount /mnt/libertix-final-verify 2>/dev/null || true
+    umount /mnt/libertix-windows-final-verify 2>/dev/null || true
+}
+
+# Rollback is intentionally conservative. It only deletes partition 3 on the
+# target disk, because that is the temporary live/final Linux slot created by the
+# Windows phase. The Windows recovery partition is never moved or removed here.
+rollback_windows_layout_best_effort() {
+    local win_num recovery_start resize_end rollback_ok=false candidate live_candidate deleted_linux_part=false
+
+    [ "$INSTALL_SUCCESS" = false ] || return 0
+    [ "$ROLLBACK_ATTEMPTED" = false ] || return 0
+    ROLLBACK_ATTEMPTED=true
+
+    echo "=== ROLLBACK: best-effort Windows layout restore ==="
+
+    if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
+        for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
+            [ -b "$candidate" ] || continue
+            if [ -n "$(find_biggest_windows_partition "$candidate")" ]; then
+                DISK="$candidate"
+                DISKNAME="$(basename "$DISK")"
+                echo "ROLLBACK: detected target disk as $DISK"
+                break
+            fi
+        done
+    fi
+    if [ -z "$WINDOWS_PART" ] && [ -n "$DISK" ] && [ -b "$DISK" ]; then
+        WINDOWS_PART="$(find_biggest_windows_partition "$DISK")"
+        [ -n "$WINDOWS_PART" ] && echo "ROLLBACK: detected Windows partition as $WINDOWS_PART"
+    fi
+
+    if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
+        echo "ROLLBACK: skipped because target disk is unknown"
+        return 1
+    fi
+    if [ -z "$WINDOWS_PART" ] || [ ! -b "$WINDOWS_PART" ]; then
+        echo "ROLLBACK: skipped because Windows partition is unknown"
+        return 1
+    fi
+
+    cleanup_live_mounts_best_effort
+    swapoff -a 2>/dev/null || true
+
+    # GRUB is installed at the very end. If that write started and a later step
+    # fails, restore the previous boot code bytes so Windows remains bootable.
+    if [ "$BOOTLOADER_WRITE_STARTED" = true ] && [ -f "$MBR_BACKUP" ]; then
+        echo "ROLLBACK: restoring pre-GRUB MBR boot code from $MBR_BACKUP"
+        dd if="$MBR_BACKUP" of="$DISK" bs=446 count=1 conv=notrunc || true
+        sync || true
+    fi
+
+    if [ -z "$NEW_PART" ]; then
+        live_candidate="$(find_live_partition_on_disk "$DISK" || true)"
+        if [ -n "$live_candidate" ] && [ "$(partition_number "$live_candidate")" = "3" ]; then
+            NEW_PART="$live_candidate"
+            NEW_PART_NUM="3"
+            echo "ROLLBACK: detected temporary Linux partition as $NEW_PART"
+        fi
+    fi
+
+    if [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ]; then
+        NEW_PART_NUM="${NEW_PART_NUM:-$(partition_number "$NEW_PART")}"
+        if [ "$NEW_PART_NUM" = "3" ] && [ "$(parent_disk_from_part "$NEW_PART")" = "$DISK" ]; then
+            if findmnt -rn -S "$NEW_PART" | grep -q .; then
+                echo "ROLLBACK: cannot delete $NEW_PART because it is still mounted"
+            elif fuser -m "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
+                echo "ROLLBACK: cannot delete $NEW_PART because it still has users"
+                cat /tmp/libertix-rollback-fuser.txt || true
+            else
+                echo "ROLLBACK: deleting temporary Linux partition $NEW_PART"
+                if parted -s "$DISK" rm "$NEW_PART_NUM"; then
+                    deleted_linux_part=true
+                    sync || true
+                    partprobe "$DISK" 2>/dev/null || true
+                    udevadm settle 2>/dev/null || true
+                else
+                    echo "ROLLBACK: deleting $NEW_PART failed"
+                fi
+            fi
+        else
+            echo "ROLLBACK: refusing to delete unexpected partition $NEW_PART"
+        fi
+    fi
+
+    if parted -sm "$DISK" print 2>/dev/null | awk -F: '$1=="3"{found=1} END{exit !found}'; then
+        if [ "$deleted_linux_part" != true ]; then
+            echo "ROLLBACK: skipping Windows resize because partition 3 is still present"
+            debug_disk_state || true
+            return 1
+        fi
+    fi
+
+    win_num="$(partition_number "$WINDOWS_PART")"
+    recovery_start="$(parted -sm "$DISK" unit s print 2>/dev/null | awk -F: '$1=="4"{gsub("s","",$2); print $2; exit}')"
+    if [ -n "$recovery_start" ]; then
+        resize_end="$((recovery_start - 1))s"
+    else
+        resize_end="100%"
+    fi
+
+    echo "ROLLBACK: resizing Windows partition $WINDOWS_PART to $resize_end"
+    if parted -s "$DISK" unit s resizepart "$win_num" "$resize_end"; then
+        partprobe "$DISK" 2>/dev/null || true
+        udevadm settle 2>/dev/null || true
+        echo "ROLLBACK: growing NTFS filesystem"
+        ntfsresize -f "$WINDOWS_PART" <<< "y" || true
+        ntfsfix -d "$WINDOWS_PART" || true
+        rollback_ok=true
+    else
+        echo "ROLLBACK: partition resize failed"
+    fi
+
+    parted -s "$DISK" set 1 boot on 2>/dev/null || true
+    if [ -n "$RECOVERY_GEOMETRY_BEFORE" ]; then
+        echo "ROLLBACK: recovery before=$RECOVERY_GEOMETRY_BEFORE"
+        echo "ROLLBACK: recovery after=$(recovery_geometry "$DISK")"
+    fi
+    debug_disk_state || true
+
+    if [ "$rollback_ok" = true ]; then
+        echo "ROLLBACK: completed best-effort Windows layout restore"
+        return 0
+    fi
+    return 1
+}
+
+fail_and_exit() {
+    local rc="$1"
+    local msg="$2"
+
+    trap - ERR
+    set +e
+    echo "ERROR: $msg"
+    debug_disk_state || true
+    if rollback_windows_layout_best_effort; then
+        append_install_result false "$rc" "completed"
+    else
+        append_install_result false "$rc" "skipped-or-failed"
+    fi
+    exit "$rc"
+}
+
+# Log command return codes without hiding failures from callers.
 run_logged() {
     echo "+ $*"
     set +e
@@ -155,6 +459,90 @@ run_logged() {
     return "$rc"
 }
 
+unmount_if_mounted() {
+    local mountpoint="$1"
+
+    if mountpoint -q "$mountpoint"; then
+        run_logged umount "$mountpoint" || return 1
+    fi
+}
+
+mount_windows_ro_with_retry() {
+    local part="$1"
+    local mountpoint="$2"
+    local attempt rc output
+
+    mkdir -p "$mountpoint"
+    unmount_if_mounted "$mountpoint" || true
+
+    for attempt in $(seq 1 10); do
+        echo "Mounting Windows partition read-only, attempt $attempt/10: $part -> $mountpoint"
+        udevadm settle 2>/dev/null || true
+
+        set +e
+        output=$(mount -t ntfs-3g -o ro "$part" "$mountpoint" 2>&1)
+        rc=$?
+        set -e
+
+        if [ "$rc" -eq 0 ]; then
+            echo "Windows partition mounted read-only on $mountpoint"
+            return 0
+        fi
+
+        echo "WARNING: read-only NTFS mount failed rc=$rc on attempt $attempt"
+        [ -n "$output" ] && echo "$output"
+
+        # A dirty NTFS flag after a reboot can make early live mounts flaky.
+        # Clear it after a few failed read-only attempts, then retry mounting.
+        if [ "$attempt" -eq 4 ] || [ "$attempt" -eq 8 ]; then
+            echo "Running ntfsfix -d before retrying read-only mount"
+            ntfsfix -d "$part" || true
+            udevadm settle 2>/dev/null || true
+        fi
+
+        sleep 2
+    done
+
+    die "cannot mount Windows partition read-only: $part"
+}
+
+wait_for_iso_source_or_die() {
+    local iso_path="$1"
+    local relative_path="$2"
+    local attempt size_before size_after human_size parent_dir
+
+    for attempt in $(seq 1 10); do
+        if [ -f "$iso_path" ]; then
+            size_before=$(stat -c '%s' "$iso_path" 2>/dev/null || echo 0)
+            sleep 1
+            size_after=$(stat -c '%s' "$iso_path" 2>/dev/null || echo 0)
+            if [ "$size_before" -eq "$size_after" ] && [ "$size_after" -gt 10485760 ]; then
+                human_size=$(du -h "$iso_path" | cut -f1)
+                echo "ISO found: $human_size (${size_after} bytes) at $iso_path"
+                return 0
+            fi
+            echo "Waiting for stable ISO file, attempt $attempt/10: size ${size_before} -> ${size_after}"
+        else
+            echo "Waiting for installer ISO, attempt $attempt/10: $iso_path"
+        fi
+        sleep 2
+    done
+
+    echo "ERROR: installer ISO not available or not stable: $iso_path"
+    echo "Config ISO_WINDOWS_PATH=$ISO_WINDOWS_PATH"
+    echo "Relative ISO path=$relative_path"
+    parent_dir=$(dirname "$iso_path")
+    if [ -d "$parent_dir" ]; then
+        echo "--- ISO parent directory listing: $parent_dir ---"
+        ls -la "$parent_dir" || true
+    fi
+    echo "--- Candidate ISO files on Windows partition ---"
+    find /mnt/windows -maxdepth 6 -iname "$ISO_FILENAME" 2>/dev/null | head -20 || true
+    die "installer ISO not available or not stable"
+}
+
+# Strict unmount only. Lazy unmount would hide open block-device references and
+# make wipefs/mkfs look safe while the live medium is still in use.
 unmount_target_disk_partitions() {
     echo "Unmounting mounted partitions from target disk $DISK..."
     local src target parent
@@ -245,25 +633,8 @@ wait_for_prereqs() {
     die "live prerequisites not ready after 60s"
 }
 
-find_biggest_windows_partition() {
-    local disk="$1"
-    local best=""
-    local best_size=0
-    local pn pdev pfs psize
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
-        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-        [ "$pfs" = "ntfs" ] || continue
-        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -gt 1000 ] && [ "$psize" -gt "$best_size" ]; then
-            best="$pdev"
-            best_size="$psize"
-        fi
-    done
-    echo "$best"
-}
-
+# Windows can leave NTFS dirty after a forced reboot. Try a normal rw mount
+# first, then clear the unsafe flag and mount again.
 mount_ntfs_rw_or_die() {
     local part="$1"
     local mountpoint="$2"
@@ -347,123 +718,9 @@ find_windows_os_partition_any() {
 delete_live_bcd_entry_or_die() {
     local bcd_file="$1"
 
-    python3 - "$bcd_file" <<'PY'
-from __future__ import annotations
-
-import shutil
-import sys
-from pathlib import Path
-
-import hivex
-
-BOOTMGR = "{9dea862c-5cdd-4e70-acc1-f32b344d4795}"
-E_PATH = "12000002"
-E_DESCRIPTION = "12000004"
-E_DISPLAYORDER = "24000001"
-E_BOOTSEQUENCE = "24000002"
-E_TOOLS_DISPLAYORDER = "24000010"
-
-
-def utf16z(text: str) -> bytes:
-    return (text + "\0").encode("utf-16le")
-
-
-def decode_utf16z(data: bytes | None) -> str:
-    if not data:
-        return ""
-    return data.decode("utf-16le", errors="replace").rstrip("\0")
-
-
-def decode_guid_list(data: bytes | None) -> list[str]:
-    text = decode_utf16z(data)
-    return [item for item in text.split("\0") if item]
-
-
-def guid_list(guids: list[str]) -> bytes:
-    return ("".join(guid + "\0" for guid in guids) + "\0").encode("utf-16le")
-
-
-def child(hive: hivex.Hivex, node: int, name: str) -> int:
-    found = hive.node_get_child(node, name)
-    if not found:
-        raise RuntimeError(f"missing BCD key: {name}")
-    return found
-
-
-def value_bytes(hive: hivex.Hivex, node: int | None, value_name: str = "Element") -> bytes | None:
-    if not node:
-        return None
-    value = hive.node_get_value(node, value_name)
-    if not value:
-        return None
-    _typ, data = hive.value_value(value)
-    return data
-
-
-def set_guid_list(hive: hivex.Hivex, elements: int, element_name: str, guids: list[str]) -> None:
-    node = hive.node_get_child(elements, element_name)
-    if guids:
-        if not node:
-            node = hive.node_add_child(elements, element_name)
-        hive.node_set_value(node, {"key": "Element", "t": 7, "value": guid_list(guids)})
-    elif node:
-        hive.node_delete_child(node)
-
-
-def main() -> int:
-    bcd = Path(sys.argv[1])
-    if not bcd.is_file():
-        raise RuntimeError(f"BCD file not found: {bcd}")
-
-    backup = bcd.with_name("BCD.bak-libertix-cleanup")
-    if not backup.exists():
-        shutil.copy2(bcd, backup)
-
-    hive = hivex.Hivex(str(bcd), write=True)
-    root = hive.root()
-    objects = child(hive, root, "Objects")
-    bootmgr = child(hive, objects, BOOTMGR)
-    bootmgr_elements = child(hive, bootmgr, "Elements")
-
-    targets: list[str] = []
-    for obj in hive.node_children(objects):
-        guid = hive.node_name(obj)
-        elements = hive.node_get_child(obj, "Elements")
-        if not elements:
-            continue
-        desc_node = hive.node_get_child(elements, E_DESCRIPTION)
-        path_node = hive.node_get_child(elements, E_PATH)
-        desc = decode_utf16z(value_bytes(hive, desc_node))
-        path = decode_utf16z(value_bytes(hive, path_node))
-        normalized_path = path.replace("/", "\\").casefold()
-        if desc.casefold() == "install linux" or normalized_path in ("\\grldr.mbr", "\\\\grldr.mbr"):
-            targets.append(guid)
-
-    if not targets:
-        print("BCD cleanup: no temporary live boot entry found")
-        return 0
-
-    target_set = {guid.casefold() for guid in targets}
-    for element in (E_DISPLAYORDER, E_BOOTSEQUENCE, E_TOOLS_DISPLAYORDER):
-        node = hive.node_get_child(bootmgr_elements, element)
-        current = decode_guid_list(value_bytes(hive, node))
-        filtered = [guid for guid in current if guid.casefold() not in target_set]
-        if filtered != current:
-            set_guid_list(hive, bootmgr_elements, element, filtered)
-
-    for guid in targets:
-        node = hive.node_get_child(objects, guid)
-        if node:
-            hive.node_delete_child(node)
-
-    hive.commit(None)
-    print("BCD cleanup: deleted " + ", ".join(targets))
-    print(f"BCD cleanup: backup={backup}")
-    return 0
-
-
-raise SystemExit(main())
-PY
+    # cleanup-bcd.py edits the offline Windows BCD hive with hivex. Keeping the
+    # Python out of this shell script makes the boot cleanup auditable.
+    python3 /usr/local/lib/libertix/cleanup-bcd.py "$bcd_file"
 }
 
 cleanup_windows_live_boot_artifacts() {
@@ -471,6 +728,8 @@ cleanup_windows_live_boot_artifacts() {
 
     mark "006-clean-windows-live-boot"
 
+    # First remove the one-shot Windows Boot Manager entry. If the installer
+    # fails later, the next reboot must fall back to Windows instead of looping.
     bcd_part=$(find_ntfs_partition_with_file "Boot/BCD" || true)
     [ -n "$bcd_part" ] || die "Windows BCD store not found"
 
@@ -482,6 +741,8 @@ cleanup_windows_live_boot_artifacts() {
     sync
     umount "$bcd_mnt"
 
+    # Then remove the GRUB4DOS files that Windows used only to start this live
+    # installer. The final Linux bootloader is installed later by grub-install.
     windows_part=$(find_windows_os_partition_any || true)
     [ -n "$windows_part" ] || die "Windows OS partition not found"
 
@@ -493,36 +754,10 @@ cleanup_windows_live_boot_artifacts() {
     umount "$windows_mnt"
 }
 
-find_live_partition_on_disk() {
-    local disk="$1"
-    local pn pdev label pfs psize legacy_label
-    legacy_label="$(printf '%s%s' 'LINUX' 'GATE')"
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
-        label=$(blkid -s LABEL -o value "$pdev" 2>/dev/null || echo "")
-        if [ "$label" = "LIBERTIX" ] || [ "$label" = "LIBERTIX_INSTALLER" ] || [ "$label" = "$legacy_label" ]; then
-            echo "$pdev"
-            return 0
-        fi
-    done
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
-        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-        [ "$pfs" = "vfat" ] || [ "$pfs" = "fat32" ] || continue
-        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -ge 1500 ] && [ "$psize" -le 3072 ]; then
-            echo "$pdev"
-            return 0
-        fi
-    done
-    return 1
-}
-
 echo "Libertix build: $(cat /etc/libertix-build-id 2>/dev/null || echo unknown)"
 wait_for_prereqs
 cleanup_windows_live_boot_artifacts
+mark "007-windows-live-boot-cleaned"
 
 # Read config.txt
 mark "010-read-config"
@@ -548,7 +783,18 @@ LINUX_SIZE_GB="30"
 if [ -f "$CONFIG_FILE" ]; then
     while IFS='=' read -r key value; do
         [[ -z "$key" || "$key" =~ ^# ]] && continue
-        value=$(echo "$value" | sed 's/^"//;s/"$//' | sed "s/^'//;s/'$//")
+        value=$(python3 - "$value" <<'PY'
+import shlex
+import sys
+
+raw = sys.argv[1]
+try:
+    parsed = shlex.split("x=" + raw, posix=True)
+    print(parsed[0].split("=", 1)[1] if parsed else "")
+except Exception:
+    print(raw.strip().strip('"').strip("'"))
+PY
+)
         case "$key" in
             SYSTEM_LANG) SYSTEM_LANG="$value" ;;
             KEYBOARD_LAYOUT) KEYBOARD_LAYOUT="$value" ;;
@@ -606,6 +852,8 @@ lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$DISK"
 
 PART_TABLE=$(parted -sm "$DISK" print 2>/dev/null | awk -F: 'NR==2{print $6}')
 PART_COUNT=$(lsblk -nr -o NAME,TYPE "$DISK" | awk '$2=="part"{c++}END{print c+0}')
+RECOVERY_GEOMETRY_BEFORE="$(recovery_geometry "$DISK")"
+[ -n "$RECOVERY_GEOMETRY_BEFORE" ] && echo "Recovery partition geometry before install: $RECOVERY_GEOMETRY_BEFORE"
 
 # Find Windows partition
 WINDOWS_PART=$(find_biggest_windows_partition "$DISK")
@@ -692,25 +940,16 @@ else
 fi
 
 mark "030-check-mint-iso"
-mkdir -p /mnt/windows
-mount -t ntfs-3g -o ro "$WINDOWS_PART" /mnt/windows
-
 ISO_WINDOWS_REL=$(windows_path_to_relative "$ISO_WINDOWS_PATH")
 ISO_SOURCE="/mnt/windows/$ISO_WINDOWS_REL"
 
-[ ! -f "$ISO_SOURCE" ] && {
-    echo "ERROR: installer ISO not found: $ISO_SOURCE"
-    echo "Config ISO_WINDOWS_PATH=$ISO_WINDOWS_PATH"
-    find /mnt/windows -maxdepth 4 -iname "$ISO_FILENAME" 2>/dev/null | head -20 || true
-    umount /mnt/windows
-    die "installer ISO not found"
-}
-echo "ISO found: $(du -h "$ISO_SOURCE" | cut -f1) at $ISO_SOURCE"
+mount_windows_ro_with_retry "$WINDOWS_PART" /mnt/windows
+wait_for_iso_source_or_die "$ISO_SOURCE" "$ISO_WINDOWS_REL"
 
 # Keep Windows NTFS unmounted while changing the MBR table. Any mounted
 # partition on the target disk can make BLKRRPART/partprobe keep the old view.
 mark "035-umount-windows"
-umount /mnt/windows
+run_logged umount /mnt/windows
 
 NEW_PART=""
 NEW_PART_NUM=""
@@ -785,13 +1024,8 @@ mark "090-mount-target"
 run_logged mount "$NEW_PART" /mnt/target
 
 mark "100-remount-windows-ro"
-run_logged mount -t ntfs-3g -o ro "$WINDOWS_PART" /mnt/windows
-[ ! -f "$ISO_SOURCE" ] && {
-    echo "ERROR: installer ISO disappeared after remount: $ISO_SOURCE"
-    umount /mnt/target
-    umount /mnt/windows
-    die "installer ISO disappeared after remount"
-}
+mount_windows_ro_with_retry "$WINDOWS_PART" /mnt/windows
+wait_for_iso_source_or_die "$ISO_SOURCE" "$ISO_WINDOWS_REL"
 
 # Extract ISO
 echo "Mounting installer ISO from Windows workspace..."
@@ -844,6 +1078,13 @@ chroot /mnt/target /usr/bin/env \
     /tmp/libertix-configure-target.sh
 rm -f /mnt/target/tmp/libertix-configure-target.sh
 
+mark "140-install-bootloader"
+echo "Backing up current MBR before GRUB install..."
+dd if="$DISK" of="$MBR_BACKUP" bs=512 count=1
+BOOTLOADER_WRITE_STARTED=true
+chroot /mnt/target grub-install --target=i386-pc --recheck "$DISK"
+INSTALL_COMMITTED=true
+
 # Cleanup mounts
 for pn in 1 2 3 4; do
     mdir="/mnt/target/mnt/win_$pn"
@@ -860,9 +1101,11 @@ umount /mnt/target 2>/dev/null || true
 
 umount /mnt/windows 2>/dev/null || true
 parted -s "$DISK" set "$NEW_PART_NUM" boot on 2>/dev/null || true
+assert_recovery_unchanged_or_die
+final_verify_or_die
 
 echo ""
 echo "=== INSTALLATION COMPLETED ==="
-echo "Rebooting in 1s..."
-sleep 1
-reboot
+INSTALL_SUCCESS=true
+append_install_result true 0 "not-needed"
+exit 0

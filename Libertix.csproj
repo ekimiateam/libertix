@@ -158,6 +158,9 @@
       <Generator>SettingsSingleFileGenerator</Generator>
       <LastGenOutput>Settings.Designer.cs</LastGenOutput>
     </None>
+    <Content Include="Scripts\libertix-recovery-guard.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
   <ItemGroup>
     <Page Include="Controls\ErrorPanel.xaml">

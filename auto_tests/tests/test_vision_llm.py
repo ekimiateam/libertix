@@ -133,6 +133,28 @@ def test_install_progress_fallback_rejects_reboot_prompt_during_linux_iso_downlo
     assert verdict["still_in_progress"] is True
 
 
+def test_install_progress_fallback_accepts_final_reboot_screen() -> None:
+    reasoning = """
+    Visible text:
+    Partitionnement termine !
+    100%
+    Boot entry configured successfully.
+    GRUB4DOS installed.
+    Next reboot will automatically boot Install Linux.
+    Buttons: Retour, Redemarrer.
+    The model accidentally writes still_in_progress: true later in its reasoning.
+    error_visible: false
+    """
+
+    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
+
+    assert verdict["iso_download_finished"] is True
+    assert verdict["installation_finished"] is True
+    assert verdict["reboot_prompt_visible"] is True
+    assert verdict["still_in_progress"] is False
+    assert verdict["error_visible"] is False
+
+
 def test_install_progress_accepts_llm_json_without_visible_text(monkeypatch, tmp_path: Path) -> None:
     image = tmp_path / "screen.png"
     Image.new("RGB", (32, 32), "white").save(image)

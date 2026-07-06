@@ -148,8 +148,29 @@ def _contains_install_blocker(content: str) -> bool:
     )
 
 
+def _contains_final_reboot_prompt(content: str) -> bool:
+    """Detect the final Libertix reboot screen from concrete UI text."""
+
+    text = content.lower()
+    reboot_button = "redemarrer" in text or "redémarrer" in text
+    final_state = any(
+        marker in text
+        for marker in (
+            "partitionnement termine",
+            "partitionnement terminé",
+            "next reboot will automatically boot",
+            "boot entry configured",
+            "grub4dos installed",
+        )
+    )
+    return reboot_button and final_state and re.search(r"\b100\s*%", text) is not None
+
+
 def _contains_active_install_progress(content: str) -> bool:
     """Detect concrete in-progress text that must block final reboot clicks."""
+
+    if _contains_final_reboot_prompt(content):
+        return False
 
     text = content.lower()
     if re.search(r"\b(downloading|copying|extracting|copie|téléchargement).{0,80}\b[0-9]{1,2}\s*%", text):
@@ -161,8 +182,6 @@ def _contains_active_install_progress(content: str) -> bool:
     return any(
         marker in text
         for marker in (
-            "downloading linux iso",
-            "downloading linux installer",
             "copying iso contents",
             "mounting iso and copying",
             "extracting system",
@@ -431,8 +450,44 @@ class VisionLLMClient:
             pattern = rf'(?<![a-z0-9_])["`]?{re.escape(name)}["`]?\s*[:=]\s*false\b'
             return re.search(pattern, text) is not None
 
-        blocking_problem = _contains_install_blocker(content)
-        active_install_progress = _contains_active_install_progress(content)
+        def evidence_excerpt() -> str:
+            markers = (
+                "visible text",
+                "image shows",
+                "scene:",
+                "text:",
+                "downloading",
+                "copying",
+                "extracting",
+                "redemarrer",
+                "redémarrer",
+                "partitionnement",
+                "espace insuffisant",
+                "insufficient space",
+                "additional space",
+                "failed",
+                "error",
+                "erreur",
+                "stage:",
+                "%",
+                "mb",
+            )
+            skipped = ("schema", "task:", "rules:", "conditions:", "respond", "contrat")
+            lines: list[str] = []
+            for raw_line in content.splitlines():
+                line = raw_line.strip()
+                lowered = line.lower()
+                if not line or any(token in lowered for token in skipped):
+                    continue
+                if any(marker in lowered for marker in markers):
+                    lines.append(line)
+            return " ".join(lines)[:1200] or "No strict JSON returned by the vision model."
+
+        evidence = evidence_excerpt()
+        analysis_source = f"{content}\n{evidence}"
+        blocking_problem = _contains_install_blocker(analysis_source)
+        final_reboot_prompt = _contains_final_reboot_prompt(analysis_source)
+        active_install_progress = _contains_active_install_progress(analysis_source)
         active_iso_copy = any(
             marker in text
             for marker in (
@@ -454,7 +509,7 @@ class VisionLLMClient:
         if active_iso_copy:
             iso_finished = False
 
-        installation_finished = conclusion_true("installation_finished")
+        installation_finished = conclusion_true("installation_finished") or final_reboot_prompt
         if any(
             marker in text
             for marker in (
@@ -467,7 +522,7 @@ class VisionLLMClient:
         ):
             installation_finished = False
 
-        reboot_prompt_visible = conclusion_true("reboot_prompt_visible")
+        reboot_prompt_visible = conclusion_true("reboot_prompt_visible") or final_reboot_prompt
         if any(
             marker in text
             for marker in (
@@ -478,6 +533,12 @@ class VisionLLMClient:
             )
         ):
             reboot_prompt_visible = False
+
+        if final_reboot_prompt:
+            iso_finished = True
+            installation_finished = True
+            reboot_prompt_visible = True
+            active_install_progress = False
 
         if active_install_progress:
             installation_finished = False
@@ -517,21 +578,28 @@ class VisionLLMClient:
             conclusion_true("still_in_progress")
             or "downloading" in text
             or "téléchargement" in text
-            or "progress" in text
             or "en cours" in text
             or active_iso_copy
             or active_install_progress
-        ) and not installation_finished
+        ) and not installation_finished and not final_reboot_prompt
 
-        compact = content.replace("\n", " ").strip()
+        if blocking_problem:
+            summary = "Fallback LLM: blocking installer problem detected from visible evidence."
+        elif final_reboot_prompt:
+            summary = "Fallback LLM: final reboot screen detected from visible evidence."
+        elif active_install_progress or active_iso_copy or still_in_progress:
+            summary = "Fallback LLM: active installer progress detected from visible evidence."
+        else:
+            summary = "Fallback LLM: no strict JSON returned; final state is not confidently detected."
+
         return {
             "iso_download_finished": bool(iso_finished),
             "installation_finished": bool(installation_finished),
             "reboot_prompt_visible": bool(reboot_prompt_visible),
             "still_in_progress": bool(still_in_progress),
             "error_visible": bool(error_visible),
-            "summary": "Fallback depuis le raisonnement LLM: " + compact[:900],
-            "visible_text": compact[:1200],
+            "summary": summary,
+            "visible_text": evidence,
         }
 
     def _wait_before_retry(

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Security.Principal;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
@@ -16,6 +18,8 @@ namespace Libertix.Pages
     {
         private double _linuxSizeGB;
         private const double FAT32_SIZE_GB = 2.0;
+        private const string RecoveryTaskName = "LibertixInstallRecovery";
+        private const string RecoveryRoot = @"C:\LibertixInstallRecovery";
         private bool _isRunning = false;
 
         public ApplyChanges()
@@ -36,9 +40,10 @@ namespace Libertix.Pages
             // Load Linux size from saved state
             var stateKey = $"ResizeDisk_{(App.Current.Properties["SelectedDistro"] as DistroInfo)?.Name}";
             var state = StateManager.GetState(stateKey);
-            if (state?.State is System.Collections.Generic.Dictionary<string, double> savedState)
+            if (state?.State is System.Collections.Generic.Dictionary<string, double> savedState &&
+                savedState.TryGetValue("LinuxSize", out var linuxSize))
             {
-                _linuxSizeGB = savedState["LinuxSize"];
+                _linuxSizeGB = linuxSize;
             }
         }
 
@@ -58,12 +63,10 @@ namespace Libertix.Pages
                         CreateNoWindow = true
                     };
 
-                    using (var process = Process.Start(psi))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        process.WaitForExit();
-                        return output;
-                    }
+                    var result = RunProcess("diskpart.exe", $"/s \"{scriptPath}\"", waitMs: 120000);
+                    if (result.exitCode != 0)
+                        return $"Error: diskpart failed rc={result.exitCode}\n{result.output}\n{result.error}";
+                    return result.output;
                 }
                 catch (Exception ex)
                 {
@@ -92,6 +95,15 @@ namespace Libertix.Pages
 
             try
             {
+                if (_linuxSizeGB < 20 || double.IsNaN(_linuxSizeGB) || double.IsInfinity(_linuxSizeGB))
+                {
+                    Log($"ERROR: Invalid Linux partition size: {_linuxSizeGB:N1}GB");
+                    UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                    BackButton.IsEnabled = true;
+                    _isRunning = false;
+                    return;
+                }
+
                 await ExecutePartitioningAsync();
             }
             catch (Exception ex)
@@ -119,6 +131,20 @@ namespace Libertix.Pages
                 Log($"ERROR: Not enough shrinkable space!");
                 Log($"  Minimum required: {minRequiredMB / 1024:N1}GB");
                 Log($"  Available: {maxShrinkMB / 1024:N1}GB");
+                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                BackButton.IsEnabled = true;
+                _isRunning = false;
+                return;
+            }
+
+            Log("Installing Windows recovery guard...");
+            // This guard is installed before any partition change. If the live
+            // installer dies before writing a success marker, Windows can delete
+            // the temporary Linux slot and grow C: back on the next startup.
+            bool recoveryGuardReady = await InstallWindowsRecoveryGuardAsync(requestedLinuxMB);
+            if (!recoveryGuardReady)
+            {
+                Log("ERROR: Failed to install Windows recovery guard");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
                 BackButton.IsEnabled = true;
                 _isRunning = false;
@@ -234,7 +260,8 @@ namespace Libertix.Pages
             }
             catch { }
 
-            // Step 6: Download Linux installer ISO to C:\
+            // Step 6: keep the large Mint ISO on the Windows NTFS partition.
+            // The live system remounts this path read-only after partitioning.
             if (App.Current.Properties["SelectedDistro"] is DistroInfo selectedDistro &&
                 !string.IsNullOrEmpty(selectedDistro.IsoInstaller) &&
                 !string.IsNullOrEmpty(selectedDistro.IsoInstallerFileName))
@@ -281,7 +308,8 @@ namespace Libertix.Pages
                 Log("WARNING: Failed to write config.txt, will use defaults");
             }
 
-            // Step 8: Download GRUB4DOS files to C:\
+            // Step 8: GRUB4DOS is only a temporary Windows Boot Manager bridge.
+            // The live installer removes these files before touching Linux.
             UpdateProgress(96, "Downloading bootloader files...");
             Log("Step 8: Downloading GRUB4DOS files to C:\\...");
 
@@ -323,7 +351,8 @@ namespace Libertix.Pages
                 Log($"Ready: {file} at C:\\");
             }
 
-            // Step 9: Configure boot entry with bcdedit
+            // Step 9: make the next reboot enter the live installer once.
+            // Windows remains the default BCD entry for later boots.
             UpdateProgress(98, "Configuring boot entry...");
             Log("Step 9: Configuring GRUB4DOS boot entry...");
             System.Threading.Thread.Sleep(1000);
@@ -375,6 +404,12 @@ namespace Libertix.Pages
         {
             try
             {
+                if (!IsRunningAsAdministrator())
+                {
+                    Log("ERROR: Administrator privileges are required to configure BCD.");
+                    return false;
+                }
+
                 // Full path to bcdedit.exe - use Sysnative to bypass WOW64 redirection
                 string bcdeditPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Sysnative", "bcdedit.exe");
 
@@ -386,35 +421,23 @@ namespace Libertix.Pages
 
                 Log($"Using bcdedit at: {bcdeditPath}");
 
-                // Step 1: Create the boot entry and capture the GUID
-                var createPsi = new ProcessStartInfo
-                {
-                    FileName = bcdeditPath,
-                    Arguments = "/create /d \"Install Linux\" /application bootsector",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    Verb = "runas"
-                };
-
+                // Create a temporary bootsector entry. The live ISO deletes this
+                // entry from the offline BCD store as its first cleanup step.
                 string guid = "";
-                string output = "";
-                string error = "";
-
-                await Task.Run(() =>
-                {
-                    using (var process = Process.Start(createPsi))
-                    {
-                        output = process.StandardOutput.ReadToEnd();
-                        error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
-                    }
-                });
+                var createResult = await Task.Run(() =>
+                    RunProcess(bcdeditPath, "/create /d \"Install Linux\" /application bootsector", 30000));
+                string output = createResult.output;
+                string error = createResult.error;
 
                 Log($"bcdedit create output: {output}");
                 if (!string.IsNullOrEmpty(error))
                     Log($"bcdedit create error: {error}");
+
+                if (createResult.exitCode != 0)
+                {
+                    Log($"ERROR: bcdedit create failed with rc={createResult.exitCode}");
+                    return false;
+                }
 
                 // Find GUID between { and } in the output
                 int startIdx = output.IndexOf('{');
@@ -443,14 +466,13 @@ namespace Libertix.Pages
 
                 await Task.Delay(1000);
 
-                // Step 4: Keep the entry registered, but use bootsequence for a
-                // one-time automatic boot into the installer.
+                // Keep the entry visible in BCD metadata, but bootsequence makes
+                // it one-shot. If the user reboots later, Windows is still default.
                 await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {guid} /addlast");
 
                 await Task.Delay(1000);
 
-                // Step 5: Do not show the Windows Boot Manager selector for this
-                // automated installation run.
+                // Suppress the Windows selector for this automated run only.
                 await RunBcdeditCommandAsync(bcdeditPath, "/set {bootmgr} displaybootmenu no");
 
                 await Task.Delay(1000);
@@ -478,28 +500,17 @@ namespace Libertix.Pages
 
         private async Task RunBcdeditCommandAsync(string bcdeditPath, string arguments)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = bcdeditPath,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
+            var result = await Task.Run(() => RunProcess(bcdeditPath, arguments, 30000));
+            if (!string.IsNullOrWhiteSpace(result.output))
+                Log($"bcdedit output: {result.output.Trim()}");
+            if (!string.IsNullOrWhiteSpace(result.error))
+                Log($"bcdedit error: {result.error.Trim()}");
 
-            int exitCode = 0;
-            await Task.Run(() =>
+            Log($"bcdedit {arguments}: {(result.exitCode == 0 ? "OK" : "Failed")}");
+            if (result.exitCode != 0)
             {
-                using (var process = Process.Start(psi))
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    process.WaitForExit();
-                    exitCode = process.ExitCode;
-                }
-            });
-
-            Log($"bcdedit {arguments}: {(exitCode == 0 ? "OK" : "Failed")}");
+                throw new InvalidOperationException($"bcdedit {arguments} failed with rc={result.exitCode}");
+            }
         }
 
         private async Task<bool> WriteConfigToFat32Async()
@@ -522,7 +533,8 @@ namespace Libertix.Pages
                 {
                     string configPath = @"Z:\config.txt";
 
-                    // Get account info
+                    // These defaults are only used if the wizard state is missing.
+                    // Normal automation fills AccountInfo before this page runs.
                     string username = "user";
                     string password = "password";
                     string computerName = "linux-pc";
@@ -551,18 +563,19 @@ namespace Libertix.Pages
                             selectedInstaller.IsoInstallerFileName);
                     }
 
-                    // Build config content with user settings
+                    // config.txt is consumed by the live installer after toram.
+                    // Keep the values shell-compatible because install-mint.sh sources it.
                     var configLines = new List<string>
                     {
-                        $"SYSTEM_LANG=\"{systemLang}\"",
-                        $"KEYBOARD_LAYOUT=\"{keyboardLayout}\"",
-                        "KEYBOARD_MODEL=\"pc105\"",
-                        $"TIMEZONE=\"{timezone}\"",
-                        $"USERNAME=\"{username}\"",
-                        $"PASSWORD=\"{password}\"",
-                        $"ISO_FILENAME=\"{isoFilename}\"",
-                        $"ISO_WINDOWS_PATH=\"{isoWindowsPath}\"",
-                        $"LINUX_SIZE_GB=\"{_linuxSizeGB:F0}\""
+                        $"SYSTEM_LANG={ShellQuoteValue(systemLang)}",
+                        $"KEYBOARD_LAYOUT={ShellQuoteValue(keyboardLayout)}",
+                        $"KEYBOARD_MODEL={ShellQuoteValue("pc105")}",
+                        $"TIMEZONE={ShellQuoteValue(timezone)}",
+                        $"USERNAME={ShellQuoteValue(username)}",
+                        $"PASSWORD={ShellQuoteValue(password)}",
+                        $"ISO_FILENAME={ShellQuoteValue(isoFilename)}",
+                        $"ISO_WINDOWS_PATH={ShellQuoteValue(isoWindowsPath)}",
+                        $"LINUX_SIZE_GB={ShellQuoteValue(_linuxSizeGB.ToString("F0"))}"
                     };
 
                     File.WriteAllText(configPath, string.Join("\n", configLines));
@@ -588,115 +601,129 @@ namespace Libertix.Pages
 
         private async Task<bool> DownloadIsoAsync(string url, string destinationPath)
         {
-            try
-            {
-                using (var client = new HttpClient())
-                {
-                    client.Timeout = TimeSpan.FromHours(2); // Long timeout for large files
-
-                    using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
-                    {
-                        response.EnsureSuccessStatusCode();
-
-                        var totalBytes = response.Content.Headers.ContentLength ?? 0;
-                        var totalMB = totalBytes / 1024.0 / 1024.0;
-
-                        Dispatcher.Invoke(() => Log($"ISO size: {totalMB:N0} MB"));
-
-                        using (var contentStream = await response.Content.ReadAsStreamAsync())
-                        using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
-                        {
-                            var buffer = new byte[8192];
-                            long totalRead = 0;
-                            int bytesRead;
-                            var lastProgressUpdate = DateTime.Now;
-
-                            while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
-                            {
-                                await fileStream.WriteAsync(buffer, 0, bytesRead);
-                                totalRead += bytesRead;
-
-                                // Update progress every 500ms
-                                if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)
-                                {
-                                    var progressPercent = totalBytes > 0 ? (int)(totalRead * 100 / totalBytes) : 0;
-                                    var downloadedMB = totalRead / 1024.0 / 1024.0;
-                                    Dispatcher.Invoke(() =>
-                                    {
-                                        var overallProgress = 60 + (progressPercent * 20 / 100); // 60-80%
-                                        UpdateProgress(overallProgress, $"Downloading... {downloadedMB:N0}/{totalMB:N0} MB ({progressPercent}%)");
-                                    });
-                                    lastProgressUpdate = DateTime.Now;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Dispatcher.Invoke(() => Log("ISO download completed"));
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Dispatcher.Invoke(() => Log($"Download failed: {ex.Message}"));
-                return false;
-            }
+            return await DownloadFileWithRetriesAsync(
+                url,
+                destinationPath,
+                attempts: 3,
+                timeout: TimeSpan.FromHours(2),
+                bufferSize: 8192,
+                progressStart: 60,
+                progressSpan: 20,
+                label: "ISO",
+                progressMessage: "Downloading...");
         }
 
         private async Task<bool> DownloadInstallerIsoAsync(string url, string destinationPath)
         {
-            try
+            return await DownloadFileWithRetriesAsync(
+                url,
+                destinationPath,
+                attempts: 3,
+                timeout: TimeSpan.FromHours(4),
+                bufferSize: 81920,
+                progressStart: 85,
+                progressSpan: 10,
+                label: "Linux installer ISO",
+                progressMessage: "Downloading Linux ISO...");
+        }
+
+        private async Task<bool> DownloadFileWithRetriesAsync(
+            string url,
+            string destinationPath,
+            int attempts,
+            TimeSpan timeout,
+            int bufferSize,
+            int progressStart,
+            int progressSpan,
+            string label,
+            string progressMessage)
+        {
+            for (int attempt = 1; attempt <= attempts; attempt++)
             {
-                using (var client = new HttpClient())
+                try
                 {
-                    client.Timeout = TimeSpan.FromHours(4); // Very long timeout for large Linux ISOs
+                    await DownloadFileOnceAsync(
+                        url,
+                        destinationPath,
+                        timeout,
+                        bufferSize,
+                        progressStart,
+                        progressSpan,
+                        label,
+                        progressMessage,
+                        attempt,
+                        attempts);
+                    Dispatcher.Invoke(() => Log($"{label} download completed"));
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    try { if (File.Exists(destinationPath)) File.Delete(destinationPath); } catch { }
+                    Dispatcher.Invoke(() => Log($"{label} download attempt {attempt}/{attempts} failed: {ex.Message}"));
+                    if (attempt == attempts)
+                        return false;
+                    await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
+                }
+            }
 
-                    using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+            return false;
+        }
+
+        private async Task DownloadFileOnceAsync(
+            string url,
+            string destinationPath,
+            TimeSpan timeout,
+            int bufferSize,
+            int progressStart,
+            int progressSpan,
+            string label,
+            string progressMessage,
+            int attempt,
+            int attempts)
+        {
+            using (var client = new HttpClient())
+            {
+                client.Timeout = timeout;
+                using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+                {
+                    response.EnsureSuccessStatusCode();
+
+                    var totalBytes = response.Content.Headers.ContentLength ?? 0;
+                    var totalMB = totalBytes / 1024.0 / 1024.0;
+                    Dispatcher.Invoke(() => Log($"{label} size: {totalMB:N0} MB (attempt {attempt}/{attempts})"));
+
+                    using (var contentStream = await response.Content.ReadAsStreamAsync())
+                    using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize, true))
                     {
-                        response.EnsureSuccessStatusCode();
+                        var buffer = new byte[bufferSize];
+                        long totalRead = 0;
+                        int bytesRead;
+                        var lastProgressUpdate = DateTime.Now;
 
-                        var totalBytes = response.Content.Headers.ContentLength ?? 0;
-                        var totalMB = totalBytes / 1024.0 / 1024.0;
-
-                        Dispatcher.Invoke(() => Log($"Linux installer ISO size: {totalMB:N0} MB"));
-
-                        using (var contentStream = await response.Content.ReadAsStreamAsync())
-                        using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+                        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
                         {
-                            var buffer = new byte[81920]; // Larger buffer for big files
-                            long totalRead = 0;
-                            int bytesRead;
-                            var lastProgressUpdate = DateTime.Now;
+                            await fileStream.WriteAsync(buffer, 0, bytesRead);
+                            totalRead += bytesRead;
 
-                            while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                            if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)
                             {
-                                await fileStream.WriteAsync(buffer, 0, bytesRead);
-                                totalRead += bytesRead;
-
-                                // Update progress every 500ms
-                                if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)
+                                var progressPercent = totalBytes > 0 ? (int)(totalRead * 100 / totalBytes) : 0;
+                                var downloadedMB = totalRead / 1024.0 / 1024.0;
+                                Dispatcher.Invoke(() =>
                                 {
-                                    var progressPercent = totalBytes > 0 ? (int)(totalRead * 100 / totalBytes) : 0;
-                                    var downloadedMB = totalRead / 1024.0 / 1024.0;
-                                    Dispatcher.Invoke(() =>
-                                    {
-                                        var overallProgress = 85 + (progressPercent * 10 / 100); // 85-95%
-                                        UpdateProgress(overallProgress, $"Downloading Linux ISO... {downloadedMB:N0}/{totalMB:N0} MB ({progressPercent}%)");
-                                    });
-                                    lastProgressUpdate = DateTime.Now;
-                                }
+                                    var overallProgress = progressStart + (progressPercent * progressSpan / 100);
+                                    UpdateProgress(overallProgress, $"{progressMessage} {downloadedMB:N0}/{totalMB:N0} MB ({progressPercent}%)");
+                                });
+                                lastProgressUpdate = DateTime.Now;
                             }
+                        }
+
+                        if (totalBytes > 0 && totalRead != totalBytes)
+                        {
+                            throw new IOException($"Downloaded size mismatch for {url}: expected {totalBytes} bytes, got {totalRead} bytes");
                         }
                     }
                 }
-
-                Dispatcher.Invoke(() => Log("Linux installer ISO download completed"));
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Dispatcher.Invoke(() => Log($"Linux installer download failed: {ex.Message}"));
-                return false;
             }
         }
 
@@ -708,7 +735,8 @@ namespace Libertix.Pages
 
                 try
                 {
-                    // Create a PowerShell script file to avoid escaping issues
+                    // Use a temporary PowerShell file instead of an inline command
+                    // so ISO paths with spaces or quotes stay predictable.
                     string scriptPath = Path.Combine(Path.GetTempPath(), $"mount_iso_{Guid.NewGuid()}.ps1");
                     string scriptContent = $@"
 $ErrorActionPreference = 'Stop'
@@ -799,7 +827,7 @@ try {{
                         if (copyProcess.ExitCode != 0)
                         {
                             Dispatcher.Invoke(() => Log($"Copy error (exit {copyProcess.ExitCode}): {copyError}"));
-                            // Continue anyway, some files may have copied
+                            return false;
                         }
 
                         // Get file count from xcopy output
@@ -844,6 +872,102 @@ try {{
                     }
                 }
             });
+        }
+
+        private async Task<bool> InstallWindowsRecoveryGuardAsync(double requestedLinuxMB)
+        {
+            return await Task.Run(() =>
+            {
+                try
+                {
+                    Directory.CreateDirectory(RecoveryRoot);
+
+                    string sourceScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Scripts", "libertix-recovery-guard.ps1");
+                    string targetScript = Path.Combine(RecoveryRoot, "recover.ps1");
+                    if (!File.Exists(sourceScript))
+                    {
+                        Dispatcher.Invoke(() => Log($"ERROR: Recovery guard script missing: {sourceScript}"));
+                        return false;
+                    }
+
+                    File.Copy(sourceScript, targetScript, true);
+
+                    // pending.env lets the startup guard identify the expected
+                    // temporary partition size without hardcoding UI choices.
+                    string metadataPath = Path.Combine(RecoveryRoot, "pending.env");
+                    string metadata = string.Join(Environment.NewLine, new[]
+                    {
+                        "LIBERTIX_INSTALL_PENDING=true",
+                        $"LINUX_SIZE_MB={requestedLinuxMB:F0}",
+                        $"CREATED_UTC={DateTime.UtcNow:O}"
+                    });
+                    File.WriteAllText(metadataPath, metadata + Environment.NewLine);
+
+                    string taskCommand = $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{targetScript}'";
+                    string args = $"/Create /TN \"{RecoveryTaskName}\" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR \"{taskCommand}\" /F";
+                    var result = RunProcess("schtasks.exe", args, waitMs: 30000);
+                    Dispatcher.Invoke(() =>
+                    {
+                        Log($"schtasks create {RecoveryTaskName}: {(result.exitCode == 0 ? "OK" : "Failed")}");
+                        if (!string.IsNullOrWhiteSpace(result.output))
+                            Log(result.output.Trim());
+                        if (!string.IsNullOrWhiteSpace(result.error))
+                            Log($"ERROR: {result.error.Trim()}");
+                    });
+
+                    return result.exitCode == 0;
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.Invoke(() => Log($"Recovery guard setup failed: {ex.Message}"));
+                    return false;
+                }
+            });
+        }
+
+        private static bool IsRunningAsAdministrator()
+        {
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                var principal = new WindowsPrincipal(identity);
+                return principal.IsInRole(WindowsBuiltInRole.Administrator);
+            }
+        }
+
+        private static string ShellQuoteValue(string value)
+        {
+            value = value ?? string.Empty;
+            if (value.Contains("\r") || value.Contains("\n"))
+                throw new InvalidOperationException("Config values cannot contain newlines");
+            return "'" + value.Replace("'", "'\\''") + "'";
+        }
+
+        private (int exitCode, string output, string error) RunProcess(string fileName, string arguments, int waitMs)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                var outputTask = process.StandardOutput.ReadToEndAsync();
+                var errorTask = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(waitMs))
+                {
+                    try { process.Kill(); } catch { }
+                    Task.WaitAll(new Task[] { outputTask, errorTask }, 2000);
+                    return (-1, outputTask.IsCompleted ? outputTask.Result : "", "Process timed out");
+                }
+
+                Task.WaitAll(outputTask, errorTask);
+                return (process.ExitCode, outputTask.Result, errorTask.Result);
+            }
         }
 
         private async Task<(double freeSpaceSizeMB, double recoveryOffsetMB)> GetFreeSpaceInfoAsync()
@@ -1033,8 +1157,8 @@ exit";
 
             try
             {
-                // Create FAT32 partition in the first available free space (right after Windows)
-                // No offset specified - diskpart will place it at the beginning of free space
+                // No offset is specified: diskpart places this at the first free
+                // slot after Windows, which is the slot the live installer reuses.
                 string script = $@"rescan
 select disk 0
 create partition primary size={sizeMB:F0}

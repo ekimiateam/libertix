@@ -21,7 +21,6 @@ namespace Libertix
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
         private const string STATE_KEY = "ChooseDistro";
-        private const string DISTROS_URL = FilepoolConfig.DistrosUrl;
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
@@ -44,25 +43,35 @@ namespace Libertix
         {
             InitializeComponent();
             _distros = new ObservableCollection<DistroInfo>();
-            LoadDistrosAsync();
-            LoadState();
             DataContext = this;
             IsDistroSelected = false;
+            Loaded += ChooseDistro_Loaded;
             CheckPartitionConfigurationAsync();
         }
 
-        private async void LoadDistrosAsync()
+        private async void ChooseDistro_Loaded(object sender, RoutedEventArgs e)
+        {
+            Loaded -= ChooseDistro_Loaded;
+            await LoadDistrosAsync();
+            LoadState();
+        }
+
+        private async Task LoadDistrosAsync()
         {
             try
             {
                 using (var client = new HttpClient())
                 {
-                    var json = await client.GetStringAsync(DISTROS_URL);
+                    var json = await client.GetStringAsync(FilepoolConfig.DistrosUrl);
                     var options = new JsonSerializerOptions
                     {
                         PropertyNameCaseInsensitive = true
                     };
                     var distroList = JsonSerializer.Deserialize<List<DistroInfoJson>>(json, options);
+                    if (distroList == null)
+                    {
+                        throw new InvalidOperationException("Distribution list JSON is empty or invalid.");
+                    }
                     
                     _distros.Clear();
                     foreach (var distroJson in distroList)
@@ -72,9 +81,10 @@ namespace Libertix
                             Name = distroJson.Name,
                             Description = distroJson.Description ?? "No description available",
                             ImageUrl = distroJson.ImageUrl,
-                            IsoUrl = distroJson.IsoUrl,
-                            IsoInstaller = distroJson.IsoInstaller,
-                            IsoInstallerFileName = distroJson.IsoInstallerFileName
+                            IsoUrl = FilepoolConfig.ResolveUrl(distroJson.IsoUrl),
+                            IsoInstaller = FilepoolConfig.ResolveUrl(distroJson.IsoInstaller),
+                            IsoInstallerFileName = distroJson.IsoInstallerFileName,
+                            SizeInGB = distroJson.SizeInGB
                         });
                     }
                 }
