@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Runtime.InteropServices;
 
 namespace Libertix
 {
@@ -26,6 +27,17 @@ namespace Libertix
         private bool _isDistroSelected;
         private bool _partitionConfigValid = true;
         private bool _partitionWarningAcknowledged = false;
+
+        private enum FirmwareType
+        {
+            Unknown = 0,
+            Bios = 1,
+            Uefi = 2,
+            Max = 3
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFirmwareType(out FirmwareType firmwareType);
 
         public bool IsDistroSelected
         {
@@ -217,6 +229,14 @@ namespace Libertix
 
         private async void CheckPartitionConfigurationAsync()
         {
+            if (IsUefiFirmware())
+            {
+                _partitionConfigValid = true;
+                PartitionWarningPanel.Visibility = Visibility.Collapsed;
+                UpdateNextButtonState();
+                return;
+            }
+
             var (isValid, warnings) = await ValidatePartitionLayoutAsync();
 
             _partitionConfigValid = isValid;
@@ -367,6 +387,11 @@ exit";
             }
 
             return partitions;
+        }
+
+        private static bool IsUefiFirmware()
+        {
+            return GetFirmwareType(out var firmwareType) && firmwareType == FirmwareType.Uefi;
         }
 
         private async Task<string> RunDiskpartAndGetOutputAsync(string scriptPath)

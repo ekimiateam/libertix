@@ -366,6 +366,8 @@ class ValidationService:
             return True
         if path.name != ".env.example" and (path.name == ".env" or path.name.startswith(".env.")):
             return False
+        if relative.parts == ("Tools", "aria2", "aria2c.exe"):
+            return True
         excluded_suffixes = {
             ".cache",
             ".dll",

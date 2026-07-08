@@ -95,18 +95,22 @@ def test_reset_selector_uses_configured_vm_names() -> None:
 def test_local_source_copy_excludes_env_files(tmp_path: Path) -> None:
     root = tmp_path
     allowed = root / "auto_tests" / ".env.example"
+    allowed_aria2 = root / "Tools" / "aria2" / "aria2c.exe"
     blocked_env = root / "auto_tests" / ".env"
     blocked_named_env = root / "auto_tests" / ".env.local"
     blocked_filepool = root / "auto_tests" / "app" / "filepool" / "mint.iso"
+    blocked_other_exe = root / "bin" / "Release" / "Libertix.exe"
 
-    for path in (allowed, blocked_env, blocked_named_env, blocked_filepool):
+    for path in (allowed, allowed_aria2, blocked_env, blocked_named_env, blocked_filepool, blocked_other_exe):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x", encoding="utf-8")
 
     assert ValidationService._include_local_source_path(root, allowed) is True  # noqa: SLF001
+    assert ValidationService._include_local_source_path(root, allowed_aria2) is True  # noqa: SLF001
     assert ValidationService._include_local_source_path(root, blocked_env) is False  # noqa: SLF001
     assert ValidationService._include_local_source_path(root, blocked_named_env) is False  # noqa: SLF001
     assert ValidationService._include_local_source_path(root, blocked_filepool) is False  # noqa: SLF001
+    assert ValidationService._include_local_source_path(root, blocked_other_exe) is False  # noqa: SLF001
 
 
 def test_vnc_display_is_converted_to_tcp_port() -> None:

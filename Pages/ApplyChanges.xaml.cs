@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -20,7 +21,20 @@ namespace Libertix.Pages
         private const double FAT32_SIZE_GB = 2.0;
         private const string RecoveryTaskName = "LibertixInstallRecovery";
         private const string RecoveryRoot = @"C:\LibertixInstallRecovery";
+        private const int Aria2MaxConnections = 5;
         private bool _isRunning = false;
+        private bool _uefiDownloadingInstallerIso = false;
+
+        private enum FirmwareType
+        {
+            Unknown = 0,
+            Bios = 1,
+            Uefi = 2,
+            Max = 3
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFirmwareType(out FirmwareType firmwareType);
 
         public ApplyChanges()
         {
@@ -94,7 +108,16 @@ namespace Libertix.Pages
                     return;
                 }
 
-                await ExecutePartitioningAsync();
+                if (IsUefiFirmware())
+                {
+                    Log("UEFI firmware detected. Using Libertix UEFI workflow.");
+                    await ExecuteUefiInstallationAsync();
+                }
+                else
+                {
+                    Log("BIOS firmware detected. Using existing BIOS workflow.");
+                    await ExecutePartitioningAsync();
+                }
             }
             catch (Exception ex)
             {
@@ -103,6 +126,198 @@ namespace Libertix.Pages
                 BackButton.IsEnabled = true;
                 _isRunning = false;
             }
+        }
+
+        private async Task ExecuteUefiInstallationAsync()
+        {
+            if (!IsRunningAsAdministrator())
+            {
+                Log("ERROR: Administrator privileges are required for UEFI installation.");
+                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                BackButton.IsEnabled = true;
+                _isRunning = false;
+                return;
+            }
+
+            string scriptPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Scripts", "libertix-uefi-install.ps1");
+            string aria2Path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "aria2", "aria2c.exe");
+
+            if (!File.Exists(scriptPath))
+            {
+                Log($"ERROR: UEFI installer script missing: {scriptPath}");
+                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                BackButton.IsEnabled = true;
+                _isRunning = false;
+                return;
+            }
+
+            if (!File.Exists(aria2Path))
+            {
+                Log($"ERROR: bundled aria2 missing: {aria2Path}");
+                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                BackButton.IsEnabled = true;
+                _isRunning = false;
+                return;
+            }
+
+            int installerSizeGB = Math.Max(20, (int)Math.Round(_linuxSizeGB));
+            UpdateProgress(5, "Préparation de l'installation UEFI...");
+            Log($"UEFI installer partition size: {installerSizeGB}GB");
+            Log($"Filepool: {FilepoolConfig.BaseUrl}");
+            Log($"aria2: bundled, max {Aria2MaxConnections} connections");
+
+            string powershell = ResolveSystemExecutable("WindowsPowerShell\\v1.0\\powershell.exe", "powershell.exe");
+            string arguments =
+                $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" " +
+                $"-Force -InstallerPartitionSizeGB {installerSizeGB} " +
+                $"-FilepoolBaseUrl \"{FilepoolConfig.BaseUrl}\" " +
+                $"-Aria2ExePath \"{aria2Path}\" -Aria2Connections {Aria2MaxConnections}";
+
+            int exitCode = await RunStreamingProcessAsync(
+                powershell,
+                arguments,
+                TimeSpan.FromHours(6),
+                line => HandleUefiInstallerOutput(line));
+
+            if (exitCode != 0)
+            {
+                Log($"ERROR: UEFI installer preparation failed with rc={exitCode}");
+                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                BackButton.IsEnabled = true;
+                _isRunning = false;
+                return;
+            }
+
+            UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
+            Log("UEFI installation preparation completed successfully.");
+            RebootButton.Visibility = Visibility.Visible;
+        }
+
+        private void HandleUefiInstallerOutput(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                return;
+
+            Log(line);
+
+            string normalized = line.ToLowerInvariant();
+            if (normalized.Contains("checking secure boot"))
+                UpdateProgress(8, "Vérification Secure Boot...");
+            else if (normalized.Contains("disabling bitlocker"))
+                UpdateProgress(18, "Déchiffrement de Windows C: initialisation...");
+            else if (normalized.Contains("windows c: decrypted"))
+                UpdateProgress(28, "Windows C: déchiffré");
+            else if (normalized.Contains("waiting for c: decryption") || normalized.Contains("decryptioninprogress"))
+                UpdateDecryptionProgress(line);
+            else if (normalized.Contains("downloading mint iso"))
+            {
+                _uefiDownloadingInstallerIso = false;
+                UpdateProgress(30, "Downloading Mint ISO...");
+            }
+            else if (normalized.Contains("mint iso ready"))
+            {
+                _uefiDownloadingInstallerIso = false;
+                UpdateProgress(45, "Mint ISO ready");
+            }
+            else if (normalized.Contains("creating") && normalized.Contains("libertixefi"))
+                UpdateProgress(52, "Creating UEFI installer partition...");
+            else if (normalized.Contains("downloading libertix uefi iso"))
+            {
+                _uefiDownloadingInstallerIso = true;
+                UpdateProgress(62, "Downloading Libertix UEFI ISO...");
+            }
+            else if (normalized.Contains("libertix-installer-uefi.iso"))
+            {
+                _uefiDownloadingInstallerIso = true;
+            }
+            else if (normalized.Contains("copying iso contents"))
+                UpdateProgress(78, "Copying UEFI installer...");
+            else if (normalized.Contains("configuring one-time uefi boot entry"))
+                UpdateProgress(90, "Configuring UEFI boot...");
+            else if (normalized.Contains("complete. next boot"))
+                UpdateProgress(100, "UEFI preparation complete");
+
+            var ariaProgress = Regex.Match(line, @"\((\d{1,3})%\)");
+            if (ariaProgress.Success && int.TryParse(ariaProgress.Groups[1].Value, out int percent))
+            {
+                int clamped = Math.Max(0, Math.Min(100, percent));
+                if (_uefiDownloadingInstallerIso)
+                {
+                    UpdateProgress(62 + (clamped * 10 / 100), $"Downloading Libertix UEFI ISO... {clamped}%");
+                }
+                else
+                {
+                    UpdateProgress(30 + (clamped * 15 / 100), $"Downloading Mint ISO... {clamped}%");
+                }
+            }
+        }
+
+        private void UpdateDecryptionProgress(string line)
+        {
+            var encryptedMatch = Regex.Match(line, @"(\d+(?:[.,]\d+)?)%\s+encrypted", RegexOptions.IgnoreCase);
+            if (!encryptedMatch.Success)
+            {
+                encryptedMatch = Regex.Match(line, @"DecryptionInProgress\s+(\d+(?:[.,]\d+)?)", RegexOptions.IgnoreCase);
+            }
+            if (!encryptedMatch.Success)
+            {
+                UpdateProgress(18, "Déchiffrement de Windows C: en cours...");
+                return;
+            }
+
+            if (!double.TryParse(encryptedMatch.Groups[1].Value.Replace(',', '.'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double encryptedPercent))
+            {
+                UpdateProgress(18, "Déchiffrement de Windows C: en cours...");
+                return;
+            }
+
+            int decryptedPercent = Math.Max(0, Math.Min(100, (int)Math.Round(100 - encryptedPercent)));
+            int overallProgress = 18 + (decryptedPercent * 10 / 100);
+            UpdateProgress(overallProgress, $"Déchiffrement de Windows C: {decryptedPercent}%");
+        }
+
+        private async Task<int> RunStreamingProcessAsync(
+            string fileName,
+            string arguments,
+            TimeSpan timeout,
+            Action<string> onLine)
+        {
+            return await Task.Run(() =>
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = fileName,
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
+                };
+
+                using (var process = new Process { StartInfo = psi, EnableRaisingEvents = true })
+                {
+                    process.OutputDataReceived += (_, e) => { if (e.Data != null) Dispatcher.Invoke(() => onLine(e.Data)); };
+                    process.ErrorDataReceived += (_, e) => { if (e.Data != null) Dispatcher.Invoke(() => onLine($"ERROR: {e.Data}")); };
+
+                    if (!process.Start())
+                        throw new InvalidOperationException($"Failed to start {fileName}");
+
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+
+                    if (!process.WaitForExit((int)timeout.TotalMilliseconds))
+                    {
+                        try { process.Kill(); } catch { }
+                        Dispatcher.Invoke(() => Log($"ERROR: process timed out after {timeout.TotalMinutes:N0} minutes"));
+                        return -1;
+                    }
+
+                    process.WaitForExit();
+                    return process.ExitCode;
+                }
+            });
         }
 
         private async Task ExecutePartitioningAsync()
@@ -632,6 +847,22 @@ namespace Libertix.Pages
             {
                 try
                 {
+                    bool aria2Downloaded = await TryDownloadWithBundledAria2Async(
+                        url,
+                        destinationPath,
+                        timeout,
+                        progressStart,
+                        progressSpan,
+                        label,
+                        progressMessage,
+                        attempt,
+                        attempts);
+                    if (aria2Downloaded)
+                    {
+                        Dispatcher.Invoke(() => Log($"{label} download completed with aria2"));
+                        return true;
+                    }
+
                     await DownloadFileOnceAsync(
                         url,
                         destinationPath,
@@ -657,6 +888,121 @@ namespace Libertix.Pages
             }
 
             return false;
+        }
+
+        private async Task<bool> TryDownloadWithBundledAria2Async(
+            string url,
+            string destinationPath,
+            TimeSpan timeout,
+            int progressStart,
+            int progressSpan,
+            string label,
+            string progressMessage,
+            int attempt,
+            int attempts)
+        {
+            string aria2Path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "aria2", "aria2c.exe");
+            if (!File.Exists(aria2Path))
+            {
+                Dispatcher.Invoke(() => Log($"{label}: bundled aria2 not found, using HTTP downloader"));
+                return false;
+            }
+
+            string destinationDir = Path.GetDirectoryName(destinationPath);
+            if (string.IsNullOrWhiteSpace(destinationDir))
+                destinationDir = Path.GetTempPath();
+
+            string fileName = Path.GetFileName(destinationPath);
+            string downloadDir = destinationDir;
+            string aria2OutputPath = destinationPath;
+
+            // aria2 is less predictable when writing directly to a drive root
+            // on Windows. Use a temp folder, then move the completed file.
+            string root = Path.GetPathRoot(destinationDir);
+            if (!string.IsNullOrEmpty(root) &&
+                string.Equals(destinationDir.TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            {
+                downloadDir = Path.Combine(Path.GetTempPath(), "LibertixDownloads", Guid.NewGuid().ToString("N"));
+                aria2OutputPath = Path.Combine(downloadDir, fileName);
+            }
+
+            Directory.CreateDirectory(downloadDir);
+            Directory.CreateDirectory(destinationDir);
+
+            var args = new[]
+            {
+                "--allow-overwrite=true",
+                "--auto-file-renaming=false",
+                "--continue=true",
+                $"--max-connection-per-server={Aria2MaxConnections}",
+                $"--split={Aria2MaxConnections}",
+                "--min-split-size=1M",
+                "--summary-interval=2",
+                "--console-log-level=warn",
+                "--check-certificate=false",
+                $"--dir={downloadDir}",
+                $"--out={fileName}",
+                url
+            };
+
+            Dispatcher.Invoke(() =>
+            {
+                Log($"{label}: downloading with bundled aria2 ({Aria2MaxConnections} connections, attempt {attempt}/{attempts})");
+                UpdateProgress(progressStart, progressMessage);
+            });
+
+            int exitCode = await RunStreamingProcessAsync(
+                aria2Path,
+                string.Join(" ", Array.ConvertAll(args, QuoteArgument)),
+                timeout,
+                line => HandleAria2DownloadOutput(line, label, progressMessage, progressStart, progressSpan));
+
+            if (exitCode != 0)
+            {
+                Dispatcher.Invoke(() => Log($"{label}: aria2 failed with rc={exitCode}, using HTTP fallback"));
+                try { if (File.Exists(aria2OutputPath)) File.Delete(aria2OutputPath); } catch { }
+                return false;
+            }
+
+            if (!File.Exists(aria2OutputPath) || new FileInfo(aria2OutputPath).Length == 0)
+            {
+                Dispatcher.Invoke(() => Log($"{label}: aria2 output missing or empty, using HTTP fallback"));
+                return false;
+            }
+
+            if (!string.Equals(aria2OutputPath, destinationPath, StringComparison.OrdinalIgnoreCase))
+            {
+                if (File.Exists(destinationPath))
+                    File.Delete(destinationPath);
+                File.Move(aria2OutputPath, destinationPath);
+                try { Directory.Delete(downloadDir, true); } catch { }
+            }
+
+            return true;
+        }
+
+        private void HandleAria2DownloadOutput(
+            string line,
+            string label,
+            string progressMessage,
+            int progressStart,
+            int progressSpan)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                return;
+
+            Log($"aria2 {label}: {line}");
+
+            var match = Regex.Match(line, @"\((\d{1,3})%\)");
+            if (!match.Success)
+                match = Regex.Match(line, @"\b(\d{1,3})%");
+
+            if (!match.Success || !int.TryParse(match.Groups[1].Value, out int percent))
+                return;
+
+            int clamped = Math.Max(0, Math.Min(100, percent));
+            int overallProgress = progressStart + (clamped * progressSpan / 100);
+            UpdateProgress(overallProgress, $"{progressMessage} {clamped}%");
         }
 
         private async Task DownloadFileOnceAsync(
@@ -922,6 +1268,39 @@ try {{
                 var principal = new WindowsPrincipal(identity);
                 return principal.IsInRole(WindowsBuiltInRole.Administrator);
             }
+        }
+
+        private static bool IsUefiFirmware()
+        {
+            if (GetFirmwareType(out var firmwareType))
+                return firmwareType == FirmwareType.Uefi;
+
+            // Conservative fallback for older Windows builds where GetFirmwareType
+            // could fail: BIOS remains the existing, already validated path.
+            return false;
+        }
+
+        private static string ResolveSystemExecutable(string relativeSystemPath, string fallback)
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            string sysnative = Path.Combine(windows, "Sysnative", relativeSystemPath);
+            if (File.Exists(sysnative))
+                return sysnative;
+
+            string system32 = Path.Combine(windows, "System32", relativeSystemPath);
+            if (File.Exists(system32))
+                return system32;
+
+            string system = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), fallback);
+            return File.Exists(system) ? system : fallback;
+        }
+
+        private static string QuoteArgument(string value)
+        {
+            if (value == null)
+                return "\"\"";
+
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
         }
 
         private static string ShellQuoteValue(string value)

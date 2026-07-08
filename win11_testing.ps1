@@ -7,6 +7,9 @@ param(
     [switch]$SkipInstaller = $false,
     [int]$InstallerPartitionSizeGB = 20,
     [string]$FilepoolBaseUrl = "http://192.168.1.170:8000/filepool",
+    [string]$Aria2ExePath = "",
+    [ValidateRange(1, 5)]
+    [int]$Aria2Connections = 5,
     [switch]$InsecureTls = $true
 )
 
@@ -984,6 +987,14 @@ function Start-BitsDownload {
 }
 
 function Get-Aria2Exe {
+    if (-not [string]::IsNullOrWhiteSpace($Aria2ExePath)) {
+        $resolved = [IO.Path]::GetFullPath($Aria2ExePath)
+        if (-not (Test-Path -LiteralPath $resolved)) {
+            throw "Provided aria2 executable was not found: $resolved"
+        }
+        return $resolved
+    }
+
     $existing =
         if (Test-Path -LiteralPath $Aria2CacheDir) {
             Get-ChildItem -LiteralPath $Aria2CacheDir -Filter "aria2c.exe" `
@@ -1056,8 +1067,8 @@ function Start-Aria2Download {
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
         "--continue=true",
-        "--max-connection-per-server=10",
-        "--split=10",
+        "--max-connection-per-server=$Aria2Connections",
+        "--split=$Aria2Connections",
         "--min-split-size=1M",
         "--summary-interval=5",
         "--console-log-level=warn",
