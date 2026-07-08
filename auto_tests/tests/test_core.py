@@ -1,15 +1,17 @@
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+import app.services.automation as automation_module
+import app.services.validation as validation_module
 from app.clients.vnc import VNCClient
 from app.config import Settings
 from app.models import ValidationRequest
-from app.services.common import ResultBuilder
-import app.services.automation as automation_module
 from app.services.automation import AutomationOptions, AutomationService
-from app.services.reset import RESET_SNAPSHOT, RESET_VM_IDS
+from app.services.common import ResultBuilder
+from app.services.reset import RESET_SNAPSHOT, RESET_VM_IDS, ResetService
 from app.services.validation import ValidationService
 
 
@@ -84,6 +86,29 @@ def test_reset_scope_is_exact() -> None:
     assert RESET_SNAPSHOT == "clean2"
 
 
+def test_reset_selector_uses_configured_vm_names() -> None:
+    service = ResetService(settings())
+
+    assert service._selected_vmids(["vm3", "win11-uefi", "502"]) == (502,)  # noqa: SLF001
+
+
+def test_local_source_copy_excludes_env_files(tmp_path: Path) -> None:
+    root = tmp_path
+    allowed = root / "auto_tests" / ".env.example"
+    blocked_env = root / "auto_tests" / ".env"
+    blocked_named_env = root / "auto_tests" / ".env.local"
+    blocked_filepool = root / "auto_tests" / "app" / "filepool" / "mint.iso"
+
+    for path in (allowed, blocked_env, blocked_named_env, blocked_filepool):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+
+    assert ValidationService._include_local_source_path(root, allowed) is True  # noqa: SLF001
+    assert ValidationService._include_local_source_path(root, blocked_env) is False  # noqa: SLF001
+    assert ValidationService._include_local_source_path(root, blocked_named_env) is False  # noqa: SLF001
+    assert ValidationService._include_local_source_path(root, blocked_filepool) is False  # noqa: SLF001
+
+
 def test_vnc_display_is_converted_to_tcp_port() -> None:
     assert VNCClient._vncdotool_address("192.168.1.166:10") == "192.168.1.166::5910"
 
@@ -109,6 +134,43 @@ def test_validation_vm_selector_rejects_unknown() -> None:
 
     with pytest.raises(Exception, match="Sélecteur VM inconnu"):
         service._select_vms(["not-a-vm"])  # noqa: SLF001
+
+
+def test_launch_interactive_accepts_zero_window_handle(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSshContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class FakeVnc:
+        def launch_desktop_shortcut(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    service = ValidationService(settings())
+    service.vnc = FakeVnc()  # type: ignore[assignment]
+
+    def fake_run_windows_script(*_args: object, step: str, **_kwargs: object) -> object:
+        if step == "vm.prepare_launch":
+            return SimpleNamespace(stdout="SESSION_ID=2\n")
+        return SimpleNamespace(stdout="PID=1234\nSESSION_ID=2\nWINDOW_HANDLE=0\n")
+
+    monkeypatch.setattr(service, "_ssh", lambda *_args, **_kwargs: FakeSshContext())
+    monkeypatch.setattr(service, "_run_windows_script", fake_run_windows_script)
+    monkeypatch.setattr(validation_module.time, "sleep", lambda _seconds: None)
+
+    vm = service._select_vms(["vm1"])[0]  # noqa: SLF001
+    result = ResultBuilder("validation")
+    launch = service._launch_interactive(  # noqa: SLF001
+        vm,
+        PureWindowsPath("Z:/Libertix-release/Libertix.exe"),
+        result,
+    )
+
+    assert launch["pid"] == 1234
+    assert launch["session_id"] == 2
+    assert launch["window_handle"] == 0
 
 
 def test_automation_scope_accepts_only_vm500() -> None:

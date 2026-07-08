@@ -53,16 +53,6 @@ namespace Libertix.Pages
             {
                 try
                 {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = "diskpart.exe",
-                        Arguments = $"/s \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
                     var result = RunProcess("diskpart.exe", $"/s \"{scriptPath}\"", waitMs: 120000);
                     if (result.exitCode != 0)
                         return $"Error: diskpart failed rc={result.exitCode}\n{result.output}\n{result.error}";

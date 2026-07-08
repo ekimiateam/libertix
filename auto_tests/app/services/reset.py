@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import shlex
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from app.clients.proxmox import ProxmoxClient
 from app.clients.ssh import SSHClient
@@ -15,19 +15,36 @@ logger = logging.getLogger(__name__)
 
 RESET_VM_IDS = (500, 501, 502)
 RESET_SNAPSHOT = "clean2"
+CONFIGURED_VM_IDS = (500, 501, 502)
 
 
 class ResetService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def run(self, on_step: Callable[[StepResult], None] | None = None) -> OperationResult:
+    def run(
+        self,
+        selectors: Sequence[str] | None = None,
+        on_step: Callable[[StepResult], None] | None = None,
+    ) -> OperationResult:
         result = ResultBuilder("reset", on_step=on_step)
         try:
-            locations = self._preflight_proxmox(result)
-            self._empty_smb(result)
-            self._restore_snapshots(locations, result)
-            return result.success("Reset terminé pour /root/smb et les VM 500, 501, 502")
+            vmids = self._selected_vmids(selectors)
+            locations = self._preflight_proxmox(result, vmids)
+            if selectors is None:
+                self._empty_smb(result)
+            else:
+                result.ok(
+                    "reset.scope",
+                    "Reset sélectif demandé: /root/smb est conservé",
+                    targets=[str(vmid) for vmid in vmids],
+                )
+            self._restore_snapshots(locations, vmids, result)
+            if selectors is None:
+                return result.success("Reset terminé pour /root/smb et les VM 500, 501, 502")
+            return result.success(
+                "Reset terminé pour " + ", ".join(str(vmid) for vmid in vmids)
+            )
         except WorkflowError as exc:
             return result.failure(exc)
         except Exception as exc:
@@ -49,10 +66,47 @@ class ResetService:
             task_timeout=s.proxmox_task_timeout_seconds,
         )
 
-    def _preflight_proxmox(self, result: ResultBuilder) -> dict[int, str]:
+    def _selected_vmids(self, selectors: Sequence[str] | None) -> tuple[int, ...]:
+        if selectors is None:
+            return RESET_VM_IDS
+        if not selectors:
+            raise WorkflowError("reset.selector", "Aucune VM demandée")
+
+        aliases: dict[str, int] = {
+            "500": 500,
+            "vm500": 500,
+            "win10-bios": 500,
+            "windows10-bios": 500,
+            "501": 501,
+            "vm501": 501,
+            "win10-uefi": 501,
+            "windows10-uefi": 501,
+            "502": 502,
+            "vm502": 502,
+            "win11": 502,
+            "win11-uefi": 502,
+            "windows11-uefi": 502,
+        }
+        for vm, vmid in zip(self.settings.vms, CONFIGURED_VM_IDS, strict=True):
+            aliases[vm.name.strip().lower()] = vmid
+        selected: list[int] = []
+        for selector in selectors:
+            key = selector.strip().lower()
+            vmid = aliases.get(key)
+            if vmid is None:
+                raise WorkflowError(
+                    "reset.selector",
+                    "VM inconnue pour le reset",
+                    details={"selector": selector},
+                )
+            if vmid not in selected:
+                selected.append(vmid)
+        return tuple(selected)
+
+    def _preflight_proxmox(self, result: ResultBuilder, vmids: Sequence[int]) -> dict[int, str]:
         locations: dict[int, str] = {}
         with self._proxmox() as proxmox:
-            for vmid in RESET_VM_IDS:
+            for vmid in vmids:
                 node = proxmox.locate_vm(vmid)
                 proxmox.assert_snapshot(node, vmid, RESET_SNAPSHOT)
                 locations[vmid] = node
@@ -63,7 +117,7 @@ class ResetService:
                     node=node,
                     snapshot=RESET_SNAPSHOT,
                 )
-        if set(locations) != set(RESET_VM_IDS):
+        if set(locations) != set(vmids):
             raise WorkflowError("proxmox.guard", "La garde de périmètre du reset a échoué")
         return locations
 
@@ -100,9 +154,11 @@ class ResetService:
             target=s.main_ssh_host,
         )
 
-    def _restore_snapshots(self, locations: dict[int, str], result: ResultBuilder) -> None:
+    def _restore_snapshots(
+        self, locations: dict[int, str], vmids: Sequence[int], result: ResultBuilder
+    ) -> None:
         with self._proxmox() as proxmox:
-            for vmid in RESET_VM_IDS:
+            for vmid in vmids:
                 if vmid not in locations:
                     raise WorkflowError(
                         "proxmox.guard",

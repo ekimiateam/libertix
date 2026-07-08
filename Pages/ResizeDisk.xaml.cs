@@ -360,13 +360,6 @@ namespace Libertix.Pages
                 TimeSpan.FromSeconds(0.3));
         }
 
-        // In ChooseDistro when a different distro is selected
-        private void OnDistroSelected(DistroInfo distro)
-        {
-            StateManager.ClearDependentStates(STATE_KEY);
-            // ... rest of selection code
-        }
-
         private void FallbackPanel_Loaded(object sender, RoutedEventArgs e)
         {
 

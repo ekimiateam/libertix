@@ -155,7 +155,9 @@ def test_install_progress_fallback_accepts_final_reboot_screen() -> None:
     assert verdict["error_visible"] is False
 
 
-def test_install_progress_accepts_llm_json_without_visible_text(monkeypatch, tmp_path: Path) -> None:
+def test_install_progress_accepts_llm_json_without_visible_text(
+    monkeypatch, tmp_path: Path
+) -> None:
     image = tmp_path / "screen.png"
     Image.new("RGB", (32, 32), "white").save(image)
     content = json.dumps(
@@ -177,9 +179,9 @@ def test_install_progress_accepts_llm_json_without_visible_text(monkeypatch, tmp
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    verdict = VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze_install_progress(
-        image, "vm1", "Windows"
-    )
+    verdict = VisionLLMClient(
+        "key", "https://example.test/v1", "model", 1
+    ).analyze_install_progress(image, "vm1", "Windows")
 
     assert verdict.still_in_progress is True
     assert verdict.visible_text

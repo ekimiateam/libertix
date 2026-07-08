@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import tarfile
 import tempfile
-import shlex
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -212,7 +212,9 @@ class ValidationService:
         accepted = tuple(f"{prefix}=" for prefix in prefixes)
         return dict(line.split("=", 1) for line in stdout.splitlines() if line.startswith(accepted))
 
-    def _prepare_server(self, result: ResultBuilder, *, source: SourceMode = "remote") -> PurePosixPath:
+    def _prepare_server(
+        self, result: ResultBuilder, *, source: SourceMode = "remote"
+    ) -> PurePosixPath:
         s = self.settings
         password = s.main_ssh_password.get_secret_value()
         source_path = f"{s.smb_root}/{s.source_dir_name}"
@@ -239,7 +241,8 @@ class ValidationService:
                 ssh.run(
                     "set -eu; "
                     'command -v git >/dev/null 2>&1 || { '
-                    'echo "git is required on the Samba host; install it explicitly before remote-source builds" >&2; '
+                    'echo "git is required on the Samba host; '
+                    'install it explicitly before remote-source builds" >&2; '
                     "exit 127; }",
                     step="server.ensure_tools",
                     timeout=s.command_timeout_seconds,
@@ -256,8 +259,10 @@ class ValidationService:
                     f"if [ -d {shlex.quote(source_path + '/.git')} ]; then "
                     f"git -C {shlex.quote(source_path)} remote get-url origin | "
                     f"grep -Fx {shlex.quote(s.repository_url)}; "
-                    f"git -C {shlex.quote(source_path)} fetch origin {shlex.quote(s.repository_branch)}; "
-                    f"git -C {shlex.quote(source_path)} checkout -B {shlex.quote(s.repository_branch)} "
+                    f"git -C {shlex.quote(source_path)} fetch origin "
+                    f"{shlex.quote(s.repository_branch)}; "
+                    f"git -C {shlex.quote(source_path)} checkout -B "
+                    f"{shlex.quote(s.repository_branch)} "
                     f"origin/{shlex.quote(s.repository_branch)}; "
                     f"elif [ -e {shlex.quote(source_path)} ]; then exit 21; "
                     f"else git clone --branch {shlex.quote(s.repository_branch)} -- "
@@ -290,7 +295,9 @@ class ValidationService:
                 details={"path": str(root)},
             )
 
-        with tempfile.NamedTemporaryFile(prefix="libertix-source-", suffix=".tar.gz", delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(
+            prefix="libertix-source-", suffix=".tar.gz", delete=False
+        ) as tmp:
             archive = Path(tmp.name)
         try:
             with tarfile.open(archive, "w:gz") as tar:
@@ -307,7 +314,8 @@ class ValidationService:
                 "set -eu; "
                 f"dest={shlex.quote(source_path)}; archive={shlex.quote(remote_archive)}; "
                 f"root={shlex.quote(s.smb_root)}; "
-                'case "$dest" in "$root"/*) ;; *) echo "Destination refusee: $dest" >&2; exit 22;; esac; '
+                'case "$dest" in "$root"/*) ;; *) '
+                'echo "Destination refusee: $dest" >&2; exit 22;; esac; '
                 'rm -rf "$dest"; mkdir -p "$dest"; '
                 'tar -xzf "$archive" -C "$dest"; rm -f "$archive"; '
                 'test -f "$dest/Libertix.sln"; test -f "$dest/Libertix.csproj"'
@@ -356,6 +364,8 @@ class ValidationService:
             return False
         if path.is_dir():
             return True
+        if path.name != ".env.example" and (path.name == ".env" or path.name.startswith(".env.")):
+            return False
         excluded_suffixes = {
             ".cache",
             ".dll",
@@ -369,9 +379,7 @@ class ValidationService:
         }
         if path.suffix.lower() in excluded_suffixes:
             return False
-        if path.name in {"uv.lock"}:
-            return False
-        return True
+        return path.name not in {"uv.lock"}
 
     def _compile_release_on_build_vm(self, result: ResultBuilder) -> PurePosixPath:
         s = self.settings
@@ -596,17 +604,24 @@ class ValidationService:
         values = self._parse_powershell_results(
             response.stdout, prefixes=("PID", "SESSION_ID", "WINDOW_HANDLE")
         )
-        required = ("PID", "SESSION_ID", "WINDOW_HANDLE")
+        required = ("PID", "SESSION_ID")
         if not all(values.get(key, "").isdigit() for key in required):
             raise WorkflowError(
                 "vm.launch",
                 "PID ou session interactive Libertix non confirmé",
                 details={"vm": vm.name, "host": vm.host},
             )
+        window_handle = values.get("WINDOW_HANDLE", "0")
+        if window_handle and not window_handle.isdigit():
+            raise WorkflowError(
+                "vm.launch",
+                "Handle de fenêtre Libertix invalide",
+                details={"vm": vm.name, "host": vm.host, "window_handle": window_handle},
+            )
         return {
             "pid": int(values["PID"]),
             "session_id": int(values["SESSION_ID"]),
-            "window_handle": int(values["WINDOW_HANDLE"]),
+            "window_handle": int(window_handle or "0"),
             "launch_method": "desktop_shortcut_vnc",
             "visual_confirmation": "capture_vnc_et_llm",
         }

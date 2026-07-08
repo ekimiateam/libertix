@@ -43,6 +43,7 @@ artifacts/
 
 # Local ISO/build artifacts
 *.iso
+*.iso.bak-*
 
 # auto_tests runtime artifacts
 auto_tests/.env
@@ -55,3 +56,7 @@ auto_tests/captures/
 auto_tests/*.log
 auto_tests/**/*.pyc
 auto_tests/app/filepool/*.iso
+auto_tests/app/filepool/*.iso.bak-*
+auto_tests/app/filepool/*.zip
+auto_tests/logs/
+auto_tests/tools/__pycache__/

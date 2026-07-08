@@ -123,7 +123,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     monitor_iso=request.monitor_iso,
                     source=request.source,
                 )
-            return await asyncio.to_thread(ResetService(configured).run)
+            return await asyncio.to_thread(ResetService(configured).run, selectors)
         finally:
             operation_lock.release()
 
@@ -165,7 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             on_step=on_step,
                         )
                     else:
-                        result = ResetService(configured).run(on_step=on_step)
+                        result = ResetService(configured).run(selectors, on_step=on_step)
                     events.put({"event": "result", "data": result.model_dump(mode="json")})
                 except Exception as exc:
                     logger.exception("Erreur interne inattendue dans le flux %s", operation)
@@ -274,12 +274,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
 
     @api.post("/api/v1/reset", response_model=OperationResult, dependencies=[Depends(authorize)])
-    async def reset() -> OperationResult:
-        return await execute("reset")
+    async def reset(vm: Annotated[list[str] | None, Query()] = None) -> OperationResult:
+        return await execute("reset", vm)
 
     @api.post("/api/v1/reset/stream", dependencies=[Depends(authorize)])
-    async def reset_stream() -> StreamingResponse:
-        return StreamingResponse(stream_operation("reset"), media_type="application/x-ndjson")
+    async def reset_stream(vm: Annotated[list[str] | None, Query()] = None) -> StreamingResponse:
+        return StreamingResponse(stream_operation("reset", vm), media_type="application/x-ndjson")
 
     return api
 

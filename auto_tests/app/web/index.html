@@ -248,11 +248,19 @@
           </div>
           <div>
             <a href="/filepool/libertix-installer-bios.iso" target="_blank" rel="noreferrer">libertix-installer-bios.iso</a>
-            <span class="pill">ISO boot</span>
+            <span class="pill">BIOS</span>
+          </div>
+          <div>
+            <a href="/filepool/libertix-installer-uefi.iso" target="_blank" rel="noreferrer">libertix-installer-uefi.iso</a>
+            <span class="pill">UEFI</span>
           </div>
           <div>
             <a href="/filepool/mint.iso" target="_blank" rel="noreferrer">mint.iso</a>
             <span class="pill">ISO Mint</span>
+          </div>
+          <div>
+            <a href="/filepool/aria2-1.37.0-win-64bit-build1.zip" target="_blank" rel="noreferrer">aria2-1.37.0-win-64bit-build1.zip</a>
+            <span class="pill">Téléchargement</span>
           </div>
         </section>
       </aside>
@@ -460,7 +468,13 @@
         clearResults();
         setBusy(true);
         setStatus("Vérification du filepool...", false);
-        const files = ["distros.json", "libertix-installer-bios.iso", "mint.iso"];
+        const files = [
+          "distros.json",
+          "libertix-installer-bios.iso",
+          "libertix-installer-uefi.iso",
+          "mint.iso",
+          "aria2-1.37.0-win-64bit-build1.zip",
+        ];
         const result = { operation: "filepool", status: "ok", files: [] };
         try {
           for (const file of files) {
@@ -519,11 +533,14 @@
       }
 
       function runReset(stream) {
+        const params = new URLSearchParams();
+        selectedVms().forEach((vm) => params.append("vm", vm));
+        const suffix = params.toString() ? `?${params.toString()}` : "";
         if (stream) {
-          runStream("/api/v1/reset/stream", {}, "reset stream");
+          runStream(`/api/v1/reset/stream${suffix}`, {}, "reset stream");
           return;
         }
-        runJson("/api/v1/reset", { method: "POST", headers: apiHeaders() }, "reset");
+        runJson(`/api/v1/reset${suffix}`, { method: "POST", headers: apiHeaders() }, "reset");
       }
 
       async function runJson(url, options, label) {

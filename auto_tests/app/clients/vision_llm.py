@@ -173,7 +173,11 @@ def _contains_active_install_progress(content: str) -> bool:
         return False
 
     text = content.lower()
-    if re.search(r"\b(downloading|copying|extracting|copie|téléchargement).{0,80}\b[0-9]{1,2}\s*%", text):
+    progress_pattern = (
+        r"\b(downloading|copying|extracting|copie|téléchargement).{0,80}"
+        r"\b[0-9]{1,2}\s*%"
+    )
+    if re.search(progress_pattern, text):
         return True
     if re.search(r"\b[0-9][0-9\s]*/[0-9][0-9\s]*\s*mb\b", text) and any(
         marker in text for marker in ("downloading", "télécharg", "linux iso", "mint.iso")
@@ -590,7 +594,10 @@ class VisionLLMClient:
         elif active_install_progress or active_iso_copy or still_in_progress:
             summary = "Fallback LLM: active installer progress detected from visible evidence."
         else:
-            summary = "Fallback LLM: no strict JSON returned; final state is not confidently detected."
+            summary = (
+                "Fallback LLM: no strict JSON returned; "
+                "final state is not confidently detected."
+            )
 
         return {
             "iso_download_finished": bool(iso_finished),
