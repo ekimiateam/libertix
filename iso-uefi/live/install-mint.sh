@@ -60,6 +60,34 @@ trap on_err ERR
 
 safe_run() { "$@" || echo "WARNING: $* failed"; }
 
+candidate_disks() {
+    local disk
+
+    lsblk -dnpo NAME,TYPE 2>/dev/null \
+        | awk '$2=="disk"{print $1}' \
+        | while read -r disk; do
+            case "$(basename "$disk")" in
+                loop*|ram*|sr*) continue ;;
+            esac
+            echo "$disk"
+        done
+
+    for disk in /sys/block/*; do
+        [ -e "$disk" ] || continue
+        disk="/dev/$(basename "$disk")"
+        case "$(basename "$disk")" in
+            loop*|ram*|sr*) continue ;;
+        esac
+        [ -b "$disk" ] || continue
+        echo "$disk"
+    done | awk '!seen[$0]++' || true
+}
+
+partitions_of_disk() {
+    local disk="$1"
+    lsblk -lnpo NAME,TYPE "$disk" 2>/dev/null | awk '$2=="part"{print $1}'
+}
+
 partition_path() {
     local disk="$1"
     local num="$2"
@@ -99,10 +127,10 @@ find_biggest_windows_partition() {
     local disk="$1"
     local best=""
     local best_size=0
-    local pn pdev pfs psize
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
+    local pdev pfs psize
+
+    while read -r pdev; do
+        [ -n "$pdev" ] || continue
         pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
         [ "$pfs" = "ntfs" ] || continue
         psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
@@ -110,34 +138,59 @@ find_biggest_windows_partition() {
             best="$pdev"
             best_size="$psize"
         fi
-    done
+    done < <(partitions_of_disk "$disk")
+
+    echo "$best"
+}
+
+find_biggest_bitlocker_partition() {
+    local disk="$1"
+    local best=""
+    local best_size=0
+    local pdev pfs psize
+
+    while read -r pdev; do
+        [ -n "$pdev" ] || continue
+        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
+        echo "$pfs" | grep -qi "bitlocker" || continue
+        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
+        if [ "$psize" -gt 1000 ] && [ "$psize" -gt "$best_size" ]; then
+            best="$pdev"
+            best_size="$psize"
+        fi
+    done < <(partitions_of_disk "$disk")
+
     echo "$best"
 }
 
 find_live_partition_on_disk() {
     local disk="$1"
-    local pn pdev label pfs psize legacy_label
+    local pdev label pfs psize legacy_label
     legacy_label="$(printf '%s%s' 'LINUX' 'GATE')"
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
+
+    while read -r pdev; do
+        [ -n "$pdev" ] || continue
         label=$(blkid -s LABEL -o value "$pdev" 2>/dev/null || echo "")
-        if [ "$label" = "LIBERTIX" ] || [ "$label" = "LIBERTIX_INSTALLER" ] || [ "$label" = "$legacy_label" ]; then
+        if [ "$label" = "LIBERTIX" ] \
+            || [ "$label" = "LIBERTIX_INSTALLER" ] \
+            || [ "$label" = "LIBERTIXEFI" ] \
+            || [ "$label" = "$legacy_label" ]; then
             echo "$pdev"
             return 0
         fi
-    done
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
+    done < <(partitions_of_disk "$disk")
+
+    while read -r pdev; do
+        [ -n "$pdev" ] || continue
         pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
         [ "$pfs" = "vfat" ] || [ "$pfs" = "fat32" ] || continue
         psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -ge 1500 ] && [ "$psize" -le 3072 ]; then
+        if [ "$psize" -ge 1500 ] && [ "$psize" -le 32768 ]; then
             echo "$pdev"
             return 0
         fi
-    done
+    done < <(partitions_of_disk "$disk")
+
     return 1
 }
 
@@ -215,7 +268,24 @@ debug_disk_state() {
 
 recovery_geometry() {
     local disk="$1"
-    parted -sm "$disk" unit s print 2>/dev/null | awk -F: '$1=="4"{print $1":"$2":"$3":"$5":"$6; exit}'
+    local part_table part ptype plabel num
+
+    part_table="$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print $6}')"
+    if [ "$part_table" = "msdos" ]; then
+        parted -sm "$disk" unit s print 2>/dev/null | awk -F: '$1=="4"{print $1":"$2":"$3":"$5":"$6; exit}'
+        return 0
+    fi
+
+    while read -r part; do
+        [ -n "$part" ] || continue
+        ptype="$(lsblk -dnro PARTTYPE "$part" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        plabel="$(lsblk -dnro PARTLABEL "$part" 2>/dev/null || true)"
+        if [ "$ptype" = "de94bba4-06d1-4d40-a16a-bfd50179d6ac" ] || echo "$plabel" | grep -qi "recovery"; then
+            num="$(partition_number "$part")"
+            parted -sm "$disk" unit s print 2>/dev/null | awk -F: -v n="$num" '$1==n{print $1":"$2":"$3":"$5":"$6; exit}'
+            return 0
+        fi
+    done < <(partitions_of_disk "$disk")
 }
 
 assert_recovery_unchanged_or_die() {
@@ -233,7 +303,7 @@ assert_recovery_unchanged_or_die() {
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
     local windows_verify="/mnt/libertix-windows-final-verify"
-    local fs uuid count
+    local fs uuid count part_table esp_part esp_verify
 
     mark "150-final-verify"
     echo "FINAL VERIFY: checking installed system before success"
@@ -244,8 +314,11 @@ final_verify_or_die() {
 
     assert_recovery_unchanged_or_die
 
+    part_table="$(parted -sm "$DISK" print 2>/dev/null | awk -F: 'NR==2{print $6}')"
     count="$(partition_count "$DISK")"
-    [ "$count" -le 4 ] || die "final verify: MBR partition count is $count"
+    if [ "$part_table" = "msdos" ]; then
+        [ "$count" -le 4 ] || die "final verify: MBR partition count is $count"
+    fi
 
     fs="$(blkid -s TYPE -o value "$NEW_PART" 2>/dev/null || true)"
     [ "$fs" = "ext4" ] || die "final verify: $NEW_PART is not ext4"
@@ -258,10 +331,28 @@ final_verify_or_die() {
     [ -f "$target_verify/etc/os-release" ] || die "final verify: target os-release missing"
     [ -f "$target_verify/etc/fstab" ] || die "final verify: target fstab missing"
     grep -q "$uuid" "$target_verify/etc/fstab" || die "final verify: root UUID missing from fstab"
+    if [ -d /sys/firmware/efi ]; then
+        esp_part="$(find_esp_partition || true)"
+        [ -n "$esp_part" ] && [ -b "$esp_part" ] || die "final verify: UEFI ESP missing"
+        esp_uuid="$(blkid -s UUID -o value "$esp_part" 2>/dev/null || true)"
+        [ -n "$esp_uuid" ] || die "final verify: ESP UUID missing"
+        grep -q "$esp_uuid" "$target_verify/etc/fstab" || die "final verify: ESP UUID missing from fstab"
+        grep -q '/boot/efi' "$target_verify/etc/fstab" || die "final verify: /boot/efi missing from fstab"
+    fi
     [ -f "$target_verify/boot/grub/grub.cfg" ] || die "final verify: grub.cfg missing"
     grep -q "menuentry" "$target_verify/boot/grub/grub.cfg" || die "final verify: grub menu missing"
     [ -d "$target_verify/home/$USERNAME" ] || die "final verify: user home missing"
     umount "$target_verify"
+
+    esp_part="$(find_esp_partition || true)"
+    [ -n "$esp_part" ] && [ -b "$esp_part" ] || die "final verify: UEFI ESP missing"
+    esp_verify="/mnt/libertix-esp-final-verify"
+    mkdir -p "$esp_verify"
+    mount -t vfat -o ro "$esp_part" "$esp_verify"
+    [ -f "$esp_verify/EFI/Libertix/shimx64.efi" ] || die "final verify: Libertix shim missing"
+    [ -f "$esp_verify/EFI/Libertix/grubx64.efi" ] || die "final verify: Libertix signed GRUB missing"
+    [ -f "$esp_verify/EFI/Libertix/grub.cfg" ] || die "final verify: Libertix EFI grub.cfg missing"
+    umount "$esp_verify"
 
     mkdir -p "$windows_verify"
     mount -t ntfs-3g -o ro "$WINDOWS_PART" "$windows_verify"
@@ -300,6 +391,7 @@ cleanup_live_mounts_best_effort() {
     umount /mnt/target/dev 2>/dev/null || true
     umount /mnt/target/proc 2>/dev/null || true
     umount /mnt/target/sys 2>/dev/null || true
+    umount /mnt/target/boot/efi 2>/dev/null || true
     for mp in /mnt/target/mnt/win_*; do
         [ -d "$mp" ] && umount "$mp" 2>/dev/null || true
     done
@@ -307,6 +399,7 @@ cleanup_live_mounts_best_effort() {
     umount /mnt/windows 2>/dev/null || true
     umount /mnt/libertix-final-verify 2>/dev/null || true
     umount /mnt/libertix-windows-final-verify 2>/dev/null || true
+    umount /mnt/libertix-esp-final-verify 2>/dev/null || true
 }
 
 # Rollback is intentionally conservative. It only deletes partition 3 on the
@@ -322,7 +415,8 @@ rollback_windows_layout_best_effort() {
     echo "=== ROLLBACK: best-effort Windows layout restore ==="
 
     if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
-        for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
+        while read -r candidate; do
+            [ -n "$candidate" ] || continue
             [ -b "$candidate" ] || continue
             if [ -n "$(find_biggest_windows_partition "$candidate")" ]; then
                 DISK="$candidate"
@@ -330,7 +424,7 @@ rollback_windows_layout_best_effort() {
                 echo "ROLLBACK: detected target disk as $DISK"
                 break
             fi
-        done
+        done < <(candidate_disks)
     fi
     if [ -z "$WINDOWS_PART" ] && [ -n "$DISK" ] && [ -b "$DISK" ]; then
         WINDOWS_PART="$(find_biggest_windows_partition "$DISK")"
@@ -607,9 +701,10 @@ wait_for_prereqs() {
         local config_ready=0
         local candidate found_config
 
-        for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
+        while read -r candidate; do
+            [ -n "$candidate" ] || continue
             [ -b "$candidate" ] && { disk_ready=1; break; }
-        done
+        done < <(candidate_disks)
 
         for candidate in \
             /run/live/medium/config.txt \
@@ -659,13 +754,13 @@ mount_ntfs_rw_or_die() {
 
 find_ntfs_partition_with_file() {
     local relative_path="$1"
-    local candidate pn pdev pfs tmp
+    local candidate pdev pfs tmp
 
-    for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
+    while read -r candidate; do
+        [ -n "$candidate" ] || continue
         [ -b "$candidate" ] || continue
-        for pn in 1 2 3 4 5; do
-            pdev=$(partition_path "$candidate" "$pn")
-            [ -b "$pdev" ] || continue
+        while read -r pdev; do
+            [ -n "$pdev" ] || continue
             pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
             [ "$pfs" = "ntfs" ] || continue
 
@@ -680,21 +775,219 @@ find_ntfs_partition_with_file() {
                 umount "$tmp" 2>/dev/null || true
             fi
             rmdir "$tmp" 2>/dev/null || true
-        done
-    done
+        done < <(partitions_of_disk "$candidate")
+    done < <(candidate_disks)
     return 1
+}
+
+find_fat_partition_with_file() {
+    local relative_path="$1"
+    local candidate pdev pfs tmp
+
+    while read -r candidate; do
+        [ -n "$candidate" ] || continue
+        [ -b "$candidate" ] || continue
+        while read -r pdev; do
+            [ -n "$pdev" ] || continue
+            pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
+            case "$pfs" in
+                vfat|fat|msdos) ;;
+                *) continue ;;
+            esac
+
+            tmp=$(mktemp -d)
+            if mount -t vfat -o ro "$pdev" "$tmp" 2>/dev/null; then
+                if [ -f "$tmp/$relative_path" ]; then
+                    umount "$tmp"
+                    rmdir "$tmp"
+                    echo "$pdev"
+                    return 0
+                fi
+                umount "$tmp" 2>/dev/null || true
+            fi
+            rmdir "$tmp" 2>/dev/null || true
+        done < <(partitions_of_disk "$candidate")
+    done < <(candidate_disks)
+    return 1
+}
+
+find_esp_partition() {
+    find_fat_partition_with_file "EFI/Microsoft/Boot/bootmgfw.efi"
+}
+
+set_linux_partition_type_or_die() {
+    local linux_gpt_guid="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+    local parttype expected
+
+    [ -n "$NEW_PART_NUM" ] || die "Linux partition number missing"
+
+    mark "060-set-linux-partition-type"
+    if [ "$PART_TABLE" = "msdos" ]; then
+        echo "Setting MBR partition $NEW_PART_NUM type to Linux (0x83)"
+        run_logged sfdisk --part-type "$DISK" "$NEW_PART_NUM" 83 || \
+            die "failed to set Linux MBR type on $NEW_PART"
+    else
+        echo "Setting GPT partition $NEW_PART_NUM type to Linux filesystem"
+        run_logged sfdisk --part-type "$DISK" "$NEW_PART_NUM" "$linux_gpt_guid" || \
+            die "failed to set Linux GPT type on $NEW_PART"
+        run_logged sfdisk --part-label "$DISK" "$NEW_PART_NUM" "LinuxMint" || \
+            die "failed to set Linux GPT label on $NEW_PART"
+    fi
+
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    if [ "$PART_TABLE" != "msdos" ]; then
+        parttype="$(lsblk -dnro PARTTYPE "$NEW_PART" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+        expected="$(echo "$linux_gpt_guid" | tr '[:upper:]' '[:lower:]')"
+        [ "$parttype" = "$expected" ] || \
+            die "Linux GPT type verification failed on $NEW_PART: $parttype"
+    fi
+}
+
+verify_linux_partition_type_or_die() {
+    local linux_gpt_guid="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+    local parttype expected
+
+    [ "$PART_TABLE" != "msdos" ] || return 0
+
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    parttype="$(lsblk -dnro PARTTYPE "$NEW_PART" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
+    expected="$(echo "$linux_gpt_guid" | tr '[:upper:]' '[:lower:]')"
+    [ "$parttype" = "$expected" ] || \
+        die "Linux GPT type verification failed on $NEW_PART after bootloader install: $parttype"
+}
+
+write_target_fstab_or_die() {
+    local root_uuid esp_part esp_uuid
+
+    root_uuid="$(blkid -s UUID -o value "$NEW_PART" 2>/dev/null || true)"
+    [ -n "$root_uuid" ] || die "root UUID missing before fstab write"
+
+    echo "UUID=$root_uuid / ext4 defaults 0 1" > /mnt/target/etc/fstab
+
+    if [ -d /sys/firmware/efi ]; then
+        esp_part="$(find_esp_partition || true)"
+        [ -n "$esp_part" ] && [ -b "$esp_part" ] || die "UEFI ESP missing before fstab write"
+        esp_uuid="$(blkid -s UUID -o value "$esp_part" 2>/dev/null || true)"
+        [ -n "$esp_uuid" ] || die "ESP UUID missing before fstab write"
+        mkdir -p /mnt/target/boot/efi
+        echo "UUID=$esp_uuid /boot/efi vfat umask=0077 0 1" >> /mnt/target/etc/fstab
+    fi
+}
+
+copy_first_existing_file_or_die() {
+    local dest="$1"
+    shift
+    local candidate
+
+    for candidate in "$@"; do
+        if [ -f "$candidate" ]; then
+            install -m 0644 "$candidate" "$dest"
+            return 0
+        fi
+    done
+
+    die "missing signed EFI file for $dest"
+}
+
+set_libertix_bootentry_first_or_die() {
+    local bootnum current_order rest new_order tab
+
+    tab="$(printf '\t')"
+    bootnum="$(
+        efibootmgr 2>/dev/null | while IFS= read -r line; do
+            case "$line" in
+                Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]"* Libertix${tab}"*)
+                    printf '%s\n' "${line#Boot}" | cut -c1-4
+                    break
+                    ;;
+            esac
+        done
+    )"
+
+    if [ -z "$bootnum" ]; then
+        return 1
+    fi
+
+    current_order="$(efibootmgr 2>/dev/null | awk -F: '/^BootOrder:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
+    rest="$(printf '%s\n' "$current_order" | tr ',' '\n' | awk -v n="$bootnum" 'toupper($0) != toupper(n) && $0 != ""' | paste -sd, -)"
+    if [ -n "$rest" ]; then
+        new_order="$bootnum,$rest"
+    else
+        new_order="$bootnum"
+    fi
+
+    run_logged efibootmgr -o "$new_order"
+    return 0
+}
+
+install_signed_uefi_bootloader_or_die() {
+    local esp_part esp_num esp_mount efi_dir root_uuid loader_path
+
+    esp_part="$(find_esp_partition || true)"
+    [ -n "$esp_part" ] && [ -b "$esp_part" ] || die "UEFI ESP not found"
+
+    esp_num="$(partition_number "$esp_part")"
+    root_uuid="$(blkid -s UUID -o value "$NEW_PART" 2>/dev/null || true)"
+    [ -n "$root_uuid" ] || die "Linux root UUID missing before EFI install"
+
+    esp_mount="/mnt/target/boot/efi"
+    mkdir -p "$esp_mount"
+    mountpoint -q "$esp_mount" || run_logged mount -t vfat "$esp_part" "$esp_mount"
+
+    efi_dir="$esp_mount/EFI/Libertix"
+    mkdir -p "$efi_dir"
+
+    # Prefer the installed Mint/Ubuntu Secure Boot chain. The Debian live shim
+    # can boot the installer, but it does not trust Mint's installed kernel.
+    copy_first_existing_file_or_die "$efi_dir/shimx64.efi" \
+        /mnt/target/usr/lib/shim/shimx64.efi.dualsigned \
+        /mnt/target/usr/lib/shim/shimx64.efi.signed.latest \
+        /mnt/target/usr/lib/shim/shimx64.efi.signed \
+        /mnt/target/usr/lib/shim/shimx64.efi
+    copy_first_existing_file_or_die "$efi_dir/grubx64.efi" \
+        /mnt/target/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed \
+        /mnt/target/usr/lib/grub/x86_64-efi-signed/grubx64.efi
+    copy_first_existing_file_or_die "$efi_dir/mmx64.efi" \
+        /mnt/target/usr/lib/shim/mmx64.efi.signed.latest \
+        /mnt/target/usr/lib/shim/mmx64.efi.signed \
+        /mnt/target/usr/lib/shim/mmx64.efi
+
+    cat > "$efi_dir/grub.cfg" <<EOF
+search --no-floppy --fs-uuid --set=root $root_uuid
+set prefix=(\$root)/boot/grub
+configfile /boot/grub/grub.cfg
+EOF
+
+    # Debian/Ubuntu signed GRUB normally reads the config beside the loaded EFI
+    # binary, but mirroring it under EFI/debian helps if the compiled prefix is
+    # distribution-specific.
+    mkdir -p "$esp_mount/EFI/debian"
+    cp -f "$efi_dir/grub.cfg" "$esp_mount/EFI/debian/grub.cfg"
+
+    sync
+
+    loader_path='\EFI\Libertix\shimx64.efi'
+    if ! set_libertix_bootentry_first_or_die; then
+        run_logged efibootmgr -c -d "$DISK" -p "$esp_num" -L "Libertix" -l "$loader_path"
+        set_libertix_bootentry_first_or_die || die "failed to put Libertix first in UEFI BootOrder"
+    fi
+    umount "$esp_mount"
 }
 
 find_windows_os_partition_any() {
     local best=""
     local best_size=0
-    local candidate pn pdev pfs psize tmp
+    local candidate pdev pfs psize tmp
 
-    for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
+    while read -r candidate; do
+        [ -n "$candidate" ] || continue
         [ -b "$candidate" ] || continue
-        for pn in 1 2 3 4 5; do
-            pdev=$(partition_path "$candidate" "$pn")
-            [ -b "$pdev" ] || continue
+        while read -r pdev; do
+            [ -n "$pdev" ] || continue
             pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
             [ "$pfs" = "ntfs" ] || continue
             psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
@@ -709,8 +1002,8 @@ find_windows_os_partition_any() {
                 umount "$tmp" 2>/dev/null || true
             fi
             rmdir "$tmp" 2>/dev/null || true
-        done
-    done
+        done < <(partitions_of_disk "$candidate")
+    done < <(candidate_disks)
 
     echo "$best"
 }
@@ -723,35 +1016,58 @@ delete_live_bcd_entry_or_die() {
     python3 /usr/local/lib/libertix/cleanup-bcd.py "$bcd_file"
 }
 
+cleanup_temporary_uefi_bootentries() {
+    local bootnum
+
+    command -v efibootmgr >/dev/null 2>&1 || return 0
+
+    efibootmgr 2>/dev/null \
+        | awk '/^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][* ] Libertix UEFI Installer/ {
+            n=substr($1,5,4)
+            gsub(/\*/, "", n)
+            print n
+        }' \
+        | while read -r bootnum; do
+            [ -n "$bootnum" ] || continue
+            echo "Deleting temporary UEFI installer entry Boot$bootnum"
+            efibootmgr -b "$bootnum" -B || \
+                echo "WARNING: cannot delete temporary UEFI installer entry Boot$bootnum"
+        done
+
+    # BootNext is one-shot and should already be consumed, but clearing it here
+    # keeps a failed live boot from looping if the firmware preserved it.
+    efibootmgr -N >/dev/null 2>&1 || true
+}
+
 cleanup_windows_live_boot_artifacts() {
-    local bcd_part windows_part bcd_mnt windows_mnt
+    local bcd_part bcd_mnt
 
     mark "006-clean-windows-live-boot"
 
-    # First remove the one-shot Windows Boot Manager entry. If the installer
+    # First remove the one-shot firmware/Windows boot entry. If the installer
     # fails later, the next reboot must fall back to Windows instead of looping.
-    bcd_part=$(find_ntfs_partition_with_file "Boot/BCD" || true)
-    [ -n "$bcd_part" ] || die "Windows BCD store not found"
+    cleanup_temporary_uefi_bootentries
 
-    bcd_mnt="/mnt/libertix-bcd"
-    echo "Cleaning temporary BCD live boot entry from $bcd_part"
-    mount_ntfs_rw_or_die "$bcd_part" "$bcd_mnt"
-    [ -f "$bcd_mnt/Boot/BCD" ] || die "Windows BCD store disappeared after mount"
-    delete_live_bcd_entry_or_die "$bcd_mnt/Boot/BCD"
-    sync
-    umount "$bcd_mnt"
-
-    # Then remove the GRUB4DOS files that Windows used only to start this live
-    # installer. The final Linux bootloader is installed later by grub-install.
-    windows_part=$(find_windows_os_partition_any || true)
-    [ -n "$windows_part" ] || die "Windows OS partition not found"
-
-    windows_mnt="/mnt/libertix-windows-cleanup"
-    echo "Removing temporary GRUB4DOS files from $windows_part"
-    mount_ntfs_rw_or_die "$windows_part" "$windows_mnt"
-    rm -f "$windows_mnt/grldr" "$windows_mnt/grldr.mbr" "$windows_mnt/menu.lst"
-    sync
-    umount "$windows_mnt"
+    bcd_part=$(find_fat_partition_with_file "EFI/Microsoft/Boot/BCD" || true)
+    if [ -n "$bcd_part" ]; then
+        bcd_mnt="/mnt/libertix-bcd"
+        echo "Cleaning temporary UEFI BCD live boot entry from $bcd_part"
+        mkdir -p "$bcd_mnt"
+        if mount -t vfat -o rw,flush "$bcd_part" "$bcd_mnt"; then
+            if [ -f "$bcd_mnt/EFI/Microsoft/Boot/BCD" ]; then
+                delete_live_bcd_entry_or_die "$bcd_mnt/EFI/Microsoft/Boot/BCD" || \
+                    echo "WARNING: UEFI BCD cleanup failed; continuing because bootsequence is one-shot"
+                sync
+            else
+                echo "WARNING: Windows UEFI BCD store disappeared after mount; continuing"
+            fi
+            umount "$bcd_mnt" 2>/dev/null || true
+        else
+            echo "WARNING: cannot mount Windows ESP for BCD cleanup; continuing"
+        fi
+    else
+        echo "WARNING: Windows UEFI BCD store not found; continuing"
+    fi
 }
 
 echo "Libertix build: $(cat /etc/libertix-build-id 2>/dev/null || echo unknown)"
@@ -834,13 +1150,34 @@ for mp in /run/live/medium /lib/live/mount/medium /cdrom; do
 done
 
 if [ -z "$TARGET_DISK" ]; then
-    for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
+    while read -r candidate; do
+        [ -n "$candidate" ] || continue
         [ -b "$candidate" ] || continue
         if [ -n "$(find_biggest_windows_partition "$candidate")" ]; then
             TARGET_DISK="$candidate"
             break
         fi
-    done
+    done < <(candidate_disks)
+fi
+
+if [ -z "$TARGET_DISK" ]; then
+    while read -r candidate; do
+        [ -n "$candidate" ] || continue
+        [ -b "$candidate" ] || continue
+        LIVE_PART="$(find_live_partition_on_disk "$candidate" || true)"
+        if [ -n "$LIVE_PART" ]; then
+            TARGET_DISK="$candidate"
+            break
+        fi
+    done < <(candidate_disks)
+fi
+
+if [ -z "$TARGET_DISK" ]; then
+    echo "ERROR: no target disk found"
+    echo "--- candidate disks ---"
+    candidate_disks || true
+    echo "--- lsblk ---"
+    lsblk -e7 -o NAME,MAJ:MIN,PKNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS || true
 fi
 
 [ ! -b "$TARGET_DISK" ] && die "target disk not found: $TARGET_DISK"
@@ -864,7 +1201,15 @@ WINDOWS_PART=$(find_biggest_windows_partition "$DISK")
 WINDOWS_SIZE=0
 [ -n "$WINDOWS_PART" ] && WINDOWS_SIZE=$(($(blockdev --getsize64 "$WINDOWS_PART" 2>/dev/null || echo 0) / 1024 / 1024))
 
-[ -z "$WINDOWS_PART" ] && die "No Windows partition"
+if [ -z "$WINDOWS_PART" ]; then
+    BITLOCKER_PART="$(find_biggest_bitlocker_partition "$DISK" || true)"
+    if [ -n "$BITLOCKER_PART" ]; then
+        die "Windows partition is BitLocker-encrypted: $BITLOCKER_PART"
+    fi
+    echo "--- no NTFS Windows partition detected on $DISK ---"
+    lsblk -e7 -o NAME,MAJ:MIN,PKNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS "$DISK" || true
+    die "No Windows partition"
+fi
 echo "Windows: $WINDOWS_PART (${WINDOWS_SIZE}MB)"
 
 # Calculate how much more we need to shrink Windows
@@ -966,7 +1311,9 @@ if [ -n "$LIVE_PART" ] && [ "$(parent_disk_from_part "$LIVE_PART")" = "$DISK" ];
     assert_no_target_disk_mounts
     NEW_PART="$LIVE_PART"
     NEW_PART_NUM=$(partition_number "$NEW_PART")
-    [ "$NEW_PART_NUM" = "3" ] || die "expected to reuse partition 3, got $NEW_PART_NUM"
+    if [ "$PART_TABLE" = "msdos" ]; then
+        [ "$NEW_PART_NUM" = "3" ] || die "expected to reuse partition 3, got $NEW_PART_NUM"
+    fi
     mark "050-assert-live-detached"
     assert_not_mounted_or_open "$NEW_PART"
 elif [ "$PART_TABLE" = "msdos" ] && [ "$PART_COUNT" -ge 4 ]; then
@@ -1008,16 +1355,7 @@ if [ -z "$NEW_PART" ]; then
     NEW_PART_NUM=$(echo "$NEW_PART" | grep -oE '[0-9]+$')
 fi
 
-if [ "$PART_TABLE" = "msdos" ] && [ -n "$NEW_PART_NUM" ]; then
-    mark "060-set-mbr-type-83"
-    echo "Setting MBR partition $NEW_PART_NUM type to Linux (0x83)"
-    run_logged sfdisk --part-type "$DISK" "$NEW_PART_NUM" 83 || {
-        echo "ERROR: failed to set Linux MBR type on $NEW_PART"
-        debug_disk_state
-        die "failed to set Linux MBR type on $NEW_PART"
-    }
-    udevadm settle 2>/dev/null || true
-fi
+set_linux_partition_type_or_die
 
 mark "070-wipefs-live-part"
 run_logged wipefs -a "$NEW_PART" || true
@@ -1037,7 +1375,11 @@ mark "110-loop-mount-mint-iso"
 run_logged mount -o loop,ro "$ISO_SOURCE" /mnt/iso
 echo "Extracting system..."
 mark "120-unsquashfs"
-run_logged unsquashfs -f -d /mnt/target /mnt/iso/casper/filesystem.squashfs
+if command -v stdbuf >/dev/null 2>&1; then
+    run_logged stdbuf -oL -eL unsquashfs -f -d /mnt/target /mnt/iso/casper/filesystem.squashfs
+else
+    run_logged unsquashfs -f -d /mnt/target /mnt/iso/casper/filesystem.squashfs
+fi
 umount /mnt/iso
 
 # System config
@@ -1047,20 +1389,19 @@ mount -t sysfs none /mnt/target/sys
 mount --bind /dev /mnt/target/dev
 mount --bind /dev/pts /mnt/target/dev/pts
 
-UUID=$(blkid -s UUID -o value "$NEW_PART")
-echo "UUID=$UUID / ext4 defaults 0 1" > /mnt/target/etc/fstab
+write_target_fstab_or_die
 
-for pn in 1 2 3 4; do
-    pdev=$(partition_path "$DISK" "$pn")
-    [ -b "$pdev" ] || continue
+while read -r pdev; do
+    [ -n "$pdev" ] || continue
     [ "$pdev" = "$NEW_PART" ] && continue
     pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
     if [ "$pfs" = "ntfs" ]; then
+        pn="$(partition_number "$pdev")"
         mdir="/mnt/target/mnt/win_$pn"
         mkdir -p "$mdir"
         mount -t ntfs-3g -o ro "$pdev" "$mdir" 2>/dev/null || true
     fi
-done
+done < <(partitions_of_disk "$DISK")
 
 install -m 0755 /usr/local/lib/libertix/configure-target.sh \
     /mnt/target/tmp/libertix-configure-target.sh
@@ -1083,28 +1424,29 @@ chroot /mnt/target /usr/bin/env \
 rm -f /mnt/target/tmp/libertix-configure-target.sh
 
 mark "140-install-bootloader"
-echo "Backing up current MBR before GRUB install..."
-dd if="$DISK" of="$MBR_BACKUP" bs=512 count=1
+echo "Installing signed UEFI bootloader..."
 BOOTLOADER_WRITE_STARTED=true
-chroot /mnt/target grub-install --target=i386-pc --recheck "$DISK"
+install_signed_uefi_bootloader_or_die
 INSTALL_COMMITTED=true
 
 # Cleanup mounts
-for pn in 1 2 3 4; do
+for pn in $(seq 1 32); do
     mdir="/mnt/target/mnt/win_$pn"
     [ -d "$mdir" ] && umount "$mdir" 2>/dev/null || true
 done
 
-parted -s "$DISK" set "$NEW_PART_NUM" boot on 2>/dev/null || true
+# In GPT, the "boot" flag means EFI System Partition. Keep it away from the
+# Linux root partition; the real ESP is mounted at /boot/efi above.
+verify_linux_partition_type_or_die
 
 umount /mnt/target/dev/pts 2>/dev/null || true
 umount /mnt/target/dev 2>/dev/null || true
 umount /mnt/target/proc 2>/dev/null || true
 umount /mnt/target/sys 2>/dev/null || true
+umount /mnt/target/boot/efi 2>/dev/null || true
 umount /mnt/target 2>/dev/null || true
 
 umount /mnt/windows 2>/dev/null || true
-parted -s "$DISK" set "$NEW_PART_NUM" boot on 2>/dev/null || true
 assert_recovery_unchanged_or_die
 final_verify_or_die
 

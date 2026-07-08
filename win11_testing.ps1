@@ -4,8 +4,9 @@
 param(
     [switch]$Force = $false,
     [switch]$Revert = $false,
-    [switch]$SkipDebian = $false,
-    [int]$DebianPartitionSizeGB = 4,
+    [switch]$SkipInstaller = $false,
+    [int]$InstallerPartitionSizeGB = 20,
+    [string]$FilepoolBaseUrl = "http://192.168.1.170:8000/filepool",
     [switch]$InsecureTls = $true
 )
 
@@ -56,19 +57,21 @@ public class ServerCertificateValidationCallback {
 }
 
 # Downloads
-$BaseUrl = "https://tpm28.com/filepool"
-$RefindZipUrl = "$BaseUrl/refind-bin-0.14.2.zip"
-$PreLoaderUrl = "$BaseUrl/PreLoader.efi"
-$HashToolUrl = "$BaseUrl/HashTool.efi"
-
-$DebianIsoUrl =
-    "https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.3.0-amd64-netinst.iso"
-$DebianIsoName = "debian-13.3.0-amd64-netinst.iso"
+$InstallerIsoUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/libertix-installer-uefi.iso"
+$InstallerIsoName = "libertix-installer-uefi.iso"
+$InstallerIsoSha256 = "56920ded95e8bdda0210542e23a133f2040c2c6ac4b2112eb8c17c1abef4e9ad"
+$MintIsoUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/mint.iso"
+$MintIsoPath = "$env:SystemDrive\mint.iso"
+$Aria2ZipName = "aria2-1.37.0-win-64bit-build1.zip"
+$Aria2ZipUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/$Aria2ZipName"
+$Aria2CacheDir = "$env:SystemDrive\LibertixTools\aria2"
+$Aria2DownloadDir = "$env:SystemDrive\LibertixTools\downloads"
 
 # Defaults
 $EspLetter = "Y"
-$DebianLetter = "X"
-$DebianLabel = "DEBIAN"
+$InstallerLetter = "X"
+$InstallerLabel = "LIBERTIXEFI"
+$InstallerBootDescription = "Libertix UEFI Installer"
 
 function Write-Log {
     param(
@@ -89,13 +92,661 @@ function Test-Administrator {
     )
 }
 
+function Invoke-BcdeditCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $output = & bcdedit @Arguments 2>&1
+    $text = $output | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "bcdedit failed ($($Arguments -join ' ')): $text"
+    }
+
+    return $text
+}
+
+function Initialize-FirmwareApi {
+    if (([System.Management.Automation.PSTypeName]"LibertixFirmwareApi").Type) {
+        return
+    }
+
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class LibertixFirmwareApi {
+    private const UInt32 TOKEN_ADJUST_PRIVILEGES = 0x0020;
+    private const UInt32 TOKEN_QUERY = 0x0008;
+    private const UInt32 SE_PRIVILEGE_ENABLED = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LUID {
+        public UInt32 LowPart;
+        public Int32 HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TOKEN_PRIVILEGES {
+        public UInt32 PrivilegeCount;
+        public LUID Luid;
+        public UInt32 Attributes;
+    }
+
+    [DllImport("advapi32.dll", SetLastError=true)]
+    private static extern bool OpenProcessToken(
+        IntPtr ProcessHandle,
+        UInt32 DesiredAccess,
+        out IntPtr TokenHandle
+    );
+
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    private static extern bool LookupPrivilegeValue(
+        string lpSystemName,
+        string lpName,
+        out LUID lpLuid
+    );
+
+    [DllImport("advapi32.dll", SetLastError=true)]
+    private static extern bool AdjustTokenPrivileges(
+        IntPtr TokenHandle,
+        bool DisableAllPrivileges,
+        ref TOKEN_PRIVILEGES NewState,
+        UInt32 BufferLength,
+        IntPtr PreviousState,
+        IntPtr ReturnLength
+    );
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern UInt32 GetFirmwareEnvironmentVariable(
+        string lpName,
+        string lpGuid,
+        byte[] pBuffer,
+        UInt32 nSize
+    );
+
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool SetFirmwareEnvironmentVariableEx(
+        string lpName,
+        string lpGuid,
+        byte[] pValue,
+        UInt32 nSize,
+        UInt32 dwAttributes
+    );
+
+    public static bool DeleteFirmwareEnvironmentVariable(
+        string lpName,
+        string lpGuid,
+        UInt32 dwAttributes
+    ) {
+        return SetFirmwareEnvironmentVariableEx(lpName, lpGuid, null, 0, dwAttributes);
+    }
+
+    public static void EnableSystemEnvironmentPrivilege() {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out token)) {
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        try {
+            LUID luid;
+            if (!LookupPrivilegeValue(null, "SeSystemEnvironmentPrivilege", out luid)) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES();
+            tp.PrivilegeCount = 1;
+            tp.Luid = luid;
+            tp.Attributes = SE_PRIVILEGE_ENABLED;
+
+            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) {
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            int error = Marshal.GetLastWin32Error();
+            if (error != 0) {
+                throw new System.ComponentModel.Win32Exception(error);
+            }
+        } finally {
+            CloseHandle(token);
+        }
+    }
+
+    public static int LastError() {
+        return Marshal.GetLastWin32Error();
+    }
+}
+"@
+}
+
+function Add-Bytes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[byte]]$Buffer,
+        [Parameter(Mandatory = $true)]
+        [byte[]]$Bytes
+    )
+
+    foreach ($byte in $Bytes) {
+        $Buffer.Add($byte)
+    }
+}
+
+function New-EfiFilePathNode {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $pathBytes = [Text.Encoding]::Unicode.GetBytes($Path + [char]0)
+    $length = [uint16](4 + $pathBytes.Length)
+    $buffer = [System.Collections.Generic.List[byte]]::new()
+    Add-Bytes $buffer ([byte[]](0x04, 0x04))
+    Add-Bytes $buffer ([BitConverter]::GetBytes($length))
+    Add-Bytes $buffer $pathBytes
+    return [byte[]]$buffer.ToArray()
+}
+
+function New-EfiHardDriveNode {
+    param([Parameter(Mandatory = $true)]$Partition)
+
+    $disk = Get-Disk -Number $Partition.DiskNumber -ErrorAction Stop
+    $sectorSize = [uint64]$disk.LogicalSectorSize
+    if ($sectorSize -eq 0) {
+        $sectorSize = 512
+    }
+
+    $startLba = [uint64]($Partition.Offset / $sectorSize)
+    $sizeLba = [uint64]($Partition.Size / $sectorSize)
+    $partitionGuid = [Guid]$Partition.Guid
+
+    $buffer = [System.Collections.Generic.List[byte]]::new()
+    Add-Bytes $buffer ([byte[]](0x04, 0x01, 0x2A, 0x00))
+    Add-Bytes $buffer ([BitConverter]::GetBytes([uint32]$Partition.PartitionNumber))
+    Add-Bytes $buffer ([BitConverter]::GetBytes($startLba))
+    Add-Bytes $buffer ([BitConverter]::GetBytes($sizeLba))
+    Add-Bytes $buffer ($partitionGuid.ToByteArray())
+    Add-Bytes $buffer ([byte[]](0x02, 0x02))
+    return [byte[]]$buffer.ToArray()
+}
+
+function New-EfiEndNode {
+    return [byte[]](0x7F, 0xFF, 0x04, 0x00)
+}
+
+function New-EfiLoadOption {
+    param(
+        [Parameter(Mandatory = $true)][string]$Description,
+        [Parameter(Mandatory = $true)]$Partition,
+        [Parameter(Mandatory = $true)][string]$LoaderPath
+    )
+
+    $devicePath = [System.Collections.Generic.List[byte]]::new()
+    Add-Bytes $devicePath (New-EfiHardDriveNode -Partition $Partition)
+    Add-Bytes $devicePath (New-EfiFilePathNode -Path $LoaderPath)
+    Add-Bytes $devicePath (New-EfiEndNode)
+
+    $descriptionBytes = [Text.Encoding]::Unicode.GetBytes($Description + [char]0)
+    $filePathBytes = [byte[]]$devicePath.ToArray()
+
+    $buffer = [System.Collections.Generic.List[byte]]::new()
+    Add-Bytes $buffer ([BitConverter]::GetBytes([uint32]1))
+    Add-Bytes $buffer ([BitConverter]::GetBytes([uint16]$filePathBytes.Length))
+    Add-Bytes $buffer $descriptionBytes
+    Add-Bytes $buffer $filePathBytes
+
+    return [byte[]]$buffer.ToArray()
+}
+
+function Test-FirmwareVariableExists {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    Initialize-FirmwareApi
+    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
+    $buffer = New-Object byte[] 65536
+    $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
+    return $size -ne 0
+}
+
+function Get-FirmwareVariableBytes {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    Initialize-FirmwareApi
+    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
+    $buffer = New-Object byte[] 65536
+    $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
+    if ($size -eq 0) {
+        return $null
+    }
+
+    $result = New-Object byte[] $size
+    [Array]::Copy($buffer, $result, $size)
+    return $result
+}
+
+function Set-FirmwareVariable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][byte[]]$Value
+    )
+
+    Initialize-FirmwareApi
+    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
+    $attributes = [uint32]0x00000007
+    $ok = [LibertixFirmwareApi]::SetFirmwareEnvironmentVariableEx(
+        $Name,
+        $global,
+        $Value,
+        [uint32]$Value.Length,
+        $attributes
+    )
+
+    if (-not $ok) {
+        $err = [LibertixFirmwareApi]::LastError()
+        throw "SetFirmwareEnvironmentVariableEx failed for ${Name}: Win32 error ${err}"
+    }
+}
+
+function Remove-FirmwareVariable {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    Initialize-FirmwareApi
+    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
+    $attributes = [uint32]0x00000007
+    [LibertixFirmwareApi]::DeleteFirmwareEnvironmentVariable($Name, $global, $attributes) |
+        Out-Null
+}
+
+function ConvertFrom-BootOrderBytes {
+    param([byte[]]$Bytes)
+
+    $order = New-Object System.Collections.Generic.List[uint16]
+    if (-not $Bytes) {
+        return $order
+    }
+
+    for ($offset = 0; $offset + 1 -lt $Bytes.Length; $offset += 2) {
+        $order.Add([BitConverter]::ToUInt16($Bytes, $offset))
+    }
+
+    return $order
+}
+
+function ConvertTo-BootOrderBytes {
+    param([Parameter(Mandatory = $true)]$Order)
+
+    $buffer = [System.Collections.Generic.List[byte]]::new()
+    foreach ($entry in $Order) {
+        Add-Bytes $buffer ([BitConverter]::GetBytes([uint16]$entry))
+    }
+
+    return [byte[]]$buffer.ToArray()
+}
+
+function Get-EfiLoadOptionDescription {
+    param([byte[]]$Bytes)
+
+    if (-not $Bytes -or $Bytes.Length -lt 8) {
+        return ""
+    }
+
+    $offset = 6
+    $end = $offset
+    while ($end + 1 -lt $Bytes.Length) {
+        if ($Bytes[$end] -eq 0 -and $Bytes[$end + 1] -eq 0) {
+            break
+        }
+        $end += 2
+    }
+
+    if ($end -le $offset) {
+        return ""
+    }
+
+    return [Text.Encoding]::Unicode.GetString($Bytes, $offset, $end - $offset)
+}
+
+function Get-EfiLoadOptionOptionalDataLength {
+    param([byte[]]$Bytes)
+
+    if (-not $Bytes -or $Bytes.Length -lt 8) {
+        return -1
+    }
+
+    $filePathListLength = [BitConverter]::ToUInt16($Bytes, 4)
+    $offset = 6
+    while ($offset + 1 -lt $Bytes.Length) {
+        if ($Bytes[$offset] -eq 0 -and $Bytes[$offset + 1] -eq 0) {
+            $offset += 2
+            break
+        }
+        $offset += 2
+    }
+
+    $optionalStart = $offset + $filePathListLength
+    if ($optionalStart -gt $Bytes.Length) {
+        return -1
+    }
+
+    return ($Bytes.Length - $optionalStart)
+}
+
+function Remove-EfiLoadOptionOptionalData {
+    param([byte[]]$Bytes)
+
+    if (-not $Bytes -or $Bytes.Length -lt 8) {
+        throw "Invalid EFI load option; too short."
+    }
+
+    $filePathListLength = [BitConverter]::ToUInt16($Bytes, 4)
+    $offset = 6
+    while ($offset + 1 -lt $Bytes.Length) {
+        if ($Bytes[$offset] -eq 0 -and $Bytes[$offset + 1] -eq 0) {
+            $offset += 2
+            break
+        }
+        $offset += 2
+    }
+
+    $optionalStart = $offset + $filePathListLength
+    if ($optionalStart -gt $Bytes.Length) {
+        throw "Invalid EFI load option; file path list exceeds variable length."
+    }
+
+    $clean = New-Object byte[] $optionalStart
+    [Array]::Copy($Bytes, $clean, $optionalStart)
+    return $clean
+}
+
+function Get-FirmwareBootNumberByDescription {
+    param([Parameter(Mandatory = $true)][string]$Description)
+
+    for ($candidate = 0x0000; $candidate -le 0xFFFF; $candidate++) {
+        $name = "Boot{0:X4}" -f $candidate
+        $bytes = Get-FirmwareVariableBytes -Name $name
+        if (-not $bytes) {
+            continue
+        }
+
+        if ((Get-EfiLoadOptionDescription -Bytes $bytes) -eq $Description) {
+            return [uint16]$candidate
+        }
+    }
+
+    return $null
+}
+
+function Set-FirmwareBootNumberFirst {
+    param([Parameter(Mandatory = $true)][uint16]$BootNumber)
+
+    $currentOrder = ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder")
+    $newOrder = New-Object System.Collections.Generic.List[uint16]
+    $newOrder.Add([uint16]$BootNumber)
+    foreach ($entry in $currentOrder) {
+        if ([uint16]$entry -ne [uint16]$BootNumber) {
+            $newOrder.Add([uint16]$entry)
+        }
+    }
+
+    Set-FirmwareVariable -Name "BootOrder" -Value (ConvertTo-BootOrderBytes -Order $newOrder)
+}
+
+function Remove-FirmwareBootNumberFromOrder {
+    param([Parameter(Mandatory = $true)][uint16]$BootNumber)
+
+    $currentOrder = ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder")
+    $newOrder = New-Object System.Collections.Generic.List[uint16]
+    $changed = $false
+    foreach ($entry in $currentOrder) {
+        if ([uint16]$entry -eq [uint16]$BootNumber) {
+            $changed = $true
+            continue
+        }
+        $newOrder.Add([uint16]$entry)
+    }
+
+    if ($changed) {
+        Set-FirmwareVariable -Name "BootOrder" -Value (ConvertTo-BootOrderBytes -Order $newOrder)
+    }
+}
+
+function Remove-BcdFirmwareEntriesByDescription {
+    param([Parameter(Mandatory = $true)][string[]]$Descriptions)
+
+    $firmwareEntries = bcdedit /enum firmware /v 2>$null
+    $current = $null
+    foreach ($line in $firmwareEntries) {
+        if ($line -match "^(identificateur|identifier)\s+(\{[^}]+\})") {
+            $current = $Matches[2]
+            continue
+        }
+
+        foreach ($description in $Descriptions) {
+            if ($line -match "^description\s+$([regex]::Escape($description))$" -and $current) {
+                bcdedit /delete $current /f 2>$null | Out-Null
+                $current = $null
+                break
+            }
+        }
+    }
+}
+
+function Remove-NativeFirmwareEntriesByDescription {
+    param([Parameter(Mandatory = $true)][string[]]$Descriptions)
+
+    for ($candidate = 0x0000; $candidate -le 0xFFFF; $candidate++) {
+        $name = "Boot{0:X4}" -f $candidate
+        $bytes = Get-FirmwareVariableBytes -Name $name
+        if (-not $bytes) {
+            continue
+        }
+
+        $description = Get-EfiLoadOptionDescription -Bytes $bytes
+        if ($Descriptions -contains $description) {
+            Remove-FirmwareBootNumberFromOrder -BootNumber ([uint16]$candidate)
+            Remove-FirmwareVariable -Name $name
+        }
+    }
+}
+
+function Remove-LibertixTemporaryFirmwareEntries {
+    Remove-BcdFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
+    Remove-NativeFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
+
+    try {
+        Remove-FirmwareVariable -Name "BootNext"
+    } catch {
+        # Best effort: BootNext may not exist, and stale BootNext cleanup must
+        # not block a fresh installer entry.
+    }
+}
+
+function Get-FirmwareEntryIdentifierByDescription {
+    param([Parameter(Mandatory = $true)][string]$Description)
+
+    $firmwareEntries = bcdedit /enum firmware /v 2>$null
+    $current = $null
+    foreach ($line in $firmwareEntries) {
+        if ($line -match "^(identificateur|identifier)\s+(\{[^}]+\})") {
+            $current = $Matches[2]
+        } elseif ($line -match "^description\s+$([regex]::Escape($Description))$" -and $current) {
+            return $current
+        }
+    }
+
+    return $null
+}
+
+function Remove-LibertixInstallerPartitionIfPresent {
+    $installerDrive = Ensure-VolumeLetterByLabel -Label $InstallerLabel -Letter $InstallerLetter
+    if (-not $installerDrive) {
+        Write-Log "No $InstallerLabel partition found." "Gray"
+        return
+    }
+
+    $letter = $installerDrive.TrimEnd(":")
+    $volume = Get-Volume -DriveLetter $letter -ErrorAction Stop
+    if ($volume.FileSystemLabel -ne $InstallerLabel) {
+        throw "Refusing to remove ${installerDrive}: label is '$($volume.FileSystemLabel)', expected '$InstallerLabel'."
+    }
+
+    $partition = Get-Partition -DriveLetter $letter -ErrorAction Stop
+    if ($partition.Size -lt 1GB -or $partition.Size -gt 128GB) {
+        throw "Refusing to remove ${installerDrive}: suspicious size $($partition.Size) bytes."
+    }
+
+    Write-Log "Removing $InstallerLabel partition on disk $($partition.DiskNumber), partition $($partition.PartitionNumber)..." "Cyan"
+    Dismount-Letter -Letter $letter
+    Remove-Partition `
+        -DiskNumber $partition.DiskNumber `
+        -PartitionNumber $partition.PartitionNumber `
+        -Confirm:$false `
+        -ErrorAction Stop
+
+    try {
+        $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
+        $cPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+        if ($supported.SizeMax -gt ($cPartition.Size + 64MB)) {
+            Write-Log "Extending C: to reclaim free space..." "Cyan"
+            Resize-Partition -DriveLetter C -Size $supported.SizeMax -ErrorAction Stop
+        }
+    } catch {
+        Write-Log "Could not extend C: automatically: $($_.Exception.Message)" "Yellow"
+    }
+}
+
+function Set-NativeUefiBootOrderOnce {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerDrive,
+        [Parameter(Mandatory = $true)][int]$InstallerDiskNumber,
+        [Parameter(Mandatory = $true)][int]$InstallerPartitionNumber,
+        [Parameter(Mandatory = $true)][string]$LoaderPath
+    )
+
+    $driveLetter = $InstallerDrive.TrimEnd(":")
+    $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction SilentlyContinue
+    if (-not $partition) {
+        $partition = Get-Partition `
+            -DiskNumber $InstallerDiskNumber `
+            -PartitionNumber $InstallerPartitionNumber `
+            -ErrorAction SilentlyContinue
+    }
+
+    if (-not $partition) {
+        throw "Cannot find Libertix installer partition by drive ${InstallerDrive} or disk $InstallerDiskNumber partition $InstallerPartitionNumber."
+    }
+
+    $bootNumber = $null
+    for ($candidate = 0x0000; $candidate -le 0xFFFF; $candidate++) {
+        $name = "Boot{0:X4}" -f $candidate
+        if (-not (Test-FirmwareVariableExists -Name $name)) {
+            $bootNumber = [uint16]$candidate
+            break
+        }
+    }
+
+    if ($null -eq $bootNumber) {
+        throw "No free UEFI Boot#### slot found."
+    }
+
+    $loadOption = New-EfiLoadOption `
+        -Description $InstallerBootDescription `
+        -Partition $partition `
+        -LoaderPath $LoaderPath
+
+    $bootVariable = "Boot{0:X4}" -f $bootNumber
+    Set-FirmwareVariable -Name $bootVariable -Value $loadOption
+
+    $currentOrder = ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder")
+    $newOrder = New-Object System.Collections.Generic.List[uint16]
+    $newOrder.Add([uint16]$bootNumber)
+    foreach ($entry in $currentOrder) {
+        if ([uint16]$entry -ne [uint16]$bootNumber) {
+            $newOrder.Add([uint16]$entry)
+        }
+    }
+
+    Set-FirmwareVariable -Name "BootOrder" -Value (ConvertTo-BootOrderBytes -Order $newOrder)
+    Remove-FirmwareVariable -Name "BootNext"
+
+    return $bootVariable
+}
+
+function Get-SecureBootDbText {
+    $db = Get-SecureBootUEFI -Name db
+    $bytes = $db.Bytes
+
+    return @(
+        [Text.Encoding]::ASCII.GetString($bytes),
+        [Text.Encoding]::Unicode.GetString($bytes),
+        [BitConverter]::ToString($bytes)
+    ) -join "`n"
+}
+
+function Test-LibertixSecureBootCompatibility {
+    Write-Log "Checking Secure Boot certificate compatibility..." "Cyan"
+
+    try {
+        $secureBootEnabled = Confirm-SecureBootUEFI
+    } catch {
+        throw "Cannot read Secure Boot state. Refusing to continue on an unknown UEFI state: $($_.Exception.Message)"
+    }
+
+    if (-not $secureBootEnabled) {
+        Write-Log "Secure Boot is disabled; signed-chain check is not required." "Yellow"
+        return
+    }
+
+    $dbText = Get-SecureBootDbText
+    $has2011 = $dbText -match "Microsoft Corporation UEFI CA 2011"
+    $has2023 = (
+        $dbText -match "Microsoft UEFI CA 2023" -or
+        $dbText -match "Microsoft Corporation UEFI CA 2023"
+    )
+    $hasWindows2023 = $dbText -match "Windows UEFI CA 2023"
+
+    if ($has2011 -and $has2023) {
+        Write-Log "Secure Boot DB contains Microsoft UEFI CA 2011 and 2023; dual-signed installer chain is compatible." "Green"
+        return
+    }
+
+    if ($has2023) {
+        Write-Log "Secure Boot DB contains Microsoft UEFI CA 2023; dual-signed installer chain is compatible." "Green"
+        return
+    }
+
+    if ($has2011) {
+        Write-Log "Secure Boot DB contains Microsoft UEFI CA 2011; dual-signed installer chain is compatible." "Green"
+        return
+    }
+
+    if ($hasWindows2023) {
+        throw "Secure Boot DB contains Windows UEFI CA 2023, but not Microsoft UEFI CA 2023 for third-party bootloaders. Disable Secure Boot or enroll the Microsoft third-party UEFI CA before installing Libertix."
+    }
+
+    throw "Secure Boot is enabled but neither Microsoft Corporation UEFI CA 2011 nor Microsoft UEFI CA 2023 was detected in db. This looks like a custom/professional Secure Boot trust store. Disable Secure Boot or enroll the Microsoft third-party UEFI CA before installing Libertix."
+}
+
 function Invoke-DiskpartScript {
     param([Parameter(Mandatory = $true)][string]$ScriptText)
 
     $tmp = [IO.Path]::GetTempFileName()
     try {
         $ScriptText | Out-File $tmp -Encoding ASCII
-        diskpart /s $tmp 2>&1 | Out-Null
+        $output = diskpart /s $tmp 2>&1
+        $text = $output | Out-String
+        if ($LASTEXITCODE -ne 0 -or $text -match "(?i)(error|erreur|failed|échec)") {
+            throw "diskpart failed: $text"
+        }
     } finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
@@ -154,12 +805,73 @@ function Dismount-Letter {
     param([Parameter(Mandatory = $true)][string]$Letter)
 
     if (Test-Path "${Letter}:\") {
-        Invoke-DiskpartScript -ScriptText @"
+        try {
+            $part = Get-Partition -DriveLetter $Letter -ErrorAction Stop
+            Remove-PartitionAccessPath `
+                -DiskNumber $part.DiskNumber `
+                -PartitionNumber $part.PartitionNumber `
+                -AccessPath "${Letter}:\" `
+                -ErrorAction Stop
+            return
+        } catch {
+            Write-Log "Could not remove ${Letter}: with PowerShell; trying diskpart best-effort..." "Yellow"
+        }
+
+        try {
+            Invoke-DiskpartScript -ScriptText @"
 select volume $Letter
 remove letter=$Letter
 exit
 "@
+        } catch {
+            Write-Log "Could not remove drive letter ${Letter}:; continuing." "Yellow"
+        }
     }
+}
+
+function Get-FreeDriveLetter {
+    $used = @{}
+    Get-Volume -ErrorAction SilentlyContinue |
+        Where-Object { $_.DriveLetter } |
+        ForEach-Object { $used[[string]$_.DriveLetter] = $true }
+
+    foreach ($candidate in "X", "W", "V", "U", "T", "S", "R", "Q", "P", "O", "N", "M", "L", "K", "J", "I", "H", "G", "F", "E", "D") {
+        if (-not $used.ContainsKey($candidate) -and -not (Test-Path "${candidate}:\")) {
+            return $candidate
+        }
+    }
+
+    throw "No free drive letter available for Libertix installer partition."
+}
+
+function Get-LibertixInstallerPartition {
+    param([string]$DriveLetter = "")
+
+    if ($DriveLetter) {
+        $partition = Get-Partition -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
+        if ($partition) {
+            return $partition
+        }
+    }
+
+    $volume = Get-Volume -ErrorAction SilentlyContinue |
+        Where-Object { $_.FileSystemLabel -eq $InstallerLabel -and $_.DriveLetter } |
+        Select-Object -First 1
+
+    if ($volume) {
+        $partition = Get-Partition -DriveLetter $volume.DriveLetter -ErrorAction SilentlyContinue
+        if ($partition) {
+            return $partition
+        }
+    }
+
+    return Get-Partition |
+        Where-Object {
+            $_.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}" -and
+            $_.Size -gt 1GB
+        } |
+        Sort-Object DiskNumber,PartitionNumber -Descending |
+        Select-Object -First 1
 }
 
 function Ensure-VolumeLetterByLabel {
@@ -173,13 +885,7 @@ function Ensure-VolumeLetterByLabel {
         Select-Object -First 1
 
     if ($vol -and $vol.DriveLetter) {
-        if ($vol.DriveLetter -ne $Letter) {
-            $part = Get-Partition -DriveLetter $vol.DriveLetter
-            Set-Partition -DiskNumber $part.DiskNumber `
-                -PartitionNumber $part.PartitionNumber `
-                -NewDriveLetter $Letter
-        }
-        return "${Letter}:"
+        return "$($vol.DriveLetter):"
     }
 
     $cim = Get-CimInstance Win32_Volume -Filter "Label='$Label'" `
@@ -190,8 +896,8 @@ function Ensure-VolumeLetterByLabel {
         return $null
     }
 
-    if ($cim.DriveLetter -and $cim.DriveLetter.TrimEnd(":") -eq $Letter) {
-        return "${Letter}:"
+    if ($cim.DriveLetter) {
+        return "$($cim.DriveLetter.TrimEnd(':')):"
     }
 
     $deviceId = $cim.DeviceID
@@ -200,13 +906,18 @@ function Ensure-VolumeLetterByLabel {
     }
 
     # Assign letter using mountvol (works even if previously hidden)
-    & mountvol "${Letter}:" $deviceId | Out-Null
-
-    if (-not (Test-Path "${Letter}:\")) {
-        throw "Failed to assign ${Letter}: to volume labeled '$Label'."
+    $letterToUse = $Letter
+    if (Test-Path "${letterToUse}:\") {
+        $letterToUse = Get-FreeDriveLetter
     }
 
-    return "${Letter}:"
+    & mountvol "${letterToUse}:" $deviceId | Out-Null
+
+    if (-not (Test-Path "${letterToUse}:\")) {
+        throw "Failed to assign a drive letter to volume labeled '$Label'."
+    }
+
+    return "${letterToUse}:"
 }
 
 function Get-PartitionGuidForLetter {
@@ -217,56 +928,6 @@ function Get-PartitionGuidForLetter {
         return (Get-GuidDLower -Guid $p.Guid)
     }
     return $null
-}
-
-function Write-RefindConfig {
-    param(
-        [Parameter(Mandatory = $true)][string]$EspPath,
-        [Parameter(Mandatory = $true)][bool]$IncludeDebian,
-        [Parameter()][string]$DebianGuidD,
-        [Parameter()][string]$DebianFsLabel
-    )
-
-    $configPath = Join-Path $EspPath "EFI\refind\refind.conf"
-
-    $base = @"
-timeout 10
-scanfor manual
-
-dont_scan_dirs ESP:/EFI/boot,EFI/boot,EFI/Microsoft
-dont_scan_files shimx64.efi,PreLoader.efi,HashTool.efi,loader.efi,refind_x64.efi,bootmgfw.efi,bootx64.efi,grubx64.efi
-dont_scan_volumes "Recovery","SYSTEM"
-
-use_graphics_for windows
-
-menuentry "Windows" {
-    icon /EFI/refind/icons/os_win8.png
-    firmware_bootnum 0001
-}
-"@
-
-    if (-not $IncludeDebian) {
-        Set-Content -Path $configPath -Value $base -Encoding UTF8
-        return
-    }
-
-    $volumeLine =
-        if ($DebianGuidD) {
-            "    volume $DebianGuidD"
-        } else {
-            "    volume `"$DebianFsLabel`""
-        }
-
-    $debian = @"
-
-menuentry "Debian Installer" {
-    icon /EFI/refind/icons/os_debian.png
-$volumeLine
-    loader /EFI/BOOT/BOOTX64.EFI
-}
-"@
-
-    Set-Content -Path $configPath -Value ($base + $debian) -Encoding UTF8
 }
 
 function Start-BitsDownload {
@@ -322,6 +983,203 @@ function Start-BitsDownload {
     Write-Progress -Activity "Downloading ISO" -Completed
 }
 
+function Get-Aria2Exe {
+    $existing =
+        if (Test-Path -LiteralPath $Aria2CacheDir) {
+            Get-ChildItem -LiteralPath $Aria2CacheDir -Filter "aria2c.exe" `
+                -Recurse -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+        } else {
+            $null
+        }
+    if ($existing) {
+        return $existing.FullName
+    }
+
+    [IO.Directory]::CreateDirectory($Aria2CacheDir) | Out-Null
+    $zipPath = Join-Path $Aria2CacheDir "aria2.zip"
+
+    Write-Log "Downloading aria2 download helper..." "Cyan"
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Invoke-WebRequest -Uri $Aria2ZipUrl -OutFile $zipPath -UseBasicParsing
+    } finally {
+        $ProgressPreference = "Continue"
+    }
+
+    if (-not (Test-Path -LiteralPath $zipPath)) {
+        throw "aria2 download helper was not downloaded."
+    }
+
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $Aria2CacheDir -Force
+    $aria2 = Get-ChildItem -LiteralPath $Aria2CacheDir -Filter "aria2c.exe" `
+        -Recurse -ErrorAction Stop |
+        Select-Object -First 1
+
+    if (-not $aria2) {
+        throw "aria2c.exe was not found after extraction."
+    }
+
+    return $aria2.FullName
+}
+
+function Start-Aria2Download {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $aria2 = Get-Aria2Exe
+    $destinationFullPath = [IO.Path]::GetFullPath($Destination)
+    $destinationDir = [IO.Path]::GetDirectoryName($destinationFullPath)
+    $destinationName = [IO.Path]::GetFileName($destinationFullPath)
+
+    if ([string]::IsNullOrWhiteSpace($destinationDir)) {
+        throw "Cannot resolve download destination directory for: $Destination"
+    }
+
+    $downloadDir = $destinationDir
+    $downloadPath = $destinationFullPath
+    if ($destinationDir -match '^[A-Za-z]:\\?$') {
+        # aria2 rejects drive-root output directories on some Windows setups.
+        # Download to a normal directory first, then move atomically to C:\mint.iso.
+        $downloadDir = $Aria2DownloadDir
+        $downloadPath = Join-Path $downloadDir $destinationName
+    }
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    if (Test-Path -LiteralPath $downloadPath) {
+        Remove-Item -LiteralPath $downloadPath -Force
+    }
+
+    Write-Log "Downloading with aria2: $destinationName" "Cyan"
+    $args = @(
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
+        "--continue=true",
+        "--max-connection-per-server=10",
+        "--split=10",
+        "--min-split-size=1M",
+        "--summary-interval=5",
+        "--console-log-level=warn",
+        "--out=$destinationName",
+        $Url
+    )
+
+    Push-Location -LiteralPath $downloadDir
+    try {
+        & $aria2 @args
+        if ($LASTEXITCODE -ne 0) {
+            throw "aria2 failed with exit code $LASTEXITCODE."
+        }
+    } finally {
+        Pop-Location
+    }
+
+    if (-not (Test-Path -LiteralPath $downloadPath)) {
+        throw "aria2 completed but downloaded file is missing: $downloadPath"
+    }
+
+    if ($downloadPath -ne $destinationFullPath) {
+        if (Test-Path -LiteralPath $destinationFullPath) {
+            Remove-Item -LiteralPath $destinationFullPath -Force
+        }
+        Move-Item -LiteralPath $downloadPath -Destination $destinationFullPath -Force
+    }
+}
+
+function Get-MountedIsoDrive {
+    param([Parameter(Mandatory = $true)][string]$ImagePath)
+
+    $resolvedImagePath = [IO.Path]::GetFullPath($ImagePath)
+    for ($attempt = 1; $attempt -le 30; $attempt++) {
+        $letters = @()
+        $image = Get-DiskImage -ImagePath $resolvedImagePath -ErrorAction SilentlyContinue
+        if ($image) {
+            try {
+                $letters += @(
+                    $image |
+                        Get-Volume -ErrorAction SilentlyContinue |
+                        Where-Object {
+                            $_.PSObject.Properties.Name -contains "DriveLetter" -and
+                            $_.DriveLetter
+                        } |
+                        Select-Object -ExpandProperty DriveLetter
+                )
+            } catch {}
+
+            try {
+                $letters += @(
+                    $image |
+                        Get-Disk -ErrorAction SilentlyContinue |
+                        Get-Partition -ErrorAction SilentlyContinue |
+                        Where-Object { $_.DriveLetter } |
+                        Select-Object -ExpandProperty DriveLetter
+                )
+            } catch {}
+        }
+
+        $letter = $letters |
+            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+            Select-Object -First 1
+        if ($letter) {
+            return "$letter`:"
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    $diagnostic = Get-DiskImage -ImagePath $resolvedImagePath -ErrorAction SilentlyContinue |
+        Format-List * |
+        Out-String
+    throw "ISO mounted, but no usable drive letter was found for $resolvedImagePath. DiskImage=$diagnostic"
+}
+
+function Start-RobustDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    try {
+        Start-Aria2Download -Url $Url -Destination $Destination
+        return
+    } catch {
+        Write-Log "aria2 failed for $Label; using BITS fallback: $($_.Exception.Message)" "Yellow"
+    }
+
+    try {
+        Start-BitsDownload -Url $Url -Destination $Destination
+        return
+    } catch {
+        Write-Log "BITS failed for $Label; using Invoke-WebRequest fallback: $($_.Exception.Message)" "Yellow"
+    }
+
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
+    } finally {
+        $ProgressPreference = "Continue"
+    }
+}
+
+function Ensure-MintIsoOnWindows {
+    $existing = Get-Item -LiteralPath $MintIsoPath -ErrorAction SilentlyContinue
+    if ($existing -and $existing.Length -gt 100MB) {
+        Write-Log "Mint ISO already present: $MintIsoPath" "Green"
+        return
+    }
+
+    Write-Log "Downloading Mint ISO to $MintIsoPath..." "Cyan"
+    Start-RobustDownload -Url $MintIsoUrl -Destination $MintIsoPath -Label "Mint ISO"
+
+    $downloadedIso = Get-Item -LiteralPath $MintIsoPath -ErrorAction Stop
+    if ($downloadedIso.Length -le 100MB) {
+        throw "Mint ISO download is too small: $($downloadedIso.Length) bytes"
+    }
+    Write-Log "Mint ISO ready: $MintIsoPath" "Green"
+}
+
 function Ensure-VolumeNotEncrypted {
     param([Parameter(Mandatory = $true)][string]$DriveLetter)
 
@@ -370,17 +1228,71 @@ function Ensure-VolumeNotEncrypted {
     Write-Progress -Activity "Decrypting ${DriveLetter}:" -Completed
 }
 
+function Ensure-WindowsVolumeReadableFromLinux {
+    $bitlockerVolume = $null
+    try {
+        $bitlockerVolume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
+    } catch {
+        $bitlockerVolume = $null
+    }
+
+    if ($bitlockerVolume) {
+        if ($bitlockerVolume.VolumeStatus -eq "FullyDecrypted") {
+            Write-Log "Windows C: is already readable from Linux." "Green"
+            return
+        }
+
+        Write-Log "Disabling BitLocker/device encryption on C: before Linux live boot..." "Cyan"
+        Disable-BitLocker -MountPoint "C:" -ErrorAction Stop
+
+        $deadline = (Get-Date).AddMinutes(90)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 10
+            $bitlockerVolume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
+            if ($bitlockerVolume.VolumeStatus -eq "FullyDecrypted") {
+                Write-Log "Windows C: decrypted." "Green"
+                return
+            }
+
+            if ($null -ne $bitlockerVolume.EncryptionPercentage) {
+                Write-Log "Waiting for C: decryption... $($bitlockerVolume.EncryptionPercentage)% encrypted" "Yellow"
+            } else {
+                Write-Log "Waiting for C: decryption... status=$($bitlockerVolume.VolumeStatus)" "Yellow"
+            }
+
+        }
+        throw "Timed out waiting for C: BitLocker decryption."
+    }
+
+    $statusText = ""
+    try {
+        $statusText = manage-bde -status C: 2>&1 | Out-String
+    } catch {
+        Write-Log "BitLocker status unavailable; continuing." "Yellow"
+        return
+    }
+
+    if ($statusText -match "(?i)(bitlocker|chiffrement|encrypted|chiffr)") {
+        Write-Log "Disabling BitLocker/device encryption on C: before Linux live boot..." "Cyan"
+        manage-bde -off C: 2>&1 | Out-Null
+        Start-Sleep -Seconds 5
+    }
+}
+
 
 function Invoke-Revert {
-    Write-Log "Reverting rEFInd..." "Cyan"
+    Write-Log "Reverting Libertix UEFI installer changes..." "Cyan"
 
     $esp = $null
     try {
         $esp = Mount-Esp -Letter $EspLetter
 
-        $refindDir = Join-Path $esp "EFI\refind"
-        if (Test-Path $refindDir) {
-            Remove-Item -Path $refindDir -Recurse -Force
+        foreach ($relativeDir in @("EFI\refind", "EFI\Libertix", "EFI\LibertixInstaller")) {
+            $path = Join-Path $esp $relativeDir
+            if (Test-Path $path) {
+                Write-Log "Removing ESP directory: $relativeDir" "Cyan"
+                Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
+            }
         }
 
         bcdedit /set "{bootmgr}" path \EFI\Microsoft\Boot\bootmgfw.efi 2>$null |
@@ -388,127 +1300,49 @@ function Invoke-Revert {
         bcdedit /set "{bootmgr}" description "Windows Boot Manager" 2>$null |
             Out-Null
 
-        $fw = bcdedit /enum firmware 2>&1
-        if ($fw -match "rEFInd.*\{([a-f0-9\-]+)\}") {
-            $id = "{$($matches[1])}"
-            bcdedit /delete $id 2>$null | Out-Null
-        }
+        Remove-BcdFirmwareEntriesByDescription -Descriptions @(
+            $InstallerBootDescription,
+            "Libertix"
+        )
+        Remove-NativeFirmwareEntriesByDescription -Descriptions @(
+            $InstallerBootDescription,
+            "Libertix"
+        )
+        try {
+            Remove-FirmwareVariable -Name "BootNext"
+        } catch {}
 
         bcdedit /set "{fwbootmgr}" default "{bootmgr}" 2>$null | Out-Null
 
-        Write-Log "Revert complete." "Green"
     } finally {
         if ($esp) { Dismount-Letter -Letter $EspLetter }
     }
 
-    Write-Host ""
-    Write-Host "Note: the DEBIAN partition is not removed." -ForegroundColor Yellow
+    Remove-LibertixInstallerPartitionIfPresent
+
+    Write-Log "Revert complete." "Green"
 }
 
-function Install-Refind {
-    Write-Log "Installing rEFInd to ESP..." "Cyan"
-
-    $tmpDir = Join-Path $env:TEMP "refind-$([Guid]::NewGuid().ToString('N'))"
-    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
-
-    $esp = $null
-    try {
-        $refindZip = Join-Path $tmpDir "refind.zip"
-        $preLoader = Join-Path $tmpDir "PreLoader.efi"
-        $hashTool = Join-Path $tmpDir "HashTool.efi"
-
-        Invoke-WebRequest -Uri $RefindZipUrl -OutFile $refindZip -UseBasicParsing
-        Invoke-WebRequest -Uri $PreLoaderUrl -OutFile $preLoader -UseBasicParsing
-        Invoke-WebRequest -Uri $HashToolUrl -OutFile $hashTool -UseBasicParsing
-
-        $extract = Join-Path $tmpDir "extract"
-        Expand-Archive -LiteralPath $refindZip -DestinationPath $extract -Force
-
-        $refindRoot =
-            Get-ChildItem -Path $extract -Directory -Filter "refind*" |
-            Select-Object -First 1
-
-        if (-not $refindRoot) {
-            throw "Failed to locate extracted rEFInd directory."
-        }
-
-        $refindSource = Join-Path $refindRoot.FullName "refind"
-
-        $esp = Mount-Esp -Letter $EspLetter
-        $dest = Join-Path $esp "EFI\refind"
-
-        if (Test-Path $dest) {
-            Remove-Item -Path $dest -Recurse -Force
-        }
-        New-Item -ItemType Directory -Path $dest -Force | Out-Null
-
-        Copy-Item -Path "$refindSource\*" -Destination $dest -Recurse -Force
-
-        @(
-            "drivers_ia32",
-            "drivers_aa64",
-            "tools_ia32",
-            "tools_aa64",
-            "refind_ia32.efi",
-            "refind_aa64.efi"
-        ) | ForEach-Object {
-            $p = Join-Path $dest $_
-            if (Test-Path $p) {
-                Remove-Item -Path $p -Recurse -Force
-            }
-        }
-
-        Copy-Item -Path $preLoader -Destination (Join-Path $dest "shimx64.efi") `
-            -Force
-        Copy-Item -Path (Join-Path $dest "refind_x64.efi") `
-            -Destination (Join-Path $dest "loader.efi") -Force
-        Copy-Item -Path $hashTool -Destination (Join-Path $dest "HashTool.efi") `
-            -Force
-
-        # Minimal config now; Debian entry is added later if requested
-        Write-RefindConfig -EspPath $esp -IncludeDebian:$false `
-            -DebianGuidD $null -DebianFsLabel $DebianLabel
-
-        # Disable hibernation / Fast Startup
-        powercfg /h off 2>&1 | Out-Null
-
-        # Create a dedicated UEFI entry (keep Windows Boot Manager intact)
-        $bootmgr = bcdedit /enum "{bootmgr}" 2>&1
-        if ($bootmgr -match "refind|shimx64") {
-            bcdedit /set "{bootmgr}" path \EFI\Microsoft\Boot\bootmgfw.efi |
-                Out-Null
-            bcdedit /set "{bootmgr}" description "Windows Boot Manager" | Out-Null
-        }
-
-        $copy = bcdedit /copy "{bootmgr}" /d "rEFInd Boot Manager" 2>&1
-        if ($copy -match "\{([a-f0-9\-]+)\}") {
-            $entry = $matches[0]
-            bcdedit /set $entry path \EFI\refind\shimx64.efi | Out-Null
-            bcdedit /set "{fwbootmgr}" displayorder $entry /addfirst 2>$null
-            bcdedit /set "{fwbootmgr}" default $entry 2>$null
-        } else {
-            # Fallback: modify {bootmgr}
-            bcdedit /set "{bootmgr}" path \EFI\refind\shimx64.efi | Out-Null
-            bcdedit /set "{bootmgr}" description "rEFInd Boot Manager" | Out-Null
-        }
-
-        Write-Log "rEFInd installed." "Green"
-    } finally {
-        if ($esp) { Dismount-Letter -Letter $EspLetter }
-        Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function New-OrReuseDebianPartition {
+function New-OrReuseInstallerPartition {
     param([Parameter(Mandatory = $true)][int]$SizeGB)
 
     # If it already exists (maybe hidden), bring it back as X:
-    $existing = Ensure-VolumeLetterByLabel -Label $DebianLabel -Letter $DebianLetter
+    $existing = Ensure-VolumeLetterByLabel -Label $InstallerLabel -Letter $InstallerLetter
     if ($existing) {
-        $guid = Get-PartitionGuidForLetter -Letter $DebianLetter
+        $existingLetter = $existing.TrimEnd(":")
+        $existingPartition = Get-LibertixInstallerPartition -DriveLetter $existingLetter
+        if (-not $existingPartition) {
+            throw "Existing Libertix installer volume was found, but its partition could not be resolved."
+        }
+        $guid = $null
+        if ($existingPartition.Guid) {
+            $guid = Get-GuidDLower -Guid $existingPartition.Guid
+        }
         return @{
             Drive = $existing
             GuidD = $guid
+            DiskNumber = $existingPartition.DiskNumber
+            PartitionNumber = $existingPartition.PartitionNumber
         }
     }
 
@@ -531,94 +1365,109 @@ function New-OrReuseDebianPartition {
         throw "Cannot shrink C: by ${SizeGB}GB (max ~$( [math]::Round($maxShrink / 1GB, 1) ) GB)."
     }
 
-    Write-Log "Creating ${SizeGB}GB FAT32 partition '$DebianLabel'..." "Cyan"
+    Write-Log "Creating ${SizeGB}GB EFI FAT32 partition '$InstallerLabel'..." "Cyan"
 
     Resize-Partition -DriveLetter C -Size ($cPart.Size - $shrinkBytes)
     Start-Sleep -Seconds 2
 
     Invoke-DiskpartScript -ScriptText @"
 select disk $($cPart.DiskNumber)
-create partition primary size=$sizeMB
-format fs=fat32 quick label=$DebianLabel
-assign letter=$DebianLetter
+create partition efi size=$sizeMB
+format fs=fat32 quick label=$InstallerLabel
+assign letter=$InstallerLetter
 exit
 "@
 
     $tries = 0
-    while (-not (Test-Path "${DebianLetter}:\") -and $tries -lt 15) {
+    while (-not (Test-Path "${InstallerLetter}:\") -and $tries -lt 15) {
         Start-Sleep -Seconds 1
         $tries++
     }
 
-    if (-not (Test-Path "${DebianLetter}:\")) {
-        throw "Failed to create/assign ${DebianLetter}: for Debian partition."
+    if (-not (Test-Path "${InstallerLetter}:\")) {
+        throw "Failed to create/assign ${InstallerLetter}: for Libertix installer partition."
     }
 
-    Ensure-VolumeNotEncrypted -DriveLetter $DebianLetter
+    $newPartition = Get-LibertixInstallerPartition -DriveLetter $InstallerLetter
+    if (-not $newPartition) {
+        throw "Libertix installer partition was created, but its partition object could not be resolved."
+    }
+    $guid = $null
+    if ($newPartition.Guid) {
+        $guid = Get-GuidDLower -Guid $newPartition.Guid
+    }
 
-    $guid = Get-PartitionGuidForLetter -Letter $DebianLetter
+    Ensure-VolumeNotEncrypted -DriveLetter $InstallerLetter
 
     return @{
-        Drive = "${DebianLetter}:"
+        Drive = "${InstallerLetter}:"
         GuidD = $guid
+        DiskNumber = $newPartition.DiskNumber
+        PartitionNumber = $newPartition.PartitionNumber
     }
 }
 
-function Install-DebianIsoToPartition {
+function Install-LibertixIsoToPartition {
     param(
         [Parameter(Mandatory = $true)][string]$PartitionDrive
     )
 
-    $tmpDir = Join-Path $env:TEMP "debian-$([Guid]::NewGuid().ToString('N'))"
+    $tmpDir = Join-Path $env:TEMP "libertix-uefi-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
-    $isoPath = Join-Path $tmpDir $DebianIsoName
+    $isoPath = Join-Path $tmpDir $InstallerIsoName
 
     try {
-        Write-Log "Downloading Debian ISO..." "Cyan"
+        Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
+        $downloadUrl = "${InstallerIsoUrl}?cacheBust=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())-$([Guid]::NewGuid().ToString('N'))"
 
-        $downloaded = $false
-        try {
-            Start-BitsDownload -Url $DebianIsoUrl -Destination $isoPath
-            $downloaded = $true
-        } catch {
-            Write-Log "BITS failed; using Invoke-WebRequest..." "Yellow"
-        }
-
-        if (-not $downloaded) {
-            $ProgressPreference = "SilentlyContinue"
-            Invoke-WebRequest -Uri $DebianIsoUrl -OutFile $isoPath -UseBasicParsing
-            $ProgressPreference = "Continue"
-        }
+        Start-RobustDownload -Url $downloadUrl -Destination $isoPath -Label "Libertix UEFI ISO"
 
         if (-not (Test-Path $isoPath)) {
             throw "ISO download failed."
         }
 
+        $actualIsoHash = (Get-FileHash -Algorithm SHA256 -Path $isoPath).Hash.ToLowerInvariant()
+        Write-Log "Libertix UEFI ISO SHA256: $actualIsoHash" "Gray"
+        if ($actualIsoHash -ne $InstallerIsoSha256) {
+            throw "Downloaded Libertix UEFI ISO hash mismatch. Expected $InstallerIsoSha256, got $actualIsoHash"
+        }
+
         Write-Log "Mounting ISO..." "Cyan"
-        $img = Mount-DiskImage -ImagePath $isoPath -PassThru
-        $vol = $img | Get-Volume
+        Mount-DiskImage -ImagePath $isoPath -PassThru | Out-Null
+        $isoDrive = Get-MountedIsoDrive -ImagePath $isoPath
 
-        if (-not $vol.DriveLetter) {
-            Start-Sleep -Seconds 2
-            $vol =
-                Get-Volume |
-                Where-Object { $_.DriveType -eq "CD-ROM" -and $_.Size -gt 0 } |
-                Select-Object -First 1
-        }
-
-        if (-not $vol -or -not $vol.DriveLetter) {
-            throw "ISO mounted but no drive letter was assigned."
-        }
-
-        $src = "$($vol.DriveLetter):\*"
+        $src = "$isoDrive\*"
         $dst = "$PartitionDrive\"
 
         Write-Log "Copying ISO contents to $PartitionDrive..." "Cyan"
         Copy-Item -Path $src -Destination $dst -Recurse -Force
 
+        $requiredFiles = @(
+            "EFI\debian\shimx64.efi",
+            "EFI\debian\grubx64.efi",
+            "EFI\debian\mmx64.efi",
+            "EFI\debian\grub.cfg",
+            "EFI\LibertixInstaller\shimx64.efi",
+            "EFI\LibertixInstaller\grubx64.efi",
+            "EFI\LibertixInstaller\mmx64.efi",
+            "EFI\LibertixInstaller\grub.cfg",
+            "live\vmlinuz",
+            "live\initrd.img",
+            "live\filesystem.squashfs"
+        )
+        foreach ($relativePath in $requiredFiles) {
+            $fullPath = Join-Path $PartitionDrive $relativePath
+            if (-not (Test-Path $fullPath)) {
+                throw "Installer copy verification failed; missing $fullPath"
+            }
+            if ((Get-Item $fullPath).Length -le 0) {
+                throw "Installer copy verification failed; empty file $fullPath"
+            }
+        }
+
         Dismount-DiskImage -ImagePath $isoPath | Out-Null
-        Write-Log "Debian installer copied." "Green"
+        Write-Log "Libertix UEFI installer copied." "Green"
     } finally {
         try {
             Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue |
@@ -627,6 +1476,152 @@ function Install-DebianIsoToPartition {
 
         Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Set-LibertixUefiBootEntry {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstallerDrive,
+        [Parameter(Mandatory = $true)][int]$InstallerDiskNumber,
+        [Parameter(Mandatory = $true)][int]$InstallerPartitionNumber
+    )
+
+    Write-Log "Configuring one-time UEFI boot entry..." "Cyan"
+
+    if (-not (Test-Path "$InstallerDrive\")) {
+        $InstallerDrive = Ensure-VolumeLetterByLabel -Label $InstallerLabel -Letter $InstallerLetter
+        if (-not $InstallerDrive -or -not (Test-Path "$InstallerDrive\")) {
+            throw "Cannot assign a drive letter to the Libertix installer partition before UEFI boot setup."
+        }
+    }
+
+    $loaderPath = "\EFI\debian\shimx64.efi"
+    $installerShim = Join-Path $InstallerDrive "EFI\debian\shimx64.efi"
+    $installerGrub = Join-Path $InstallerDrive "EFI\debian\grubx64.efi"
+    $installerMok = Join-Path $InstallerDrive "EFI\debian\mmx64.efi"
+    foreach ($path in @($installerShim, $installerGrub, $installerMok)) {
+        if (-not (Test-Path $path)) {
+            throw "Installer EFI file not found: $path"
+        }
+    }
+
+    powercfg /h off 2>&1 | Out-Null
+
+    $driveRoot = "$InstallerDrive\"
+    $grubConfig = @"
+set default=0
+set timeout=0
+set timeout_style=hidden
+set hidden_timeout=0
+set hidden_timeout_quiet=true
+
+menuentry "Install Linux Mint (Automatic)" {
+    linux /live/vmlinuz boot=live toram components quiet silent loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
+    initrd /live/initrd.img
+}
+"@
+    foreach ($grubConfigDir in @(
+        (Join-Path $driveRoot "EFI\debian"),
+        (Join-Path $driveRoot "EFI\LibertixInstaller"),
+        (Join-Path $driveRoot "EFI\BOOT"),
+        (Join-Path $driveRoot "boot\grub")
+    )) {
+        New-Item -ItemType Directory -Path $grubConfigDir -Force | Out-Null
+        $grubConfigPath = Join-Path $grubConfigDir "grub.cfg"
+        if (Test-Path $grubConfigPath) {
+            attrib -R -S -H $grubConfigPath 2>$null
+            Remove-Item -Path $grubConfigPath -Force
+        }
+        Set-Content -Path $grubConfigPath -Value $grubConfig -Encoding ASCII
+    }
+
+    Remove-LibertixTemporaryFirmwareEntries
+
+    $copyText = Invoke-BcdeditCommand -Arguments @(
+        "/copy",
+        "{bootmgr}",
+        "/d",
+        $InstallerBootDescription
+    )
+    if ($copyText -notmatch "(\{[0-9a-fA-F-]+\})") {
+        throw "Could not parse created firmware entry id from bcdedit output: $copyText"
+    }
+    $entryId = $Matches[1]
+
+    Invoke-BcdeditCommand -Arguments @(
+        "/set",
+        $entryId,
+        "device",
+        "partition=$InstallerDrive"
+    ) | Out-Null
+    Invoke-BcdeditCommand -Arguments @(
+        "/set",
+        $entryId,
+        "path",
+        $loaderPath
+    ) | Out-Null
+
+    foreach ($value in @(
+        "locale",
+        "inherit",
+        "default",
+        "resumeobject",
+        "toolsdisplayorder",
+        "timeout"
+    )) {
+        bcdedit /deletevalue $entryId $value 2>$null | Out-Null
+    }
+
+    Invoke-BcdeditCommand -Arguments @(
+        "/set",
+        "{fwbootmgr}",
+        "displayorder",
+        $entryId,
+        "/addfirst"
+    ) | Out-Null
+
+    $bootNumber = $null
+    for ($i = 0; $i -lt 10; $i++) {
+        $bootNumber = Get-FirmwareBootNumberByDescription -Description $InstallerBootDescription
+        if ($null -ne $bootNumber) {
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    if ($null -eq $bootNumber) {
+        throw "Windows created the BCD firmware entry, but no matching Boot#### variable was found."
+    }
+
+    $bootVariable = "Boot{0:X4}" -f $bootNumber
+    $originalLoadOption = Get-FirmwareVariableBytes -Name $bootVariable
+    if (-not $originalLoadOption) {
+        throw "Cannot read $bootVariable after bcdedit created the firmware entry."
+    }
+
+    $optionalDataLengthBefore = Get-EfiLoadOptionOptionalDataLength -Bytes $originalLoadOption
+    if ($optionalDataLengthBefore -lt 0) {
+        throw "Cannot parse $bootVariable load option created by Windows."
+    }
+
+    if ($optionalDataLengthBefore -gt 0) {
+        $cleanLoadOption = Remove-EfiLoadOptionOptionalData -Bytes $originalLoadOption
+        Set-FirmwareVariable -Name $bootVariable -Value $cleanLoadOption
+    }
+
+    $writtenLoadOption = Get-FirmwareVariableBytes -Name $bootVariable
+    $optionalDataLength = Get-EfiLoadOptionOptionalDataLength -Bytes $writtenLoadOption
+    if ($optionalDataLength -ne 0) {
+        throw "Clean UEFI load option verification failed for ${bootVariable}; optional data length is ${optionalDataLength}."
+    }
+
+    Set-FirmwareBootNumberFirst -BootNumber $bootNumber
+    try {
+        Remove-FirmwareVariable -Name "BootNext"
+    } catch {
+        # Best effort: BootNext may not exist.
+    }
+
+    Write-Log "One-time UEFI entry configured: $entryId / $bootVariable -> ${InstallerDrive}${loaderPath}" "Green"
 }
 
 if (-not (Test-Administrator)) {
@@ -640,54 +1635,44 @@ if ($Revert) {
 }
 
 if (-not $Force) {
-    $already = bcdedit /enum firmware 2>$null | Select-String -Pattern "refind"
+    $already = bcdedit /enum firmware 2>$null | Select-String -Pattern "Libertix UEFI Installer"
     if ($already) {
-        Write-Log "rEFInd entry detected. Use -Force to reinstall." "Yellow"
+        Write-Log "Libertix UEFI entry detected. Use -Force to recreate." "Yellow"
     }
 }
 
 try {
-    Install-Refind
+    Test-LibertixSecureBootCompatibility
+    Ensure-WindowsVolumeReadableFromLinux
+    Ensure-MintIsoOnWindows
 
-    if ($SkipDebian) {
-        $esp = Mount-Esp -Letter $EspLetter
-        try {
-            Write-RefindConfig -EspPath $esp -IncludeDebian:$false `
-                -DebianGuidD $null -DebianFsLabel $DebianLabel
-        } finally {
-            Dismount-Letter -Letter $EspLetter
-        }
-
-        Write-Log "Done (Windows entry only)." "Green"
+    if ($SkipInstaller) {
+        Write-Log "Done (installer partition skipped)." "Green"
         exit 0
     }
 
-    $info = New-OrReuseDebianPartition -SizeGB $DebianPartitionSizeGB
-    $drive = $info.Drive
-    $guidD = $info.GuidD
+    $info = New-OrReuseInstallerPartition -SizeGB $InstallerPartitionSizeGB
+    $drive = $info["Drive"]
+    $installerDiskNumber = [int]$info["DiskNumber"]
+    $installerPartitionNumber = [int]$info["PartitionNumber"]
 
-    Install-DebianIsoToPartition -PartitionDrive $drive
+    Install-LibertixIsoToPartition -PartitionDrive $drive
 
-    $esp = Mount-Esp -Letter $EspLetter
-    try {
-        Write-RefindConfig -EspPath $esp -IncludeDebian:$true `
-            -DebianGuidD $guidD -DebianFsLabel $DebianLabel
-    } finally {
-        Dismount-Letter -Letter $EspLetter
-    }
+    Set-LibertixUefiBootEntry `
+        -InstallerDrive $drive `
+        -InstallerDiskNumber $installerDiskNumber `
+        -InstallerPartitionNumber $installerPartitionNumber
 
-    Dismount-Letter -Letter $DebianLetter
+    Dismount-Letter -Letter ($drive.TrimEnd(":"))
 
     Write-Host ""
-    Write-Log "Complete. rEFInd menu: Windows + Debian Installer." "Green"
+    Write-Log "Complete. Next boot should start Libertix UEFI installer once." "Green"
     Write-Host ""
-    Write-Host "First boot (Secure Boot): enroll loader.efi via HashTool if prompted." `
+    Write-Host "First boot: signed shim/GRUB should start the Libertix live installer." `
         -ForegroundColor Yellow
 
-    $r = Read-Host "Restart now? (y/n)"
-    if ($r -match "^(y|Y)$") {
-        Restart-Computer -Force
-    }
+    Write-Log "Restarting now..." "Cyan"
+    Restart-Computer -Force
 } catch {
     Write-Log $_.Exception.Message "Red"
     Write-Log "Tip: you can run with -Revert to restore Windows boot." "Yellow"
