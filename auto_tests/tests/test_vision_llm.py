@@ -185,3 +185,79 @@ def test_install_progress_accepts_llm_json_without_visible_text(
 
     assert verdict.still_in_progress is True
     assert verdict.visible_text
+
+
+def test_install_progress_ignores_not_responding_during_active_download(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "iso_download_finished": False,
+            "installation_finished": False,
+            "reboot_prompt_visible": False,
+            "still_in_progress": True,
+            "error_visible": True,
+            "summary": "Libertix (Ne répond pas) pendant FileAlloc aria2.",
+            "visible_text": (
+                "Libertix (Ne répond pas). Downloading Linux ISO... 0%. "
+                "[FileAlloc:#c04 1.4GiB/2.8GiB(51%)] "
+                "aria2 Linux installer ISO: FILE: C:/Users/admin/AppData/Local/Temp/Libertix/mint.iso"
+            ),
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient(
+        "key", "https://example.test/v1", "model", 1
+    ).analyze_install_progress(image, "vm1", "Windows")
+
+    assert verdict.still_in_progress is True
+    assert verdict.error_visible is False
+
+
+def test_install_progress_ignores_finished_flags_during_bitlocker_decryption(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "iso_download_finished": True,
+            "installation_finished": True,
+            "reboot_prompt_visible": True,
+            "still_in_progress": False,
+            "error_visible": False,
+            "summary": "Fallback LLM: no strict JSON returned; final state is not confidently detected.",
+            "visible_text": (
+                "Déchiffrement de Windows C: 75%. "
+                "OperatingSystem C: 63,01 DecryptionInProgress 36. "
+                "Waiting for C: decryption... 12% encrypted."
+            ),
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient(
+        "key", "https://example.test/v1", "model", 1
+    ).analyze_install_progress(image, "vm3", "Windows 11 UEFI")
+
+    assert verdict.iso_download_finished is False
+    assert verdict.installation_finished is False
+    assert verdict.reboot_prompt_visible is False
+    assert verdict.still_in_progress is True

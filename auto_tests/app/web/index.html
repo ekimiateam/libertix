@@ -227,6 +227,10 @@
         <section class="panel stack">
           <h2>Automation</h2>
           <label>
+            Utilisateur Linux
+            <input id="linuxUsername" type="text" value="test" autocomplete="off" />
+          </label>
+          <label>
             Mot de passe Linux
             <input id="linuxPassword" type="password" value="linux" autocomplete="off" />
           </label>
@@ -321,6 +325,7 @@
     <script>
       const apiKeyInput = document.getElementById("apiKey");
       const sourceModeInput = document.getElementById("sourceMode");
+      const linuxUsernameInput = document.getElementById("linuxUsername");
       const linuxPasswordInput = document.getElementById("linuxPassword");
       const monitorIsoInput = document.getElementById("monitorIso");
       const vmList = document.getElementById("vmList");
@@ -332,11 +337,13 @@
 
       apiKeyInput.value = localStorage.getItem("libertix_api_key") || "";
       sourceModeInput.value = localStorage.getItem("libertix_source_mode") || "remote";
+      linuxUsernameInput.value = localStorage.getItem("libertix_linux_username") || "test";
       linuxPasswordInput.value = localStorage.getItem("libertix_linux_password") || "linux";
 
       document.getElementById("saveKey").addEventListener("click", () => {
         localStorage.setItem("libertix_api_key", apiKeyInput.value);
         localStorage.setItem("libertix_source_mode", sourceModeInput.value);
+        localStorage.setItem("libertix_linux_username", linuxUsernameInput.value);
         localStorage.setItem("libertix_linux_password", linuxPasswordInput.value);
         setStatus("Paramètres enregistrés dans le navigateur.", false);
       });
@@ -379,6 +386,7 @@
         return {
           ...requestBody(),
           apply,
+          linux_username: linuxUsernameInput.value || "test",
           linux_password: linuxPasswordInput.value || "linux",
           monitor_iso: monitorIsoInput.checked,
         };

@@ -52,5 +52,6 @@ class AutomationRequest(ValidationRequest):
     """
 
     apply: bool = Field(default=False, description="Run the full installer UI and click Apply")
+    linux_username: str = Field(default="test", min_length=1)
     linux_password: str = Field(default="linux", min_length=1)
     monitor_iso: bool = Field(default=True)

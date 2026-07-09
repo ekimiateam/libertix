@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shlex
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.clients.proxmox import ProxmoxClient
 from app.clients.ssh import SSHClient
@@ -157,18 +158,28 @@ class ResetService:
     def _restore_snapshots(
         self, locations: dict[int, str], vmids: Sequence[int], result: ResultBuilder
     ) -> None:
-        with self._proxmox() as proxmox:
-            for vmid in vmids:
-                if vmid not in locations:
-                    raise WorkflowError(
-                        "proxmox.guard",
-                        "VM hors garde ou localisation absente",
-                        details={"vmid": vmid},
-                    )
-                proxmox.rollback(locations[vmid], vmid, RESET_SNAPSHOT)
+        for vmid in vmids:
+            if vmid not in locations:
+                raise WorkflowError(
+                    "proxmox.guard",
+                    "VM hors garde ou localisation absente",
+                    details={"vmid": vmid},
+                )
+
+        def restore_one(vmid: int) -> tuple[int, str]:
+            node = locations[vmid]
+            with self._proxmox() as proxmox:
+                proxmox.rollback(node, vmid, RESET_SNAPSHOT)
+            return vmid, node
+
+        with ThreadPoolExecutor(max_workers=len(vmids)) as executor:
+            futures = {executor.submit(restore_one, vmid): vmid for vmid in vmids}
+            for future in as_completed(futures):
+                vmid, node = future.result()
                 result.ok(
                     "proxmox.rollback",
                     "Snapshot restauré avec succès",
                     target=str(vmid),
+                    node=node,
                     snapshot=RESET_SNAPSHOT,
                 )

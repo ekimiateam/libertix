@@ -10,6 +10,13 @@ param(
     [string]$Aria2ExePath = "",
     [ValidateRange(1, 5)]
     [int]$Aria2Connections = 5,
+    [string]$LinuxUsername = "",
+    [string]$LinuxPassword = "",
+    [string]$LinuxComputerName = "",
+    [string]$SystemLang = "en_US.UTF-8",
+    [string]$KeyboardLayout = "us",
+    [string]$KeyboardModel = "pc105",
+    [string]$Timezone = "UTC",
     [switch]$InsecureTls = $true
 )
 
@@ -62,7 +69,7 @@ public class ServerCertificateValidationCallback {
 # Downloads
 $InstallerIsoUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/libertix-installer-uefi.iso"
 $InstallerIsoName = "libertix-installer-uefi.iso"
-$InstallerIsoSha256 = "56920ded95e8bdda0210542e23a133f2040c2c6ac4b2112eb8c17c1abef4e9ad"
+$InstallerIsoSha256 = "8568a36b2a63f509e3bcd9788b0d8c6f4f41d0a0448d2bcb574a73154fa18822"
 $MintIsoUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/mint.iso"
 $MintIsoPath = "$env:SystemDrive\mint.iso"
 $Aria2ZipName = "aria2-1.37.0-win-64bit-build1.zip"
@@ -75,6 +82,7 @@ $EspLetter = "Y"
 $InstallerLetter = "X"
 $InstallerLabel = "LIBERTIXEFI"
 $InstallerBootDescription = "Libertix UEFI Installer"
+$InstallerEspDirectory = "EFI\LibertixInstaller"
 
 function Write-Log {
     param(
@@ -84,6 +92,74 @@ function Write-Log {
     )
 
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')] $Message" -ForegroundColor $Color
+}
+
+function ConvertTo-ShellQuotedValue {
+    param([AllowNull()][string]$Value)
+
+    if ($null -eq $Value) {
+        $Value = ""
+    }
+    if ($Value -match "[`r`n]") {
+        throw "Config values cannot contain newlines."
+    }
+
+    return "'" + $Value.Replace("'", "'\''") + "'"
+}
+
+function Test-LibertixLiveConfig {
+    foreach ($item in @(
+        @{ Name = "LinuxUsername"; Value = $LinuxUsername },
+        @{ Name = "LinuxPassword"; Value = $LinuxPassword },
+        @{ Name = "LinuxComputerName"; Value = $LinuxComputerName },
+        @{ Name = "SystemLang"; Value = $SystemLang },
+        @{ Name = "KeyboardLayout"; Value = $KeyboardLayout },
+        @{ Name = "Timezone"; Value = $Timezone }
+    )) {
+        if ([string]::IsNullOrWhiteSpace([string]$item.Value)) {
+            throw "Missing live installer config value: $($item.Name)"
+        }
+    }
+}
+
+function Write-LibertixLiveConfig {
+    param(
+        [Parameter(Mandatory = $true)][string]$PartitionDrive
+    )
+
+    if (-not (Test-Path "$PartitionDrive\")) {
+        throw "Cannot write live config because partition is not mounted: $PartitionDrive"
+    }
+
+    $configPath = Join-Path $PartitionDrive "config.txt"
+    if (Test-Path $configPath) {
+        attrib -R -S -H $configPath 2>$null
+        Remove-Item -Path $configPath -Force
+    }
+
+    $configLines = @(
+        "SYSTEM_LANG=$(ConvertTo-ShellQuotedValue $SystemLang)",
+        "KEYBOARD_LAYOUT=$(ConvertTo-ShellQuotedValue $KeyboardLayout)",
+        "KEYBOARD_MODEL=$(ConvertTo-ShellQuotedValue $KeyboardModel)",
+        "TIMEZONE=$(ConvertTo-ShellQuotedValue $Timezone)",
+        "USERNAME=$(ConvertTo-ShellQuotedValue $LinuxUsername)",
+        "PASSWORD=$(ConvertTo-ShellQuotedValue $LinuxPassword)",
+        "COMPUTER_NAME=$(ConvertTo-ShellQuotedValue $LinuxComputerName)",
+        "ISO_FILENAME=$(ConvertTo-ShellQuotedValue 'mint.iso')",
+        "ISO_WINDOWS_PATH=$(ConvertTo-ShellQuotedValue $MintIsoPath)",
+        "LINUX_SIZE_GB=$(ConvertTo-ShellQuotedValue ([string]$InstallerPartitionSizeGB))"
+    )
+
+    Set-Content -Path $configPath -Value $configLines -Encoding ASCII
+
+    $written = Get-Content -Path $configPath -Raw -ErrorAction Stop
+    foreach ($requiredKey in @("USERNAME=", "PASSWORD=", "COMPUTER_NAME=", "ISO_WINDOWS_PATH=", "LINUX_SIZE_GB=")) {
+        if ($written -notmatch [regex]::Escape($requiredKey)) {
+            throw "Live config verification failed; missing $requiredKey in $configPath"
+        }
+    }
+
+    Write-Log "Live config written to $configPath for user '$LinuxUsername'." "Green"
 }
 
 function Test-Administrator {
@@ -609,12 +685,48 @@ function Remove-LibertixInstallerPartitionIfPresent {
 
     Write-Log "Removing $InstallerLabel partition on disk $($partition.DiskNumber), partition $($partition.PartitionNumber)..." "Cyan"
     Dismount-Letter -Letter $letter
-    Remove-Partition `
-        -DiskNumber $partition.DiskNumber `
-        -PartitionNumber $partition.PartitionNumber `
-        -Confirm:$false `
-        -ErrorAction Stop
+    try {
+        Remove-Partition `
+            -DiskNumber $partition.DiskNumber `
+            -PartitionNumber $partition.PartitionNumber `
+            -Confirm:$false `
+            -ErrorAction Stop
+    } catch {
+        Write-Log "PowerShell could not remove $InstallerLabel partition; trying diskpart fallback..." "Yellow"
+        Invoke-DiskpartScript -ScriptText @"
+select disk $($partition.DiskNumber)
+select partition $($partition.PartitionNumber)
+delete partition override
+exit
+"@
+    }
 
+    Assert-LibertixInstallerPartitionRemoved
+    Extend-CDriveToMaximum
+}
+
+function Test-LibertixInstallerPartitionPresent {
+    $volume = Get-Volume -ErrorAction SilentlyContinue |
+        Where-Object { $_.FileSystemLabel -eq $InstallerLabel } |
+        Select-Object -First 1
+    if ($volume) {
+        return $true
+    }
+
+    $cim = Get-CimInstance Win32_Volume -Filter "Label='$InstallerLabel'" `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    return ($null -ne $cim)
+}
+
+function Assert-LibertixInstallerPartitionRemoved {
+    Start-Sleep -Seconds 1
+    if (Test-LibertixInstallerPartitionPresent) {
+        throw "$InstallerLabel partition is still present after revert attempt."
+    }
+}
+
+function Extend-CDriveToMaximum {
     try {
         $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
         $cPartition = Get-Partition -DriveLetter C -ErrorAction Stop
@@ -623,7 +735,16 @@ function Remove-LibertixInstallerPartitionIfPresent {
             Resize-Partition -DriveLetter C -Size $supported.SizeMax -ErrorAction Stop
         }
     } catch {
-        Write-Log "Could not extend C: automatically: $($_.Exception.Message)" "Yellow"
+        Write-Log "PowerShell could not extend C:; trying diskpart fallback..." "Yellow"
+        try {
+            Invoke-DiskpartScript -ScriptText @"
+select volume C
+extend
+exit
+"@
+        } catch {
+            throw "Could not extend C: during revert: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -635,8 +756,15 @@ function Set-NativeUefiBootOrderOnce {
         [Parameter(Mandatory = $true)][string]$LoaderPath
     )
 
-    $driveLetter = $InstallerDrive.TrimEnd(":")
-    $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction SilentlyContinue
+    $driveLetter = ""
+    if (-not [string]::IsNullOrWhiteSpace($InstallerDrive)) {
+        $driveLetter = $InstallerDrive.Substring(0, 1)
+    }
+
+    $partition = $null
+    if (-not [string]::IsNullOrWhiteSpace($driveLetter)) {
+        $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction SilentlyContinue
+    }
     if (-not $partition) {
         $partition = Get-Partition `
             -DiskNumber $InstallerDiskNumber `
@@ -802,6 +930,89 @@ exit
     }
 
     return "${Letter}:"
+}
+
+function Get-WindowsEspPartition {
+    $winPart = Get-Partition -DriveLetter C -ErrorAction Stop
+    $espPart =
+        Get-Partition -DiskNumber $winPart.DiskNumber -ErrorAction Stop |
+        Where-Object {
+            $_.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
+        } |
+        Select-Object -First 1
+
+    if (-not $espPart) {
+        throw "ESP not found on disk $($winPart.DiskNumber)."
+    }
+
+    return $espPart
+}
+
+function Remove-LibertixTemporaryEspFiles {
+    param([Parameter(Mandatory = $true)][string]$EspDrive)
+
+    $path = Join-Path $EspDrive $InstallerEspDirectory
+    if (Test-Path $path) {
+        Write-Log "Removing temporary ESP boot directory: $InstallerEspDirectory" "Cyan"
+        Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
+    }
+}
+
+function Install-LibertixTemporaryBootloaderOnEsp {
+    param(
+        [Parameter(Mandatory = $true)][string]$EspDrive,
+        [Parameter(Mandatory = $true)][string]$InstallerDrive
+    )
+
+    if (-not (Test-Path "$EspDrive\")) {
+        throw "Cannot install temporary bootloader; ESP is not mounted: $EspDrive"
+    }
+    if (-not (Test-Path "$InstallerDrive\")) {
+        throw "Cannot install temporary bootloader; installer partition is not mounted: $InstallerDrive"
+    }
+
+    $destination = Join-Path $EspDrive $InstallerEspDirectory
+    Remove-LibertixTemporaryEspFiles -EspDrive $EspDrive
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+
+    $sourceBoot = Join-Path $InstallerDrive "EFI\BOOT"
+    $bootx64 = Join-Path $sourceBoot "BOOTX64.EFI"
+    $grubx64 = Join-Path $sourceBoot "grubx64.efi"
+    $mmx64 = Join-Path $sourceBoot "mmx64.efi"
+    foreach ($path in @($bootx64, $grubx64, $mmx64)) {
+        if (-not (Test-Path $path)) {
+            throw "Installer EFI file not found before ESP copy: $path"
+        }
+    }
+
+    Copy-Item -LiteralPath $bootx64 -Destination (Join-Path $destination "BOOTX64.EFI") -Force
+    Copy-Item -LiteralPath $grubx64 -Destination (Join-Path $destination "grubx64.efi") -Force
+    Copy-Item -LiteralPath $mmx64 -Destination (Join-Path $destination "mmx64.efi") -Force
+
+    $grubConfig = @"
+set default=0
+set timeout=0
+set timeout_style=hidden
+set hidden_timeout=0
+set hidden_timeout_quiet=true
+
+search --no-floppy --label $InstallerLabel --set=root
+
+menuentry "Install Linux Mint (Automatic)" {
+    linux /live/vmlinuz boot=live toram components quiet silent loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
+    initrd /live/initrd.img
+}
+"@
+    Set-Content -Path (Join-Path $destination "grub.cfg") -Value $grubConfig -Encoding ASCII
+
+    foreach ($relativePath in @("BOOTX64.EFI", "grubx64.efi", "mmx64.efi", "grub.cfg")) {
+        $fullPath = Join-Path $destination $relativePath
+        if (-not (Test-Path $fullPath) -or (Get-Item $fullPath).Length -le 0) {
+            throw "Temporary ESP bootloader verification failed: $fullPath"
+        }
+    }
+
+    Write-Log "Temporary UEFI loader installed on Windows ESP: $InstallerEspDirectory" "Green"
 }
 
 function Dismount-Letter {
@@ -1248,31 +1459,53 @@ function Ensure-WindowsVolumeReadableFromLinux {
     }
 
     if ($bitlockerVolume) {
-        if ($bitlockerVolume.VolumeStatus -eq "FullyDecrypted") {
+        if (Test-BitLockerVolumeReadable -Volume $bitlockerVolume) {
             Write-Log "Windows C: is already readable from Linux." "Green"
             return
         }
 
         Write-Log "Disabling BitLocker/device encryption on C: before Linux live boot..." "Cyan"
-        Disable-BitLocker -MountPoint "C:" -ErrorAction Stop
+        Disable-BitLocker -MountPoint "C:" -ErrorAction Continue
+        manage-bde -off C: 2>&1 | Out-Null
 
-        $deadline = (Get-Date).AddMinutes(90)
-        while ((Get-Date) -lt $deadline) {
+        $maxDecryptionWait = [TimeSpan]::FromHours(6)
+        $decryptionTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        $attempt = 0
+        $lastEncryptedPercent = $null
+        $samePercentCount = 0
+        while ($decryptionTimer.Elapsed -lt $maxDecryptionWait) {
             Start-Sleep -Seconds 10
+            $attempt++
             $bitlockerVolume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
-            if ($bitlockerVolume.VolumeStatus -eq "FullyDecrypted") {
+            if (Test-BitLockerVolumeReadable -Volume $bitlockerVolume) {
                 Write-Log "Windows C: decrypted." "Green"
                 return
             }
 
             if ($null -ne $bitlockerVolume.EncryptionPercentage) {
-                Write-Log "Waiting for C: decryption... $($bitlockerVolume.EncryptionPercentage)% encrypted" "Yellow"
+                $encryptedPercent = [int]$bitlockerVolume.EncryptionPercentage
+                if ($null -ne $lastEncryptedPercent -and $encryptedPercent -eq $lastEncryptedPercent) {
+                    $samePercentCount++
+                } else {
+                    $samePercentCount = 0
+                    $lastEncryptedPercent = $encryptedPercent
+                }
+                Write-Log "Waiting for C: decryption... $encryptedPercent% encrypted, protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
             } else {
-                Write-Log "Waiting for C: decryption... status=$($bitlockerVolume.VolumeStatus)" "Yellow"
+                Write-Log "Waiting for C: decryption... status=$($bitlockerVolume.VolumeStatus), protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
+            }
+
+            if (($attempt % 12) -eq 0 -or $samePercentCount -ge 12) {
+                Write-Log "Reasserting BitLocker decryption request for C:..." "Yellow"
+                Disable-BitLocker -MountPoint "C:" -ErrorAction Continue
+                manage-bde -off C: 2>&1 | Out-Null
+                $samePercentCount = 0
             }
 
         }
-        throw "Timed out waiting for C: BitLocker decryption."
+        $decryptionTimer.Stop()
+        $finalStatus = manage-bde -status C: 2>&1 | Out-String
+        throw "Timed out waiting for C: BitLocker decryption. Final status: $finalStatus"
     }
 
     $statusText = ""
@@ -1288,6 +1521,18 @@ function Ensure-WindowsVolumeReadableFromLinux {
         manage-bde -off C: 2>&1 | Out-Null
         Start-Sleep -Seconds 5
     }
+}
+
+function Test-BitLockerVolumeReadable {
+    param([Parameter(Mandatory = $true)]$Volume)
+
+    if ($Volume.VolumeStatus -eq "FullyDecrypted") {
+        return $true
+    }
+    if ($null -ne $Volume.EncryptionPercentage -and [int]$Volume.EncryptionPercentage -le 0) {
+        return $true
+    }
+    return $false
 }
 
 
@@ -1310,6 +1555,8 @@ function Invoke-Revert {
             Out-Null
         bcdedit /set "{bootmgr}" description "Windows Boot Manager" 2>$null |
             Out-Null
+        bcdedit /deletevalue "{bootmgr}" bootsequence 2>$null | Out-Null
+        bcdedit /deletevalue "{fwbootmgr}" bootsequence 2>$null | Out-Null
 
         Remove-BcdFirmwareEntriesByDescription -Descriptions @(
             $InstallerBootDescription,
@@ -1376,18 +1623,22 @@ function New-OrReuseInstallerPartition {
         throw "Cannot shrink C: by ${SizeGB}GB (max ~$( [math]::Round($maxShrink / 1GB, 1) ) GB)."
     }
 
-    Write-Log "Creating ${SizeGB}GB EFI FAT32 partition '$InstallerLabel'..." "Cyan"
+    Write-Log "Creating ${SizeGB}GB FAT32 installer partition '$InstallerLabel'..." "Cyan"
 
     Resize-Partition -DriveLetter C -Size ($cPart.Size - $shrinkBytes)
     Start-Sleep -Seconds 2
 
-    Invoke-DiskpartScript -ScriptText @"
-select disk $($cPart.DiskNumber)
-create partition efi size=$sizeMB
-format fs=fat32 quick label=$InstallerLabel
-assign letter=$InstallerLetter
-exit
-"@
+    $newPartition = New-Partition `
+        -DiskNumber $cPart.DiskNumber `
+        -Size $shrinkBytes `
+        -DriveLetter $InstallerLetter
+
+    Format-Volume `
+        -DriveLetter $InstallerLetter `
+        -FileSystem FAT32 `
+        -NewFileSystemLabel $InstallerLabel `
+        -Confirm:$false `
+        -Force | Out-Null
 
     $tries = 0
     while (-not (Test-Path "${InstallerLetter}:\") -and $tries -lt 15) {
@@ -1399,13 +1650,13 @@ exit
         throw "Failed to create/assign ${InstallerLetter}: for Libertix installer partition."
     }
 
-    $newPartition = Get-LibertixInstallerPartition -DriveLetter $InstallerLetter
-    if (-not $newPartition) {
+    $verifiedPartition = Get-LibertixInstallerPartition -DriveLetter $InstallerLetter
+    if (-not $verifiedPartition) {
         throw "Libertix installer partition was created, but its partition object could not be resolved."
     }
     $guid = $null
-    if ($newPartition.Guid) {
-        $guid = Get-GuidDLower -Guid $newPartition.Guid
+    if ($verifiedPartition.Guid) {
+        $guid = Get-GuidDLower -Guid $verifiedPartition.Guid
     }
 
     Ensure-VolumeNotEncrypted -DriveLetter $InstallerLetter
@@ -1413,8 +1664,8 @@ exit
     return @{
         Drive = "${InstallerLetter}:"
         GuidD = $guid
-        DiskNumber = $newPartition.DiskNumber
-        PartitionNumber = $newPartition.PartitionNumber
+        DiskNumber = $verifiedPartition.DiskNumber
+        PartitionNumber = $verifiedPartition.PartitionNumber
     }
 }
 
@@ -1505,14 +1756,20 @@ function Set-LibertixUefiBootEntry {
         }
     }
 
-    $loaderPath = "\EFI\debian\shimx64.efi"
-    $installerShim = Join-Path $InstallerDrive "EFI\debian\shimx64.efi"
-    $installerGrub = Join-Path $InstallerDrive "EFI\debian\grubx64.efi"
-    $installerMok = Join-Path $InstallerDrive "EFI\debian\mmx64.efi"
-    foreach ($path in @($installerShim, $installerGrub, $installerMok)) {
-        if (-not (Test-Path $path)) {
-            throw "Installer EFI file not found: $path"
+    $espDrive = $null
+    $espPartition = Get-WindowsEspPartition
+    $loaderPath = "\$InstallerEspDirectory\BOOTX64.EFI"
+    try {
+        $espDrive = Mount-Esp -Letter $EspLetter
+        Install-LibertixTemporaryBootloaderOnEsp -EspDrive $espDrive -InstallerDrive $InstallerDrive
+    } finally {
+        if ($espDrive) {
+            Dismount-Letter -Letter ($espDrive.Substring(0, 1))
         }
+    }
+
+    if (-not $espPartition) {
+        throw "Windows ESP partition could not be resolved for UEFI boot setup."
     }
 
     powercfg /h off 2>&1 | Out-Null
@@ -1524,6 +1781,8 @@ set timeout=0
 set timeout_style=hidden
 set hidden_timeout=0
 set hidden_timeout_quiet=true
+
+search --no-floppy --label $InstallerLabel --set=root
 
 menuentry "Install Linux Mint (Automatic)" {
     linux /live/vmlinuz boot=live toram components quiet silent loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
@@ -1546,93 +1805,22 @@ menuentry "Install Linux Mint (Automatic)" {
     }
 
     Remove-LibertixTemporaryFirmwareEntries
+    bcdedit /deletevalue "{bootmgr}" bootsequence 2>$null | Out-Null
+    bcdedit /deletevalue "{fwbootmgr}" bootsequence 2>$null | Out-Null
 
-    $copyText = Invoke-BcdeditCommand -Arguments @(
-        "/copy",
-        "{bootmgr}",
-        "/d",
-        $InstallerBootDescription
-    )
-    if ($copyText -notmatch "(\{[0-9a-fA-F-]+\})") {
-        throw "Could not parse created firmware entry id from bcdedit output: $copyText"
-    }
-    $entryId = $Matches[1]
-
-    Invoke-BcdeditCommand -Arguments @(
-        "/set",
-        $entryId,
-        "device",
-        "partition=$InstallerDrive"
-    ) | Out-Null
-    Invoke-BcdeditCommand -Arguments @(
-        "/set",
-        $entryId,
-        "path",
-        $loaderPath
-    ) | Out-Null
-
-    foreach ($value in @(
-        "locale",
-        "inherit",
-        "default",
-        "resumeobject",
-        "toolsdisplayorder",
-        "timeout"
-    )) {
-        bcdedit /deletevalue $entryId $value 2>$null | Out-Null
+    $bootVariable = Set-NativeUefiBootOrderOnce `
+        -InstallerDrive "${EspLetter}:" `
+        -InstallerDiskNumber $espPartition.DiskNumber `
+        -InstallerPartitionNumber $espPartition.PartitionNumber `
+        -LoaderPath $loaderPath
+    if ($bootVariable -notmatch "^Boot([0-9A-Fa-f]{4})$") {
+        throw "Unexpected native UEFI boot variable name: $bootVariable"
     }
 
-    Invoke-BcdeditCommand -Arguments @(
-        "/set",
-        "{fwbootmgr}",
-        "displayorder",
-        $entryId,
-        "/addfirst"
-    ) | Out-Null
+    $bootNumber = [Convert]::ToUInt16($Matches[1], 16)
+    Set-FirmwareVariable -Name "BootNext" -Value (ConvertTo-BootOrderBytes -Order @($bootNumber))
 
-    $bootNumber = $null
-    for ($i = 0; $i -lt 10; $i++) {
-        $bootNumber = Get-FirmwareBootNumberByDescription -Description $InstallerBootDescription
-        if ($null -ne $bootNumber) {
-            break
-        }
-        Start-Sleep -Seconds 1
-    }
-
-    if ($null -eq $bootNumber) {
-        throw "Windows created the BCD firmware entry, but no matching Boot#### variable was found."
-    }
-
-    $bootVariable = "Boot{0:X4}" -f $bootNumber
-    $originalLoadOption = Get-FirmwareVariableBytes -Name $bootVariable
-    if (-not $originalLoadOption) {
-        throw "Cannot read $bootVariable after bcdedit created the firmware entry."
-    }
-
-    $optionalDataLengthBefore = Get-EfiLoadOptionOptionalDataLength -Bytes $originalLoadOption
-    if ($optionalDataLengthBefore -lt 0) {
-        throw "Cannot parse $bootVariable load option created by Windows."
-    }
-
-    if ($optionalDataLengthBefore -gt 0) {
-        $cleanLoadOption = Remove-EfiLoadOptionOptionalData -Bytes $originalLoadOption
-        Set-FirmwareVariable -Name $bootVariable -Value $cleanLoadOption
-    }
-
-    $writtenLoadOption = Get-FirmwareVariableBytes -Name $bootVariable
-    $optionalDataLength = Get-EfiLoadOptionOptionalDataLength -Bytes $writtenLoadOption
-    if ($optionalDataLength -ne 0) {
-        throw "Clean UEFI load option verification failed for ${bootVariable}; optional data length is ${optionalDataLength}."
-    }
-
-    Set-FirmwareBootNumberFirst -BootNumber $bootNumber
-    try {
-        Remove-FirmwareVariable -Name "BootNext"
-    } catch {
-        # Best effort: BootNext may not exist.
-    }
-
-    Write-Log "One-time UEFI entry configured: $entryId / $bootVariable -> ${InstallerDrive}${loaderPath}" "Green"
+    Write-Log "One-time native UEFI entry configured: $bootVariable -> ESP:$loaderPath" "Green"
 }
 
 if (-not (Test-Administrator)) {
@@ -1653,6 +1841,7 @@ if (-not $Force) {
 }
 
 try {
+    Test-LibertixLiveConfig
     Test-LibertixSecureBootCompatibility
     Ensure-WindowsVolumeReadableFromLinux
     Ensure-MintIsoOnWindows
@@ -1668,6 +1857,7 @@ try {
     $installerPartitionNumber = [int]$info["PartitionNumber"]
 
     Install-LibertixIsoToPartition -PartitionDrive $drive
+    Write-LibertixLiveConfig -PartitionDrive $drive
 
     Set-LibertixUefiBootEntry `
         -InstallerDrive $drive `
@@ -1686,6 +1876,12 @@ try {
     Restart-Computer -Force
 } catch {
     Write-Log $_.Exception.Message "Red"
-    Write-Log "Tip: you can run with -Revert to restore Windows boot." "Yellow"
+    Write-Log "Error during preparation; running automatic revert..." "Yellow"
+    try {
+        Invoke-Revert
+    } catch {
+        Write-Log "Automatic revert failed: $($_.Exception.Message)" "Red"
+        Write-Log "Tip: you can run with -Revert to restore Windows boot." "Yellow"
+    }
     exit 1
 }

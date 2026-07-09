@@ -144,6 +144,9 @@ def _contains_install_blocker(content: str) -> bool:
             "impossible de charger",
             "no iso url found",
             "failed to copy iso",
+            "installation échouée",
+            "installation echouee",
+            "installer-failed",
         )
     )
 
@@ -183,6 +186,18 @@ def _contains_active_install_progress(content: str) -> bool:
         marker in text for marker in ("downloading", "télécharg", "linux iso", "mint.iso")
     ):
         return True
+    if any(
+        marker in text
+        for marker in (
+            "decryptioninprogress",
+            "decryption in progress",
+            "décryptage en cours",
+            "dechiffrement de windows",
+            "déchiffrement de windows",
+            "waiting for c: decryption",
+        )
+    ):
+        return True
     return any(
         marker in text
         for marker in (
@@ -191,6 +206,24 @@ def _contains_active_install_progress(content: str) -> bool:
             "extracting system",
             "stage: 120-unsquashfs",
             "stage: 130-target-system-config",
+            "extraction de mint",
+            "configuration du systeme installe",
+            "configuration du système installé",
+        )
+    )
+
+
+def _contains_live_install_success(content: str) -> bool:
+    """Detect the final live ISO success screen without relying on LLM wording."""
+
+    text = content.lower()
+    return any(
+        marker in text
+        for marker in (
+            "installer-success",
+            "installation terminée et vérifiée",
+            "installation terminee et verifiee",
+            "libertix_install_success=true",
         )
     )
 
@@ -375,7 +408,35 @@ class VisionLLMClient:
                     data = self._progress_from_reasoning_text(content)
                 if isinstance(data, dict) and "visible_text" not in data:
                     data["visible_text"] = content.replace("\n", " ").strip()[:1200]
-                return InstallProgressVerdict.model_validate(data)
+                verdict = InstallProgressVerdict.model_validate(data)
+                if (
+                    verdict.error_visible
+                    and verdict.active_install_progress_visible
+                    and not verdict.blocking_problem_visible
+                ):
+                    verdict = verdict.model_copy(
+                        update={
+                            "error_visible": False,
+                            "summary": (
+                                f"{verdict.summary} "
+                                "Erreur visuelle ignoree: une progression active est visible."
+                            ),
+                        }
+                    )
+                if verdict.done and verdict.active_install_progress_visible:
+                    verdict = verdict.model_copy(
+                        update={
+                            "iso_download_finished": False,
+                            "installation_finished": False,
+                            "reboot_prompt_visible": False,
+                            "still_in_progress": True,
+                            "summary": (
+                                f"{verdict.summary} "
+                                "Verdict de fin ignore: une progression active est visible."
+                            ),
+                        }
+                    )
+                return verdict
             except httpx.HTTPStatusError as exc:
                 if (
                     exc.response.status_code in (429, 500, 502, 503, 504)
@@ -513,7 +574,12 @@ class VisionLLMClient:
         if active_iso_copy:
             iso_finished = False
 
-        installation_finished = conclusion_true("installation_finished") or final_reboot_prompt
+        live_install_success = _contains_live_install_success(analysis_source)
+        installation_finished = (
+            conclusion_true("installation_finished")
+            or final_reboot_prompt
+            or live_install_success
+        )
         if any(
             marker in text
             for marker in (
@@ -538,10 +604,10 @@ class VisionLLMClient:
         ):
             reboot_prompt_visible = False
 
-        if final_reboot_prompt:
+        if final_reboot_prompt or live_install_success:
             iso_finished = True
             installation_finished = True
-            reboot_prompt_visible = True
+            reboot_prompt_visible = final_reboot_prompt
             active_install_progress = False
 
         if active_install_progress:

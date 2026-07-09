@@ -161,17 +161,41 @@ namespace Libertix.Pages
             }
 
             int installerSizeGB = Math.Max(20, (int)Math.Round(_linuxSizeGB));
+            if (!(App.Current.Properties["AccountInfo"] is AccountInfo account) ||
+                string.IsNullOrWhiteSpace(account.Username) ||
+                string.IsNullOrWhiteSpace(account.Password) ||
+                string.IsNullOrWhiteSpace(account.ComputerName))
+            {
+                Log("ERROR: Linux account configuration is missing.");
+                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                BackButton.IsEnabled = true;
+                _isRunning = false;
+                return;
+            }
+
+            string systemLang = Localization.GetLinuxLocale();
+            string keyboardLayout = Localization.GetKeyboardLayout();
+            string timezone = Localization.GetWindowsTimezoneAsLinux();
+
             UpdateProgress(5, "Préparation de l'installation UEFI...");
             Log($"UEFI installer partition size: {installerSizeGB}GB");
             Log($"Filepool: {FilepoolConfig.BaseUrl}");
             Log($"aria2: bundled, max {Aria2MaxConnections} connections");
+            Log($"Linux account: {account.Username}");
 
             string powershell = ResolveSystemExecutable("WindowsPowerShell\\v1.0\\powershell.exe", "powershell.exe");
             string arguments =
                 $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" " +
                 $"-Force -InstallerPartitionSizeGB {installerSizeGB} " +
                 $"-FilepoolBaseUrl \"{FilepoolConfig.BaseUrl}\" " +
-                $"-Aria2ExePath \"{aria2Path}\" -Aria2Connections {Aria2MaxConnections}";
+                $"-Aria2ExePath \"{aria2Path}\" -Aria2Connections {Aria2MaxConnections} " +
+                $"-LinuxUsername {QuoteArgument(account.Username)} " +
+                $"-LinuxPassword {QuoteArgument(account.Password)} " +
+                $"-LinuxComputerName {QuoteArgument(account.ComputerName)} " +
+                $"-SystemLang {QuoteArgument(systemLang)} " +
+                $"-KeyboardLayout {QuoteArgument(keyboardLayout)} " +
+                $"-KeyboardModel pc105 " +
+                $"-Timezone {QuoteArgument(timezone)}";
 
             int exitCode = await RunStreamingProcessAsync(
                 powershell,
@@ -510,7 +534,11 @@ namespace Libertix.Pages
             bool configSuccess = await WriteConfigToFat32Async();
             if (!configSuccess)
             {
-                Log("WARNING: Failed to write config.txt, will use defaults");
+                Log("ERROR: Failed to write config.txt");
+                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                BackButton.IsEnabled = true;
+                _isRunning = false;
+                return;
             }
 
             // Step 8: GRUB4DOS is only a temporary Windows Boot Manager bridge.
@@ -778,6 +806,7 @@ namespace Libertix.Pages
                         $"TIMEZONE={ShellQuoteValue(timezone)}",
                         $"USERNAME={ShellQuoteValue(username)}",
                         $"PASSWORD={ShellQuoteValue(password)}",
+                        $"COMPUTER_NAME={ShellQuoteValue(computerName)}",
                         $"ISO_FILENAME={ShellQuoteValue(isoFilename)}",
                         $"ISO_WINDOWS_PATH={ShellQuoteValue(isoWindowsPath)}",
                         $"LINUX_SIZE_GB={ShellQuoteValue(_linuxSizeGB.ToString("F0"))}"

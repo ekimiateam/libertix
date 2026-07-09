@@ -119,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     AutomationService(configured).run,
                     selectors,
                     apply=request.apply,
+                    linux_username=request.linux_username,
                     linux_password=request.linux_password,
                     monitor_iso=request.monitor_iso,
                     source=request.source,
@@ -159,6 +160,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         result = AutomationService(configured).run(
                             selectors,
                             apply=request.apply,
+                            linux_username=request.linux_username,
                             linux_password=request.linux_password,
                             monitor_iso=request.monitor_iso,
                             source=request.source,

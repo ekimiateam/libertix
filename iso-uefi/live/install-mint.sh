@@ -268,12 +268,32 @@ debug_disk_state() {
 
 recovery_geometry() {
     local disk="$1"
-    local part_table part ptype plabel num
+    local part_table line dev num start size end type part ptype plabel layout
 
     part_table="$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print $6}')"
     if [ "$part_table" = "msdos" ]; then
         parted -sm "$disk" unit s print 2>/dev/null | awk -F: '$1=="4"{print $1":"$2":"$3":"$5":"$6; exit}'
         return 0
+    fi
+
+    if command -v sfdisk >/dev/null 2>&1; then
+        while IFS= read -r line; do
+            case "$line" in
+                "$disk"*":"*"type="*)
+                    type="$(printf '%s\n' "$line" | sed -n 's/.*type=\([^, ]*\).*/\1/p' | tr '[:upper:]' '[:lower:]')"
+                    [ "$type" = "de94bba4-06d1-4d40-a16a-bfd50179d6ac" ] || continue
+                    dev="${line%% :*}"
+                    num="$(partition_number "$dev")"
+                    start="$(printf '%s\n' "$line" | sed -n 's/.*start=[[:space:]]*\([0-9]*\).*/\1/p')"
+                    size="$(printf '%s\n' "$line" | sed -n 's/.*size=[[:space:]]*\([0-9]*\).*/\1/p')"
+                    if [ -n "$num" ] && [ -n "$start" ] && [ -n "$size" ]; then
+                        end="$((start + size - 1))"
+                        echo "$num:${start}s:${end}s:${size}s:$type"
+                        return 0
+                    fi
+                    ;;
+            esac
+        done < <(sfdisk -d "$disk" 2>/dev/null || true)
     fi
 
     while read -r part; do
@@ -282,22 +302,67 @@ recovery_geometry() {
         plabel="$(lsblk -dnro PARTLABEL "$part" 2>/dev/null || true)"
         if [ "$ptype" = "de94bba4-06d1-4d40-a16a-bfd50179d6ac" ] || echo "$plabel" | grep -qi "recovery"; then
             num="$(partition_number "$part")"
-            parted -sm "$disk" unit s print 2>/dev/null | awk -F: -v n="$num" '$1==n{print $1":"$2":"$3":"$5":"$6; exit}'
+            layout="$(parted -sm "$disk" unit s print 2>/dev/null | awk -F: -v n="$num" '$1==n{print $1":"$2":"$3":"$4; exit}')"
+            [ -n "$layout" ] && echo "$layout:$ptype"
             return 0
         fi
     done < <(partitions_of_disk "$disk")
 }
 
+recovery_start_sector() {
+    local geometry start
+    geometry="$(recovery_geometry "$1")"
+    [ -n "$geometry" ] || return 0
+    start="$(printf '%s\n' "$geometry" | awk -F: '{print $2; exit}')"
+    start="${start%s}"
+    [ -n "$start" ] && printf '%s\n' "$start"
+}
+
+normalize_recovery_geometry() {
+    local geometry="$1"
+    local num start end size type
+
+    [ -n "$geometry" ] || return 0
+    num="$(printf '%s\n' "$geometry" | awk -F: '{print $1; exit}')"
+    start="$(printf '%s\n' "$geometry" | awk -F: '{print $2; exit}')"
+    end="$(printf '%s\n' "$geometry" | awk -F: '{print $3; exit}')"
+    size="$(printf '%s\n' "$geometry" | awk -F: '{print $4; exit}')"
+    type="$(printf '%s\n' "$geometry" | awk -F: '{print $5; exit}' | tr '[:upper:]' '[:lower:]')"
+
+    start="${start%s}"
+    end="${end%s}"
+    size="${size%s}"
+    type="${type:-unknown}"
+
+    [ -n "$num" ] && [ -n "$start" ] && [ -n "$end" ] && [ -n "$size" ] || return 0
+    printf '%s:%s:%s:%s:%s\n' "$num" "$start" "$end" "$size" "$type"
+}
+
 assert_recovery_unchanged_or_die() {
-    local current
+    local current attempt before_key current_key
     [ -n "$RECOVERY_GEOMETRY_BEFORE" ] || return 0
-    current="$(recovery_geometry "$DISK")"
-    if [ "$current" != "$RECOVERY_GEOMETRY_BEFORE" ]; then
-        echo "ERROR: Windows recovery partition geometry changed"
+
+    before_key="$(normalize_recovery_geometry "$RECOVERY_GEOMETRY_BEFORE")"
+    for attempt in $(seq 1 30); do
+        partprobe "$DISK" 2>/dev/null || true
+        udevadm settle 2>/dev/null || true
+        current="$(recovery_geometry "$DISK")"
+        [ "$current" = "$RECOVERY_GEOMETRY_BEFORE" ] && return 0
+        current_key="$(normalize_recovery_geometry "$current")"
+        if [ -n "$before_key" ] && [ "$current_key" = "$before_key" ]; then
+            echo "Recovery geometry raw format changed but normalized geometry is identical"
+            echo "before raw: $RECOVERY_GEOMETRY_BEFORE"
+            echo "after raw : $current"
+            return 0
+        fi
+        echo "Recovery geometry check attempt $attempt/30 differs"
         echo "before: $RECOVERY_GEOMETRY_BEFORE"
         echo "after : $current"
-        die "Windows recovery partition changed"
-    fi
+        sleep 1
+    done
+
+    echo "ERROR: Windows recovery partition geometry changed"
+    die "Windows recovery partition changed"
 }
 
 final_verify_or_die() {
@@ -402,9 +467,9 @@ cleanup_live_mounts_best_effort() {
     umount /mnt/libertix-esp-final-verify 2>/dev/null || true
 }
 
-# Rollback is intentionally conservative. It only deletes partition 3 on the
-# target disk, because that is the temporary live/final Linux slot created by the
-# Windows phase. The Windows recovery partition is never moved or removed here.
+# Rollback is intentionally conservative. It only deletes the live/final Linux
+# slot that was already identified during this run. The Windows recovery
+# partition is never moved or removed here.
 rollback_windows_layout_best_effort() {
     local win_num recovery_start resize_end rollback_ok=false candidate live_candidate deleted_linux_part=false
 
@@ -451,18 +516,26 @@ rollback_windows_layout_best_effort() {
         sync || true
     fi
 
+    cleanup_final_uefi_bootloader_best_effort || true
+
     if [ -z "$NEW_PART" ]; then
-        live_candidate="$(find_live_partition_on_disk "$DISK" || true)"
-        if [ -n "$live_candidate" ] && [ "$(partition_number "$live_candidate")" = "3" ]; then
+        if [ -n "$LIVE_PART" ] && [ -b "$LIVE_PART" ] && [ "$(parent_disk_from_part "$LIVE_PART")" = "$DISK" ]; then
+            NEW_PART="$LIVE_PART"
+            NEW_PART_NUM="$(partition_number "$NEW_PART")"
+            echo "ROLLBACK: using known live/Linux partition $NEW_PART"
+        else
+            live_candidate="$(find_live_partition_on_disk "$DISK" || true)"
+            if [ -n "$live_candidate" ]; then
             NEW_PART="$live_candidate"
-            NEW_PART_NUM="3"
+                NEW_PART_NUM="$(partition_number "$NEW_PART")"
             echo "ROLLBACK: detected temporary Linux partition as $NEW_PART"
+            fi
         fi
     fi
 
     if [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ]; then
         NEW_PART_NUM="${NEW_PART_NUM:-$(partition_number "$NEW_PART")}"
-        if [ "$NEW_PART_NUM" = "3" ] && [ "$(parent_disk_from_part "$NEW_PART")" = "$DISK" ]; then
+        if [ "$NEW_PART" != "$WINDOWS_PART" ] && [ "$(parent_disk_from_part "$NEW_PART")" = "$DISK" ]; then
             if findmnt -rn -S "$NEW_PART" | grep -q .; then
                 echo "ROLLBACK: cannot delete $NEW_PART because it is still mounted"
             elif fuser -m "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
@@ -484,16 +557,16 @@ rollback_windows_layout_best_effort() {
         fi
     fi
 
-    if parted -sm "$DISK" print 2>/dev/null | awk -F: '$1=="3"{found=1} END{exit !found}'; then
+    if [ -n "$NEW_PART_NUM" ] && parted -sm "$DISK" print 2>/dev/null | awk -F: -v n="$NEW_PART_NUM" '$1==n{found=1} END{exit !found}'; then
         if [ "$deleted_linux_part" != true ]; then
-            echo "ROLLBACK: skipping Windows resize because partition 3 is still present"
+            echo "ROLLBACK: skipping Windows resize because partition $NEW_PART_NUM is still present"
             debug_disk_state || true
             return 1
         fi
     fi
 
     win_num="$(partition_number "$WINDOWS_PART")"
-    recovery_start="$(parted -sm "$DISK" unit s print 2>/dev/null | awk -F: '$1=="4"{gsub("s","",$2); print $2; exit}')"
+    recovery_start="$(recovery_start_sector "$DISK" || true)"
     if [ -n "$recovery_start" ]; then
         resize_end="$((recovery_start - 1))s"
     else
@@ -813,6 +886,43 @@ find_fat_partition_with_file() {
 
 find_esp_partition() {
     find_fat_partition_with_file "EFI/Microsoft/Boot/bootmgfw.efi"
+}
+
+cleanup_final_uefi_bootloader_best_effort() {
+    local bootnum esp_part esp_mount
+
+    [ "$INSTALL_SUCCESS" = false ] || return 0
+
+    if command -v efibootmgr >/dev/null 2>&1; then
+        efibootmgr 2>/dev/null \
+            | awk '/^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][* ] Libertix[[:space:]]/ {
+                n=substr($1,5,4)
+                gsub(/\*/, "", n)
+                print n
+            }' \
+            | while read -r bootnum; do
+                [ -n "$bootnum" ] || continue
+                echo "ROLLBACK: deleting final UEFI entry Boot$bootnum"
+                efibootmgr -b "$bootnum" -B || \
+                    echo "ROLLBACK: warning: cannot delete final UEFI entry Boot$bootnum"
+            done
+    fi
+
+    esp_part="$(find_esp_partition || true)"
+    [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 0
+
+    esp_mount="/mnt/libertix-rollback-esp"
+    mkdir -p "$esp_mount"
+    if mount -t vfat -o rw,flush "$esp_part" "$esp_mount"; then
+        if [ -d "$esp_mount/EFI/Libertix" ]; then
+            echo "ROLLBACK: removing EFI/Libertix from ESP"
+            rm -rf "$esp_mount/EFI/Libertix"
+            sync || true
+        fi
+        umount "$esp_mount" 2>/dev/null || true
+    else
+        echo "ROLLBACK: warning: cannot mount ESP to remove EFI/Libertix"
+    fi
 }
 
 set_linux_partition_type_or_die() {

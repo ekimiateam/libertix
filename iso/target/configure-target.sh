@@ -145,13 +145,13 @@ configure_grub() {
 
     cat > /etc/default/grub <<'EOF'
 GRUB_DEFAULT=0
-GRUB_TIMEOUT=10
+GRUB_TIMEOUT=-1
 GRUB_TIMEOUT_STYLE=menu
 GRUB_DISTRIBUTOR="Linux Mint"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
 GRUB_CMDLINE_LINUX=""
 GRUB_DISABLE_OS_PROBER=true
-GRUB_RECORDFAIL_TIMEOUT=10
+GRUB_RECORDFAIL_TIMEOUT=-1
 EOF
 
     rm -f /etc/default/grub.d/50_linuxmint.cfg 2>/dev/null || true

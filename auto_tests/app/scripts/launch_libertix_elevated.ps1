@@ -70,7 +70,14 @@ for ($i = 0; $i -lt 15; $i++) {
 }
 
 if (-not $process) {
-    $taskState = schtasks.exe /Query /TN $taskName /V /FO LIST 2>&1
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $taskState = schtasks.exe /Query /TN $taskName /V /FO LIST 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $oldPreference
+    }
     throw ("Libertix ne tourne pas après lancement administrateur; tâche=" + ($taskState -join " | "))
 }
 
