@@ -1,0 +1,87 @@
+<Page x:Class="Libertix.Pages.UefiBootFallback"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="UefiBootFallback">
+    <Grid Background="#232136">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Margin="32,28,32,12"
+                   HorizontalAlignment="Center"
+                   Text="Le demarrage UEFI n'a pas lance l'installateur"
+                   Foreground="#E0DEF4"
+                   FontSize="34"
+                   FontWeight="Light"
+                   TextAlignment="Center"
+                   TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="1" Width="680" VerticalAlignment="Center">
+            <TextBlock Text="Windows est revenu sans marqueur du live. Libertix a conserve une copie locale verifiee et peut utiliser l'entree firmware UEFI validee pour relancer le live."
+                       Foreground="#E0DEF4"
+                       FontSize="17"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,22"/>
+            <Border Background="#2A273F" BorderBrush="#363252" BorderThickness="1" CornerRadius="8" Padding="18">
+                <StackPanel>
+                    <TextBlock x:Name="CurrentStepText"
+                               Text="Verification de l'etat de reprise..."
+                               Foreground="#E0DEF4"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"/>
+                    <ProgressBar x:Name="ProgressBar"
+                                 Height="20"
+                                 Minimum="0"
+                                 Maximum="100"
+                                 Value="0"
+                                 Margin="0,16,0,0"
+                                 Foreground="#3E8FB0"
+                                 Background="#363252"/>
+                    <TextBox x:Name="LogOutput"
+                             Height="180"
+                             Margin="0,16,0,0"
+                             Background="#1E1C31"
+                             Foreground="#908CAA"
+                             BorderBrush="#363252"
+                             BorderThickness="1"
+                             FontFamily="Consolas"
+                             FontSize="12"
+                             IsReadOnly="True"
+                             VerticalScrollBarVisibility="Auto"
+                             TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <Grid Grid.Row="2" Margin="24">
+            <Button x:Name="CancelButton"
+                    Content="Annuler et restaurer Windows"
+                    Style="{StaticResource ModernButton}"
+                    Width="250"
+                    Height="50"
+                    HorizontalAlignment="Left"
+                    Click="CancelButton_Click"/>
+            <Button x:Name="FallbackButton"
+                    Content="Utiliser le demarrage firmware"
+                    Style="{StaticResource ModernButton}"
+                    Width="250"
+                    Height="50"
+                    HorizontalAlignment="Right"
+                    Click="FallbackButton_Click"/>
+            <Button x:Name="RebootButton"
+                    Content="Redemarrer"
+                    Style="{StaticResource ModernButton}"
+                    Width="250"
+                    Height="50"
+                    HorizontalAlignment="Right"
+                    Visibility="Collapsed"
+                    Click="RebootButton_Click"/>
+        </Grid>
+    </Grid>
+</Page>

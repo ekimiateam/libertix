@@ -1,5 +1,6 @@
-from pathlib import Path, PurePosixPath, PureWindowsPath
+import subprocess
 import threading
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -9,10 +10,11 @@ import app.services.automation as automation_module
 import app.services.validation as validation_module
 from app.clients.vnc import VNCClient
 from app.config import Settings
+from app.errors import WorkflowError
 from app.models import ValidationRequest
-from app.services.automation import AutomationOptions, AutomationService
+from app.services.automation import AutomationOptions, AutomationService, Point
 from app.services.common import ResultBuilder
-from app.services.reset import RESET_SNAPSHOT, RESET_VM_IDS, ResetService
+from app.services.reset import RESET_SNAPSHOT, ResetService
 from app.services.validation import ValidationService
 
 
@@ -45,6 +47,9 @@ def settings(**overrides: object) -> Settings:
                 "vnc": "192.168.1.166:10",
                 "screen_width": 1024,
                 "screen_height": 768,
+                "vmid": 500,
+                "firmware": "bios",
+                "automation_enabled": True,
             },
             {
                 "name": "vm2",
@@ -53,6 +58,10 @@ def settings(**overrides: object) -> Settings:
                 "vnc": "192.168.1.166:11",
                 "screen_width": 1280,
                 "screen_height": 800,
+                "vmid": 501,
+                "firmware": "uefi",
+                "disable_defender_for_automation": True,
+                "automation_enabled": True,
             },
             {
                 "name": "vm3",
@@ -61,6 +70,9 @@ def settings(**overrides: object) -> Settings:
                 "vnc": "192.168.1.166:12",
                 "screen_width": 1280,
                 "screen_height": 800,
+                "vmid": 502,
+                "firmware": "uefi",
+                "automation_enabled": True,
             },
         ),
         "_env_file": None,
@@ -71,7 +83,7 @@ def settings(**overrides: object) -> Settings:
 
 def test_share_path_translation() -> None:
     service = ValidationService(settings())
-    actual = service._to_windows_share_path(  # noqa: SLF001
+    actual = service.to_windows_share_path(
         PurePosixPath("/root/smb/Libertix-release/folder/Libertix.exe")
     )
     assert actual == PureWindowsPath("Z:/Libertix-release/folder/Libertix.exe")
@@ -83,7 +95,7 @@ def test_smb_root_is_strictly_guarded() -> None:
 
 
 def test_reset_scope_is_exact() -> None:
-    assert RESET_VM_IDS == (500, 501, 502)
+    assert ResetService(settings())._selected_vmids(None) == (500, 501, 502)  # noqa: SLF001
     assert RESET_SNAPSHOT == "clean2"
 
 
@@ -91,6 +103,23 @@ def test_reset_selector_uses_configured_vm_names() -> None:
     service = ResetService(settings())
 
     assert service._selected_vmids(["vm3", "win11-uefi", "502"]) == (502,)  # noqa: SLF001
+
+
+def test_reset_selector_does_not_depend_on_vm_order() -> None:
+    configured = settings().vms
+    service = ResetService(settings(vms=tuple(reversed(configured))))
+
+    assert service._selected_vmids(["vm1", "vm3"]) == (500, 502)  # noqa: SLF001
+
+
+def test_result_builder_cannot_report_success_after_failure() -> None:
+    result = ResultBuilder("automation")
+    result.failure(WorkflowError("test.failure", "fatal"))
+
+    final = result.success("must not become successful")
+
+    assert final.status == "problème"
+    assert final.steps[-1].step == "test.failure"
 
 
 def test_reset_restores_selected_vms_in_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -141,7 +170,14 @@ def test_local_source_copy_excludes_env_files(tmp_path: Path) -> None:
     blocked_filepool = root / "auto_tests" / "app" / "filepool" / "mint.iso"
     blocked_other_exe = root / "bin" / "Release" / "Libertix.exe"
 
-    for path in (allowed, allowed_aria2, blocked_env, blocked_named_env, blocked_filepool, blocked_other_exe):
+    for path in (
+        allowed,
+        allowed_aria2,
+        blocked_env,
+        blocked_named_env,
+        blocked_filepool,
+        blocked_other_exe,
+    ):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x", encoding="utf-8")
 
@@ -157,6 +193,22 @@ def test_vnc_display_is_converted_to_tcp_port() -> None:
     assert VNCClient._vncdotool_address("192.168.1.166:10") == "192.168.1.166::5910"
 
 
+def test_absolute_vnc_click_is_not_scaled() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    events: list[tuple[str, int, int] | tuple[str, int]] = []
+    client = SimpleNamespace(
+        mouseMove=lambda x, y: events.append(("move", x, y)),
+        mousePress=lambda button: events.append(("press", button)),
+    )
+
+    service._click_absolute(client, vm, Point(1045, 643), 0)  # noqa: SLF001
+
+    assert events == [("move", 1045, 643), ("press", 1)]
+    with pytest.raises(WorkflowError, match="hors écran"):
+        service._click_absolute(client, vm, Point(1280, 643), 0)  # noqa: SLF001
+
+
 def test_validation_source_defaults_to_remote() -> None:
     assert ValidationRequest().source == "remote"
 
@@ -168,7 +220,7 @@ def test_validation_source_accepts_local() -> None:
 def test_validation_vm_selector_accepts_aliases() -> None:
     service = ValidationService(settings())
 
-    selected = service._select_vms(["10 uefi"])  # noqa: SLF001
+    selected = service.select_vms(["10 uefi"])
 
     assert [vm.name for vm in selected] == ["vm2"]
 
@@ -177,7 +229,7 @@ def test_validation_vm_selector_rejects_unknown() -> None:
     service = ValidationService(settings())
 
     with pytest.raises(Exception, match="Sélecteur VM inconnu"):
-        service._select_vms(["not-a-vm"])  # noqa: SLF001
+        service.select_vms(["not-a-vm"])
 
 
 def test_launch_interactive_accepts_zero_window_handle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -200,11 +252,11 @@ def test_launch_interactive_accepts_zero_window_handle(monkeypatch: pytest.Monke
             return SimpleNamespace(stdout="SESSION_ID=2\n")
         return SimpleNamespace(stdout="PID=1234\nSESSION_ID=2\nWINDOW_HANDLE=0\n")
 
-    monkeypatch.setattr(service, "_ssh", lambda *_args, **_kwargs: FakeSshContext())
-    monkeypatch.setattr(service, "_run_windows_script", fake_run_windows_script)
+    monkeypatch.setattr(service, "ssh", lambda *_args, **_kwargs: FakeSshContext())
+    monkeypatch.setattr(service, "run_windows_script", fake_run_windows_script)
     monkeypatch.setattr(validation_module.time, "sleep", lambda _seconds: None)
 
-    vm = service._select_vms(["vm1"])[0]  # noqa: SLF001
+    vm = service.select_vms(["vm1"])[0]
     result = ResultBuilder("validation")
     launch = service._launch_interactive(  # noqa: SLF001
         vm,
@@ -219,28 +271,28 @@ def test_launch_interactive_accepts_zero_window_handle(monkeypatch: pytest.Monke
 
 def test_automation_scope_accepts_only_vm500() -> None:
     service = AutomationService(settings())
-    selected = service.validation._select_vms(["vm1"])  # noqa: SLF001
+    selected = service.validation.select_vms(["vm1"])
 
     service._assert_autoclick_scope(selected, ["vm1"])  # noqa: SLF001
 
 
 def test_automation_scope_accepts_vm502_uefi() -> None:
     service = AutomationService(settings())
-    selected = service.validation._select_vms(["vm3"])  # noqa: SLF001
+    selected = service.validation.select_vms(["vm3"])
 
     service._assert_autoclick_scope(selected, ["vm3"])  # noqa: SLF001
 
 
 def test_automation_scope_accepts_vm501_uefi() -> None:
     service = AutomationService(settings())
-    selected = service.validation._select_vms(["vm2"])  # noqa: SLF001
+    selected = service.validation.select_vms(["vm2"])
 
     service._assert_autoclick_scope(selected, ["vm2"])  # noqa: SLF001
 
 
 def test_automation_scope_accepts_all_validated_vms() -> None:
     service = AutomationService(settings())
-    selected = service.validation._select_vms(["vm1", "vm2", "vm3"])  # noqa: SLF001
+    selected = service.validation.select_vms(["vm1", "vm2", "vm3"])
 
     profiles = service._automation_profiles(selected, ["vm1", "vm2", "vm3"])  # noqa: SLF001
 
@@ -249,6 +301,137 @@ def test_automation_scope_accepts_all_validated_vms() -> None:
         "vm2": 501,
         "vm3": 502,
     }
+
+
+def test_automation_refuses_vm_already_in_io_error() -> None:
+    class FakeProxmox:
+        def _request(self, _method: str, _path: str, *, step: str) -> object:
+            assert step == "automation.vm_status"
+            return {"status": "running", "qmpstatus": "io-error"}
+
+    service = AutomationService(settings())
+
+    with pytest.raises(WorkflowError, match="io-error"):
+        service._assert_vm_not_in_io_error(  # noqa: SLF001
+            FakeProxmox(), "node-a", 500, ResultBuilder("automation")
+        )
+
+
+def test_automation_refuses_low_local_lvm_headroom() -> None:
+    class FakeProxmox:
+        def _request(self, _method: str, _path: str, *, step: str) -> object:
+            assert step == "automation.storage"
+            return {"total": 100 * 1024**3, "used": 95 * 1024**3, "avail": 5 * 1024**3}
+
+    service = AutomationService(settings())
+
+    with pytest.raises(WorkflowError, match="local-lvm insuffisante"):
+        service._assert_proxmox_storage_headroom(  # noqa: SLF001
+            FakeProxmox(),
+            {500: "node-a", 501: "node-a", 502: "node-a"},
+            3,
+            ResultBuilder("automation"),
+        )
+
+
+def test_automation_reports_local_lvm_headroom() -> None:
+    class FakeProxmox:
+        def _request(self, _method: str, _path: str, *, step: str) -> object:
+            assert step == "automation.storage"
+            return {"total": 100 * 1024**3, "used": 30 * 1024**3, "avail": 70 * 1024**3}
+
+    service = AutomationService(settings())
+    result = ResultBuilder("automation")
+
+    service._assert_proxmox_storage_headroom(  # noqa: SLF001
+        FakeProxmox(), {500: "node-a", 501: "node-a", 502: "node-a"}, 3, result
+    )
+
+    assert result.steps[-1].step == "automation.storage_headroom"
+    assert result.steps[-1].context["available_gib"] == 70
+    assert result.steps[-1].context["required_gib"] == 60
+
+
+@pytest.mark.parametrize(
+    ("prepared", "realtime", "exclusion", "expected"),
+    (
+        ("realtime-disabled", "false", r"C:\release", True),
+        ("exclusion-only", "true", r"C:\release", True),
+        ("realtime-disabled", "true", r"C:\release", False),
+        ("true", "false", r"C:\release", False),
+        ("exclusion-only", "true", "", False),
+    ),
+)
+def test_defender_preparation_contract(
+    prepared: str, realtime: str, exclusion: str, expected: bool
+) -> None:
+    assert (
+        AutomationService._defender_preparation_is_valid(  # noqa: SLF001
+            prepared, realtime, exclusion
+        )
+        is expected
+    )
+
+
+def test_apply_requires_visual_monitoring() -> None:
+    result = AutomationService(settings()).run(
+        ["vm1"],
+        apply=True,
+        linux_username="test",
+        linux_password="test",
+        monitor_iso=False,
+        source="local",
+    )
+
+    assert result.status == "problème"
+    assert result.steps[-1].step == "automation.monitor_required"
+
+
+def test_wizard_account_guard_is_fail_closed(tmp_path: Path) -> None:
+    service = AutomationService(settings())
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        detected_screen="account",
+        expected_screen_visible=True,
+        no_blocking_error=True,
+        username_visible=False,
+        password_fields_filled=False,
+        visible_text="Créez votre compte Linux utilisateur Mot de passe",
+        model_dump=lambda: {},
+    )
+    vm = service.validation.select_vms(["vm1"])[0]
+
+    with pytest.raises(WorkflowError, match="Apply est bloqué"):
+        service._assert_wizard_state(  # noqa: SLF001
+            tmp_path / "account.png",
+            vm,
+            expected_screen="account",
+            expected_username="test",
+            result=ResultBuilder("automation"),
+        )
+
+
+def test_wizard_account_guard_accepts_explicit_visible_text(tmp_path: Path) -> None:
+    service = AutomationService(settings())
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        detected_screen="account",
+        expected_screen_visible=True,
+        no_blocking_error=True,
+        username_visible=False,
+        password_fields_filled=False,
+        visible_text=(
+            "Créez votre compte Linux test Mot de passe •••• Confirmer le mot de passe ••••"
+        ),
+        model_dump=lambda: {},
+    )
+    vm = service.validation.select_vms(["vm1"])[0]
+
+    service._assert_wizard_state(  # noqa: SLF001
+        tmp_path / "account.png",
+        vm,
+        expected_screen="account",
+        expected_username="test",
+        result=ResultBuilder("automation"),
+    )
 
 
 def test_automation_scope_rejects_unvalidated_vm() -> None:
@@ -262,6 +445,9 @@ def test_automation_scope_rejects_unvalidated_vm() -> None:
                     "vnc": "192.168.1.166:10",
                     "screen_width": 1024,
                     "screen_height": 768,
+                    "vmid": 500,
+                    "firmware": "bios",
+                    "automation_enabled": True,
                 },
                 {
                     "name": "vm4",
@@ -270,11 +456,14 @@ def test_automation_scope_rejects_unvalidated_vm() -> None:
                     "vnc": "192.168.1.166:14",
                     "screen_width": 1024,
                     "screen_height": 768,
+                    "vmid": 501,
+                    "firmware": "uefi",
+                    "automation_enabled": False,
                 },
             )
         )
     )
-    selected = service.validation._select_vms(["vm1", "vm4"])  # noqa: SLF001
+    selected = service.validation.select_vms(["vm1", "vm4"])
 
     with pytest.raises(Exception, match="Auto-click Libertix refusé"):
         service._assert_autoclick_scope(selected, ["vm1", "vm4"])  # noqa: SLF001
@@ -305,9 +494,12 @@ def test_automation_logs_vm500_reset_before_ui(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(automation_module, "ProxmoxClient", FakeProxmox)
     service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    profile = service._automation_profile_for_vm(vm)  # noqa: SLF001
+    assert profile is not None
 
     result = ResultBuilder("automation")
-    service._restore_clean_snapshot(result, service.BIOS_PROFILE)  # noqa: SLF001
+    service._restore_clean_snapshot(result, profile)  # noqa: SLF001
 
     assert calls == [
         ("locate", 500, None),
@@ -343,9 +535,12 @@ def test_automation_logs_vm502_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(automation_module, "ProxmoxClient", FakeProxmox)
     service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    profile = service._automation_profile_for_vm(vm)  # noqa: SLF001
+    assert profile is not None
 
     result = ResultBuilder("automation")
-    service._restore_clean_snapshot(result, service.UEFI_PROFILE)  # noqa: SLF001
+    service._restore_clean_snapshot(result, profile)  # noqa: SLF001
 
     assert calls == [
         ("locate", 502, None),
@@ -381,9 +576,12 @@ def test_automation_logs_vm501_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(automation_module, "ProxmoxClient", FakeProxmox)
     service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    profile = service._automation_profile_for_vm(vm)  # noqa: SLF001
+    assert profile is not None
 
     result = ResultBuilder("automation")
-    service._restore_clean_snapshot(result, service.WIN10_UEFI_PROFILE)  # noqa: SLF001
+    service._restore_clean_snapshot(result, profile)  # noqa: SLF001
 
     assert calls == [
         ("locate", 501, None),
@@ -394,9 +592,7 @@ def test_automation_logs_vm501_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -
     assert "Reset VM501 terminé" in result.steps[-1].message
 
 
-def test_automation_apply_false_only_launches_ui(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
+def test_automation_apply_false_only_launches_ui(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     class FakeClient:
         def __init__(self) -> None:
             self.clicks = 0
@@ -422,7 +618,9 @@ def test_automation_apply_false_only_launches_ui(
     monkeypatch.setattr(automation_module.api, "connect", lambda _address: fake_client)
     monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
     service = AutomationService(settings(capture_dir=tmp_path))
-    vm = service.validation._select_vms(["vm1"])[0]  # noqa: SLF001
+    vm = service.validation.select_vms(["vm1"])[0]
+    profile = service._automation_profile_for_vm(vm)  # noqa: SLF001
+    assert profile is not None
     result = ResultBuilder("automation")
 
     service._click_wizard(  # noqa: SLF001
@@ -430,7 +628,7 @@ def test_automation_apply_false_only_launches_ui(
         AutomationOptions(
             apply=False, linux_username="test", linux_password="linux", monitor_iso=True
         ),
-        service.BIOS_PROFILE,
+        profile,
         result,
     )
 
@@ -449,21 +647,18 @@ def test_automation_uefi_monitor_stops_on_live_boot_not_windows_progress() -> No
 
     assert (
         service._uefi_reboot_or_live_started(  # noqa: SLF001
-            "Downloading Mint ISO... 60%",
-            "Windows desktop with Libertix wizard and active progress bar",
+            "Downloading Mint ISO... 60% Windows desktop with Libertix wizard",
         )
         is False
     )
     assert (
         service._uefi_reboot_or_live_started(  # noqa: SLF001
-            "Windows Boot Manager with Windows 10 highlighted",
             "Gestionnaire de démarrage Windows; no Libertix installer visible",
         )
         is False
     )
     assert (
         service._uefi_reboot_or_live_started(  # noqa: SLF001
-            "Libertix installer is creating the UEFI installer partition",
             "Appliquer les modifications Creating UEFI installer partition "
             "C:\\LibertixTools\\downloads\\mint.iso",
         )
@@ -471,7 +666,6 @@ def test_automation_uefi_monitor_stops_on_live_boot_not_windows_progress() -> No
     )
     assert (
         service._uefi_reboot_or_live_started(  # noqa: SLF001
-            "Fallback LLM: active installer progress detected from visible evidence.",
             "Appliquer les modifications Copying UEFI installer... "
             "Mounting ISO... Copying ISO contents to X:... Libertix UEFI installer copied.",
         )
@@ -479,14 +673,12 @@ def test_automation_uefi_monitor_stops_on_live_boot_not_windows_progress() -> No
     )
     assert (
         service._uefi_reboot_or_live_started(  # noqa: SLF001
-            "Linux boot process showing kernel and initramfs loading",
             "vmlinuz initrd squashfs",
         )
-        is True
+        is False
     )
     assert (
         service._uefi_reboot_or_live_started(  # noqa: SLF001
-            "Libertix Installer",
             "Installation automatique Code: 120-unsquashfs F12: mode terminal",
         )
         is True
@@ -501,13 +693,46 @@ def test_bios_final_grub_waits_for_manual_selection() -> None:
     assert "GRUB_TIMEOUT=10" not in grub_defaults
 
 
-def test_uefi_recovery_guard_uses_normalized_geometry_and_long_retry() -> None:
+def test_bios_installer_keeps_windows_boot_partition_active() -> None:
+    installer = Path("../iso/live/install-mint.sh").read_text(encoding="utf-8")
+    preflight = Path("../Scripts/libertix-storage-preflight.ps1").read_text(encoding="utf-8")
+
+    assert "WINDOWS_BOOT_PARTITION_OFFSET_BYTES" in installer
+    assert 'set "$NEW_PART_NUM" boot off' in installer
+    assert 'set "$WINDOWS_BOOT_PART_NUM" boot on' in installer
+    assert 'set "$NEW_PART_NUM" boot on' not in installer
+    assert "final verify: Windows boot partition is not active" in installer
+    assert 'Write-Result "BOOT_PARTITION_OFFSET"' in preflight
+
+    awk_program = """
+        $1 == number {
+            matched = 1
+            count = split($7, flags, ",")
+            for (i = 1; i <= count; i++) {
+                sub(/;$/, "", flags[i])
+                if (flags[i] == "boot") has_boot = 1
+            }
+        }
+        END { exit !(matched && has_boot) }
+    """
+    sample = "/dev/sda:64GB:scsi:512:512:msdos:QEMU:;\n1:1MB:53MB:52MB:primary:ntfs:boot;\n"
+    result = subprocess.run(
+        ["awk", "-F:", "-v", "number=1", awk_program],
+        input=sample,
+        text=True,
+        check=False,
+        capture_output=True,
+    )
+    assert result.returncode == 0
+
+
+def test_uefi_recovery_guard_uses_exact_windows_manifest() -> None:
     installer = Path("../iso-uefi/live/install-mint.sh").read_text(encoding="utf-8")
 
-    assert "normalize_recovery_geometry()" in installer
-    assert 'for attempt in $(seq 1 30); do' in installer
-    assert 'current_key="$(normalize_recovery_geometry "$current")"' in installer
-    assert "Recovery geometry raw format changed but normalized geometry is identical" in installer
+    assert 'partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES"' in installer
+    assert 'recovery_size=$(blockdev --getsize64 "$recovery_part"' in installer
+    assert 'recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES' in installer
+    assert "Windows recovery partition changed" not in installer
 
 
 def test_uefi_bitlocker_wait_uses_monotonic_timer() -> None:
@@ -516,3 +741,52 @@ def test_uefi_bitlocker_wait_uses_monotonic_timer() -> None:
     assert "[System.Diagnostics.Stopwatch]::StartNew()" in script
     assert "$decryptionTimer.Elapsed -lt $maxDecryptionWait" in script
     assert "(Get-Date).AddHours(6)" not in script
+
+
+def test_live_installers_require_exact_disk_and_recovery_manifest() -> None:
+    for path in ("../iso/live/install-mint.sh", "../iso-uefi/live/install-mint.sh"):
+        installer = Path(path).read_text(encoding="utf-8")
+        assert "resolve_target_disk_from_manifest" in installer
+        assert "WINDOWS_PARTITION_OFFSET_BYTES" in installer
+        assert "INSTALLER_PARTITION_OFFSET_BYTES" in installer
+        assert "RECOVERY_PARTITION_OFFSET_BYTES" in installer
+        assert "RECOVERY_PARTITION_SIZE_BYTES" in installer
+        assert "ntfsresize failed; the partition table was not changed" in installer
+        assert "WARNING: ntfsresize failed, continuing" not in installer
+
+
+def test_uefi_one_shot_does_not_reorder_bootorder() -> None:
+    script = Path("../Scripts/libertix-uefi-install.ps1").read_text(encoding="utf-8")
+    function_body = script.split("function Set-NativeUefiBootOrderOnce", 1)[1].split(
+        "function Get-FirmwareBootNumberByDescription", 1
+    )[0]
+
+    assert 'Set-FirmwareVariable -Name "BootOrder"' not in function_body
+    assert 'Set-FirmwareVariable -Name "BootNext"' in script
+
+
+def test_uefi_recovery_tasks_are_not_clock_boundary_dependent() -> None:
+    script = Path("../Scripts/libertix-register-uefi-recovery-tasks.ps1").read_text(
+        encoding="utf-8"
+    )
+    source = Path("../Pages/ApplyChanges.xaml.cs").read_text(encoding="utf-8")
+
+    assert "New-ScheduledTaskTrigger -AtStartup" in script
+    assert "New-ScheduledTaskTrigger -AtLogOn" in script
+    assert "-StartWhenAvailable" in script
+    assert "StartBoundary" not in script
+    assert "libertix-register-uefi-recovery-tasks.ps1" in source
+    method_start = source.index("private void InstallUefiRecoveryAgent")
+    method_end = source.index("private static void DeleteUefiRecoverySession", method_start)
+    assert '"/SC ONSTART /RU SYSTEM' not in source[method_start:method_end]
+
+
+def test_wpf_storage_preflight_fails_closed() -> None:
+    source = Path("../Pages/ApplyChanges.xaml.cs").read_text(encoding="utf-8")
+    preflight = Path("../Scripts/libertix-storage-preflight.ps1").read_text(encoding="utf-8")
+
+    assert "DetectFirmwareTypeOrThrow" in source
+    assert "Installation was stopped before any disk change" in source
+    assert "SYSTEM_DISK_NUMBER" in preflight
+    assert "BITLOCKER_SAFE" in preflight
+    assert "Exactly one Windows recovery partition is required" in preflight

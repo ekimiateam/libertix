@@ -12,6 +12,8 @@ namespace Libertix.Models
         public string IsoUrl { get; set; }
         public string IsoInstaller { get; set; }
         public string IsoInstallerFileName { get; set; }
+        public string IsoSha256 { get; set; }
+        public string IsoInstallerSha256 { get; set; }
         public double SizeInGB { get; set; }
 
         public bool IsSelected

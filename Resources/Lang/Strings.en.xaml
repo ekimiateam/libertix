@@ -80,4 +80,5 @@
     <system:String x:Key="ApplyChangesError">An error occurred</system:String>
     <system:String x:Key="ApplyChangesReboot">Reboot</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">The computer will restart to complete the installation. Continue?</system:String>
+    <system:String x:Key="PartitionSafetyBlockMessage">Installation is blocked until this safety check is resolved.</system:String>
 </ResourceDictionary>

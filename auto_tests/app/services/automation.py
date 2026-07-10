@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import Literal
 
 from vncdotool import api
 
@@ -21,6 +23,10 @@ from app.services.reset import RESET_SNAPSHOT
 from app.services.validation import ValidationService
 
 logger = logging.getLogger(__name__)
+
+GIB = 1024**3
+LOCAL_LVM_MIN_FREE_BYTES = 20 * GIB
+LOCAL_LVM_MIN_FREE_PER_VM_BYTES = 20 * GIB
 
 
 @dataclass(frozen=True)
@@ -58,30 +64,6 @@ class AutomationService:
 
     REFERENCE_WIDTH = 1024
     REFERENCE_HEIGHT = 768
-    BIOS_PROFILE = WizardProfile(
-        name="bios",
-        vm_name="vm1",
-        vm_host="192.168.1.240",
-        vmid=500,
-        launch_only_label="BIOS",
-    )
-    WIN10_UEFI_PROFILE = WizardProfile(
-        name="uefi",
-        vm_name="vm2",
-        vm_host="192.168.1.241",
-        vmid=501,
-        launch_only_label="UEFI",
-        disable_defender_for_automation=True,
-    )
-    WIN11_UEFI_PROFILE = WizardProfile(
-        name="uefi",
-        vm_name="vm3",
-        vm_host="192.168.1.242",
-        vmid=502,
-        launch_only_label="UEFI",
-    )
-    UEFI_PROFILE = WIN11_UEFI_PROFILE
-    PROFILES = (BIOS_PROFILE, WIN10_UEFI_PROFILE, WIN11_UEFI_PROFILE)
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -109,14 +91,19 @@ class AutomationService:
     ) -> OperationResult:
         result = ResultBuilder("automation", on_step=on_step)
         try:
-            selected_vms = self.validation._select_vms(vm_selectors)  # noqa: SLF001
+            if apply and not monitor_iso:
+                raise WorkflowError(
+                    "automation.monitor_required",
+                    "Apply exige la surveillance visuelle jusqu'au démarrage du live",
+                )
+            selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
-            # Always restore the known clean snapshot before UI automation. The
-            # wizard can modify the disk, so retries must not inherit old state.
-            for vm in selected_vms:
-                self._restore_clean_snapshot(result, profiles[vm.name])
-            executable = self.validation._prepare_server(result, source=source)  # noqa: SLF001
-            windows_path = self.validation._to_windows_share_path(executable)  # noqa: SLF001
+            # Preflight every VM before starting any rollback, then restore all
+            # selected snapshots concurrently. A triple run therefore starts
+            # from one coherent clean baseline instead of resetting one VM at a time.
+            self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
+            executable = self.validation.prepare_server(result, source=source)
+            windows_path = self.validation.to_windows_share_path(executable)
             result.ok(
                 "automation.release_path",
                 "Exécutable Libertix prêt pour automatisation UI",
@@ -129,7 +116,7 @@ class AutomationService:
                 monitor_iso=monitor_iso,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
-                futures = [
+                futures = {
                     executor.submit(
                         self._run_vm_isolated,
                         vm,
@@ -137,22 +124,32 @@ class AutomationService:
                         options,
                         profiles[vm.name],
                         on_step,
-                    )
+                    ): vm
                     for vm in selected_vms
-                ]
-                for future in futures:
+                }
+                failures: list[OperationResult] = []
+                for future in as_completed(futures):
                     vm_result = future.result()
                     result.steps.extend(vm_result.steps)
                     if vm_result.status == "problème":
-                        return OperationResult(
-                            status="problème",
-                            operation="automation",
-                            message=vm_result.message,
-                            steps=result.steps,
-                        )
-            suffix = "avec Apply" if apply else "lancement interface uniquement"
+                        failures.append(vm_result)
+                if failures:
+                    messages = "; ".join(item.message for item in failures)
+                    return OperationResult(
+                        status="problème",
+                        operation="automation",
+                        message=f"Automation échouée sur une ou plusieurs VM: {messages}",
+                        steps=result.steps,
+                    )
+            suffix = (
+                "préparation vérifiée jusqu'au démarrage du live"
+                if apply and monitor_iso
+                else "clic Apply envoyé sans validation de fin"
+                if apply
+                else "interface lancée uniquement"
+            )
             return result.success(
-                f"Automatisation Libertix terminée sur {len(selected_vms)} VM(s) {suffix}"
+                f"Automatisation Libertix sur {len(selected_vms)} VM(s): {suffix}"
             )
         except WorkflowError as exc:
             return result.failure(exc)
@@ -167,10 +164,16 @@ class AutomationService:
             )
 
     def _automation_profile_for_vm(self, vm: VMConfig) -> WizardProfile | None:
-        for profile in self.PROFILES:
-            if vm.name == profile.vm_name and vm.host == profile.vm_host:
-                return profile
-        return None
+        if not vm.automation_enabled:
+            return None
+        return WizardProfile(
+            name=vm.firmware,
+            vm_name=vm.name,
+            vm_host=vm.host,
+            vmid=vm.vmid,
+            launch_only_label=vm.firmware.upper(),
+            disable_defender_for_automation=vm.disable_defender_for_automation,
+        )
 
     def _automation_profiles(
         self, selected_vms: Sequence[VMConfig], selectors: Sequence[str] | None
@@ -208,7 +211,8 @@ class AutomationService:
                 ],
                 "allowed": [
                     {"vmid": profile.vmid, "name": profile.vm_name, "host": profile.vm_host}
-                    for profile in self.PROFILES
+                    for profile in (self._automation_profile_for_vm(vm) for vm in self.settings.vms)
+                    if profile is not None
                 ],
             },
         )
@@ -224,7 +228,6 @@ class AutomationService:
             s.proxmox_url,
             s.proxmox_token_id,
             s.proxmox_token_secret.get_secret_value(),
-            verify_tls=s.proxmox_verify_tls,
             timeout=s.proxmox_timeout_seconds,
             task_timeout=s.proxmox_task_timeout_seconds,
         )
@@ -250,6 +253,116 @@ class AutomationService:
                 snapshot=RESET_SNAPSHOT,
             )
 
+    def _restore_clean_snapshots(
+        self, result: ResultBuilder, profiles: Sequence[WizardProfile]
+    ) -> None:
+        locations: dict[int, str] = {}
+        with self._proxmox() as proxmox:
+            for profile in profiles:
+                node = proxmox.locate_vm(profile.vmid)
+                proxmox.assert_snapshot(node, profile.vmid, RESET_SNAPSHOT)
+                self._assert_vm_not_in_io_error(proxmox, node, profile.vmid, result)
+                locations[profile.vmid] = node
+                result.ok(
+                    "automation.rollback_preflight",
+                    "VM et snapshot vérifiés avant automation",
+                    target=str(profile.vmid),
+                    node=node,
+                    snapshot=RESET_SNAPSHOT,
+                )
+            self._assert_proxmox_storage_headroom(proxmox, locations, len(profiles), result)
+
+        def restore(profile: WizardProfile) -> tuple[int, str]:
+            node = locations[profile.vmid]
+            with self._proxmox() as proxmox:
+                proxmox.rollback(node, profile.vmid, RESET_SNAPSHOT)
+            return profile.vmid, node
+
+        with ThreadPoolExecutor(max_workers=len(profiles)) as executor:
+            futures = {executor.submit(restore, profile): profile for profile in profiles}
+            for future in as_completed(futures):
+                vmid, node = future.result()
+                result.ok(
+                    "automation.reset_vm_done",
+                    f"Reset VM{vmid} terminé: snapshot clean2 restauré et tâche Proxmox validée",
+                    target=str(vmid),
+                    node=node,
+                    snapshot=RESET_SNAPSHOT,
+                )
+
+    def _assert_vm_not_in_io_error(
+        self, proxmox: ProxmoxClient, node: str, vmid: int, result: ResultBuilder
+    ) -> None:
+        data = proxmox._request(
+            "GET", f"/nodes/{node}/qemu/{vmid}/status/current", step="automation.vm_status"
+        )
+        if not isinstance(data, dict):
+            raise WorkflowError(
+                "automation.vm_status",
+                "Réponse Proxmox invalide pendant la vérification d'état VM",
+                details={"vmid": vmid, "node": node},
+            )
+        qmpstatus = str(data.get("qmpstatus") or "")
+        status = str(data.get("status") or "")
+        if qmpstatus == "io-error":
+            raise WorkflowError(
+                "automation.vm_io_error",
+                "Automation refusée: la VM est en io-error Proxmox avant rollback",
+                details={"vmid": vmid, "node": node, "status": status, "qmpstatus": qmpstatus},
+            )
+        result.ok(
+            "automation.vm_status",
+            "État VM Proxmox vérifié avant rollback",
+            target=str(vmid),
+            node=node,
+            status=status,
+            qmpstatus=qmpstatus,
+        )
+
+    def _assert_proxmox_storage_headroom(
+        self,
+        proxmox: ProxmoxClient,
+        locations: dict[int, str],
+        vm_count: int,
+        result: ResultBuilder,
+    ) -> None:
+        for node in sorted(set(locations.values())):
+            data = proxmox._request(
+                "GET", f"/nodes/{node}/storage/local-lvm/status", step="automation.storage"
+            )
+            if not isinstance(data, dict):
+                raise WorkflowError(
+                    "automation.storage",
+                    "Réponse Proxmox invalide pendant la vérification stockage",
+                    details={"node": node, "storage": "local-lvm"},
+                )
+            total = int(data.get("total") or 0)
+            used = int(data.get("used") or 0)
+            avail = int(data.get("avail") or 0)
+            min_free = max(LOCAL_LVM_MIN_FREE_BYTES, LOCAL_LVM_MIN_FREE_PER_VM_BYTES * vm_count)
+            used_percent = (used / total * 100.0) if total else 100.0
+            if avail < min_free:
+                raise WorkflowError(
+                    "automation.storage_headroom",
+                    "Automation refusée: marge local-lvm insuffisante pour éviter un io-error",
+                    details={
+                        "node": node,
+                        "storage": "local-lvm",
+                        "available_gib": round(avail / GIB, 2),
+                        "required_gib": round(min_free / GIB, 2),
+                        "used_percent": round(used_percent, 2),
+                    },
+                )
+            result.ok(
+                "automation.storage_headroom",
+                "Marge local-lvm vérifiée avant rollback",
+                target=node,
+                storage="local-lvm",
+                available_gib=round(avail / GIB, 2),
+                required_gib=round(min_free / GIB, 2),
+                used_percent=round(used_percent, 2),
+            )
+
     def _run_vm_isolated(
         self,
         vm: VMConfig,
@@ -261,7 +374,7 @@ class AutomationService:
         result = ResultBuilder("automation", on_step=on_step)
         try:
             self._prepare_vm_for_automation(vm, profile, result)
-            local_executable = self.validation._deploy_to_documents(vm, executable)  # noqa: SLF001
+            local_executable = self.validation.deploy_to_documents(vm, executable)
             result.ok(
                 "automation.deploy",
                 "Release Libertix copiée localement avant automatisation",
@@ -287,10 +400,10 @@ class AutomationService:
     ) -> None:
         if not profile.disable_defender_for_automation:
             return
-        with self.validation._ssh(  # noqa: SLF001
+        with self.validation.ssh(
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
-            response = self.validation._run_windows_script(  # noqa: SLF001
+            response = self.validation.run_windows_script(
                 ssh,
                 script_name="prepare_automation_vm.ps1",
                 config={
@@ -300,10 +413,19 @@ class AutomationService:
                 step="automation.prepare_vm",
                 timeout=90,
             )
-        values = self.validation._parse_powershell_results(  # noqa: SLF001
+        values = self.validation.parse_powershell_results(
             response.stdout,
             prefixes=("DEFENDER_PREPARED", "DEFENDER_REALTIME", "DEFENDER_EXCLUSION"),
         )
+        prepared_state = values.get("DEFENDER_PREPARED", "").casefold()
+        realtime_state = values.get("DEFENDER_REALTIME", "").casefold()
+        exclusion = values.get("DEFENDER_EXCLUSION", "").strip()
+        if not self._defender_preparation_is_valid(prepared_state, realtime_state, exclusion):
+            raise WorkflowError(
+                "automation.prepare_vm",
+                "La préparation Defender demandée n'est pas vérifiée",
+                details={"vm": vm.name, "host": vm.host, **values},
+            )
         result.ok(
             "automation.prepare_vm",
             "VM préparée avant automation UI",
@@ -312,28 +434,42 @@ class AutomationService:
             **values,
         )
 
+    @staticmethod
+    def _defender_preparation_is_valid(
+        prepared_state: str, realtime_state: str, exclusion: str
+    ) -> bool:
+        if not exclusion or prepared_state not in {"realtime-disabled", "exclusion-only"}:
+            return False
+        return prepared_state != "realtime-disabled" or realtime_state == "false"
+
     def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:
         task_name = f"LibertixAutoInstall_{vm.name}"
         # The scheduled task launches into the interactive desktop session while
         # keeping the process elevated. SSH alone would start a non-visible UI.
-        with self.validation._ssh(  # noqa: SLF001
+        with self.validation.ssh(
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
-            response = self.validation._run_windows_script(  # noqa: SLF001
+            response = self.validation.run_windows_script(
                 ssh,
                 script_name="launch_libertix_elevated.ps1",
                 config={"executable": str(executable), "task_name": task_name},
                 step="automation.launch_elevated",
                 timeout=90,
             )
-        values = self.validation._parse_powershell_results(  # noqa: SLF001
-            response.stdout, prefixes=("PID", "SESSION_ID", "TASK_NAME")
+        values = self.validation.parse_powershell_results(
+            response.stdout, prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE")
         )
         if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
             raise WorkflowError(
                 "automation.launch_elevated",
                 "Processus Libertix administrateur non confirmé",
                 details={"vm": vm.name, "host": vm.host, "stdout": response.stdout[-4000:]},
+            )
+        if PureWindowsPath(values.get("EXECUTABLE", "")) != executable:
+            raise WorkflowError(
+                "automation.launch_elevated",
+                "Le processus lancé ne correspond pas à l'exécutable déployé",
+                details={"vm": vm.name, "expected": str(executable)},
             )
         return {
             "pid": int(values["PID"]),
@@ -357,7 +493,8 @@ class AutomationService:
             if not options.apply:
                 result.ok(
                     "automation.launch_only_stop",
-                    f"Arrêt volontaire après lancement visible de l'interface {profile.launch_only_label}",
+                    "Arrêt volontaire après lancement visible de l'interface "
+                    f"{profile.launch_only_label}",
                     target=vm.vnc,
                     vm=vm.name,
                 )
@@ -397,22 +534,38 @@ class AutomationService:
         # _click. They match the VM500 BIOS wizard path validated by VNC.
         self._click(client, vm, Point(512, 438), 2.0)
         self._capture_from_client(client, vm, "01-distro", result)
-
-        self._click(client, vm, Point(145, 395), 0.5)
-        self._click(client, vm, Point(919, 628), 2.0)
-        self._capture_from_client(client, vm, "02-resize", result)
-
-        self._click(client, vm, Point(919, 628), 2.0)
-        self._capture_from_client(client, vm, "03-account", result)
+        self._navigate_to_account(
+            client,
+            vm,
+            welcome_point=Point(512, 438),
+            distro_point=Point(145, 395),
+            next_point=Point(919, 628),
+            username=options.linux_username,
+            result=result,
+        )
 
         self._fill_field(client, vm, Point(512, 220), options.linux_username)
         self._fill_field(client, vm, Point(512, 333), options.linux_password)
         self._fill_field(client, vm, Point(512, 445), options.linux_password)
         time.sleep(0.5)
-        self._capture_from_client(client, vm, "04-account-filled", result)
+        account_capture = self._capture_from_client(client, vm, "04-account-filled", result)
+        self._assert_wizard_state(
+            account_capture,
+            vm,
+            expected_screen="account",
+            expected_username=options.linux_username,
+            result=result,
+        )
 
         self._click(client, vm, Point(919, 628), 2.0)
-        self._capture_from_client(client, vm, "05-warning", result)
+        warning_capture = self._capture_from_client(client, vm, "05-warning", result)
+        self._assert_wizard_state(
+            warning_capture,
+            vm,
+            expected_screen="warning",
+            expected_username=options.linux_username,
+            result=result,
+        )
 
         self._click(client, vm, Point(221, 541), 0.5)
         self._click(client, vm, Point(919, 628), 10.0)
@@ -425,26 +578,185 @@ class AutomationService:
         # converted back to the same 1024x768 reference system used by _click().
         self._click(client, vm, Point(512, 432), 2.0)
         self._capture_from_client(client, vm, "01-distro", result)
-
-        self._click(client, vm, Point(220, 389), 0.5)
-        self._click(client, vm, Point(838, 614), 2.0)
-        self._capture_from_client(client, vm, "02-resize", result)
-
-        self._click(client, vm, Point(838, 614), 2.0)
-        self._capture_from_client(client, vm, "03-account", result)
+        self._navigate_to_account(
+            client,
+            vm,
+            welcome_point=Point(512, 432),
+            distro_point=Point(220, 389),
+            next_point=Point(838, 614),
+            username=options.linux_username,
+            result=result,
+        )
 
         self._fill_field(client, vm, Point(508, 223), options.linux_username)
         self._fill_field(client, vm, Point(508, 330), options.linux_password)
         self._fill_field(client, vm, Point(508, 438), options.linux_password)
         time.sleep(0.5)
-        self._capture_from_client(client, vm, "04-account-filled", result)
+        account_capture = self._capture_from_client(client, vm, "04-account-filled", result)
+        self._assert_wizard_state(
+            account_capture,
+            vm,
+            expected_screen="account",
+            expected_username=options.linux_username,
+            result=result,
+        )
 
         self._click(client, vm, Point(838, 614), 2.0)
-        self._capture_from_client(client, vm, "05-warning", result)
+        warning_capture = self._capture_from_client(client, vm, "05-warning", result)
+        self._assert_wizard_state(
+            warning_capture,
+            vm,
+            expected_screen="warning",
+            expected_username=options.linux_username,
+            result=result,
+        )
 
         self._click(client, vm, Point(278, 530), 0.5)
         self._click(client, vm, Point(838, 614), 10.0)
         self._capture_from_client(client, vm, "06-apply-started", result)
+
+    def _navigate_to_account(
+        self,
+        client: object,
+        vm: VMConfig,
+        *,
+        welcome_point: Point,
+        distro_point: Point,
+        next_point: Point,
+        username: str,
+        result: ResultBuilder,
+    ) -> None:
+        deadline = time.monotonic() + 600
+        attempt = 0
+        while time.monotonic() < deadline:
+            attempt += 1
+            capture = self._capture_from_client(client, vm, f"02-navigation-{attempt:02d}", result)
+            verdict = self.vision_llm.analyze_wizard_state(
+                capture,
+                vm.name,
+                vm.os,
+                expected_screen="account",
+                expected_username=username,
+            )
+            context = {
+                "target": vm.vnc,
+                "vm": vm.name,
+                "capture": str(capture),
+                "detected_screen": verdict.detected_screen,
+                "expected_screen_visible": verdict.expected_screen_visible,
+                "no_blocking_error": verdict.no_blocking_error,
+                "summary": verdict.summary,
+                "visible_text": verdict.visible_text,
+            }
+            # Empty account fields legitimately show "password required" before
+            # automation fills them. Validation becomes strict immediately after fill.
+            if verdict.detected_screen == "account":
+                return
+            if not verdict.no_blocking_error:
+                raise WorkflowError(
+                    "automation.wizard_navigation",
+                    "Erreur visible pendant la navigation de l'assistant",
+                    details=context,
+                )
+            result.ok(
+                "automation.wizard_navigation",
+                "Page de l'assistant identifiée avant navigation",
+                **context,
+            )
+            if verdict.detected_screen == "welcome":
+                self._click(client, vm, welcome_point, 3.0)
+            elif verdict.detected_screen == "distro":
+                self._click(client, vm, distro_point, 0.7)
+                self._click(client, vm, next_point, 3.0)
+            elif verdict.detected_screen == "resize":
+                self._click(client, vm, next_point, 3.0)
+            elif verdict.detected_screen in {"warning", "apply"}:
+                raise WorkflowError(
+                    "automation.wizard_navigation",
+                    "L'assistant a dépassé l'écran compte de manière inattendue",
+                    details=context,
+                )
+            elif (
+                verdict.detected_screen == "other"
+                and "contrôle de compte d'utilisateur" in verdict.visible_text.lower()
+                and "sécurité windows" in verdict.visible_text.lower()
+            ):
+                client.keyPress("esc")
+                time.sleep(3)
+                result.ok(
+                    "automation.dismiss_windows_security_uac",
+                    "UAC retardé de Sécurité Windows fermé sans autoriser de modification",
+                    target=vm.vnc,
+                    vm=vm.name,
+                )
+            else:
+                time.sleep(3)
+
+        raise WorkflowError(
+            "automation.wizard_navigation",
+            "Timeout en attendant l'écran de création du compte",
+            details={"vm": vm.name, "target": vm.vnc},
+        )
+
+    def _assert_wizard_state(
+        self,
+        capture: Path,
+        vm: VMConfig,
+        *,
+        expected_screen: Literal["account", "warning"],
+        expected_username: str,
+        result: ResultBuilder,
+    ) -> None:
+        verdict = self.vision_llm.analyze_wizard_state(
+            capture,
+            vm.name,
+            vm.os,
+            expected_screen=expected_screen,
+            expected_username=expected_username,
+        )
+        context = {
+            "target": vm.vnc,
+            "vm": vm.name,
+            "capture": str(capture),
+            "expected_screen": expected_screen,
+            **verdict.model_dump(),
+        }
+        visible_text = verdict.visible_text or ""
+        username_pattern = rf"(?<![A-Za-z0-9_-]){re.escape(expected_username)}(?![A-Za-z0-9_-])"
+        username_visible_from_text = bool(re.search(username_pattern, visible_text))
+        masked_fields = re.findall(r"(?:[\u2022\u25cf\u00b7*]\s*){3,}", visible_text)
+        password_fields_filled_from_text = len(masked_fields) >= 2
+        username_confirmed = verdict.username_visible or username_visible_from_text
+        passwords_confirmed = verdict.password_fields_filled or password_fields_filled_from_text
+        context.update(
+            {
+                "username_visible_from_text": username_visible_from_text,
+                "password_fields_filled_from_text": password_fields_filled_from_text,
+                "username_confirmed": username_confirmed,
+                "password_fields_confirmed": passwords_confirmed,
+            }
+        )
+        # The following transition to the warning page is the authoritative WPF
+        # validation that both password fields are non-empty and identical. OCR
+        # frequently omits mask glyphs, so requiring them here creates false
+        # negatives without adding safety before the non-destructive Next click.
+        account_valid = expected_screen != "account" or username_confirmed
+        if (
+            verdict.detected_screen != expected_screen
+            or not verdict.expected_screen_visible
+            or not verdict.no_blocking_error
+            or not account_valid
+        ):
+            raise WorkflowError(
+                "automation.wizard_state",
+                "État critique de l'assistant non confirmé; Apply est bloqué",
+                details=context,
+            )
+        result.ok(
+            "automation.wizard_state",
+            "État critique de l'assistant confirmé avant de continuer",
+            **context,
+        )
 
     def _monitor_install_progress(self, vm: VMConfig, result: ResultBuilder) -> None:
         deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
@@ -458,9 +770,7 @@ class AutomationService:
                 verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
             except WorkflowError as exc:
                 exc.details.update({"vm": vm.name, "target": vm.vnc, "capture": str(capture)})
-                result.failure(exc)
-                last_context = exc.details
-                continue
+                raise
             context = {
                 "target": vm.vnc,
                 "vm": vm.name,
@@ -519,6 +829,7 @@ class AutomationService:
         deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
         attempt = 0
         last_context: dict[str, object] | None = None
+        reboot_clicked = False
         while time.monotonic() < deadline:
             attempt += 1
             time.sleep(self.settings.automation_monitor_interval_seconds)
@@ -527,9 +838,7 @@ class AutomationService:
                 verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
             except WorkflowError as exc:
                 exc.details.update({"vm": vm.name, "target": vm.vnc, "capture": str(capture)})
-                result.failure(exc)
-                last_context = exc.details
-                continue
+                raise
             context = {
                 "target": vm.vnc,
                 "vm": vm.name,
@@ -548,7 +857,20 @@ class AutomationService:
                     "Erreur visible pendant la préparation UEFI",
                     details=context,
                 )
-            if self._uefi_reboot_or_live_started(verdict.summary, verdict.visible_text):
+            if (
+                not reboot_clicked
+                and (verdict.installation_finished or verdict.reboot_prompt_visible)
+                and not verdict.active_install_progress_visible
+            ):
+                result.ok(
+                    "automation.uefi_preparation_finished",
+                    "Préparation UEFI terminée; validation du redémarrage",
+                    **context,
+                )
+                self._click_reboot_after_preparation(vm, result)
+                reboot_clicked = True
+                continue
+            if self._uefi_reboot_or_live_started(verdict.visible_text):
                 result.ok(
                     "automation.uefi_reboot_seen",
                     "Reboot Windows vers le live UEFI confirmé visuellement",
@@ -562,7 +884,7 @@ class AutomationService:
         )
 
     @staticmethod
-    def _uefi_reboot_or_live_started(summary: str, visible_text: str) -> bool:
+    def _uefi_reboot_or_live_started(visible_text: str) -> bool:
         """Detect that Windows has left the wizard and the live boot path started.
 
         The UEFI automation must match the BIOS contract: it confirms the app
@@ -570,7 +892,7 @@ class AutomationService:
         for Mint installation success.
         """
 
-        text = f"{summary}\n{visible_text}".lower()
+        text = visible_text.lower()
         if any(
             blocker in text
             for blocker in (
@@ -605,19 +927,18 @@ class AutomationService:
         return any(
             marker in text
             for marker in (
-                "linux boot process",
-                "kernel and initramfs",
-                "libertix installer",
-                "installation automatique",
+                "libertix stage:",
+                "code: 120-unsquashfs",
                 "f12: mode terminal",
-                "gnu grub",
-                "start boot option",
-                "isolinux",
-                "vmlinuz",
-                "initrd",
-                "squashfs",
-                "bdsdxe",
-                "starting boot",
+                "libertix_install_success=",
+            )
+        ) and any(
+            marker in text
+            for marker in (
+                "installation automatique",
+                "extraction de mint",
+                "libertix stage:",
+                "installer-success",
             )
         )
 
@@ -629,14 +950,16 @@ class AutomationService:
             # Small delays keep the click sequence visible and avoid racing the
             # confirmation dialog after the LLM declares the wizard complete.
             time.sleep(2)
-            self._click(client, vm, Point(919, 628), 1.0)
+            reboot_point = Point(1045, 643) if vm.screen_width >= 1200 else Point(919, 628)
+            confirm_point = Point(688, 462) if vm.screen_width >= 1200 else Point(560, 446)
+            self._click_absolute(client, vm, reboot_point, 1.0)
             self._capture_from_client(client, vm, "reboot-confirm", result)
             time.sleep(1)
-            self._click(client, vm, Point(560, 446), 3.0)
+            self._click_absolute(client, vm, confirm_point, 3.0)
             self._capture_from_client(client, vm, "reboot-accepted", result)
             result.ok(
                 "automation.reboot_clicked",
-                "Bouton de redémarrage validé après verdict LLM de fin",
+                "Commande de redémarrage envoyée après verdict LLM de fin",
                 target=vm.vnc,
                 vm=vm.name,
             )
@@ -693,6 +1016,18 @@ class AutomationService:
         x = round(point.x * vm.screen_width / self.REFERENCE_WIDTH)
         y = round(point.y * vm.screen_height / self.REFERENCE_HEIGHT)
         client.mouseMove(x, y)
+        client.mousePress(1)
+        time.sleep(delay)
+
+    @staticmethod
+    def _click_absolute(client: object, vm: VMConfig, point: Point, delay: float) -> None:
+        if not (0 <= point.x < vm.screen_width and 0 <= point.y < vm.screen_height):
+            raise WorkflowError(
+                "automation.click",
+                "Coordonnées VNC hors écran",
+                details={"vm": vm.name, "x": point.x, "y": point.y},
+            )
+        client.mouseMove(point.x, point.y)
         client.mousePress(1)
         time.sleep(delay)
 

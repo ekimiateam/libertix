@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.IO;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using Libertix.Commands;
 using Libertix.Helpers;
@@ -30,6 +31,7 @@ namespace Libertix.Pages
         private string _manualSize;
         private string _sizeErrorMessage;
         private bool _hasSizeError;
+        private readonly ICommand _openDiskCleanupCommand;
 
         public event PropertyChangedEventHandler PropertyChanged;
 
@@ -37,6 +39,7 @@ namespace Libertix.Pages
         public double MinimumWindowsFree => 15; // Minimum 15GB free for Windows
         private double AvailableLinuxSize => _initialFreeSpace - MinimumWindowsFree;
         public double MaximumSize => Math.Max(MinimumSize, AvailableLinuxSize); // Keep slider range valid.
+        public bool CanAllocateLinux => AvailableLinuxSize >= MinimumSize;
 
         // Windows total = Used + remaining free after Linux allocation
         public double WindowsTotalSpace => _windowsUsedSpace + _windowsFreeSpace;
@@ -102,7 +105,7 @@ namespace Libertix.Pages
                 {
                     _selectedSize = value;
                     UpdatePartitionSizes(value);
-                    ManualSize = value.ToString("F0");
+                    ManualSize = value.ToString("F0", CultureInfo.InvariantCulture);
                     NotifyPropertyChanged(nameof(SelectedSize));
                 }
             }
@@ -183,11 +186,12 @@ namespace Libertix.Pages
         public string AdditionalSpaceNeeded => HasError ? 
             $"Additional space needed: {(MinimumSize - WindowsFreeSpace):N1} GB" : null;
 
-        public ICommand OpenDiskCleanupCommand => new RelayCommand(_ => Process.Start("cleanmgr.exe"));
+        public ICommand OpenDiskCleanupCommand => _openDiskCleanupCommand;
 
         public ResizeDisk()
         {
             InitializeComponent();
+            _openDiskCleanupCommand = new RelayCommand(_ => Process.Start("cleanmgr.exe"));
             DataContext = this;
 
             // Use the actual Windows system drive instead of relying on DriveInfo enumeration order.
@@ -206,7 +210,7 @@ namespace Libertix.Pages
                 LoadState(distro);
             }
 
-            ManualSize = RecommendedSize.ToString("F0");
+            ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
         }
 
         private void SaveState(DistroInfo distro)
@@ -243,21 +247,23 @@ namespace Libertix.Pages
                 SelectedSize = savedState["SelectedSize"];
                 WindowsFreeSpace = savedState["WindowsFreeSpace"];
                 LinuxSize = savedState["LinuxSize"];
-                ManualSize = SelectedSize.ToString("F0");
+                ManualSize = SelectedSize.ToString("F0", CultureInfo.InvariantCulture);
             }
             else
             {
                 // Initialize with recommended size
                 SelectedSize = RecommendedSize;
-                ManualSize = RecommendedSize.ToString("F0");
+                ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
             }
         }
 
         private double CalculateRecommendedSize()
         {
             // Use 40% of available space or minimum 30GB, maximum 100GB
+            if (!CanAllocateLinux)
+                return MinimumSize;
             double recommendedSize = Math.Max(MinimumSize, _initialFreeSpace * 0.4);
-            return Math.Min(recommendedSize, 100);
+            return Math.Min(Math.Min(recommendedSize, 100), AvailableLinuxSize);
         }
 
         private void CheckSpaceRequirements()
@@ -275,8 +281,9 @@ namespace Libertix.Pages
                 return;
             }
 
-            if (double.TryParse(value, out double size))
+            if (uint.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out uint parsed))
             {
+                double size = parsed;
                 if (size < MinimumSize)
                 {
                     HasSizeError = true;
@@ -316,7 +323,20 @@ namespace Libertix.Pages
 
         private static bool IsTextAllowed(string text)
         {
-            return double.TryParse(text, out _) || text == ".";
+            return text.All(char.IsDigit);
+        }
+
+        private void ManualSize_Pasting(object sender, DataObjectPastingEventArgs e)
+        {
+            if (!e.SourceDataObject.GetDataPresent(DataFormats.UnicodeText, true))
+            {
+                e.CancelCommand();
+                return;
+            }
+
+            string text = e.SourceDataObject.GetData(DataFormats.UnicodeText) as string;
+            if (string.IsNullOrEmpty(text) || !text.All(char.IsDigit))
+                e.CancelCommand();
         }
 
         private void NotifyPropertyChanged(string propertyName)

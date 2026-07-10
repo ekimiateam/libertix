@@ -205,7 +205,7 @@
           <input id="apiKey" type="password" autocomplete="off" />
           <label for="sourceMode">Source build</label>
           <select id="sourceMode">
-            <option value="remote">DEV distant</option>
+            <option value="remote">dev distant</option>
             <option value="local">Working tree local</option>
           </select>
           <div class="buttons">
@@ -335,17 +335,13 @@
       const stepsBody = document.getElementById("steps");
       const buttons = [...document.querySelectorAll("button")];
 
-      apiKeyInput.value = localStorage.getItem("libertix_api_key") || "";
-      sourceModeInput.value = localStorage.getItem("libertix_source_mode") || "remote";
-      linuxUsernameInput.value = localStorage.getItem("libertix_linux_username") || "test";
-      linuxPasswordInput.value = localStorage.getItem("libertix_linux_password") || "linux";
+      sourceModeInput.value = sessionStorage.getItem("libertix_source_mode") || "remote";
+      linuxUsernameInput.value = sessionStorage.getItem("libertix_linux_username") || "test";
 
       document.getElementById("saveKey").addEventListener("click", () => {
-        localStorage.setItem("libertix_api_key", apiKeyInput.value);
-        localStorage.setItem("libertix_source_mode", sourceModeInput.value);
-        localStorage.setItem("libertix_linux_username", linuxUsernameInput.value);
-        localStorage.setItem("libertix_linux_password", linuxPasswordInput.value);
-        setStatus("Paramètres enregistrés dans le navigateur.", false);
+        sessionStorage.setItem("libertix_source_mode", sourceModeInput.value);
+        sessionStorage.setItem("libertix_linux_username", linuxUsernameInput.value);
+        setStatus("Options non sensibles enregistrées pour cet onglet. Les secrets restent en mémoire.", false);
       });
       document.getElementById("health").addEventListener("click", checkHealth);
       document.getElementById("loadVms").addEventListener("click", loadVms);

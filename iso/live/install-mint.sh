@@ -12,14 +12,23 @@ CURRENT_STAGE="bootstrap"
 DISK=""
 LIVE_PART=""
 WINDOWS_PART=""
+WINDOWS_BOOT_PART=""
 NEW_PART=""
 NEW_PART_NUM=""
 INSTALL_SUCCESS=false
-INSTALL_COMMITTED=false
 BOOTLOADER_WRITE_STARTED=false
 MBR_BACKUP="$LOG_DIR/mbr-before-grub.bin"
 ROLLBACK_ATTEMPTED=false
 RECOVERY_GEOMETRY_BEFORE=""
+# Keep rollback-safe defaults available before the configuration file is parsed.
+# ERR can fire during bootstrap and rollback must never fail because of `set -u`.
+TARGET_DISK_SIZE_BYTES=""
+WINDOWS_PARTITION_OFFSET_BYTES=""
+WINDOWS_BOOT_PARTITION_OFFSET_BYTES=""
+INSTALLER_PARTITION_OFFSET_BYTES=""
+EXPECTED_PARTITION_STYLE=""
+RECOVERY_PARTITION_OFFSET_BYTES=""
+RECOVERY_PARTITION_SIZE_BYTES=""
 echo "$CURRENT_STAGE" > "$STAGE_FILE"
 
 mark() {
@@ -93,6 +102,70 @@ windows_path_to_relative() {
 
 partition_count() {
     lsblk -nr -o NAME,TYPE "$1" | awk '$2=="part"{c++}END{print c+0}'
+}
+
+partitions_of_disk() {
+    local disk="$1"
+    lsblk -lnpo NAME,TYPE "$disk" 2>/dev/null | awk '$2=="part"{print $1}'
+}
+
+candidate_disks() {
+    lsblk -dnpo NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}' | while read -r disk; do
+        case "$(basename "$disk")" in
+            loop*|ram*|sr*) continue ;;
+        esac
+        echo "$disk"
+    done
+}
+
+partition_start_bytes() {
+    local disk="$1" part="$2" start logical_sector
+    start=$(cat "/sys/class/block/$(basename "$part")/start" 2>/dev/null) || return 1
+    logical_sector=$(blockdev --getss "$disk" 2>/dev/null) || return 1
+    echo "$((start * logical_sector))"
+}
+
+partition_at_offset() {
+    local disk="$1" expected_offset="$2" part actual_offset
+    while read -r part; do
+        [ -n "$part" ] || continue
+        actual_offset=$(partition_start_bytes "$disk" "$part" || true)
+        if [ "$actual_offset" = "$expected_offset" ]; then
+            echo "$part"
+            return 0
+        fi
+    done < <(partitions_of_disk "$disk")
+    return 1
+}
+
+disk_matches_manifest() {
+    local disk="$1" actual_size actual_style expected_style windows_candidate boot_candidate
+    actual_size=$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)
+    [ "$actual_size" = "$TARGET_DISK_SIZE_BYTES" ] || return 1
+    actual_style=$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}')
+    expected_style=$(echo "$EXPECTED_PARTITION_STYLE" | tr '[:upper:]' '[:lower:]')
+    [ "$expected_style" != "mbr" ] || expected_style="msdos"
+    [ "$actual_style" = "$expected_style" ] || return 1
+    windows_candidate=$(partition_at_offset "$disk" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
+    [ -n "$windows_candidate" ] || return 1
+    [ "$(blkid -s TYPE -o value "$windows_candidate" 2>/dev/null || true)" = "ntfs" ] || return 1
+    boot_candidate=$(partition_at_offset "$disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
+    [ -n "$boot_candidate" ] || return 1
+}
+
+resolve_target_disk_from_manifest() {
+    local candidate matches=()
+    while read -r candidate; do
+        [ -b "$candidate" ] || continue
+        if disk_matches_manifest "$candidate"; then
+            matches+=("$candidate")
+        fi
+    done < <(candidate_disks)
+    [ "${#matches[@]}" -eq 1 ] || {
+        echo "Manifest matched ${#matches[@]} target disks; exactly one is required" >&2
+        return 1
+    }
+    echo "${matches[0]}"
 }
 
 find_biggest_windows_partition() {
@@ -219,21 +292,67 @@ recovery_geometry() {
 }
 
 assert_recovery_unchanged_or_die() {
-    local current
-    [ -n "$RECOVERY_GEOMETRY_BEFORE" ] || return 0
-    current="$(recovery_geometry "$DISK")"
-    if [ "$current" != "$RECOVERY_GEOMETRY_BEFORE" ]; then
-        echo "ERROR: Windows recovery partition geometry changed"
-        echo "before: $RECOVERY_GEOMETRY_BEFORE"
-        echo "after : $current"
-        die "Windows recovery partition changed"
+    local recovery_part recovery_size
+    recovery_part=$(partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES" || true)
+    [ -n "$recovery_part" ] && [ -b "$recovery_part" ] || die "Windows recovery partition is missing at its recorded offset"
+    recovery_size=$(blockdev --getsize64 "$recovery_part" 2>/dev/null || echo 0)
+    [ "$recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES" ] || \
+        die "Windows recovery partition size changed: expected $RECOVERY_PARTITION_SIZE_BYTES, got $recovery_size"
+
+    echo "Windows recovery partition verified from manifest: $recovery_part ($recovery_size bytes)"
+}
+
+verify_fstab_or_die() {
+    local target_root="$1" output rc
+    local target_dev="$target_root/dev"
+
+    [ -f "$target_root/etc/fstab" ] || die "final verify: target fstab missing"
+    [ -d "$target_dev" ] || die "final verify: target /dev directory missing"
+
+    # findmnt resolves mount targets from /. Run it in the installed system;
+    # otherwise target paths are incorrectly checked against the live system.
+    mount --rbind /dev "$target_dev" || die "final verify: unable to bind /dev for fstab validation"
+    mount --make-rslave "$target_dev" || {
+        umount -R "$target_dev" 2>/dev/null || true
+        die "final verify: unable to isolate target /dev bind"
+    }
+
+    if output=$(chroot "$target_root" findmnt --verify --verbose --tab-file /etc/fstab 2>&1); then
+        rc=0
+    else
+        rc=$?
     fi
+    umount -R "$target_dev" || die "final verify: unable to unmount target /dev bind"
+
+    printf '%s\n' "$output"
+    [ "$rc" -eq 0 ] && return 0
+    if printf '%s\n' "$output" | grep -Eq '(^|[[:space:]])0 parse errors, 0 errors,'; then
+        echo "FINAL VERIFY: fstab has non-fatal compatibility warnings only"
+        return 0
+    fi
+    die "final verify: fstab is invalid"
+}
+
+partition_has_boot_flag() {
+    local disk="$1" partition_number="$2"
+    parted -sm "$disk" print 2>/dev/null |
+        awk -F: -v number="$partition_number" '
+            $1 == number {
+                matched = 1
+                count = split($7, flags, ",")
+                for (i = 1; i <= count; i++) {
+                    sub(/;$/, "", flags[i])
+                    if (flags[i] == "boot") has_boot = 1
+                }
+            }
+            END { exit !(matched && has_boot) }
+        '
 }
 
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
     local windows_verify="/mnt/libertix-windows-final-verify"
-    local fs uuid count
+    local fs uuid count windows_boot_part_num
 
     mark "150-final-verify"
     echo "FINAL VERIFY: checking installed system before success"
@@ -241,11 +360,20 @@ final_verify_or_die() {
     [ -n "$DISK" ] && [ -b "$DISK" ] || die "final verify: target disk missing"
     [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] || die "final verify: Linux partition missing"
     [ -n "$WINDOWS_PART" ] && [ -b "$WINDOWS_PART" ] || die "final verify: Windows partition missing"
+    [ -n "$WINDOWS_BOOT_PART" ] && [ -b "$WINDOWS_BOOT_PART" ] || \
+        die "final verify: Windows boot partition missing"
 
     assert_recovery_unchanged_or_die
 
     count="$(partition_count "$DISK")"
     [ "$count" -le 4 ] || die "final verify: MBR partition count is $count"
+
+    windows_boot_part_num="$(partition_number "$WINDOWS_BOOT_PART")"
+    partition_has_boot_flag "$DISK" "$windows_boot_part_num" || \
+        die "final verify: Windows boot partition is not active"
+    if partition_has_boot_flag "$DISK" "$NEW_PART_NUM"; then
+        die "final verify: Linux partition unexpectedly has the MBR boot flag"
+    fi
 
     fs="$(blkid -s TYPE -o value "$NEW_PART" 2>/dev/null || true)"
     [ "$fs" = "ext4" ] || die "final verify: $NEW_PART is not ext4"
@@ -261,10 +389,21 @@ final_verify_or_die() {
     [ -f "$target_verify/boot/grub/grub.cfg" ] || die "final verify: grub.cfg missing"
     grep -q "menuentry" "$target_verify/boot/grub/grub.cfg" || die "final verify: grub menu missing"
     [ -d "$target_verify/home/$USERNAME" ] || die "final verify: user home missing"
+    find "$target_verify/boot" -maxdepth 1 -type f -name 'vmlinuz-*' -print -quit | grep -q . || die "final verify: kernel missing"
+    find "$target_verify/boot" -maxdepth 1 -type f -name 'initrd.img-*' -print -quit | grep -q . || die "final verify: initramfs missing"
+    chroot "$target_verify" id "$USERNAME" | grep -q 'groups=.*sudo' || die "final verify: user is not in sudo group"
+    chroot "$target_verify" passwd -S "$USERNAME" | grep -Eq "^[^ ]+ P " || die "final verify: user password is not set"
+    chroot "$target_verify" visudo -cf /etc/sudoers >/dev/null || die "final verify: sudoers is invalid"
+    chroot "$target_verify" grub-script-check /boot/grub/grub.cfg || die "final verify: grub.cfg syntax is invalid"
+    dpkg_audit=$(chroot "$target_verify" dpkg --audit)
+    [ -z "$dpkg_audit" ] || die "final verify: dpkg audit failed: $dpkg_audit"
+    verify_fstab_or_die "$target_verify"
     umount "$target_verify"
 
     mkdir -p "$windows_verify"
     mount -t ntfs-3g -o ro "$WINDOWS_PART" "$windows_verify"
+    [ -d "$windows_verify/Windows/System32" ] || die "final verify: Windows system directory missing"
+    [ -f "$windows_verify/Windows/System32/config/SYSTEM" ] || die "final verify: Windows SYSTEM hive missing"
     [ ! -e "$windows_verify/grldr" ] || die "final verify: temporary grldr still present"
     [ ! -e "$windows_verify/grldr.mbr" ] || die "final verify: temporary grldr.mbr still present"
     [ ! -e "$windows_verify/menu.lst" ] || die "final verify: temporary menu.lst still present"
@@ -313,7 +452,8 @@ cleanup_live_mounts_best_effort() {
 # target disk, because that is the temporary live/final Linux slot created by the
 # Windows phase. The Windows recovery partition is never moved or removed here.
 rollback_windows_layout_best_effort() {
-    local win_num recovery_start resize_end rollback_ok=false candidate live_candidate deleted_linux_part=false
+    local win_num recovery_start logical_sector resize_end rollback_ok=false boot_restore_ok=true
+    local live_candidate deleted_linux_part=false windows_boot_candidate windows_boot_num
 
     [ "$INSTALL_SUCCESS" = false ] || return 0
     [ "$ROLLBACK_ATTEMPTED" = false ] || return 0
@@ -322,19 +462,12 @@ rollback_windows_layout_best_effort() {
     echo "=== ROLLBACK: best-effort Windows layout restore ==="
 
     if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
-        for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
-            [ -b "$candidate" ] || continue
-            if [ -n "$(find_biggest_windows_partition "$candidate")" ]; then
-                DISK="$candidate"
-                DISKNAME="$(basename "$DISK")"
-                echo "ROLLBACK: detected target disk as $DISK"
-                break
-            fi
-        done
+        DISK=$(resolve_target_disk_from_manifest || true)
+        [ -n "$DISK" ] && DISKNAME="$(basename "$DISK")"
     fi
     if [ -z "$WINDOWS_PART" ] && [ -n "$DISK" ] && [ -b "$DISK" ]; then
-        WINDOWS_PART="$(find_biggest_windows_partition "$DISK")"
-        [ -n "$WINDOWS_PART" ] && echo "ROLLBACK: detected Windows partition as $WINDOWS_PART"
+        WINDOWS_PART="$(partition_at_offset "$DISK" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)"
+        [ -n "$WINDOWS_PART" ] && echo "ROLLBACK: resolved Windows partition as $WINDOWS_PART"
     fi
 
     if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
@@ -353,22 +486,23 @@ rollback_windows_layout_best_effort() {
     # fails, restore the previous boot code bytes so Windows remains bootable.
     if [ "$BOOTLOADER_WRITE_STARTED" = true ] && [ -f "$MBR_BACKUP" ]; then
         echo "ROLLBACK: restoring pre-GRUB MBR boot code from $MBR_BACKUP"
-        dd if="$MBR_BACKUP" of="$DISK" bs=446 count=1 conv=notrunc || true
+        dd if="$MBR_BACKUP" of="$DISK" bs=446 count=1 conv=notrunc || boot_restore_ok=false
         sync || true
     fi
 
     if [ -z "$NEW_PART" ]; then
-        live_candidate="$(find_live_partition_on_disk "$DISK" || true)"
-        if [ -n "$live_candidate" ] && [ "$(partition_number "$live_candidate")" = "3" ]; then
+        live_candidate="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+        if [ -n "$live_candidate" ]; then
             NEW_PART="$live_candidate"
-            NEW_PART_NUM="3"
-            echo "ROLLBACK: detected temporary Linux partition as $NEW_PART"
+            NEW_PART_NUM="$(partition_number "$live_candidate")"
+            echo "ROLLBACK: resolved transaction partition as $NEW_PART"
         fi
     fi
 
     if [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ]; then
         NEW_PART_NUM="${NEW_PART_NUM:-$(partition_number "$NEW_PART")}"
-        if [ "$NEW_PART_NUM" = "3" ] && [ "$(parent_disk_from_part "$NEW_PART")" = "$DISK" ]; then
+        if [ "$(parent_disk_from_part "$NEW_PART")" = "$DISK" ] && \
+            [ "$(partition_start_bytes "$DISK" "$NEW_PART" || true)" = "$INSTALLER_PARTITION_OFFSET_BYTES" ]; then
             if findmnt -rn -S "$NEW_PART" | grep -q .; then
                 echo "ROLLBACK: cannot delete $NEW_PART because it is still mounted"
             elif fuser -m "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
@@ -390,16 +524,17 @@ rollback_windows_layout_best_effort() {
         fi
     fi
 
-    if parted -sm "$DISK" print 2>/dev/null | awk -F: '$1=="3"{found=1} END{exit !found}'; then
+    if [ -n "$NEW_PART_NUM" ] && parted -sm "$DISK" print 2>/dev/null | awk -F: -v n="$NEW_PART_NUM" '$1==n{found=1} END{exit !found}'; then
         if [ "$deleted_linux_part" != true ]; then
-            echo "ROLLBACK: skipping Windows resize because partition 3 is still present"
+            echo "ROLLBACK: skipping Windows resize because transaction partition $NEW_PART_NUM is still present"
             debug_disk_state || true
             return 1
         fi
     fi
 
     win_num="$(partition_number "$WINDOWS_PART")"
-    recovery_start="$(parted -sm "$DISK" unit s print 2>/dev/null | awk -F: '$1=="4"{gsub("s","",$2); print $2; exit}')"
+    logical_sector=$(blockdev --getss "$DISK" 2>/dev/null || echo 512)
+    recovery_start="$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector))"
     if [ -n "$recovery_start" ]; then
         resize_end="$((recovery_start - 1))s"
     else
@@ -411,14 +546,23 @@ rollback_windows_layout_best_effort() {
         partprobe "$DISK" 2>/dev/null || true
         udevadm settle 2>/dev/null || true
         echo "ROLLBACK: growing NTFS filesystem"
-        ntfsresize -f "$WINDOWS_PART" <<< "y" || true
-        ntfsfix -d "$WINDOWS_PART" || true
-        rollback_ok=true
+        if ntfsresize -f "$WINDOWS_PART" <<< "y" && ntfsfix -d "$WINDOWS_PART"; then
+            [ "$boot_restore_ok" = true ] && rollback_ok=true
+        else
+            echo "ROLLBACK: NTFS growth or verification failed"
+        fi
     else
         echo "ROLLBACK: partition resize failed"
     fi
 
-    parted -s "$DISK" set 1 boot on 2>/dev/null || true
+    windows_boot_candidate=$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
+    if [ -n "$windows_boot_candidate" ] && [ -b "$windows_boot_candidate" ]; then
+        windows_boot_num="$(partition_number "$windows_boot_candidate")"
+        parted -s "$DISK" set "$windows_boot_num" boot on 2>/dev/null || true
+    else
+        echo "ROLLBACK: Windows boot partition could not be resolved from the manifest"
+        boot_restore_ok=false
+    fi
     if [ -n "$RECOVERY_GEOMETRY_BEFORE" ]; then
         echo "ROLLBACK: recovery before=$RECOVERY_GEOMETRY_BEFORE"
         echo "ROLLBACK: recovery after=$(recovery_geometry "$DISK")"
@@ -775,11 +919,18 @@ KEYBOARD_LAYOUT="us"
 KEYBOARD_MODEL="pc105"
 TIMEZONE="UTC"
 USERNAME=""
-PASSWORD=""
+PASSWORD_HASH=""
 COMPUTER_NAME=""
 ISO_FILENAME="mint.iso"
 ISO_WINDOWS_PATH=""
 LINUX_SIZE_GB="30"
+TARGET_DISK_SIZE_BYTES=""
+WINDOWS_PARTITION_OFFSET_BYTES=""
+WINDOWS_BOOT_PARTITION_OFFSET_BYTES=""
+INSTALLER_PARTITION_OFFSET_BYTES=""
+EXPECTED_PARTITION_STYLE=""
+RECOVERY_PARTITION_OFFSET_BYTES=""
+RECOVERY_PARTITION_SIZE_BYTES=""
 
 if [ -f "$CONFIG_FILE" ]; then
     while IFS='=' read -r key value; do
@@ -802,55 +953,49 @@ PY
             KEYBOARD_MODEL) KEYBOARD_MODEL="$value" ;;
             TIMEZONE) TIMEZONE="$value" ;;
             USERNAME) USERNAME="$value" ;;
-            PASSWORD) PASSWORD="$value" ;;
+            PASSWORD_HASH) PASSWORD_HASH="$value" ;;
             COMPUTER_NAME) COMPUTER_NAME="$value" ;;
             ISO_FILENAME) ISO_FILENAME="$value" ;;
             ISO_WINDOWS_PATH) ISO_WINDOWS_PATH="$value" ;;
             LINUX_SIZE_GB) LINUX_SIZE_GB="$value" ;;
+            TARGET_DISK_SIZE_BYTES) TARGET_DISK_SIZE_BYTES="$value" ;;
+            WINDOWS_PARTITION_OFFSET_BYTES) WINDOWS_PARTITION_OFFSET_BYTES="$value" ;;
+            WINDOWS_BOOT_PARTITION_OFFSET_BYTES) WINDOWS_BOOT_PARTITION_OFFSET_BYTES="$value" ;;
+            INSTALLER_PARTITION_OFFSET_BYTES) INSTALLER_PARTITION_OFFSET_BYTES="$value" ;;
+            EXPECTED_PARTITION_STYLE) EXPECTED_PARTITION_STYLE="$value" ;;
+            RECOVERY_PARTITION_OFFSET_BYTES) RECOVERY_PARTITION_OFFSET_BYTES="$value" ;;
+            RECOVERY_PARTITION_SIZE_BYTES) RECOVERY_PARTITION_SIZE_BYTES="$value" ;;
         esac
     done < "$CONFIG_FILE"
 fi
 
 [ -n "$USERNAME" ] || die "config.txt missing USERNAME"
-[ -n "$PASSWORD" ] || die "config.txt missing PASSWORD"
+[[ "$PASSWORD_HASH" == \$6\$* ]] || die "config.txt missing valid PASSWORD_HASH"
 [ -n "$COMPUTER_NAME" ] || die "config.txt missing COMPUTER_NAME"
 [ -n "$LINUX_SIZE_GB" ] || die "config.txt missing LINUX_SIZE_GB"
+[ "$TARGET_DISK_SIZE_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid TARGET_DISK_SIZE_BYTES"
+[ "$WINDOWS_PARTITION_OFFSET_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid WINDOWS_PARTITION_OFFSET_BYTES"
+[ "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid WINDOWS_BOOT_PARTITION_OFFSET_BYTES"
+[ "$INSTALLER_PARTITION_OFFSET_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid INSTALLER_PARTITION_OFFSET_BYTES"
+case "$EXPECTED_PARTITION_STYLE" in GPT|MBR) ;; *) die "config.txt has invalid EXPECTED_PARTITION_STYLE" ;; esac
+[ "$RECOVERY_PARTITION_OFFSET_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid RECOVERY_PARTITION_OFFSET_BYTES"
+[ "$RECOVERY_PARTITION_SIZE_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid RECOVERY_PARTITION_SIZE_BYTES"
 [ -z "$ISO_WINDOWS_PATH" ] && ISO_WINDOWS_PATH="$ISO_FILENAME"
 
 echo "Config: Lang=$SYSTEM_LANG Keyboard=$KEYBOARD_LAYOUT User=$USERNAME LinuxSize=${LINUX_SIZE_GB}GB"
 
-# Detect disk
+# Detect the exact disk recorded by Windows.
 mark "020-detect-disk"
-TARGET_DISK=""
+TARGET_DISK=$(resolve_target_disk_from_manifest || true)
 LIVE_PART=""
-for mp in /run/live/medium /lib/live/mount/medium /cdrom; do
-    if mountpoint -q "$mp" 2>/dev/null; then
-        LIVE_PART=$(findmnt -n -o SOURCE "$mp" 2>/dev/null || true)
-        if [ -b "$LIVE_PART" ]; then
-            TARGET_DISK=$(parent_disk_from_part "$LIVE_PART")
-            break
-        fi
-    fi
-done
-
-if [ -z "$TARGET_DISK" ]; then
-    for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
-        [ -b "$candidate" ] || continue
-        if [ -n "$(find_biggest_windows_partition "$candidate")" ]; then
-            TARGET_DISK="$candidate"
-            break
-        fi
-    done
-fi
 
 [ ! -b "$TARGET_DISK" ] && die "target disk not found: $TARGET_DISK"
 
 DISK="$TARGET_DISK"
 DISKNAME=$(basename "$DISK")
 
-if [ -z "$LIVE_PART" ] || [ ! -b "$LIVE_PART" ]; then
-    LIVE_PART=$(find_live_partition_on_disk "$DISK" || true)
-fi
+LIVE_PART=$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)
+[ -n "$LIVE_PART" ] && [ -b "$LIVE_PART" ] || die "Installer partition does not match the Windows manifest"
 
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$DISK"
 
@@ -860,12 +1005,21 @@ RECOVERY_GEOMETRY_BEFORE="$(recovery_geometry "$DISK")"
 [ -n "$RECOVERY_GEOMETRY_BEFORE" ] && echo "Recovery partition geometry before install: $RECOVERY_GEOMETRY_BEFORE"
 
 # Find Windows partition
-WINDOWS_PART=$(find_biggest_windows_partition "$DISK")
+WINDOWS_PART=$(partition_at_offset "$DISK" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
 WINDOWS_SIZE=0
 [ -n "$WINDOWS_PART" ] && WINDOWS_SIZE=$(($(blockdev --getsize64 "$WINDOWS_PART" 2>/dev/null || echo 0) / 1024 / 1024))
 
-[ -z "$WINDOWS_PART" ] && die "No Windows partition"
+[ -n "$WINDOWS_PART" ] && [ "$(blkid -s TYPE -o value "$WINDOWS_PART" 2>/dev/null || true)" = "ntfs" ] || \
+    die "Windows partition does not match the Windows manifest"
 echo "Windows: $WINDOWS_PART (${WINDOWS_SIZE}MB)"
+echo "$WINDOWS_PART" > "$LOG_DIR/windows-partition"
+
+WINDOWS_BOOT_PART=$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
+[ -n "$WINDOWS_BOOT_PART" ] && [ -b "$WINDOWS_BOOT_PART" ] || \
+    die "Windows boot partition does not match the Windows manifest"
+[ "$(parent_disk_from_part "$WINDOWS_BOOT_PART")" = "$DISK" ] || \
+    die "Windows boot partition is not on the target disk"
+echo "Windows boot partition: $WINDOWS_BOOT_PART"
 
 # Calculate how much more we need to shrink Windows
 # LINUX_SIZE_GB includes the 2GB FAT32, so we need (LINUX_SIZE_GB - 2) more for ext4
@@ -918,19 +1072,19 @@ if [ "$ADDITIONAL_SHRINK_MB" -gt 1024 ]; then
 
     # Check filesystem first
     echo "Checking NTFS filesystem..."
-    ntfsfix "$WINDOWS_PART" || true
+    ntfsfix "$WINDOWS_PART" || die "NTFS pre-resize check failed"
 
     # Resize NTFS filesystem (size in bytes for ntfsresize)
     NEW_SIZE_BYTES=$((NEW_WINDOWS_SIZE_MB * 1024 * 1024))
     echo "Resizing NTFS to ${NEW_WINDOWS_SIZE_MB}MB..."
-    ntfsresize -f -s "${NEW_SIZE_BYTES}" "$WINDOWS_PART" <<< "y" || {
-        echo "WARNING: ntfsresize failed, continuing with available space"
-    }
+    ntfsresize -f -s "${NEW_SIZE_BYTES}" "$WINDOWS_PART" <<< "y" || \
+        die "ntfsresize failed; the partition table was not changed"
 
     # Resize partition table
     PART_NUM=$(echo "$WINDOWS_PART" | grep -oE '[0-9]+$')
     echo "Resizing partition table..."
-    parted -s "$DISK" resizepart "$PART_NUM" "${NEW_WINDOWS_SIZE_MB}MB" 2>/dev/null || true
+    parted -s "$DISK" resizepart "$PART_NUM" "${NEW_WINDOWS_SIZE_MB}MB" 2>/dev/null || \
+        die "parted failed after NTFS resize; rollback is required"
 
     sync
     partprobe "$DISK" 2>/dev/null || true
@@ -939,6 +1093,9 @@ if [ "$ADDITIONAL_SHRINK_MB" -gt 1024 ]; then
     # Update Windows size
     WINDOWS_SIZE=$(($(blockdev --getsize64 "$WINDOWS_PART" 2>/dev/null || echo 0) / 1024 / 1024))
     echo "Windows partition now: ${WINDOWS_SIZE}MB"
+    [ "$WINDOWS_SIZE" -ge "$((NEW_WINDOWS_SIZE_MB - 8))" ] && \
+        [ "$WINDOWS_SIZE" -le "$((NEW_WINDOWS_SIZE_MB + 8))" ] || \
+        die "Windows partition size verification failed after resize"
 else
     echo "No additional shrinking needed (current free space is sufficient)"
 fi
@@ -1020,7 +1177,7 @@ if [ "$PART_TABLE" = "msdos" ] && [ -n "$NEW_PART_NUM" ]; then
 fi
 
 mark "070-wipefs-live-part"
-run_logged wipefs -a "$NEW_PART" || true
+run_logged wipefs -a "$NEW_PART" || die "Failed to clear old signatures on $NEW_PART"
 mark "080-mkfs-ext4"
 run_logged mkfs.ext4 -F "$NEW_PART"
 mkdir -p /mnt/target /mnt/iso
@@ -1075,10 +1232,11 @@ chroot /mnt/target /usr/bin/env \
     KEYBOARD_MODEL="$KEYBOARD_MODEL" \
     TIMEZONE="$TIMEZONE" \
     USERNAME="$USERNAME" \
-    PASSWORD="$PASSWORD" \
+    PASSWORD_HASH="$PASSWORD_HASH" \
     COMPUTER_NAME="$COMPUTER_NAME" \
     DISK="$DISK" \
     DISKNAME="$DISKNAME" \
+    WINDOWS_PART="$WINDOWS_PART" \
     /tmp/libertix-configure-target.sh
 rm -f /mnt/target/tmp/libertix-configure-target.sh
 
@@ -1087,15 +1245,12 @@ echo "Backing up current MBR before GRUB install..."
 dd if="$DISK" of="$MBR_BACKUP" bs=512 count=1
 BOOTLOADER_WRITE_STARTED=true
 chroot /mnt/target grub-install --target=i386-pc --recheck "$DISK"
-INSTALL_COMMITTED=true
 
 # Cleanup mounts
 for pn in 1 2 3 4; do
     mdir="/mnt/target/mnt/win_$pn"
     [ -d "$mdir" ] && umount "$mdir" 2>/dev/null || true
 done
-
-parted -s "$DISK" set "$NEW_PART_NUM" boot on 2>/dev/null || true
 
 umount /mnt/target/dev/pts 2>/dev/null || true
 umount /mnt/target/dev 2>/dev/null || true
@@ -1104,7 +1259,15 @@ umount /mnt/target/sys 2>/dev/null || true
 umount /mnt/target 2>/dev/null || true
 
 umount /mnt/windows 2>/dev/null || true
-parted -s "$DISK" set "$NEW_PART_NUM" boot on 2>/dev/null || true
+
+# GRUB is installed in the MBR and does not need the Linux partition marked
+# active. Keep the Windows boot partition active so Windows, ReAgentC and WinRE
+# continue to resolve the system BCD store after the partition renumbering.
+WINDOWS_BOOT_PART_NUM="$(partition_number "$WINDOWS_BOOT_PART")"
+run_logged parted -s "$DISK" set "$NEW_PART_NUM" boot off
+run_logged parted -s "$DISK" set "$WINDOWS_BOOT_PART_NUM" boot on
+partprobe "$DISK" 2>/dev/null || true
+udevadm settle 2>/dev/null || true
 assert_recovery_unchanged_or_die
 final_verify_or_die
 

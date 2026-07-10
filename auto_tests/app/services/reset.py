@@ -14,9 +14,7 @@ from app.services.common import ResultBuilder
 
 logger = logging.getLogger(__name__)
 
-RESET_VM_IDS = (500, 501, 502)
 RESET_SNAPSHOT = "clean2"
-CONFIGURED_VM_IDS = (500, 501, 502)
 
 
 class ResetService:
@@ -30,6 +28,7 @@ class ResetService:
     ) -> OperationResult:
         result = ResultBuilder("reset", on_step=on_step)
         try:
+            reset_vm_ids = tuple(vm.vmid for vm in self.settings.vms)
             vmids = self._selected_vmids(selectors)
             locations = self._preflight_proxmox(result, vmids)
             if selectors is None:
@@ -42,10 +41,11 @@ class ResetService:
                 )
             self._restore_snapshots(locations, vmids, result)
             if selectors is None:
-                return result.success("Reset terminé pour /root/smb et les VM 500, 501, 502")
-            return result.success(
-                "Reset terminé pour " + ", ".join(str(vmid) for vmid in vmids)
-            )
+                return result.success(
+                    "Reset terminé pour /root/smb et les VM "
+                    + ", ".join(str(vmid) for vmid in reset_vm_ids)
+                )
+            return result.success("Reset terminé pour " + ", ".join(str(vmid) for vmid in vmids))
         except WorkflowError as exc:
             return result.failure(exc)
         except Exception as exc:
@@ -62,14 +62,13 @@ class ResetService:
             s.proxmox_url,
             s.proxmox_token_id,
             s.proxmox_token_secret.get_secret_value(),
-            verify_tls=s.proxmox_verify_tls,
             timeout=s.proxmox_timeout_seconds,
             task_timeout=s.proxmox_task_timeout_seconds,
         )
 
     def _selected_vmids(self, selectors: Sequence[str] | None) -> tuple[int, ...]:
         if selectors is None:
-            return RESET_VM_IDS
+            return tuple(vm.vmid for vm in self.settings.vms)
         if not selectors:
             raise WorkflowError("reset.selector", "Aucune VM demandée")
 
@@ -88,8 +87,8 @@ class ResetService:
             "win11-uefi": 502,
             "windows11-uefi": 502,
         }
-        for vm, vmid in zip(self.settings.vms, CONFIGURED_VM_IDS, strict=True):
-            aliases[vm.name.strip().lower()] = vmid
+        for vm in self.settings.vms:
+            aliases[vm.name.strip().lower()] = vm.vmid
         selected: list[int] = []
         for selector in selectors:
             key = selector.strip().lower()

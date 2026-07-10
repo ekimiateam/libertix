@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hmac
 import json
 import logging
+import os
 import queue
 import threading
-import traceback
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from threading import Lock
@@ -29,7 +31,63 @@ from app.services.automation import AutomationService
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
 
-operation_lock = Lock()
+
+class ProcessOperationLock:
+    """Serialize destructive operations across threads and Uvicorn processes."""
+
+    def __init__(self, path: Path) -> None:
+        self._thread_lock = Lock()
+        self._path = path
+        self._file = None
+
+    def acquire(self, *, blocking: bool = False) -> bool:
+        if not self._thread_lock.acquire(blocking=blocking):
+            return False
+        try:
+            self._file = self._path.open("a+", encoding="ascii")
+            flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            fcntl.flock(self._file.fileno(), flags)
+            self._file.seek(0)
+            self._file.truncate()
+            self._file.write(f"pid={os.getpid()}\n")
+            self._file.flush()
+            return True
+        except (BlockingIOError, OSError):
+            if self._file is not None:
+                self._file.close()
+                self._file = None
+            self._thread_lock.release()
+            return False
+
+    def release(self) -> None:
+        if self._file is not None:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+            self._file.close()
+            self._file = None
+        self._thread_lock.release()
+
+
+operation_lock = ProcessOperationLock(Path("/tmp/libertix-auto-tests.lock"))
+
+
+def cleanup_old_captures(settings: Settings) -> None:
+    cutoff = time.time() - settings.capture_retention_days * 86400
+    files = sorted(
+        (path for path in settings.capture_dir.glob("*") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for index, path in enumerate(files):
+        if index >= settings.capture_retention_count or path.stat().st_mtime < cutoff:
+            try:
+                path.unlink()
+            except OSError:
+                logger.warning(
+                    "Impossible de supprimer une ancienne capture",
+                    extra={"step": "capture.cleanup", "target": str(path)},
+                )
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI):
         configure_logging(configured.log_level)
         configured.capture_dir.mkdir(parents=True, exist_ok=True)
+        cleanup_old_captures(configured)
         yield
 
     api = FastAPI(
@@ -174,15 +233,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     result = OperationResult(
                         status="problème",
                         operation=operation,
-                        message=f"problème: erreur interne inattendue: {exc}",
+                        message="problème: erreur interne inattendue",
                         steps=[
                             StepResult(
                                 step=f"{operation}.internal_error",
                                 status="problème",
-                                message=str(exc),
+                                message="Erreur interne inattendue; consulter les logs serveur",
                                 context={
                                     "exception_type": type(exc).__name__,
-                                    "python_traceback": traceback.format_exc()[-8000:],
                                 },
                             )
                         ],

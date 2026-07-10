@@ -22,6 +22,12 @@ namespace Libertix.Models
         [JsonPropertyName("isoInstallerFileName")]
         public string IsoInstallerFileName { get; set; }
 
+        [JsonPropertyName("isoSha256")]
+        public string IsoSha256 { get; set; }
+
+        [JsonPropertyName("isoInstallerSha256")]
+        public string IsoInstallerSha256 { get; set; }
+
         [JsonPropertyName("sizeInGB")]
         public double SizeInGB { get; set; }
     }

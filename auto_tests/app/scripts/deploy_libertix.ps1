@@ -105,7 +105,8 @@ try {
     $target = Join-Path $documents $config.release_dir_name
 
     # Relance propre : pas d'ancien processus, pas d'ancienne copie locale.
-    Unregister-ScheduledTask -TaskName "LibertixAutoTest" -Confirm:$false -ErrorAction SilentlyContinue
+    Get-ScheduledTask -TaskName "LibertixAutoInstall_*" -ErrorAction SilentlyContinue |
+        Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop
     Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction Stop
     Start-Sleep -Milliseconds 500
@@ -123,8 +124,15 @@ try {
     if (-not (Test-Path -LiteralPath $localExe -PathType Leaf)) {
         throw "Libertix.exe absent après copie locale"
     }
+    $sourceExe = Join-Path $sourcePath $config.relative_executable
+    $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceExe).Hash.ToLowerInvariant()
+    $localHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $localExe).Hash.ToLowerInvariant()
+    if ($sourceHash -ne $localHash) {
+        throw "Le hash de Libertix.exe local ne correspond pas à la release Samba"
+    }
 
     Write-Result -Name "LOCAL_EXE" -Value $localExe
+    Write-Result -Name "LOCAL_EXE_SHA256" -Value $localHash
 }
 finally {
     if ($mapped -and $mappedDrive) {

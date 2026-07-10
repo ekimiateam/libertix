@@ -2,10 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Globalization;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using System.Security.Cryptography;
+using System.Security.AccessControl;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
@@ -18,12 +22,36 @@ namespace Libertix.Pages
     public partial class ApplyChanges : Page
     {
         private double _linuxSizeGB;
-        private const double FAT32_SIZE_GB = 2.0;
         private const string RecoveryTaskName = "LibertixInstallRecovery";
         private const string RecoveryRoot = @"C:\LibertixInstallRecovery";
+        private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
+        private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
         private const int Aria2MaxConnections = 5;
         private bool _isRunning = false;
         private bool _uefiDownloadingInstallerIso = false;
+        private StoragePreflightInfo _storagePreflight;
+        private bool _biosRecoveryGuardInstalled;
+
+        private sealed class StoragePreflightInfo
+        {
+            public FirmwareType Firmware { get; set; }
+            public string SystemDrive { get; set; }
+            public int SystemDiskNumber { get; set; }
+            public int SystemPartitionNumber { get; set; }
+            public long SystemPartitionOffset { get; set; }
+            public long SystemPartitionSize { get; set; }
+            public int BootPartitionNumber { get; set; }
+            public long BootPartitionOffset { get; set; }
+            public long BootPartitionSize { get; set; }
+            public string SystemDiskUniqueId { get; set; }
+            public long SystemDiskSize { get; set; }
+            public string PartitionStyle { get; set; }
+            public int RecoveryPartitionNumber { get; set; }
+            public long RecoveryPartitionOffset { get; set; }
+            public long RecoveryPartitionSize { get; set; }
+            public bool BitLockerSafe { get; set; }
+            public string BitLockerState { get; set; }
+        }
 
         private enum FirmwareType
         {
@@ -108,19 +136,31 @@ namespace Libertix.Pages
                     return;
                 }
 
-                if (IsUefiFirmware())
+                FirmwareType firmware = DetectFirmwareTypeOrThrow();
+                _storagePreflight = await RunStoragePreflightAsync(firmware);
+
+                if (firmware == FirmwareType.Uefi)
                 {
                     Log("UEFI firmware detected. Using Libertix UEFI workflow.");
                     await ExecuteUefiInstallationAsync();
                 }
-                else
+                else if (firmware == FirmwareType.Bios)
                 {
                     Log("BIOS firmware detected. Using existing BIOS workflow.");
                     await ExecutePartitioningAsync();
                 }
+                else
+                {
+                    throw new InvalidOperationException("Unsupported firmware type.");
+                }
             }
             catch (Exception ex)
             {
+                if (_biosRecoveryGuardInstalled)
+                {
+                    await FailBiosPreparationAndRollbackAsync($"Unexpected preparation failure: {ex.Message}");
+                    return;
+                }
                 Log($"ERROR: {ex.Message}");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
                 BackButton.IsEnabled = true;
@@ -184,27 +224,47 @@ namespace Libertix.Pages
             Log($"Linux account: {account.Username}");
 
             string powershell = ResolveSystemExecutable("WindowsPowerShell\\v1.0\\powershell.exe", "powershell.exe");
-            string arguments =
-                $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" " +
-                $"-Force -InstallerPartitionSizeGB {installerSizeGB} " +
-                $"-FilepoolBaseUrl \"{FilepoolConfig.BaseUrl}\" " +
-                $"-Aria2ExePath \"{aria2Path}\" -Aria2Connections {Aria2MaxConnections} " +
-                $"-LinuxUsername {QuoteArgument(account.Username)} " +
-                $"-LinuxPassword {QuoteArgument(account.Password)} " +
-                $"-LinuxComputerName {QuoteArgument(account.ComputerName)} " +
-                $"-SystemLang {QuoteArgument(systemLang)} " +
-                $"-KeyboardLayout {QuoteArgument(keyboardLayout)} " +
-                $"-KeyboardModel pc105 " +
-                $"-Timezone {QuoteArgument(timezone)}";
+            UefiRecoveryState recovery = CreateUefiRecoverySession();
+            string configPath = WriteProtectedUefiConfig(new
+            {
+                InstallerPartitionSizeGB = installerSizeGB,
+                FilepoolBaseUrl = FilepoolConfig.BaseUrl,
+                Aria2ExePath = aria2Path,
+                Aria2Connections = Aria2MaxConnections,
+                LinuxUsername = account.Username,
+                LinuxPasswordHash = LinuxPasswordHasher.Hash(account.Password),
+                LinuxComputerName = account.ComputerName,
+                SystemLang = systemLang,
+                KeyboardLayout = keyboardLayout,
+                KeyboardModel = "pc105",
+                Timezone = timezone,
+                BootStrategy = "BootNext",
+                RecoveryRoot = recovery.RecoveryRoot,
+                RecoveryRunId = recovery.RunId
+            });
+            File.Copy(configPath, recovery.ConfigPath, true);
+            WriteUefiRecoveryState(recovery);
 
-            int exitCode = await RunStreamingProcessAsync(
-                powershell,
-                arguments,
-                TimeSpan.FromHours(6),
-                line => HandleUefiInstallerOutput(line));
+            int exitCode;
+            try
+            {
+                    string arguments =
+                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                    $"-ConfigPath {QuoteArgument(configPath)} -Force -PreserveConfig";
+                exitCode = await RunStreamingProcessAsync(
+                    powershell,
+                    arguments,
+                    TimeSpan.FromHours(6.5),
+                    line => HandleUefiInstallerOutput(line));
+            }
+            finally
+            {
+                try { if (File.Exists(configPath)) File.Delete(configPath); } catch { }
+            }
 
             if (exitCode != 0)
             {
+                DeleteUefiRecoverySession(recovery);
                 Log($"ERROR: UEFI installer preparation failed with rc={exitCode}");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
                 BackButton.IsEnabled = true;
@@ -212,9 +272,167 @@ namespace Libertix.Pages
                 return;
             }
 
+            try
+            {
+                InstallUefiRecoveryAgent(recovery, powershell);
+            }
+            catch (Exception ex)
+            {
+                Log($"ERROR: UEFI recovery agent setup failed: {ex.Message}");
+                var revert = await Task.Run(() => RunProcess(
+                    powershell,
+                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert",
+                    300000));
+                Log($"UEFI revert after recovery-agent failure: rc={revert.exitCode}");
+                DeleteUefiRecoverySession(recovery);
+                throw;
+            }
+
             UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
             Log("UEFI installation preparation completed successfully.");
             RebootButton.Visibility = Visibility.Visible;
+        }
+
+        private UefiRecoveryState CreateUefiRecoverySession()
+        {
+            string runId = Guid.NewGuid().ToString("N");
+            string root = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "Libertix",
+                "UefiRecovery",
+                runId);
+            string payloadRoot = Path.Combine(root, "payload");
+            Directory.CreateDirectory(payloadRoot);
+
+            var manifestFiles = new List<UefiRecoveryManifestFile>();
+            string sourceRoot = AppDomain.CurrentDomain.BaseDirectory;
+            foreach (string sourceFile in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+            {
+                string relativePath = sourceFile.Substring(sourceRoot.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string destinationFile = Path.Combine(payloadRoot, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationFile));
+                File.Copy(sourceFile, destinationFile, true);
+                var info = new FileInfo(destinationFile);
+                using (var sha = SHA256.Create())
+                using (var stream = File.OpenRead(destinationFile))
+                {
+                    manifestFiles.Add(new UefiRecoveryManifestFile
+                    {
+                        RelativePath = relativePath,
+                        Length = info.Length,
+                        Sha256 = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant()
+                    });
+                }
+            }
+
+            File.WriteAllText(
+                Path.Combine(root, "payload-manifest.json"),
+                JsonSerializer.Serialize(new UefiRecoveryManifest { Files = manifestFiles.ToArray() }),
+                new UTF8Encoding(false));
+
+            if (_storagePreflight == null)
+                throw new InvalidOperationException("UEFI recovery requires a completed storage preflight.");
+
+            return new UefiRecoveryState
+            {
+                RunId = runId,
+                RecoveryRoot = root,
+                PayloadRoot = payloadRoot,
+                ConfigPath = Path.Combine(root, "uefi-config.json"),
+                TaskName = UefiRecoveryTaskPrefix + runId,
+                PromptTaskName = UefiRecoveryPromptTaskPrefix + runId,
+                Phase = "Preparing",
+                CreatedUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                SystemDiskNumber = _storagePreflight.SystemDiskNumber,
+                ExpectedLinuxPartitionSize = checked((long)Math.Max(20, (int)Math.Round(_linuxSizeGB)) * 1024L * 1024L * 1024L)
+            };
+        }
+
+        private static void WriteUefiRecoveryState(UefiRecoveryState state)
+        {
+            string statePath = Path.Combine(state.RecoveryRoot, "state.json");
+            File.WriteAllText(statePath, JsonSerializer.Serialize(state), new UTF8Encoding(false));
+        }
+
+        private void InstallUefiRecoveryAgent(UefiRecoveryState recovery, string powershell)
+        {
+            string agent = Path.Combine(recovery.PayloadRoot, "Scripts", "libertix-uefi-recovery-agent.ps1");
+            string taskRegistrationScript = Path.Combine(
+                recovery.PayloadRoot,
+                "Scripts",
+                "libertix-register-uefi-recovery-tasks.ps1");
+            if (!File.Exists(agent) || !File.Exists(taskRegistrationScript) || !File.Exists(recovery.ConfigPath))
+                throw new InvalidOperationException("Cached UEFI recovery payload is incomplete.");
+
+            recovery.Phase = "AwaitingReboot";
+            WriteUefiRecoveryState(recovery);
+
+            string launcher = Path.Combine(recovery.RecoveryRoot, "run-recovery-agent.cmd");
+            File.WriteAllText(
+                launcher,
+                "@echo off\r\n" +
+                "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" " +
+                "-NoProfile -ExecutionPolicy Bypass -File \"%~dp0payload\\Scripts\\libertix-uefi-recovery-agent.ps1\" " +
+                "-StatePath \"%~dp0state.json\"\r\n",
+                new UTF8Encoding(false));
+            string promptLauncher = Path.Combine(recovery.RecoveryRoot, "run-recovery-prompt.cmd");
+            File.WriteAllText(
+                promptLauncher,
+                "@echo off\r\n" +
+                "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" " +
+                "-NoProfile -ExecutionPolicy Bypass -File \"%~dp0payload\\Scripts\\libertix-uefi-recovery-agent.ps1\" " +
+                "-StatePath \"%~dp0state.json\" -Action Prompt\r\n",
+                new UTF8Encoding(false));
+
+            string registrationArguments =
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(taskRegistrationScript)} " +
+                $"-StartupTaskName {QuoteArgument(recovery.TaskName)} " +
+                $"-StartupLauncher {QuoteArgument(launcher)} " +
+                $"-PromptTaskName {QuoteArgument(recovery.PromptTaskName)} " +
+                $"-PromptLauncher {QuoteArgument(promptLauncher)} " +
+                $"-PromptUser {QuoteArgument(WindowsIdentity.GetCurrent().Name)}";
+            var result = RunProcess(powershell, registrationArguments, waitMs: 30000);
+            if (result.exitCode != 0)
+                throw new InvalidOperationException($"Cannot create UEFI recovery tasks: {result.output} {result.error}".Trim());
+
+            Log($"UEFI return-to-Windows guards installed: {recovery.TaskName}, {recovery.PromptTaskName}");
+        }
+
+        private static void DeleteUefiRecoverySession(UefiRecoveryState recovery)
+        {
+            if (recovery == null || string.IsNullOrWhiteSpace(recovery.RecoveryRoot))
+                return;
+            try
+            {
+                if (Directory.Exists(recovery.RecoveryRoot))
+                    Directory.Delete(recovery.RecoveryRoot, true);
+            }
+            catch { }
+        }
+
+        private static string WriteProtectedUefiConfig(object config)
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "Libertix");
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, $"uefi-config-{Guid.NewGuid():N}.json");
+            File.WriteAllText(path, JsonSerializer.Serialize(config), new UTF8Encoding(false));
+
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                var security = new FileSecurity();
+                security.SetAccessRuleProtection(true, false);
+                security.SetOwner(identity.User);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    identity.User,
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                    FileSystemRights.FullControl,
+                    AccessControlType.Allow));
+                File.SetAccessControl(path, security);
+            }
+            return path;
         }
 
         private void HandleUefiInstallerOutput(string line)
@@ -322,8 +540,16 @@ namespace Libertix.Pages
 
                 using (var process = new Process { StartInfo = psi, EnableRaisingEvents = true })
                 {
-                    process.OutputDataReceived += (_, e) => { if (e.Data != null) Dispatcher.Invoke(() => onLine(e.Data)); };
-                    process.ErrorDataReceived += (_, e) => { if (e.Data != null) Dispatcher.Invoke(() => onLine($"ERROR: {e.Data}")); };
+                    process.OutputDataReceived += (_, e) =>
+                    {
+                        if (e.Data != null)
+                            Dispatcher.BeginInvoke(new Action(() => onLine(e.Data)));
+                    };
+                    process.ErrorDataReceived += (_, e) =>
+                    {
+                        if (e.Data != null)
+                            Dispatcher.BeginInvoke(new Action(() => onLine($"ERROR: {e.Data}")));
+                    };
 
                     if (!process.Start())
                         throw new InvalidOperationException($"Failed to start {fileName}");
@@ -387,9 +613,7 @@ namespace Libertix.Pages
             bool step1Success = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
             if (!step1Success)
             {
-                Log("ERROR: Failed to shrink Windows partition (step 1)");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                await FailBiosPreparationAndRollbackAsync("Failed to shrink Windows partition (step 1)");
                 return;
             }
 
@@ -405,9 +629,20 @@ namespace Libertix.Pages
             bool step2Success = await CreateFat32PartitionSimpleAsync(requestedLinuxMB);
             if (!step2Success)
             {
-                Log("ERROR: Failed to create FAT32 partition");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                await FailBiosPreparationAndRollbackAsync("Failed to create FAT32 partition");
+                return;
+            }
+
+            // On MBR, inserting the Linux slot before the recovery partition
+            // can change its partition number. Refresh WinRE while Windows is
+            // still booted through its normal BCD store; after GRUB is written,
+            // ReAgentC can no longer reliably update that store.
+            Log("Refreshing Windows Recovery Environment registration...");
+            bool winReReady = await RefreshWindowsRecoveryRegistrationAsync();
+            if (!winReReady)
+            {
+                await FailBiosPreparationAndRollbackAsync(
+                    "Windows Recovery Environment could not be re-enabled after partitioning");
                 return;
             }
 
@@ -423,18 +658,12 @@ namespace Libertix.Pages
             await Task.Delay(3000);
 
             // Step 4: Download ISO
-            string isoUrl = "";
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro && !string.IsNullOrEmpty(distro.IsoUrl))
-            {
-                isoUrl = distro.IsoUrl;
-            }
+            var selectedDistroConfig = App.Current.Properties["SelectedDistro"] as DistroInfo;
+            string isoUrl = selectedDistroConfig?.IsoUrl ?? "";
 
             if (string.IsNullOrEmpty(isoUrl))
             {
-                Log("ERROR: No ISO URL found for selected distribution");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                await FailBiosPreparationAndRollbackAsync("No ISO URL found for selected distribution");
                 return;
             }
 
@@ -460,10 +689,12 @@ namespace Libertix.Pages
 
             if (!downloadSuccess)
             {
-                Log("ERROR: Failed to download ISO");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                await FailBiosPreparationAndRollbackAsync("Failed to download ISO");
+                return;
+            }
+            if (!await VerifySha256Async(tempIsoPath, selectedDistroConfig?.IsoSha256, "Libertix BIOS ISO"))
+            {
+                await FailBiosPreparationAndRollbackAsync("Libertix BIOS ISO integrity verification failed");
                 return;
             }
 
@@ -474,10 +705,7 @@ namespace Libertix.Pages
             bool copySuccess = await MountAndCopyIsoAsync(tempIsoPath);
             if (!copySuccess)
             {
-                Log("ERROR: Failed to copy ISO contents");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                await FailBiosPreparationAndRollbackAsync("Failed to copy ISO contents");
                 return;
             }
 
@@ -518,10 +746,15 @@ namespace Libertix.Pages
 
                 if (!installerDownloadSuccess)
                 {
-                    Log("ERROR: Failed to download Linux installer ISO");
-                    UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                    BackButton.IsEnabled = true;
-                    _isRunning = false;
+                    await FailBiosPreparationAndRollbackAsync("Failed to download Linux installer ISO");
+                    return;
+                }
+                if (!await VerifySha256Async(
+                    installerPath,
+                    selectedDistro.IsoInstallerSha256,
+                    "Mint ISO"))
+                {
+                    await FailBiosPreparationAndRollbackAsync("Mint ISO integrity verification failed");
                     return;
                 }
                 Log($"Linux installer saved to {installerPath}");
@@ -534,10 +767,7 @@ namespace Libertix.Pages
             bool configSuccess = await WriteConfigToFat32Async();
             if (!configSuccess)
             {
-                Log("ERROR: Failed to write config.txt");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                await FailBiosPreparationAndRollbackAsync("Failed to write config.txt");
                 return;
             }
 
@@ -547,6 +777,12 @@ namespace Libertix.Pages
             Log("Step 8: Downloading GRUB4DOS files to C:\\...");
 
             string[] grubFiles = { "grldr", "grldr.mbr", "menu.lst" };
+            var grubHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["grldr"] = "124988a6091248111f5d372ad210f21250a42cfd05d9d6366be28347b6368675",
+                ["grldr.mbr"] = "53fce0d82a09531b1a7af728e712a957db3966835304e8bdae5e350220270b33",
+                ["menu.lst"] = "9351d1477b214f860da85307adff0713cfac725fde46b90944acd5b4617aa747"
+            };
             foreach (var file in grubFiles)
             {
                 string url = $"{FilepoolConfig.BaseUrl}/{file}";
@@ -575,10 +811,12 @@ namespace Libertix.Pages
 
                 if (!success)
                 {
-                    Log($"ERROR: Failed to obtain {file}");
-                    UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                    BackButton.IsEnabled = true;
-                    _isRunning = false;
+                    await FailBiosPreparationAndRollbackAsync($"Failed to obtain {file}");
+                    return;
+                }
+                if (!await VerifySha256Async(destPath, grubHashes[file], file))
+                {
+                    await FailBiosPreparationAndRollbackAsync($"Integrity verification failed for {file}");
                     return;
                 }
                 Log($"Ready: {file} at C:\\");
@@ -588,15 +826,12 @@ namespace Libertix.Pages
             // Windows remains the default BCD entry for later boots.
             UpdateProgress(98, "Configuring boot entry...");
             Log("Step 9: Configuring GRUB4DOS boot entry...");
-            System.Threading.Thread.Sleep(1000);
+            await Task.Delay(1000);
 
             bool bootConfigured = await ConfigureBootEntryAsync();
             if (!bootConfigured)
             {
-                Log("ERROR: Failed to configure boot entry");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                await FailBiosPreparationAndRollbackAsync("Failed to configure boot entry");
                 return;
             }
 
@@ -612,6 +847,51 @@ namespace Libertix.Pages
             Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
 
             RebootButton.Visibility = Visibility.Visible;
+        }
+
+        private async Task FailBiosPreparationAndRollbackAsync(string reason)
+        {
+            Log($"ERROR: {reason}");
+            UpdateProgress(0, "Erreur détectée, restauration de Windows en cours...");
+
+            bool rollbackSucceeded = false;
+            if (_biosRecoveryGuardInstalled)
+            {
+                string recoveryScript = Path.Combine(RecoveryRoot, "recover.ps1");
+                if (File.Exists(recoveryScript))
+                {
+                    string powershell = ResolveSystemExecutable(
+                        "WindowsPowerShell\\v1.0\\powershell.exe",
+                        "powershell.exe");
+                    int exitCode = await RunStreamingProcessAsync(
+                        powershell,
+                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(recoveryScript)}",
+                        TimeSpan.FromMinutes(10),
+                        line => Log($"ROLLBACK: {line}"));
+                    rollbackSucceeded = exitCode == 0;
+                }
+            }
+
+            _biosRecoveryGuardInstalled = !rollbackSucceeded;
+            _isRunning = false;
+            if (rollbackSucceeded)
+            {
+                Log("Automatic rollback completed and verified.");
+                UpdateProgress(0, "Erreur pendant la préparation. Windows a été restauré.");
+                BackButton.IsEnabled = true;
+            }
+            else
+            {
+                Log("CRITICAL: Automatic rollback did not complete. Do not retry or power off the machine.");
+                UpdateProgress(0, "Rollback incomplet. Une intervention manuelle est requise.");
+                BackButton.IsEnabled = false;
+                MessageBox.Show(
+                    "La préparation a échoué et le rollback automatique n'a pas pu être vérifié. " +
+                    "Ne relancez pas l'installation et consultez C:\\LibertixInstallRecovery\\recovery.log.",
+                    "Libertix - rollback incomplet",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+            }
         }
 
         private async Task<bool> DownloadFileAsync(string url, string destinationPath)
@@ -631,6 +911,33 @@ namespace Libertix.Pages
                 Dispatcher.Invoke(() => Log($"Download failed for {url}: {ex.Message}"));
                 return false;
             }
+        }
+
+        private async Task<bool> VerifySha256Async(string path, string expectedHash, string label)
+        {
+            if (string.IsNullOrWhiteSpace(expectedHash) ||
+                !Regex.IsMatch(expectedHash, "^[0-9a-fA-F]{64}$"))
+            {
+                Log($"ERROR: Missing or invalid SHA256 manifest entry for {label}.");
+                return false;
+            }
+            if (!File.Exists(path))
+            {
+                Log($"ERROR: Cannot verify missing file for {label}: {path}");
+                return false;
+            }
+
+            string actualHash = await Task.Run(() =>
+            {
+                using (var stream = File.OpenRead(path))
+                using (var sha = SHA256.Create())
+                {
+                    return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+                }
+            });
+            bool valid = string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase);
+            Log($"{label} SHA256: {actualHash} ({(valid ? "verified" : "MISMATCH")})");
+            return valid;
         }
 
         private async Task<bool> ConfigureBootEntryAsync()
@@ -760,24 +1067,36 @@ namespace Libertix.Pages
                 timezone = Localization.GetWindowsTimezoneAsLinux();
             });
 
+            if (_storagePreflight == null)
+            {
+                Log("ERROR: Storage preflight is missing while writing live config.");
+                return false;
+            }
+            if (!(App.Current.Properties["AccountInfo"] is AccountInfo configuredAccount) ||
+                string.IsNullOrWhiteSpace(configuredAccount.Username) ||
+                string.IsNullOrWhiteSpace(configuredAccount.Password) ||
+                string.IsNullOrWhiteSpace(configuredAccount.ComputerName))
+            {
+                Log("ERROR: Linux account configuration is missing.");
+                return false;
+            }
+
+            long installerPartitionOffset = await QueryPartitionOffsetAsync('Z');
+            if (installerPartitionOffset <= 0)
+            {
+                Log("ERROR: Could not identify the temporary installer partition Z:.");
+                return false;
+            }
+
             return await Task.Run(() =>
             {
                 try
                 {
                     string configPath = @"Z:\config.txt";
 
-                    // These defaults are only used if the wizard state is missing.
-                    // Normal automation fills AccountInfo before this page runs.
-                    string username = "user";
-                    string password = "password";
-                    string computerName = "linux-pc";
-
-                    if (App.Current.Properties["AccountInfo"] is AccountInfo account)
-                    {
-                        username = account.Username;
-                        password = account.Password;
-                        computerName = account.ComputerName;
-                    }
+                    string username = configuredAccount.Username;
+                    string passwordHash = LinuxPasswordHasher.Hash(configuredAccount.Password);
+                    string computerName = configuredAccount.ComputerName;
 
                     // Get distro info - use IsoInstallerFileName for config
                     string isoFilename = "mint.iso";
@@ -805,14 +1124,23 @@ namespace Libertix.Pages
                         $"KEYBOARD_MODEL={ShellQuoteValue("pc105")}",
                         $"TIMEZONE={ShellQuoteValue(timezone)}",
                         $"USERNAME={ShellQuoteValue(username)}",
-                        $"PASSWORD={ShellQuoteValue(password)}",
+                        $"PASSWORD_HASH={ShellQuoteValue(passwordHash)}",
                         $"COMPUTER_NAME={ShellQuoteValue(computerName)}",
                         $"ISO_FILENAME={ShellQuoteValue(isoFilename)}",
                         $"ISO_WINDOWS_PATH={ShellQuoteValue(isoWindowsPath)}",
-                        $"LINUX_SIZE_GB={ShellQuoteValue(_linuxSizeGB.ToString("F0"))}"
+                        $"LINUX_SIZE_GB={ShellQuoteValue(_linuxSizeGB.ToString("F0", CultureInfo.InvariantCulture))}",
+                        $"TARGET_DISK_SIZE_BYTES={ShellQuoteValue(_storagePreflight.SystemDiskSize.ToString(CultureInfo.InvariantCulture))}",
+                        $"WINDOWS_PARTITION_OFFSET_BYTES={ShellQuoteValue(_storagePreflight.SystemPartitionOffset.ToString(CultureInfo.InvariantCulture))}",
+                        $"WINDOWS_BOOT_PARTITION_OFFSET_BYTES={ShellQuoteValue(_storagePreflight.BootPartitionOffset.ToString(CultureInfo.InvariantCulture))}",
+                        $"INSTALLER_PARTITION_OFFSET_BYTES={ShellQuoteValue(installerPartitionOffset.ToString(CultureInfo.InvariantCulture))}",
+                        $"EXPECTED_PARTITION_STYLE={ShellQuoteValue(_storagePreflight.PartitionStyle)}",
+                        $"RECOVERY_PARTITION_OFFSET_BYTES={ShellQuoteValue(_storagePreflight.RecoveryPartitionOffset.ToString(CultureInfo.InvariantCulture))}",
+                        $"RECOVERY_PARTITION_SIZE_BYTES={ShellQuoteValue(_storagePreflight.RecoveryPartitionSize.ToString(CultureInfo.InvariantCulture))}"
                     };
 
-                    File.WriteAllText(configPath, string.Join("\n", configLines));
+                    // POSIX read loops do not process a final unterminated line. Keep the
+                    // manifest newline-terminated so the recovery geometry is always read.
+                    File.WriteAllText(configPath, string.Join("\n", configLines) + "\n");
 
                     Dispatcher.Invoke(() =>
                     {
@@ -831,6 +1159,28 @@ namespace Libertix.Pages
                     return false;
                 }
             });
+        }
+
+        private async Task<long> QueryPartitionOffsetAsync(char driveLetter)
+        {
+            string powershell = ResolveSystemExecutable(
+                "WindowsPowerShell\\v1.0\\powershell.exe",
+                "powershell.exe");
+            string command =
+                $"$p=Get-Partition -DriveLetter {char.ToUpperInvariant(driveLetter)} -ErrorAction Stop; " +
+                "[Console]::Out.WriteLine($p.Offset.ToString([Globalization.CultureInfo]::InvariantCulture))";
+            var result = await Task.Run(() => RunProcess(
+                powershell,
+                $"-NoProfile -Command {QuoteArgument(command)}",
+                30000));
+            if (result.exitCode != 0)
+            {
+                Log($"ERROR: Partition identity query failed: {result.error}");
+                return 0;
+            }
+            return long.TryParse(result.output.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long offset)
+                ? offset
+                : 0;
         }
 
         private async Task<bool> DownloadIsoAsync(string url, string destinationPath)
@@ -968,7 +1318,7 @@ namespace Libertix.Pages
                 "--min-split-size=1M",
                 "--summary-interval=2",
                 "--console-log-level=warn",
-                "--check-certificate=false",
+                "--check-certificate=true",
                 $"--dir={downloadDir}",
                 $"--out={fileName}",
                 url
@@ -1257,6 +1607,26 @@ try {{
 
                     File.Copy(sourceScript, targetScript, true);
 
+                    if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
+                    {
+                        Dispatcher.Invoke(() => Log("ERROR: BIOS storage preflight is missing."));
+                        return false;
+                    }
+
+                    string bcdBackupPath = Path.Combine(RecoveryRoot, "bcd-backup");
+                    if (File.Exists(bcdBackupPath))
+                        File.Delete(bcdBackupPath);
+                    var bcdBackup = RunProcess(
+                        ResolveSystemExecutable("bcdedit.exe", "bcdedit.exe"),
+                        $"/export {QuoteArgument(bcdBackupPath)}",
+                        waitMs: 30000);
+                    if (bcdBackup.exitCode != 0 || !File.Exists(bcdBackupPath))
+                    {
+                        Dispatcher.Invoke(() => Log(
+                            $"ERROR: BCD backup failed rc={bcdBackup.exitCode}: {bcdBackup.error}"));
+                        return false;
+                    }
+
                     // pending.env lets the startup guard identify the expected
                     // temporary partition size without hardcoding UI choices.
                     string metadataPath = Path.Combine(RecoveryRoot, "pending.env");
@@ -1264,6 +1634,15 @@ try {{
                     {
                         "LIBERTIX_INSTALL_PENDING=true",
                         $"LINUX_SIZE_MB={requestedLinuxMB:F0}",
+                        $"SYSTEM_DRIVE={_storagePreflight.SystemDrive}",
+                        $"SYSTEM_DISK_NUMBER={_storagePreflight.SystemDiskNumber}",
+                        $"SYSTEM_PARTITION_NUMBER={_storagePreflight.SystemPartitionNumber}",
+                        $"SYSTEM_PARTITION_OFFSET={_storagePreflight.SystemPartitionOffset}",
+                        $"SYSTEM_PARTITION_SIZE_BYTES={_storagePreflight.SystemPartitionSize}",
+                        $"SYSTEM_DISK_UNIQUE_ID={_storagePreflight.SystemDiskUniqueId}",
+                        $"RECOVERY_PARTITION_NUMBER={_storagePreflight.RecoveryPartitionNumber}",
+                        $"RECOVERY_PARTITION_OFFSET_BYTES={_storagePreflight.RecoveryPartitionOffset}",
+                        $"RECOVERY_PARTITION_SIZE_BYTES={_storagePreflight.RecoveryPartitionSize}",
                         $"CREATED_UTC={DateTime.UtcNow:O}"
                     });
                     File.WriteAllText(metadataPath, metadata + Environment.NewLine);
@@ -1280,7 +1659,8 @@ try {{
                             Log($"ERROR: {result.error.Trim()}");
                     });
 
-                    return result.exitCode == 0;
+                    _biosRecoveryGuardInstalled = result.exitCode == 0;
+                    return _biosRecoveryGuardInstalled;
                 }
                 catch (Exception ex)
                 {
@@ -1299,14 +1679,105 @@ try {{
             }
         }
 
-        private static bool IsUefiFirmware()
+        private static FirmwareType DetectFirmwareTypeOrThrow()
         {
             if (GetFirmwareType(out var firmwareType))
-                return firmwareType == FirmwareType.Uefi;
+            {
+                if (firmwareType == FirmwareType.Bios || firmwareType == FirmwareType.Uefi)
+                    return firmwareType;
+                throw new InvalidOperationException($"Unsupported firmware type: {firmwareType}.");
+            }
 
-            // Conservative fallback for older Windows builds where GetFirmwareType
-            // could fail: BIOS remains the existing, already validated path.
-            return false;
+            int error = Marshal.GetLastWin32Error();
+            throw new InvalidOperationException(
+                $"Windows could not determine the firmware type (Win32 error {error}). " +
+                "Installation was stopped before any disk change.");
+        }
+
+        private async Task<StoragePreflightInfo> RunStoragePreflightAsync(FirmwareType firmware)
+        {
+            string scriptPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Scripts",
+                "libertix-storage-preflight.ps1");
+            if (!File.Exists(scriptPath))
+                throw new FileNotFoundException("Storage preflight script is missing.", scriptPath);
+
+            string expected = firmware == FirmwareType.Uefi ? "UEFI" : "BIOS";
+            string powershell = ResolveSystemExecutable(
+                "WindowsPowerShell\\v1.0\\powershell.exe",
+                "powershell.exe");
+            var result = await Task.Run(() => RunProcess(
+                powershell,
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                $"-ExpectedFirmware {expected} " +
+                (firmware == FirmwareType.Bios ? "-DecryptBitLocker" : ""),
+                firmware == FirmwareType.Bios ? (int)TimeSpan.FromHours(6.5).TotalMilliseconds : 120000));
+
+            if (!string.IsNullOrWhiteSpace(result.output))
+                Log(result.output.Trim());
+            if (!string.IsNullOrWhiteSpace(result.error))
+                Log($"ERROR: {result.error.Trim()}");
+            if (result.exitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Storage preflight failed with rc={result.exitCode}: {result.error}");
+            }
+
+            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string rawLine in result.output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int separator = rawLine.IndexOf('=');
+                if (separator <= 0)
+                    continue;
+                values[rawLine.Substring(0, separator).Trim()] = rawLine.Substring(separator + 1).Trim();
+            }
+
+            string[] required =
+            {
+                "PREFLIGHT_OK", "FIRMWARE", "SYSTEM_DRIVE", "SYSTEM_DISK_NUMBER",
+                "SYSTEM_PARTITION_NUMBER", "SYSTEM_PARTITION_OFFSET", "SYSTEM_PARTITION_SIZE",
+                "BOOT_PARTITION_NUMBER", "BOOT_PARTITION_OFFSET", "BOOT_PARTITION_SIZE",
+                "SYSTEM_DISK_UNIQUE_ID", "SYSTEM_DISK_SIZE", "PARTITION_STYLE",
+                "RECOVERY_PARTITION_NUMBER", "RECOVERY_PARTITION_OFFSET", "RECOVERY_PARTITION_SIZE",
+                "BITLOCKER_SAFE", "BITLOCKER_STATE"
+            };
+            foreach (string key in required)
+            {
+                if (!values.ContainsKey(key))
+                    throw new InvalidOperationException($"Storage preflight did not return {key}.");
+            }
+            if (!string.Equals(values["PREFLIGHT_OK"], "true", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Storage preflight did not confirm a safe state.");
+
+            var info = new StoragePreflightInfo
+            {
+                Firmware = firmware,
+                SystemDrive = values["SYSTEM_DRIVE"],
+                SystemDiskNumber = int.Parse(values["SYSTEM_DISK_NUMBER"], CultureInfo.InvariantCulture),
+                SystemPartitionNumber = int.Parse(values["SYSTEM_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
+                SystemPartitionOffset = long.Parse(values["SYSTEM_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
+                SystemPartitionSize = long.Parse(values["SYSTEM_PARTITION_SIZE"], CultureInfo.InvariantCulture),
+                BootPartitionNumber = int.Parse(values["BOOT_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
+                BootPartitionOffset = long.Parse(values["BOOT_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
+                BootPartitionSize = long.Parse(values["BOOT_PARTITION_SIZE"], CultureInfo.InvariantCulture),
+                SystemDiskUniqueId = values["SYSTEM_DISK_UNIQUE_ID"],
+                SystemDiskSize = long.Parse(values["SYSTEM_DISK_SIZE"], CultureInfo.InvariantCulture),
+                PartitionStyle = values["PARTITION_STYLE"],
+                RecoveryPartitionNumber = int.Parse(values["RECOVERY_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
+                RecoveryPartitionOffset = long.Parse(values["RECOVERY_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
+                RecoveryPartitionSize = long.Parse(values["RECOVERY_PARTITION_SIZE"], CultureInfo.InvariantCulture),
+                BitLockerSafe = bool.Parse(values["BITLOCKER_SAFE"]),
+                BitLockerState = values["BITLOCKER_STATE"]
+            };
+
+            if (firmware == FirmwareType.Bios && !info.BitLockerSafe)
+                throw new InvalidOperationException("BitLocker is not fully decrypted on the Windows volume.");
+
+            Log($"Storage preflight OK: firmware={expected}, disk={info.SystemDiskNumber}, " +
+                $"partition={info.SystemPartitionNumber}, style={info.PartitionStyle}, " +
+                $"BitLocker={info.BitLockerState}.");
+            return info;
         }
 
         private static string ResolveSystemExecutable(string relativeSystemPath, string fallback)
@@ -1329,7 +1800,31 @@ try {{
             if (value == null)
                 return "\"\"";
 
-            return "\"" + value.Replace("\"", "\\\"") + "\"";
+            var quoted = new StringBuilder("\"");
+            int backslashes = 0;
+            foreach (char character in value)
+            {
+                if (character == '\\')
+                {
+                    backslashes++;
+                    continue;
+                }
+
+                if (character == '"')
+                {
+                    quoted.Append('\\', backslashes * 2 + 1);
+                    quoted.Append('"');
+                    backslashes = 0;
+                    continue;
+                }
+
+                quoted.Append('\\', backslashes);
+                quoted.Append(character);
+                backslashes = 0;
+            }
+            quoted.Append('\\', backslashes * 2);
+            quoted.Append('"');
+            return quoted.ToString();
         }
 
         private static string ShellQuoteValue(string value)
@@ -1549,6 +2044,56 @@ exit";
             }
         }
 
+        private async Task<bool> RefreshWindowsRecoveryRegistrationAsync()
+        {
+            return await Task.Run(() =>
+            {
+                var disable = RunProcess("reagentc.exe", "/disable", waitMs: 60000);
+                if (disable.exitCode != 0)
+                {
+                    Log($"WinRE disable was not required: {disable.output} {disable.error}".Trim());
+                }
+
+                var enable = RunProcess("reagentc.exe", "/enable", waitMs: 60000);
+                if (enable.exitCode != 0)
+                {
+                    Log($"ERROR: reagentc /enable failed rc={enable.exitCode}: {enable.output} {enable.error}".Trim());
+                    return false;
+                }
+
+                var status = RunProcess("reagentc.exe", "/info", waitMs: 60000);
+                if (status.exitCode != 0)
+                {
+                    Log($"ERROR: reagentc /info failed rc={status.exitCode}: {status.output} {status.error}".Trim());
+                    return false;
+                }
+
+                string normalizedStatus = RemoveDiacritics(status.output).ToLowerInvariant();
+                bool enabled = normalizedStatus.Contains("enabled") ||
+                    (normalizedStatus.Contains("active") && !normalizedStatus.Contains("desactive"));
+                if (!enabled)
+                {
+                    Log($"ERROR: WinRE is not enabled after refresh: {status.output}".Trim());
+                    return false;
+                }
+
+                Log("Windows Recovery Environment is enabled on the final partition layout.");
+                return true;
+            });
+        }
+
+        private static string RemoveDiacritics(string value)
+        {
+            string decomposed = (value ?? string.Empty).Normalize(NormalizationForm.FormD);
+            var builder = new StringBuilder(decomposed.Length);
+            foreach (char character in decomposed)
+            {
+                if (CharUnicodeInfo.GetUnicodeCategory(character) != UnicodeCategory.NonSpacingMark)
+                    builder.Append(character);
+            }
+            return builder.ToString().Normalize(NormalizationForm.FormC);
+        }
+
         private async Task<bool> CreateFat32PartitionSimpleAsync(double sizeMB)
         {
             string diskpartScript = Path.Combine(Path.GetTempPath(), $"create_fat32_{Guid.NewGuid()}.txt");
@@ -1557,8 +2102,11 @@ exit";
             {
                 // No offset is specified: diskpart places this at the first free
                 // slot after Windows, which is the slot the live installer reuses.
+                if (_storagePreflight == null)
+                    throw new InvalidOperationException("Storage preflight is missing.");
+
                 string script = $@"rescan
-select disk 0
+select disk {_storagePreflight.SystemDiskNumber}
 create partition primary size={sizeMB:F0}
 format fs=fat32 quick label=LIBERTIX
 assign letter=Z

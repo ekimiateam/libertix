@@ -73,21 +73,10 @@
                            TextWrapping="Wrap"
                            Margin="0,0,0,10"/>
 
-                <TextBlock Text="{DynamicResource PartitionWarningMessage}"
+                <TextBlock Text="{DynamicResource PartitionSafetyBlockMessage}"
                            Foreground="#eb6f92"
                            FontSize="12"
-                           TextWrapping="Wrap"
-                           Margin="0,0,0,15"/>
-
-                <CheckBox x:Name="PartitionWarningCheckbox"
-                          Foreground="#E0DEF4"
-                          FontSize="14"
-                          Checked="PartitionWarningCheckbox_Changed"
-                          Unchecked="PartitionWarningCheckbox_Changed">
-                    <TextBlock Text="{DynamicResource PartitionWarningCheckbox}"
-                               TextWrapping="Wrap"
-                               Foreground="#E0DEF4"/>
-                </CheckBox>
+                           TextWrapping="Wrap"/>
             </StackPanel>
         </Border>
 

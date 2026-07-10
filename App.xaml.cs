@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Configuration;
 using System.Data;
+using System.IO;
 using System.Linq;
 using System.Security.Principal;
 using System.Threading.Tasks;
@@ -28,7 +29,34 @@ namespace Libertix
                 return;
             }
 
+            string recoveryStatePath = TryGetUefiRecoveryStatePath(e.Args);
+            if (!string.IsNullOrWhiteSpace(recoveryStatePath))
+                Properties["UefiRecoveryStatePath"] = recoveryStatePath;
+
             base.OnStartup(e);
+        }
+
+        private static string TryGetUefiRecoveryStatePath(string[] args)
+        {
+            if (args == null || !args.Contains("--uefi-bootnext-failed"))
+                return null;
+
+            int stateIndex = Array.IndexOf(args, "--uefi-recovery-state");
+            if (stateIndex < 0 || stateIndex + 1 >= args.Length)
+                return null;
+
+            try
+            {
+                string path = Path.GetFullPath(args[stateIndex + 1]);
+                string root = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    "Libertix",
+                    "UefiRecovery") + Path.DirectorySeparatorChar;
+                if (path.StartsWith(root, StringComparison.OrdinalIgnoreCase) && File.Exists(path))
+                    return path;
+            }
+            catch { }
+            return null;
         }
 
         private static bool IsRunningAsAdministrator()

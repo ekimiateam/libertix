@@ -176,6 +176,7 @@
                         Minimum="{Binding MinimumSize}"
                         Maximum="{Binding MaximumSize}"
                         Value="{Binding SelectedSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                        IsEnabled="{Binding CanAllocateLinux}"
                         TickFrequency="1"
                         IsSnapToTickEnabled="True"/>
                 
@@ -189,7 +190,9 @@
                          TextAlignment="Center"
                          VerticalContentAlignment="Center"
                          Text="{Binding ManualSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         PreviewTextInput="NumberValidationTextBox"/>
+                         IsEnabled="{Binding CanAllocateLinux}"
+                         PreviewTextInput="NumberValidationTextBox"
+                         DataObject.Pasting="ManualSize_Pasting"/>
                 
                 <TextBlock Grid.Column="2"
                           VerticalAlignment="Center"

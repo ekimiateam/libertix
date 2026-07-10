@@ -46,6 +46,7 @@ STAGES = {
 UNSQUASHFS_STAGE_START = 54
 UNSQUASHFS_STAGE_END = 76
 
+
 def read_text(path: Path, default: str = "") -> str:
     try:
         return path.read_text(errors="replace").strip()
@@ -165,7 +166,9 @@ class LibertixGui:
         self.root.configure(bg="#0b1020")
         self.root.overrideredirect(True)
         self.root.attributes("-fullscreen", True)
-        self.root.geometry(f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0")
+        self.root.geometry(
+            f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0"
+        )
         for sequence in (
             "<F12>",
             "<KeyPress-F12>",
@@ -296,7 +299,9 @@ class LibertixGui:
             padx=14,
             pady=12,
         )
-        self.scroll = tk.Scrollbar(self.details_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.scroll = tk.Scrollbar(
+            self.details_frame, orient=tk.VERTICAL, command=self.log_text.yview
+        )
         self.log_text.configure(yscrollcommand=self.scroll.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -317,7 +322,9 @@ class LibertixGui:
         self.root.after(200, self.refresh)
         self.root.after(120, self.animate_progress)
 
-    def scaled(self, width: int, height: int, base: int, minimum: int, maximum: int) -> int:
+    def scaled(
+        self, width: int, height: int, base: int, minimum: int, maximum: int
+    ) -> int:
         scale = min(width / 1024, height / 768)
         return max(minimum, min(maximum, int(base * scale)))
 
@@ -344,14 +351,27 @@ class LibertixGui:
         self.container.configure(padx=pad_x, pady=pad_y)
         self.logo.configure(font=("DejaVu Sans", logo_font, "bold"))
         self.subtitle.configure(font=("DejaVu Sans", subtitle_font))
-        self.stage_label.configure(font=("DejaVu Sans", stage_font, "bold"), wraplength=max(360, width - pad_x * 2))
+        self.stage_label.configure(
+            font=("DejaVu Sans", stage_font, "bold"),
+            wraplength=max(360, width - pad_x * 2),
+        )
         self.code_label.configure(font=("DejaVu Sans Mono", code_font))
         self.progress_canvas.configure(height=progress_height)
         self.percent_label.configure(font=("DejaVu Sans", body_font, "bold"))
         self.subprogress_label.configure(font=("DejaVu Sans", max(10, body_font - 4)))
-        self.message_label.configure(font=("DejaVu Sans", body_font), wraplength=max(360, width - pad_x * 2))
-        self.details_button.configure(font=("DejaVu Sans", button_font), padx=max(8, button_font - 1), pady=max(4, button_font // 3))
-        self.reboot_button.configure(font=("DejaVu Sans", button_font, "bold"), padx=max(10, button_font + 1), pady=max(4, button_font // 3))
+        self.message_label.configure(
+            font=("DejaVu Sans", body_font), wraplength=max(360, width - pad_x * 2)
+        )
+        self.details_button.configure(
+            font=("DejaVu Sans", button_font),
+            padx=max(8, button_font - 1),
+            pady=max(4, button_font // 3),
+        )
+        self.reboot_button.configure(
+            font=("DejaVu Sans", button_font, "bold"),
+            padx=max(10, button_font + 1),
+            pady=max(4, button_font // 3),
+        )
         log_reserved_height = 150 if self.details_visible else 460
         self.log_text.configure(
             font=("DejaVu Sans Mono", log_font),
@@ -372,7 +392,9 @@ class LibertixGui:
         self.progress_canvas.pack(fill=tk.X, pady=(0, 8), after=self.code_label)
         self.percent_label.pack(anchor="e", pady=(0, 2), after=self.progress_canvas)
         self.subprogress_label.pack(anchor="e", pady=(0, 20), after=self.percent_label)
-        self.message_label.pack(anchor="w", fill=tk.X, pady=(0, 18), after=self.subprogress_label)
+        self.message_label.pack(
+            anchor="w", fill=tk.X, pady=(0, 18), after=self.subprogress_label
+        )
 
     def unpack_summary_widgets(self) -> None:
         for widget in (
@@ -409,7 +431,9 @@ class LibertixGui:
 
     def toggle_details(self) -> None:
         self.details_visible = not self.details_visible
-        self.details_button.configure(text="Masquer les details" if self.details_visible else "Plus de details")
+        self.details_button.configure(
+            text="Masquer les details" if self.details_visible else "Plus de details"
+        )
         if self.details_visible:
             self.unpack_summary_widgets()
             self.details_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 10))
@@ -429,24 +453,39 @@ class LibertixGui:
                 path.unlink()
             except FileNotFoundError:
                 pass
-        subprocess.run(["chvt", "1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        subprocess.run(
+            ["chvt", "1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
         self.root.after(50, self.root.destroy)
 
     def reboot(self) -> None:
         self.reboot_button.configure(state=tk.DISABLED, text="Reboot en cours...")
-        subprocess.Popen(["systemctl", "reboot", "-i"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            ["systemctl", "reboot", "-i"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def draw_progress(self) -> None:
         self.progress_canvas.delete("all")
         width = max(self.progress_canvas.winfo_width(), 1)
         height = max(self.progress_canvas.winfo_height(), 1)
         filled = int(width * max(0, min(self.current_percent, 100)) / 100)
-        self.progress_canvas.create_rectangle(0, 0, width, height, fill="#1f2937", outline="")
-        self.progress_canvas.create_rectangle(0, 0, filled, height, fill="#38bdf8", outline="")
+        self.progress_canvas.create_rectangle(
+            0, 0, width, height, fill="#1f2937", outline=""
+        )
+        self.progress_canvas.create_rectangle(
+            0, 0, filled, height, fill="#38bdf8", outline=""
+        )
         self.percent_label.configure(text=f"{self.current_percent}%")
         self.subprogress_label.configure(text=self.subprogress_text)
 
-    def set_progress(self, percent: int, *, running: bool, subprogress: str = "") -> None:
+    def set_progress(
+        self, percent: int, *, running: bool, subprogress: str = ""
+    ) -> None:
         self.current_percent = max(0, min(percent, 100))
         self.progress_running = running
         self.subprogress_text = subprogress
@@ -457,7 +496,9 @@ class LibertixGui:
             self.progress_tick = (self.progress_tick + 1) % 4
             base_text = self.subprogress_text.rstrip(".")
             if base_text:
-                self.subprogress_label.configure(text=base_text + "." * self.progress_tick)
+                self.subprogress_label.configure(
+                    text=base_text + "." * self.progress_tick
+                )
         self.root.after(500, self.animate_progress)
 
     def refresh(self) -> None:
@@ -467,6 +508,7 @@ class LibertixGui:
         build = read_text(BUILD_ID_FILE, "unknown")
         success = result.get("LIBERTIX_INSTALL_SUCCESS")
         rc = result.get("LIBERTIX_INSTALL_RC")
+        rollback = result.get("LIBERTIX_INSTALL_ROLLBACK")
         finished = success == "true" or (success == "false" and rc is not None)
 
         self.stage_label.configure(text=label)
@@ -480,12 +522,19 @@ class LibertixGui:
             )
             self.reboot_button.pack_forget()
         elif success == "false" and rc is not None:
-            self.message_label.configure(
-                text=f"Erreur pendant l'installation.\n{short_failure_message(rc)}",
-                fg="#fecaca",
-            )
-            if not self.reboot_button.winfo_ismapped():
-                self.reboot_button.pack(side=tk.LEFT, padx=(12, 0))
+            if rollback == "completed":
+                self.message_label.configure(
+                    text=f"Erreur pendant l'installation.\nRollback Windows termine et verifie.\n{short_failure_message(rc)}",
+                    fg="#fecaca",
+                )
+                if not self.reboot_button.winfo_ismapped():
+                    self.reboot_button.pack(side=tk.LEFT, padx=(12, 0))
+            else:
+                self.message_label.configure(
+                    text=f"Erreur pendant l'installation.\nROLLBACK NON VERIFIE: ne redemarrez pas.\n{short_failure_message(rc)}",
+                    fg="#fecaca",
+                )
+                self.reboot_button.pack_forget()
         else:
             self.message_label.configure(text=label, fg="#d1d5db")
             self.reboot_button.pack_forget()

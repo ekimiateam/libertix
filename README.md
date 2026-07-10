@@ -12,28 +12,32 @@ A modern, user-friendly Windows application that simplifies the process of dual-
 - 🖼️ Visual disk space representation
 - 📊 Real-time system requirements check
 
-## Supported Distributions (for now)
+## Supported distribution
 
-- Zorin OS 17.2 Core
-- Ubuntu 24.04 LTS
+- Linux Mint 22.3 Cinnamon
 
 ## Requirements
 
-- Windows 7 or later
-- .NET Framework 4.8.1
-- At least 30GB of free disk space
+- Windows 10 or Windows 11, in BIOS/MBR or UEFI/GPT mode
+- .NET Framework 4.8
+- At least 20GB of shrinkable free space on the Windows system disk
 - Administrator privileges
+
+BitLocker or Device Encryption must be fully decrypted before disk changes. Libertix performs this
+check and requests decryption when required. The installer preserves the detected Windows recovery
+partition and refuses unknown or ambiguous disk layouts.
 
 ## Development
 
 1. Clone the repository:
+
 ```bash
 git clone https://github.com/ekimiateam/libertix.git
 ```
 
 2. Open the solution in Visual Studio 2022
 
-3. Restore NuGet packages
+3. Install the .NET Framework 4.8 SDK/targeting pack and restore NuGet packages
 
 4. Build and run the project
 

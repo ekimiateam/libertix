@@ -16,36 +16,36 @@ partitions_of_disk() {
 }
 
 configure_user() {
-    useradd -m -s /bin/bash -G sudo,adm,cdrom,audio,video,plugdev "$USERNAME" 2>/dev/null || true
-    echo "$USERNAME:$PASSWORD" | chpasswd
-    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+    if id "$USERNAME" >/dev/null 2>&1; then
+        [ "$(id -u "$USERNAME")" -ne 0 ] || { echo "Refusing UID 0 desktop account" >&2; exit 1; }
+        usermod -s /bin/bash -a -G sudo,adm,cdrom,audio,video,plugdev "$USERNAME"
+    else
+        useradd -m -s /bin/bash -G sudo,adm,cdrom,audio,video,plugdev "$USERNAME"
+    fi
+    [[ "$PASSWORD_HASH" == \$6\$* ]] || { echo "Invalid Linux password hash" >&2; exit 1; }
+    usermod --password "$PASSWORD_HASH" "$USERNAME"
+    passwd -S "$USERNAME" | grep -Eq "^[^ ]+ P "
     echo "$COMPUTER_NAME" > /etc/hostname
 }
 
 configure_windows_mount() {
-    local win_uuid="" pdev pfs psize
-
-    while read -r pdev; do
-        [ -n "$pdev" ] || continue
-        pfs="$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")"
-        if [ "$pfs" = "ntfs" ]; then
-            psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024 / 1024))
-            if [ "$psize" -gt 10 ]; then
-                win_uuid="$(blkid -s UUID -o value "$pdev")"
-                break
-            fi
-        fi
-    done < <(partitions_of_disk "$DISK")
-
-    if [ -n "$win_uuid" ]; then
-        mkdir -p /mnt/windows
-        echo "UUID=$win_uuid /mnt/windows ntfs-3g defaults,uid=1000,gid=1000,dmask=022,fmask=133,windows_names,nofail 0 0" >> /etc/fstab
-    fi
+    local win_uuid uid gid
+    [ -b "$WINDOWS_PART" ] || { echo "Windows partition missing: $WINDOWS_PART" >&2; exit 1; }
+    [ "$(blkid -s TYPE -o value "$WINDOWS_PART" 2>/dev/null)" = "ntfs" ] || {
+        echo "Windows partition is not NTFS: $WINDOWS_PART" >&2
+        exit 1
+    }
+    win_uuid="$(blkid -s UUID -o value "$WINDOWS_PART")"
+    [ -n "$win_uuid" ] || { echo "Windows UUID missing" >&2; exit 1; }
+    uid="$(id -u "$USERNAME")"
+    gid="$(id -g "$USERNAME")"
+    mkdir -p /mnt/windows
+    echo "UUID=$win_uuid /mnt/windows ntfs-3g defaults,uid=$uid,gid=$gid,dmask=022,fmask=133,windows_names,nofail 0 0" >> /etc/fstab
 }
 
 configure_locale() {
     sed -i "s/# $SYSTEM_LANG/$SYSTEM_LANG/" /etc/locale.gen 2>/dev/null || true
-    locale-gen 2>/dev/null || true
+    locale-gen
     cat > /etc/default/locale <<EOF
 LANG=$SYSTEM_LANG
 LC_ALL=$SYSTEM_LANG
@@ -80,7 +80,7 @@ model='$KEYBOARD_MODEL'
 [org/cinnamon/desktop/input-sources]
 sources=[('xkb', '$KEYBOARD_LAYOUT')]
 EOF
-    dconf update 2>/dev/null || true
+    dconf update
 }
 
 configure_timezone() {
@@ -106,19 +106,6 @@ cleanup_live_boot_artifacts() {
     rm -f /usr/lib/systemd/system/casper*.service
     rm -f /usr/lib/systemd/system/*/casper*.service
     rm -rf /var/lib/casper
-}
-
-cleanup_keyring_pam_noise() {
-    local pam_file
-
-    # On this non-interactive install path, pam_gnome_keyring can emit login
-    # errors before the user session daemon exists. The desktop still starts;
-    # removing the PAM hook keeps journal health checks focused on real issues.
-    for pam_file in /etc/pam.d/*; do
-        [ -f "$pam_file" ] || continue
-        grep -q 'pam_gnome_keyring\.so' "$pam_file" 2>/dev/null || continue
-        sed -i '/pam_gnome_keyring\.so/d' "$pam_file"
-    done
 }
 
 find_windows_boot_uuid() {
@@ -195,7 +182,6 @@ main() {
     configure_keyboard
     configure_timezone
     cleanup_live_boot_artifacts
-    cleanup_keyring_pam_noise
     configure_grub
     enable_first_boot_resize
 }

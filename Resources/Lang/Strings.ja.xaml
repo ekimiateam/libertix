@@ -80,4 +80,5 @@
     <system:String x:Key="ApplyChangesError">エラーが発生しました</system:String>
     <system:String x:Key="ApplyChangesReboot">再起動</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">インストールを完了するためにコンピューターを再起動します。続行しますか？</system:String>
+    <system:String x:Key="PartitionSafetyBlockMessage">この安全性チェックが解決されるまでインストールはブロックされます。</system:String>
 </ResourceDictionary>

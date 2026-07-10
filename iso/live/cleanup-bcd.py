@@ -38,7 +38,9 @@ def child(hive: hivex.Hivex, node: int, name: str) -> int:
     return found
 
 
-def value_bytes(hive: hivex.Hivex, node: int | None, value_name: str = "Element") -> bytes | None:
+def value_bytes(
+    hive: hivex.Hivex, node: int | None, value_name: str = "Element"
+) -> bytes | None:
     if not node:
         return None
     value = hive.node_get_value(node, value_name)
@@ -48,7 +50,9 @@ def value_bytes(hive: hivex.Hivex, node: int | None, value_name: str = "Element"
     return data
 
 
-def set_guid_list(hive: hivex.Hivex, elements: int, element_name: str, guids: list[str]) -> None:
+def set_guid_list(
+    hive: hivex.Hivex, elements: int, element_name: str, guids: list[str]
+) -> None:
     node = hive.node_get_child(elements, element_name)
     if guids:
         if not node:
@@ -84,7 +88,10 @@ def main() -> int:
         desc = decode_utf16z(value_bytes(hive, desc_node))
         path = decode_utf16z(value_bytes(hive, path_node))
         normalized_path = path.replace("/", "\\").casefold()
-        if desc.casefold() == "install linux" or normalized_path in ("\\grldr.mbr", "\\\\grldr.mbr"):
+        if desc.casefold() == "install linux" or normalized_path in (
+            "\\grldr.mbr",
+            "\\\\grldr.mbr",
+        ):
             targets.append(guid)
 
     if not targets:

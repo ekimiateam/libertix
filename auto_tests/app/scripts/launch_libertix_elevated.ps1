@@ -38,6 +38,9 @@ finally {
 
 $time = (Get-Date).AddMinutes(1).ToString("HH:mm")
 $quotedExe = '"' + $exe + '"'
+$interactiveSession = Get-Process -Name explorer -ErrorAction Stop |
+    Sort-Object StartTime -Descending |
+    Select-Object -First 1 -ExpandProperty SessionId
 
 $createOutput = schtasks.exe `
     /Create `
@@ -62,6 +65,10 @@ $process = $null
 for ($i = 0; $i -lt 15; $i++) {
     Start-Sleep -Seconds 2
     $process = Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.SessionId -eq $interactiveSession -and
+            $_.Path -eq $exe
+        } |
         Sort-Object StartTime -Descending |
         Select-Object -First 1
     if ($process) {
@@ -81,6 +88,18 @@ if (-not $process) {
     throw ("Libertix ne tourne pas après lancement administrateur; tâche=" + ($taskState -join " | "))
 }
 
+$processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction Stop
+if ($processInfo.ExecutablePath -ne $exe -or $processInfo.SessionId -ne $interactiveSession) {
+    throw "Libertix process identity does not match the deployed executable/session"
+}
+
+$deleteOutput = schtasks.exe /Delete /TN $taskName /F 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    throw ("Libertix started but scheduled task cleanup failed; sortie=" + ($deleteOutput -join " | "))
+}
+
 Write-Result -Name "PID" -Value $process.Id
 Write-Result -Name "SESSION_ID" -Value $process.SessionId
 Write-Result -Name "TASK_NAME" -Value $taskName
+Write-Result -Name "EXECUTABLE" -Value $processInfo.ExecutablePath

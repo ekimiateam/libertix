@@ -32,6 +32,7 @@
                    FontSize="16"
                    Margin="0,0,0,5"/>
             <TextBox x:Name="UsernameBox"
+                     MaxLength="32"
                      Height="40"
                      FontSize="16"
                      Padding="10,5"
@@ -66,6 +67,7 @@
                    FontSize="16"
                    Margin="0,0,0,5"/>
             <PasswordBox x:Name="PasswordBox"
+                         MaxLength="128"
                          Height="40"
                          FontSize="16"
                          Padding="10,5"
@@ -101,6 +103,7 @@
                    FontSize="16"
                    Margin="0,0,0,5"/>
             <PasswordBox x:Name="ConfirmPasswordBox"
+                         MaxLength="128"
                          Height="40"
                          FontSize="16"
                          Padding="10,5"
@@ -136,6 +139,7 @@
                    FontSize="16"
                    Margin="0,0,0,5"/>
             <TextBox x:Name="HostnameBox"
+                     MaxLength="63"
                      Height="40"
                      FontSize="16"
                      Padding="10,5"

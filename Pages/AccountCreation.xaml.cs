@@ -11,8 +11,8 @@ namespace Libertix.Pages
     public partial class AccountCreation : Page
     {
         private const string STATE_KEY = "AccountCreation";
-        private readonly Regex usernameRegex = new Regex("^[a-z][a-z0-9-]*$");
-        private readonly Regex hostnameRegex = new Regex("^[a-z][a-z0-9-]*$");
+        private readonly Regex usernameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$");
+        private readonly Regex hostnameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$");
 
         public AccountCreation()
         {
@@ -90,7 +90,7 @@ namespace Libertix.Pages
                 UsernameError.Text = "Username is required";
                 isValid = false;
             }
-            else if (!usernameRegex.IsMatch(UsernameBox.Text))
+            else if (!usernameRegex.IsMatch(UsernameBox.Text) || UsernameBox.Text == "root")
             {
                 UsernameError.Text = "Username must start with a letter and contain only lowercase letters, numbers, or hyphens";
                 isValid = false;
@@ -109,6 +109,11 @@ namespace Libertix.Pages
             else if (PasswordBox.Password.Length < 4)
             {
                 PasswordError.Text = Application.Current.Resources["PasswordTooShort"] as string ?? "Password must be at least 4 characters";
+                isValid = false;
+            }
+            else if (PasswordBox.Password.Length > 128)
+            {
+                PasswordError.Text = "Password must not exceed 128 characters";
                 isValid = false;
             }
             else

@@ -31,6 +31,16 @@ namespace Libertix
             LanguageComboBox.SelectedIndex = langIndex;
             Localization.SetLanguage(windowsLang);
 
+            if (App.Current.Properties["UefiRecoveryStatePath"] is string recoveryStatePath &&
+                !string.IsNullOrWhiteSpace(recoveryStatePath))
+            {
+                Dispatcher.BeginInvoke(new Action(() =>
+                    NavigationHelper.NavigateWithAnimationInFrame(
+                        MainFrame,
+                        new UefiBootFallback(),
+                        TimeSpan.Zero)));
+            }
+
 /*#if DEBUG
             DebugPanel.Visibility = Visibility.Visible;
 #endif*/

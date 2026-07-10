@@ -18,7 +18,6 @@ class ProxmoxClient:
         token_id: str,
         token_secret: str,
         *,
-        verify_tls: bool,
         timeout: float,
         task_timeout: float,
     ) -> None:
@@ -26,7 +25,7 @@ class ProxmoxClient:
         self.task_timeout = task_timeout
         self.client = httpx.Client(
             headers={"Authorization": f"PVEAPIToken={token_id}={token_secret}"},
-            verify=verify_tls,
+            verify=False,
             timeout=timeout,
         )
 

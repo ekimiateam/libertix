@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import shlex
 import tarfile
 import tempfile
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -46,25 +48,28 @@ class ValidationService:
     ) -> OperationResult:
         result = ResultBuilder("validation", on_step=on_step)
         try:
-            selected_vms = self._select_vms(vm_selectors)
-            executable = self._prepare_server(result, source=source)
-            windows_path = self._to_windows_share_path(executable)
+            selected_vms = self.select_vms(vm_selectors)
+            executable = self.prepare_server(result, source=source)
+            windows_path = self.to_windows_share_path(executable)
             result.ok("release.path", "Chemin de l'exécutable résolu", path=str(windows_path))
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
-                futures = [
-                    executor.submit(self._validate_vm_isolated, vm, windows_path, on_step)
+                futures = {
+                    executor.submit(self._validate_vm_isolated, vm, windows_path, on_step): vm
                     for vm in selected_vms
-                ]
-                for future in futures:
+                }
+                failures: list[OperationResult] = []
+                for future in as_completed(futures):
                     vm_result = future.result()
                     result.steps.extend(vm_result.steps)
                     if vm_result.status == "problème":
-                        return OperationResult(
-                            status="problème",
-                            operation="validation",
-                            message=vm_result.message,
-                            steps=result.steps,
-                        )
+                        failures.append(vm_result)
+                if failures:
+                    return OperationResult(
+                        status="problème",
+                        operation="validation",
+                        message="; ".join(item.message for item in failures),
+                        steps=result.steps,
+                    )
             count = len(selected_vms)
             plural = "s" if count > 1 else ""
             return result.success(f"Validation terminée avec succès sur {count} VM{plural}")
@@ -78,7 +83,7 @@ class ValidationService:
                 )
             )
 
-    def _select_vms(self, selectors: Sequence[str] | None) -> tuple[VMConfig, ...]:
+    def select_vms(self, selectors: Sequence[str] | None) -> tuple[VMConfig, ...]:
         if not selectors:
             return self.settings.vms
 
@@ -133,7 +138,7 @@ class ValidationService:
     def _normalize_selector(value: str) -> str:
         return "".join(ch for ch in value.lower() if ch.isalnum())
 
-    def _ssh(self, host: str, username: str, password: str) -> SSHClient:
+    def ssh(self, host: str, username: str, password: str) -> SSHClient:
         return SSHClient(
             host,
             username,
@@ -142,7 +147,7 @@ class ValidationService:
             connect_timeout=self.settings.ssh_timeout_seconds,
         )
 
-    def _run_windows_script(
+    def run_windows_script(
         self,
         ssh: SSHClient,
         *,
@@ -206,19 +211,19 @@ class ValidationService:
             )
 
     @staticmethod
-    def _parse_powershell_results(stdout: str, *, prefixes: Sequence[str]) -> dict[str, str]:
+    def parse_powershell_results(stdout: str, *, prefixes: Sequence[str]) -> dict[str, str]:
         """Extract NAME=VALUE lines emitted intentionally by our .ps1 scripts."""
 
         accepted = tuple(f"{prefix}=" for prefix in prefixes)
         return dict(line.split("=", 1) for line in stdout.splitlines() if line.startswith(accepted))
 
-    def _prepare_server(
+    def prepare_server(
         self, result: ResultBuilder, *, source: SourceMode = "remote"
     ) -> PurePosixPath:
         s = self.settings
         password = s.main_ssh_password.get_secret_value()
         source_path = f"{s.smb_root}/{s.source_dir_name}"
-        with self._ssh(s.main_ssh_host, s.main_ssh_user, password) as ssh:
+        with self.ssh(s.main_ssh_host, s.main_ssh_user, password) as ssh:
             ssh.run(
                 "set -eu; "
                 f"p={shlex.quote(s.smb_root)}; "
@@ -240,7 +245,7 @@ class ValidationService:
                 # branch on the Samba host before compiling on the Windows build VM.
                 ssh.run(
                     "set -eu; "
-                    'command -v git >/dev/null 2>&1 || { '
+                    "command -v git >/dev/null 2>&1 || { "
                     'echo "git is required on the Samba host; '
                     'install it explicitly before remote-source builds" >&2; '
                     "exit 127; }",
@@ -264,16 +269,31 @@ class ValidationService:
                     f"git -C {shlex.quote(source_path)} checkout -B "
                     f"{shlex.quote(s.repository_branch)} "
                     f"origin/{shlex.quote(s.repository_branch)}; "
+                    f"git -C {shlex.quote(source_path)} reset --hard "
+                    f"origin/{shlex.quote(s.repository_branch)}; "
+                    f"git -C {shlex.quote(source_path)} clean -ffdqx; "
                     f"elif [ -e {shlex.quote(source_path)} ]; then exit 21; "
                     f"else git clone --branch {shlex.quote(s.repository_branch)} -- "
                     f"{shlex.quote(s.repository_url)} {shlex.quote(source_path)}; fi"
                 )
                 ssh.run(clone_script, step="server.clone", timeout=s.command_timeout_seconds)
+                revision = ssh.run(
+                    f"git -C {shlex.quote(source_path)} rev-parse HEAD",
+                    step="server.source_revision",
+                    timeout=s.command_timeout_seconds,
+                ).stdout.strip()
+                if not re.fullmatch(r"[0-9a-f]{40}", revision):
+                    raise WorkflowError(
+                        "server.source_revision",
+                        "Révision Git source invalide",
+                        details={"revision": revision},
+                    )
                 result.ok(
                     "server.clone",
                     "Clone Libertix présent, origine et branche vérifiées",
                     target=s.main_ssh_host,
                     branch=s.repository_branch,
+                    revision=revision,
                     source="remote",
                 )
             else:
@@ -306,6 +326,8 @@ class ValidationService:
                         continue
                     tar.add(path, arcname=path.relative_to(root), recursive=False)
 
+            archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+
             remote_archive = f"/tmp/{archive.name}"
             ssh.upload_file(archive, remote_archive, step="server.copy_local_source.upload")
             # The destination is removed only inside the configured Samba root.
@@ -333,6 +355,7 @@ class ValidationService:
                 local_path=str(root),
                 remote_path=source_path,
                 archive_size=archive.stat().st_size,
+                archive_sha256=archive_sha256,
             )
         finally:
             archive.unlink(missing_ok=True)
@@ -393,12 +416,12 @@ class ValidationService:
             "samba_password": s.samba_password.get_secret_value(),
         }
 
-        with self._ssh(
+        with self.ssh(
             s.build_vm_host,
             s.build_vm_user,
             s.build_vm_password.get_secret_value(),
         ) as ssh:
-            response = self._run_windows_script(
+            response = self.run_windows_script(
                 ssh,
                 script_name="build_libertix.ps1",
                 config=config,
@@ -406,8 +429,9 @@ class ValidationService:
                 timeout=max(s.command_timeout_seconds, 900),
             )
 
-        values = self._parse_powershell_results(
-            response.stdout, prefixes=("MSBUILD", "TEMP_BUILD_DIR", "FINAL_EXE")
+        values = self.parse_powershell_results(
+            response.stdout,
+            prefixes=("MSBUILD", "TEMP_BUILD_DIR", "FINAL_EXE", "FINAL_EXE_SHA256"),
         )
         final_exe = values.get("FINAL_EXE")
         if not final_exe:
@@ -421,12 +445,13 @@ class ValidationService:
             "Libertix compilé sur la VM Windows et copié vers Samba",
             target=s.build_vm_host,
             msbuild=values.get("MSBUILD"),
+            executable_sha256=values.get("FINAL_EXE_SHA256"),
             temp_build_dir=values.get("TEMP_BUILD_DIR"),
             cleanup="dossier temporaire, script et config supprimés en fin de commande",
         )
         return PurePosixPath(f"{s.smb_root}/{s.release_dir_name}/Libertix.exe")
 
-    def _to_windows_share_path(self, path: PurePosixPath) -> PureWindowsPath:
+    def to_windows_share_path(self, path: PurePosixPath) -> PureWindowsPath:
         root = PurePosixPath(self.settings.smb_root)
         try:
             relative = path.relative_to(root)
@@ -437,7 +462,7 @@ class ValidationService:
     def _validate_vm(
         self, vm: VMConfig, executable: PureWindowsPath, result: ResultBuilder
     ) -> None:
-        local_executable = self._deploy_to_documents(vm, executable)
+        local_executable = self.deploy_to_documents(vm, executable)
         result.ok(
             "vm.deploy",
             "Release copiée depuis Samba vers le dossier Documents",
@@ -503,7 +528,7 @@ class ValidationService:
                 )
             )
 
-    def _deploy_to_documents(self, vm: VMConfig, executable: PureWindowsPath) -> PureWindowsPath:
+    def deploy_to_documents(self, vm: VMConfig, executable: PureWindowsPath) -> PureWindowsPath:
         share_release = PureWindowsPath("Z:/") / self.settings.release_dir_name
         try:
             relative_executable = executable.relative_to(share_release)
@@ -524,18 +549,22 @@ class ValidationService:
             "release_dir_name": self.settings.release_dir_name,
             "relative_executable": str(relative_executable),
         }
-        with self._ssh(
+        with self.ssh(
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
-            response = self._run_windows_script(
+            response = self.run_windows_script(
                 ssh,
                 script_name="deploy_libertix.ps1",
                 config=config,
                 step="vm.deploy",
                 timeout=max(self.settings.command_timeout_seconds, 300),
             )
-        values = self._parse_powershell_results(response.stdout, prefixes=("LOCAL_EXE",))
-        if not values.get("LOCAL_EXE"):
+        values = self.parse_powershell_results(
+            response.stdout, prefixes=("LOCAL_EXE", "LOCAL_EXE_SHA256")
+        )
+        if not values.get("LOCAL_EXE") or not re.fullmatch(
+            r"[0-9a-f]{64}", values.get("LOCAL_EXE_SHA256", "")
+        ):
             raise WorkflowError(
                 "vm.deploy",
                 "Le chemin local de Libertix n'a pas été confirmé",
@@ -551,17 +580,17 @@ class ValidationService:
             "executable": str(executable),
             "username": vm.username,
         }
-        with self._ssh(
+        with self.ssh(
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
-            prepared = self._run_windows_script(
+            prepared = self.run_windows_script(
                 ssh,
                 script_name="launch_libertix.ps1",
                 config=prepare_config,
                 step="vm.prepare_launch",
                 timeout=60,
             )
-        prepared_values = self._parse_powershell_results(prepared.stdout, prefixes=("SESSION_ID",))
+        prepared_values = self.parse_powershell_results(prepared.stdout, prefixes=("SESSION_ID",))
         session_id = prepared_values.get("SESSION_ID")
         if not session_id or not session_id.isdigit():
             raise WorkflowError(
@@ -593,17 +622,17 @@ class ValidationService:
             "executable": str(executable),
             "session_id": int(session_id),
         }
-        with self._ssh(
+        with self.ssh(
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
-            response = self._run_windows_script(
+            response = self.run_windows_script(
                 ssh,
                 script_name="launch_libertix.ps1",
                 config=verify_config,
                 step="vm.launch",
                 timeout=60,
             )
-        values = self._parse_powershell_results(
+        values = self.parse_powershell_results(
             response.stdout, prefixes=("PID", "SESSION_ID", "WINDOW_HANDLE")
         )
         required = ("PID", "SESSION_ID")

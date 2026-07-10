@@ -28,6 +28,10 @@ class VNCClient:
         client = None
         try:
             client = api.connect(self._vncdotool_address(address))
+            # Long downloads can let Windows blank the virtual display. A pointer move wakes
+            # it without changing focus, clicking a control, or sending keyboard input.
+            client.mouseMove(1, 1)
+            time.sleep(0.25)
             client.captureScreen(str(destination))
         except Exception as exc:
             destination.unlink(missing_ok=True)

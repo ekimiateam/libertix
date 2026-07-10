@@ -18,7 +18,6 @@ def test_vm_lookup_only_queries_nodes_and_target_vmid() -> None:
         "https://proxmox.test:8006",
         "token",
         "secret",
-        verify_tls=True,
         timeout=1,
         task_timeout=1,
     )

@@ -80,4 +80,5 @@
     <system:String x:Key="ApplyChangesError">Une erreur s'est produite</system:String>
     <system:String x:Key="ApplyChangesReboot">Redemarrer</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">L'ordinateur va redemarrer pour terminer l'installation. Continuer ?</system:String>
+    <system:String x:Key="PartitionSafetyBlockMessage">Installation bloquée jusqu'à résolution de ce contrôle de sécurité.</system:String>
 </ResourceDictionary>

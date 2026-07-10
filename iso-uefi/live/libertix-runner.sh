@@ -491,25 +491,15 @@ collect_debug() {
 }
 
 copy_logs_to_windows_best_effort() {
-    local win="" p fs size_mb tmp log_root log_dir
+    local win="" fs tmp log_root log_dir
 
-    for p in /dev/sd*[0-9] /dev/vd*[0-9] /dev/nvme*n*p[0-9] /dev/mmcblk*p[0-9]; do
-        [ -b "$p" ] || continue
-        fs="$(blkid -s TYPE -o value "$p" 2>/dev/null || true)"
-        [ "$fs" = "ntfs" ] || continue
-        size_mb=$(( $(blockdev --getsize64 "$p" 2>/dev/null || echo 0) / 1024 / 1024 ))
-        [ "$size_mb" -gt 1000 ] || continue
-        win="$p"
-        break
-    done
-
-    [ -n "$win" ] || return 0
+    win="$(cat "$LOG_DIR/windows-partition" 2>/dev/null || true)"
+    [ -n "$win" ] && [ -b "$win" ] || return 0
+    fs="$(blkid -s TYPE -o value "$win" 2>/dev/null || true)"
+    [ "$fs" = "ntfs" ] || return 0
     tmp="/mnt/libertix-logcopy"
     mkdir -p "$tmp"
-    if ! mount -t ntfs-3g "$win" "$tmp" 2>/dev/null; then
-        ntfsfix -d "$win" >/dev/null 2>&1 || true
-        mount -t ntfs-3g "$win" "$tmp" 2>/dev/null || return 0
-    fi
+    mount -t ntfs-3g "$win" "$tmp" 2>/dev/null || return 0
     if mountpoint -q "$tmp"; then
         log_root="$tmp/LibertixInstallLogs"
         log_dir="$log_root/$RUN_ID"
@@ -526,6 +516,9 @@ copy_logs_to_windows_best_effort() {
         cp -f "$STAGE_FILE" "$log_root/latest/stage.txt" 2>/dev/null || true
         cp -f "$FAIL_FILE" "$log_root/latest/failure.txt" 2>/dev/null || true
         cp -f "$RESULT_FILE" "$log_root/latest/result.env" 2>/dev/null || true
+        if grep -q '^LIBERTIX_INSTALL_SUCCESS=true$' "$RESULT_FILE" 2>/dev/null; then
+            rm -f "$tmp/LibertixTools/uefi-transaction.json" 2>/dev/null || true
+        fi
         sync
         umount "$tmp" 2>/dev/null || true
     fi
@@ -549,6 +542,9 @@ write_success_result() {
 
 write_failure_result() {
     local rc="$1"
+    local rollback
+    rollback="$(grep '^LIBERTIX_INSTALL_ROLLBACK=' "$LOG" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+    [ -n "$rollback" ] || rollback="unknown"
 echo "installer-failed-rc-$rc" > "$STAGE_FILE"
 if [ -s "$FAIL_FILE" ]; then
     echo "runner_rc=$rc" >> "$FAIL_FILE"
@@ -560,6 +556,7 @@ fi
         echo "LIBERTIX_INSTALL_RUN_ID=$RUN_ID"
         echo "LIBERTIX_INSTALL_STAGE=$(current_stage)"
         echo "LIBERTIX_INSTALL_RC=$rc"
+        echo "LIBERTIX_INSTALL_ROLLBACK=$rollback"
     } > "$RESULT_FILE"
     {
         echo ""
@@ -567,6 +564,7 @@ fi
         echo "LIBERTIX_INSTALL_RUN_ID=$RUN_ID"
         echo "LIBERTIX_INSTALL_STAGE=$(current_stage)"
         echo "LIBERTIX_INSTALL_RC=$rc"
+        echo "LIBERTIX_INSTALL_ROLLBACK=$rollback"
     } >> "$LOG"
 }
 
@@ -616,6 +614,7 @@ failure_screen_loop() {
                     if [ "$UI_MODE" = "details" ]; then UI_MODE="progress"; else UI_MODE="details"; fi
                     ;;
                 r|R)
+                    grep -q '^LIBERTIX_INSTALL_ROLLBACK=completed$' "$RESULT_FILE" 2>/dev/null || continue
                     printf '\033[?25h' > /dev/tty1 2>/dev/null || true
                     stop_graphical_ui
                     sync

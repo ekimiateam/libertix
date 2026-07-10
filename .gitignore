@@ -58,5 +58,6 @@ auto_tests/**/*.pyc
 auto_tests/app/filepool/*.iso
 auto_tests/app/filepool/*.iso.bak-*
 auto_tests/app/filepool/*.zip
+auto_tests/known_hosts
 auto_tests/logs/
 auto_tests/tools/__pycache__/

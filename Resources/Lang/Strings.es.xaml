@@ -80,4 +80,5 @@
     <system:String x:Key="ApplyChangesError">Ocurrio un error</system:String>
     <system:String x:Key="ApplyChangesReboot">Reiniciar</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">El ordenador se reiniciara para completar la instalacion. Continuar?</system:String>
+    <system:String x:Key="PartitionSafetyBlockMessage">La instalación está bloqueada hasta resolver este control de seguridad.</system:String>
 </ResourceDictionary>

@@ -145,6 +145,8 @@ $mapped = $false
 $mappedDrive = $null
 $temp = Join-Path $env:TEMP ("Libertix-build-" + [guid]::NewGuid().ToString("N"))
 $srcLocal = Join-Path $temp "source"
+$releaseStaging = $null
+$releaseBackup = $null
 
 # Important pour la VM 192.168.1.138, utilisée aussi manuellement :
 # le cache NuGet reste dans le dossier temporaire du build et disparaît au cleanup.
@@ -234,28 +236,62 @@ try {
         throw "Libertix.exe absent après compilation Release"
     }
 
-    if (Test-Path -LiteralPath $releasePath) {
-        Remove-Item -LiteralPath $releasePath -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $releasePath -Force | Out-Null
+    $releaseStaging = "$releasePath.staging-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $releaseStaging -Force | Out-Null
 
     $buildDir = Split-Path -Parent $exe.FullName
-    Copy-WithRobocopy -Source $buildDir -Destination $releasePath
+    Copy-WithRobocopy -Source $buildDir -Destination $releaseStaging
 
-    $finalExe = Join-Path $releasePath "Libertix.exe"
-    if (-not (Test-Path -LiteralPath $finalExe -PathType Leaf)) {
+    $stagedExe = Join-Path $releaseStaging "Libertix.exe"
+    if (-not (Test-Path -LiteralPath $stagedExe -PathType Leaf)) {
         throw "Libertix.exe absent dans Libertix-release après copie"
+    }
+    $finalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedExe).Hash.ToLowerInvariant()
+
+    if (Test-Path -LiteralPath $releasePath) {
+        $releaseBackup = "$releasePath.backup-$([Guid]::NewGuid().ToString('N'))"
+        Move-Item -LiteralPath $releasePath -Destination $releaseBackup
+    }
+    try {
+        Move-Item -LiteralPath $releaseStaging -Destination $releasePath
+    }
+    catch {
+        if ($releaseBackup -and -not (Test-Path -LiteralPath $releasePath)) {
+            Move-Item -LiteralPath $releaseBackup -Destination $releasePath
+            $releaseBackup = $null
+        }
+        throw
+    }
+    $releaseStaging = $null
+    $finalExe = Join-Path $releasePath "Libertix.exe"
+    $publishedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $finalExe).Hash.ToLowerInvariant()
+    if ($publishedHash -ne $finalHash) {
+        throw "Le hash de Libertix.exe a changé pendant la publication"
+    }
+    if ($releaseBackup) {
+        Remove-Item -LiteralPath $releaseBackup -Recurse -Force
+        $releaseBackup = $null
     }
 
     Write-Result -Name "MSBUILD" -Value $msbuild
     Write-Result -Name "TEMP_BUILD_DIR" -Value $temp
     Write-Result -Name "FINAL_EXE" -Value $finalExe
+    Write-Result -Name "FINAL_EXE_SHA256" -Value $publishedHash
 }
 finally {
     # Nettoyage systématique : source copiée, packages NuGet temporaires et
     # éventuels bin/obj de build disparaissent même en cas d'erreur.
     if (Test-Path -LiteralPath $temp) {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($releaseStaging -and (Test-Path -LiteralPath $releaseStaging)) {
+        Remove-Item -LiteralPath $releaseStaging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if ($releaseBackup -and (Test-Path -LiteralPath $releaseBackup)) {
+        if (Test-Path -LiteralPath $releasePath) {
+            Remove-Item -LiteralPath $releasePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Move-Item -LiteralPath $releaseBackup -Destination $releasePath -ErrorAction SilentlyContinue
     }
     if ($mapped) {
         if ($mappedDrive) {

@@ -36,15 +36,61 @@
 # For a complete CI/CD sample to get started with GitHub Action workflows for Desktop Applications,
 # refer to https://github.com/microsoft/github-actions-for-desktop-apps
 
-name: .NET Core Desktop
+name: Libertix quality and .NET Framework build
 
 on:
   push:
-    branches: [ "DEV" ]
+    branches: [ "dev" ]
   pull_request:
-    branches: [ "DEV" ]
+    branches: [ "dev" ]
 
 jobs:
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Install auto_tests
+      working-directory: auto_tests
+      run: python -m pip install -e '.[dev]'
+
+    - name: Python tests and lint
+      working-directory: auto_tests
+      run: |
+        python -m pytest
+        ruff check .
+        ruff format --check .
+
+    - name: Shell syntax and ShellCheck
+      run: |
+        find iso iso-uefi -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
+        find iso iso-uefi -type f -name '*.sh' -print0 | xargs -0 shellcheck -x -S error
+
+    - name: Parse PowerShell scripts
+      shell: pwsh
+      run: |
+        $errors = @()
+        Get-ChildItem Scripts, auto_tests/app/scripts -Recurse -Filter *.ps1 | ForEach-Object {
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $_.FullName,
+            [ref]$tokens,
+            [ref]$parseErrors
+          ) | Out-Null
+          $errors += $parseErrors
+        }
+        if ($errors.Count -gt 0) {
+          $errors | Format-List
+          throw "PowerShell parsing failed"
+        }
 
   build:
 

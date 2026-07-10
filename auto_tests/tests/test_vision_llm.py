@@ -82,6 +82,22 @@ def test_install_progress_fallback_ignores_schema_instructions() -> None:
     assert verdict["error_visible"] is False
 
 
+def test_install_progress_fallback_never_uses_prompt_assignments_as_evidence() -> None:
+    reasoning = """
+    Schema rule: installation_finished=true when complete.
+    Fields to determine: reboot_prompt_visible=true.
+    The image is a Windows desktop showing Downloading Mint ISO... 42%.
+    Visible text: Downloading Mint ISO... 42% 1.2GiB/2.8GiB ETA 4m.
+    """
+
+    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
+
+    assert verdict["analysis_source"] == "reasoning_fallback"
+    assert verdict["installation_finished"] is False
+    assert verdict["reboot_prompt_visible"] is False
+    assert verdict["still_in_progress"] is True
+
+
 def test_install_progress_fallback_detects_insufficient_space_blocker() -> None:
     reasoning = """
     Image shows a modal saying Espace insuffisant.
@@ -187,7 +203,7 @@ def test_install_progress_accepts_llm_json_without_visible_text(
     assert verdict.visible_text
 
 
-def test_install_progress_ignores_not_responding_during_active_download(
+def test_install_progress_never_hides_error_during_active_download(
     monkeypatch, tmp_path: Path
 ) -> None:
     image = tmp_path / "screen.png"
@@ -203,7 +219,8 @@ def test_install_progress_ignores_not_responding_during_active_download(
             "visible_text": (
                 "Libertix (Ne répond pas). Downloading Linux ISO... 0%. "
                 "[FileAlloc:#c04 1.4GiB/2.8GiB(51%)] "
-                "aria2 Linux installer ISO: FILE: C:/Users/admin/AppData/Local/Temp/Libertix/mint.iso"
+                "aria2 Linux installer ISO: FILE: "
+                "C:/Users/admin/AppData/Local/Temp/Libertix/mint.iso"
             ),
         }
     )
@@ -221,7 +238,7 @@ def test_install_progress_ignores_not_responding_during_active_download(
     ).analyze_install_progress(image, "vm1", "Windows")
 
     assert verdict.still_in_progress is True
-    assert verdict.error_visible is False
+    assert verdict.error_visible is True
 
 
 def test_install_progress_ignores_finished_flags_during_bitlocker_decryption(
@@ -236,7 +253,9 @@ def test_install_progress_ignores_finished_flags_during_bitlocker_decryption(
             "reboot_prompt_visible": True,
             "still_in_progress": False,
             "error_visible": False,
-            "summary": "Fallback LLM: no strict JSON returned; final state is not confidently detected.",
+            "summary": (
+                "Fallback LLM: no strict JSON returned; final state is not confidently detected."
+            ),
             "visible_text": (
                 "Déchiffrement de Windows C: 75%. "
                 "OperatingSystem C: 63,01 DecryptionInProgress 36. "
@@ -261,3 +280,20 @@ def test_install_progress_ignores_finished_flags_during_bitlocker_decryption(
     assert verdict.installation_finished is False
     assert verdict.reboot_prompt_visible is False
     assert verdict.still_in_progress is True
+
+
+def test_wizard_reasoning_uses_only_complete_verdict_json() -> None:
+    reasoning = """
+    Prompt mentions {detected_screen: account} but this is not JSON evidence.
+    Final answer:
+    {"detected_screen":"distro","expected_screen_visible":false,
+     "no_blocking_error":true,"visible_text":["Linux Mint 22.3", "Suivant"]}
+    """
+
+    verdict = VisionLLMClient._load_wizard_json(reasoning)  # noqa: SLF001
+
+    assert verdict["detected_screen"] == "distro"
+    assert verdict["expected_screen_visible"] is False
+    assert verdict["username_visible"] is False
+    assert verdict["password_fields_filled"] is False
+    assert verdict["visible_text"] == "Linux Mint 22.3\nSuivant"

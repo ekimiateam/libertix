@@ -81,6 +81,8 @@
     <Compile Include="Converters\InverseBoolConverter.cs" />
     <Compile Include="Converters\VisibilityToBoolConverter.cs" />
     <Compile Include="Helpers\FilepoolConfig.cs" />
+    <Compile Include="Helpers\LinuxPasswordHasher.cs" />
+    <Compile Include="Helpers\UefiRecoveryState.cs" />
     <Compile Include="Models\DistroInfo.cs" />
     <Compile Include="Models\DistroInfoJson.cs" />
     <Compile Include="Models\AccountInfo.cs" />
@@ -90,6 +92,9 @@
     </Compile>
     <Compile Include="Pages\ApplyChanges.xaml.cs">
       <DependentUpon>ApplyChanges.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="Pages\UefiBootFallback.xaml.cs">
+      <DependentUpon>UefiBootFallback.xaml</DependentUpon>
     </Compile>
     <Compile Include="Pages\ChooseDistro.xaml.cs">
       <DependentUpon>ChooseDistro.xaml</DependentUpon>
@@ -111,6 +116,7 @@
     </Compile>
     <Page Include="Pages\AccountCreation.xaml" />
     <Page Include="Pages\ApplyChanges.xaml" />
+    <Page Include="Pages\UefiBootFallback.xaml" />
     <Page Include="Pages\WarningConfirmation.xaml" />
     <Compile Include="Pages\WarningConfirmation.xaml.cs">
       <DependentUpon>WarningConfirmation.xaml</DependentUpon>
@@ -163,6 +169,15 @@
     <Content Include="Scripts\libertix-recovery-guard.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\libertix-uefi-recovery-agent.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\libertix-register-uefi-recovery-tasks.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\libertix-storage-preflight.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Tools\aria2\aria2c.exe">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -197,6 +212,7 @@
     <Resource Include="Resources\Images\Icon.ico" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="CryptSharpOfficial" Version="2.1.0" />
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
     <PackageReference Include="System.Memory" Version="4.5.5" />

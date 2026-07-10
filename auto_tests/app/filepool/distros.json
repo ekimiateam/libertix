@@ -1,11 +1,13 @@
 [
   {
-    "name": "Linux Mint 22.2 Cinnamon",
+    "name": "Linux Mint 22.3 Cinnamon",
     "description": "Linux Mint is an operating system for desktop and laptop computers. It is designed to work out of the box and comes fully equipped with the apps most people need.",
     "imageUrl": "https://www.linuxmint.com/web/img/screenshots/c1.jpg",
     "isoUrl": "libertix-installer-bios.iso",
     "isoInstaller": "mint.iso",
     "isoInstallerFileName": "mint.iso",
+    "isoSha256": "02b60f357cef51d2107008d313f452ae9f458e909aee5bdea10f8cbeba47dd4f",
+    "isoInstallerSha256": "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4",
     "sizeInGB": 20
   }
 ]

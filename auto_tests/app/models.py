@@ -52,6 +52,11 @@ class AutomationRequest(ValidationRequest):
     """
 
     apply: bool = Field(default=False, description="Run the full installer UI and click Apply")
-    linux_username: str = Field(default="test", min_length=1)
-    linux_password: str = Field(default="linux", min_length=1)
+    linux_username: str = Field(
+        default="test",
+        min_length=1,
+        max_length=32,
+        pattern=r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$",
+    )
+    linux_password: str = Field(default="linux", min_length=4, max_length=128)
     monitor_iso: bool = Field(default=True)

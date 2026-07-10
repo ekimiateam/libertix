@@ -19,7 +19,7 @@ def image_score(previous: Path, current: Path) -> float:
 def ranked_changes(directory: Path, pattern: str) -> list[tuple[float, Path, Path]]:
     frames = sorted(directory.glob(pattern))
     changes: list[tuple[float, Path, Path]] = []
-    for previous, current in zip(frames, frames[1:]):
+    for previous, current in zip(frames, frames[1:], strict=False):
         try:
             changes.append((image_score(previous, current), previous, current))
         except OSError as exc:
@@ -28,7 +28,9 @@ def ranked_changes(directory: Path, pattern: str) -> list[tuple[float, Path, Pat
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Rank VNC screenshots by frame-to-frame visual change.")
+    parser = argparse.ArgumentParser(
+        description="Rank VNC screenshots by frame-to-frame visual change."
+    )
     parser.add_argument("directory", type=Path)
     parser.add_argument("--pattern", default="*.png")
     parser.add_argument("--top", type=int, default=20)

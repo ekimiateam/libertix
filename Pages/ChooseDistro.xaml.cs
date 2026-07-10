@@ -8,7 +8,6 @@ using Libertix.Helpers;
 using Libertix.Models;
 using Libertix.Pages;
 using System.ComponentModel;
-using System.Windows.Media.Animation;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -25,8 +24,7 @@ namespace Libertix
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
-        private bool _partitionConfigValid = true;
-        private bool _partitionWarningAcknowledged = false;
+        private bool _partitionConfigValid = false;
 
         private enum FirmwareType
         {
@@ -58,13 +56,13 @@ namespace Libertix
             DataContext = this;
             IsDistroSelected = false;
             Loaded += ChooseDistro_Loaded;
-            CheckPartitionConfigurationAsync();
         }
 
         private async void ChooseDistro_Loaded(object sender, RoutedEventArgs e)
         {
             Loaded -= ChooseDistro_Loaded;
             await LoadDistrosAsync();
+            await CheckPartitionConfigurationAsync();
             LoadState();
         }
 
@@ -74,13 +72,14 @@ namespace Libertix
             {
                 using (var client = new HttpClient())
                 {
+                    client.Timeout = TimeSpan.FromSeconds(30);
                     var json = await client.GetStringAsync(FilepoolConfig.DistrosUrl);
                     var options = new JsonSerializerOptions
                     {
                         PropertyNameCaseInsensitive = true
                     };
                     var distroList = JsonSerializer.Deserialize<List<DistroInfoJson>>(json, options);
-                    if (distroList == null)
+                    if (distroList == null || distroList.Count == 0)
                     {
                         throw new InvalidOperationException("Distribution list JSON is empty or invalid.");
                     }
@@ -88,6 +87,16 @@ namespace Libertix
                     _distros.Clear();
                     foreach (var distroJson in distroList)
                     {
+                        if (string.IsNullOrWhiteSpace(distroJson.Name) ||
+                            string.IsNullOrWhiteSpace(distroJson.IsoUrl) ||
+                            string.IsNullOrWhiteSpace(distroJson.IsoInstaller) ||
+                            string.IsNullOrWhiteSpace(distroJson.IsoInstallerFileName) ||
+                            !Regex.IsMatch(distroJson.IsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
+                            !Regex.IsMatch(distroJson.IsoInstallerSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
+                            distroJson.SizeInGB < 20)
+                        {
+                            throw new InvalidOperationException("Distribution manifest contains an invalid entry.");
+                        }
                         _distros.Add(new DistroInfo
                         {
                             Name = distroJson.Name,
@@ -96,16 +105,19 @@ namespace Libertix
                             IsoUrl = FilepoolConfig.ResolveUrl(distroJson.IsoUrl),
                             IsoInstaller = FilepoolConfig.ResolveUrl(distroJson.IsoInstaller),
                             IsoInstallerFileName = distroJson.IsoInstallerFileName,
+                            IsoSha256 = distroJson.IsoSha256,
+                            IsoInstallerSha256 = distroJson.IsoInstallerSha256,
                             SizeInGB = distroJson.SizeInGB
                         });
                     }
                 }
                 DistrosItemsControl.ItemsSource = _distros;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 MessageBox.Show(
-                    Application.Current.Resources["DistroLoadError"] as string ?? "Failed to load distributions",
+                    (Application.Current.Resources["DistroLoadError"] as string ?? "Failed to load distributions") +
+                    Environment.NewLine + ex.Message,
                     "Error",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
@@ -181,62 +193,10 @@ namespace Libertix
             }
         }
 
-        private void NavigateWithAnimation(Page nextPage)
-        {
-            var fadeOut = new DoubleAnimation
-            {
-                From = 1.0,
-                To = 0.0,
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
-
-            var slideOut = new ThicknessAnimation
-            {
-                From = new Thickness(0),
-                To = new Thickness(-100, 0, 0, 0),
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
-
-            fadeOut.Completed += (s, _) =>
-            {
-                var currentBackground = ((Grid)this.Content).Background;
-                NavigationService.Navigate(nextPage);
-                ((Grid)nextPage.Content).Background = currentBackground;
-
-                var fadeIn = new DoubleAnimation
-                {
-                    From = 0.0,
-                    To = 1.0,
-                    Duration = TimeSpan.FromSeconds(0.3)
-                };
-
-                var slideIn = new ThicknessAnimation
-                {
-                    From = new Thickness(100, 0, 0, 0),
-                    To = new Thickness(0),
-                    Duration = TimeSpan.FromSeconds(0.3)
-                };
-
-                nextPage.BeginAnimation(UIElement.OpacityProperty, fadeIn);
-                nextPage.BeginAnimation(FrameworkElement.MarginProperty, slideIn);
-            };
-
-            this.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-            this.BeginAnimation(FrameworkElement.MarginProperty, slideOut);
-        }
-
         #region Partition Validation
 
-        private async void CheckPartitionConfigurationAsync()
+        private async Task CheckPartitionConfigurationAsync()
         {
-            if (IsUefiFirmware())
-            {
-                _partitionConfigValid = true;
-                PartitionWarningPanel.Visibility = Visibility.Collapsed;
-                UpdateNextButtonState();
-                return;
-            }
-
             var (isValid, warnings) = await ValidatePartitionLayoutAsync();
 
             _partitionConfigValid = isValid;
@@ -251,177 +211,74 @@ namespace Libertix
             UpdateNextButtonState();
         }
 
-        private void PartitionWarningCheckbox_Changed(object sender, RoutedEventArgs e)
-        {
-            _partitionWarningAcknowledged = PartitionWarningCheckbox.IsChecked == true;
-            UpdateNextButtonState();
-        }
-
         private void UpdateNextButtonState()
         {
-            // Button is enabled if:
-            // 1. A distro is selected AND
-            // 2. Either partition config is valid OR user acknowledged the warning
-            bool canProceed = _selectedDistro != null &&
-                              (_partitionConfigValid || _partitionWarningAcknowledged);
+            // Storage preflight failures are safety blockers, not warnings that
+            // can be bypassed with a checkbox.
+            bool canProceed = _selectedDistro != null && _partitionConfigValid;
             NextButton.IsEnabled = canProceed;
         }
 
         private async Task<(bool isValid, List<string> warnings)> ValidatePartitionLayoutAsync()
         {
             var warnings = new List<string>();
-
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"check_partitions_{Guid.NewGuid()}.txt");
-
             try
             {
-                string script = @"select disk 0
-list partition
-exit";
+                if (!GetFirmwareType(out var firmwareType) ||
+                    (firmwareType != FirmwareType.Bios && firmwareType != FirmwareType.Uefi))
+                    throw new InvalidOperationException("Windows could not determine the firmware type.");
 
-                File.WriteAllText(diskpartScript, script);
-                string output = await RunDiskpartAndGetOutputAsync(diskpartScript);
+                string scriptPath = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "Scripts",
+                    "libertix-storage-preflight.ps1");
+                if (!File.Exists(scriptPath))
+                    throw new FileNotFoundException("Storage preflight script is missing.", scriptPath);
 
-                var partitions = ParsePartitionList(output);
+                string expected = firmwareType == FirmwareType.Uefi ? "UEFI" : "BIOS";
+                var result = await Task.Run(() => RunProcessWithTimeout(
+                    "powershell.exe",
+                    $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -ExpectedFirmware {expected}",
+                    120000));
+                if (result.exitCode != 0 || !result.output.Contains("PREFLIGHT_OK=true"))
+                    throw new InvalidOperationException(
+                        $"Storage preflight failed: {result.error} {result.output}");
 
-                // Check 1: Should have exactly 3 partitions
-                if (partitions.Count > 3)
-                {
-                    warnings.Add($"Expected 3 partitions, found {partitions.Count}");
-                }
-                else if (partitions.Count < 3)
-                {
-                    warnings.Add($"Expected 3 partitions, found only {partitions.Count}");
-                }
-
-                // Check 2: First partition should be between 40-150MB (EFI/System)
-                if (partitions.Count > 0)
-                {
-                    var firstPartition = partitions[0];
-                    if (firstPartition.SizeMB < 40 || firstPartition.SizeMB > 150)
-                    {
-                        warnings.Add($"First partition size is {firstPartition.SizeMB:F0}MB (expected 40-150MB for System)");
-                    }
-                }
-
-                // Check 3: Last partition should be between 400-700MB (Recovery)
-                if (partitions.Count > 0)
-                {
-                    var lastPartition = partitions[partitions.Count - 1];
-                    if (lastPartition.SizeMB < 400 || lastPartition.SizeMB > 700)
-                    {
-                        warnings.Add($"Last partition size is {lastPartition.SizeMB:F0}MB (expected 400-700MB for Recovery)");
-                    }
-                }
-
-                return (warnings.Count == 0, warnings);
+                return (true, warnings);
             }
             catch (Exception ex)
             {
                 warnings.Add($"Error checking partitions: {ex.Message}");
                 return (false, warnings);
             }
-            finally
+        }
+
+        private static (int exitCode, string output, string error) RunProcessWithTimeout(
+            string fileName,
+            string arguments,
+            int timeoutMilliseconds)
+        {
+            var startInfo = new ProcessStartInfo
             {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
+                FileName = fileName,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using (var process = Process.Start(startInfo))
+            {
+                var output = process.StandardOutput.ReadToEndAsync();
+                var error = process.StandardError.ReadToEndAsync();
+                if (!process.WaitForExit(timeoutMilliseconds))
+                {
+                    try { process.Kill(); } catch { }
+                    return (-1, "", "Storage preflight timed out.");
+                }
+                Task.WaitAll(output, error);
+                return (process.ExitCode, output.Result, error.Result);
             }
-        }
-
-        private class PartitionInfo
-        {
-            public int Number { get; set; }
-            public string Type { get; set; }
-            public double SizeMB { get; set; }
-        }
-
-        private List<PartitionInfo> ParsePartitionList(string output)
-        {
-            var partitions = new List<PartitionInfo>();
-            var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-            foreach (var line in lines)
-            {
-                var partitionMatch = Regex.Match(line, @"Partition\s+(\d+)", RegexOptions.IgnoreCase);
-                if (!partitionMatch.Success)
-                    continue;
-
-                int partitionNumber = int.Parse(partitionMatch.Groups[1].Value);
-
-                var sizeMatches = Regex.Matches(line, @"(\d+)\s*(G|M|K)\s*o?", RegexOptions.IgnoreCase);
-
-                if (sizeMatches.Count > 0)
-                {
-                    var sizeMatch = sizeMatches[0];
-                    double size = double.Parse(sizeMatch.Groups[1].Value);
-                    string unit = sizeMatch.Groups[2].Value.ToUpper();
-
-                    double sizeMB;
-                    switch (unit)
-                    {
-                        case "G":
-                            sizeMB = size * 1024;
-                            break;
-                        case "K":
-                            sizeMB = size / 1024;
-                            break;
-                        default:
-                            sizeMB = size;
-                            break;
-                    }
-
-                    string type = "Unknown";
-                    var typeMatch = Regex.Match(line, @"Partition\s+\d+\s+(\w+)", RegexOptions.IgnoreCase);
-                    if (typeMatch.Success)
-                    {
-                        type = typeMatch.Groups[1].Value;
-                    }
-
-                    partitions.Add(new PartitionInfo
-                    {
-                        Number = partitionNumber,
-                        Type = type,
-                        SizeMB = sizeMB
-                    });
-                }
-            }
-
-            return partitions;
-        }
-
-        private static bool IsUefiFirmware()
-        {
-            return GetFirmwareType(out var firmwareType) && firmwareType == FirmwareType.Uefi;
-        }
-
-        private async Task<string> RunDiskpartAndGetOutputAsync(string scriptPath)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = "diskpart.exe",
-                        Arguments = $"/s \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var process = Process.Start(psi))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        process.WaitForExit();
-                        return output;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    return $"Error: {ex.Message}";
-                }
-            });
         }
 
         #endregion

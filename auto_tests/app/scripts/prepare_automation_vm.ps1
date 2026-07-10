@@ -19,18 +19,34 @@ $disableDefender = [bool]$config.disable_defender
 $documents = [Environment]::GetFolderPath("MyDocuments")
 $releasePath = Join-Path $documents $releaseDirName
 
-if ($disableDefender -and (Get-Command Set-MpPreference -ErrorAction SilentlyContinue)) {
+if ($disableDefender) {
+    if (-not (Get-Command Set-MpPreference -ErrorAction SilentlyContinue)) {
+        throw "Defender preparation was requested but Set-MpPreference is unavailable"
+    }
     New-Item -ItemType Directory -Path $releasePath -Force | Out-Null
 
-    Add-MpPreference -ExclusionPath $releasePath -ErrorAction SilentlyContinue
-    Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+    Add-MpPreference -ExclusionPath $releasePath -ErrorAction Stop
+    Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+    # Windows can surface SecHealthUI above the wizard after this setting changes.
+    # It is only a notification surface; closing it keeps VNC automation focused.
+    Get-Process -Name "SecHealthUI" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
 
-    $status = Get-MpComputerStatus -ErrorAction SilentlyContinue
-    Write-Result -Name "DEFENDER_PREPARED" -Value "true"
+    $status = Get-MpComputerStatus -ErrorAction Stop
+    $preferences = Get-MpPreference -ErrorAction Stop
+    if ($preferences.ExclusionPath -notcontains $releasePath) {
+        throw "Defender exclusion was not applied to $releasePath"
+    }
+    $preparedState = if ($status.RealTimeProtectionEnabled) {
+        "exclusion-only"
+    } else {
+        "realtime-disabled"
+    }
+    Write-Result -Name "DEFENDER_PREPARED" -Value $preparedState
     Write-Result -Name "DEFENDER_REALTIME" -Value ([string]$status.RealTimeProtectionEnabled)
     Write-Result -Name "DEFENDER_EXCLUSION" -Value $releasePath
 }
 else {
-    Write-Result -Name "DEFENDER_PREPARED" -Value "false"
+    Write-Result -Name "DEFENDER_PREPARED" -Value "not-requested"
     Write-Result -Name "DEFENDER_EXCLUSION" -Value $releasePath
 }

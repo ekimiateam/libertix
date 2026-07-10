@@ -34,10 +34,12 @@ durable de la machine.
 
 ## Choix actuel dans Libertix
 
-Pour l'instant, le script UEFI Libertix garde le comportement existant : il crée l'entrée
-`Libertix UEFI Installer`, la met en premier dans `BootOrder`, puis nettoie cette entrée dès le boot
-du live ISO. Ce choix reste volontairement conservé tant que `BootNext` n'a pas été validé sur les
-machines ciblées.
+Le premier essai utilise `BootNext` vers une entree firmware native qui cible le loader temporaire
+`EFI\LibertixInstaller\BOOTX64.EFI` sur l'ESP Windows. Avant le redemarrage, Libertix relit
+l'entree `Boot####`, le chemin du loader, les hashes des fichiers EFI et la valeur `BootNext`.
 
-Le mode `-Revert` doit supprimer l'entrée Libertix, nettoyer les fichiers EFI Libertix, supprimer la
-partition temporaire `LIBERTIXEFI` si elle existe, et remettre Windows Boot Manager comme défaut.
+Si Windows revient sans marqueur du live, le garde de reprise lance une copie locale verifiee de
+Libertix et demande a l'utilisateur s'il veut utiliser le seul fallback valide : une entree firmware
+creee avec BCD et placee temporairement en tete de `BootOrder`. Ce n'est pas un chainload direct par
+Windows Boot Manager. Le live supprime ses artefacts BCD/EFI avant toute modification de disque et le
+mode `-Revert` restaure l'ordre firmware sauvegarde, les fichiers ESP et la partition temporaire.

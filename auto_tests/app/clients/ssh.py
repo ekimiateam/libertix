@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,9 +39,8 @@ class SSHClient:
     def __enter__(self) -> SSHClient:
         logger.info("Connexion SSH", extra={"step": "ssh.connect", "target": self.host})
         client = paramiko.SSHClient()
-        client.load_system_host_keys()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(
                 self.host,
                 port=self.port,
@@ -86,9 +86,28 @@ class SSHClient:
         logger.info("Commande distante démarrée", extra={"step": step, "target": self.host})
         try:
             _stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
-            exit_code = stdout.channel.recv_exit_status()
-            out = stdout.read().decode("utf-8", errors="replace").strip()
-            err = stderr.read().decode("utf-8", errors="replace").strip()
+            channel = stdout.channel
+            deadline = time.monotonic() + timeout
+            out_chunks: list[bytes] = []
+            err_chunks: list[bytes] = []
+            while True:
+                while channel.recv_ready():
+                    out_chunks.append(channel.recv(65536))
+                while channel.recv_stderr_ready():
+                    err_chunks.append(channel.recv_stderr(65536))
+                if (
+                    channel.exit_status_ready()
+                    and not channel.recv_ready()
+                    and not channel.recv_stderr_ready()
+                ):
+                    break
+                if time.monotonic() >= deadline:
+                    channel.close()
+                    raise TimeoutError(f"SSH command timed out after {timeout} seconds")
+                time.sleep(0.02)
+            exit_code = channel.recv_exit_status()
+            out = b"".join(out_chunks).decode("utf-8", errors="replace").strip()
+            err = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             raise WorkflowError(
                 step,

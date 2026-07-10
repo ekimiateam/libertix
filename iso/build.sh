@@ -10,11 +10,17 @@ require_root() {
     [ "$EUID" -eq 0 ] || { echo "Run with sudo!"; exit 1; }
 }
 
-install_build_dependencies() {
-    echo "=== Installing build dependencies ==="
-    apt update
-    apt install -y debootstrap squashfs-tools xorriso isolinux syslinux-utils \
-        grub-pc-bin grub-efi-amd64-bin mtools dosfstools
+require_build_dependencies() {
+    local command missing=()
+    for command in debootstrap mksquashfs xorriso grub-mkstandalone mmd mcopy mkfs.vfat; do
+        command -v "$command" >/dev/null 2>&1 || missing+=("$command")
+    done
+    [ -f /usr/lib/ISOLINUX/isolinux.bin ] || missing+=("isolinux.bin")
+    [ -f /usr/lib/ISOLINUX/isohdpfx.bin ] || missing+=("isohdpfx.bin")
+    [ "${#missing[@]}" -eq 0 ] || {
+        printf 'Missing ISO build prerequisites: %s\n' "${missing[*]}" >&2
+        exit 1
+    }
 }
 
 prepare_workdir() {
@@ -24,7 +30,7 @@ prepare_workdir() {
 
 bootstrap_live_system() {
     echo "=== Creating minimal Debian system ==="
-    debootstrap --variant=minbase stable "$WORKDIR/chroot" http://deb.debian.org/debian/
+    debootstrap --variant=minbase trixie "$WORKDIR/chroot" http://deb.debian.org/debian/
 }
 
 mount_chroot_filesystems() {
@@ -83,7 +89,7 @@ install_live_installer_assets() {
 write_build_id() {
     local build_git build_id
     build_git="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo nogit)"
-    if ! git -C "$ROOT_DIR" diff --quiet 2>/dev/null; then
+    if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
         build_git="${build_git}-dirty"
     fi
     build_id="$(date -u +%Y%m%d-%H%M%S)-${build_git}"
@@ -93,6 +99,8 @@ write_build_id() {
     cat > "$WORKDIR/chroot/etc/motd" <<EOF
 Libertix build: $build_id
 EOF
+    chroot "$WORKDIR/chroot" dpkg-query -W -f='${Package}=${Version}\n' \
+        | LC_ALL=C sort > "$WORKDIR/iso_build/libertix-packages.txt"
 }
 
 write_live_config() {
@@ -105,7 +113,7 @@ KEYBOARD_LAYOUT=$(shell_quote "$KEYBOARD_LAYOUT")
 KEYBOARD_MODEL=$(shell_quote "$KEYBOARD_MODEL")
 TIMEZONE=$(shell_quote "$TIMEZONE")
 USERNAME=$(shell_quote "$USERNAME")
-PASSWORD=$(shell_quote "$PASSWORD")
+PASSWORD_HASH=$(shell_quote "$PASSWORD_HASH")
 COMPUTER_NAME=$(shell_quote "$COMPUTER_NAME")
 ISO_FILENAME=$(shell_quote "$ISO_FILENAME")
 LINUX_SIZE_GB=$(shell_quote "$LINUX_SIZE_GB")
@@ -118,8 +126,12 @@ build_squashfs() {
     mksquashfs "$WORKDIR/chroot" "$WORKDIR/iso_build/live/filesystem.squashfs" \
         -comp xz -b 1M -e boot
 
-    cp "$WORKDIR/chroot/boot/vmlinuz-"* "$WORKDIR/iso_build/live/vmlinuz"
-    cp "$WORKDIR/chroot/boot/initrd.img-"* "$WORKDIR/iso_build/live/initrd.img"
+    mapfile -t kernels < <(find "$WORKDIR/chroot/boot" -maxdepth 1 -type f -name 'vmlinuz-*' | sort)
+    [ "${#kernels[@]}" -eq 1 ] || { echo "Expected exactly one kernel, found ${#kernels[@]}"; exit 1; }
+    initrd="$WORKDIR/chroot/boot/initrd.img-${kernels[0]##*vmlinuz-}"
+    [ -f "$initrd" ] || { echo "Missing initramfs for ${kernels[0]}"; exit 1; }
+    cp "${kernels[0]}" "$WORKDIR/iso_build/live/vmlinuz"
+    cp "$initrd" "$WORKDIR/iso_build/live/initrd.img"
 }
 
 configure_isolinux() {
@@ -172,7 +184,7 @@ main() {
     require_root
     trap cleanup EXIT
 
-    install_build_dependencies
+    require_build_dependencies
     prepare_workdir
     bootstrap_live_system
     mount_chroot_filesystems
