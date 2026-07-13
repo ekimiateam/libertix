@@ -203,6 +203,40 @@ def test_install_progress_accepts_llm_json_without_visible_text(
     assert verdict.visible_text
 
 
+def test_install_progress_normalizes_contradictory_final_reboot_json(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "iso_download_finished": True,
+            "installation_finished": False,
+            "reboot_prompt_visible": False,
+            "still_in_progress": True,
+            "error_visible": False,
+            "summary": "La préparation UEFI est réussie mais probablement intermédiaire.",
+            "visible_text": "Partitionnement terminé ! 100% Retour Redémarrer",
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient(
+        "key", "https://example.test/v1", "model", 1
+    ).analyze_install_progress(image, "vm2", "Windows 10 UEFI")
+
+    assert verdict.installation_finished is True
+    assert verdict.reboot_prompt_visible is True
+    assert verdict.still_in_progress is False
+
+
 def test_install_progress_never_hides_error_during_active_download(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -297,3 +331,41 @@ def test_wizard_reasoning_uses_only_complete_verdict_json() -> None:
     assert verdict["username_visible"] is False
     assert verdict["password_fields_filled"] is False
     assert verdict["visible_text"] == "Linux Mint 22.3\nSuivant"
+
+
+def test_wizard_normalizes_bare_false_when_account_evidence_is_complete(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "detected_screen": "account",
+            "expected_screen_visible": True,
+            "no_blocking_error": False,
+            "username_visible": True,
+            "password_fields_filled": True,
+            "summary": "Compte et champs remplis; aucune erreur visible.",
+            "visible_text": "Créez votre compte Linux test Mot de passe Confirmer le mot de passe",
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient(
+        "key", "https://example.test/v1", "model", 1
+    ).analyze_wizard_state(
+        image,
+        "vm3",
+        "Windows 11 UEFI",
+        expected_screen="account",
+        expected_username="test",
+    )
+
+    assert verdict.no_blocking_error is True

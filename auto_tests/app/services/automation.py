@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from typing import Literal
@@ -18,6 +18,7 @@ from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
 from app.models import OperationResult, SourceMode, StepResult
+from app.services.automation_types import AutomationOptions, Point, WizardProfile
 from app.services.common import ResultBuilder
 from app.services.reset import RESET_SNAPSHOT
 from app.services.validation import ValidationService
@@ -27,30 +28,6 @@ logger = logging.getLogger(__name__)
 GIB = 1024**3
 LOCAL_LVM_MIN_FREE_BYTES = 20 * GIB
 LOCAL_LVM_MIN_FREE_PER_VM_BYTES = 20 * GIB
-
-
-@dataclass(frozen=True)
-class AutomationOptions:
-    apply: bool
-    linux_username: str
-    linux_password: str
-    monitor_iso: bool
-
-
-@dataclass(frozen=True)
-class Point:
-    x: int
-    y: int
-
-
-@dataclass(frozen=True)
-class WizardProfile:
-    name: str
-    vm_name: str
-    vm_host: str
-    vmid: int
-    launch_only_label: str
-    disable_defender_for_automation: bool = False
 
 
 class AutomationService:
@@ -67,6 +44,7 @@ class AutomationService:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._capture_dir = Path(settings.capture_dir)
         self.validation = ValidationService(settings)
         self.vnc = VNCClient()
         self.vision_llm = VisionLLMClient(
@@ -89,6 +67,12 @@ class AutomationService:
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
+        self.settings.capture_dir.mkdir(parents=True, exist_ok=True)
+        capture_workspace = tempfile.TemporaryDirectory(
+            prefix="automation-", dir=self.settings.capture_dir
+        )
+        previous_capture_dir = self._capture_dir
+        self._capture_dir = Path(capture_workspace.name)
         result = ResultBuilder("automation", on_step=on_step)
         try:
             if apply and not monitor_iso:
@@ -162,6 +146,9 @@ class AutomationService:
                     details={"type": type(exc).__name__},
                 )
             )
+        finally:
+            self._capture_dir = previous_capture_dir
+            capture_workspace.cleanup()
 
     def _automation_profile_for_vm(self, vm: VMConfig) -> WizardProfile | None:
         if not vm.automation_enabled:
@@ -540,28 +527,41 @@ class AutomationService:
             welcome_point=Point(512, 438),
             distro_point=Point(145, 395),
             next_point=Point(919, 628),
+            sharing_point=Point(899, 588),
             username=options.linux_username,
             result=result,
         )
 
-        self._fill_field(client, vm, Point(512, 220), options.linux_username)
-        self._fill_field(client, vm, Point(512, 333), options.linux_password)
-        self._fill_field(client, vm, Point(512, 445), options.linux_password)
+        self._fill_account_fields(
+            client,
+            vm,
+            username_point=Point(512, 220),
+            password_point=Point(512, 333),
+            confirmation_point=Point(512, 445),
+            username=options.linux_username,
+            password=options.linux_password,
+        )
         time.sleep(0.5)
-        account_capture = self._capture_from_client(client, vm, "04-account-filled", result)
+        account_capture, account_capture_latest = self._capture_wizard_pair(
+            client, vm, "04-account-filled", result
+        )
         self._assert_wizard_state(
             account_capture,
             vm,
+            latest_capture=account_capture_latest,
             expected_screen="account",
             expected_username=options.linux_username,
             result=result,
         )
 
         self._click(client, vm, Point(919, 628), 2.0)
-        warning_capture = self._capture_from_client(client, vm, "05-warning", result)
+        warning_capture, warning_capture_latest = self._capture_wizard_pair(
+            client, vm, "05-warning", result
+        )
         self._assert_wizard_state(
             warning_capture,
             vm,
+            latest_capture=warning_capture_latest,
             expected_screen="warning",
             expected_username=options.linux_username,
             result=result,
@@ -584,28 +584,41 @@ class AutomationService:
             welcome_point=Point(512, 432),
             distro_point=Point(220, 389),
             next_point=Point(838, 614),
+            sharing_point=Point(822, 579),
             username=options.linux_username,
             result=result,
         )
 
-        self._fill_field(client, vm, Point(508, 223), options.linux_username)
-        self._fill_field(client, vm, Point(508, 330), options.linux_password)
-        self._fill_field(client, vm, Point(508, 438), options.linux_password)
+        self._fill_account_fields(
+            client,
+            vm,
+            username_point=Point(508, 223),
+            password_point=Point(508, 330),
+            confirmation_point=Point(508, 438),
+            username=options.linux_username,
+            password=options.linux_password,
+        )
         time.sleep(0.5)
-        account_capture = self._capture_from_client(client, vm, "04-account-filled", result)
+        account_capture, account_capture_latest = self._capture_wizard_pair(
+            client, vm, "04-account-filled", result
+        )
         self._assert_wizard_state(
             account_capture,
             vm,
+            latest_capture=account_capture_latest,
             expected_screen="account",
             expected_username=options.linux_username,
             result=result,
         )
 
         self._click(client, vm, Point(838, 614), 2.0)
-        warning_capture = self._capture_from_client(client, vm, "05-warning", result)
+        warning_capture, warning_capture_latest = self._capture_wizard_pair(
+            client, vm, "05-warning", result
+        )
         self._assert_wizard_state(
             warning_capture,
             vm,
+            latest_capture=warning_capture_latest,
             expected_screen="warning",
             expected_username=options.linux_username,
             result=result,
@@ -623,36 +636,88 @@ class AutomationService:
         welcome_point: Point,
         distro_point: Point,
         next_point: Point,
+        sharing_point: Point,
         username: str,
         result: ResultBuilder,
     ) -> None:
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + 300
+        last_screen: str | None = None
         attempt = 0
         while time.monotonic() < deadline:
             attempt += 1
-            capture = self._capture_from_client(client, vm, f"02-navigation-{attempt:02d}", result)
-            verdict = self.vision_llm.analyze_wizard_state(
-                capture,
-                vm.name,
-                vm.os,
-                expected_screen="account",
-                expected_username=username,
+            capture, latest_capture = self._capture_wizard_pair(
+                client, vm, f"02-navigation-{attempt:02d}", result
             )
+            try:
+                verdict = self.vision_llm.analyze_wizard_state(
+                    capture,
+                    vm.name,
+                    vm.os,
+                    expected_screen="account",
+                    expected_username=username,
+                    second_image_path=latest_capture,
+                )
+            except WorkflowError as exc:
+                if exc.step != "llm.wizard_state":
+                    raise
+                result.ok(
+                    "automation.wizard_vision_retry",
+                    "Verdict LLM temporairement invalide; nouvelle capture sans clic",
+                    target=vm.vnc,
+                    vm=vm.name,
+                    attempt=attempt,
+                    error=exc.message,
+                )
+                time.sleep(3)
+                continue
             context = {
                 "target": vm.vnc,
                 "vm": vm.name,
                 "capture": str(capture),
+                "latest_capture": str(latest_capture),
                 "detected_screen": verdict.detected_screen,
                 "expected_screen_visible": verdict.expected_screen_visible,
                 "no_blocking_error": verdict.no_blocking_error,
                 "summary": verdict.summary,
                 "visible_text": verdict.visible_text,
             }
+            visible_lower = verdict.visible_text.lower()
             # Empty account fields legitimately show "password required" before
             # automation fills them. Validation becomes strict immediately after fill.
             if verdict.detected_screen == "account":
                 return
-            if not verdict.no_blocking_error:
+            if (
+                verdict.detected_screen == "compatibility"
+                and "preflight_ok=true" not in verdict.visible_text.lower()
+            ):
+                result.ok(
+                    "automation.compatibility_wait",
+                    "Préflight de compatibilité encore en cours",
+                    **context,
+                )
+                time.sleep(2)
+                continue
+            compatibility_without_error = (
+                verdict.detected_screen == "compatibility"
+                and "compat_e_" not in verdict.visible_text.lower()
+            )
+            known_wizard_page_without_error = (
+                verdict.detected_screen in {"welcome", "distro", "resize", "sharing"}
+                and not any(
+                    marker in visible_lower
+                    for marker in (
+                        "une erreur s'est produite",
+                        "erreur pendant",
+                        "compat_e_",
+                        "installation failed",
+                    )
+                )
+            )
+            if (
+                not verdict.no_blocking_error
+                and not compatibility_without_error
+                and not known_wizard_page_without_error
+            ):
                 raise WorkflowError(
                     "automation.wizard_navigation",
                     "Erreur visible pendant la navigation de l'assistant",
@@ -663,13 +728,23 @@ class AutomationService:
                 "Page de l'assistant identifiée avant navigation",
                 **context,
             )
+            if verdict.detected_screen != last_screen:
+                # The vision service can be slow when three VMs are analyzed in
+                # parallel. Measure a stall from the latest real wizard
+                # transition instead of from the beginning of the whole path.
+                deadline = time.monotonic() + 300
+                last_screen = verdict.detected_screen
             if verdict.detected_screen == "welcome":
-                self._click(client, vm, welcome_point, 3.0)
+                self._click(client, vm, welcome_point, 1.0)
+            elif verdict.detected_screen == "compatibility":
+                self._click(client, vm, next_point, 1.0)
             elif verdict.detected_screen == "distro":
-                self._click(client, vm, distro_point, 0.7)
-                self._click(client, vm, next_point, 3.0)
+                self._click(client, vm, distro_point, 0.3)
+                self._click(client, vm, next_point, 1.0)
             elif verdict.detected_screen == "resize":
-                self._click(client, vm, next_point, 3.0)
+                self._click(client, vm, next_point, 1.0)
+            elif verdict.detected_screen == "sharing":
+                self._click(client, vm, sharing_point, 1.0)
             elif verdict.detected_screen in {"warning", "apply"}:
                 raise WorkflowError(
                     "automation.wizard_navigation",
@@ -689,6 +764,20 @@ class AutomationService:
                     target=vm.vnc,
                     vm=vm.name,
                 )
+            elif (
+                verdict.detected_screen == "other"
+                and "protection contre les virus et menaces" in verdict.visible_text.lower()
+            ):
+                client.keyDown("alt")
+                client.keyPress("f4")
+                client.keyUp("alt")
+                time.sleep(3)
+                result.ok(
+                    "automation.dismiss_windows_security_window",
+                    "Fenêtre Windows Security fermée pour rendre Libertix au premier plan",
+                    target=vm.vnc,
+                    vm=vm.name,
+                )
             else:
                 time.sleep(3)
 
@@ -703,6 +792,7 @@ class AutomationService:
         capture: Path,
         vm: VMConfig,
         *,
+        latest_capture: Path | None = None,
         expected_screen: Literal["account", "warning"],
         expected_username: str,
         result: ResultBuilder,
@@ -713,11 +803,13 @@ class AutomationService:
             vm.os,
             expected_screen=expected_screen,
             expected_username=expected_username,
+            second_image_path=latest_capture,
         )
         context = {
             "target": vm.vnc,
             "vm": vm.name,
             "capture": str(capture),
+            "latest_capture": str(latest_capture or capture),
             "expected_screen": expected_screen,
             **verdict.model_dump(),
         }
@@ -757,6 +849,18 @@ class AutomationService:
             "État critique de l'assistant confirmé avant de continuer",
             **context,
         )
+
+    def _capture_wizard_pair(
+        self,
+        client: object,
+        vm: VMConfig,
+        label: str,
+        result: ResultBuilder,
+    ) -> tuple[Path, Path]:
+        first = self._capture_from_client(client, vm, f"{label}-01", result)
+        time.sleep(1)
+        second = self._capture_from_client(client, vm, f"{label}-02", result)
+        return first, second
 
     def _monitor_install_progress(self, vm: VMConfig, result: ResultBuilder) -> None:
         deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
@@ -870,7 +974,12 @@ class AutomationService:
                 self._click_reboot_after_preparation(vm, result)
                 reboot_clicked = True
                 continue
-            if self._uefi_reboot_or_live_started(verdict.visible_text):
+            # Depending on the local vision model, the stable live-stage text
+            # can be returned in either visible_text or the concise summary.
+            # Inspect both fields so a real live boot is not missed merely
+            # because the model placed its OCR evidence in the summary.
+            live_evidence = f"{verdict.visible_text}\n{verdict.summary}"
+            if self._uefi_reboot_or_live_started(live_evidence):
                 result.ok(
                     "automation.uefi_reboot_seen",
                     "Reboot Windows vers le live UEFI confirmé visuellement",
@@ -929,6 +1038,7 @@ class AutomationService:
             for marker in (
                 "libertix stage:",
                 "code: 120-unsquashfs",
+                "code: 130-target-system-config",
                 "f12: mode terminal",
                 "libertix_install_success=",
             )
@@ -937,6 +1047,8 @@ class AutomationService:
             for marker in (
                 "installation automatique",
                 "extraction de mint",
+                "configuration du système installé",
+                "configuration du systeme installe",
                 "libertix stage:",
                 "installer-success",
             )
@@ -1010,7 +1122,7 @@ class AutomationService:
     def _capture_path(self, vm: VMConfig, label: str) -> Path:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in label)
-        return Path(self.settings.capture_dir) / f"{vm.name}-auto-{stamp}-{safe_label}.png"
+        return self._capture_dir / f"{vm.name}-auto-{stamp}-{safe_label}.png"
 
     def _click(self, client: object, vm: VMConfig, point: Point, delay: float) -> None:
         x = round(point.x * vm.screen_width / self.REFERENCE_WIDTH)
@@ -1037,6 +1149,26 @@ class AutomationService:
         time.sleep(0.15)
         self._type_text(client, text)
         time.sleep(0.35)
+
+    def _fill_account_fields(
+        self,
+        client: object,
+        vm: VMConfig,
+        *,
+        username_point: Point,
+        password_point: Point,
+        confirmation_point: Point,
+        username: str,
+        password: str,
+    ) -> None:
+        self._fill_field(client, vm, username_point, username)
+        self._fill_field(client, vm, password_point, password)
+        self._fill_field(client, vm, confirmation_point, password)
+        # WPF can recreate the first PasswordBox when its initial validation
+        # error clears. A second selected write makes both password controls
+        # deterministic without relying on clipboard or OCR.
+        self._fill_field(client, vm, password_point, password)
+        self._fill_field(client, vm, confirmation_point, password)
 
     @staticmethod
     def _type_text(client: object, text: str) -> None:

@@ -69,6 +69,8 @@ trap on_err ERR
 
 safe_run() { "$@" || echo "WARNING: $* failed"; }
 
+. /usr/local/lib/libertix/libertix-install-platform-common.sh
+
 candidate_disks() {
     local disk
 
@@ -893,7 +895,7 @@ assert_not_mounted_or_open() {
 
 wait_for_prereqs() {
     mark "005-wait-prereqs"
-    local i
+    local i label_device
     for i in $(seq 1 60); do
         local disk_ready=0
         local config_ready=0
@@ -913,14 +915,25 @@ wait_for_prereqs() {
         done
 
         if [ "$config_ready" -eq 0 ]; then
-            found_config=$(find /run/live /lib/live /cdrom -maxdepth 6 -name config.txt -print -quit 2>/dev/null || true)
+            found_config=$(find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt -print -quit 2>/dev/null || true)
             [ -n "$found_config" ] && config_ready=1
+        fi
+
+        if [ "$config_ready" -eq 0 ]; then
+            while read -r label_device; do
+                [ -n "$label_device" ] || continue
+                [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = "LIBERTIXEFI" ] && {
+                    config_ready=1
+                    break
+                }
+            done < <(blkid -o device 2>/dev/null || true)
         fi
 
         if [ "$disk_ready" -eq 1 ] && [ "$config_ready" -eq 1 ]; then
             udevadm settle 2>/dev/null || true
             return 0
         fi
+        [ "$i" -eq 60 ] && echo "Prerequisite timeout: disk_ready=$disk_ready config_ready=$config_ready"
         sleep 1
     done
     die "live prerequisites not ready after 60s"
@@ -1317,17 +1330,34 @@ cleanup_windows_live_boot_artifacts() {
 
 echo "Libertix build: $(cat /etc/libertix-build-id 2>/dev/null || echo unknown)"
 wait_for_prereqs
-cleanup_windows_live_boot_artifacts
-mark "007-windows-live-boot-cleaned"
 
-# Read config.txt
+# Read config.txt. In low-memory mode the live root comes from an ISO on NTFS,
+# while the generated configuration remains on the temporary FAT partition.
 mark "010-read-config"
 CONFIG_FILE=""
 for mp in /run/live/medium /lib/live/mount/medium /cdrom; do
     [ -f "$mp/config.txt" ] && { CONFIG_FILE="$mp/config.txt"; break; }
 done
 if [ -z "$CONFIG_FILE" ]; then
-    CONFIG_FILE=$(find /run/live /lib/live /cdrom -maxdepth 6 -name config.txt -print -quit 2>/dev/null || true)
+    CONFIG_FILE=$(find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt -print -quit 2>/dev/null || true)
+fi
+if [ -z "$CONFIG_FILE" ]; then
+    config_mount="/run/libertix-config-medium"
+    mkdir -p "$config_mount"
+    while read -r config_part; do
+        [ -n "$config_part" ] || continue
+        config_label=$(blkid -s LABEL -o value "$config_part" 2>/dev/null || true)
+        [ "$config_label" = "LIBERTIXEFI" ] || continue
+        if mount -t vfat -o ro "$config_part" "$config_mount" 2>/dev/null; then
+            mounted_config=$(find "$config_mount" -maxdepth 1 -type f -iname config.txt -print -quit 2>/dev/null || true)
+            if [ -n "$mounted_config" ]; then
+                cp "$mounted_config" "$LOG_DIR/config.txt"
+                CONFIG_FILE="$LOG_DIR/config.txt"
+            fi
+            umount "$config_mount" 2>/dev/null || true
+        fi
+        [ -n "$CONFIG_FILE" ] && break
+    done < <(blkid -o device 2>/dev/null || true)
 fi
 [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ] || die "config.txt not found on live medium"
 
@@ -1347,6 +1377,10 @@ INSTALLER_PARTITION_OFFSET_BYTES=""
 EXPECTED_PARTITION_STYLE=""
 RECOVERY_PARTITION_OFFSET_BYTES=""
 RECOVERY_PARTITION_SIZE_BYTES=""
+LOW_MEMORY_MODE="false"
+SHARE_WINDOWS_FILES_IN_LINUX="true"
+SHARE_LINUX_FILES_IN_WINDOWS="true"
+WINDOWS_PROFILES_JSON_BASE64="W10="
 
 if [ -f "$CONFIG_FILE" ]; then
     while IFS='=' read -r key value; do
@@ -1382,6 +1416,10 @@ PY
             RECOVERY_PARTITION_SIZE_BYTES) RECOVERY_PARTITION_SIZE_BYTES="$value" ;;
             RECOVERY_ROOT_WINDOWS) RECOVERY_ROOT_WINDOWS="$value" ;;
             RECOVERY_RUN_ID) RECOVERY_RUN_ID="$value" ;;
+            LOW_MEMORY_MODE) LOW_MEMORY_MODE="$value" ;;
+            SHARE_WINDOWS_FILES_IN_LINUX) SHARE_WINDOWS_FILES_IN_LINUX="$value" ;;
+            SHARE_LINUX_FILES_IN_WINDOWS) SHARE_LINUX_FILES_IN_WINDOWS="$value" ;;
+            WINDOWS_PROFILES_JSON_BASE64) WINDOWS_PROFILES_JSON_BASE64="$value" ;;
         esac
     done < "$CONFIG_FILE"
 fi
@@ -1396,6 +1434,9 @@ fi
 case "$EXPECTED_PARTITION_STYLE" in GPT|MBR) ;; *) die "config.txt has invalid EXPECTED_PARTITION_STYLE" ;; esac
 [ "$RECOVERY_PARTITION_OFFSET_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid RECOVERY_PARTITION_OFFSET_BYTES"
 [ "$RECOVERY_PARTITION_SIZE_BYTES" -gt 0 ] 2>/dev/null || die "config.txt missing valid RECOVERY_PARTITION_SIZE_BYTES"
+case "$LOW_MEMORY_MODE" in true|false) ;; *) die "config.txt has invalid LOW_MEMORY_MODE" ;; esac
+case "$SHARE_WINDOWS_FILES_IN_LINUX" in true|false) ;; *) die "config.txt has invalid SHARE_WINDOWS_FILES_IN_LINUX" ;; esac
+case "$SHARE_LINUX_FILES_IN_WINDOWS" in true|false) ;; *) die "config.txt has invalid SHARE_LINUX_FILES_IN_WINDOWS" ;; esac
 [ -z "$ISO_WINDOWS_PATH" ] && ISO_WINDOWS_PATH="$ISO_FILENAME"
 
 echo "Config: Lang=$SYSTEM_LANG Keyboard=$KEYBOARD_LAYOUT User=$USERNAME LinuxSize=${LINUX_SIZE_GB}GB"
@@ -1446,6 +1487,10 @@ if [ -z "$WINDOWS_PART" ] || [ "$(blkid -s TYPE -o value "$WINDOWS_PART" 2>/dev/
 fi
 echo "Windows: $WINDOWS_PART (${WINDOWS_SIZE}MB)"
 echo "$WINDOWS_PART" > "$LOG_DIR/windows-partition"
+
+run_live_preflight
+cleanup_windows_live_boot_artifacts
+mark "027-windows-live-boot-cleaned"
 write_windows_recovery_marker_best_effort "live-started" 0
 
 # Calculate how much more we need to shrink Windows
@@ -1644,6 +1689,14 @@ done < <(partitions_of_disk "$DISK")
 
 install -m 0755 /usr/local/lib/libertix/configure-target.sh \
     /mnt/target/tmp/libertix-configure-target.sh
+install -m 0755 /usr/local/lib/libertix/10_libertix \
+    /mnt/target/tmp/10_libertix
+install -m 0755 /usr/local/lib/libertix/render-libertix-menu.py \
+    /mnt/target/tmp/render-libertix-menu.py
+GRUB_RESOLUTION="$(detect_grub_resolution)"
+rm -rf /mnt/target/boot/grub/themes/Libertix
+/usr/local/lib/libertix/grub-theme-source/generate-theme.sh \
+    "$GRUB_RESOLUTION" /mnt/target/boot/grub/themes/Libertix
 install -m 0755 /usr/local/lib/libertix/first-boot-resize.sh \
     /mnt/target/usr/local/bin/first-boot-resize.sh
 install -m 0644 /usr/local/lib/libertix/first-boot-resize.service \
@@ -1660,8 +1713,13 @@ chroot /mnt/target /usr/bin/env \
     DISK="$DISK" \
     DISKNAME="$DISKNAME" \
     WINDOWS_PART="$WINDOWS_PART" \
+    SHARE_WINDOWS_FILES_IN_LINUX="$SHARE_WINDOWS_FILES_IN_LINUX" \
+    SHARE_LINUX_FILES_IN_WINDOWS="$SHARE_LINUX_FILES_IN_WINDOWS" \
+    WINDOWS_PROFILES_JSON_BASE64="$WINDOWS_PROFILES_JSON_BASE64" \
+    GRUB_RESOLUTION="$GRUB_RESOLUTION" \
     /tmp/libertix-configure-target.sh
-rm -f /mnt/target/tmp/libertix-configure-target.sh
+rm -f /mnt/target/tmp/libertix-configure-target.sh \
+    /mnt/target/tmp/10_libertix /mnt/target/tmp/render-libertix-menu.py
 
 mark "140-install-bootloader"
 echo "Installing signed UEFI bootloader..."

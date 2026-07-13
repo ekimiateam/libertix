@@ -176,6 +176,134 @@ Get-Process Libertix -ErrorAction SilentlyContinue |
     Select-Object ProcessName, Id, SessionId, Path |
     Format-Table -AutoSize
 
+Write-Section "WINDOWS LINUX SHARE"
+$shareRoot = "C:\ProgramData\Libertix\WindowsShare"
+$shareConfigPath = Join-Path $shareRoot "config.json"
+$sharePendingPath = Join-Path $shareRoot "pending.marker"
+$shareLogPath = Join-Path $shareRoot "windows-share.log"
+$ext4Executable = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+$launcherKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp\Services\ext4-mount"
+$mountTaskName = "LibertixLinuxReadOnly"
+
+Write-Output ("WINDOWS_SHARE_ROOT_PRESENT={0}" -f (Test-Path -LiteralPath $shareRoot))
+Write-Output ("WINDOWS_SHARE_CONFIG_PRESENT={0}" -f (Test-Path -LiteralPath $shareConfigPath -PathType Leaf))
+Write-Output ("WINDOWS_SHARE_PENDING_PRESENT={0}" -f (Test-Path -LiteralPath $sharePendingPath))
+Write-Output ("EXT4_EXECUTABLE_PRESENT={0}" -f (Test-Path -LiteralPath $ext4Executable -PathType Leaf))
+
+$shareConfig = $null
+if (Test-Path -LiteralPath $shareConfigPath -PathType Leaf) {
+    try {
+        $shareConfig = Get-Content -LiteralPath $shareConfigPath -Raw | ConvertFrom-Json
+        Write-Output ("WINDOWS_SHARE_ENABLED={0}" -f [bool]$shareConfig.Enabled)
+        Write-Output ("WINDOWS_SHARE_LINUX_USERNAME={0}" -f [string]$shareConfig.LinuxUsername)
+        Write-Output ("WINDOWS_SHARE_SYSTEM_DISK={0}" -f [int]$shareConfig.SystemDiskNumber)
+        Write-Output ("WINDOWS_SHARE_EXPECTED_PARTITION_SIZE={0}" -f [int64]$shareConfig.ExpectedLinuxPartitionSize)
+    } catch {
+        Write-Output ("WINDOWS_SHARE_CONFIG_ERROR={0}" -f $_.Exception.Message)
+    }
+}
+
+if (Test-Path -LiteralPath $launcherKey) {
+    $launcherCommand = [string](Get-ItemPropertyValue -LiteralPath $launcherKey -Name CommandLine -ErrorAction SilentlyContinue)
+    Write-Output ("EXT4_LAUNCHER_COMMAND={0}" -f $launcherCommand)
+    Write-Output ("EXT4_LAUNCHER_READ_ONLY={0}" -f [bool]($launcherCommand -match '(?i)(?:^|\s)--ro(?:\s|$)'))
+} else {
+    Write-Output "EXT4_LAUNCHER_KEY_PRESENT=False"
+}
+
+$watcher = Get-CimInstance Win32_Service -Filter "Name='ExtFsWatcher'" -ErrorAction SilentlyContinue
+if ($watcher) {
+    Write-Output ("EXTFSWATCHER_STATE={0}" -f $watcher.State)
+    Write-Output ("EXTFSWATCHER_START_MODE={0}" -f $watcher.StartMode)
+} else {
+    Write-Output "EXTFSWATCHER_PRESENT=False"
+}
+
+$mountTask = Get-ScheduledTask -TaskName $mountTaskName -ErrorAction SilentlyContinue
+Write-Output ("WINDOWS_SHARE_MOUNT_TASK_PRESENT={0}" -f [bool]$mountTask)
+if ($mountTask) {
+    $mountTaskInfo = Get-ScheduledTaskInfo -TaskName $mountTaskName -ErrorAction SilentlyContinue
+    Write-Output ("WINDOWS_SHARE_MOUNT_TASK_STATE={0}" -f $mountTask.State)
+    Write-Output ("WINDOWS_SHARE_MOUNT_TASK_LAST_RESULT={0}" -f $mountTaskInfo.LastTaskResult)
+    Write-Output ("WINDOWS_SHARE_MOUNT_TASK_USER={0}" -f $mountTask.Principal.UserId)
+    Write-Output ("WINDOWS_SHARE_MOUNT_TASK_TRIGGER={0}" -f $mountTask.Triggers[0].CimClass.CimClassName)
+}
+$pinTasks = @(Get-ScheduledTask -TaskName "LibertixLinuxReadOnlyPin_*" -ErrorAction SilentlyContinue)
+Write-Output ("WINDOWS_SHARE_PIN_TASK_COUNT={0}" -f $pinTasks.Count)
+foreach ($pinTask in $pinTasks) {
+    $pinTaskInfo = Get-ScheduledTaskInfo -TaskName $pinTask.TaskName -ErrorAction SilentlyContinue
+    Write-Output ("WINDOWS_SHARE_PIN_TASK_NAME={0}" -f $pinTask.TaskName)
+    Write-Output ("WINDOWS_SHARE_PIN_TASK_STATE={0}" -f $pinTask.State)
+    Write-Output ("WINDOWS_SHARE_PIN_TASK_LAST_RESULT={0}" -f $pinTaskInfo.LastTaskResult)
+    Write-Output ("WINDOWS_SHARE_PIN_TASK_USER={0}" -f $pinTask.Principal.UserId)
+    Write-Output ("WINDOWS_SHARE_PIN_TASK_TRIGGER={0}" -f $pinTask.Triggers[0].CimClass.CimClassName)
+}
+
+$ext4Processes = @(Get-CimInstance Win32_Process -Filter "Name='ext4.exe'" -ErrorAction SilentlyContinue)
+$ext4Processes |
+    Select-Object ProcessId, ExecutablePath, CommandLine |
+    Format-List
+Write-Output ("EXT4_MOUNT_PROCESS_COUNT={0}" -f $ext4Processes.Count)
+Write-Output ("EXT4_MOUNT_PROCESS_READ_ONLY={0}" -f [bool]($ext4Processes.CommandLine -match '(?i)(?:^|\s)--ro(?:\s|$)'))
+
+$linuxUsername = if ($shareConfig) { [string]$shareConfig.LinuxUsername } else { "test" }
+$linuxDrive = $null
+$linuxHome = $null
+foreach ($letter in @("L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
+    $candidate = "${letter}:\home\$linuxUsername"
+    if (Test-Path -LiteralPath $candidate -PathType Container) {
+        $linuxDrive = "${letter}:"
+        $linuxHome = $candidate
+        break
+    }
+}
+Write-Output ("LINUX_READ_ONLY_DRIVE={0}" -f $linuxDrive)
+Write-Output ("LINUX_HOME_PRESENT={0}" -f [bool]$linuxHome)
+if ($linuxHome) {
+    Get-ChildItem -LiteralPath $linuxHome -Force -ErrorAction SilentlyContinue |
+        Select-Object -First 50 Name, Mode, Length, LastWriteTime |
+        Format-Table -AutoSize
+
+    $writeProbe = Join-Path $linuxDrive (".libertix-audit-write-probe-{0}" -f [Guid]::NewGuid().ToString("N"))
+    $linuxWriteAccepted = $false
+    try {
+        Set-Content -LiteralPath $writeProbe -Value "this write must be refused" -ErrorAction Stop
+        $linuxWriteAccepted = $true
+    } catch {
+        Write-Output ("LINUX_WRITE_REFUSAL={0}" -f $_.Exception.Message)
+    } finally {
+        if ($linuxWriteAccepted) {
+            Remove-Item -LiteralPath $writeProbe -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Output ("LINUX_WRITE_DENIED={0}" -f (-not $linuxWriteAccepted))
+}
+
+$shareShortcuts = @(
+    Get-ChildItem -Path "C:\Users\*\Links\Linux_*_read-only.lnk" -File -ErrorAction SilentlyContinue
+)
+$shareShortcuts |
+    Select-Object FullName, Length, LastWriteTime |
+    Format-Table -AutoSize
+Write-Output ("LINUX_EXPLORER_SHORTCUT_COUNT={0}" -f $shareShortcuts.Count)
+
+$mintWriteMarkers = @(
+    Get-ChildItem -Path "C:\Users\*\Documents\libertix-mint-write-*.txt" -File -ErrorAction SilentlyContinue
+)
+$mintWriteMarkers |
+    Select-Object FullName, Length, LastWriteTime |
+    Format-Table -AutoSize
+foreach ($marker in $mintWriteMarkers) {
+    Write-Output ("--- {0} ---" -f $marker.FullName)
+    Get-Content -LiteralPath $marker.FullName -ErrorAction SilentlyContinue
+}
+Write-Output ("MINT_TO_WINDOWS_WRITE_MARKER_COUNT={0}" -f $mintWriteMarkers.Count)
+
+if (Test-Path -LiteralPath $shareLogPath -PathType Leaf) {
+    Write-Output ("--- {0} ---" -f $shareLogPath)
+    Get-Content -LiteralPath $shareLogPath -ErrorAction SilentlyContinue
+}
+
 Write-Section "ACCOUNTS AND PROFILE"
 Get-LocalUser | Select-Object Name, Enabled, LastLogon, PasswordRequired |
     Format-Table -AutoSize

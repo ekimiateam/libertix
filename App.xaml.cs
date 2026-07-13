@@ -7,6 +7,7 @@ using System.Linq;
 using System.Security.Principal;
 using System.Threading.Tasks;
 using System.Windows;
+using Libertix.Models;
 
 namespace Libertix
 {
@@ -15,6 +16,8 @@ namespace Libertix
     /// </summary>
     public partial class App : Application
     {
+        public InstallationState InstallationState { get; } = new InstallationState();
+
         protected override void OnStartup(StartupEventArgs e)
         {
             if (!IsRunningAsAdministrator())
@@ -31,7 +34,7 @@ namespace Libertix
 
             string recoveryStatePath = TryGetUefiRecoveryStatePath(e.Args);
             if (!string.IsNullOrWhiteSpace(recoveryStatePath))
-                Properties["UefiRecoveryStatePath"] = recoveryStatePath;
+                InstallationState.UefiRecoveryStatePath = recoveryStatePath;
 
             base.OnStartup(e);
         }

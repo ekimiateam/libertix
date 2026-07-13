@@ -1,0 +1,366 @@
+from __future__ import annotations
+
+import hashlib
+import runpy
+import subprocess
+import xml.etree.ElementTree as ET
+from collections.abc import Callable
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8-sig")
+
+
+def read_apply_changes() -> str:
+    """Read the complete ApplyChanges partial class as one reviewable source."""
+
+    return "\n".join(
+        read(path)
+        for path in (
+            "Pages/ApplyChanges.xaml.cs",
+            "Pages/ApplyChanges.Downloads.cs",
+            "Pages/ApplyChanges.System.cs",
+            "Pages/ApplyChanges.Types.cs",
+        )
+    )
+
+
+def test_compatibility_preflight_is_before_distro_selection() -> None:
+    main = read("MainWindow.xaml.cs")
+    page = read("Pages/CompatibilityCheck.xaml.cs")
+
+    assert "new CompatibilityCheck(_installationState)" in main
+    assert "_installationState.Compatibility = info" in page
+    assert "new ChooseDistro(_installationState)" in page
+    assert "App.Current.Properties" not in page
+
+
+def test_live_boot_mode_function_is_fail_closed(
+    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    library = ROOT / "assets/live/libertix-install-platform-common.sh"
+
+    accepted_low_memory = run_shell_function(
+        library,
+        "validate_live_boot_mode",
+        "true",
+        "boot=live findiso=/libertix-live.iso quiet",
+    )
+    rejected_low_memory = run_shell_function(
+        library,
+        "validate_live_boot_mode",
+        "true",
+        "boot=live toram quiet",
+    )
+    accepted_normal = run_shell_function(
+        library,
+        "validate_live_boot_mode",
+        "false",
+        "boot=live toram quiet",
+    )
+    rejected_normal = run_shell_function(
+        library,
+        "validate_live_boot_mode",
+        "false",
+        "boot=live quiet",
+    )
+
+    assert accepted_low_memory.returncode == 0
+    assert accepted_normal.returncode == 0
+    assert rejected_low_memory.returncode != 0
+    assert "LIVE_E_LOW_MEMORY_BOOT" in rejected_low_memory.stdout
+    assert rejected_normal.returncode != 0
+    assert "LIVE_E_TORAM_BOOT" in rejected_normal.stdout
+
+
+def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
+    apply_changes = read_apply_changes()
+    uefi = read("Scripts/libertix-uefi-install.ps1")
+    for installer in (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")):
+        assert ". /usr/local/lib/libertix/libertix-install-platform-common.sh" in installer
+
+    assert "ConfigureBiosLowMemoryBootAsync" in apply_changes
+    assert "LowMemoryMode = lowMemoryMode" in apply_changes
+    assert "$LowMemoryMode" in uefi
+    assert "findiso=/libertix-live.iso" in uefi
+
+
+def test_runner_stage_functions_return_stable_labels_and_percentages(
+    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    library = ROOT / "assets/live/libertix-runner-stage-common.sh"
+
+    label = run_shell_function(library, "libertix_stage_label", "120-unsquashfs")
+    percent = run_shell_function(library, "libertix_stage_percent", "120-unsquashfs")
+    unknown_label = run_shell_function(library, "libertix_stage_label", "custom-stage")
+
+    assert label.returncode == 0
+    assert label.stdout.strip() == "Extraction de Mint"
+    assert percent.returncode == 0
+    assert percent.stdout.strip() == "64"
+    assert unknown_label.stdout.strip() == "custom-stage"
+
+
+def test_uefi_copy_preserves_live_boot_case_sensitive_names() -> None:
+    uefi = read("Scripts/libertix-uefi-install.ps1")
+
+    assert '$actualLiveDirectories[0].Name -cne "live"' in uefi
+    assert "Live directory name case normalization failed" in uefi
+    assert '"live\\filesystem.squashfs"' in uefi
+    assert "$actual[0].Name -cne $expectedName" in uefi
+    assert "Live file name case normalization failed" in uefi
+
+
+def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
+    fallback = read("Pages/UefiBootFallback.xaml.cs")
+    uefi = read("Scripts/libertix-uefi-install.ps1")
+    transaction_module = read("Scripts/modules/Libertix.Transaction.psm1")
+
+    assert "-BootStrategy FirmwareBootOrder -ReusePreparedInstaller" in fallback
+    fallback_command = fallback.split("-BootStrategy FirmwareBootOrder", 1)[0].rsplit(
+        "powershell,", 1
+    )[1]
+    assert "-Force" not in fallback_command
+
+    assert "function Save-PreparedInstallerManifest" in uefi
+    assert "function Assert-PreparedInstallerManifest" in uefi
+    assert '"live\\filesystem.squashfs"' in transaction_module
+    assert '"live\\initrd.img"' in transaction_module
+    assert '"live\\vmlinuz"' in transaction_module
+    assert '"EFI\\BOOT\\BOOTX64.EFI"' in transaction_module
+    assert "Prepared installer SHA256 manifest verified" in uefi
+    assert "Temporary ESP loader SHA256 verified" in uefi
+
+    reuse_path = uefi.split("try {\n    if ($ReusePreparedInstaller)", 1)[1].split(
+        "    Test-LibertixLiveConfig\n    Test-LibertixSecureBootCompatibility", 1
+    )[0]
+    assert "Get-ReusablePreparedInstallerPartition" in reuse_path
+    assert "Assert-PreparedInstallerManifest" in reuse_path
+    assert "Set-LibertixUefiBootEntry" in reuse_path
+    assert "-ReusePreparedInstaller" in reuse_path
+    assert "Install-LibertixIsoToPartition" not in reuse_path
+    assert "Start-RobustDownload" not in reuse_path
+    assert "FALLBACK_REUSED_PREPARED_INSTALLER=true" in reuse_path
+
+    boot_setup = uefi.split("function Set-LibertixUefiBootEntry", 1)[1]
+    assert "Remove-LibertixTemporaryFirmwareEntries" in boot_setup
+    assert 'Remove-FirmwareVariable -Name "BootNext"' in boot_setup
+    assert "Firmware BootOrder fallback verified" in boot_setup
+
+
+def test_bios_copy_preserves_live_boot_case_sensitive_names() -> None:
+    apply_changes = read_apply_changes()
+
+    assert "NormalizeLiveBootNames(destDir)" in apply_changes
+    assert 'StringComparison.OrdinalIgnoreCase' in apply_changes
+    assert '"filesystem.squashfs", "initrd.img", "vmlinuz"' in apply_changes
+    assert "Live directory name case normalization failed" in apply_changes
+
+
+def test_live_manifest_survives_detached_toram_medium_and_fat_name_case() -> None:
+    apply_changes = read_apply_changes()
+    assert 'NormalizeRootFileNameCase(@"Z:\\\", "config.txt")' in apply_changes
+
+    for installer in (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")):
+        assert "find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt" in installer
+        assert (
+            'mounted_config=$(find "$config_mount" -maxdepth 1 -type f -iname config.txt'
+            in installer
+        )
+        assert (
+            "Prerequisite timeout: disk_ready=$disk_ready config_ready=$config_ready"
+            in installer
+        )
+
+
+def test_sharing_options_reach_both_live_installers() -> None:
+    apply_changes = read_apply_changes()
+    for installer in (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")):
+        assert "SHARE_WINDOWS_FILES_IN_LINUX" in installer
+        assert "SHARE_LINUX_FILES_IN_WINDOWS" in installer
+        assert "WINDOWS_PROFILES_JSON_BASE64" in installer
+
+    assert "ShareWindowsFilesInLinux" in apply_changes
+    assert "ShareLinuxFilesInWindows" in apply_changes
+    assert "WindowsProfilesJsonBase64" in apply_changes
+    assert '"Default"' in apply_changes
+    assert '"Default User"' in apply_changes
+    assert "excludedProfiles.Contains(profileName)" in apply_changes
+
+
+def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
+    for target in (
+        read("iso/target/configure-target.sh"),
+        read("iso-uefi/target/configure-target.sh"),
+    ):
+        assert 'shortcut="User_$profile"' in target
+        assert ".config/gtk-3.0/bookmarks" in target
+
+    windows_share = read("Scripts/libertix-configure-windows-share.ps1")
+    assert "--ro" in windows_share
+    assert "winfsp-x64.dll" in windows_share
+    assert "launchctl-x64.exe" in windows_share
+    assert 'New-ScheduledTaskTrigger -AtStartup' in windows_share
+    assert 'New-ScheduledTaskPrincipal' in windows_share
+    assert '-UserId "SYSTEM"' in windows_share
+    assert 'Register-ScheduledTask' in windows_share
+    assert 'Start-ScheduledTask -TaskName $taskName' in windows_share
+    assert 'LibertixLinuxReadOnlyPin' in windows_share
+    assert 'New-ScheduledTaskTrigger -AtLogOn' in windows_share
+    assert 'Get-CimInstance Win32_UserProfile' in windows_share
+    assert '-LogonType Interactive' in windows_share
+    assert '-RunLevel Highest' in windows_share
+    assert 'Install-ExplorerPinTasks' in windows_share
+    assert '[switch]$Pin' in windows_share
+    assert 'cmd.exe /d /c mklink /J' in windows_share
+    assert (
+        '$shellApplication.Namespace($junctionPath).Self.InvokeVerb("pintohome")'
+        in windows_share
+    )
+    assert 'Refusing to replace a non-junction path' in windows_share
+    assert 'Get-CimInstance Win32_UserProfile' in windows_share
+    assert 'Install-ExplorerShortcuts' in windows_share
+    assert 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' in windows_share
+    assert '& $launchCtl start "ext4-mount"' in windows_share
+    assert "SECURITY ERROR: the Linux volume accepted a write despite --ro" in windows_share
+    assert "Set-Service -Name ExtFsWatcher -StartupType Disabled" in windows_share
+
+
+def test_ext4_setup_payload_matches_pinned_release_hash() -> None:
+    setup = ROOT / "auto_tests/app/filepool/ext4-win-driver-0.2.2-x64-Setup.exe"
+    assert setup.is_file()
+    assert hashlib.sha256(setup.read_bytes()).hexdigest() == (
+        "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031"
+    )
+
+
+def test_live_gui_uses_the_proven_direct_xorg_path() -> None:
+    rootfs = read("iso-uefi/live/setup-live-rootfs.sh")
+    for variant in ("iso", "iso-uefi"):
+        runner = read(f"{variant}/live/libertix-runner.sh")
+
+        assert "xinit" not in runner
+        assert " xinit " not in rootfs
+        assert '"$x_server" "$GUI_DISPLAY" "vt$GUI_VT"' in runner
+        assert "-ac -noreset" in runner
+        assert 'XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui' in runner
+
+
+def test_terminal_fallback_does_not_reset_video_mode_on_redraw() -> None:
+    rootfs = read("iso-uefi/live/setup-live-rootfs.sh")
+    for variant in ("iso", "iso-uefi"):
+        runner = read(f"{variant}/live/libertix-runner.sh")
+
+        assert "write_tty1_screen" in runner
+        assert "cmp -s" in runner
+        assert "perl -pe 's/\\n/\\r\\n/g'" in runner
+        assert "printf '\\033c'" not in runner
+        assert "dmesg -n 1" in runner
+        assert "prepare_terminal_ui" in runner
+        assert "getty@tty1.service" in rootfs
+        assert "ln -sf /dev/null" in rootfs
+
+
+def test_developer_terminal_is_verbose_and_initialized_only_once() -> None:
+    for variant in ("iso", "iso-uefi"):
+        runner = read(f"{variant}/live/libertix-runner.sh")
+
+        assert 'DEV_TERMINAL_ACTIVE=false' in runner
+        assert '[ "$DEV_TERMINAL_ACTIVE" = false ] || return 1' in runner
+        assert 'DEV_TERMINAL_ACTIVE=true' in runner
+        assert 'UI_MODE="details"' in runner
+        assert 'log_lines=$((rows - 10))' in runner
+        assert 'tail -n "$log_lines" "$LOG"' in runner
+        assert 'render_key="$(current_stage):$UI_MODE:$log_size"' in runner
+
+
+def test_live_logs_are_copied_completely_and_verified() -> None:
+    helper = read("assets/live/libertix-copy-logs.sh")
+    build = read("iso/build.sh")
+
+    assert 'journalctl -b --no-pager' in helper
+    assert 'dmesg > "$LOG_DIR/dmesg.log"' in helper
+    assert 'cp -f /var/log/Xorg.*.log' in helper
+    assert 'mount -o remount,rw "$target"' in helper
+    assert 'cp -a "$LOG_DIR/." "$log_dir/"' in helper
+    assert "sha256sum > SHA256SUMS" in helper
+    assert "trap cleanup_mount EXIT" in helper
+    assert 'mount -o remount,ro "$target"' in helper
+
+    for variant in ("iso", "iso-uefi"):
+        runner = read(f"{variant}/live/libertix-runner.sh")
+        assert "/usr/local/sbin/libertix-copy-logs" in runner
+        assert "libertix-copy-logs.sh" in build
+        assert 'LOG_COPY_STATUS="success"' in runner
+
+
+def test_grub_submenu_entries_always_have_a_transparent_icon_class() -> None:
+    renderer = read("grub/render-libertix-menu.py")
+    assert "add_invisible_icon_class" in renderer
+    assert "--class find.none" in renderer
+    assert (ROOT / "assets/grub-theme/icons/find.none.png").is_file()
+
+
+def test_grub_kernel_update_keeps_all_advanced_entries_nested() -> None:
+    renderer = runpy.run_path(str(ROOT / "grub/render-libertix-menu.py"))
+    extract = renderer["extract_top_level_block"]
+    lines = [
+        "submenu 'Advanced options for Linux Mint' {",
+        "\tmenuentry 'Linux Mint, with Linux new' {",
+        "\t}",
+        "\tmenuentry 'Linux Mint, with Linux new (recovery mode)' {",
+        "\t}",
+        "\tmenuentry 'Linux Mint, with Linux old' {",
+        "\t}",
+        "\tmenuentry 'Linux Mint, with Linux old (recovery mode)' {",
+        "\t}",
+        "}",
+        "menuentry 'trailing sentinel' {",
+        "}",
+    ]
+
+    assert extract(lines, "submenu ") == (0, 10)
+
+
+def test_compatibility_preflight_forces_utf8_console_codepage() -> None:
+    script = read("Scripts/libertix-compatibility-preflight.ps1")
+    runner = read("Helpers/CompatibilityPreflightRunner.cs")
+    assert 'chcp.com" 65001' in script
+    assert "[Console]::OutputEncoding" in script
+    assert "[Console]::InputEncoding" in script
+    assert "StandardOutputEncoding = Encoding.UTF8" in runner
+    assert "NormalizeUtf8Line" in runner
+    assert "Encoding.GetEncoding(1252).GetBytes(line)" in runner
+
+
+def test_windows_manifest_declares_supported_platform_dpi_and_long_paths() -> None:
+    root = ET.parse(ROOT / "app1.manifest").getroot()
+    supported = root.find(
+        ".//{urn:schemas-microsoft-com:compatibility.v1}supportedOS"
+    )
+    dpi_legacy = root.find(
+        ".//{http://schemas.microsoft.com/SMI/2005/WindowsSettings}dpiAware"
+    )
+    dpi_current = root.find(
+        ".//{http://schemas.microsoft.com/SMI/2016/WindowsSettings}dpiAwareness"
+    )
+    long_paths = root.find(
+        ".//{http://schemas.microsoft.com/SMI/2016/WindowsSettings}longPathAware"
+    )
+
+    assert supported is not None
+    assert supported.attrib["Id"] == "{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"
+    assert dpi_legacy is not None and dpi_legacy.text == "true/pm"
+    assert dpi_current is not None and dpi_current.text.startswith("PerMonitorV2")
+    assert long_paths is not None and long_paths.text == "true"
+
+
+def test_grub_decorations_use_guarded_desktop_bitmap_path() -> None:
+    theme = read("assets/grub-theme/theme.txt")
+    generator = read("assets/grub-theme/generate-theme.sh")
+    assert 'desktop-image: "background.png"' in theme
+    assert "+ image {" not in theme
+    assert "background.png" in generator

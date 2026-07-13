@@ -64,6 +64,50 @@
     <system:String x:Key="WarningConfirmCheckbox">Entiendo los riesgos y he respaldado mis datos importantes</system:String>
     <system:String x:Key="WarningConfirmButton">Entiendo, Continuar</system:String>
 
+    <!-- Comprobación de compatibilidad -->
+    <system:String x:Key="CompatibilityTitle">Comprobación de compatibilidad</system:String>
+    <system:String x:Key="CompatibilityDescription">Libertix comprueba la memoria, el firmware y el almacenamiento antes de continuar.</system:String>
+    <system:String x:Key="CompatibilityStarting">Iniciando comprobaciones...</system:String>
+    <system:String x:Key="CompatibilityRetry">Reintentar</system:String>
+    <system:String x:Key="CompatibilityContinue">Continuar</system:String>
+    <system:String x:Key="CompatibilityRunning">Comprobando este equipo...</system:String>
+    <system:String x:Key="CompatibilityLowMemorySuccess">El equipo es compatible. Se utilizará el modo de memoria reducida.</system:String>
+    <system:String x:Key="CompatibilitySuccess">El equipo es compatible con Libertix.</system:String>
+    <system:String x:Key="CompatibilityWarningPrefix">ADVERTENCIA: </system:String>
+    <system:String x:Key="CompatibilityUnexpectedPrefix">COMPAT_E_UNEXPECTED: </system:String>
+
+    <!-- Uso compartido de archivos -->
+    <system:String x:Key="SharingTitle">Uso compartido de archivos</system:String>
+    <system:String x:Key="SharingDescription">Elija qué archivos estarán disponibles desde cada sistema.</system:String>
+    <system:String x:Key="SharingWindowsToLinuxTitle">Mostrar los archivos de Windows en Mint</system:String>
+    <system:String x:Key="SharingWindowsToLinuxDescription">Cada perfil de Windows aparecerá como User_nombre en el gestor de archivos.</system:String>
+    <system:String x:Key="SharingLinuxToWindowsTitle">Mostrar los archivos de Linux en Windows (solo lectura)</system:String>
+    <system:String x:Key="SharingLinuxToWindowsDescription">Windows podrá consultar los archivos de Linux sin modificar la partición ext4.</system:String>
+
+    <!-- Recuperación del arranque UEFI -->
+    <system:String x:Key="UefiFallbackTitle">El arranque UEFI no inició el instalador</system:String>
+    <system:String x:Key="UefiFallbackDescription">Windows regresó sin el marcador del sistema live. Libertix conservó una copia local verificada y puede usar la entrada UEFI validada para reiniciar el sistema live.</system:String>
+    <system:String x:Key="UefiFallbackChecking">Comprobando el estado de recuperación...</system:String>
+    <system:String x:Key="UefiFallbackCancel">Cancelar y restaurar Windows</system:String>
+    <system:String x:Key="UefiFallbackUseFirmware">Usar el arranque del firmware</system:String>
+    <system:String x:Key="UefiFallbackReboot">Reiniciar</system:String>
+    <system:String x:Key="UefiFallbackStateMissing">No se encontró el estado de recuperación UEFI.</system:String>
+    <system:String x:Key="UefiFallbackStateIncomplete">El estado de recuperación UEFI está incompleto.</system:String>
+    <system:String x:Key="UefiFallbackBootNextFailedLog">BootNext no alcanzó el sistema live. La estrategia de firmware validada está lista.</system:String>
+    <system:String x:Key="UefiFallbackReady">Elija si Libertix debe reiniciar mediante la entrada de firmware UEFI.</system:String>
+    <system:String x:Key="UefiFallbackLoadFailed">No se pudo cargar la recuperación UEFI.</system:String>
+    <system:String x:Key="UefiFallbackErrorPrefix">ERROR: </system:String>
+    <system:String x:Key="UefiFallbackPreparingFirmware">Preparando el arranque del firmware UEFI...</system:String>
+    <system:String x:Key="UefiFallbackFirmwareFailedFormat">Falló la preparación del arranque del firmware (rc={0}).</system:String>
+    <system:String x:Key="UefiFallbackFirmwareReady">El arranque del firmware está preparado. Reinicie para iniciar el sistema live.</system:String>
+    <system:String x:Key="UefiFallbackPreparationFailed">Falló la preparación del modo alternativo.</system:String>
+    <system:String x:Key="UefiFallbackRestoring">Restaurando el estado UEFI inicial...</system:String>
+    <system:String x:Key="UefiFallbackRestoreFailedFormat">Falló la restauración UEFI (rc={0}).</system:String>
+    <system:String x:Key="UefiFallbackWindowsRestored">Windows ha sido restaurado. Libertix se cerrará.</system:String>
+    <system:String x:Key="UefiFallbackCancelledLog">Transacción UEFI cancelada y archivos temporales programados para su eliminación.</system:String>
+    <system:String x:Key="UefiFallbackRestoreFailed">Falló la restauración UEFI.</system:String>
+    <system:String x:Key="UefiFallbackTimeoutLog">ERROR: el proceso de recuperación superó el límite de 30 minutos</system:String>
+
     <!-- Apply Changes -->
     <system:String x:Key="ApplyChangesTitle">Aplicar cambios</system:String>
     <system:String x:Key="ApplyChangesWaiting">Listo para iniciar el particionamiento</system:String>

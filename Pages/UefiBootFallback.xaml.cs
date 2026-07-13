@@ -7,38 +7,45 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using Libertix.Helpers;
+using Libertix.Models;
 
 namespace Libertix.Pages
 {
     public partial class UefiBootFallback : Page
     {
+        private readonly InstallationState _installationState;
         private UefiRecoveryState _state;
         private string _statePath;
         private bool _running;
 
-        public UefiBootFallback()
+        public UefiBootFallback() : this(((App)Application.Current).InstallationState)
         {
+        }
+
+        public UefiBootFallback(InstallationState installationState)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             LoadRecoveryState();
         }
 
         private void LoadRecoveryState()
         {
-            _statePath = App.Current.Properties["UefiRecoveryStatePath"] as string;
+            _statePath = _installationState.UefiRecoveryStatePath;
             try
             {
                 if (string.IsNullOrWhiteSpace(_statePath) || !File.Exists(_statePath))
-                    throw new InvalidOperationException("Etat de reprise UEFI introuvable.");
+                    throw new InvalidOperationException(Localization.GetString("UefiFallbackStateMissing"));
                 _state = JsonSerializer.Deserialize<UefiRecoveryState>(File.ReadAllText(_statePath));
                 if (_state == null || string.IsNullOrWhiteSpace(_state.PayloadRoot) || string.IsNullOrWhiteSpace(_state.ConfigPath))
-                    throw new InvalidOperationException("Etat de reprise UEFI incomplet.");
-                Log("BootNext n'a pas atteint le live. La strategie firmware validee est prete.");
-                CurrentStepText.Text = "Choisissez si Libertix doit relancer avec l'entree firmware UEFI.";
+                    throw new InvalidOperationException(Localization.GetString("UefiFallbackStateIncomplete"));
+                Log(Localization.GetString("UefiFallbackBootNextFailedLog"));
+                CurrentStepText.Text = Localization.GetString("UefiFallbackReady");
             }
             catch (Exception ex)
             {
-                CurrentStepText.Text = "Impossible de charger la reprise UEFI.";
-                Log("ERROR: " + ex.Message);
+                CurrentStepText.Text = Localization.GetString("UefiFallbackLoadFailed");
+                Log(Localization.GetString("UefiFallbackErrorPrefix") + ex.Message);
                 FallbackButton.IsEnabled = false;
                 CancelButton.IsEnabled = false;
             }
@@ -54,7 +61,7 @@ namespace Libertix.Pages
             CancelButton.IsEnabled = false;
             _state.Phase = "FallbackRunning";
             SaveState();
-            CurrentStepText.Text = "Preparation du demarrage firmware UEFI...";
+            CurrentStepText.Text = Localization.GetString("UefiFallbackPreparingFirmware");
             ProgressBar.Value = 20;
 
             string script = Path.Combine(_state.PayloadRoot, "Scripts", "libertix-uefi-install.ps1");
@@ -64,14 +71,16 @@ namespace Libertix.Pages
                 int exitCode = await RunProcessAsync(
                     powershell,
                     $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(script)} " +
-                    $"-ConfigPath {QuoteArgument(_state.ConfigPath)} -Force -PreserveConfig -BootStrategy FirmwareBootOrder");
+                    $"-ConfigPath {QuoteArgument(_state.ConfigPath)} -PreserveConfig " +
+                    "-BootStrategy FirmwareBootOrder -ReusePreparedInstaller");
                 if (exitCode != 0)
-                    throw new InvalidOperationException("La preparation du demarrage firmware a echoue (rc=" + exitCode + ").");
+                    throw new InvalidOperationException(string.Format(
+                        Localization.GetString("UefiFallbackFirmwareFailedFormat"), exitCode));
 
                 _state.Phase = "AwaitingFallbackReboot";
                 SaveState();
                 ProgressBar.Value = 100;
-                CurrentStepText.Text = "Demarrage firmware prepare. Redemarrez pour lancer le live.";
+                CurrentStepText.Text = Localization.GetString("UefiFallbackFirmwareReady");
                 RebootButton.Visibility = Visibility.Visible;
                 FallbackButton.Visibility = Visibility.Collapsed;
             }
@@ -79,8 +88,8 @@ namespace Libertix.Pages
             {
                 _state.Phase = "FallbackPreparationFailed";
                 SaveState();
-                CurrentStepText.Text = "La preparation du fallback a echoue.";
-                Log("ERROR: " + ex.Message);
+                CurrentStepText.Text = Localization.GetString("UefiFallbackPreparationFailed");
+                Log(Localization.GetString("UefiFallbackErrorPrefix") + ex.Message);
                 FallbackButton.IsEnabled = true;
                 CancelButton.IsEnabled = true;
             }
@@ -98,7 +107,7 @@ namespace Libertix.Pages
             _running = true;
             FallbackButton.IsEnabled = false;
             CancelButton.IsEnabled = false;
-            CurrentStepText.Text = "Restauration de l'etat UEFI initial...";
+            CurrentStepText.Text = Localization.GetString("UefiFallbackRestoring");
             ProgressBar.Value = 35;
             try
             {
@@ -109,17 +118,18 @@ namespace Libertix.Pages
                     $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agent)} " +
                     $"-StatePath {QuoteArgument(_statePath)} -Action Cancel");
                 if (exitCode != 0)
-                    throw new InvalidOperationException("La restauration UEFI a echoue (rc=" + exitCode + ").");
+                    throw new InvalidOperationException(string.Format(
+                        Localization.GetString("UefiFallbackRestoreFailedFormat"), exitCode));
                 ProgressBar.Value = 100;
-                CurrentStepText.Text = "Windows a ete restaure. Libertix va se fermer.";
-                Log("Transaction UEFI annulee et fichiers temporaires programmes pour suppression.");
+                CurrentStepText.Text = Localization.GetString("UefiFallbackWindowsRestored");
+                Log(Localization.GetString("UefiFallbackCancelledLog"));
                 await Task.Delay(1200);
                 Application.Current.Shutdown(0);
             }
             catch (Exception ex)
             {
-                CurrentStepText.Text = "La restauration UEFI a echoue.";
-                Log("ERROR: " + ex.Message);
+                CurrentStepText.Text = Localization.GetString("UefiFallbackRestoreFailed");
+                Log(Localization.GetString("UefiFallbackErrorPrefix") + ex.Message);
                 FallbackButton.IsEnabled = true;
                 CancelButton.IsEnabled = true;
             }
@@ -164,6 +174,14 @@ namespace Libertix.Pages
                     process.Start();
                     process.BeginOutputReadLine();
                     process.BeginErrorReadLine();
+                    if (!process.WaitForExit(
+                        (int)WindowsProcessTimeouts.RecoveryOperation.TotalMilliseconds))
+                    {
+                        try { process.Kill(); } catch { }
+                        Dispatcher.BeginInvoke(new Action(() =>
+                            Log(Localization.GetString("UefiFallbackTimeoutLog"))));
+                        return -1;
+                    }
                     process.WaitForExit();
                     return process.ExitCode;
                 }

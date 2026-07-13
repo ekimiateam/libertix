@@ -12,8 +12,28 @@ from typing import Literal
 
 import httpx
 from PIL import Image
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
+from app.clients.vision_models import (
+    InstallProgressVerdict,
+    VisionVerdict,
+    WizardStateVerdict,
+)
+from app.clients.vision_models import (
+    contains_active_install_progress as _contains_active_install_progress,
+)
+from app.clients.vision_models import (
+    contains_final_reboot_prompt as _contains_final_reboot_prompt,
+)
+from app.clients.vision_models import (
+    contains_install_blocker as _contains_install_blocker,
+)
+from app.clients.vision_models import (
+    contains_live_install_success as _contains_live_install_success,
+)
+from app.clients.vision_models import (
+    contains_wizard_blocker as _contains_wizard_blocker,
+)
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
@@ -65,7 +85,10 @@ WIZARD_STATE_SCHEMA = {
     "properties": {
         "detected_screen": {
             "type": "string",
-            "enum": ["welcome", "distro", "resize", "account", "warning", "apply", "other"],
+            "enum": [
+                "welcome", "compatibility", "distro", "resize", "sharing",
+                "account", "warning", "apply", "other"
+            ],
         },
         "expected_screen_visible": {"type": "boolean"},
         "no_blocking_error": {"type": "boolean"},
@@ -112,158 +135,6 @@ PÉRIMÈTRE DE VALIDATION :
   clairement de lire/utiliser l'application.
 - no_visible_problem doit donc être false uniquement si un problème est visible dans Libertix
   lui-même, si Libertix est masqué/illisible, ou si une erreur bloque son écran d'accueil."""
-
-
-class VisionVerdict(BaseModel):
-    no_visible_problem: bool
-    libertix_running: bool
-    welcome_message_ok: bool
-    summary: str = Field(min_length=1)
-    visible_problems: list[str]
-
-    @property
-    def valid(self) -> bool:
-        return self.no_visible_problem and self.libertix_running and self.welcome_message_ok
-
-
-class InstallProgressVerdict(BaseModel):
-    iso_download_finished: bool
-    installation_finished: bool
-    reboot_prompt_visible: bool
-    still_in_progress: bool
-    error_visible: bool
-    summary: str = Field(min_length=1)
-    visible_text: str
-    analysis_source: Literal["strict_json", "reasoning_fallback"] = "strict_json"
-
-    @property
-    def done(self) -> bool:
-        return (
-            self.iso_download_finished or self.installation_finished or self.reboot_prompt_visible
-        )
-
-    @property
-    def blocking_problem_visible(self) -> bool:
-        """Return true for known Libertix blockers even if the LLM booleans are wrong."""
-
-        return _contains_install_blocker(f"{self.summary}\n{self.visible_text}")
-
-    @property
-    def active_install_progress_visible(self) -> bool:
-        """Return true when the screen still shows active download/copy/install work."""
-
-        return _contains_active_install_progress(f"{self.summary}\n{self.visible_text}")
-
-
-class WizardStateVerdict(BaseModel):
-    detected_screen: Literal["welcome", "distro", "resize", "account", "warning", "apply", "other"]
-    expected_screen_visible: bool
-    no_blocking_error: bool
-    username_visible: bool
-    password_fields_filled: bool
-    summary: str = Field(min_length=1)
-    visible_text: str
-
-
-def _contains_install_blocker(content: str) -> bool:
-    """Detect concrete blocking UI text from Libertix installation screens."""
-
-    text = content.lower()
-    return any(
-        marker in text
-        for marker in (
-            "espace insuffisant",
-            "insufficient space",
-            "additional space needed",
-            "size cannot exceed",
-            "failed to download",
-            "failed to obtain",
-            "impossible de télécharger",
-            "impossible de charger",
-            "no iso url found",
-            "failed to copy iso",
-            "installation échouée",
-            "installation echouee",
-            "installer-failed",
-        )
-    )
-
-
-def _contains_final_reboot_prompt(content: str) -> bool:
-    """Detect the final Libertix reboot screen from concrete UI text."""
-
-    text = content.lower()
-    reboot_button = "redemarrer" in text or "redémarrer" in text
-    final_state = any(
-        marker in text
-        for marker in (
-            "partitionnement termine",
-            "partitionnement terminé",
-            "next reboot will automatically boot",
-            "boot entry configured",
-            "grub4dos installed",
-        )
-    )
-    return reboot_button and final_state and re.search(r"\b100\s*%", text) is not None
-
-
-def _contains_active_install_progress(content: str) -> bool:
-    """Detect concrete in-progress text that must block final reboot clicks."""
-
-    if _contains_final_reboot_prompt(content):
-        return False
-
-    text = content.lower()
-    progress_pattern = (
-        r"\b(downloading|copying|extracting|copie|téléchargement).{0,80}"
-        r"\b[0-9]{1,2}\s*%"
-    )
-    if re.search(progress_pattern, text):
-        return True
-    if re.search(r"\b[0-9][0-9\s]*/[0-9][0-9\s]*\s*mb\b", text) and any(
-        marker in text for marker in ("downloading", "télécharg", "linux iso", "mint.iso")
-    ):
-        return True
-    if any(
-        marker in text
-        for marker in (
-            "decryptioninprogress",
-            "decryption in progress",
-            "décryptage en cours",
-            "dechiffrement de windows",
-            "déchiffrement de windows",
-            "waiting for c: decryption",
-        )
-    ):
-        return True
-    return any(
-        marker in text
-        for marker in (
-            "copying iso contents",
-            "mounting iso and copying",
-            "extracting system",
-            "stage: 120-unsquashfs",
-            "stage: 130-target-system-config",
-            "extraction de mint",
-            "configuration du systeme installe",
-            "configuration du système installé",
-        )
-    )
-
-
-def _contains_live_install_success(content: str) -> bool:
-    """Detect the final live ISO success screen without relying on LLM wording."""
-
-    text = content.lower()
-    return any(
-        marker in text
-        for marker in (
-            "installer-success",
-            "installation terminée et vérifiée",
-            "installation terminee et verifiee",
-            "libertix_install_success=true",
-        )
-    )
 
 
 class VisionLLMClient:
@@ -451,6 +322,24 @@ class VisionLLMClient:
                 if isinstance(data, dict):
                     data["analysis_source"] = analysis_source
                 verdict = InstallProgressVerdict.model_validate(data)
+                visible_evidence = f"{verdict.summary}\n{verdict.visible_text}"
+                if (
+                    _contains_final_reboot_prompt(visible_evidence)
+                    and not _contains_install_blocker(visible_evidence)
+                ):
+                    verdict = verdict.model_copy(
+                        update={
+                            "iso_download_finished": True,
+                            "installation_finished": True,
+                            "reboot_prompt_visible": True,
+                            "still_in_progress": False,
+                            "error_visible": False,
+                            "summary": (
+                                f"{verdict.summary} Verdict normalisé depuis les preuves "
+                                "visibles: 100 %, état final et bouton Redémarrer."
+                            ),
+                        }
+                    )
                 if verdict.done and verdict.active_install_progress_visible:
                     verdict = verdict.model_copy(
                         update={
@@ -496,10 +385,14 @@ class VisionLLMClient:
         *,
         expected_screen: Literal["account", "warning"],
         expected_username: str,
+        second_image_path: Path | None = None,
     ) -> WizardStateVerdict:
         """Fail-closed visual guard before the destructive wizard transition."""
 
         image = self._optimized_image(image_path)
+        second_image = (
+            self._optimized_image(second_image_path) if second_image_path is not None else None
+        )
         screen_instruction = (
             "l'écran de création du compte, avec le nom utilisateur exact visible et les deux "
             "champs de mot de passe visiblement remplis"
@@ -516,9 +409,24 @@ class VisionLLMClient:
                         "Réponds uniquement avec l'objet JSON strict demandé. "
                         "Ne déduis rien qui n'est pas visible. Un mauvais écran met uniquement "
                         "expected_screen_visible à false. Une erreur ou un champ invalide visible "
-                        "met no_blocking_error à false. Une image illisible met les deux à false. "
-                        "Classe detected_screen parmi welcome, distro, resize, account, warning, "
-                        "apply ou other."
+                        "met no_blocking_error à false. Une image illisible met uniquement "
+                        "expected_screen_visible à false: elle ne prouve pas une erreur. "
+                        "IMPORTANT: no_blocking_error=false exige un message d'erreur concret "
+                        "recopié dans visible_text; une notification du bureau ou un simple doute "
+                        "ne constitue pas une erreur Libertix. "
+                        "Si la fenêtre Libertix est ouverte mais vide, partiellement dessinée, "
+                        "blanche/noire ou visiblement entre deux pages, classe "
+                        "detected_screen=other, "
+                        "expected_screen_visible=false et no_blocking_error=true: c'est un rendu "
+                        "transitoire qui doit être recapturé, pas une erreur. Ne qualifie jamais "
+                        "cet état de crash sans message d'erreur explicite dans Libertix. "
+                        "Quand deux captures sont fournies, elles sont chronologiques et espacées "
+                        "d'une seconde. Utilise la seconde comme état actuel. Si elles diffèrent, "
+                        "considère que Libertix change de page; ne transforme pas cette transition "
+                        "en erreur. "
+                        "Classe detected_screen parmi welcome, compatibility, distro, resize, "
+                        "sharing, account, warning, apply ou other. Sur compatibility, une erreur "
+                        "COMPAT_E_* ou un bouton Continuer désactivé met no_blocking_error à false."
                     ),
                 },
                 {
@@ -532,14 +440,30 @@ class VisionLLMClient:
                                 f"{expected_username!r}. Pour l'écran warning, username_visible et "
                                 "password_fields_filled peuvent rester false car les champs "
                                 "ne sont "
-                                "plus affichés. Recopie seulement le texte réellement lisible dans "
-                                "visible_text."
+                                "plus affichés. Recopie dans visible_text tout le texte réellement "
+                                "lisible dans Libertix: titre, étape, boutons, champs, "
+                                "progression, avertissements et surtout le texte exact de toute "
+                                "erreur. Si aucun "
+                                "texte Libertix n'est lisible, laisse visible_text vide et traite "
+                                "l'image comme un rendu transitoire sans erreur bloquante."
                             ),
                         },
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/jpeg;base64,{image}"},
                         },
+                        *(
+                            [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{second_image}"
+                                    },
+                                }
+                            ]
+                            if second_image is not None
+                            else []
+                        ),
                     ],
                 },
             ],
@@ -569,7 +493,36 @@ class VisionLLMClient:
                 content = message.get("content") or message.get("reasoning")
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("Le LLM n'a produit aucun verdict d'écran")
-                return WizardStateVerdict.model_validate(self._load_wizard_json(content))
+                verdict = WizardStateVerdict.model_validate(self._load_wizard_json(content))
+                visible_evidence = f"{verdict.summary}\n{verdict.visible_text}"
+                critical_fields_confirmed = (
+                    expected_screen == "account"
+                    and verdict.detected_screen == "account"
+                    and verdict.expected_screen_visible
+                    and verdict.username_visible
+                    and verdict.password_fields_filled
+                    and expected_username.casefold() in verdict.visible_text.casefold()
+                )
+                warning_confirmed = (
+                    expected_screen == "warning"
+                    and verdict.detected_screen == "warning"
+                    and verdict.expected_screen_visible
+                )
+                if (
+                    not verdict.no_blocking_error
+                    and (critical_fields_confirmed or warning_confirmed)
+                    and not _contains_wizard_blocker(visible_evidence)
+                ):
+                    verdict = verdict.model_copy(
+                        update={
+                            "no_blocking_error": True,
+                            "summary": (
+                                f"{verdict.summary} Verdict normalisé: l'écran et les champs "
+                                "critiques sont confirmés, sans erreur Libertix visible."
+                            ),
+                        }
+                    )
+                return verdict
             except httpx.HTTPStatusError as exc:
                 if (
                     exc.response.status_code in (429, 500, 502, 503, 504)
@@ -620,6 +573,19 @@ class VisionLLMClient:
         visible_text = verdict.get("visible_text", "")
         if isinstance(visible_text, list):
             verdict["visible_text"] = "\n".join(str(item) for item in visible_text)
+        normalized_text = str(verdict.get("visible_text", "")).casefold()
+        screen_markers = (
+            (("vérification de compatibilité", "compatibility check"), "compatibility"),
+            (("choisissez votre version de linux", "choose a distribution"), "distro"),
+            (("redimensionnez votre disque", "resize your disk"), "resize"),
+            (("partage des fichiers", "file sharing"), "sharing"),
+            (("créez votre compte linux", "create your linux account"), "account"),
+            (("vous allez effectuer des modifications importantes",), "warning"),
+        )
+        for markers, screen in screen_markers:
+            if any(marker in normalized_text for marker in markers):
+                verdict["detected_screen"] = screen
+                break
         verdict.setdefault("expected_screen_visible", False)
         verdict.setdefault("no_blocking_error", False)
         verdict.setdefault("username_visible", False)

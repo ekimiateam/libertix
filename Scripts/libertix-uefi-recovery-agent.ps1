@@ -109,9 +109,32 @@ function Remove-RecoveryArtifacts {
     if (-not [string]::IsNullOrWhiteSpace([string]$State.PromptTaskName)) {
         schtasks.exe /Delete /TN $State.PromptTaskName /F 2>$null | Out-Null
     }
+    Remove-Item -LiteralPath "C:\libertix-live.iso" -Force -ErrorAction SilentlyContinue
     $root = [IO.Path]::GetFullPath([string]$State.RecoveryRoot)
     $quotedRoot = '"' + $root.Replace('"', '""') + '"'
     Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c ping 127.0.0.1 -n 3 > nul & rmdir /s /q $quotedRoot" -WindowStyle Hidden
+}
+
+function Invoke-WindowsShareFinalize {
+    $config = "C:\ProgramData\Libertix\WindowsShare\config.json"
+    $script = "C:\ProgramData\Libertix\WindowsShare\mount-linux-readonly.ps1"
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return }
+    if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
+        throw "Windows share configuration exists but its script is missing."
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ConfigPath $config -Finalize
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows read-only Linux sharing setup failed with rc=$LASTEXITCODE."
+    }
+    Write-AgentLog "Windows read-only Linux sharing finalized."
+}
+
+function Remove-PendingWindowsSharePayload {
+    $root = "C:\ProgramData\Libertix\WindowsShare"
+    if (Test-Path -LiteralPath (Join-Path $root "pending.marker") -PathType Leaf) {
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        Write-AgentLog "Removed pending Windows sharing payload."
+    }
 }
 
 function Start-FallbackUi {
@@ -144,6 +167,7 @@ try {
             throw "UEFI revert failed with rc=$LASTEXITCODE."
         }
         Write-AgentLog "Fallback was declined; UEFI transaction reverted."
+        Remove-PendingWindowsSharePayload
         Remove-RecoveryArtifacts -State $state
         exit 0
     }
@@ -161,6 +185,7 @@ try {
         $state.Phase = "Completed"
         Save-State -State $state
         Write-AgentLog "Live success and Linux partition verified; removing temporary recovery payload."
+        Invoke-WindowsShareFinalize
         Remove-RecoveryArtifacts -State $state
         exit 0
     }

@@ -7,7 +7,7 @@ param(
     [switch]$Revert = $false,
     [switch]$SkipInstaller = $false,
     [int]$InstallerPartitionSizeGB = 20,
-    [string]$FilepoolBaseUrl = "http://192.168.1.170:8000/filepool",
+    [string]$FilepoolBaseUrl = "",
     [string]$Aria2ExePath = "",
     [ValidateRange(1, 5)]
     [int]$Aria2Connections = 5,
@@ -20,8 +20,13 @@ param(
     [string]$Timezone = "UTC",
     [ValidateSet("BootNext", "FirmwareBootOrder")]
     [string]$BootStrategy = "BootNext",
+    [switch]$ReusePreparedInstaller = $false,
     [string]$RecoveryRoot = "",
     [string]$RecoveryRunId = "",
+    [bool]$LowMemoryMode = $false,
+    [bool]$ShareWindowsFilesInLinux = $true,
+    [bool]$ShareLinuxFilesInWindows = $true,
+    [string]$WindowsProfilesJsonBase64 = "W10=",
     [switch]$PreserveConfig = $false,
     [switch]$InsecureTls = $false
 )
@@ -29,6 +34,21 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $bootStrategyWasSpecified = $PSBoundParameters.ContainsKey("BootStrategy")
+
+$requiredModules = @(
+    "Libertix.Process.psm1",
+    "Libertix.Firmware.psm1",
+    "Libertix.Download.psm1",
+    "Libertix.Transaction.psm1",
+    "Libertix.Rollback.psm1"
+)
+foreach ($moduleName in $requiredModules) {
+    $modulePath = Join-Path $PSScriptRoot "modules\$moduleName"
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        throw "Libertix PowerShell module is missing: $modulePath"
+    }
+    Import-Module -Name $modulePath -Force -ErrorAction Stop
+}
 
 if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     try {
@@ -53,12 +73,34 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
         if ($config.PSObject.Properties.Name -contains "RecoveryRunId") {
             $RecoveryRunId = [string]$config.RecoveryRunId
         }
+        if ($config.PSObject.Properties.Name -contains "LowMemoryMode") {
+            $LowMemoryMode = [bool]$config.LowMemoryMode
+        }
+        if ($config.PSObject.Properties.Name -contains "ShareWindowsFilesInLinux") {
+            $ShareWindowsFilesInLinux = [bool]$config.ShareWindowsFilesInLinux
+        }
+        if ($config.PSObject.Properties.Name -contains "ShareLinuxFilesInWindows") {
+            $ShareLinuxFilesInWindows = [bool]$config.ShareLinuxFilesInWindows
+        }
+        if ($config.PSObject.Properties.Name -contains "WindowsProfilesJsonBase64") {
+            $WindowsProfilesJsonBase64 = [string]$config.WindowsProfilesJsonBase64
+        }
     } finally {
         if (-not $PreserveConfig) {
             Remove-Item -LiteralPath $ConfigPath -Force -ErrorAction SilentlyContinue
         }
     }
 }
+
+$parsedFilepoolUri = $null
+if (
+    [string]::IsNullOrWhiteSpace($FilepoolBaseUrl) -or
+    -not [Uri]::TryCreate($FilepoolBaseUrl, [UriKind]::Absolute, [ref]$parsedFilepoolUri) -or
+    $parsedFilepoolUri.Scheme -notin @("http", "https")
+) {
+    throw "FilepoolBaseUrl is required and must be an absolute HTTP(S) URL supplied by Libertix."
+}
+$FilepoolBaseUrl = $FilepoolBaseUrl.TrimEnd("/")
 
 # Networking defaults
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -104,18 +146,22 @@ public class ServerCertificateValidationCallback {
 }
 
 # Downloads
-$InstallerIsoUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/libertix-installer-uefi.iso"
+$Aria2ZipName = "aria2-1.37.0-win-64bit-build1.zip"
+$downloadUrls = New-LibertixDownloadUrls `
+    -FilepoolBaseUrl $FilepoolBaseUrl `
+    -Aria2ZipName $Aria2ZipName
+$InstallerIsoUrl = $downloadUrls.InstallerIso
 $InstallerIsoName = "libertix-installer-uefi.iso"
-$InstallerIsoSha256 = "1701f5bfbf291f55c27e890379b9ac72ce34be79c7ab4947a96f07f3575c6f5e"
-$MintIsoUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/mint.iso"
+$InstallerIsoSha256 = "61d930b34d98a33c36f433117aca6bb61e0039081ee744f56b21bcda1f23ad05"
+$MintIsoUrl = $downloadUrls.MintIso
 $MintIsoPath = "$env:SystemDrive\mint.iso"
 $MintIsoSha256 = "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4"
-$Aria2ZipName = "aria2-1.37.0-win-64bit-build1.zip"
-$Aria2ZipUrl = "$($FilepoolBaseUrl.TrimEnd('/'))/$Aria2ZipName"
+$Aria2ZipUrl = $downloadUrls.Aria2Zip
 $Aria2ZipSha256 = "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288"
 $Aria2ExeSha256 = "be2099c214f63a3cb4954b09a0becd6e2e34660b886d4c898d260febfe9d70c2"
 $Aria2CacheDir = "$env:SystemDrive\LibertixTools\aria2"
 $Aria2DownloadDir = "$env:SystemDrive\LibertixTools\downloads"
+$LowMemoryIsoPath = "$env:SystemDrive\libertix-live.iso"
 
 # Defaults
 $EspLetter = "Y"
@@ -238,7 +284,11 @@ function Write-LibertixLiveConfig {
         "RECOVERY_PARTITION_OFFSET_BYTES=$(ConvertTo-ShellQuotedValue ([string]$recoveryPartition.Offset))",
         "RECOVERY_PARTITION_SIZE_BYTES=$(ConvertTo-ShellQuotedValue ([string]$recoveryPartition.Size))",
         "RECOVERY_ROOT_WINDOWS=$(ConvertTo-ShellQuotedValue $RecoveryRoot)",
-        "RECOVERY_RUN_ID=$(ConvertTo-ShellQuotedValue $RecoveryRunId)"
+        "RECOVERY_RUN_ID=$(ConvertTo-ShellQuotedValue $RecoveryRunId)",
+        "LOW_MEMORY_MODE=$(ConvertTo-ShellQuotedValue $LowMemoryMode.ToString().ToLowerInvariant())",
+        "SHARE_WINDOWS_FILES_IN_LINUX=$(ConvertTo-ShellQuotedValue $ShareWindowsFilesInLinux.ToString().ToLowerInvariant())",
+        "SHARE_LINUX_FILES_IN_WINDOWS=$(ConvertTo-ShellQuotedValue $ShareLinuxFilesInWindows.ToString().ToLowerInvariant())",
+        "WINDOWS_PROFILES_JSON_BASE64=$(ConvertTo-ShellQuotedValue $WindowsProfilesJsonBase64)"
     )
 
     Set-Content -Path $configPath -Value $configLines -Encoding ASCII
@@ -249,7 +299,9 @@ function Write-LibertixLiveConfig {
         "TARGET_DISK_SIZE_BYTES=", "WINDOWS_PARTITION_OFFSET_BYTES=",
         "INSTALLER_PARTITION_OFFSET_BYTES=", "EXPECTED_PARTITION_STYLE=",
         "RECOVERY_PARTITION_OFFSET_BYTES=", "RECOVERY_PARTITION_SIZE_BYTES=",
-        "RECOVERY_ROOT_WINDOWS=", "RECOVERY_RUN_ID="
+        "RECOVERY_ROOT_WINDOWS=", "RECOVERY_RUN_ID=", "LOW_MEMORY_MODE=",
+        "SHARE_WINDOWS_FILES_IN_LINUX=", "SHARE_LINUX_FILES_IN_WINDOWS=",
+        "WINDOWS_PROFILES_JSON_BASE64="
     )) {
         if ($written -notmatch [regex]::Escape($requiredKey)) {
             throw "Live config verification failed; missing $requiredKey in $configPath"
@@ -423,83 +475,6 @@ public static class LibertixFirmwareApi {
 "@
 }
 
-function Add-Bytes {
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [System.Collections.Generic.List[byte]]$Buffer,
-        [Parameter(Mandatory = $true)]
-        [byte[]]$Bytes
-    )
-
-    foreach ($byte in $Bytes) {
-        $Buffer.Add($byte)
-    }
-}
-
-function New-EfiFilePathNode {
-    param([Parameter(Mandatory = $true)][string]$Path)
-
-    $pathBytes = [Text.Encoding]::Unicode.GetBytes($Path + [char]0)
-    $length = [uint16](4 + $pathBytes.Length)
-    $buffer = [System.Collections.Generic.List[byte]]::new()
-    Add-Bytes $buffer ([byte[]](0x04, 0x04))
-    Add-Bytes $buffer ([BitConverter]::GetBytes($length))
-    Add-Bytes $buffer $pathBytes
-    return [byte[]]$buffer.ToArray()
-}
-
-function New-EfiHardDriveNode {
-    param([Parameter(Mandatory = $true)]$Partition)
-
-    $disk = Get-Disk -Number $Partition.DiskNumber -ErrorAction Stop
-    $sectorSize = [uint64]$disk.LogicalSectorSize
-    if ($sectorSize -eq 0) {
-        $sectorSize = 512
-    }
-
-    $startLba = [uint64]($Partition.Offset / $sectorSize)
-    $sizeLba = [uint64]($Partition.Size / $sectorSize)
-    $partitionGuid = [Guid]$Partition.Guid
-
-    $buffer = [System.Collections.Generic.List[byte]]::new()
-    Add-Bytes $buffer ([byte[]](0x04, 0x01, 0x2A, 0x00))
-    Add-Bytes $buffer ([BitConverter]::GetBytes([uint32]$Partition.PartitionNumber))
-    Add-Bytes $buffer ([BitConverter]::GetBytes($startLba))
-    Add-Bytes $buffer ([BitConverter]::GetBytes($sizeLba))
-    Add-Bytes $buffer ($partitionGuid.ToByteArray())
-    Add-Bytes $buffer ([byte[]](0x02, 0x02))
-    return [byte[]]$buffer.ToArray()
-}
-
-function New-EfiEndNode {
-    return [byte[]](0x7F, 0xFF, 0x04, 0x00)
-}
-
-function New-EfiLoadOption {
-    param(
-        [Parameter(Mandatory = $true)][string]$Description,
-        [Parameter(Mandatory = $true)]$Partition,
-        [Parameter(Mandatory = $true)][string]$LoaderPath
-    )
-
-    $devicePath = [System.Collections.Generic.List[byte]]::new()
-    Add-Bytes $devicePath (New-EfiHardDriveNode -Partition $Partition)
-    Add-Bytes $devicePath (New-EfiFilePathNode -Path $LoaderPath)
-    Add-Bytes $devicePath (New-EfiEndNode)
-
-    $descriptionBytes = [Text.Encoding]::Unicode.GetBytes($Description + [char]0)
-    $filePathBytes = [byte[]]$devicePath.ToArray()
-
-    $buffer = [System.Collections.Generic.List[byte]]::new()
-    Add-Bytes $buffer ([BitConverter]::GetBytes([uint32]1))
-    Add-Bytes $buffer ([BitConverter]::GetBytes([uint16]$filePathBytes.Length))
-    Add-Bytes $buffer $descriptionBytes
-    Add-Bytes $buffer $filePathBytes
-
-    return [byte[]]$buffer.ToArray()
-}
-
 function Test-FirmwareVariableExists {
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -561,107 +536,6 @@ function Remove-FirmwareVariable {
     $attributes = [uint32]0x00000007
     [LibertixFirmwareApi]::DeleteFirmwareEnvironmentVariable($Name, $global, $attributes) |
         Out-Null
-}
-
-function ConvertFrom-BootOrderBytes {
-    param([byte[]]$Bytes)
-
-    $order = New-Object System.Collections.Generic.List[uint16]
-    if (-not $Bytes) {
-        return $order
-    }
-
-    for ($offset = 0; $offset + 1 -lt $Bytes.Length; $offset += 2) {
-        $order.Add([BitConverter]::ToUInt16($Bytes, $offset))
-    }
-
-    return $order
-}
-
-function ConvertTo-BootOrderBytes {
-    param([Parameter(Mandatory = $true)]$Order)
-
-    $buffer = [System.Collections.Generic.List[byte]]::new()
-    foreach ($entry in $Order) {
-        Add-Bytes $buffer ([BitConverter]::GetBytes([uint16]$entry))
-    }
-
-    return [byte[]]$buffer.ToArray()
-}
-
-function Get-EfiLoadOptionDescription {
-    param([byte[]]$Bytes)
-
-    if (-not $Bytes -or $Bytes.Length -lt 8) {
-        return ""
-    }
-
-    $offset = 6
-    $end = $offset
-    while ($end + 1 -lt $Bytes.Length) {
-        if ($Bytes[$end] -eq 0 -and $Bytes[$end + 1] -eq 0) {
-            break
-        }
-        $end += 2
-    }
-
-    if ($end -le $offset) {
-        return ""
-    }
-
-    return [Text.Encoding]::Unicode.GetString($Bytes, $offset, $end - $offset)
-}
-
-function Get-EfiLoadOptionOptionalDataLength {
-    param([byte[]]$Bytes)
-
-    if (-not $Bytes -or $Bytes.Length -lt 8) {
-        return -1
-    }
-
-    $filePathListLength = [BitConverter]::ToUInt16($Bytes, 4)
-    $offset = 6
-    while ($offset + 1 -lt $Bytes.Length) {
-        if ($Bytes[$offset] -eq 0 -and $Bytes[$offset + 1] -eq 0) {
-            $offset += 2
-            break
-        }
-        $offset += 2
-    }
-
-    $optionalStart = $offset + $filePathListLength
-    if ($optionalStart -gt $Bytes.Length) {
-        return -1
-    }
-
-    return ($Bytes.Length - $optionalStart)
-}
-
-function Remove-EfiLoadOptionOptionalData {
-    param([byte[]]$Bytes)
-
-    if (-not $Bytes -or $Bytes.Length -lt 8) {
-        throw "Invalid EFI load option; too short."
-    }
-
-    $filePathListLength = [BitConverter]::ToUInt16($Bytes, 4)
-    $offset = 6
-    while ($offset + 1 -lt $Bytes.Length) {
-        if ($Bytes[$offset] -eq 0 -and $Bytes[$offset + 1] -eq 0) {
-            $offset += 2
-            break
-        }
-        $offset += 2
-    }
-
-    $optionalStart = $offset + $filePathListLength
-    if ($optionalStart -gt $Bytes.Length) {
-        throw "Invalid EFI load option; file path list exceeds variable length."
-    }
-
-    $clean = New-Object byte[] $optionalStart
-    [Array]::Copy($Bytes, $clean, $optionalStart)
-    return $clean
 }
 
 function Remove-FirmwareBootNumberFromOrder {
@@ -1094,9 +968,12 @@ function Invoke-DiskpartScript {
     $tmp = [IO.Path]::GetTempFileName()
     try {
         $ScriptText | Out-File $tmp -Encoding ASCII
-        $output = diskpart /s $tmp 2>&1
-        $text = $output | Out-String
-        if ($LASTEXITCODE -ne 0 -or $text -match "(?i)(error|erreur|failed|échec)") {
+        $result = Invoke-LibertixNativeProcess `
+            -FilePath "$env:SystemRoot\System32\diskpart.exe" `
+            -Arguments ('/s "{0}"' -f $tmp) `
+            -TimeoutSeconds 120
+        $text = ($result.StandardOutput + [Environment]::NewLine + $result.StandardError).Trim()
+        if ($result.ExitCode -ne 0 -or $text -match "(?i)(error|erreur|failed|échec)") {
             throw "diskpart failed: $text"
         }
     } finally {
@@ -1220,7 +1097,7 @@ set hidden_timeout_quiet=true
 search --no-floppy --label $InstallerLabel --set=root
 
 menuentry "Install Linux Mint (Automatic)" {
-    linux /live/vmlinuz boot=live toram components quiet silent loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
+    linux /live/vmlinuz boot=live toram components quiet splash silent plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
     initrd /live/initrd.img
 }
 "@
@@ -1542,53 +1419,6 @@ function Start-Aria2Download {
     }
 }
 
-function Get-MountedIsoDrive {
-    param([Parameter(Mandatory = $true)][string]$ImagePath)
-
-    $resolvedImagePath = [IO.Path]::GetFullPath($ImagePath)
-    for ($attempt = 1; $attempt -le 30; $attempt++) {
-        $letters = @()
-        $image = Get-DiskImage -ImagePath $resolvedImagePath -ErrorAction SilentlyContinue
-        if ($image) {
-            try {
-                $letters += @(
-                    $image |
-                        Get-Volume -ErrorAction SilentlyContinue |
-                        Where-Object {
-                            $_.PSObject.Properties.Name -contains "DriveLetter" -and
-                            $_.DriveLetter
-                        } |
-                        Select-Object -ExpandProperty DriveLetter
-                )
-            } catch {}
-
-            try {
-                $letters += @(
-                    $image |
-                        Get-Disk -ErrorAction SilentlyContinue |
-                        Get-Partition -ErrorAction SilentlyContinue |
-                        Where-Object { $_.DriveLetter } |
-                        Select-Object -ExpandProperty DriveLetter
-                )
-            } catch {}
-        }
-
-        $letter = $letters |
-            Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-            Select-Object -First 1
-        if ($letter) {
-            return "$letter`:"
-        }
-
-        Start-Sleep -Milliseconds 500
-    }
-
-    $diagnostic = Get-DiskImage -ImagePath $resolvedImagePath -ErrorAction SilentlyContinue |
-        Format-List * |
-        Out-String
-    throw "ISO mounted, but no usable drive letter was found for $resolvedImagePath. DiskImage=$diagnostic"
-}
-
 function Start-RobustDownload {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
@@ -1755,18 +1585,6 @@ function Ensure-WindowsVolumeReadableFromLinux {
     throw "Timed out waiting for C: BitLocker decryption. Final status: $finalStatus"
 }
 
-function Test-BitLockerVolumeReadable {
-    param([Parameter(Mandatory = $true)]$Volume)
-
-    if ($Volume.VolumeStatus -eq "FullyDecrypted") {
-        return $true
-    }
-    if ($null -ne $Volume.EncryptionPercentage -and [int]$Volume.EncryptionPercentage -le 0) {
-        return $true
-    }
-    return $false
-}
-
 function Save-TransactionPreparationState {
     param([Parameter(Mandatory = $true)]$SystemPartition)
 
@@ -1788,6 +1606,7 @@ function Save-TransactionPreparationState {
         InstallerBootVariable = ""
         FirmwareEntryId = ""
         EspLoaderSha256 = @{}
+        InstallerFileSha256 = @{}
         CreatedUtc = [DateTime]::UtcNow.ToString("o")
     }
     $directory = Split-Path -Parent $TransactionStatePath
@@ -1822,6 +1641,7 @@ function Save-TransactionPartitionState {
         InstallerBootVariable = if ($existing) { [string]$existing.InstallerBootVariable } else { "" }
         FirmwareEntryId = if ($existing) { [string]$existing.FirmwareEntryId } else { "" }
         EspLoaderSha256 = if ($existing -and $existing.EspLoaderSha256) { $existing.EspLoaderSha256 } else { @{} }
+        InstallerFileSha256 = if ($existing -and $existing.InstallerFileSha256) { $existing.InstallerFileSha256 } else { @{} }
         CreatedUtc = [DateTime]::UtcNow.ToString("o")
     }
     $directory = Split-Path -Parent $TransactionStatePath
@@ -1839,6 +1659,51 @@ function Get-TransactionPartitionState {
     } catch {
         throw "Invalid UEFI transaction state file: $($_.Exception.Message)"
     }
+}
+
+function Save-PreparedInstallerManifest {
+    param([Parameter(Mandatory = $true)][string]$InstallerDrive)
+
+    $state = Get-TransactionPartitionState
+    if (-not $state) {
+        throw "Cannot save prepared installer manifest without transaction state."
+    }
+    $manifest = Get-FileHashManifest `
+        -Root "$InstallerDrive\" `
+        -RelativePaths (Get-InstallerManifestRelativePaths)
+    $state | Add-Member -NotePropertyName InstallerFileSha256 -NotePropertyValue $manifest -Force
+    $state | Add-Member -NotePropertyName InstallerManifestUtc -NotePropertyValue ([DateTime]::UtcNow.ToString("o")) -Force
+    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $TransactionStatePath -Encoding UTF8
+    Write-Log "Prepared installer SHA256 manifest saved ($($manifest.Count) files)." "Green"
+}
+
+function Assert-PreparedInstallerManifest {
+    param([Parameter(Mandatory = $true)][string]$InstallerDrive)
+
+    $state = Get-TransactionPartitionState
+    if (-not $state -or -not $state.InstallerFileSha256) {
+        throw "Prepared installer SHA256 manifest is missing; refusing firmware fallback."
+    }
+    $expectedPaths = @(Get-InstallerManifestRelativePaths)
+    $savedProperties = @($state.InstallerFileSha256.PSObject.Properties)
+    if ($savedProperties.Count -ne $expectedPaths.Count) {
+        throw "Prepared installer SHA256 manifest is incomplete; refusing firmware fallback."
+    }
+    foreach ($relativePath in $expectedPaths) {
+        $saved = $state.InstallerFileSha256.PSObject.Properties[$relativePath]
+        if (-not $saved -or [string]::IsNullOrWhiteSpace([string]$saved.Value)) {
+            throw "Prepared installer SHA256 manifest has no hash for $relativePath"
+        }
+        $fullPath = Join-Path "$InstallerDrive\" $relativePath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "Prepared installer verification failed; missing $relativePath"
+        }
+        $actual = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        if ($actual -ne ([string]$saved.Value).ToLowerInvariant()) {
+            throw "Prepared installer SHA256 mismatch: $relativePath"
+        }
+    }
+    Write-Log "Prepared installer SHA256 manifest verified ($($expectedPaths.Count) files)." "Green"
 }
 
 function Update-TransactionFirmwareState {
@@ -1898,34 +1763,6 @@ function Get-VerifiedTransactionPartition {
     return $partition
 }
 
-function Restore-CDriveInitialSize {
-    $state = Get-TransactionPartitionState
-    if (-not $state -or -not $state.OriginalCSize) {
-        throw "Cannot restore C: without the saved initial size."
-    }
-    $partition = Get-Partition -DriveLetter C -ErrorAction Stop
-    $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
-    if (
-        $partition.DiskNumber -ne [int]$state.DiskNumber -or
-        ([string]$disk.UniqueId).Trim() -ne ([string]$state.DiskUniqueId).Trim()
-    ) {
-        throw "C: disk identity changed; refusing rollback resize."
-    }
-    $initialSize = [int64]$state.OriginalCSize
-    if ($partition.Size -lt $initialSize) {
-        $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
-        if ($supported.SizeMax -lt $initialSize) {
-            throw "C: cannot be restored to its initial size."
-        }
-        Resize-Partition -DriveLetter C -Size $initialSize -ErrorAction Stop
-    }
-    $verified = Get-Partition -DriveLetter C -ErrorAction Stop
-    if ($verified.Size -lt $initialSize) {
-        throw "C: rollback size verification failed."
-    }
-}
-
-
 function Invoke-Revert {
     Write-Log "Reverting Libertix UEFI installer changes..." "Cyan"
 
@@ -1949,7 +1786,11 @@ function Invoke-Revert {
     }
 
     Remove-LibertixInstallerPartitionIfPresent
-    Restore-CDriveInitialSize
+    $rollbackState = Get-TransactionPartitionState
+    if (-not $rollbackState) {
+        throw "Cannot restore C: without the saved transaction state."
+    }
+    Restore-LibertixCDriveInitialSize -State $rollbackState
     Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction SilentlyContinue
 
     Write-Log "Revert complete." "Green"
@@ -2060,6 +1901,43 @@ function New-OrReuseInstallerPartition {
     }
 }
 
+function Get-ReusablePreparedInstallerPartition {
+    $partition = Get-VerifiedTransactionPartition
+    if (-not $partition) {
+        throw "Owned prepared installer partition is missing; refusing firmware fallback."
+    }
+    if (-not $partition.DriveLetter) {
+        Set-Partition `
+            -DiskNumber $partition.DiskNumber `
+            -PartitionNumber $partition.PartitionNumber `
+            -NewDriveLetter $InstallerLetter `
+            -ErrorAction Stop
+        $partition = Get-Partition `
+            -DiskNumber $partition.DiskNumber `
+            -PartitionNumber $partition.PartitionNumber `
+            -ErrorAction Stop
+    }
+    $volume = $partition | Get-Volume -ErrorAction Stop
+    if ($volume.FileSystem -ne "FAT32") {
+        throw "Prepared installer partition is not FAT32; refusing firmware fallback."
+    }
+    if ($volume.FileSystemLabel -ne $InstallerLabel) {
+        throw "Prepared installer partition label changed; refusing firmware fallback."
+    }
+    if ($volume.HealthStatus -ne "Healthy") {
+        throw "Prepared installer partition is not healthy; refusing firmware fallback."
+    }
+    $drive = "$($partition.DriveLetter):"
+    if (-not (Test-Path "$drive\")) {
+        throw "Prepared installer partition is not accessible after drive-letter assignment."
+    }
+    return @{
+        Drive = $drive
+        DiskNumber = [int]$partition.DiskNumber
+        PartitionNumber = [int]$partition.PartitionNumber
+    }
+}
+
 function Install-LibertixIsoToPartition {
     param(
         [Parameter(Mandatory = $true)][string]$PartitionDrive
@@ -2086,6 +1964,15 @@ function Install-LibertixIsoToPartition {
             throw "Downloaded Libertix UEFI ISO hash mismatch. Expected $InstallerIsoSha256, got $actualIsoHash"
         }
 
+        if ($LowMemoryMode) {
+            Copy-Item -LiteralPath $isoPath -Destination $LowMemoryIsoPath -Force
+            $lowMemoryHash = (Get-FileHash -Algorithm SHA256 -Path $LowMemoryIsoPath).Hash.ToLowerInvariant()
+            if ($lowMemoryHash -ne $InstallerIsoSha256) {
+                throw "Low-memory ISO copy hash mismatch. Expected $InstallerIsoSha256, got $lowMemoryHash"
+            }
+            Write-Log "Low-memory ISO retained at $LowMemoryIsoPath." "Green"
+        }
+
         Write-Log "Mounting ISO..." "Cyan"
         Mount-DiskImage -ImagePath $isoPath -PassThru | Out-Null
         $isoDrive = Get-MountedIsoDrive -ImagePath $isoPath
@@ -2095,6 +1982,75 @@ function Install-LibertixIsoToPartition {
 
         Write-Log "Copying ISO contents to $PartitionDrive..." "Cyan"
         Copy-Item -Path $src -Destination $dst -Recurse -Force
+
+        # live-boot discovers images with a case-sensitive *.squashfs glob.
+        # Its toram copy also recreates directory names on a case-sensitive
+        # tmpfs. Windows can expose ISO9660-only names in uppercase while
+        # copying to FAT, so force the long VFAT names used by the initramfs.
+        $expectedLiveDirectory = Join-Path $PartitionDrive "live"
+        $actualLiveDirectories = @(
+            Get-ChildItem -LiteralPath $PartitionDrive -Directory -ErrorAction Stop |
+                Where-Object { $_.Name -ieq "live" }
+        )
+        if ($actualLiveDirectories.Count -ne 1) {
+            throw "Expected exactly one copied live directory; found $($actualLiveDirectories.Count)."
+        }
+        if ($actualLiveDirectories[0].Name -cne "live") {
+            $temporaryLiveDirectory = Join-Path $PartitionDrive ".libertix-live-case-$([Guid]::NewGuid().ToString('N'))"
+            Move-Item -LiteralPath $actualLiveDirectories[0].FullName -Destination $temporaryLiveDirectory -Force
+            Move-Item -LiteralPath $temporaryLiveDirectory -Destination $expectedLiveDirectory -Force
+        }
+        if ((Get-Item -LiteralPath $expectedLiveDirectory -ErrorAction Stop).Name -cne "live") {
+            throw "Live directory name case normalization failed."
+        }
+
+        foreach ($relativePath in @(
+            "live\filesystem.squashfs",
+            "live\initrd.img",
+            "live\vmlinuz"
+        )) {
+            $expectedPath = Join-Path $PartitionDrive $relativePath
+            $parent = Split-Path -Parent $expectedPath
+            $expectedName = Split-Path -Leaf $expectedPath
+            $actual = @(
+                Get-ChildItem -LiteralPath $parent -File -ErrorAction Stop |
+                    Where-Object { $_.Name -ieq $expectedName }
+            )
+            if ($actual.Count -ne 1) {
+                throw "Expected exactly one copied live file for $relativePath; found $($actual.Count)."
+            }
+            if ($actual[0].Name -cne $expectedName) {
+                $temporaryPath = Join-Path $parent ".libertix-case-$([Guid]::NewGuid().ToString('N'))"
+                Move-Item -LiteralPath $actual[0].FullName -Destination $temporaryPath -Force
+                Move-Item -LiteralPath $temporaryPath -Destination $expectedPath -Force
+            }
+            $verifiedName = (Get-Item -LiteralPath $expectedPath -ErrorAction Stop).Name
+            if ($verifiedName -cne $expectedName) {
+                throw "Live file name case normalization failed: expected $expectedName, got $verifiedName."
+            }
+        }
+
+        if ($LowMemoryMode) {
+            $bootConfigs = @(Get-ChildItem -Path $PartitionDrive -Filter "*.cfg" -Recurse -File)
+            if ($bootConfigs.Count -eq 0) {
+                throw "No boot configuration was found for low-memory mode."
+            }
+            foreach ($bootConfig in $bootConfigs) {
+                $content = Get-Content -LiteralPath $bootConfig.FullName -Raw
+                $updated = $content -replace '(?i)(^|\s)toram(?=\s|$)', '$1findiso=/libertix-live.iso'
+                if ($updated -eq $content -and $content -notmatch 'findiso=/libertix-live\.iso') {
+                    continue
+                }
+                Set-Content -LiteralPath $bootConfig.FullName -Value $updated -Encoding ASCII -NoNewline
+            }
+            $configured = @(Get-ChildItem -Path $PartitionDrive -Filter "*.cfg" -Recurse -File | Where-Object {
+                (Get-Content -LiteralPath $_.FullName -Raw) -match 'findiso=/libertix-live\.iso'
+            })
+            if ($configured.Count -eq 0) {
+                throw "Low-memory boot configuration could not be applied."
+            }
+            Write-Log "Low-memory findiso boot configured in $($configured.Count) boot files." "Green"
+        }
 
         $requiredFiles = @(
             "EFI\debian\shimx64.efi",
@@ -2135,7 +2091,8 @@ function Set-LibertixUefiBootEntry {
     param(
         [Parameter(Mandatory = $true)][string]$InstallerDrive,
         [Parameter(Mandatory = $true)][int]$InstallerDiskNumber,
-        [Parameter(Mandatory = $true)][int]$InstallerPartitionNumber
+        [Parameter(Mandatory = $true)][int]$InstallerPartitionNumber,
+        [switch]$ReusePreparedInstaller = $false
     )
 
     Write-Log "Configuring one-time UEFI boot entry..." "Cyan"
@@ -2153,7 +2110,31 @@ function Set-LibertixUefiBootEntry {
     $loaderPath = "\$InstallerEspDirectory\BOOTX64.EFI"
     try {
         $espDrive = Mount-Esp -Letter $EspLetter
-        $loaderHashes = Install-LibertixTemporaryBootloaderOnEsp -EspDrive $espDrive -InstallerDrive $InstallerDrive
+        if ($ReusePreparedInstaller) {
+            $state = Get-TransactionPartitionState
+            if (-not $state -or -not $state.EspLoaderSha256) {
+                throw "Temporary ESP loader SHA256 state is missing; refusing firmware fallback."
+            }
+            $destination = Join-Path $espDrive $InstallerEspDirectory
+            foreach ($relativePath in @("BOOTX64.EFI", "grubx64.efi", "mmx64.efi", "grub.cfg")) {
+                $saved = $state.EspLoaderSha256.PSObject.Properties[$relativePath]
+                if (-not $saved -or [string]::IsNullOrWhiteSpace([string]$saved.Value)) {
+                    throw "Temporary ESP loader SHA256 state has no hash for $relativePath"
+                }
+                $fullPath = Join-Path $destination $relativePath
+                if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+                    throw "Temporary ESP loader is missing: $relativePath"
+                }
+                $actual = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                if ($actual -ne ([string]$saved.Value).ToLowerInvariant()) {
+                    throw "Temporary ESP loader SHA256 mismatch: $relativePath"
+                }
+                $loaderHashes[$relativePath] = $actual
+            }
+            Write-Log "Temporary ESP loader SHA256 verified ($($loaderHashes.Count) files)." "Green"
+        } else {
+            $loaderHashes = Install-LibertixTemporaryBootloaderOnEsp -EspDrive $espDrive -InstallerDrive $InstallerDrive
+        }
     } finally {
         if ($espDrive) {
             Dismount-Letter -Letter ($espDrive.Substring(0, 1))
@@ -2166,8 +2147,9 @@ function Set-LibertixUefiBootEntry {
 
     powercfg /h off 2>&1 | Out-Null
 
-    $driveRoot = "$InstallerDrive\"
-    $grubConfig = @"
+    if (-not $ReusePreparedInstaller) {
+        $driveRoot = "$InstallerDrive\"
+        $grubConfig = @"
 set default=0
 set timeout=0
 set timeout_style=hidden
@@ -2177,23 +2159,24 @@ set hidden_timeout_quiet=true
 search --no-floppy --label $InstallerLabel --set=root
 
 menuentry "Install Linux Mint (Automatic)" {
-    linux /live/vmlinuz boot=live toram components quiet silent loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
+    linux /live/vmlinuz boot=live toram components quiet splash silent plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
     initrd /live/initrd.img
 }
 "@
-    foreach ($grubConfigDir in @(
-        (Join-Path $driveRoot "EFI\debian"),
-        (Join-Path $driveRoot "EFI\LibertixInstaller"),
-        (Join-Path $driveRoot "EFI\BOOT"),
-        (Join-Path $driveRoot "boot\grub")
-    )) {
-        New-Item -ItemType Directory -Path $grubConfigDir -Force | Out-Null
-        $grubConfigPath = Join-Path $grubConfigDir "grub.cfg"
-        if (Test-Path $grubConfigPath) {
-            attrib -R -S -H $grubConfigPath 2>$null
-            Remove-Item -Path $grubConfigPath -Force
+        foreach ($grubConfigDir in @(
+            (Join-Path $driveRoot "EFI\debian"),
+            (Join-Path $driveRoot "EFI\LibertixInstaller"),
+            (Join-Path $driveRoot "EFI\BOOT"),
+            (Join-Path $driveRoot "boot\grub")
+        )) {
+            New-Item -ItemType Directory -Path $grubConfigDir -Force | Out-Null
+            $grubConfigPath = Join-Path $grubConfigDir "grub.cfg"
+            if (Test-Path $grubConfigPath) {
+                attrib -R -S -H $grubConfigPath 2>$null
+                Remove-Item -Path $grubConfigPath -Force
+            }
+            Set-Content -Path $grubConfigPath -Value $grubConfig -Encoding ASCII
         }
-        Set-Content -Path $grubConfigPath -Value $grubConfig -Encoding ASCII
     }
 
     Remove-LibertixTemporaryFirmwareEntries
@@ -2205,9 +2188,14 @@ menuentry "Install Linux Mint (Automatic)" {
         }
     }
 
-    $originalBootOrder = @(
-        ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder")
-    )
+    $transactionState = Get-TransactionPartitionState
+    $originalBootOrder = if (
+        $ReusePreparedInstaller -and $transactionState -and $transactionState.OriginalBootOrder
+    ) {
+        @($transactionState.OriginalBootOrder | ForEach-Object { [uint16]$_ })
+    } else {
+        @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder"))
+    }
     if ($originalBootOrder.Count -eq 0) {
         throw "UEFI BootOrder is empty; refusing to prepare a temporary boot entry."
     }
@@ -2284,6 +2272,25 @@ if (-not $Force) {
 }
 
 try {
+    if ($ReusePreparedInstaller) {
+        if ($BootStrategy -ne "FirmwareBootOrder") {
+            throw "Prepared installer reuse is only valid with FirmwareBootOrder."
+        }
+        Test-LibertixLiveConfig
+        $info = Get-ReusablePreparedInstallerPartition
+        $drive = $info["Drive"]
+        Assert-PreparedInstallerManifest -InstallerDrive $drive
+        Set-LibertixUefiBootEntry `
+            -InstallerDrive $drive `
+            -InstallerDiskNumber ([int]$info["DiskNumber"]) `
+            -InstallerPartitionNumber ([int]$info["PartitionNumber"]) `
+            -ReusePreparedInstaller
+        Dismount-Letter -Letter ($drive.TrimEnd(":"))
+        Write-Log "FALLBACK_REUSED_PREPARED_INSTALLER=true" "Green"
+        Write-Log "Preparation complete; waiting for the user interface to confirm restart." "Cyan"
+        exit 0
+    }
+
     Test-LibertixLiveConfig
     Test-LibertixSecureBootCompatibility
     Ensure-WindowsVolumeReadableFromLinux
@@ -2306,6 +2313,7 @@ try {
         -InstallerDrive $drive `
         -InstallerDiskNumber $installerDiskNumber `
         -InstallerPartitionNumber $installerPartitionNumber
+    Save-PreparedInstallerManifest -InstallerDrive $drive
 
     Dismount-Letter -Letter ($drive.TrimEnd(":"))
 

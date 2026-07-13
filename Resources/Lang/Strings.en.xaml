@@ -64,6 +64,50 @@
     <system:String x:Key="WarningConfirmCheckbox">I understand the risks and have backed up my important data</system:String>
     <system:String x:Key="WarningConfirmButton">I Understand</system:String>
 
+    <!-- Compatibility check -->
+    <system:String x:Key="CompatibilityTitle">Compatibility check</system:String>
+    <system:String x:Key="CompatibilityDescription">Libertix checks memory, firmware, and storage before continuing.</system:String>
+    <system:String x:Key="CompatibilityStarting">Starting checks...</system:String>
+    <system:String x:Key="CompatibilityRetry">Try again</system:String>
+    <system:String x:Key="CompatibilityContinue">Continue</system:String>
+    <system:String x:Key="CompatibilityRunning">Checking this computer...</system:String>
+    <system:String x:Key="CompatibilityLowMemorySuccess">This computer is compatible. Low-memory mode will be used.</system:String>
+    <system:String x:Key="CompatibilitySuccess">This computer is compatible with Libertix.</system:String>
+    <system:String x:Key="CompatibilityWarningPrefix">WARNING: </system:String>
+    <system:String x:Key="CompatibilityUnexpectedPrefix">COMPAT_E_UNEXPECTED: </system:String>
+
+    <!-- File sharing -->
+    <system:String x:Key="SharingTitle">File sharing</system:String>
+    <system:String x:Key="SharingDescription">Choose which files are accessible from each system.</system:String>
+    <system:String x:Key="SharingWindowsToLinuxTitle">Show Windows files in Mint</system:String>
+    <system:String x:Key="SharingWindowsToLinuxDescription">Each Windows profile will appear as User_name in the file manager.</system:String>
+    <system:String x:Key="SharingLinuxToWindowsTitle">Show Linux files in Windows (read-only)</system:String>
+    <system:String x:Key="SharingLinuxToWindowsDescription">Windows will be able to view Linux files without modifying the ext4 partition.</system:String>
+
+    <!-- UEFI boot fallback -->
+    <system:String x:Key="UefiFallbackTitle">UEFI boot did not start the installer</system:String>
+    <system:String x:Key="UefiFallbackDescription">Windows returned without the live marker. Libertix kept a verified local copy and can use the validated UEFI firmware entry to restart the live system.</system:String>
+    <system:String x:Key="UefiFallbackChecking">Checking recovery state...</system:String>
+    <system:String x:Key="UefiFallbackCancel">Cancel and restore Windows</system:String>
+    <system:String x:Key="UefiFallbackUseFirmware">Use firmware boot</system:String>
+    <system:String x:Key="UefiFallbackReboot">Restart</system:String>
+    <system:String x:Key="UefiFallbackStateMissing">UEFI recovery state was not found.</system:String>
+    <system:String x:Key="UefiFallbackStateIncomplete">UEFI recovery state is incomplete.</system:String>
+    <system:String x:Key="UefiFallbackBootNextFailedLog">BootNext did not reach the live system. The validated firmware strategy is ready.</system:String>
+    <system:String x:Key="UefiFallbackReady">Choose whether Libertix should restart using the UEFI firmware entry.</system:String>
+    <system:String x:Key="UefiFallbackLoadFailed">Unable to load UEFI recovery.</system:String>
+    <system:String x:Key="UefiFallbackErrorPrefix">ERROR: </system:String>
+    <system:String x:Key="UefiFallbackPreparingFirmware">Preparing UEFI firmware boot...</system:String>
+    <system:String x:Key="UefiFallbackFirmwareFailedFormat">Firmware boot preparation failed (rc={0}).</system:String>
+    <system:String x:Key="UefiFallbackFirmwareReady">Firmware boot is ready. Restart to launch the live system.</system:String>
+    <system:String x:Key="UefiFallbackPreparationFailed">Fallback preparation failed.</system:String>
+    <system:String x:Key="UefiFallbackRestoring">Restoring the initial UEFI state...</system:String>
+    <system:String x:Key="UefiFallbackRestoreFailedFormat">UEFI restoration failed (rc={0}).</system:String>
+    <system:String x:Key="UefiFallbackWindowsRestored">Windows has been restored. Libertix will close.</system:String>
+    <system:String x:Key="UefiFallbackCancelledLog">UEFI transaction cancelled and temporary files scheduled for deletion.</system:String>
+    <system:String x:Key="UefiFallbackRestoreFailed">UEFI restoration failed.</system:String>
+    <system:String x:Key="UefiFallbackTimeoutLog">ERROR: recovery process timed out after 30 minutes</system:String>
+
     <!-- Apply Changes -->
     <system:String x:Key="ApplyChangesTitle">Apply Changes</system:String>
     <system:String x:Key="ApplyChangesWaiting">Ready to start partitioning</system:String>

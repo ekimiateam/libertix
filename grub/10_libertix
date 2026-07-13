@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT HUP INT TERM
+
+/usr/local/lib/libertix/grub-generators/10_linux > "$workdir/linux.cfg"
+if [ -x /usr/local/lib/libertix/grub-generators/30_uefi-firmware ]; then
+    /usr/local/lib/libertix/grub-generators/30_uefi-firmware > "$workdir/firmware.cfg"
+fi
+
+exec python3 /usr/local/lib/libertix/render-libertix-menu.py \
+    --linux "$workdir/linux.cfg" \
+    --windows /etc/libertix/grub-windows.cfg \
+    --firmware "$workdir/firmware.cfg"

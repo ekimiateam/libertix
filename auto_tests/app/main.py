@@ -1,23 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import hmac
 import json
 import logging
-import os
 import queue
 import threading
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from threading import Lock
 from typing import Annotated, Literal
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api_requests import automation_request, validation_request
+from app.api_runtime import cleanup_capture_workspaces, operation_lock
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
 from app.models import (
@@ -31,63 +29,6 @@ from app.services.automation import AutomationService
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
 
-
-class ProcessOperationLock:
-    """Serialize destructive operations across threads and Uvicorn processes."""
-
-    def __init__(self, path: Path) -> None:
-        self._thread_lock = Lock()
-        self._path = path
-        self._file = None
-
-    def acquire(self, *, blocking: bool = False) -> bool:
-        if not self._thread_lock.acquire(blocking=blocking):
-            return False
-        try:
-            self._file = self._path.open("a+", encoding="ascii")
-            flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
-            fcntl.flock(self._file.fileno(), flags)
-            self._file.seek(0)
-            self._file.truncate()
-            self._file.write(f"pid={os.getpid()}\n")
-            self._file.flush()
-            return True
-        except (BlockingIOError, OSError):
-            if self._file is not None:
-                self._file.close()
-                self._file = None
-            self._thread_lock.release()
-            return False
-
-    def release(self) -> None:
-        if self._file is not None:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-            self._file.close()
-            self._file = None
-        self._thread_lock.release()
-
-
-operation_lock = ProcessOperationLock(Path("/tmp/libertix-auto-tests.lock"))
-
-
-def cleanup_old_captures(settings: Settings) -> None:
-    cutoff = time.time() - settings.capture_retention_days * 86400
-    files = sorted(
-        (path for path in settings.capture_dir.glob("*") if path.is_file()),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    for index, path in enumerate(files):
-        if index >= settings.capture_retention_count or path.stat().st_mtime < cutoff:
-            try:
-                path.unlink()
-            except OSError:
-                logger.warning(
-                    "Impossible de supprimer une ancienne capture",
-                    extra={"step": "capture.cleanup", "target": str(path)},
-                )
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -98,7 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI):
         configure_logging(configured.log_level)
         configured.capture_dir.mkdir(parents=True, exist_ok=True)
-        cleanup_old_captures(configured)
+        cleanup_capture_workspaces(configured)
         yield
 
     api = FastAPI(
@@ -116,41 +57,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expected = configured.api_access_token.get_secret_value()
         if not hmac.compare_digest(x_api_key, expected):
             raise HTTPException(status_code=401, detail="Clé API invalide")
-
-    def validation_selectors(
-        body: ValidationRequest | None, query_vms: list[str] | None
-    ) -> list[str] | None:
-        selectors: list[str] = []
-        if body:
-            selectors.extend(body.selectors() or [])
-        if query_vms:
-            selectors.extend(query_vms)
-        return selectors or None
-
-    def validation_request(
-        body: ValidationRequest | None,
-        query_vms: list[str] | None,
-        query_source: SourceMode | None,
-    ) -> tuple[list[str] | None, ValidationRequest]:
-        request = body or ValidationRequest()
-        selectors = validation_selectors(request, query_vms)
-        if query_source is not None:
-            request.source = query_source
-        return selectors, request
-
-    def automation_request(
-        body: AutomationRequest | None,
-        query_vms: list[str] | None,
-        query_apply: bool | None,
-        query_source: SourceMode | None,
-    ) -> tuple[list[str] | None, AutomationRequest]:
-        request = body or AutomationRequest()
-        selectors = validation_selectors(request, query_vms)
-        if query_apply is not None:
-            request.apply = query_apply
-        if query_source is not None:
-            request.source = query_source
-        return selectors, request
 
     async def execute(
         operation: str,

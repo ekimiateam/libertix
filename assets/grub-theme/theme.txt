@@ -1,0 +1,43 @@
+# GRUB2 gfxmenu Libertix theme
+
+# Global properties
+title-text: ""
+desktop-color: "#222134"
+desktop-image: "background.png"
+desktop-image-scale-method: "stretch"
+terminal-font: "Console Bold 16"
+terminal-left: "0%"
+terminal-top: "0%"
+terminal-width: "100%"
+terminal-height: "100%"
+terminal-border: "0"
+
+# Styling for the boot menu
++ boot_menu {
+  left = 25%
+  top = 25%
+  width = 50%
+  height = 50%
+  item_font = "Display Bold 24"
+  item_color = "#cccccc"
+  selected_item_color = "#ffffff"
+  icon_width = 48
+  icon_height = 48
+  item_icon_space = 26
+  item_height = 56
+  item_padding = 12
+  item_spacing = 16
+  selected_item_pixmap_style = "select_*.png"
+}
+
+# Styling for a boot countdown
++ label {
+  top = 80%
+  left = 35%
+  width = 30%
+  align = "center"
+  id = "__timeout__"
+  text = "Booting in %d seconds"
+  color = "#cccccc"
+  font = "Display Bold 24"
+}

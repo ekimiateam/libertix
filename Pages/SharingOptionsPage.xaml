@@ -1,0 +1,63 @@
+<Page x:Class="Libertix.Pages.SharingOptionsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="File sharing">
+    <Grid Background="#232136" Margin="50">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,20,0,35">
+            <TextBlock Text="{DynamicResource SharingTitle}"
+                       Foreground="#E0DEF4"
+                       FontSize="46"
+                       FontWeight="Light"
+                       HorizontalAlignment="Center"/>
+            <TextBlock Text="{DynamicResource SharingDescription}"
+                       Foreground="#908CAA"
+                       FontSize="16"
+                       HorizontalAlignment="Center"
+                       Margin="0,10,0,0"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" VerticalAlignment="Center" Margin="80,0">
+            <CheckBox x:Name="WindowsToLinuxCheckBox"
+                      IsChecked="True"
+                      Foreground="#E0DEF4"
+                      FontSize="19"
+                      Margin="0,0,0,30">
+                <StackPanel Margin="10,0,0,0">
+                    <TextBlock Text="{DynamicResource SharingWindowsToLinuxTitle}" FontWeight="SemiBold"/>
+                    <TextBlock Text="{DynamicResource SharingWindowsToLinuxDescription}"
+                               Foreground="#908CAA" FontSize="14" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                </StackPanel>
+            </CheckBox>
+
+            <CheckBox x:Name="LinuxToWindowsCheckBox"
+                      IsChecked="True"
+                      Foreground="#E0DEF4"
+                      FontSize="19">
+                <StackPanel Margin="10,0,0,0">
+                    <TextBlock Text="{DynamicResource SharingLinuxToWindowsTitle}" FontWeight="SemiBold"/>
+                    <TextBlock Text="{DynamicResource SharingLinuxToWindowsDescription}"
+                               Foreground="#908CAA" FontSize="14" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                </StackPanel>
+            </CheckBox>
+        </StackPanel>
+
+        <Grid Grid.Row="2" Margin="0,30,0,10">
+            <Button Content="{DynamicResource Back}"
+                    Style="{StaticResource ModernButton}"
+                    Width="180" Height="48"
+                    HorizontalAlignment="Left"
+                    Click="BackButton_Click"/>
+            <Button Content="{DynamicResource Next}"
+                    Style="{StaticResource ModernButton}"
+                    Width="180" Height="48"
+                    HorizontalAlignment="Right"
+                    Click="NextButton_Click"/>
+        </Grid>
+    </Grid>
+</Page>

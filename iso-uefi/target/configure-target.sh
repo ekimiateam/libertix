@@ -30,6 +30,10 @@ configure_user() {
 
 configure_windows_mount() {
     local win_uuid uid gid
+    [ "$SHARE_WINDOWS_FILES_IN_LINUX" = "true" ] || {
+        echo "Windows-to-Linux file sharing disabled by the user."
+        return 0
+    }
     [ -b "$WINDOWS_PART" ] || { echo "Windows partition missing: $WINDOWS_PART" >&2; exit 1; }
     [ "$(blkid -s TYPE -o value "$WINDOWS_PART" 2>/dev/null)" = "ntfs" ] || {
         echo "Windows partition is not NTFS: $WINDOWS_PART" >&2
@@ -41,6 +45,42 @@ configure_windows_mount() {
     gid="$(id -g "$USERNAME")"
     mkdir -p /mnt/windows
     echo "UUID=$win_uuid /mnt/windows ntfs-3g defaults,uid=$uid,gid=$gid,dmask=022,fmask=133,windows_names,nofail 0 0" >> /etc/fstab
+}
+
+configure_windows_profile_shortcuts() {
+    [ "$SHARE_WINDOWS_FILES_IN_LINUX" = "true" ] || return 0
+    local home_dir bookmarks profile shortcut profiles_output
+    home_dir="/home/$USERNAME"
+    bookmarks="$home_dir/.config/gtk-3.0/bookmarks"
+    mkdir -p "$(dirname "$bookmarks")"
+    : > "$bookmarks"
+
+    profiles_output=$(python3 - "$WINDOWS_PROFILES_JSON_BASE64" <<'PY'
+import base64
+import json
+import sys
+
+profiles = json.loads(base64.b64decode(sys.argv[1], validate=True).decode("utf-8"))
+if not isinstance(profiles, list) or not all(isinstance(item, str) for item in profiles):
+    raise SystemExit("invalid Windows profile manifest")
+for profile in profiles:
+    print(profile)
+PY
+    ) || { echo "Cannot decode Windows profile manifest" >&2; exit 1; }
+    while IFS= read -r profile; do
+        [ -n "$profile" ] || continue
+        case "$profile" in .|..|*/*) echo "Invalid Windows profile name: $profile" >&2; exit 1 ;; esac
+        shortcut="User_$profile"
+        ln -sfn "/mnt/windows/Users/$profile" "$home_dir/$shortcut"
+        printf 'file://%s/%s %s\n' "$home_dir" "$shortcut" "$shortcut" >> "$bookmarks"
+    done <<< "$profiles_output"
+    chown -h "$USERNAME:$USERNAME" "$home_dir"/User_* 2>/dev/null || true
+    chown -R "$USERNAME:$USERNAME" "$home_dir/.config"
+}
+
+configure_windows_readonly_request() {
+    mkdir -p /etc/libertix
+    printf '%s\n' "$SHARE_LINUX_FILES_IN_WINDOWS" > /etc/libertix/share-linux-in-windows
 }
 
 configure_locale() {
@@ -136,6 +176,11 @@ find_windows_boot_uuid() {
 configure_grub() {
     local win_boot_uuid
 
+    [[ "${GRUB_RESOLUTION:-}" =~ ^[0-9]+x[0-9]+$ ]] || {
+        echo "Invalid GRUB resolution: ${GRUB_RESOLUTION:-missing}" >&2
+        exit 1
+    }
+
     cat > /etc/default/grub <<'EOF'
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=-1
@@ -145,15 +190,16 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
 GRUB_CMDLINE_LINUX=""
 GRUB_DISABLE_OS_PROBER=true
 GRUB_RECORDFAIL_TIMEOUT=-1
+GRUB_THEME="/boot/grub/themes/Libertix/theme.txt"
 EOF
+    printf 'GRUB_GFXMODE="%s,auto"\n' "$GRUB_RESOLUTION" >> /etc/default/grub
 
     rm -f /etc/default/grub.d/50_linuxmint.cfg 2>/dev/null || true
     win_boot_uuid="$(find_windows_boot_uuid || true)"
 
     if [ -n "$win_boot_uuid" ]; then
-        cat > /etc/grub.d/40_custom <<EOF
-#!/bin/sh
-exec tail -n +3 \$0
+        mkdir -p /etc/libertix
+        cat > /etc/libertix/grub-windows.cfg <<EOF
 menuentry "Windows Boot Manager" --class windows --class os {
     insmod part_gpt
     insmod fat
@@ -161,13 +207,29 @@ menuentry "Windows Boot Manager" --class windows --class os {
     chainloader /EFI/Microsoft/Boot/bootmgfw.efi
 }
 EOF
-        chmod +x /etc/grub.d/40_custom
     else
-        sed -i 's/GRUB_DISABLE_OS_PROBER=true/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub
+        echo "Windows Boot Manager was not found" >&2
+        exit 1
     fi
 
-    os-prober 2>/dev/null || true
+    mkdir -p /usr/local/lib/libertix/grub-generators
+    install -m 0755 /etc/grub.d/10_linux \
+        /usr/local/lib/libertix/grub-generators/10_linux
+    if [ -f /etc/grub.d/30_uefi-firmware ]; then
+        install -m 0755 /etc/grub.d/30_uefi-firmware \
+            /usr/local/lib/libertix/grub-generators/30_uefi-firmware
+    fi
+    install -m 0755 /tmp/10_libertix /etc/grub.d/10_libertix
+    install -m 0755 /tmp/render-libertix-menu.py \
+        /usr/local/lib/libertix/render-libertix-menu.py
+    chmod -x /etc/grub.d/10_linux /etc/grub.d/30_uefi-firmware 2>/dev/null || true
+    chmod -x /etc/grub.d/40_custom 2>/dev/null || true
+
     update-grub
+    grub-script-check /boot/grub/grub.cfg
+    grep -Fq -- "--class linuxmint" /boot/grub/grub.cfg
+    grep -Fq "submenu 'Advanced options' --class efi" /boot/grub/grub.cfg
+    grep -Fq "menuentry 'Shutdown' --class shutdown" /boot/grub/grub.cfg
 }
 
 enable_first_boot_resize() {
@@ -178,6 +240,8 @@ enable_first_boot_resize() {
 main() {
     configure_user
     configure_windows_mount
+    configure_windows_profile_shortcuts
+    configure_windows_readonly_request
     configure_locale
     configure_keyboard
     configure_timezone

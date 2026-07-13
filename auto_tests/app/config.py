@@ -63,9 +63,7 @@ class Settings(BaseSettings):
     proxmox_timeout_seconds: float = 30
     proxmox_task_timeout_seconds: float = 300
 
-    capture_dir: Path = Path("captures")
-    capture_retention_days: int = Field(default=7, ge=1)
-    capture_retention_count: int = Field(default=1000, ge=1)
+    capture_dir: Path = Path("/tmp/libertix-auto-tests-captures")
     launch_wait_seconds: float = 2
     automation_monitor_interval_seconds: float = 30
     automation_monitor_timeout_seconds: float = 23400

@@ -18,6 +18,7 @@ namespace Libertix.Pages
 {
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {
+        private readonly InstallationState _installationState;
         private const string STATE_KEY = "ResizeDisk";
         private readonly double _totalSpace;
         private readonly double _initialFreeSpace;
@@ -188,8 +189,13 @@ namespace Libertix.Pages
 
         public ICommand OpenDiskCleanupCommand => _openDiskCleanupCommand;
 
-        public ResizeDisk()
+        public ResizeDisk() : this(((App)Application.Current).InstallationState)
         {
+        }
+
+        public ResizeDisk(InstallationState installationState)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             _openDiskCleanupCommand = new RelayCommand(_ => Process.Start("cleanmgr.exe"));
             DataContext = this;
@@ -205,7 +211,7 @@ namespace Libertix.Pages
             _initialFreeSpace = Math.Round(systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0);
             WindowsFreeSpace = _initialFreeSpace;
 
-            if (App.Current.Properties["SelectedDistro"] is Models.DistroInfo distro)
+            if (_installationState.SelectedDistro is Models.DistroInfo distro)
             {
                 LoadState(distro);
             }
@@ -346,13 +352,13 @@ namespace Libertix.Pages
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro)
+            if (_installationState.SelectedDistro is DistroInfo distro)
             {
                 SaveState(distro);
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new ChooseDistro(),
+                new ChooseDistro(_installationState),
                 TimeSpan.FromSeconds(0.3),
                 slideLeft: false);
         }
@@ -370,13 +376,13 @@ namespace Libertix.Pages
                 return;
             }
 
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro)
+            if (_installationState.SelectedDistro is DistroInfo distro)
             {
                 SaveState(distro);
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new AccountCreation(),
+                new SharingOptionsPage(_installationState),
                 TimeSpan.FromSeconds(0.3));
         }
 

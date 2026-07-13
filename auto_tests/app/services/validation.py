@@ -22,6 +22,7 @@ from app.config import Settings, VMConfig
 from app.errors import WorkflowError
 from app.models import OperationResult, SourceMode, StepResult
 from app.services.common import ResultBuilder
+from app.services.source_tree import LocalSourceTree
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 class ValidationService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._capture_dir = Path(settings.capture_dir)
         self.vision_llm = VisionLLMClient(
             settings.llm_api_key.get_secret_value(),
             settings.llm_api_url,
@@ -46,6 +48,12 @@ class ValidationService:
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
+        self.settings.capture_dir.mkdir(parents=True, exist_ok=True)
+        capture_workspace = tempfile.TemporaryDirectory(
+            prefix="validation-", dir=self.settings.capture_dir
+        )
+        previous_capture_dir = self._capture_dir
+        self._capture_dir = Path(capture_workspace.name)
         result = ResultBuilder("validation", on_step=on_step)
         try:
             selected_vms = self.select_vms(vm_selectors)
@@ -82,6 +90,9 @@ class ValidationService:
                     "internal", "Erreur interne inattendue", details={"type": type(exc).__name__}
                 )
             )
+        finally:
+            self._capture_dir = previous_capture_dir
+            capture_workspace.cleanup()
 
     def select_vms(self, selectors: Sequence[str] | None) -> tuple[VMConfig, ...]:
         if not selectors:
@@ -362,49 +373,11 @@ class ValidationService:
 
     @staticmethod
     def _local_repository_root() -> Path:
-        return Path(__file__).resolve().parents[3]
+        return LocalSourceTree.repository_root()
 
     @staticmethod
     def _include_local_source_path(root: Path, path: Path) -> bool:
-        relative = path.relative_to(root)
-        parts = set(relative.parts)
-        excluded_dirs = {
-            ".git",
-            ".venv",
-            ".pytest_cache",
-            ".ruff_cache",
-            "__pycache__",
-            "bin",
-            "obj",
-            "captures",
-            "filepool",
-        }
-        if parts & excluded_dirs:
-            return False
-        if len(relative.parts) >= 2 and relative.parts[:2] == ("auto_tests", "captures"):
-            return False
-        if len(relative.parts) >= 3 and relative.parts[:3] == ("auto_tests", "app", "filepool"):
-            return False
-        if path.is_dir():
-            return True
-        if path.name != ".env.example" and (path.name == ".env" or path.name.startswith(".env.")):
-            return False
-        if relative.parts == ("Tools", "aria2", "aria2c.exe"):
-            return True
-        excluded_suffixes = {
-            ".cache",
-            ".dll",
-            ".exe",
-            ".iso",
-            ".pdb",
-            ".pyc",
-            ".tar",
-            ".gz",
-            ".zip",
-        }
-        if path.suffix.lower() in excluded_suffixes:
-            return False
-        return path.name not in {"uv.lock"}
+        return LocalSourceTree.include(root, path)
 
     def _compile_release_on_build_vm(self, result: ResultBuilder) -> PurePosixPath:
         s = self.settings
@@ -488,7 +461,7 @@ class ValidationService:
         )
 
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        capture = Path(self.settings.capture_dir) / f"{vm.name}-{stamp}.png"
+        capture = self._capture_dir / f"{vm.name}-{stamp}.png"
         self.vnc.capture(vm.vnc, capture)
         result.ok("vnc.capture", "Capture VNC enregistrée", target=vm.vnc, path=str(capture))
 
@@ -575,84 +548,38 @@ class ValidationService:
     def _launch_interactive(
         self, vm: VMConfig, executable: PureWindowsPath, result: ResultBuilder
     ) -> dict[str, object]:
-        prepare_config = {
-            "mode": "prepare",
-            "executable": str(executable),
-            "username": vm.username,
-        }
-        with self.ssh(
-            vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
-        ) as ssh:
-            prepared = self.run_windows_script(
-                ssh,
-                script_name="launch_libertix.ps1",
-                config=prepare_config,
-                step="vm.prepare_launch",
-                timeout=60,
-            )
-        prepared_values = self.parse_powershell_results(prepared.stdout, prefixes=("SESSION_ID",))
-        session_id = prepared_values.get("SESSION_ID")
-        if not session_id or not session_id.isdigit():
-            raise WorkflowError(
-                "vm.prepare_launch",
-                "Session graphique non confirmée",
-                details={"vm": vm.name, "host": vm.host, "stdout": prepared.stdout[-4000:]},
-            )
-        result.ok(
-            "vm.prepare_launch",
-            "Raccourci de lancement Libertix préparé dans la session graphique",
-            target=vm.host,
-            vm=vm.name,
-            session_id=int(session_id),
-            launch_shortcut="Desktop\\Libertix.lnk",
-            cleanup="raccourci et clé RUNASINVOKER supprimés après vérification",
-        )
-
-        time.sleep(2)
-        self.vnc.launch_desktop_shortcut(vm.vnc, width=vm.screen_width, height=vm.screen_height)
-        result.ok(
-            "vnc.launch",
-            "Raccourci Libertix activé dans la session graphique via VNC",
-            target=vm.vnc,
-            vm=vm.name,
-        )
-
-        verify_config = {
-            "mode": "verify",
-            "executable": str(executable),
-            "session_id": int(session_id),
-        }
+        del result
+        task_name = f"LibertixValidation_{vm.name}"
         with self.ssh(
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
             response = self.run_windows_script(
                 ssh,
-                script_name="launch_libertix.ps1",
-                config=verify_config,
-                step="vm.launch",
-                timeout=60,
+                script_name="launch_libertix_elevated.ps1",
+                config={"executable": str(executable), "task_name": task_name},
+                step="vm.launch_elevated",
+                timeout=90,
             )
         values = self.parse_powershell_results(
-            response.stdout, prefixes=("PID", "SESSION_ID", "WINDOW_HANDLE")
+            response.stdout, prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE")
         )
-        required = ("PID", "SESSION_ID")
-        if not all(values.get(key, "").isdigit() for key in required):
+        if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
             raise WorkflowError(
-                "vm.launch",
-                "PID ou session interactive Libertix non confirmé",
-                details={"vm": vm.name, "host": vm.host},
+                "vm.launch_elevated",
+                "Processus Libertix administrateur non confirmé",
+                details={"vm": vm.name, "host": vm.host, "stdout": response.stdout[-4000:]},
             )
-        window_handle = values.get("WINDOW_HANDLE", "0")
-        if window_handle and not window_handle.isdigit():
+        if PureWindowsPath(values.get("EXECUTABLE", "")) != executable:
             raise WorkflowError(
-                "vm.launch",
-                "Handle de fenêtre Libertix invalide",
-                details={"vm": vm.name, "host": vm.host, "window_handle": window_handle},
+                "vm.launch_elevated",
+                "Le processus lancé ne correspond pas à l'exécutable déployé",
+                details={"vm": vm.name, "expected": str(executable)},
             )
         return {
             "pid": int(values["PID"]),
             "session_id": int(values["SESSION_ID"]),
-            "window_handle": int(window_handle or "0"),
-            "launch_method": "desktop_shortcut_vnc",
+            "window_handle": 0,
+            "task_name": values.get("TASK_NAME", task_name),
+            "launch_method": "scheduled_task_elevated",
             "visual_confirmation": "capture_vnc_et_llm",
         }

@@ -14,6 +14,8 @@ GUI_READY_FILE="$LOG_DIR/gui-ready"
 GUI_HEARTBEAT_FILE="$LOG_DIR/gui-heartbeat"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)"
 UI_MODE="progress"
+LAST_RENDER_KEY=""
+DEV_TERMINAL_ACTIVE=false
 GUI_PID=""
 XORG_PID=""
 SUCCESS_REBOOT_DELAY=5
@@ -28,9 +30,15 @@ GUI_DISPLAY=":1"
 GUI_SOCKET="/tmp/.X11-unix/X1"
 GUI_LOCK="/tmp/.X1-lock"
 GUI_VT=7
+LOG_COPY_STATUS="not-attempted"
+
+. /usr/local/lib/libertix/libertix-runner-stage-common.sh
 
 mkdir -p "$LOG_DIR"
 touch "$LOG" "$DEBUG_LOG" "$FAIL_FILE"
+# Keep every kernel message available through dmesg/journal without allowing
+# console printk to overwrite the dedicated tty1 UI.
+dmesg -n 1 2>/dev/null || true
 rm -f "$DEV_FILE" "$GUI_READY_FILE" "$GUI_HEARTBEAT_FILE"
 echo "runner-start" > "$STAGE_FILE"
 cat > "$RESULT_FILE" <<EOF
@@ -46,7 +54,6 @@ current_stage() {
 write_tty1_screen() {
     [ -e /dev/tty1 ] || return 0
     cat > "$TTY_SCREEN_FILE.$$"
-    printf '\033[J' >> "$TTY_SCREEN_FILE.$$"
     if [ -f "$TTY_SCREEN_LAST" ] && cmp -s "$TTY_SCREEN_FILE.$$" "$TTY_SCREEN_LAST"; then
         rm -f "$TTY_SCREEN_FILE.$$"
         return 0
@@ -55,18 +62,29 @@ write_tty1_screen() {
     # Some live virtual consoles do not translate LF to CRLF after mode
     # switches. Convert explicitly so every redraw starts each line at
     # column 0 instead of drifting diagonally across the screen.
-    perl -pe 's/\n/\r\n/g' "$TTY_SCREEN_FILE.$$" > /dev/tty1 2>/dev/null || true
+    {
+        printf '\033[?25l\033[H'
+        perl -pe 's/\n/\r\n/g' "$TTY_SCREEN_FILE.$$"
+        printf '\033[J'
+    } > /dev/tty1 2>/dev/null || true
     rm -f "$TTY_SCREEN_FILE.$$"
 }
 
 terminal_clear() {
     # Keep redraws stable: moving home and clearing after the new content avoids
     # the black frame caused by a full-screen clear before every refresh.
-    printf '\033[?25l\033[H'
+    printf '\033[?25l'
 }
 
 terminal_full_clear() {
     printf '\033[?25l\033[H\033[2J'
+}
+
+prepare_terminal_ui() {
+    chvt 1 2>/dev/null || true
+    sleep 0.25
+    printf '\033[?25l\033[H\033[2J' > /dev/tty1 2>/dev/null || true
+    rm -f "$TTY_SCREEN_LAST"
 }
 
 build_id() {
@@ -74,59 +92,11 @@ build_id() {
 }
 
 stage_label() {
-    case "$1" in
-        runner-start) echo "Demarrage de l'installateur" ;;
-        005-wait-prereqs) echo "Detection du live et du disque" ;;
-        006-clean-windows-live-boot) echo "Nettoyage du boot temporaire Windows" ;;
-        007-windows-live-boot-cleaned) echo "Boot temporaire nettoye" ;;
-        010-read-config) echo "Lecture de la configuration" ;;
-        020-detect-disk) echo "Detection des partitions" ;;
-        030-check-mint-iso) echo "Verification de l'ISO Mint" ;;
-        035-umount-windows) echo "Liberation de la partition Windows" ;;
-        040-unmount-target-disk) echo "Liberation du disque cible" ;;
-        050-assert-live-detached) echo "Verification du live en RAM" ;;
-        060-set-mbr-type-83|060-set-linux-partition-type) echo "Preparation de la partition Linux" ;;
-        070-wipefs-live-part) echo "Nettoyage de l'ancien systeme de fichiers" ;;
-        080-mkfs-ext4) echo "Creation du systeme de fichiers Linux" ;;
-        090-mount-target) echo "Montage de la cible Linux" ;;
-        100-remount-windows-ro) echo "Remontage lecture seule de Windows" ;;
-        110-loop-mount-mint-iso) echo "Montage de l'ISO Mint" ;;
-        120-unsquashfs) echo "Extraction de Mint" ;;
-        130-target-system-config) echo "Configuration du systeme installe" ;;
-        140-install-bootloader) echo "Installation du bootloader" ;;
-        150-final-verify) echo "Verification finale" ;;
-        installer-success) echo "Installation terminee" ;;
-        installer-failed-*) echo "Installation echouee" ;;
-        *) echo "$1" ;;
-    esac
+    libertix_stage_label "$1"
 }
 
 stage_percent() {
-    case "$1" in
-        runner-start) echo 1 ;;
-        005-wait-prereqs) echo 3 ;;
-        006-clean-windows-live-boot) echo 5 ;;
-        007-windows-live-boot-cleaned) echo 7 ;;
-        010-read-config) echo 10 ;;
-        020-detect-disk) echo 14 ;;
-        030-check-mint-iso) echo 18 ;;
-        035-umount-windows) echo 22 ;;
-        040-unmount-target-disk) echo 26 ;;
-        050-assert-live-detached) echo 30 ;;
-        060-set-mbr-type-83|060-set-linux-partition-type) echo 34 ;;
-        070-wipefs-live-part) echo 38 ;;
-        080-mkfs-ext4) echo 42 ;;
-        090-mount-target) echo 46 ;;
-        100-remount-windows-ro) echo 50 ;;
-        110-loop-mount-mint-iso) echo 54 ;;
-        120-unsquashfs) echo 64 ;;
-        130-target-system-config) echo 76 ;;
-        140-install-bootloader) echo 90 ;;
-        150-final-verify) echo 98 ;;
-        installer-success) echo 100 ;;
-        installer-failed-*) echo 100 ;;
-        *) echo 1 ;;
-    esac
+    libertix_stage_percent "$1"
 }
 
 unsquashfs_subpercent() {
@@ -203,6 +173,15 @@ tty_cols() {
     esac
 }
 
+tty_rows() {
+    local rows
+    rows="$(stty size < /dev/tty1 2>/dev/null | awk '{print $1}' || true)"
+    case "$rows" in
+        ''|*[!0-9]*) echo 48 ;;
+        *) [ "$rows" -gt 16 ] && echo "$rows" || echo 48 ;;
+    esac
+}
+
 clip_tty_lines() {
     local cols max
     cols="$(tty_cols)"
@@ -272,13 +251,21 @@ render_progress() {
 }
 
 render_details() {
+    local rows log_lines
+    rows="$(tty_rows)"
+    log_lines=$((rows - 10))
+    [ "$log_lines" -ge 8 ] || log_lines=8
     {
-        screen_header
-        printf '\n Details live:\n'
-        tail -44 "$LOG" 2>/dev/null | wrap_tty_lines | sed 's/^/  /'
-        printf '\n ------------------------------------------------------------\n'
-        printf ' Raccourcis: [D] Progression\n'
-        printf ' Logs complets: /run/libertix/install.log\n'
+        printf '\033[?25l'
+        printf ' ============================================================\n'
+        printf ' Libertix DEV | Build: %s\n' "$(build_id)"
+        printf ' Etape: %s | Code: %s\n' \
+            "$(stage_label_dynamic "$(current_stage)")" "$(current_stage)"
+        printf ' ============================================================\n'
+        printf ' install.log (les %s dernieres lignes):\n' "$log_lines"
+        tail -n "$log_lines" "$LOG" 2>/dev/null | clip_tty_lines | sed 's/^/  /'
+        printf ' ------------------------------------------------------------\n'
+        printf ' [D] Progression | Journal complet: /run/libertix/install.log\n'
     } | write_tty1_screen
 }
 
@@ -353,11 +340,14 @@ stop_graphical_ui() {
 
 switch_to_terminal_ui_if_requested() {
     [ -f "$DEV_FILE" ] || return 1
-    UI_MODE="progress"
+    [ "$DEV_TERMINAL_ACTIVE" = false ] || return 1
+    DEV_TERMINAL_ACTIVE=true
+    UI_MODE="details"
 
     stop_graphical_ui
-    chvt 1 2>/dev/null || true
-    render_progress
+    prepare_terminal_ui
+    LAST_RENDER_KEY=""
+    render_current_screen
     return 0
 }
 
@@ -370,71 +360,49 @@ start_gui() {
     cleanup_existing_x_servers
     echo "Starting graphical installer UI" >> "$LOG"
 
-    if command -v xinit >/dev/null 2>&1; then
-        echo "X server selected: $x_server via xinit" >> "$LOG"
-        setsid xinit /usr/local/sbin/libertix-gui -- "$x_server" "$GUI_DISPLAY" "vt$GUI_VT" -nolisten tcp -s 0 -dpms -br \
-            >> "$GUI_LOG" 2>&1 &
-        GUI_PID="$!"
+    echo "X server selected: $x_server direct" >> "$LOG"
+    "$x_server" "$GUI_DISPLAY" "vt$GUI_VT" -nolisten tcp -ac -noreset -s 0 -dpms -br >> "$GUI_LOG" 2>&1 &
+    XORG_PID="$!"
 
-        for wait_count in $(seq 1 "$GUI_READY_TIMEOUT"); do
-            if gui_running; then
-                chvt "$GUI_VT" 2>/dev/null || true
-                echo "Graphical installer UI ready" >> "$LOG"
-                return 0
-            fi
-            if ! kill -0 "$GUI_PID" 2>/dev/null; then
-                echo "Graphical UI exited before ready" >> "$LOG"
-                echo "Graphical UI details: $GUI_LOG" >> "$LOG"
-                break
-            fi
-            sleep 1
-        done
-    else
-        cleanup_existing_x_servers
-        echo "X server selected: $x_server direct fallback" >> "$LOG"
-        "$x_server" "$GUI_DISPLAY" "vt$GUI_VT" -nolisten tcp -ac -noreset -s 0 -dpms -br >> "$GUI_LOG" 2>&1 &
-        XORG_PID="$!"
+    for wait_count in $(seq 1 "$XORG_START_TIMEOUT"); do
+        [ -S "$GUI_SOCKET" ] && break
+        if ! kill -0 "$XORG_PID" 2>/dev/null; then
+            echo "Xorg exited before display socket was ready" >> "$LOG"
+            break
+        fi
+        sleep 1
+    done
 
-        for wait_count in $(seq 1 "$XORG_START_TIMEOUT"); do
-            [ -S "$GUI_SOCKET" ] && break
-            if ! kill -0 "$XORG_PID" 2>/dev/null; then
-                echo "Xorg exited before display socket was ready" >> "$LOG"
-                break
-            fi
-            sleep 1
-        done
-
-        if [ -S "$GUI_SOCKET" ]; then
-            sleep 1
-            for attempt in $(seq 1 "$GUI_CLIENT_ATTEMPTS"); do
-                echo "Starting graphical installer client, attempt $attempt/$GUI_CLIENT_ATTEMPTS" >> "$LOG"
-                rm -f "$GUI_READY_FILE" "$GUI_HEARTBEAT_FILE"
-                DISPLAY="$GUI_DISPLAY" XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui >> "$GUI_LOG" 2>&1 &
-                GUI_PID="$!"
-                for wait_count in $(seq 1 "$GUI_READY_TIMEOUT"); do
-                    if gui_running; then
-                        chvt "$GUI_VT" 2>/dev/null || true
-                        echo "Graphical installer UI ready" >> "$LOG"
-                        return 0
-                    fi
-                    kill -0 "$GUI_PID" 2>/dev/null || break
-                    sleep 1
-                done
-
-                if [ -n "${GUI_PID:-}" ] && kill -0 "$GUI_PID" 2>/dev/null; then
-                    kill "$GUI_PID" 2>/dev/null || true
-                    sleep 1
-                    kill -9 "$GUI_PID" 2>/dev/null || true
+    if [ -S "$GUI_SOCKET" ]; then
+        sleep 1
+        for attempt in $(seq 1 "$GUI_CLIENT_ATTEMPTS"); do
+            echo "Starting graphical installer client, attempt $attempt/$GUI_CLIENT_ATTEMPTS" >> "$LOG"
+            rm -f "$GUI_READY_FILE" "$GUI_HEARTBEAT_FILE"
+            DISPLAY="$GUI_DISPLAY" XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui >> "$GUI_LOG" 2>&1 &
+            GUI_PID="$!"
+            for wait_count in $(seq 1 "$GUI_READY_TIMEOUT"); do
+                if gui_running; then
+                    chvt "$GUI_VT" 2>/dev/null || true
+                    echo "Graphical installer UI ready" >> "$LOG"
+                    return 0
                 fi
+                kill -0 "$GUI_PID" 2>/dev/null || break
                 sleep 1
             done
-        fi
+
+            if [ -n "${GUI_PID:-}" ] && kill -0 "$GUI_PID" 2>/dev/null; then
+                kill "$GUI_PID" 2>/dev/null || true
+                sleep 1
+                kill -9 "$GUI_PID" 2>/dev/null || true
+            fi
+            sleep 1
+        done
     fi
 
     echo "Graphical UI did not report ready; falling back to terminal UI" >> "$LOG"
     echo "Graphical UI details: $GUI_LOG" >> "$LOG"
     stop_graphical_ui
-    chvt 1 2>/dev/null || true
+    prepare_terminal_ui
     return 1
 }
 
@@ -455,6 +423,14 @@ handle_live_keys() {
 }
 
 render_current_screen() {
+    local log_size render_key
+    log_size="$(stat -c %s "$LOG" 2>/dev/null || echo 0)"
+    render_key="$(current_stage):$UI_MODE:$log_size"
+    [ "$render_key" != "$LAST_RENDER_KEY" ] || {
+        render_serial_status
+        return 0
+    }
+    LAST_RENDER_KEY="$render_key"
     case "$UI_MODE" in
         details) render_details ;;
         *) render_progress ;;
@@ -491,36 +467,10 @@ collect_debug() {
 }
 
 copy_logs_to_windows_best_effort() {
-    local win="" fs tmp log_root log_dir
-
-    win="$(cat "$LOG_DIR/windows-partition" 2>/dev/null || true)"
-    [ -n "$win" ] && [ -b "$win" ] || return 0
-    fs="$(blkid -s TYPE -o value "$win" 2>/dev/null || true)"
-    [ "$fs" = "ntfs" ] || return 0
-    tmp="/mnt/libertix-logcopy"
-    mkdir -p "$tmp"
-    mount -t ntfs-3g "$win" "$tmp" 2>/dev/null || return 0
-    if mountpoint -q "$tmp"; then
-        log_root="$tmp/LibertixInstallLogs"
-        log_dir="$log_root/$RUN_ID"
-        mkdir -p "$log_dir" "$log_root/latest" 2>/dev/null || true
-        cp -f "$LOG" "$log_dir/install.log" 2>/dev/null || true
-        cp -f "$GUI_LOG" "$log_dir/gui.log" 2>/dev/null || true
-        cp -f "$DEBUG_LOG" "$log_dir/debug.log" 2>/dev/null || true
-        cp -f "$STAGE_FILE" "$log_dir/stage.txt" 2>/dev/null || true
-        cp -f "$FAIL_FILE" "$log_dir/failure.txt" 2>/dev/null || true
-        cp -f "$RESULT_FILE" "$log_dir/result.env" 2>/dev/null || true
-        cp -f "$LOG" "$log_root/latest/install.log" 2>/dev/null || true
-        cp -f "$GUI_LOG" "$log_root/latest/gui.log" 2>/dev/null || true
-        cp -f "$DEBUG_LOG" "$log_root/latest/debug.log" 2>/dev/null || true
-        cp -f "$STAGE_FILE" "$log_root/latest/stage.txt" 2>/dev/null || true
-        cp -f "$FAIL_FILE" "$log_root/latest/failure.txt" 2>/dev/null || true
-        cp -f "$RESULT_FILE" "$log_root/latest/result.env" 2>/dev/null || true
-        if grep -q '^LIBERTIX_INSTALL_SUCCESS=true$' "$RESULT_FILE" 2>/dev/null; then
-            rm -f "$tmp/LibertixTools/uefi-transaction.json" 2>/dev/null || true
-        fi
-        sync
-        umount "$tmp" 2>/dev/null || true
+    if /usr/local/sbin/libertix-copy-logs "$RUN_ID"; then
+        LOG_COPY_STATUS="success"
+    else
+        LOG_COPY_STATUS="failed"
     fi
 }
 
@@ -578,7 +528,11 @@ success_screen_and_reboot() {
                 screen_header
                 printf '\n Installation terminee et verifiee.\n'
                 printf ' Redemarrage automatique dans %s seconde(s).\n\n' "$remaining"
-                printf ' Logs copies dans C:\\LibertixInstallLogs quand Windows est disponible.\n'
+                if [ "$LOG_COPY_STATUS" = "success" ]; then
+                    printf ' Logs verifies dans C:\\LibertixInstallLogs.\n'
+                else
+                    printf ' ATTENTION: copie des logs Windows en echec.\n'
+                fi
             } | write_tty1_screen
         fi
         render_serial_status
@@ -671,7 +625,7 @@ while kill -0 "$pid" 2>/dev/null; do
     elif graphical_ui_started; then
         echo "Graphical UI stopped or became unhealthy; falling back to terminal UI" >> "$LOG"
         stop_graphical_ui
-        chvt 1 2>/dev/null || true
+        prepare_terminal_ui
         render_current_screen
     else
         handle_live_keys

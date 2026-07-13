@@ -31,7 +31,7 @@ class ValidationRequest(BaseModel):
     vms: list[str] | None = Field(default=None, description="VM selectors, e.g. vm2")
     vm: str | None = Field(default=None, description="Single VM selector shortcut")
     source: SourceMode = Field(
-        default="remote",
+        default="local",
         description="Build source: remote clones origin/branch, local copies this working tree",
     )
 

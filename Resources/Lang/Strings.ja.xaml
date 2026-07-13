@@ -64,6 +64,50 @@
     <system:String x:Key="WarningConfirmCheckbox">リスクを理解し、重要なデータをバックアップしました</system:String>
     <system:String x:Key="WarningConfirmButton">理解しました、続行</system:String>
 
+    <!-- 互換性チェック -->
+    <system:String x:Key="CompatibilityTitle">互換性チェック</system:String>
+    <system:String x:Key="CompatibilityDescription">続行する前に、Libertix がメモリ、ファームウェア、ストレージを確認します。</system:String>
+    <system:String x:Key="CompatibilityStarting">チェックを開始しています...</system:String>
+    <system:String x:Key="CompatibilityRetry">再試行</system:String>
+    <system:String x:Key="CompatibilityContinue">続行</system:String>
+    <system:String x:Key="CompatibilityRunning">このコンピューターを確認しています...</system:String>
+    <system:String x:Key="CompatibilityLowMemorySuccess">このコンピューターは互換性があります。省メモリモードを使用します。</system:String>
+    <system:String x:Key="CompatibilitySuccess">このコンピューターは Libertix と互換性があります。</system:String>
+    <system:String x:Key="CompatibilityWarningPrefix">警告: </system:String>
+    <system:String x:Key="CompatibilityUnexpectedPrefix">COMPAT_E_UNEXPECTED: </system:String>
+
+    <!-- ファイル共有 -->
+    <system:String x:Key="SharingTitle">ファイル共有</system:String>
+    <system:String x:Key="SharingDescription">各システムからアクセスできるファイルを選択してください。</system:String>
+    <system:String x:Key="SharingWindowsToLinuxTitle">Windows のファイルを Mint に表示</system:String>
+    <system:String x:Key="SharingWindowsToLinuxDescription">各 Windows プロファイルはファイルマネージャーに User_名前として表示されます。</system:String>
+    <system:String x:Key="SharingLinuxToWindowsTitle">Linux のファイルを Windows に表示（読み取り専用）</system:String>
+    <system:String x:Key="SharingLinuxToWindowsDescription">Windows は ext4 パーティションを変更せずに Linux のファイルを参照できます。</system:String>
+
+    <!-- UEFI ブート回復 -->
+    <system:String x:Key="UefiFallbackTitle">UEFI ブートでインストーラーを起動できませんでした</system:String>
+    <system:String x:Key="UefiFallbackDescription">live のマーカーがないまま Windows に戻りました。Libertix は検証済みのローカルコピーを保持しており、検証済みの UEFI ファームウェアエントリから live を再起動できます。</system:String>
+    <system:String x:Key="UefiFallbackChecking">回復状態を確認しています...</system:String>
+    <system:String x:Key="UefiFallbackCancel">キャンセルして Windows を復元</system:String>
+    <system:String x:Key="UefiFallbackUseFirmware">ファームウェアブートを使用</system:String>
+    <system:String x:Key="UefiFallbackReboot">再起動</system:String>
+    <system:String x:Key="UefiFallbackStateMissing">UEFI 回復状態が見つかりません。</system:String>
+    <system:String x:Key="UefiFallbackStateIncomplete">UEFI 回復状態が不完全です。</system:String>
+    <system:String x:Key="UefiFallbackBootNextFailedLog">BootNext は live に到達しませんでした。検証済みのファームウェア方式を使用できます。</system:String>
+    <system:String x:Key="UefiFallbackReady">UEFI ファームウェアエントリを使用して Libertix を再起動するか選択してください。</system:String>
+    <system:String x:Key="UefiFallbackLoadFailed">UEFI 回復を読み込めません。</system:String>
+    <system:String x:Key="UefiFallbackErrorPrefix">エラー: </system:String>
+    <system:String x:Key="UefiFallbackPreparingFirmware">UEFI ファームウェアブートを準備しています...</system:String>
+    <system:String x:Key="UefiFallbackFirmwareFailedFormat">ファームウェアブートの準備に失敗しました (rc={0})。</system:String>
+    <system:String x:Key="UefiFallbackFirmwareReady">ファームウェアブートの準備が完了しました。live を起動するには再起動してください。</system:String>
+    <system:String x:Key="UefiFallbackPreparationFailed">フォールバックの準備に失敗しました。</system:String>
+    <system:String x:Key="UefiFallbackRestoring">初期 UEFI 状態を復元しています...</system:String>
+    <system:String x:Key="UefiFallbackRestoreFailedFormat">UEFI の復元に失敗しました (rc={0})。</system:String>
+    <system:String x:Key="UefiFallbackWindowsRestored">Windows を復元しました。Libertix を終了します。</system:String>
+    <system:String x:Key="UefiFallbackCancelledLog">UEFI トランザクションをキャンセルし、一時ファイルを削除するよう設定しました。</system:String>
+    <system:String x:Key="UefiFallbackRestoreFailed">UEFI の復元に失敗しました。</system:String>
+    <system:String x:Key="UefiFallbackTimeoutLog">エラー: 回復処理が 30 分の制限時間を超えました</system:String>
+
     <!-- Apply Changes -->
     <system:String x:Key="ApplyChangesTitle">変更を適用</system:String>
     <system:String x:Key="ApplyChangesWaiting">パーティション作成の準備完了</system:String>

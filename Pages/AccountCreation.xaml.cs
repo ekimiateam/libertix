@@ -10,12 +10,18 @@ namespace Libertix.Pages
 {
     public partial class AccountCreation : Page
     {
+        private readonly InstallationState _installationState;
         private const string STATE_KEY = "AccountCreation";
         private readonly Regex usernameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$");
         private readonly Regex hostnameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$");
 
-        public AccountCreation()
+        public AccountCreation() : this(((App)Application.Current).InstallationState)
         {
+        }
+
+        public AccountCreation(InstallationState installationState)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             UpdateDefaultValues();
             LoadState();
@@ -161,7 +167,7 @@ namespace Libertix.Pages
             SaveState();
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new ResizeDisk(),
+                new SharingOptionsPage(_installationState),
                 TimeSpan.FromSeconds(0.3),
                 slideLeft: false);
         }
@@ -175,9 +181,12 @@ namespace Libertix.Pages
                 ComputerName = HostnameBox.Text
             };
 
-            App.Current.Properties["AccountInfo"] = accountInfo;
+            _installationState.Account = accountInfo;
             SaveState();
-            NavigationHelper.NavigateWithAnimation(NavigationService, new WarningConfirmation(), TimeSpan.FromSeconds(0.3));
+            NavigationHelper.NavigateWithAnimation(
+                NavigationService,
+                new WarningConfirmation(_installationState),
+                TimeSpan.FromSeconds(0.3));
         }
 
         private void PasswordBox_PreviewExecuted(object sender, ExecutedRoutedEventArgs e)

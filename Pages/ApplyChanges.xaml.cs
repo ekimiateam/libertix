@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -21,51 +22,29 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges : Page
     {
+        private readonly InstallationState _installationState;
         private double _linuxSizeGB;
         private const string RecoveryTaskName = "LibertixInstallRecovery";
         private const string RecoveryRoot = @"C:\LibertixInstallRecovery";
         private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
         private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
         private const int Aria2MaxConnections = 5;
+        private const string WindowsShareRoot = @"C:\ProgramData\Libertix\WindowsShare";
+        private const string Ext4SetupFileName = "ext4-win-driver-0.2.2-x64-Setup.exe";
+        private const string Ext4SetupSha256 = "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031";
         private bool _isRunning = false;
         private bool _uefiDownloadingInstallerIso = false;
         private StoragePreflightInfo _storagePreflight;
         private bool _biosRecoveryGuardInstalled;
 
-        private sealed class StoragePreflightInfo
+
+        public ApplyChanges() : this(((App)Application.Current).InstallationState)
         {
-            public FirmwareType Firmware { get; set; }
-            public string SystemDrive { get; set; }
-            public int SystemDiskNumber { get; set; }
-            public int SystemPartitionNumber { get; set; }
-            public long SystemPartitionOffset { get; set; }
-            public long SystemPartitionSize { get; set; }
-            public int BootPartitionNumber { get; set; }
-            public long BootPartitionOffset { get; set; }
-            public long BootPartitionSize { get; set; }
-            public string SystemDiskUniqueId { get; set; }
-            public long SystemDiskSize { get; set; }
-            public string PartitionStyle { get; set; }
-            public int RecoveryPartitionNumber { get; set; }
-            public long RecoveryPartitionOffset { get; set; }
-            public long RecoveryPartitionSize { get; set; }
-            public bool BitLockerSafe { get; set; }
-            public string BitLockerState { get; set; }
         }
 
-        private enum FirmwareType
+        public ApplyChanges(InstallationState installationState)
         {
-            Unknown = 0,
-            Bios = 1,
-            Uefi = 2,
-            Max = 3
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool GetFirmwareType(out FirmwareType firmwareType);
-
-        public ApplyChanges()
-        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             LoadSummary();
             Loaded += ApplyChanges_Loaded;
@@ -80,7 +59,7 @@ namespace Libertix.Pages
         private void LoadSummary()
         {
             // Load Linux size from saved state
-            var stateKey = $"ResizeDisk_{(App.Current.Properties["SelectedDistro"] as DistroInfo)?.Name}";
+            var stateKey = $"ResizeDisk_{_installationState.SelectedDistro?.Name}";
             var state = StateManager.GetState(stateKey);
             if (state?.State is System.Collections.Generic.Dictionary<string, double> savedState &&
                 savedState.TryGetValue("LinuxSize", out var linuxSize))
@@ -95,7 +74,10 @@ namespace Libertix.Pages
             {
                 try
                 {
-                    var result = RunProcess("diskpart.exe", $"/s \"{scriptPath}\"", waitMs: 120000);
+                    var result = RunProcess(
+                        "diskpart.exe",
+                        $"/s \"{scriptPath}\"",
+                        waitMs: (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds);
                     if (result.exitCode != 0)
                         return $"Error: diskpart failed rc={result.exitCode}\n{result.output}\n{result.error}";
                     return result.output;
@@ -113,7 +95,7 @@ namespace Libertix.Pages
 
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new WarningConfirmation(),
+                new WarningConfirmation(_installationState),
                 TimeSpan.FromSeconds(0.3),
                 slideLeft: false);
         }
@@ -138,6 +120,8 @@ namespace Libertix.Pages
 
                 FirmwareType firmware = DetectFirmwareTypeOrThrow();
                 _storagePreflight = await RunStoragePreflightAsync(firmware);
+                if (!await PrepareWindowsSharePayloadAsync())
+                    throw new InvalidOperationException("Windows read-only Linux sharing payload preparation failed.");
 
                 if (firmware == FirmwareType.Uefi)
                 {
@@ -162,6 +146,7 @@ namespace Libertix.Pages
                     return;
                 }
                 Log($"ERROR: {ex.Message}");
+                CleanupPendingWindowsSharePayload();
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
                 BackButton.IsEnabled = true;
                 _isRunning = false;
@@ -201,7 +186,7 @@ namespace Libertix.Pages
             }
 
             int installerSizeGB = Math.Max(20, (int)Math.Round(_linuxSizeGB));
-            if (!(App.Current.Properties["AccountInfo"] is AccountInfo account) ||
+            if (!(_installationState.Account is AccountInfo account) ||
                 string.IsNullOrWhiteSpace(account.Username) ||
                 string.IsNullOrWhiteSpace(account.Password) ||
                 string.IsNullOrWhiteSpace(account.ComputerName))
@@ -216,6 +201,12 @@ namespace Libertix.Pages
             string systemLang = Localization.GetLinuxLocale();
             string keyboardLayout = Localization.GetKeyboardLayout();
             string timezone = Localization.GetWindowsTimezoneAsLinux();
+            bool lowMemoryMode =
+                _installationState.Compatibility is CompatibilityInfo compatibility &&
+                compatibility.LowMemoryMode;
+            SharingOptions sharingOptions =
+                _installationState.Sharing;
+            string windowsProfilesJsonBase64 = GetWindowsProfilesJsonBase64();
 
             UpdateProgress(5, "Préparation de l'installation UEFI...");
             Log($"UEFI installer partition size: {installerSizeGB}GB");
@@ -240,7 +231,11 @@ namespace Libertix.Pages
                 Timezone = timezone,
                 BootStrategy = "BootNext",
                 RecoveryRoot = recovery.RecoveryRoot,
-                RecoveryRunId = recovery.RunId
+                RecoveryRunId = recovery.RunId,
+                LowMemoryMode = lowMemoryMode,
+                ShareWindowsFilesInLinux = sharingOptions.ShareWindowsFilesInLinux,
+                ShareLinuxFilesInWindows = sharingOptions.ShareLinuxFilesInWindows,
+                WindowsProfilesJsonBase64 = windowsProfilesJsonBase64
             });
             File.Copy(configPath, recovery.ConfigPath, true);
             WriteUefiRecoveryState(recovery);
@@ -254,7 +249,7 @@ namespace Libertix.Pages
                 exitCode = await RunStreamingProcessAsync(
                     powershell,
                     arguments,
-                    TimeSpan.FromHours(6.5),
+                    WindowsProcessTimeouts.InstallerOperation,
                     line => HandleUefiInstallerOutput(line));
             }
             finally
@@ -265,6 +260,7 @@ namespace Libertix.Pages
             if (exitCode != 0)
             {
                 DeleteUefiRecoverySession(recovery);
+                CleanupPendingWindowsSharePayload();
                 Log($"ERROR: UEFI installer preparation failed with rc={exitCode}");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
                 BackButton.IsEnabled = true;
@@ -282,9 +278,10 @@ namespace Libertix.Pages
                 var revert = await Task.Run(() => RunProcess(
                     powershell,
                     $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert",
-                    300000));
+                    (int)WindowsProcessTimeouts.DiskImageOperation.TotalMilliseconds));
                 Log($"UEFI revert after recovery-agent failure: rc={revert.exitCode}");
                 DeleteUefiRecoverySession(recovery);
+                CleanupPendingWindowsSharePayload();
                 throw;
             }
 
@@ -391,7 +388,10 @@ namespace Libertix.Pages
                 $"-PromptTaskName {QuoteArgument(recovery.PromptTaskName)} " +
                 $"-PromptLauncher {QuoteArgument(promptLauncher)} " +
                 $"-PromptUser {QuoteArgument(WindowsIdentity.GetCurrent().Name)}";
-            var result = RunProcess(powershell, registrationArguments, waitMs: 30000);
+            var result = RunProcess(
+                powershell,
+                registrationArguments,
+                waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds);
             if (result.exitCode != 0)
                 throw new InvalidOperationException($"Cannot create UEFI recovery tasks: {result.output} {result.error}".Trim());
 
@@ -658,7 +658,7 @@ namespace Libertix.Pages
             await Task.Delay(3000);
 
             // Step 4: Download ISO
-            var selectedDistroConfig = App.Current.Properties["SelectedDistro"] as DistroInfo;
+            var selectedDistroConfig = _installationState.SelectedDistro;
             string isoUrl = selectedDistroConfig?.IsoUrl ?? "";
 
             if (string.IsNullOrEmpty(isoUrl))
@@ -709,6 +709,15 @@ namespace Libertix.Pages
                 return;
             }
 
+            bool biosLowMemoryMode =
+                _installationState.Compatibility is CompatibilityInfo biosCompatibility &&
+                biosCompatibility.LowMemoryMode;
+            if (biosLowMemoryMode && !await ConfigureBiosLowMemoryBootAsync(tempIsoPath))
+            {
+                await FailBiosPreparationAndRollbackAsync("Failed to configure low-memory live boot");
+                return;
+            }
+
             // Cleanup temp ISO
             try
             {
@@ -719,7 +728,7 @@ namespace Libertix.Pages
 
             // Step 6: keep the large Mint ISO on the Windows NTFS partition.
             // The live system remounts this path read-only after partitioning.
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo selectedDistro &&
+            if (_installationState.SelectedDistro is DistroInfo selectedDistro &&
                 !string.IsNullOrEmpty(selectedDistro.IsoInstaller) &&
                 !string.IsNullOrEmpty(selectedDistro.IsoInstallerFileName))
             {
@@ -781,7 +790,7 @@ namespace Libertix.Pages
             {
                 ["grldr"] = "124988a6091248111f5d372ad210f21250a42cfd05d9d6366be28347b6368675",
                 ["grldr.mbr"] = "53fce0d82a09531b1a7af728e712a957db3966835304e8bdae5e350220270b33",
-                ["menu.lst"] = "9351d1477b214f860da85307adff0713cfac725fde46b90944acd5b4617aa747"
+                ["menu.lst"] = "13731be2f7bee147e1da523293caa0a2fd8fdc65c299c7f8419cf050fcaa0760"
             };
             foreach (var file in grubFiles)
             {
@@ -876,6 +885,7 @@ namespace Libertix.Pages
             _isRunning = false;
             if (rollbackSucceeded)
             {
+                CleanupPendingWindowsSharePayload();
                 Log("Automatic rollback completed and verified.");
                 UpdateProgress(0, "Erreur pendant la préparation. Windows a été restauré.");
                 BackButton.IsEnabled = true;
@@ -965,7 +975,10 @@ namespace Libertix.Pages
                 // entry from the offline BCD store as its first cleanup step.
                 string guid = "";
                 var createResult = await Task.Run(() =>
-                    RunProcess(bcdeditPath, "/create /d \"Install Linux\" /application bootsector", 30000));
+                    RunProcess(
+                        bcdeditPath,
+                        "/create /d \"Install Linux\" /application bootsector",
+                        (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds));
                 string output = createResult.output;
                 string error = createResult.error;
 
@@ -1040,7 +1053,10 @@ namespace Libertix.Pages
 
         private async Task RunBcdeditCommandAsync(string bcdeditPath, string arguments)
         {
-            var result = await Task.Run(() => RunProcess(bcdeditPath, arguments, 30000));
+            var result = await Task.Run(() => RunProcess(
+                bcdeditPath,
+                arguments,
+                (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds));
             if (!string.IsNullOrWhiteSpace(result.output))
                 Log($"bcdedit output: {result.output.Trim()}");
             if (!string.IsNullOrWhiteSpace(result.error))
@@ -1072,7 +1088,7 @@ namespace Libertix.Pages
                 Log("ERROR: Storage preflight is missing while writing live config.");
                 return false;
             }
-            if (!(App.Current.Properties["AccountInfo"] is AccountInfo configuredAccount) ||
+            if (!(_installationState.Account is AccountInfo configuredAccount) ||
                 string.IsNullOrWhiteSpace(configuredAccount.Username) ||
                 string.IsNullOrWhiteSpace(configuredAccount.Password) ||
                 string.IsNullOrWhiteSpace(configuredAccount.ComputerName))
@@ -1100,13 +1116,13 @@ namespace Libertix.Pages
 
                     // Get distro info - use IsoInstallerFileName for config
                     string isoFilename = "mint.iso";
-                    if (App.Current.Properties["SelectedDistro"] is DistroInfo distro && !string.IsNullOrEmpty(distro.IsoInstallerFileName))
+                    if (_installationState.SelectedDistro is DistroInfo distro && !string.IsNullOrEmpty(distro.IsoInstallerFileName))
                     {
                         isoFilename = distro.IsoInstallerFileName;
                     }
 
                     string isoWindowsPath = isoFilename;
-                    if (App.Current.Properties["SelectedDistro"] is DistroInfo selectedInstaller &&
+                    if (_installationState.SelectedDistro is DistroInfo selectedInstaller &&
                         !string.IsNullOrEmpty(selectedInstaller.IsoInstallerFileName))
                     {
                         isoWindowsPath = Path.Combine(
@@ -1115,7 +1131,8 @@ namespace Libertix.Pages
                             selectedInstaller.IsoInstallerFileName);
                     }
 
-                    // config.txt is consumed by the live installer after toram.
+                    // The live installer copies these values before reformatting the
+                    // temporary partition, in both toram and low-memory findiso modes.
                     // Keep the values shell-compatible because install-mint.sh sources it.
                     var configLines = new List<string>
                     {
@@ -1135,12 +1152,17 @@ namespace Libertix.Pages
                         $"INSTALLER_PARTITION_OFFSET_BYTES={ShellQuoteValue(installerPartitionOffset.ToString(CultureInfo.InvariantCulture))}",
                         $"EXPECTED_PARTITION_STYLE={ShellQuoteValue(_storagePreflight.PartitionStyle)}",
                         $"RECOVERY_PARTITION_OFFSET_BYTES={ShellQuoteValue(_storagePreflight.RecoveryPartitionOffset.ToString(CultureInfo.InvariantCulture))}",
-                        $"RECOVERY_PARTITION_SIZE_BYTES={ShellQuoteValue(_storagePreflight.RecoveryPartitionSize.ToString(CultureInfo.InvariantCulture))}"
+                        $"RECOVERY_PARTITION_SIZE_BYTES={ShellQuoteValue(_storagePreflight.RecoveryPartitionSize.ToString(CultureInfo.InvariantCulture))}",
+                        $"LOW_MEMORY_MODE={ShellQuoteValue((_installationState.Compatibility is CompatibilityInfo compatibility && compatibility.LowMemoryMode).ToString().ToLowerInvariant())}",
+                        $"SHARE_WINDOWS_FILES_IN_LINUX={ShellQuoteValue(_installationState.Sharing.ShareWindowsFilesInLinux.ToString().ToLowerInvariant())}",
+                        $"SHARE_LINUX_FILES_IN_WINDOWS={ShellQuoteValue(_installationState.Sharing.ShareLinuxFilesInWindows.ToString().ToLowerInvariant())}",
+                        $"WINDOWS_PROFILES_JSON_BASE64={ShellQuoteValue(GetWindowsProfilesJsonBase64())}"
                     };
 
                     // POSIX read loops do not process a final unterminated line. Keep the
                     // manifest newline-terminated so the recovery geometry is always read.
                     File.WriteAllText(configPath, string.Join("\n", configLines) + "\n");
+                    NormalizeRootFileNameCase(@"Z:\", "config.txt");
 
                     Dispatcher.Invoke(() =>
                     {
@@ -1172,7 +1194,7 @@ namespace Libertix.Pages
             var result = await Task.Run(() => RunProcess(
                 powershell,
                 $"-NoProfile -Command {QuoteArgument(command)}",
-                30000));
+                (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds));
             if (result.exitCode != 0)
             {
                 Log($"ERROR: Partition identity query failed: {result.error}");
@@ -1183,262 +1205,83 @@ namespace Libertix.Pages
                 : 0;
         }
 
-        private async Task<bool> DownloadIsoAsync(string url, string destinationPath)
-        {
-            return await DownloadFileWithRetriesAsync(
-                url,
-                destinationPath,
-                attempts: 3,
-                timeout: TimeSpan.FromHours(2),
-                bufferSize: 8192,
-                progressStart: 60,
-                progressSpan: 20,
-                label: "ISO",
-                progressMessage: "Downloading...");
-        }
 
-        private async Task<bool> DownloadInstallerIsoAsync(string url, string destinationPath)
+        private static void NormalizeLiveBootNames(string destinationRoot)
         {
-            return await DownloadFileWithRetriesAsync(
-                url,
-                destinationPath,
-                attempts: 3,
-                timeout: TimeSpan.FromHours(4),
-                bufferSize: 81920,
-                progressStart: 85,
-                progressSpan: 10,
-                label: "Linux installer ISO",
-                progressMessage: "Downloading Linux ISO...");
-        }
+            string[] liveDirectories = Directory.GetDirectories(destinationRoot)
+                .Where(path => string.Equals(
+                    Path.GetFileName(path), "live", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (liveDirectories.Length != 1)
+                throw new IOException($"Expected exactly one copied live directory; found {liveDirectories.Length}.");
 
-        private async Task<bool> DownloadFileWithRetriesAsync(
-            string url,
-            string destinationPath,
-            int attempts,
-            TimeSpan timeout,
-            int bufferSize,
-            int progressStart,
-            int progressSpan,
-            string label,
-            string progressMessage)
-        {
-            for (int attempt = 1; attempt <= attempts; attempt++)
+            string expectedLiveDirectory = Path.Combine(destinationRoot, "live");
+            if (!string.Equals(
+                Path.GetFileName(liveDirectories[0]), "live", StringComparison.Ordinal))
             {
-                try
-                {
-                    bool aria2Downloaded = await TryDownloadWithBundledAria2Async(
-                        url,
-                        destinationPath,
-                        timeout,
-                        progressStart,
-                        progressSpan,
-                        label,
-                        progressMessage,
-                        attempt,
-                        attempts);
-                    if (aria2Downloaded)
-                    {
-                        Dispatcher.Invoke(() => Log($"{label} download completed with aria2"));
-                        return true;
-                    }
+                string temporaryDirectory = Path.Combine(
+                    destinationRoot, $".libertix-live-case-{Guid.NewGuid():N}");
+                Directory.Move(liveDirectories[0], temporaryDirectory);
+                Directory.Move(temporaryDirectory, expectedLiveDirectory);
+            }
+            if (!string.Equals(
+                Path.GetFileName(new DirectoryInfo(expectedLiveDirectory).FullName),
+                "live",
+                StringComparison.Ordinal))
+            {
+                throw new IOException("Live directory name case normalization failed.");
+            }
 
-                    await DownloadFileOnceAsync(
-                        url,
-                        destinationPath,
-                        timeout,
-                        bufferSize,
-                        progressStart,
-                        progressSpan,
-                        label,
-                        progressMessage,
-                        attempt,
-                        attempts);
-                    Dispatcher.Invoke(() => Log($"{label} download completed"));
-                    return true;
-                }
-                catch (Exception ex)
+            foreach (string expectedName in new[] { "filesystem.squashfs", "initrd.img", "vmlinuz" })
+            {
+                string[] matches = Directory.GetFiles(expectedLiveDirectory)
+                    .Where(path => string.Equals(
+                        Path.GetFileName(path), expectedName, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                if (matches.Length != 1)
+                    throw new IOException($"Expected exactly one copied live file for {expectedName}; found {matches.Length}.");
+
+                string expectedPath = Path.Combine(expectedLiveDirectory, expectedName);
+                if (!string.Equals(Path.GetFileName(matches[0]), expectedName, StringComparison.Ordinal))
                 {
-                    try { if (File.Exists(destinationPath)) File.Delete(destinationPath); } catch { }
-                    Dispatcher.Invoke(() => Log($"{label} download attempt {attempt}/{attempts} failed: {ex.Message}"));
-                    if (attempt == attempts)
-                        return false;
-                    await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
+                    string temporaryPath = Path.Combine(
+                        expectedLiveDirectory, $".libertix-case-{Guid.NewGuid():N}");
+                    File.Move(matches[0], temporaryPath);
+                    File.Move(temporaryPath, expectedPath);
+                }
+                if (!string.Equals(
+                    Path.GetFileName(new FileInfo(expectedPath).FullName),
+                    expectedName,
+                    StringComparison.Ordinal))
+                {
+                    throw new IOException($"Live file name case normalization failed: {expectedName}.");
                 }
             }
-
-            return false;
         }
 
-        private async Task<bool> TryDownloadWithBundledAria2Async(
-            string url,
-            string destinationPath,
-            TimeSpan timeout,
-            int progressStart,
-            int progressSpan,
-            string label,
-            string progressMessage,
-            int attempt,
-            int attempts)
+        private static void NormalizeRootFileNameCase(string directory, string expectedName)
         {
-            string aria2Path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "aria2", "aria2c.exe");
-            if (!File.Exists(aria2Path))
+            string[] matches = Directory.GetFiles(directory)
+                .Where(path => string.Equals(
+                    Path.GetFileName(path), expectedName, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (matches.Length != 1)
+                throw new IOException($"Expected exactly one file for {expectedName}; found {matches.Length}.");
+
+            string expectedPath = Path.Combine(directory, expectedName);
+            if (!string.Equals(Path.GetFileName(matches[0]), expectedName, StringComparison.Ordinal))
             {
-                Dispatcher.Invoke(() => Log($"{label}: bundled aria2 not found, using HTTP downloader"));
-                return false;
+                string temporaryPath = Path.Combine(
+                    directory, $".libertix-case-{Guid.NewGuid():N}");
+                File.Move(matches[0], temporaryPath);
+                File.Move(temporaryPath, expectedPath);
             }
-
-            string destinationDir = Path.GetDirectoryName(destinationPath);
-            if (string.IsNullOrWhiteSpace(destinationDir))
-                destinationDir = Path.GetTempPath();
-
-            string fileName = Path.GetFileName(destinationPath);
-            string downloadDir = destinationDir;
-            string aria2OutputPath = destinationPath;
-
-            // aria2 is less predictable when writing directly to a drive root
-            // on Windows. Use a temp folder, then move the completed file.
-            string root = Path.GetPathRoot(destinationDir);
-            if (!string.IsNullOrEmpty(root) &&
-                string.Equals(destinationDir.TrimEnd('\\'), root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(
+                Path.GetFileName(new FileInfo(expectedPath).FullName),
+                expectedName,
+                StringComparison.Ordinal))
             {
-                downloadDir = Path.Combine(Path.GetTempPath(), "LibertixDownloads", Guid.NewGuid().ToString("N"));
-                aria2OutputPath = Path.Combine(downloadDir, fileName);
-            }
-
-            Directory.CreateDirectory(downloadDir);
-            Directory.CreateDirectory(destinationDir);
-
-            var args = new[]
-            {
-                "--allow-overwrite=true",
-                "--auto-file-renaming=false",
-                "--continue=true",
-                $"--max-connection-per-server={Aria2MaxConnections}",
-                $"--split={Aria2MaxConnections}",
-                "--min-split-size=1M",
-                "--summary-interval=2",
-                "--console-log-level=warn",
-                "--check-certificate=true",
-                $"--dir={downloadDir}",
-                $"--out={fileName}",
-                url
-            };
-
-            Dispatcher.Invoke(() =>
-            {
-                Log($"{label}: downloading with bundled aria2 ({Aria2MaxConnections} connections, attempt {attempt}/{attempts})");
-                UpdateProgress(progressStart, progressMessage);
-            });
-
-            int exitCode = await RunStreamingProcessAsync(
-                aria2Path,
-                string.Join(" ", Array.ConvertAll(args, QuoteArgument)),
-                timeout,
-                line => HandleAria2DownloadOutput(line, label, progressMessage, progressStart, progressSpan));
-
-            if (exitCode != 0)
-            {
-                Dispatcher.Invoke(() => Log($"{label}: aria2 failed with rc={exitCode}, using HTTP fallback"));
-                try { if (File.Exists(aria2OutputPath)) File.Delete(aria2OutputPath); } catch { }
-                return false;
-            }
-
-            if (!File.Exists(aria2OutputPath) || new FileInfo(aria2OutputPath).Length == 0)
-            {
-                Dispatcher.Invoke(() => Log($"{label}: aria2 output missing or empty, using HTTP fallback"));
-                return false;
-            }
-
-            if (!string.Equals(aria2OutputPath, destinationPath, StringComparison.OrdinalIgnoreCase))
-            {
-                if (File.Exists(destinationPath))
-                    File.Delete(destinationPath);
-                File.Move(aria2OutputPath, destinationPath);
-                try { Directory.Delete(downloadDir, true); } catch { }
-            }
-
-            return true;
-        }
-
-        private void HandleAria2DownloadOutput(
-            string line,
-            string label,
-            string progressMessage,
-            int progressStart,
-            int progressSpan)
-        {
-            if (string.IsNullOrWhiteSpace(line))
-                return;
-
-            Log($"aria2 {label}: {line}");
-
-            var match = Regex.Match(line, @"\((\d{1,3})%\)");
-            if (!match.Success)
-                match = Regex.Match(line, @"\b(\d{1,3})%");
-
-            if (!match.Success || !int.TryParse(match.Groups[1].Value, out int percent))
-                return;
-
-            int clamped = Math.Max(0, Math.Min(100, percent));
-            int overallProgress = progressStart + (clamped * progressSpan / 100);
-            UpdateProgress(overallProgress, $"{progressMessage} {clamped}%");
-        }
-
-        private async Task DownloadFileOnceAsync(
-            string url,
-            string destinationPath,
-            TimeSpan timeout,
-            int bufferSize,
-            int progressStart,
-            int progressSpan,
-            string label,
-            string progressMessage,
-            int attempt,
-            int attempts)
-        {
-            using (var client = new HttpClient())
-            {
-                client.Timeout = timeout;
-                using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
-                {
-                    response.EnsureSuccessStatusCode();
-
-                    var totalBytes = response.Content.Headers.ContentLength ?? 0;
-                    var totalMB = totalBytes / 1024.0 / 1024.0;
-                    Dispatcher.Invoke(() => Log($"{label} size: {totalMB:N0} MB (attempt {attempt}/{attempts})"));
-
-                    using (var contentStream = await response.Content.ReadAsStreamAsync())
-                    using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize, true))
-                    {
-                        var buffer = new byte[bufferSize];
-                        long totalRead = 0;
-                        int bytesRead;
-                        var lastProgressUpdate = DateTime.Now;
-
-                        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
-                        {
-                            await fileStream.WriteAsync(buffer, 0, bytesRead);
-                            totalRead += bytesRead;
-
-                            if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)
-                            {
-                                var progressPercent = totalBytes > 0 ? (int)(totalRead * 100 / totalBytes) : 0;
-                                var downloadedMB = totalRead / 1024.0 / 1024.0;
-                                Dispatcher.Invoke(() =>
-                                {
-                                    var overallProgress = progressStart + (progressPercent * progressSpan / 100);
-                                    UpdateProgress(overallProgress, $"{progressMessage} {downloadedMB:N0}/{totalMB:N0} MB ({progressPercent}%)");
-                                });
-                                lastProgressUpdate = DateTime.Now;
-                            }
-                        }
-
-                        if (totalBytes > 0 && totalRead != totalBytes)
-                        {
-                            throw new IOException($"Downloaded size mismatch for {url}: expected {totalBytes} bytes, got {totalRead} bytes");
-                        }
-                    }
-                }
+                throw new IOException($"File name case normalization failed: {expectedName}.");
             }
         }
 
@@ -1472,29 +1315,16 @@ try {{
 ";
                     File.WriteAllText(scriptPath, scriptContent);
 
-                    // Run the mount script
-                    var mountPsi = new ProcessStartInfo
+                    var mountResult = RunProcess(
+                        "powershell.exe",
+                        $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
+                        (int)WindowsProcessTimeouts.DiskImageOperation.TotalMilliseconds);
+                    mountedDrive = mountResult.output.Trim();
+                    if (mountResult.exitCode != 0 || string.IsNullOrEmpty(mountedDrive))
                     {
-                        FileName = "powershell.exe",
-                        Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var process = Process.Start(mountPsi))
-                    {
-                        mountedDrive = process.StandardOutput.ReadToEnd().Trim();
-                        string error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
-
-                        if (process.ExitCode != 0 || string.IsNullOrEmpty(mountedDrive))
-                        {
-                            Dispatcher.Invoke(() => Log($"ERROR mounting ISO: {error}"));
-                            File.Delete(scriptPath);
-                            return false;
-                        }
+                        Dispatcher.Invoke(() => Log($"ERROR mounting ISO: {mountResult.error}"));
+                        File.Delete(scriptPath);
+                        return false;
                     }
 
                     File.Delete(scriptPath);
@@ -1522,36 +1352,26 @@ try {{
 
                     Dispatcher.Invoke(() => Log($"Copying files from {sourceDir} to {destDir}..."));
 
-                    // Use xcopy for reliable copying (robocopy can have issues with ISO)
-                    var copyPsi = new ProcessStartInfo
+                    // Use xcopy for reliable copying (robocopy can have issues with ISO).
+                    var copyResult = RunProcess(
+                        "xcopy",
+                        $"\"{sourceDir}*\" \"{destDir}\" /E /H /Y /Q",
+                        (int)WindowsProcessTimeouts.FileCopy.TotalMilliseconds);
+                    if (copyResult.exitCode != 0)
                     {
-                        FileName = "xcopy",
-                        Arguments = $"\"{sourceDir}*\" \"{destDir}\" /E /H /Y /Q",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var copyProcess = Process.Start(copyPsi))
-                    {
-                        string copyOutput = copyProcess.StandardOutput.ReadToEnd();
-                        string copyError = copyProcess.StandardError.ReadToEnd();
-                        copyProcess.WaitForExit();
-
-                        if (copyProcess.ExitCode != 0)
-                        {
-                            Dispatcher.Invoke(() => Log($"Copy error (exit {copyProcess.ExitCode}): {copyError}"));
-                            return false;
-                        }
-
-                        // Get file count from xcopy output
-                        var lines = copyOutput.Split('\n');
-                        string lastLine = lines.Length > 0 ? lines[lines.Length - 1].Trim() : "done";
-                        if (string.IsNullOrWhiteSpace(lastLine) && lines.Length > 1)
-                            lastLine = lines[lines.Length - 2].Trim();
-                        Dispatcher.Invoke(() => Log($"Copy completed: {(string.IsNullOrWhiteSpace(lastLine) ? "done" : lastLine)}"));
+                        Dispatcher.Invoke(() => Log($"Copy error (exit {copyResult.exitCode}): {copyResult.error}"));
+                        return false;
                     }
+
+                    // Get file count from xcopy output.
+                    var lines = copyResult.output.Split('\n');
+                    string lastLine = lines.Length > 0 ? lines[lines.Length - 1].Trim() : "done";
+                    if (string.IsNullOrWhiteSpace(lastLine) && lines.Length > 1)
+                        lastLine = lines[lines.Length - 2].Trim();
+                    Dispatcher.Invoke(() => Log($"Copy completed: {(string.IsNullOrWhiteSpace(lastLine) ? "done" : lastLine)}"));
+
+                    NormalizeLiveBootNames(destDir);
+                    Dispatcher.Invoke(() => Log("Live boot directory and file name casing verified"));
 
                     Dispatcher.Invoke(() => Log("Files copied successfully"));
                     return true;
@@ -1567,18 +1387,12 @@ try {{
                     try
                     {
                         Dispatcher.Invoke(() => Log("Dismounting ISO..."));
-                        var unmountPsi = new ProcessStartInfo
-                        {
-                            FileName = "powershell.exe",
-                            Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"Dismount-DiskImage -ImagePath '{isoPath.Replace("'", "''")}'\"",
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-
-                        using (var unmountProcess = Process.Start(unmountPsi))
-                        {
-                            unmountProcess.WaitForExit();
-                        }
+                        var unmountResult = RunProcess(
+                            "powershell.exe",
+                            $"-NoProfile -ExecutionPolicy Bypass -Command \"Dismount-DiskImage -ImagePath '{isoPath.Replace("'", "''")}'\"",
+                            (int)WindowsProcessTimeouts.DiskImageOperation.TotalMilliseconds);
+                        if (unmountResult.exitCode != 0)
+                            throw new InvalidOperationException(unmountResult.error);
                         Dispatcher.Invoke(() => Log("ISO dismounted"));
                     }
                     catch (Exception unmountEx)
@@ -1587,6 +1401,166 @@ try {{
                     }
                 }
             });
+        }
+
+        private async Task<bool> ConfigureBiosLowMemoryBootAsync(string verifiedIsoPath)
+        {
+            const string retainedIsoPath = @"C:\libertix-live.iso";
+            try
+            {
+                await Task.Run(() => File.Copy(verifiedIsoPath, retainedIsoPath, true));
+                string expectedHash = _installationState.SelectedDistro?.IsoSha256;
+                if (!await VerifySha256Async(retainedIsoPath, expectedHash, "Libertix low-memory ISO"))
+                    return false;
+
+                string[] bootConfigs = Directory.GetFiles(@"Z:\", "*.cfg", SearchOption.AllDirectories);
+                int updatedCount = 0;
+                foreach (string bootConfig in bootConfigs)
+                {
+                    string content = File.ReadAllText(bootConfig);
+                    string updated = Regex.Replace(
+                        content,
+                        @"(?i)(^|\s)toram(?=\s|$)",
+                        "$1findiso=/libertix-live.iso");
+                    if (updated == content) continue;
+                    File.SetAttributes(bootConfig, FileAttributes.Normal);
+                    File.WriteAllText(bootConfig, updated, new UTF8Encoding(false));
+                    updatedCount++;
+                }
+
+                if (updatedCount == 0)
+                {
+                    Log("ERROR: No BIOS boot configuration accepted low-memory findiso mode.");
+                    return false;
+                }
+                Log($"Low-memory findiso mode configured in {updatedCount} BIOS boot files.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Low-memory BIOS setup failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static string GetWindowsProfilesJsonBase64()
+        {
+            var profiles = new List<string>();
+            var excludedProfiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "All Users",
+                "Default",
+                "Default User",
+                "defaultuser0",
+                "Public",
+                "WDAGUtilityAccount"
+            };
+            string usersRoot = Path.Combine(
+                Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows)),
+                "Users");
+            if (Directory.Exists(usersRoot))
+            {
+                foreach (string profilePath in Directory.GetDirectories(usersRoot))
+                {
+                    try
+                    {
+                        if (!File.Exists(Path.Combine(profilePath, "NTUSER.DAT"))) continue;
+                        string profileName = Path.GetFileName(profilePath);
+                        if (excludedProfiles.Contains(profileName)) continue;
+                        profiles.Add(profileName);
+                    }
+                    catch (UnauthorizedAccessException) { }
+                    catch (IOException) { }
+                }
+            }
+            profiles.Sort(StringComparer.OrdinalIgnoreCase);
+            string json = JsonSerializer.Serialize(profiles.ToArray());
+            return Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
+        }
+
+        private async Task<bool> PrepareWindowsSharePayloadAsync()
+        {
+            if (_storagePreflight == null)
+                return false;
+            if (!(_installationState.Account is AccountInfo account) ||
+                string.IsNullOrWhiteSpace(account.Username))
+                return false;
+
+            SharingOptions options = _installationState.Sharing;
+            try
+            {
+                Directory.CreateDirectory(WindowsShareRoot);
+                string sourceScript = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "Scripts",
+                    "libertix-configure-windows-share.ps1");
+                string targetScript = Path.Combine(WindowsShareRoot, "mount-linux-readonly.ps1");
+                if (!File.Exists(sourceScript))
+                    throw new FileNotFoundException("Windows sharing script is missing.", sourceScript);
+                File.Copy(sourceScript, targetScript, true);
+
+                string setupPath = Path.Combine(WindowsShareRoot, Ext4SetupFileName);
+                if (options.ShareLinuxFilesInWindows)
+                {
+                    bool setupReady = File.Exists(setupPath) &&
+                        await VerifySha256Async(setupPath, Ext4SetupSha256, "ext4 Windows setup cache");
+                    if (!setupReady)
+                    {
+                        string setupUrl = $"{FilepoolConfig.BaseUrl}/{Ext4SetupFileName}";
+                        if (!await DownloadFileWithRetriesAsync(
+                            setupUrl,
+                            setupPath,
+                            attempts: 3,
+                            timeout: TimeSpan.FromMinutes(20),
+                            bufferSize: 81920,
+                            progressStart: 5,
+                            progressSpan: 3,
+                            label: "ext4 Windows read-only support",
+                            progressMessage: "Préparation du partage Windows..."))
+                            return false;
+                        if (!await VerifySha256Async(setupPath, Ext4SetupSha256, "ext4 Windows setup"))
+                            return false;
+                    }
+                }
+
+                long expectedLinuxSize = checked(
+                    (long)Math.Max(20, (int)Math.Round(_linuxSizeGB)) * 1024L * 1024L * 1024L);
+                string configPath = Path.Combine(WindowsShareRoot, "config.json");
+                File.WriteAllText(
+                    configPath,
+                    JsonSerializer.Serialize(new
+                    {
+                        Enabled = options.ShareLinuxFilesInWindows,
+                        SystemDiskNumber = _storagePreflight.SystemDiskNumber,
+                        ExpectedLinuxPartitionSize = expectedLinuxSize,
+                        LinuxUsername = account.Username,
+                        SetupPath = setupPath,
+                        SetupSha256 = Ext4SetupSha256
+                    }),
+                    new UTF8Encoding(false));
+                File.WriteAllText(
+                    Path.Combine(WindowsShareRoot, "pending.marker"),
+                    DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+                    new UTF8Encoding(false));
+                Log($"Windows read-only sharing payload prepared: enabled={options.ShareLinuxFilesInWindows}.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"Windows sharing payload preparation failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static void CleanupPendingWindowsSharePayload()
+        {
+            try
+            {
+                string marker = Path.Combine(WindowsShareRoot, "pending.marker");
+                if (File.Exists(marker) && Directory.Exists(WindowsShareRoot))
+                    Directory.Delete(WindowsShareRoot, true);
+            }
+            catch { }
         }
 
         private async Task<bool> InstallWindowsRecoveryGuardAsync(double requestedLinuxMB)
@@ -1619,7 +1593,7 @@ try {{
                     var bcdBackup = RunProcess(
                         ResolveSystemExecutable("bcdedit.exe", "bcdedit.exe"),
                         $"/export {QuoteArgument(bcdBackupPath)}",
-                        waitMs: 30000);
+                        waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds);
                     if (bcdBackup.exitCode != 0 || !File.Exists(bcdBackupPath))
                     {
                         Dispatcher.Invoke(() => Log(
@@ -1649,7 +1623,10 @@ try {{
 
                     string taskCommand = $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{targetScript}'";
                     string args = $"/Create /TN \"{RecoveryTaskName}\" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR \"{taskCommand}\" /F";
-                    var result = RunProcess("schtasks.exe", args, waitMs: 30000);
+                    var result = RunProcess(
+                        "schtasks.exe",
+                        args,
+                        waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds);
                     Dispatcher.Invoke(() =>
                     {
                         Log($"schtasks create {RecoveryTaskName}: {(result.exitCode == 0 ? "OK" : "Failed")}");
@@ -1670,198 +1647,6 @@ try {{
             });
         }
 
-        private static bool IsRunningAsAdministrator()
-        {
-            using (var identity = WindowsIdentity.GetCurrent())
-            {
-                var principal = new WindowsPrincipal(identity);
-                return principal.IsInRole(WindowsBuiltInRole.Administrator);
-            }
-        }
-
-        private static FirmwareType DetectFirmwareTypeOrThrow()
-        {
-            if (GetFirmwareType(out var firmwareType))
-            {
-                if (firmwareType == FirmwareType.Bios || firmwareType == FirmwareType.Uefi)
-                    return firmwareType;
-                throw new InvalidOperationException($"Unsupported firmware type: {firmwareType}.");
-            }
-
-            int error = Marshal.GetLastWin32Error();
-            throw new InvalidOperationException(
-                $"Windows could not determine the firmware type (Win32 error {error}). " +
-                "Installation was stopped before any disk change.");
-        }
-
-        private async Task<StoragePreflightInfo> RunStoragePreflightAsync(FirmwareType firmware)
-        {
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                "Scripts",
-                "libertix-storage-preflight.ps1");
-            if (!File.Exists(scriptPath))
-                throw new FileNotFoundException("Storage preflight script is missing.", scriptPath);
-
-            string expected = firmware == FirmwareType.Uefi ? "UEFI" : "BIOS";
-            string powershell = ResolveSystemExecutable(
-                "WindowsPowerShell\\v1.0\\powershell.exe",
-                "powershell.exe");
-            var result = await Task.Run(() => RunProcess(
-                powershell,
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
-                $"-ExpectedFirmware {expected} " +
-                (firmware == FirmwareType.Bios ? "-DecryptBitLocker" : ""),
-                firmware == FirmwareType.Bios ? (int)TimeSpan.FromHours(6.5).TotalMilliseconds : 120000));
-
-            if (!string.IsNullOrWhiteSpace(result.output))
-                Log(result.output.Trim());
-            if (!string.IsNullOrWhiteSpace(result.error))
-                Log($"ERROR: {result.error.Trim()}");
-            if (result.exitCode != 0)
-            {
-                throw new InvalidOperationException(
-                    $"Storage preflight failed with rc={result.exitCode}: {result.error}");
-            }
-
-            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string rawLine in result.output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                int separator = rawLine.IndexOf('=');
-                if (separator <= 0)
-                    continue;
-                values[rawLine.Substring(0, separator).Trim()] = rawLine.Substring(separator + 1).Trim();
-            }
-
-            string[] required =
-            {
-                "PREFLIGHT_OK", "FIRMWARE", "SYSTEM_DRIVE", "SYSTEM_DISK_NUMBER",
-                "SYSTEM_PARTITION_NUMBER", "SYSTEM_PARTITION_OFFSET", "SYSTEM_PARTITION_SIZE",
-                "BOOT_PARTITION_NUMBER", "BOOT_PARTITION_OFFSET", "BOOT_PARTITION_SIZE",
-                "SYSTEM_DISK_UNIQUE_ID", "SYSTEM_DISK_SIZE", "PARTITION_STYLE",
-                "RECOVERY_PARTITION_NUMBER", "RECOVERY_PARTITION_OFFSET", "RECOVERY_PARTITION_SIZE",
-                "BITLOCKER_SAFE", "BITLOCKER_STATE"
-            };
-            foreach (string key in required)
-            {
-                if (!values.ContainsKey(key))
-                    throw new InvalidOperationException($"Storage preflight did not return {key}.");
-            }
-            if (!string.Equals(values["PREFLIGHT_OK"], "true", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Storage preflight did not confirm a safe state.");
-
-            var info = new StoragePreflightInfo
-            {
-                Firmware = firmware,
-                SystemDrive = values["SYSTEM_DRIVE"],
-                SystemDiskNumber = int.Parse(values["SYSTEM_DISK_NUMBER"], CultureInfo.InvariantCulture),
-                SystemPartitionNumber = int.Parse(values["SYSTEM_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
-                SystemPartitionOffset = long.Parse(values["SYSTEM_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
-                SystemPartitionSize = long.Parse(values["SYSTEM_PARTITION_SIZE"], CultureInfo.InvariantCulture),
-                BootPartitionNumber = int.Parse(values["BOOT_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
-                BootPartitionOffset = long.Parse(values["BOOT_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
-                BootPartitionSize = long.Parse(values["BOOT_PARTITION_SIZE"], CultureInfo.InvariantCulture),
-                SystemDiskUniqueId = values["SYSTEM_DISK_UNIQUE_ID"],
-                SystemDiskSize = long.Parse(values["SYSTEM_DISK_SIZE"], CultureInfo.InvariantCulture),
-                PartitionStyle = values["PARTITION_STYLE"],
-                RecoveryPartitionNumber = int.Parse(values["RECOVERY_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
-                RecoveryPartitionOffset = long.Parse(values["RECOVERY_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
-                RecoveryPartitionSize = long.Parse(values["RECOVERY_PARTITION_SIZE"], CultureInfo.InvariantCulture),
-                BitLockerSafe = bool.Parse(values["BITLOCKER_SAFE"]),
-                BitLockerState = values["BITLOCKER_STATE"]
-            };
-
-            if (firmware == FirmwareType.Bios && !info.BitLockerSafe)
-                throw new InvalidOperationException("BitLocker is not fully decrypted on the Windows volume.");
-
-            Log($"Storage preflight OK: firmware={expected}, disk={info.SystemDiskNumber}, " +
-                $"partition={info.SystemPartitionNumber}, style={info.PartitionStyle}, " +
-                $"BitLocker={info.BitLockerState}.");
-            return info;
-        }
-
-        private static string ResolveSystemExecutable(string relativeSystemPath, string fallback)
-        {
-            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            string sysnative = Path.Combine(windows, "Sysnative", relativeSystemPath);
-            if (File.Exists(sysnative))
-                return sysnative;
-
-            string system32 = Path.Combine(windows, "System32", relativeSystemPath);
-            if (File.Exists(system32))
-                return system32;
-
-            string system = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), fallback);
-            return File.Exists(system) ? system : fallback;
-        }
-
-        private static string QuoteArgument(string value)
-        {
-            if (value == null)
-                return "\"\"";
-
-            var quoted = new StringBuilder("\"");
-            int backslashes = 0;
-            foreach (char character in value)
-            {
-                if (character == '\\')
-                {
-                    backslashes++;
-                    continue;
-                }
-
-                if (character == '"')
-                {
-                    quoted.Append('\\', backslashes * 2 + 1);
-                    quoted.Append('"');
-                    backslashes = 0;
-                    continue;
-                }
-
-                quoted.Append('\\', backslashes);
-                quoted.Append(character);
-                backslashes = 0;
-            }
-            quoted.Append('\\', backslashes * 2);
-            quoted.Append('"');
-            return quoted.ToString();
-        }
-
-        private static string ShellQuoteValue(string value)
-        {
-            value = value ?? string.Empty;
-            if (value.Contains("\r") || value.Contains("\n"))
-                throw new InvalidOperationException("Config values cannot contain newlines");
-            return "'" + value.Replace("'", "'\\''") + "'";
-        }
-
-        private (int exitCode, string output, string error) RunProcess(string fileName, string arguments, int waitMs)
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            using (var process = Process.Start(psi))
-            {
-                var outputTask = process.StandardOutput.ReadToEndAsync();
-                var errorTask = process.StandardError.ReadToEndAsync();
-                if (!process.WaitForExit(waitMs))
-                {
-                    try { process.Kill(); } catch { }
-                    Task.WaitAll(new Task[] { outputTask, errorTask }, 2000);
-                    return (-1, outputTask.IsCompleted ? outputTask.Result : "", "Process timed out");
-                }
-
-                Task.WaitAll(outputTask, errorTask);
-                return (process.ExitCode, outputTask.Result, errorTask.Result);
-            }
-        }
 
         private async Task<(double freeSpaceSizeMB, double recoveryOffsetMB)> GetFreeSpaceInfoAsync()
         {
@@ -2048,20 +1833,29 @@ exit";
         {
             return await Task.Run(() =>
             {
-                var disable = RunProcess("reagentc.exe", "/disable", waitMs: 60000);
+                var disable = RunProcess(
+                    "reagentc.exe",
+                    "/disable",
+                    waitMs: (int)WindowsProcessTimeouts.ServiceCommand.TotalMilliseconds);
                 if (disable.exitCode != 0)
                 {
                     Log($"WinRE disable was not required: {disable.output} {disable.error}".Trim());
                 }
 
-                var enable = RunProcess("reagentc.exe", "/enable", waitMs: 60000);
+                var enable = RunProcess(
+                    "reagentc.exe",
+                    "/enable",
+                    waitMs: (int)WindowsProcessTimeouts.ServiceCommand.TotalMilliseconds);
                 if (enable.exitCode != 0)
                 {
                     Log($"ERROR: reagentc /enable failed rc={enable.exitCode}: {enable.output} {enable.error}".Trim());
                     return false;
                 }
 
-                var status = RunProcess("reagentc.exe", "/info", waitMs: 60000);
+                var status = RunProcess(
+                    "reagentc.exe",
+                    "/info",
+                    waitMs: (int)WindowsProcessTimeouts.ServiceCommand.TotalMilliseconds);
                 if (status.exitCode != 0)
                 {
                     Log($"ERROR: reagentc /info failed rc={status.exitCode}: {status.output} {status.error}".Trim());
@@ -2139,40 +1933,30 @@ exit";
             {
                 try
                 {
-                    var psi = new ProcessStartInfo
+                    var result = RunProcess(
+                        "diskpart.exe",
+                        $"/s \"{scriptPath}\"",
+                        (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds);
+                    string output = result.output;
+                    string error = result.error;
+
+                    Dispatcher.Invoke(() =>
                     {
-                        FileName = "diskpart.exe",
-                        Arguments = $"/s \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
+                        if (!string.IsNullOrWhiteSpace(output))
+                            Log(output);
+                        if (!string.IsNullOrWhiteSpace(error))
+                            Log($"ERROR: {error}");
+                    });
 
-                    using (var process = Process.Start(psi))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        string error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
+                    // Check for error keywords in output.
+                    bool hasError = output.ToLower().Contains("introuvable") ||
+                                   output.ToLower().Contains("erreur") ||
+                                   output.ToLower().Contains("error") ||
+                                   output.ToLower().Contains("failed") ||
+                                   output.ToLower().Contains("impossible") ||
+                                   output.ToLower().Contains("insuffisant");
 
-                        Dispatcher.Invoke(() =>
-                        {
-                            if (!string.IsNullOrWhiteSpace(output))
-                                Log(output);
-                            if (!string.IsNullOrWhiteSpace(error))
-                                Log($"ERROR: {error}");
-                        });
-
-                        // Check for error keywords in output
-                        bool hasError = output.ToLower().Contains("introuvable") ||
-                                       output.ToLower().Contains("erreur") ||
-                                       output.ToLower().Contains("error") ||
-                                       output.ToLower().Contains("failed") ||
-                                       output.ToLower().Contains("impossible") ||
-                                       output.ToLower().Contains("insuffisant");
-
-                        return (process.ExitCode == 0 && !hasError, output);
-                    }
+                    return (result.exitCode == 0 && !hasError, output);
                 }
                 catch (Exception ex)
                 {

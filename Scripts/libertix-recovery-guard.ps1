@@ -64,6 +64,42 @@ function Restore-BcdState {
     Write-RecoveryLog "BCD state restored from the pre-install backup."
 }
 
+function Remove-TemporaryBootPayload {
+    foreach ($temporaryBootFile in @(
+        "C:\grldr",
+        "C:\grldr.mbr",
+        "C:\menu.lst",
+        "C:\libertix-live.iso"
+    )) {
+        if (Test-Path -LiteralPath $temporaryBootFile -PathType Leaf) {
+            Remove-Item -LiteralPath $temporaryBootFile -Force -ErrorAction Stop
+            Write-RecoveryLog "Removed temporary boot file: $temporaryBootFile"
+        }
+    }
+}
+
+function Invoke-WindowsShareFinalize {
+    $config = "C:\ProgramData\Libertix\WindowsShare\config.json"
+    $script = "C:\ProgramData\Libertix\WindowsShare\mount-linux-readonly.ps1"
+    if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return }
+    if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
+        throw "Windows share configuration exists but its script is missing."
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ConfigPath $config -Finalize
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows read-only Linux sharing setup failed with rc=$LASTEXITCODE."
+    }
+    Write-RecoveryLog "Windows read-only Linux sharing finalized."
+}
+
+function Remove-PendingWindowsSharePayload {
+    $root = "C:\ProgramData\Libertix\WindowsShare"
+    if (Test-Path -LiteralPath (Join-Path $root "pending.marker") -PathType Leaf) {
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        Write-RecoveryLog "Removed pending Windows sharing payload."
+    }
+}
+
 try {
     Write-RecoveryLog "Recovery guard started."
 
@@ -77,6 +113,8 @@ try {
     )
     if ($success -eq "true" -and $resultIsFresh) {
         Write-RecoveryLog "Successful install marker found; no disk rollback needed."
+        Remove-TemporaryBootPayload
+        Invoke-WindowsShareFinalize
         Remove-RecoveryTask
         Save-RecoveryLog
         Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
@@ -178,13 +216,9 @@ try {
     }
 
     Restore-BcdState
+    Remove-PendingWindowsSharePayload
 
-    foreach ($temporaryBootFile in @("C:\grldr", "C:\grldr.mbr", "C:\menu.lst")) {
-        if (Test-Path -LiteralPath $temporaryBootFile -PathType Leaf) {
-            Remove-Item -LiteralPath $temporaryBootFile -Force -ErrorAction Stop
-            Write-RecoveryLog "Removed temporary boot file: $temporaryBootFile"
-        }
-    }
+    Remove-TemporaryBootPayload
 
     $finalSystemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
     if ($finalSystemPartition.Size -lt $initialSystemSize) {

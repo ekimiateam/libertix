@@ -205,8 +205,8 @@
           <input id="apiKey" type="password" autocomplete="off" />
           <label for="sourceMode">Source build</label>
           <select id="sourceMode">
-            <option value="remote">dev distant</option>
             <option value="local">Working tree local</option>
+            <option value="remote">dev distant</option>
           </select>
           <div class="buttons">
             <button id="saveKey">Enregistrer</button>
@@ -335,7 +335,7 @@
       const stepsBody = document.getElementById("steps");
       const buttons = [...document.querySelectorAll("button")];
 
-      sourceModeInput.value = sessionStorage.getItem("libertix_source_mode") || "remote";
+      sourceModeInput.value = sessionStorage.getItem("libertix_source_mode") || "local";
       linuxUsernameInput.value = sessionStorage.getItem("libertix_linux_username") || "test";
 
       document.getElementById("saveKey").addEventListener("click", () => {
@@ -374,7 +374,7 @@
         const vms = selectedVms();
         return {
           ...(vms.length ? { vms } : {}),
-          source: sourceModeInput.value || "remote",
+          source: sourceModeInput.value || "local",
         };
       }
 

@@ -7,13 +7,17 @@ using System.Windows.Media.Animation;
 using System.Windows.Navigation;
 using Libertix.Helpers;
 using Libertix.Pages;
+using Libertix.Models;
 
 namespace Libertix
 {
     public partial class MainWindow : Window
     {
+        private readonly InstallationState _installationState;
+
         public MainWindow()
         {
+            _installationState = ((App)Application.Current).InstallationState;
             InitializeComponent();
 
             // Detect Windows language and set as default
@@ -31,13 +35,13 @@ namespace Libertix
             LanguageComboBox.SelectedIndex = langIndex;
             Localization.SetLanguage(windowsLang);
 
-            if (App.Current.Properties["UefiRecoveryStatePath"] is string recoveryStatePath &&
+            if (_installationState.UefiRecoveryStatePath is string recoveryStatePath &&
                 !string.IsNullOrWhiteSpace(recoveryStatePath))
             {
                 Dispatcher.BeginInvoke(new Action(() =>
                     NavigationHelper.NavigateWithAnimationInFrame(
                         MainFrame,
-                        new UefiBootFallback(),
+                        new UefiBootFallback(_installationState),
                         TimeSpan.Zero)));
             }
 
@@ -51,7 +55,7 @@ namespace Libertix
             StateManager.ClearState("ChooseDistro"); // Clear state when starting fresh
             NavigationHelper.NavigateWithAnimationInFrame(
                 MainFrame,
-                new ChooseDistro(),
+                new CompatibilityCheck(_installationState),
                 TimeSpan.FromSeconds(0.3));
         }
 
@@ -83,19 +87,19 @@ namespace Libertix
                 switch (pageName)
                 {
                     case "ChooseDistro":
-                        targetPage = new ChooseDistro();
+                        targetPage = new ChooseDistro(_installationState);
                         break;
                     case "ResizeDisk":
-                        targetPage = new ResizeDisk();
+                        targetPage = new ResizeDisk(_installationState);
                         break;
                     case "AccountCreation":
-                        targetPage = new AccountCreation();
+                        targetPage = new AccountCreation(_installationState);
                         break;
                     case "WarningConfirmation":
-                        targetPage = new WarningConfirmation();
+                        targetPage = new WarningConfirmation(_installationState);
                         break;
                     case "ApplyChanges":
-                        targetPage = new ApplyChanges();
+                        targetPage = new ApplyChanges(_installationState);
                         break;
                 }
 

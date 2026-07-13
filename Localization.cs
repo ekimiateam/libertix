@@ -179,5 +179,13 @@ namespace Libertix
         {
             return KeyboardLayouts.TryGetValue(CurrentLanguage, out string layout) ? layout : "us";
         }
+
+        /// <summary>
+        /// Resolve a localized string used by page code-behind.
+        /// </summary>
+        public static string GetString(string key)
+        {
+            return Application.Current.TryFindResource(key) as string ?? key;
+        }
     }
 }

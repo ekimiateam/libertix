@@ -12,7 +12,7 @@
         <TextBlock Grid.Row="0"
                    Margin="32,28,32,12"
                    HorizontalAlignment="Center"
-                   Text="Le demarrage UEFI n'a pas lance l'installateur"
+                   Text="{DynamicResource UefiFallbackTitle}"
                    Foreground="#E0DEF4"
                    FontSize="34"
                    FontWeight="Light"
@@ -20,7 +20,7 @@
                    TextWrapping="Wrap"/>
 
         <StackPanel Grid.Row="1" Width="680" VerticalAlignment="Center">
-            <TextBlock Text="Windows est revenu sans marqueur du live. Libertix a conserve une copie locale verifiee et peut utiliser l'entree firmware UEFI validee pour relancer le live."
+            <TextBlock Text="{DynamicResource UefiFallbackDescription}"
                        Foreground="#E0DEF4"
                        FontSize="17"
                        TextAlignment="Center"
@@ -29,7 +29,7 @@
             <Border Background="#2A273F" BorderBrush="#363252" BorderThickness="1" CornerRadius="8" Padding="18">
                 <StackPanel>
                     <TextBlock x:Name="CurrentStepText"
-                               Text="Verification de l'etat de reprise..."
+                               Text="{DynamicResource UefiFallbackChecking}"
                                Foreground="#E0DEF4"
                                FontSize="16"
                                FontWeight="SemiBold"
@@ -61,21 +61,21 @@
 
         <Grid Grid.Row="2" Margin="24">
             <Button x:Name="CancelButton"
-                    Content="Annuler et restaurer Windows"
+                    Content="{DynamicResource UefiFallbackCancel}"
                     Style="{StaticResource ModernButton}"
                     Width="250"
                     Height="50"
                     HorizontalAlignment="Left"
                     Click="CancelButton_Click"/>
             <Button x:Name="FallbackButton"
-                    Content="Utiliser le demarrage firmware"
+                    Content="{DynamicResource UefiFallbackUseFirmware}"
                     Style="{StaticResource ModernButton}"
                     Width="250"
                     Height="50"
                     HorizontalAlignment="Right"
                     Click="FallbackButton_Click"/>
             <Button x:Name="RebootButton"
-                    Content="Redemarrer"
+                    Content="{DynamicResource UefiFallbackReboot}"
                     Style="{StaticResource ModernButton}"
                     Width="250"
                     Height="50"

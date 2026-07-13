@@ -20,6 +20,7 @@ namespace Libertix
 {
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
+        private readonly InstallationState _installationState;
         private const string STATE_KEY = "ChooseDistro";
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
@@ -49,8 +50,13 @@ namespace Libertix
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        public ChooseDistro()
+        public ChooseDistro() : this(((App)Application.Current).InstallationState)
         {
+        }
+
+        public ChooseDistro(InstallationState installationState)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             _distros = new ObservableCollection<DistroInfo>();
             DataContext = this;
@@ -188,8 +194,11 @@ namespace Libertix
             if (_selectedDistro != null)
             {
                 SaveState();
-                App.Current.Properties["SelectedDistro"] = _selectedDistro;
-                NavigationHelper.NavigateWithAnimation(NavigationService, new ResizeDisk(), TimeSpan.FromSeconds(0.3));
+                _installationState.SelectedDistro = _selectedDistro;
+                NavigationHelper.NavigateWithAnimation(
+                    NavigationService,
+                    new ResizeDisk(_installationState),
+                    TimeSpan.FromSeconds(0.3));
             }
         }
 
@@ -258,27 +267,14 @@ namespace Libertix
             string arguments,
             int timeoutMilliseconds)
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            using (var process = Process.Start(startInfo))
-            {
-                var output = process.StandardOutput.ReadToEndAsync();
-                var error = process.StandardError.ReadToEndAsync();
-                if (!process.WaitForExit(timeoutMilliseconds))
-                {
-                    try { process.Kill(); } catch { }
-                    return (-1, "", "Storage preflight timed out.");
-                }
-                Task.WaitAll(output, error);
-                return (process.ExitCode, output.Result, error.Result);
-            }
+            WindowsProcessResult result = WindowsProcessRunner.Run(
+                fileName,
+                arguments,
+                TimeSpan.FromMilliseconds(timeoutMilliseconds));
+            return (
+                result.ExitCode,
+                result.StandardOutput,
+                result.TimedOut ? "Storage preflight timed out." : result.StandardError);
         }
 
         #endregion
