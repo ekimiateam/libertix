@@ -2,9 +2,11 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 from PIL import Image
 
-from app.clients.vision_llm import VisionLLMClient
+from app.clients.vision_llm import INSTALL_PROGRESS_SYSTEM_PROMPT, VisionLLMClient
+from app.errors import WorkflowError
 
 
 def test_llm_json_verdict(monkeypatch, tmp_path: Path) -> None:
@@ -149,6 +151,21 @@ def test_install_progress_fallback_rejects_reboot_prompt_during_linux_iso_downlo
     assert verdict["still_in_progress"] is True
 
 
+def test_install_progress_fallback_does_not_turn_negative_error_text_into_error() -> None:
+    reasoning = """
+    Scene: Libertix installer.
+    Downloading Mint ISO... 35%
+    1.0GiB/2.8GiB (35%), ETA 29m52s.
+    Aucun message d'erreur n'est présent et aucune invite de redémarrage n'est visible.
+    error_visible: false
+    """
+
+    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
+
+    assert verdict["still_in_progress"] is True
+    assert verdict["error_visible"] is False
+
+
 def test_install_progress_fallback_accepts_final_reboot_screen() -> None:
     reasoning = """
     Visible text:
@@ -201,6 +218,162 @@ def test_install_progress_accepts_llm_json_without_visible_text(
 
     assert verdict.still_in_progress is True
     assert verdict.visible_text
+
+
+def test_install_progress_reads_only_complete_json_from_reasoning(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    final_json = json.dumps(
+        {
+            "iso_download_finished": False,
+            "installation_finished": False,
+            "reboot_prompt_visible": False,
+            "still_in_progress": True,
+            "error_visible": False,
+            "summary": "Mint extraction is still running.",
+            "visible_text": "Extraction de Mint 54%",
+        }
+    )
+    reasoning = (
+        "The schema says installation_finished=true when complete. "
+        "This sentence is reasoning and must not drive the verdict.\n"
+        f"Final answer:\n{final_json}"
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": None, "reasoning": reasoning}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient(
+        "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
+    ).analyze_install_progress(image, "vm2", "Windows UEFI")
+
+    assert verdict.analysis_source == "reasoning_json"
+    assert verdict.installation_finished is False
+    assert verdict.still_in_progress is True
+    assert verdict.visible_text == "Extraction de Mint 54%"
+
+
+def test_install_progress_does_not_infer_state_from_reasoning_prose(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    reasoning = (
+        "The screenshot shows Downloading Mint ISO 42%. "
+        "still_in_progress should therefore be true, but no final JSON was produced."
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": None, "reasoning": reasoning}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with pytest.raises(WorkflowError):
+        VisionLLMClient(
+            "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
+        ).analyze_install_progress(image, "vm2", "Windows UEFI")
+
+
+def test_install_progress_prefers_final_content_over_reasoning(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "iso_download_finished": False,
+            "installation_finished": False,
+            "reboot_prompt_visible": False,
+            "still_in_progress": True,
+            "error_visible": False,
+            "summary": "Download is active.",
+            "visible_text": "Downloading Mint ISO... 42%",
+        }
+    )
+    contradictory_reasoning = json.dumps(
+        {
+            "iso_download_finished": True,
+            "installation_finished": True,
+            "reboot_prompt_visible": True,
+            "still_in_progress": False,
+            "error_visible": False,
+            "summary": "Wrong reasoning verdict.",
+            "visible_text": "Redemarrer 100%",
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": content,
+                            "reasoning": contradictory_reasoning,
+                        }
+                    }
+                ]
+            },
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient(
+        "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
+    ).analyze_install_progress(image, "vm2", "Windows UEFI")
+
+    assert verdict.analysis_source == "strict_json"
+    assert verdict.installation_finished is False
+    assert verdict.still_in_progress is True
+
+
+def test_install_progress_uses_short_english_prompt_and_thinking_budget(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    captured_payload: dict[str, object] = {}
+    content = json.dumps(
+        {
+            "iso_download_finished": False,
+            "installation_finished": False,
+            "reboot_prompt_visible": False,
+            "still_in_progress": True,
+            "error_visible": False,
+            "summary": "Waiting for the next visible state.",
+            "visible_text": "Downloading Mint ISO... 10%",
+        }
+    )
+
+    def fake_post(*_args, **kwargs):
+        captured_payload.update(kwargs["json"])
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    VisionLLMClient(
+        "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
+    ).analyze_install_progress(image, "vm2", "Windows UEFI")
+
+    messages = captured_payload["messages"]
+    assert isinstance(messages, list)
+    assert messages[0]["content"] == INSTALL_PROGRESS_SYSTEM_PROMPT
+    assert len(INSTALL_PROGRESS_SYSTEM_PROMPT) < 1400
+    assert captured_payload["max_tokens"] == 2048
 
 
 def test_install_progress_normalizes_contradictory_final_reboot_json(

@@ -974,6 +974,17 @@ class AutomationService:
                 self._click_reboot_after_preparation(vm, result)
                 reboot_clicked = True
                 continue
+            if (
+                reboot_clicked
+                and verdict.installation_finished
+                and not verdict.active_install_progress_visible
+            ):
+                result.ok(
+                    "automation.uefi_installation_finished",
+                    "Installation UEFI terminée et bureau Linux démarré",
+                    **context,
+                )
+                return
             # Depending on the local vision model, the stable live-stage text
             # can be returned in either visible_text or the concise summary.
             # Inspect both fields so a real live boot is not missed merely

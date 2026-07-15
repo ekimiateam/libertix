@@ -31,6 +31,11 @@ apt autoremove -y 2>/dev/null || true
 ln -sf /dev/null /etc/systemd/system/getty@tty1.service
 rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service
 
+# Keep kernel messages available on ttyS0, but do not start a login prompt on
+# machines that advertise a serial console without a usable serial terminal.
+# Otherwise serial-getty restarts every ten seconds and pollutes diagnostics.
+ln -sf /dev/null /etc/systemd/system/serial-getty@ttyS0.service
+
 /usr/local/lib/libertix/configure-live-boot-splash
 update-initramfs -u -k all
 lsinitramfs /boot/initrd.img-* 2>/dev/null | grep -E "live" | head -5 || true

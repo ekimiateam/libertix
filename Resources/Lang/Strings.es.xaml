@@ -124,5 +124,15 @@
     <system:String x:Key="ApplyChangesError">Ocurrio un error</system:String>
     <system:String x:Key="ApplyChangesReboot">Reiniciar</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">El ordenador se reiniciara para completar la instalacion. Continuar?</system:String>
+    <system:String x:Key="ApplyChangesCancel">Cancelar la instalacion</system:String>
+    <system:String x:Key="ApplyChangesCancelConfirm">Cancelar la instalacion y restaurar Windows? La operacion segura actual se detendra y Libertix ejecutara y verificara la restauracion.</system:String>
+    <system:String x:Key="ApplyChangesCancelInProgress">Cancelacion solicitada. Restaurando Windows...</system:String>
+    <system:String x:Key="ApplyChangesExpandLogs">Ampliar registros</system:String>
+    <system:String x:Key="ApplyChangesLogsTitle">Registros de instalación</system:String>
+    <system:String x:Key="ApplyChangesCloseExpandedLogs">Reducir registros</system:String>
+    <system:String x:Key="CloseConfirmationTitle">Cerrar Libertix</system:String>
+    <system:String x:Key="CloseConfirmationMessage">Realmente desea cerrar Libertix?</system:String>
+    <system:String x:Key="TrayInstallTitle">Instalacion de Libertix en curso</system:String>
+    <system:String x:Key="TrayInstallMessage">La instalacion sigue ejecutandose. Haga doble clic en el icono de Libertix junto al reloj para volver a abrir la ventana.</system:String>
     <system:String x:Key="PartitionSafetyBlockMessage">La instalación está bloqueada hasta resolver este control de seguridad.</system:String>
 </ResourceDictionary>

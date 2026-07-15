@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 import app.services.automation as automation_module
 from app.clients.vision_llm import VisionLLMClient
+from app.clients.vision_models import InstallProgressVerdict
 from app.clients.vnc import VNCClient
 from app.config import Settings
 from app.errors import WorkflowError
@@ -89,6 +90,7 @@ def apply_changes_source() -> str:
         (root / path).read_text(encoding="utf-8-sig")
         for path in (
             "Pages/ApplyChanges.xaml.cs",
+            "Pages/ApplyChanges.Cancellation.cs",
             "Pages/ApplyChanges.Downloads.cs",
             "Pages/ApplyChanges.System.cs",
             "Pages/ApplyChanges.Types.cs",
@@ -1056,6 +1058,58 @@ def test_automation_uefi_monitor_stops_on_live_boot_not_windows_progress() -> No
         )
         is True
     )
+
+
+def test_automation_uefi_monitor_stops_when_mint_desktop_is_seen_after_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    verdicts = iter(
+        (
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=True,
+                reboot_prompt_visible=True,
+                still_in_progress=False,
+                error_visible=False,
+                summary="Préparation UEFI terminée, bouton Redémarrer visible.",
+                visible_text="Libertix 100% Redémarrer",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=True,
+                reboot_prompt_visible=False,
+                still_in_progress=False,
+                error_visible=False,
+                summary="Bureau Linux Mint opérationnel après installation.",
+                visible_text="Bienvenue à Linux Mint 22.3 Cinnamon",
+            ),
+        )
+    )
+    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"/tmp/{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda _capture, _name, _os: next(verdicts),
+    )
+    reboot_clicks: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "_click_reboot_after_preparation",
+        lambda selected_vm, _result: reboot_clicks.append(selected_vm.name),
+    )
+    result = ResultBuilder("automation")
+
+    service._monitor_uefi_until_reboot(vm, result)  # noqa: SLF001
+
+    assert reboot_clicks == ["vm3"]
+    assert result.steps[-1].step == "automation.uefi_installation_finished"
 
 
 def test_bios_final_grub_waits_for_manual_selection() -> None:

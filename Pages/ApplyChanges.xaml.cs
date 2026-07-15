@@ -12,9 +12,11 @@ using System.Security.AccessControl;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Libertix.Helpers;
 using Libertix.Models;
 
@@ -30,7 +32,7 @@ namespace Libertix.Pages
         private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
         private const int Aria2MaxConnections = 5;
         private const string WindowsShareRoot = @"C:\ProgramData\Libertix\WindowsShare";
-        private const string Ext4SetupFileName = "ext4-win-driver-0.2.2-x64-Setup.exe";
+        private const string Ext4SetupFileName = "ext4-win-driver.exe";
         private const string Ext4SetupSha256 = "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031";
         private bool _isRunning = false;
         private bool _uefiDownloadingInstallerIso = false;
@@ -46,6 +48,7 @@ namespace Libertix.Pages
         {
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
+            InitializeInstallationControls();
             LoadSummary();
             Loaded += ApplyChanges_Loaded;
         }
@@ -104,7 +107,7 @@ namespace Libertix.Pages
         {
             if (_isRunning) return;
 
-            _isRunning = true;
+            SetInstallationRunning(true);
             BackButton.IsEnabled = false;
 
             try
@@ -113,15 +116,18 @@ namespace Libertix.Pages
                 {
                     Log($"ERROR: Invalid Linux partition size: {_linuxSizeGB:N1}GB");
                     UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                    BackButton.IsEnabled = true;
-                    _isRunning = false;
+                    FinishInstallation(enableBackButton: true);
                     return;
                 }
 
                 FirmwareType firmware = DetectFirmwareTypeOrThrow();
+                _activeFirmware = firmware;
+                ThrowIfCancellationRequested();
                 _storagePreflight = await RunStoragePreflightAsync(firmware);
+                ThrowIfCancellationRequested();
                 if (!await PrepareWindowsSharePayloadAsync())
                     throw new InvalidOperationException("Windows read-only Linux sharing payload preparation failed.");
+                ThrowIfCancellationRequested();
 
                 if (firmware == FirmwareType.Uefi)
                 {
@@ -138,6 +144,10 @@ namespace Libertix.Pages
                     throw new InvalidOperationException("Unsupported firmware type.");
                 }
             }
+            catch (OperationCanceledException)
+            {
+                await HandleCancellationAsync();
+            }
             catch (Exception ex)
             {
                 if (_biosRecoveryGuardInstalled)
@@ -148,8 +158,7 @@ namespace Libertix.Pages
                 Log($"ERROR: {ex.Message}");
                 CleanupPendingWindowsSharePayload();
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
             }
         }
 
@@ -159,8 +168,7 @@ namespace Libertix.Pages
             {
                 Log("ERROR: Administrator privileges are required for UEFI installation.");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
                 return;
             }
 
@@ -171,8 +179,7 @@ namespace Libertix.Pages
             {
                 Log($"ERROR: UEFI installer script missing: {scriptPath}");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
                 return;
             }
 
@@ -180,8 +187,7 @@ namespace Libertix.Pages
             {
                 Log($"ERROR: bundled aria2 missing: {aria2Path}");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
                 return;
             }
 
@@ -193,8 +199,7 @@ namespace Libertix.Pages
             {
                 Log("ERROR: Linux account configuration is missing.");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
                 return;
             }
 
@@ -216,6 +221,7 @@ namespace Libertix.Pages
 
             string powershell = ResolveSystemExecutable("WindowsPowerShell\\v1.0\\powershell.exe", "powershell.exe");
             UefiRecoveryState recovery = CreateUefiRecoverySession();
+            _activeUefiRecovery = recovery;
             string configPath = WriteProtectedUefiConfig(new
             {
                 InstallerPartitionSizeGB = installerSizeGB,
@@ -257,14 +263,16 @@ namespace Libertix.Pages
                 try { if (File.Exists(configPath)) File.Delete(configPath); } catch { }
             }
 
+            if (_installationCancellation.IsCancellationRequested || exitCode == -2)
+                throw new OperationCanceledException(_installationCancellation.Token);
+
             if (exitCode != 0)
             {
                 DeleteUefiRecoverySession(recovery);
                 CleanupPendingWindowsSharePayload();
                 Log($"ERROR: UEFI installer preparation failed with rc={exitCode}");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
                 return;
             }
 
@@ -288,6 +296,7 @@ namespace Libertix.Pages
             UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
             Log("UEFI installation preparation completed successfully.");
             RebootButton.Visibility = Visibility.Visible;
+            FinishInstallation(enableBackButton: false);
         }
 
         private UefiRecoveryState CreateUefiRecoverySession()
@@ -364,29 +373,12 @@ namespace Libertix.Pages
             recovery.Phase = "AwaitingReboot";
             WriteUefiRecoveryState(recovery);
 
-            string launcher = Path.Combine(recovery.RecoveryRoot, "run-recovery-agent.cmd");
-            File.WriteAllText(
-                launcher,
-                "@echo off\r\n" +
-                "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" " +
-                "-NoProfile -ExecutionPolicy Bypass -File \"%~dp0payload\\Scripts\\libertix-uefi-recovery-agent.ps1\" " +
-                "-StatePath \"%~dp0state.json\"\r\n",
-                new UTF8Encoding(false));
-            string promptLauncher = Path.Combine(recovery.RecoveryRoot, "run-recovery-prompt.cmd");
-            File.WriteAllText(
-                promptLauncher,
-                "@echo off\r\n" +
-                "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" " +
-                "-NoProfile -ExecutionPolicy Bypass -File \"%~dp0payload\\Scripts\\libertix-uefi-recovery-agent.ps1\" " +
-                "-StatePath \"%~dp0state.json\" -Action Prompt\r\n",
-                new UTF8Encoding(false));
-
             string registrationArguments =
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(taskRegistrationScript)} " +
+                $"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {QuoteArgument(taskRegistrationScript)} " +
                 $"-StartupTaskName {QuoteArgument(recovery.TaskName)} " +
-                $"-StartupLauncher {QuoteArgument(launcher)} " +
+                $"-AgentPath {QuoteArgument(agent)} " +
                 $"-PromptTaskName {QuoteArgument(recovery.PromptTaskName)} " +
-                $"-PromptLauncher {QuoteArgument(promptLauncher)} " +
+                $"-StatePath {QuoteArgument(Path.Combine(recovery.RecoveryRoot, "state.json"))} " +
                 $"-PromptUser {QuoteArgument(WindowsIdentity.GetCurrent().Name)}";
             var result = RunProcess(
                 powershell,
@@ -522,7 +514,8 @@ namespace Libertix.Pages
             string fileName,
             string arguments,
             TimeSpan timeout,
-            Action<string> onLine)
+            Action<string> onLine,
+            bool observeCancellation = true)
         {
             return await Task.Run(() =>
             {
@@ -554,18 +547,36 @@ namespace Libertix.Pages
                     if (!process.Start())
                         throw new InvalidOperationException($"Failed to start {fileName}");
 
-                    process.BeginOutputReadLine();
-                    process.BeginErrorReadLine();
-
-                    if (!process.WaitForExit((int)timeout.TotalMilliseconds))
+                    SetActiveStreamingProcess(process);
+                    try
                     {
-                        try { process.Kill(); } catch { }
-                        Dispatcher.Invoke(() => Log($"ERROR: process timed out after {timeout.TotalMinutes:N0} minutes"));
-                        return -1;
-                    }
+                        process.BeginOutputReadLine();
+                        process.BeginErrorReadLine();
 
-                    process.WaitForExit();
-                    return process.ExitCode;
+                        var timer = Stopwatch.StartNew();
+                        while (!process.WaitForExit(250))
+                        {
+                            if (observeCancellation && _installationCancellation.IsCancellationRequested)
+                            {
+                                StopProcessTree(process);
+                                return -2;
+                            }
+
+                            if (timer.Elapsed > timeout)
+                            {
+                                StopProcessTree(process);
+                                Dispatcher.Invoke(() => Log($"ERROR: process timed out after {timeout.TotalMinutes:N0} minutes"));
+                                return -1;
+                            }
+                        }
+
+                        process.WaitForExit();
+                        return process.ExitCode;
+                    }
+                    finally
+                    {
+                        ClearActiveStreamingProcess(process);
+                    }
                 }
             });
         }
@@ -575,6 +586,7 @@ namespace Libertix.Pages
             // Query available shrink space first
             Log("Checking available shrink space...");
             double maxShrinkMB = await QueryShrinkSpaceAsync();
+            ThrowIfCancellationRequested();
             Log($"Maximum shrinkable space: {maxShrinkMB / 1024:N1}GB ({maxShrinkMB:N0}MB)");
 
             // The temporary FAT32 live partition is created at the final Linux size.
@@ -587,8 +599,7 @@ namespace Libertix.Pages
                 Log($"  Minimum required: {minRequiredMB / 1024:N1}GB");
                 Log($"  Available: {maxShrinkMB / 1024:N1}GB");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
                 return;
             }
 
@@ -597,12 +608,12 @@ namespace Libertix.Pages
             // installer dies before writing a success marker, Windows can delete
             // the temporary Linux slot and grow C: back on the next startup.
             bool recoveryGuardReady = await InstallWindowsRecoveryGuardAsync(requestedLinuxMB);
+            ThrowIfCancellationRequested();
             if (!recoveryGuardReady)
             {
                 Log("ERROR: Failed to install Windows recovery guard");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                FinishInstallation(enableBackButton: true);
                 return;
             }
 
@@ -611,6 +622,7 @@ namespace Libertix.Pages
             Log($"Step 1: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
 
             bool step1Success = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
+            ThrowIfCancellationRequested();
             if (!step1Success)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to shrink Windows partition (step 1)");
@@ -619,7 +631,7 @@ namespace Libertix.Pages
 
             // Wait for disk to update
             Log("Waiting for disk to update...");
-            await Task.Delay(3000);
+            await Task.Delay(3000, _installationCancellation.Token);
 
             // Step 2: Create FAT32 partition in the free space (no offset - goes right after Windows).
             // It is intentionally sized like the final Linux partition; the live installer reformats it.
@@ -627,6 +639,7 @@ namespace Libertix.Pages
             Log($"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
 
             bool step2Success = await CreateFat32PartitionSimpleAsync(requestedLinuxMB);
+            ThrowIfCancellationRequested();
             if (!step2Success)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to create FAT32 partition");
@@ -639,6 +652,7 @@ namespace Libertix.Pages
             // ReAgentC can no longer reliably update that store.
             Log("Refreshing Windows Recovery Environment registration...");
             bool winReReady = await RefreshWindowsRecoveryRegistrationAsync();
+            ThrowIfCancellationRequested();
             if (!winReReady)
             {
                 await FailBiosPreparationAndRollbackAsync(
@@ -648,14 +662,14 @@ namespace Libertix.Pages
 
             // Wait for disk to update
             Log("Waiting for disk to update...");
-            await Task.Delay(3000);
+            await Task.Delay(3000, _installationCancellation.Token);
 
             Log("Step 3: No second shrink needed; live partition will become the Linux partition.");
 
             // Wait for disk to update
             Log("Waiting for disk to update...");
             UpdateProgress(50, Application.Current.Resources["ApplyChangesWaitDisk"] as string ?? "Waiting for disk update...");
-            await Task.Delay(3000);
+            await Task.Delay(3000, _installationCancellation.Token);
 
             // Step 4: Download ISO
             var selectedDistroConfig = _installationState.SelectedDistro;
@@ -679,6 +693,7 @@ namespace Libertix.Pages
             {
                 Log($"Found local ISO: {localIsoName}, copying...");
                 await Task.Run(() => File.Copy(localIsoPath, tempIsoPath, true));
+                ThrowIfCancellationRequested();
                 downloadSuccess = true;
                 UpdateProgress(80, "ISO copied from local folder");
             }
@@ -686,6 +701,7 @@ namespace Libertix.Pages
             {
                 downloadSuccess = await DownloadIsoAsync(isoUrl, tempIsoPath);
             }
+            ThrowIfCancellationRequested();
 
             if (!downloadSuccess)
             {
@@ -697,12 +713,14 @@ namespace Libertix.Pages
                 await FailBiosPreparationAndRollbackAsync("Libertix BIOS ISO integrity verification failed");
                 return;
             }
+            ThrowIfCancellationRequested();
 
             // Step 5: Mount ISO and copy contents to Z:
             UpdateProgress(80, "Copying ISO contents to Z:...");
             Log("Step 5: Mounting ISO and copying contents to Z:...");
 
             bool copySuccess = await MountAndCopyIsoAsync(tempIsoPath);
+            ThrowIfCancellationRequested();
             if (!copySuccess)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to copy ISO contents");
@@ -745,6 +763,7 @@ namespace Libertix.Pages
                 {
                     Log($"Found local installer ISO: {selectedDistro.IsoInstallerFileName}, copying...");
                     await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
+                    ThrowIfCancellationRequested();
                     installerDownloadSuccess = true;
                     UpdateProgress(95, "Linux installer copied from local folder");
                 }
@@ -752,6 +771,7 @@ namespace Libertix.Pages
                 {
                     installerDownloadSuccess = await DownloadInstallerIsoAsync(selectedDistro.IsoInstaller, installerPath);
                 }
+                ThrowIfCancellationRequested();
 
                 if (!installerDownloadSuccess)
                 {
@@ -766,6 +786,7 @@ namespace Libertix.Pages
                     await FailBiosPreparationAndRollbackAsync("Mint ISO integrity verification failed");
                     return;
                 }
+                ThrowIfCancellationRequested();
                 Log($"Linux installer saved to {installerPath}");
             }
 
@@ -774,6 +795,7 @@ namespace Libertix.Pages
             Log("Step 7: Writing configuration to Z:\\config.txt...");
 
             bool configSuccess = await WriteConfigToFat32Async();
+            ThrowIfCancellationRequested();
             if (!configSuccess)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to write config.txt");
@@ -817,6 +839,7 @@ namespace Libertix.Pages
                 {
                     success = await DownloadFileAsync(url, destPath);
                 }
+                ThrowIfCancellationRequested();
 
                 if (!success)
                 {
@@ -835,9 +858,10 @@ namespace Libertix.Pages
             // Windows remains the default BCD entry for later boots.
             UpdateProgress(98, "Configuring boot entry...");
             Log("Step 9: Configuring GRUB4DOS boot entry...");
-            await Task.Delay(1000);
+            await Task.Delay(1000, _installationCancellation.Token);
 
             bool bootConfigured = await ConfigureBootEntryAsync();
+            ThrowIfCancellationRequested();
             if (!bootConfigured)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to configure boot entry");
@@ -856,6 +880,7 @@ namespace Libertix.Pages
             Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
 
             RebootButton.Visibility = Visibility.Visible;
+            FinishInstallation(enableBackButton: false);
         }
 
         private async Task FailBiosPreparationAndRollbackAsync(string reason)
@@ -876,25 +901,25 @@ namespace Libertix.Pages
                         powershell,
                         $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(recoveryScript)}",
                         TimeSpan.FromMinutes(10),
-                        line => Log($"ROLLBACK: {line}"));
+                        line => Log($"ROLLBACK: {line}"),
+                        observeCancellation: false);
                     rollbackSucceeded = exitCode == 0;
                 }
             }
 
             _biosRecoveryGuardInstalled = !rollbackSucceeded;
-            _isRunning = false;
             if (rollbackSucceeded)
             {
                 CleanupPendingWindowsSharePayload();
                 Log("Automatic rollback completed and verified.");
                 UpdateProgress(0, "Erreur pendant la préparation. Windows a été restauré.");
-                BackButton.IsEnabled = true;
+                FinishInstallation(enableBackButton: true);
             }
             else
             {
                 Log("CRITICAL: Automatic rollback did not complete. Do not retry or power off the machine.");
                 UpdateProgress(0, "Rollback incomplet. Une intervention manuelle est requise.");
-                BackButton.IsEnabled = false;
+                FinishInstallation(enableBackButton: false);
                 MessageBox.Show(
                     "La préparation a échoué et le rollback automatique n'a pas pu être vérifié. " +
                     "Ne relancez pas l'installation et consultez C:\\LibertixInstallRecovery\\recovery.log.",
@@ -911,10 +936,19 @@ namespace Libertix.Pages
                 using (var client = new HttpClient())
                 {
                     client.Timeout = TimeSpan.FromMinutes(5);
-                    var data = await client.GetByteArrayAsync(url);
-                    File.WriteAllBytes(destinationPath, data);
+                    using (var response = await client.GetAsync(url, _installationCancellation.Token))
+                    {
+                        response.EnsureSuccessStatusCode();
+                        var data = await response.Content.ReadAsByteArrayAsync();
+                        ThrowIfCancellationRequested();
+                        File.WriteAllBytes(destinationPath, data);
+                    }
                     return true;
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
@@ -1621,7 +1655,7 @@ try {{
                     });
                     File.WriteAllText(metadataPath, metadata + Environment.NewLine);
 
-                    string taskCommand = $"powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{targetScript}'";
+                    string taskCommand = $"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File '{targetScript}'";
                     string args = $"/Create /TN \"{RecoveryTaskName}\" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR \"{taskCommand}\" /F";
                     var result = RunProcess(
                         "schtasks.exe",
@@ -1976,6 +2010,7 @@ exit";
 
             if (result == MessageBoxResult.Yes)
             {
+                (Application.Current.MainWindow as MainWindow)?.PrepareForSystemRestart();
                 Process.Start("shutdown", "/r /t 0");
             }
         }
@@ -1992,11 +2027,54 @@ exit";
 
         private void Log(string message)
         {
+            string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
             Dispatcher.Invoke(() =>
             {
-                LogOutput.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n");
-                LogOutput.ScrollToEnd();
+                AppendLogLine(LogOutput, line);
+                if (ExpandedLogsOverlay.Visibility == Visibility.Visible)
+                    AppendLogLine(ExpandedLogOutput, line);
             });
+            AppendPersistentLog(line);
+            ApplicationLogger.Write($"INSTALLATION: {message}");
+        }
+
+        private static void AppendLogLine(TextBox output, string line)
+        {
+            const double bottomTolerance = 4.0;
+            bool wasAtBottom =
+                output.ExtentHeight <= output.ViewportHeight ||
+                output.VerticalOffset >=
+                    output.ExtentHeight - output.ViewportHeight - bottomTolerance;
+            double previousOffset = output.VerticalOffset;
+
+            output.AppendText(line + Environment.NewLine);
+            // TextBox updates its scroll extent after the append has returned.
+            // Apply the decision on the next layout pass: follow new lines only
+            // when the user was already at the bottom, otherwise preserve the
+            // exact manual reading position.
+            output.Dispatcher.BeginInvoke(
+                DispatcherPriority.Background,
+                new Action(() =>
+                {
+                    if (wasAtBottom)
+                        output.ScrollToEnd();
+                    else
+                        output.ScrollToVerticalOffset(previousOffset);
+                }));
+        }
+
+        private void ExpandLogsButton_Click(object sender, RoutedEventArgs e)
+        {
+            ExpandedLogOutput.Text = LogOutput.Text;
+            ExpandedLogsOverlay.Visibility = Visibility.Visible;
+            ExpandedLogOutput.ScrollToEnd();
+            ExpandedLogOutput.Focus();
+        }
+
+        private void CloseExpandedLogsButton_Click(object sender, RoutedEventArgs e)
+        {
+            ExpandedLogsOverlay.Visibility = Visibility.Collapsed;
+            ExpandLogsButton.Focus();
         }
     }
 }

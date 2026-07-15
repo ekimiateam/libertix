@@ -93,6 +93,12 @@ namespace Libertix.Helpers
                         output + error.ToString());
                 }
 
+                // WaitForExit(timeout) only confirms that the process ended. The
+                // parameterless call also waits for the asynchronous stdout/stderr
+                // handlers to drain, so the final required key/value lines cannot
+                // be parsed intermittently as an incomplete result.
+                process.WaitForExit();
+
                 string diagnostics = output + error.ToString();
                 if (process.ExitCode != 0 || !IsTrue(values, "PREFLIGHT_OK"))
                 {

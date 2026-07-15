@@ -8,6 +8,7 @@
         Title="Libertix"
         Height="630" Width="1070"
         MinHeight="630" MinWidth="1070"
+        ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen">
 
     <Frame x:Name="MainFrame" NavigationUIVisibility="Hidden" Background="#232136">

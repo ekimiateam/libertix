@@ -124,5 +124,15 @@
     <system:String x:Key="ApplyChangesError">エラーが発生しました</system:String>
     <system:String x:Key="ApplyChangesReboot">再起動</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">インストールを完了するためにコンピューターを再起動します。続行しますか？</system:String>
+    <system:String x:Key="ApplyChangesCancel">インストールをキャンセル</system:String>
+    <system:String x:Key="ApplyChangesCancelConfirm">インストールをキャンセルして Windows を復元しますか？現在の安全な処理を停止し、Libertix がロールバックを実行して確認します。</system:String>
+    <system:String x:Key="ApplyChangesCancelInProgress">キャンセルを受け付けました。Windows を復元しています...</system:String>
+    <system:String x:Key="ApplyChangesExpandLogs">ログを拡大</system:String>
+    <system:String x:Key="ApplyChangesLogsTitle">インストールログ</system:String>
+    <system:String x:Key="ApplyChangesCloseExpandedLogs">ログを縮小</system:String>
+    <system:String x:Key="CloseConfirmationTitle">Libertix を閉じる</system:String>
+    <system:String x:Key="CloseConfirmationMessage">Libertix を閉じてもよろしいですか？</system:String>
+    <system:String x:Key="TrayInstallTitle">Libertix のインストール中</system:String>
+    <system:String x:Key="TrayInstallMessage">インストールはバックグラウンドで続行中です。時計の近くにある Libertix アイコンをダブルクリックするとウィンドウを再表示できます。</system:String>
     <system:String x:Key="PartitionSafetyBlockMessage">この安全性チェックが解決されるまでインストールはブロックされます。</system:String>
 </ResourceDictionary>

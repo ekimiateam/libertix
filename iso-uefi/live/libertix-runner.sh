@@ -64,7 +64,10 @@ write_tty1_screen() {
     # column 0 instead of drifting diagonally across the screen.
     {
         printf '\033[?25l\033[H'
-        perl -pe 's/\n/\r\n/g' "$TTY_SCREEN_FILE.$$"
+        # Erase the unused remainder of every overwritten line. Without this,
+        # shorter status text leaves characters from the previous frame on the
+        # Linux virtual console even though the area below is cleared.
+        perl -pe 's/\n/\033[K\r\n/g' "$TTY_SCREEN_FILE.$$"
         printf '\033[J'
     } > /dev/tty1 2>/dev/null || true
     rm -f "$TTY_SCREEN_FILE.$$"
@@ -375,6 +378,9 @@ start_gui() {
 
     if [ -S "$GUI_SOCKET" ]; then
         sleep 1
+        if command -v xsetroot >/dev/null 2>&1; then
+            DISPLAY="$GUI_DISPLAY" XAUTHORITY=/dev/null xsetroot -cursor_name left_ptr >> "$GUI_LOG" 2>&1 || true
+        fi
         for attempt in $(seq 1 "$GUI_CLIENT_ATTEMPTS"); do
             echo "Starting graphical installer client, attempt $attempt/$GUI_CLIENT_ATTEMPTS" >> "$LOG"
             rm -f "$GUI_READY_FILE" "$GUI_HEARTBEAT_FILE"

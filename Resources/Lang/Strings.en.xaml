@@ -124,5 +124,15 @@
     <system:String x:Key="ApplyChangesError">An error occurred</system:String>
     <system:String x:Key="ApplyChangesReboot">Reboot</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">The computer will restart to complete the installation. Continue?</system:String>
+    <system:String x:Key="ApplyChangesCancel">Cancel installation</system:String>
+    <system:String x:Key="ApplyChangesCancelConfirm">Cancel the installation and restore Windows? The current safe operation will stop, then Libertix will run and verify the rollback.</system:String>
+    <system:String x:Key="ApplyChangesCancelInProgress">Cancellation requested. Restoring Windows...</system:String>
+    <system:String x:Key="ApplyChangesExpandLogs">Enlarge logs</system:String>
+    <system:String x:Key="ApplyChangesLogsTitle">Installation logs</system:String>
+    <system:String x:Key="ApplyChangesCloseExpandedLogs">Reduce logs</system:String>
+    <system:String x:Key="CloseConfirmationTitle">Close Libertix</system:String>
+    <system:String x:Key="CloseConfirmationMessage">Do you really want to close Libertix?</system:String>
+    <system:String x:Key="TrayInstallTitle">Libertix installation in progress</system:String>
+    <system:String x:Key="TrayInstallMessage">The installation is still running. Double-click the Libertix icon near the clock to reopen the window.</system:String>
     <system:String x:Key="PartitionSafetyBlockMessage">Installation is blocked until this safety check is resolved.</system:String>
 </ResourceDictionary>

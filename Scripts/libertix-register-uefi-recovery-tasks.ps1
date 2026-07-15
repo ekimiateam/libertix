@@ -4,13 +4,13 @@ param(
     [string]$StartupTaskName,
 
     [Parameter(Mandatory = $true)]
-    [string]$StartupLauncher,
+    [string]$AgentPath,
 
     [Parameter(Mandatory = $true)]
     [string]$PromptTaskName,
 
     [Parameter(Mandatory = $true)]
-    [string]$PromptLauncher,
+    [string]$StatePath,
 
     [Parameter(Mandatory = $true)]
     [string]$PromptUser
@@ -34,7 +34,10 @@ try {
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries
 
-    $startupAction = New-ScheduledTaskAction -Execute $StartupLauncher
+    $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+    $baseArguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -StatePath "{1}"' -f `
+        $AgentPath, $StatePath
+    $startupAction = New-ScheduledTaskAction -Execute $powerShell -Argument $baseArguments
     $startupTrigger = New-ScheduledTaskTrigger -AtStartup
     $startupPrincipal = New-ScheduledTaskPrincipal `
         -UserId "SYSTEM" `
@@ -48,7 +51,9 @@ try {
         -Settings $settings `
         -Force | Out-Null
 
-    $promptAction = New-ScheduledTaskAction -Execute $PromptLauncher
+    $promptAction = New-ScheduledTaskAction `
+        -Execute $powerShell `
+        -Argument ($baseArguments + ' -Action Prompt')
     $promptTrigger = New-ScheduledTaskTrigger -AtLogOn -User $PromptUser
     $promptPrincipal = New-ScheduledTaskPrincipal `
         -UserId $PromptUser `

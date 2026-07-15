@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Net.Http;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Libertix.Pages
@@ -86,13 +87,18 @@ namespace Libertix.Pages
                     Dispatcher.Invoke(() => Log($"{label} download completed"));
                     return true;
                 }
+                catch (OperationCanceledException)
+                {
+                    try { if (File.Exists(destinationPath)) File.Delete(destinationPath); } catch { }
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     try { if (File.Exists(destinationPath)) File.Delete(destinationPath); } catch { }
                     Dispatcher.Invoke(() => Log($"{label} download attempt {attempt}/{attempts} failed: {ex.Message}"));
                     if (attempt == attempts)
                         return false;
-                    await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
+                    await Task.Delay(TimeSpan.FromSeconds(2 * attempt), _installationCancellation.Token);
                 }
             }
 
@@ -166,6 +172,9 @@ namespace Libertix.Pages
                 timeout,
                 line => HandleAria2DownloadOutput(line, label, progressMessage, progressStart, progressSpan));
 
+            if (_installationCancellation.IsCancellationRequested || exitCode == -2)
+                throw new OperationCanceledException(_installationCancellation.Token);
+
             if (exitCode != 0)
             {
                 Dispatcher.Invoke(() => Log($"{label}: aria2 failed with rc={exitCode}, using HTTP fallback"));
@@ -229,7 +238,10 @@ namespace Libertix.Pages
             using (var client = new HttpClient())
             {
                 client.Timeout = timeout;
-                using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+                using (var response = await client.GetAsync(
+                    url,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    _installationCancellation.Token))
                 {
                     response.EnsureSuccessStatusCode();
 
@@ -245,9 +257,17 @@ namespace Libertix.Pages
                         int bytesRead;
                         var lastProgressUpdate = DateTime.Now;
 
-                        while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                        while ((bytesRead = await contentStream.ReadAsync(
+                            buffer,
+                            0,
+                            buffer.Length,
+                            _installationCancellation.Token)) > 0)
                         {
-                            await fileStream.WriteAsync(buffer, 0, bytesRead);
+                            await fileStream.WriteAsync(
+                                buffer,
+                                0,
+                                bytesRead,
+                                _installationCancellation.Token);
                             totalRead += bytesRead;
 
                             if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)

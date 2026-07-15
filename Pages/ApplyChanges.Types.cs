@@ -27,6 +27,9 @@ namespace Libertix.Pages
             public long RecoveryPartitionSize { get; set; }
             public bool BitLockerSafe { get; set; }
             public string BitLockerState { get; set; }
+            public int BitLockerConversionStatus { get; set; }
+            public int BitLockerEncryptionPercentage { get; set; }
+            public int BitLockerProtectionStatus { get; set; }
         }
 
         private enum FirmwareType

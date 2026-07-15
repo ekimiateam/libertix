@@ -7,6 +7,7 @@ using System.Linq;
 using System.Security.Principal;
 using System.Threading.Tasks;
 using System.Windows;
+using Libertix.Helpers;
 using Libertix.Models;
 
 namespace Libertix
@@ -20,8 +21,13 @@ namespace Libertix
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            ApplicationLogger.Initialize();
+            ApplicationLogger.Write("Libertix.exe startup.");
+            RegisterApplicationErrorLogging();
+
             if (!IsRunningAsAdministrator())
             {
+                ApplicationLogger.Write("Startup refused: administrator privileges are missing.");
                 MessageBox.Show(
                     "Libertix doit être lancé en administrateur pour modifier les partitions et le démarrage Windows.",
                     "Libertix - droits administrateur requis",
@@ -37,6 +43,24 @@ namespace Libertix
                 InstallationState.UefiRecoveryStatePath = recoveryStatePath;
 
             base.OnStartup(e);
+        }
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            ApplicationLogger.Write($"Libertix.exe exit, code={e.ApplicationExitCode}.");
+            base.OnExit(e);
+        }
+
+        private void RegisterApplicationErrorLogging()
+        {
+            DispatcherUnhandledException += (_, args) =>
+                ApplicationLogger.WriteException("Unhandled WPF dispatcher exception.", args.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+                ApplicationLogger.Write(
+                    "Unhandled AppDomain exception." + Environment.NewLine +
+                    (args.ExceptionObject?.ToString() ?? "No exception details."));
+            TaskScheduler.UnobservedTaskException += (_, args) =>
+                ApplicationLogger.WriteException("Unobserved task exception.", args.Exception);
         }
 
         private static string TryGetUefiRecoveryStatePath(string[] args)

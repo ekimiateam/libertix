@@ -73,6 +73,15 @@
                              IsReadOnly="True"
                              VerticalScrollBarVisibility="Auto"
                              TextWrapping="Wrap"/>
+
+                    <Button x:Name="ExpandLogsButton"
+                            Content="{DynamicResource ApplyChangesExpandLogs}"
+                            Style="{StaticResource ModernButton}"
+                            Width="200"
+                            Height="50"
+                            HorizontalAlignment="Right"
+                            Margin="0,10,0,0"
+                            Click="ExpandLogsButton_Click"/>
                 </StackPanel>
             </Border>
 
@@ -96,6 +105,65 @@
                     HorizontalAlignment="Right"
                     Visibility="Collapsed"
                     Click="RebootButton_Click"/>
+
+            <Button x:Name="CancelInstallationButton"
+                    Content="{DynamicResource ApplyChangesCancel}"
+                    Style="{StaticResource ModernButton}"
+                    Width="220"
+                    Height="50"
+                    HorizontalAlignment="Right"
+                    Visibility="Collapsed"
+                    Click="CancelInstallationButton_Click"/>
+        </Grid>
+
+        <Grid x:Name="ExpandedLogsOverlay"
+              Grid.RowSpan="3"
+              Panel.ZIndex="10"
+              Background="#EE1E1C31"
+              Visibility="Collapsed">
+            <Border Margin="45"
+                    Padding="20"
+                    Background="#2a273f"
+                    BorderBrush="#363252"
+                    BorderThickness="1"
+                    CornerRadius="8">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0"
+                               Text="{DynamicResource ApplyChangesLogsTitle}"
+                               Foreground="#E0DEF4"
+                               FontSize="22"
+                               FontWeight="SemiBold"
+                               Margin="0,0,0,15"/>
+
+                    <TextBox x:Name="ExpandedLogOutput"
+                             Grid.Row="1"
+                             Background="#1e1c31"
+                             Foreground="#908CAA"
+                             BorderBrush="#363252"
+                             BorderThickness="1"
+                             FontFamily="Consolas"
+                             FontSize="13"
+                             IsReadOnly="True"
+                             VerticalScrollBarVisibility="Auto"
+                             HorizontalScrollBarVisibility="Auto"
+                             TextWrapping="NoWrap"/>
+
+                    <Button Grid.Row="2"
+                            Content="{DynamicResource ApplyChangesCloseExpandedLogs}"
+                            Style="{StaticResource ModernButton}"
+                            Width="200"
+                            Height="40"
+                            HorizontalAlignment="Right"
+                            Margin="0,15,0,0"
+                            Click="CloseExpandedLogsButton_Click"/>
+                </Grid>
+            </Border>
         </Grid>
     </Grid>
 </Page>

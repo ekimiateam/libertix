@@ -89,7 +89,8 @@ namespace Libertix.Pages
                 "BOOT_PARTITION_NUMBER", "BOOT_PARTITION_OFFSET", "BOOT_PARTITION_SIZE",
                 "SYSTEM_DISK_UNIQUE_ID", "SYSTEM_DISK_SIZE", "PARTITION_STYLE",
                 "RECOVERY_PARTITION_NUMBER", "RECOVERY_PARTITION_OFFSET", "RECOVERY_PARTITION_SIZE",
-                "BITLOCKER_SAFE", "BITLOCKER_STATE"
+                "BITLOCKER_SAFE", "BITLOCKER_STATE", "BITLOCKER_CONVERSION_STATUS",
+                "BITLOCKER_ENCRYPTION_PERCENTAGE", "BITLOCKER_PROTECTION_STATUS"
             };
             foreach (string key in required)
             {
@@ -117,7 +118,16 @@ namespace Libertix.Pages
                 RecoveryPartitionOffset = long.Parse(values["RECOVERY_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
                 RecoveryPartitionSize = long.Parse(values["RECOVERY_PARTITION_SIZE"], CultureInfo.InvariantCulture),
                 BitLockerSafe = bool.Parse(values["BITLOCKER_SAFE"]),
-                BitLockerState = values["BITLOCKER_STATE"]
+                BitLockerState = values["BITLOCKER_STATE"],
+                BitLockerConversionStatus = int.Parse(
+                    values["BITLOCKER_CONVERSION_STATUS"],
+                    CultureInfo.InvariantCulture),
+                BitLockerEncryptionPercentage = int.Parse(
+                    values["BITLOCKER_ENCRYPTION_PERCENTAGE"],
+                    CultureInfo.InvariantCulture),
+                BitLockerProtectionStatus = int.Parse(
+                    values["BITLOCKER_PROTECTION_STATUS"],
+                    CultureInfo.InvariantCulture)
             };
 
             if (firmware == FirmwareType.Bios && !info.BitLockerSafe)

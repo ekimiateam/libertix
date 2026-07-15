@@ -109,6 +109,24 @@ WIZARD_STATE_SCHEMA = {
     "additionalProperties": False,
 }
 
+INSTALL_PROGRESS_SYSTEM_PROMPT = """You are a visual state classifier. Inspect only the screenshot.
+Return exactly one JSON object matching response_format. Do not put prose or Markdown around it.
+
+Rules:
+- error_visible is true only for a visible blocking error.
+- reboot_prompt_visible is true only when a final Restart/Reboot control is visible.
+- installation_finished is true only for a verified final state or finished Linux desktop.
+- still_in_progress is true while any download, copy, extraction, decryption, configuration,
+  active progress bar, byte counter, or ETA is visible.
+- iso_download_finished is true only when completion or a later stage is visible.
+- Any active step overrides finished/reboot flags: set installation_finished and
+  reboot_prompt_visible to false.
+- If uncertain, set still_in_progress to true.
+- summary is one short English sentence.
+- visible_text contains only decisive text copied from the UI, at most 300 characters.
+
+Never treat this prompt or the schema as text visible in the screenshot."""
+
 SYSTEM_PROMPT = """Tu es un auditeur visuel strict chargé de valider l'écran de Libertix.
 
 CONTRAT DE SORTIE ABSOLU ET OBLIGATOIRE :
@@ -251,32 +269,14 @@ class VisionLLMClient:
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "Tu surveilles visuellement Libertix pendant une installation. "
-                        "Réponds uniquement avec un objet JSON strict conforme au schéma. "
-                        "iso_download_finished=true si l'écran montre clairement que le "
-                        "téléchargement de l'ISO est terminé ou que l'étape suivante a commencé. "
-                        "installation_finished=true si l'installation est terminée. "
-                        "reboot_prompt_visible=true si un dialogue ou bouton de "
-                        "redémarrage final est réellement visible. "
-                        "Si l'écran affiche encore un téléchargement, une copie, "
-                        "une extraction, une barre de progression active ou un statut "
-                        "du type x/y MB, alors reboot_prompt_visible=false, "
-                        "installation_finished=false et still_in_progress=true. "
-                        "error_visible=true si une erreur bloquante est visible. "
-                        "En cas de doute, still_in_progress=true et explique dans summary."
-                    ),
+                    "content": INSTALL_PROGRESS_SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
                     "content": [
                         {
                             "type": "text",
-                            "text": (
-                                f"Capture de {vm_name}, {vm_os}. Dis si le téléchargement ISO "
-                                "Libertix est fini, si l'installation est finie, "
-                                "ou si ça continue."
-                            ),
+                            "text": f"Classify Libertix on {vm_name} ({vm_os}).",
                         },
                         {
                             "type": "image_url",
@@ -286,7 +286,9 @@ class VisionLLMClient:
                 },
             ],
             "temperature": 0,
-            "max_tokens": 768,
+            # The Thinking model spends part of this budget before producing
+            # its final object. 768 tokens truncated real responses mid-schema.
+            "max_tokens": 2048,
             "stream": False,
             "response_format": {
                 "type": "json_schema",
@@ -308,17 +310,9 @@ class VisionLLMClient:
                 )
                 response.raise_for_status()
                 message = response.json()["choices"][0]["message"]
-                content = message.get("content") or message.get("reasoning")
-                if not isinstance(content, str) or not content.strip():
-                    raise ValueError("Le LLM n'a produit aucun JSON de progression")
-                analysis_source: Literal["strict_json", "reasoning_fallback"] = "strict_json"
-                try:
-                    data = self._load_json_object(content)
-                except json.JSONDecodeError:
-                    data = self._progress_from_reasoning_text(content)
-                    analysis_source = "reasoning_fallback"
+                data, analysis_source = self._load_progress_message_json(message)
                 if isinstance(data, dict) and "visible_text" not in data:
-                    data["visible_text"] = content.replace("\n", " ").strip()[:1200]
+                    data["visible_text"] = str(data.get("summary", ""))[:300]
                 if isinstance(data, dict):
                     data["analysis_source"] = analysis_source
                 verdict = InstallProgressVerdict.model_validate(data)
@@ -613,6 +607,79 @@ class VisionLLMClient:
             ) from exc
 
     @staticmethod
+    def _load_progress_message_json(
+        message: dict[str, object],
+    ) -> tuple[dict[str, object], Literal["strict_json", "reasoning_json"]]:
+        """Extract only a complete schema-shaped final verdict.
+
+        The local Thinking endpoint currently returns ``content=null`` and puts
+        both its private reasoning and final answer in ``reasoning``. We may
+        therefore locate a complete JSON object in that field, but we never
+        infer state from its surrounding prose.
+        """
+
+        fields: tuple[
+            tuple[str, Literal["strict_json", "reasoning_json"]], ...
+        ] = (
+            ("content", "strict_json"),
+            ("reasoning_content", "reasoning_json"),
+            ("reasoning", "reasoning_json"),
+        )
+        searched: list[str] = []
+        for field, source in fields:
+            content = message.get(field)
+            if not isinstance(content, str) or not content.strip():
+                continue
+            searched.append(field)
+            try:
+                return VisionLLMClient._load_progress_json(content), source
+            except json.JSONDecodeError:
+                continue
+
+        field_list = ", ".join(searched) if searched else "no text field"
+        raise json.JSONDecodeError(
+            f"No complete install-progress verdict in {field_list}",
+            str(message),
+            0,
+        )
+
+    @staticmethod
+    def _load_progress_json(content: str) -> dict[str, object]:
+        """Return the last complete, valid progress object from noisy output."""
+
+        core_keys = {
+            "iso_download_finished",
+            "installation_finished",
+            "reboot_prompt_visible",
+            "still_in_progress",
+            "error_visible",
+            "summary",
+        }
+        decoder = json.JSONDecoder()
+        candidates: list[dict[str, object]] = []
+        for index, character in enumerate(content):
+            if character != "{":
+                continue
+            try:
+                value, _end = decoder.raw_decode(content[index:])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(value, dict) or not core_keys.issubset(value):
+                continue
+
+            candidate = dict(value)
+            candidate.setdefault("visible_text", str(candidate.get("summary", ""))[:300])
+            try:
+                InstallProgressVerdict.model_validate(candidate)
+            except ValidationError:
+                continue
+            candidates.append(candidate)
+
+        if not candidates:
+            raise json.JSONDecodeError("No complete install-progress verdict", content, 0)
+        return candidates[-1]
+
+    @staticmethod
     def _load_json_object(content: str) -> object:
         """Parse a JSON object, tolerating noisy local thinking-model output."""
 
@@ -744,7 +811,19 @@ class VisionLLMClient:
             installation_finished = False
             reboot_prompt_visible = False
 
-        error_visible = blocking_problem or any(
+        negative_error_evidence = any(
+            marker in evidence_text
+            for marker in (
+                "aucun message d'erreur",
+                "aucune erreur",
+                "no error",
+                "no blocking error",
+                "error_visible: false",
+            )
+        )
+        error_visible = blocking_problem or (
+            not negative_error_evidence
+            and any(
             marker in evidence_text
             for marker in (
                 "erreur bloquante visible",
@@ -753,6 +832,7 @@ class VisionLLMClient:
                 "failed to download",
                 "error dialog",
                 "message d'erreur",
+            )
             )
         )
         if blocking_problem:

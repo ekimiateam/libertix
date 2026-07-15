@@ -1,4 +1,5 @@
 ﻿using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
@@ -14,11 +15,16 @@ namespace Libertix
     public partial class MainWindow : Window
     {
         private readonly InstallationState _installationState;
+        private readonly TrayIconController _trayIcon;
+        private bool _hiddenInTray;
+        private bool _allowClose;
 
         public MainWindow()
         {
             _installationState = ((App)Application.Current).InstallationState;
             InitializeComponent();
+            _trayIcon = new TrayIconController(RestoreFromTray);
+            _installationState.InstallationRunningChanged += InstallationState_InstallationRunningChanged;
 
             // Detect Windows language and set as default
             string windowsLang = Localization.GetWindowsLanguageCode();
@@ -48,6 +54,85 @@ namespace Libertix
 /*#if DEBUG
             DebugPanel.Visibility = Visibility.Visible;
 #endif*/
+        }
+
+        protected override void OnClosing(CancelEventArgs e)
+        {
+            if (_allowClose)
+            {
+                base.OnClosing(e);
+                return;
+            }
+
+            if (_installationState.IsInstallationRunning)
+            {
+                e.Cancel = true;
+                HideInTrayDuringInstallation();
+                return;
+            }
+
+            var result = MessageBox.Show(
+                ResourceText("CloseConfirmationMessage", "Voulez-vous vraiment fermer Libertix ?"),
+                ResourceText("CloseConfirmationTitle", "Fermer Libertix"),
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question);
+            if (result != MessageBoxResult.Yes)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            _allowClose = true;
+            base.OnClosing(e);
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            _installationState.InstallationRunningChanged -= InstallationState_InstallationRunningChanged;
+            _trayIcon.Dispose();
+            base.OnClosed(e);
+        }
+
+        public void PrepareForSystemRestart()
+        {
+            _allowClose = true;
+        }
+
+        private void HideInTrayDuringInstallation()
+        {
+            _hiddenInTray = true;
+            Hide();
+            _trayIcon.Show(
+                ResourceText("TrayInstallTitle", "Installation Libertix en cours"),
+                ResourceText(
+                    "TrayInstallMessage",
+                    "L'installation continue en arrière-plan. Double-cliquez sur l'icône Libertix près de l'horloge pour rouvrir la fenêtre."));
+        }
+
+        private void RestoreFromTray()
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _hiddenInTray = false;
+                _trayIcon.Hide();
+                Show();
+                WindowState = WindowState.Normal;
+                Activate();
+                Topmost = true;
+                Topmost = false;
+                Focus();
+            }));
+        }
+
+        private void InstallationState_InstallationRunningChanged(object sender, EventArgs e)
+        {
+            if (!_installationState.IsInstallationRunning && _hiddenInTray)
+                RestoreFromTray();
+        }
+
+        private static string ResourceText(string key, string fallback)
+        {
+            return Application.Current.Resources[key] as string ?? fallback;
         }
 
         private void Button_Click(object sender, RoutedEventArgs e)

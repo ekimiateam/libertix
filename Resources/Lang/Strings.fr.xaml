@@ -124,5 +124,15 @@
     <system:String x:Key="ApplyChangesError">Une erreur s'est produite</system:String>
     <system:String x:Key="ApplyChangesReboot">Redemarrer</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">L'ordinateur va redemarrer pour terminer l'installation. Continuer ?</system:String>
+    <system:String x:Key="ApplyChangesCancel">Annuler l'installation</system:String>
+    <system:String x:Key="ApplyChangesCancelConfirm">Annuler l'installation et restaurer Windows ? L'operation sure en cours sera arretee, puis Libertix executera et verifiera le rollback.</system:String>
+    <system:String x:Key="ApplyChangesCancelInProgress">Annulation demandee. Restauration de Windows en cours...</system:String>
+    <system:String x:Key="ApplyChangesExpandLogs">Agrandir les logs</system:String>
+    <system:String x:Key="ApplyChangesLogsTitle">Logs d'installation</system:String>
+    <system:String x:Key="ApplyChangesCloseExpandedLogs">Réduire les logs</system:String>
+    <system:String x:Key="CloseConfirmationTitle">Fermer Libertix</system:String>
+    <system:String x:Key="CloseConfirmationMessage">Voulez-vous vraiment fermer Libertix ?</system:String>
+    <system:String x:Key="TrayInstallTitle">Installation Libertix en cours</system:String>
+    <system:String x:Key="TrayInstallMessage">L'installation continue en arriere-plan. Double-cliquez sur l'icone Libertix pres de l'horloge pour rouvrir la fenetre.</system:String>
     <system:String x:Key="PartitionSafetyBlockMessage">Installation bloquée jusqu'à résolution de ce contrôle de sécurité.</system:String>
 </ResourceDictionary>

@@ -135,7 +135,9 @@ class InstallProgressVerdict(BaseModel):
     error_visible: bool
     summary: str = Field(min_length=1)
     visible_text: str
-    analysis_source: Literal["strict_json", "reasoning_fallback"] = "strict_json"
+    analysis_source: Literal["strict_json", "reasoning_json", "reasoning_fallback"] = (
+        "strict_json"
+    )
 
     @property
     def done(self) -> bool:

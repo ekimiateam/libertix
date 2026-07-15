@@ -66,6 +66,8 @@
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="System.Net.Http" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xaml">
       <RequiredTargetFramework>4.0</RequiredTargetFramework>
     </Reference>
@@ -82,8 +84,10 @@
     <Compile Include="Converters\VisibilityToBoolConverter.cs" />
     <Compile Include="Helpers\FilepoolConfig.cs" />
     <Compile Include="Helpers\CompatibilityPreflightRunner.cs" />
+    <Compile Include="Helpers\ApplicationLogger.cs" />
     <Compile Include="Helpers\WindowsProcessRunner.cs" />
     <Compile Include="Helpers\LinuxPasswordHasher.cs" />
+    <Compile Include="Helpers\TrayIconController.cs" />
     <Compile Include="Helpers\UefiRecoveryState.cs" />
     <Compile Include="Models\DistroInfo.cs" />
     <Compile Include="Models\DistroInfoJson.cs" />
@@ -99,6 +103,9 @@
       <DependentUpon>ApplyChanges.xaml</DependentUpon>
     </Compile>
     <Compile Include="Pages\ApplyChanges.Downloads.cs">
+      <DependentUpon>ApplyChanges.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="Pages\ApplyChanges.Cancellation.cs">
       <DependentUpon>ApplyChanges.xaml</DependentUpon>
     </Compile>
     <Compile Include="Pages\ApplyChanges.System.cs">

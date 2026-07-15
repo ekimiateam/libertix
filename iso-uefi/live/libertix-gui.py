@@ -165,7 +165,7 @@ class LibertixGui:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Libertix Installer")
-        self.root.configure(bg="#0b1020")
+        self.root.configure(bg="#0b1020", cursor="left_ptr")
         self.root.overrideredirect(True)
         self.root.attributes("-fullscreen", True)
         self.root.geometry(
@@ -190,7 +190,7 @@ class LibertixGui:
         self.subprogress_text = ""
         self.last_log_text = ""
 
-        self.container = tk.Frame(self.root, bg="#0b1020")
+        self.container = tk.Frame(self.root, bg="#0b1020", cursor="left_ptr")
         self.container.place(x=0, y=0, relwidth=1, relheight=1)
 
         self.logo = tk.Label(
@@ -281,7 +281,7 @@ class LibertixGui:
 
         self.reboot_button = tk.Button(
             self.button_bar,
-            text="Reboot",
+            text="Redemarrer",
             command=self.reboot,
             font=("DejaVu Sans", 14, "bold"),
             padx=22,
@@ -464,7 +464,7 @@ class LibertixGui:
         self.root.after(50, self.root.destroy)
 
     def reboot(self) -> None:
-        self.reboot_button.configure(state=tk.DISABLED, text="Reboot en cours...")
+        self.reboot_button.configure(state=tk.DISABLED, text="Redemarrage en cours...")
         subprocess.Popen(
             ["systemctl", "reboot", "-i"],
             stdout=subprocess.DEVNULL,
