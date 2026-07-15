@@ -15,8 +15,8 @@ git config --global --add safe.directory /workspace
 case "$mode" in
     bios)
         /workspace/iso/build.sh
-        verify-libertix-iso bios /workspace/libertix-installer.iso
-        outputs=(/workspace/libertix-installer.iso)
+        verify-libertix-iso bios /workspace/libertix-installer-bios.iso
+        outputs=(/workspace/libertix-installer-bios.iso)
         ;;
     uefi)
         /workspace/iso-uefi/build.sh
@@ -26,10 +26,10 @@ case "$mode" in
     all)
         /workspace/iso/build.sh
         /workspace/iso-uefi/build.sh
-        verify-libertix-iso bios /workspace/libertix-installer.iso
+        verify-libertix-iso bios /workspace/libertix-installer-bios.iso
         verify-libertix-iso uefi /workspace/libertix-installer-uefi.iso
         outputs=(
-            /workspace/libertix-installer.iso
+            /workspace/libertix-installer-bios.iso
             /workspace/libertix-installer-uefi.iso
         )
         ;;

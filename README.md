@@ -10,7 +10,7 @@ Docker versionné. Aucune commande `sudo` n'est nécessaire sur l'hôte :
 ```
 
 Les modes `bios` et `uefi` permettent de reconstruire une seule image. Les artefacts produits à la
-racine du dépôt sont `libertix-installer.iso` et `libertix-installer-uefi.iso`.
+racine du dépôt sont `libertix-installer-bios.iso` et `libertix-installer-uefi.iso`.
 
 Le repack d'une ISO existante n'est pas le workflow de génération : toute modification du live, du
 rootfs ou du démarrage doit être ajoutée aux sources sous `iso/`, `iso-uefi/`, `grub/` ou `assets/`,

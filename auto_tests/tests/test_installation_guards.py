@@ -504,6 +504,21 @@ def test_uefi_iso_download_uses_the_canonical_url_without_cache_busting() -> Non
     assert "Start-RobustDownload -Url $downloadUrl" in download
 
 
+def test_bios_iso_output_name_matches_the_filepool_contract() -> None:
+    defaults = read("iso/config/defaults.env")
+    docker_builder = read("docker/iso-builder/build-isos.sh")
+    workflow = read(".github/workflows/ci.yml")
+    distros = read("auto_tests/app/filepool/distros.json")
+
+    expected_name = "libertix-installer-bios.iso"
+    assert f'OUTPUT_ISO="{expected_name}"' in defaults
+    assert f"/workspace/{expected_name}" in docker_builder
+    assert expected_name in workflow
+    assert f'"isoUrl": "{expected_name}"' in distros
+    assert "libertix-installer.iso" not in defaults
+    assert "/workspace/libertix-installer.iso" not in docker_builder
+
+
 def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     script = read("Scripts/libertix-uefi-install.ps1")
     bits = script.split("function Start-BitsDownload", 1)[1].split("function Get-Aria2Exe", 1)[0]

@@ -181,10 +181,10 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          test -s libertix-installer.iso
+          test -s libertix-installer-bios.iso
           test -s libertix-installer-uefi.iso
           sha256sum \
-            libertix-installer.iso \
+            libertix-installer-bios.iso \
             libertix-installer-uefi.iso \
             | tee libertix-isos.sha256
           cat libertix-isos.sha256 >> "$GITHUB_STEP_SUMMARY"
@@ -194,7 +194,7 @@ jobs:
         with:
           name: Libertix-mini-isos-${{ github.sha }}
           path: |
-            libertix-installer.iso
+            libertix-installer-bios.iso
             libertix-installer-uefi.iso
             libertix-isos.sha256
           if-no-files-found: error
