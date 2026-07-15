@@ -37,9 +37,7 @@ class LocalSourceTree:
             return False
         if path.is_dir():
             return True
-        if path.name != ".env.example" and (
-            path.name == ".env" or path.name.startswith(".env.")
-        ):
+        if path.name != ".env.example" and (path.name == ".env" or path.name.startswith(".env.")):
             return False
         if relative.parts == ("Tools", "aria2", "aria2c.exe"):
             return True

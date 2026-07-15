@@ -701,16 +701,18 @@ class AutomationService:
                 verdict.detected_screen == "compatibility"
                 and "compat_e_" not in verdict.visible_text.lower()
             )
-            known_wizard_page_without_error = (
-                verdict.detected_screen in {"welcome", "distro", "resize", "sharing"}
-                and not any(
-                    marker in visible_lower
-                    for marker in (
-                        "une erreur s'est produite",
-                        "erreur pendant",
-                        "compat_e_",
-                        "installation failed",
-                    )
+            known_wizard_page_without_error = verdict.detected_screen in {
+                "welcome",
+                "distro",
+                "resize",
+                "sharing",
+            } and not any(
+                marker in visible_lower
+                for marker in (
+                    "une erreur s'est produite",
+                    "erreur pendant",
+                    "compat_e_",
+                    "installation failed",
                 )
             )
             if (

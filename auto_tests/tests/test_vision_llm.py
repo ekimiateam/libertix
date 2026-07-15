@@ -284,9 +284,7 @@ def test_install_progress_does_not_infer_state_from_reasoning_prose(
         ).analyze_install_progress(image, "vm2", "Windows UEFI")
 
 
-def test_install_progress_prefers_final_content_over_reasoning(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_install_progress_prefers_final_content_over_reasoning(monkeypatch, tmp_path: Path) -> None:
     image = tmp_path / "screen.png"
     Image.new("RGB", (32, 32), "white").save(image)
     content = json.dumps(
@@ -531,9 +529,7 @@ def test_wizard_normalizes_bare_false_when_account_evidence_is_complete(
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    verdict = VisionLLMClient(
-        "key", "https://example.test/v1", "model", 1
-    ).analyze_wizard_state(
+    verdict = VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze_wizard_state(
         image,
         "vm3",
         "Windows 11 UEFI",

@@ -156,14 +156,14 @@ def test_bios_copy_preserves_live_boot_case_sensitive_names() -> None:
     apply_changes = read_apply_changes()
 
     assert "NormalizeLiveBootNames(destDir)" in apply_changes
-    assert 'StringComparison.OrdinalIgnoreCase' in apply_changes
+    assert "StringComparison.OrdinalIgnoreCase" in apply_changes
     assert '"filesystem.squashfs", "initrd.img", "vmlinuz"' in apply_changes
     assert "Live directory name case normalization failed" in apply_changes
 
 
 def test_live_manifest_survives_detached_toram_medium_and_fat_name_case() -> None:
     apply_changes = read_apply_changes()
-    assert 'NormalizeRootFileNameCase(@"Z:\\\", "config.txt")' in apply_changes
+    assert 'NormalizeRootFileNameCase(@"Z:\\", "config.txt")' in apply_changes
 
     for installer in (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")):
         assert "find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt" in installer
@@ -172,8 +172,7 @@ def test_live_manifest_survives_detached_toram_medium_and_fat_name_case() -> Non
             in installer
         )
         assert (
-            "Prerequisite timeout: disk_ready=$disk_ready config_ready=$config_ready"
-            in installer
+            "Prerequisite timeout: disk_ready=$disk_ready config_ready=$config_ready" in installer
         )
 
 
@@ -204,27 +203,26 @@ def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
     assert "--ro" in windows_share
     assert "winfsp-x64.dll" in windows_share
     assert "launchctl-x64.exe" in windows_share
-    assert 'New-ScheduledTaskTrigger -AtStartup' in windows_share
-    assert 'New-ScheduledTaskPrincipal' in windows_share
+    assert "New-ScheduledTaskTrigger -AtStartup" in windows_share
+    assert "New-ScheduledTaskPrincipal" in windows_share
     assert '-UserId "SYSTEM"' in windows_share
-    assert 'Register-ScheduledTask' in windows_share
-    assert 'Start-ScheduledTask -TaskName $taskName' in windows_share
-    assert 'LibertixLinuxReadOnlyPin' in windows_share
-    assert 'New-ScheduledTaskTrigger -AtLogOn' in windows_share
-    assert 'Get-CimInstance Win32_UserProfile' in windows_share
-    assert '-LogonType Interactive' in windows_share
-    assert '-RunLevel Highest' in windows_share
-    assert 'Install-ExplorerPinTasks' in windows_share
-    assert '[switch]$Pin' in windows_share
-    assert 'cmd.exe /d /c mklink /J' in windows_share
+    assert "Register-ScheduledTask" in windows_share
+    assert "Start-ScheduledTask -TaskName $taskName" in windows_share
+    assert "LibertixLinuxReadOnlyPin" in windows_share
+    assert "New-ScheduledTaskTrigger -AtLogOn" in windows_share
+    assert "Get-CimInstance Win32_UserProfile" in windows_share
+    assert "-LogonType Interactive" in windows_share
+    assert "-RunLevel Highest" in windows_share
+    assert "Install-ExplorerPinTasks" in windows_share
+    assert "[switch]$Pin" in windows_share
+    assert "cmd.exe /d /c mklink /J" in windows_share
     assert (
-        '$shellApplication.Namespace($junctionPath).Self.InvokeVerb("pintohome")'
-        in windows_share
+        '$shellApplication.Namespace($junctionPath).Self.InvokeVerb("pintohome")' in windows_share
     )
-    assert 'Refusing to replace a non-junction path' in windows_share
-    assert 'Get-CimInstance Win32_UserProfile' in windows_share
-    assert 'Install-ExplorerShortcuts' in windows_share
-    assert 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' in windows_share
+    assert "Refusing to replace a non-junction path" in windows_share
+    assert "Get-CimInstance Win32_UserProfile" in windows_share
+    assert "Install-ExplorerShortcuts" in windows_share
+    assert "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" in windows_share
     assert '& $launchCtl start "ext4-mount"' in windows_share
     assert "SECURITY ERROR: the Linux volume accepted a write despite --ro" in windows_share
     assert "Set-Service -Name ExtFsWatcher -StartupType Disabled" in windows_share
@@ -247,7 +245,7 @@ def test_live_gui_uses_the_proven_direct_xorg_path() -> None:
         assert " xinit " not in rootfs
         assert '"$x_server" "$GUI_DISPLAY" "vt$GUI_VT"' in runner
         assert "-ac -noreset" in runner
-        assert 'XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui' in runner
+        assert "XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui" in runner
 
 
 def test_live_gui_sets_a_visible_pointer_on_both_boot_paths() -> None:
@@ -256,7 +254,7 @@ def test_live_gui_sets_a_visible_pointer_on_both_boot_paths() -> None:
     assert 'cursor="left_ptr"' in gui
     for variant in ("iso", "iso-uefi"):
         runner = read(f"{variant}/live/libertix-runner.sh")
-        assert 'xsetroot -cursor_name left_ptr' in runner
+        assert "xsetroot -cursor_name left_ptr" in runner
 
 
 def test_live_reboot_is_only_offered_after_verified_rollback() -> None:
@@ -280,7 +278,7 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     assert "_installationCancellation.Cancel()" in cancellation
     assert 'Arguments = $"/PID {processId} /T /F"' in cancellation
     assert "FailBiosPreparationAndRollbackAsync" in cancellation
-    assert 'QuoteArgument(scriptPath)} -Revert' in cancellation
+    assert "QuoteArgument(scriptPath)} -Revert" in cancellation
     assert "observeCancellation: false" in cancellation
     assert "catch (OperationCanceledException)" in apply_changes
 
@@ -346,8 +344,8 @@ def test_windows_boot_tasks_do_not_launch_visible_command_windows() -> None:
 
     assert "run-recovery-agent.cmd" not in apply_changes
     assert "run-recovery-prompt.cmd" not in apply_changes
-    assert '-WindowStyle Hidden -ExecutionPolicy Bypass -File' in recovery_tasks
-    assert '-WindowStyle Hidden -ExecutionPolicy Bypass -File' in share
+    assert "-WindowStyle Hidden -ExecutionPolicy Bypass -File" in recovery_tasks
+    assert "-WindowStyle Hidden -ExecutionPolicy Bypass -File" in share
     assert "New-ScheduledTaskTrigger -AtStartup" in share
     assert 'UserId "SYSTEM"' in share
 
@@ -389,9 +387,9 @@ def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
     create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
         "function Get-ReusablePreparedInstallerPartition", 1
     )[0]
-    prepared_reuse = script.split(
-        "function Get-ReusablePreparedInstallerPartition", 1
-    )[1].split("function Install-LibertixIsoToPartition", 1)[0]
+    prepared_reuse = script.split("function Get-ReusablePreparedInstallerPartition", 1)[1].split(
+        "function Install-LibertixIsoToPartition", 1
+    )[0]
 
     assert "$existingDriveLetter = Get-FreeDriveLetter" in create_or_reuse
     assert "-NewDriveLetter $existingDriveLetter" in create_or_reuse
@@ -487,8 +485,7 @@ def test_uefi_live_expands_fat32_staging_before_ext4_format() -> None:
 
     assert "desired_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
     assert (
-        'recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))'
-        in reuse
+        "recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))" in reuse
     )
     assert 'run_logged parted -s "$DISK" unit s resizepart' in reuse
     assert 'expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART"' in reuse
@@ -509,9 +506,7 @@ def test_uefi_iso_download_uses_the_canonical_url_without_cache_busting() -> Non
 
 def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     script = read("Scripts/libertix-uefi-install.ps1")
-    bits = script.split("function Start-BitsDownload", 1)[1].split(
-        "function Get-Aria2Exe", 1
-    )[0]
+    bits = script.split("function Start-BitsDownload", 1)[1].split("function Get-Aria2Exe", 1)[0]
     robust = script.split("function Start-RobustDownload", 1)[1].split(
         "function Ensure-MintIsoOnWindows", 1
     )[0]
@@ -552,11 +547,11 @@ def test_developer_terminal_is_verbose_and_initialized_only_once() -> None:
     for variant in ("iso", "iso-uefi"):
         runner = read(f"{variant}/live/libertix-runner.sh")
 
-        assert 'DEV_TERMINAL_ACTIVE=false' in runner
+        assert "DEV_TERMINAL_ACTIVE=false" in runner
         assert '[ "$DEV_TERMINAL_ACTIVE" = false ] || return 1' in runner
-        assert 'DEV_TERMINAL_ACTIVE=true' in runner
+        assert "DEV_TERMINAL_ACTIVE=true" in runner
         assert 'UI_MODE="details"' in runner
-        assert 'log_lines=$((rows - 10))' in runner
+        assert "log_lines=$((rows - 10))" in runner
         assert 'tail -n "$log_lines" "$LOG"' in runner
         assert 'render_key="$(current_stage):$UI_MODE:$log_size"' in runner
 
@@ -565,9 +560,9 @@ def test_live_logs_are_copied_completely_and_verified() -> None:
     helper = read("assets/live/libertix-copy-logs.sh")
     build = read("iso/build.sh")
 
-    assert 'journalctl -b --no-pager' in helper
+    assert "journalctl -b --no-pager" in helper
     assert 'dmesg > "$LOG_DIR/dmesg.log"' in helper
-    assert 'cp -f /var/log/Xorg.*.log' in helper
+    assert "cp -f /var/log/Xorg.*.log" in helper
     assert 'mount -o remount,rw "$target"' in helper
     assert 'cp -a "$LOG_DIR/." "$log_dir/"' in helper
     assert "sha256sum > SHA256SUMS" in helper
@@ -623,8 +618,7 @@ def test_compatibility_preflight_forces_utf8_console_codepage() -> None:
 def test_compatibility_runner_drains_async_output_before_parsing_final_fields() -> None:
     runner = read("Helpers/CompatibilityPreflightRunner.cs")
     timeout_wait = (
-        "process.WaitForExit((int)WindowsProcessTimeouts.CompatibilityPreflight."
-        "TotalMilliseconds)"
+        "process.WaitForExit((int)WindowsProcessTimeouts.CompatibilityPreflight.TotalMilliseconds)"
     )
     timeout_position = runner.index(timeout_wait)
     drain_position = runner.index("process.WaitForExit();", timeout_position)
@@ -635,12 +629,8 @@ def test_compatibility_runner_drains_async_output_before_parsing_final_fields() 
 
 def test_windows_manifest_declares_supported_platform_dpi_and_long_paths() -> None:
     root = ET.parse(ROOT / "app1.manifest").getroot()
-    supported = root.find(
-        ".//{urn:schemas-microsoft-com:compatibility.v1}supportedOS"
-    )
-    dpi_legacy = root.find(
-        ".//{http://schemas.microsoft.com/SMI/2005/WindowsSettings}dpiAware"
-    )
+    supported = root.find(".//{urn:schemas-microsoft-com:compatibility.v1}supportedOS")
+    dpi_legacy = root.find(".//{http://schemas.microsoft.com/SMI/2005/WindowsSettings}dpiAware")
     dpi_current = root.find(
         ".//{http://schemas.microsoft.com/SMI/2016/WindowsSettings}dpiAwareness"
     )

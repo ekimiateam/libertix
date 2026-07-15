@@ -86,8 +86,15 @@ WIZARD_STATE_SCHEMA = {
         "detected_screen": {
             "type": "string",
             "enum": [
-                "welcome", "compatibility", "distro", "resize", "sharing",
-                "account", "warning", "apply", "other"
+                "welcome",
+                "compatibility",
+                "distro",
+                "resize",
+                "sharing",
+                "account",
+                "warning",
+                "apply",
+                "other",
             ],
         },
         "expected_screen_visible": {"type": "boolean"},
@@ -317,10 +324,9 @@ class VisionLLMClient:
                     data["analysis_source"] = analysis_source
                 verdict = InstallProgressVerdict.model_validate(data)
                 visible_evidence = f"{verdict.summary}\n{verdict.visible_text}"
-                if (
-                    _contains_final_reboot_prompt(visible_evidence)
-                    and not _contains_install_blocker(visible_evidence)
-                ):
+                if _contains_final_reboot_prompt(
+                    visible_evidence
+                ) and not _contains_install_blocker(visible_evidence):
                     verdict = verdict.model_copy(
                         update={
                             "iso_download_finished": True,
@@ -450,9 +456,7 @@ class VisionLLMClient:
                             [
                                 {
                                     "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{second_image}"
-                                    },
+                                    "image_url": {"url": f"data:image/jpeg;base64,{second_image}"},
                                 }
                             ]
                             if second_image is not None
@@ -618,9 +622,7 @@ class VisionLLMClient:
         infer state from its surrounding prose.
         """
 
-        fields: tuple[
-            tuple[str, Literal["strict_json", "reasoning_json"]], ...
-        ] = (
+        fields: tuple[tuple[str, Literal["strict_json", "reasoning_json"]], ...] = (
             ("content", "strict_json"),
             ("reasoning_content", "reasoning_json"),
             ("reasoning", "reasoning_json"),
@@ -824,15 +826,15 @@ class VisionLLMClient:
         error_visible = blocking_problem or (
             not negative_error_evidence
             and any(
-            marker in evidence_text
-            for marker in (
-                "erreur bloquante visible",
-                "impossible de charger la liste",
-                "impossible de télécharger",
-                "failed to download",
-                "error dialog",
-                "message d'erreur",
-            )
+                marker in evidence_text
+                for marker in (
+                    "erreur bloquante visible",
+                    "impossible de charger la liste",
+                    "impossible de télécharger",
+                    "failed to download",
+                    "error dialog",
+                    "message d'erreur",
+                )
             )
         )
         if blocking_problem:

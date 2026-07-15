@@ -47,6 +47,10 @@ jobs:
         working-directory: auto_tests
         run: python -m ruff check app tests
 
+      - name: Check Python formatting
+        working-directory: auto_tests
+        run: python -m ruff format --check app tests
+
       - name: Run Python test suite with coverage
         working-directory: auto_tests
         run: python -m pytest --cov=app --cov-report=term-missing
