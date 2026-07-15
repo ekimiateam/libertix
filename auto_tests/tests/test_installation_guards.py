@@ -486,7 +486,10 @@ def test_uefi_live_expands_fat32_staging_before_ext4_format() -> None:
     )[0]
 
     assert "desired_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
-    assert 'recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))' in reuse
+    assert (
+        'recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))'
+        in reuse
+    )
     assert 'run_logged parted -s "$DISK" unit s resizepart' in reuse
     assert 'expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART"' in reuse
     assert '"$expanded_partition_bytes" -eq "$desired_partition_bytes"' in reuse
