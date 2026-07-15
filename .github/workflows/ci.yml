@@ -116,8 +116,6 @@ jobs:
           /warnaserror
           /p:Configuration=Release
           '/p:Platform=Any CPU'
-          /p:ContinuousIntegrationBuild=true
-          /p:Deterministic=true
           /verbosity:minimal
 
       - name: Verify WPF output
