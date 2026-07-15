@@ -443,6 +443,31 @@ def test_uefi_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
     assert "-Size $stagingBytes" in create_or_reuse
 
 
+def test_bios_large_linux_partition_uses_fat32_staging_and_full_reservation() -> None:
+    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    partitioning = apply_changes.split("private async Task ExecutePartitioningAsync", 1)[1].split(
+        "private async Task FailBiosPreparationAndRollbackAsync", 1
+    )[0]
+
+    assert "BiosFat32DirectLimitMB = 31 * 1024" in apply_changes
+    assert "BiosFat32StagingSizeMB = 8 * 1024" in apply_changes
+    assert "GetBiosFat32PartitionSizeMB(requestedLinuxMB)" in partitioning
+    assert "ShrinkWindowsPartitionAsync(requestedLinuxMB)" in partitioning
+    assert "CreateFat32PartitionSimpleAsync(biosStagingMB)" in partitioning
+    assert "the live will expand it" in partitioning
+
+
+def test_bios_recovery_guard_accepts_staging_or_final_partition_size() -> None:
+    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+
+    assert '$"STAGING_SIZE_MB={stagingSizeMB:F0}"' in apply_changes
+    assert 'Read-EnvValue -Path $Pending -Name "STAGING_SIZE_MB"' in recovery
+    assert "$matchesStagingSize" in recovery
+    assert "$matchesFinalSize" in recovery
+    assert "$isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize" in recovery
+
+
 def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
     script = read("Scripts/libertix-uefi-install.ps1")
     create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
@@ -479,6 +504,22 @@ def test_uefi_low_memory_boot_files_are_writable_and_revert_removes_iso() -> Non
 
 def test_uefi_live_expands_fat32_staging_before_ext4_format() -> None:
     installer = read("iso-uefi/live/install-mint.sh")
+    reuse = installer.split('if [ -n "$LIVE_PART" ]', 1)[1].split(
+        'elif [ "$PART_TABLE" = "msdos" ]', 1
+    )[0]
+
+    assert "desired_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
+    assert (
+        "recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))" in reuse
+    )
+    assert 'run_logged parted -s "$DISK" unit s resizepart' in reuse
+    assert 'expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART"' in reuse
+    assert '"$expanded_partition_bytes" -eq "$desired_partition_bytes"' in reuse
+    assert reuse.index("resizepart") < installer.index('run_logged wipefs -a "$NEW_PART"')
+
+
+def test_bios_live_expands_fat32_staging_before_ext4_format() -> None:
+    installer = read("iso/live/install-mint.sh")
     reuse = installer.split('if [ -n "$LIVE_PART" ]', 1)[1].split(
         'elif [ "$PART_TABLE" = "msdos" ]', 1
     )[0]

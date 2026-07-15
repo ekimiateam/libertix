@@ -1174,6 +1174,34 @@ if [ -n "$LIVE_PART" ] && [ "$(parent_disk_from_part "$LIVE_PART")" = "$DISK" ];
     [ "$NEW_PART_NUM" = "3" ] || die "expected to reuse partition 3, got $NEW_PART_NUM"
     mark "050-assert-live-detached"
     assert_not_mounted_or_open "$NEW_PART"
+
+    # Windows reserves the complete requested Linux size but creates only an
+    # 8 GiB FAT32 staging partition when the final size exceeds 31 GiB. Expand
+    # this same MBR partition into the contiguous reserved space before ext4.
+    current_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
+    desired_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))
+    if [ "$current_partition_bytes" -lt "$desired_partition_bytes" ]; then
+        logical_sector_bytes=$(blockdev --getss "$DISK" 2>/dev/null || echo 0)
+        [ "$logical_sector_bytes" -gt 0 ] || die "cannot determine target disk logical sector size"
+        partition_start_sector=$(cat "/sys/class/block/$(basename "$NEW_PART")/start" 2>/dev/null || echo 0)
+        [ "$partition_start_sector" -gt 0 ] || die "cannot determine installer partition start sector"
+        desired_partition_sectors=$((desired_partition_bytes / logical_sector_bytes))
+        desired_end_sector=$((partition_start_sector + desired_partition_sectors - 1))
+        recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))
+        [ "$desired_end_sector" -lt "$recovery_start_sector" ] || \
+            die "requested Linux partition would overlap the Windows recovery partition"
+
+        echo "Expanding FAT32 staging partition from $current_partition_bytes to $desired_partition_bytes bytes before ext4 format"
+        run_logged parted -s "$DISK" unit s resizepart "$NEW_PART_NUM" "${desired_end_sector}s"
+        sync
+        partprobe "$DISK" 2>/dev/null || true
+        udevadm settle 2>/dev/null || true
+        sleep 2
+
+        expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
+        [ "$expanded_partition_bytes" -eq "$desired_partition_bytes" ] || \
+            die "installer partition expansion verification failed: expected $desired_partition_bytes, got $expanded_partition_bytes"
+    fi
 elif [ "$PART_TABLE" = "msdos" ] && [ "$PART_COUNT" -ge 4 ]; then
     echo "ERROR: MBR has $PART_COUNT partitions and no removable live partition was found"
     echo "Refusing to delete or move the Windows recovery partition"

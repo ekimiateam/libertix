@@ -122,6 +122,7 @@ try {
     }
 
     $expectedMbText = Read-EnvValue -Path $Pending -Name "LINUX_SIZE_MB"
+    $stagingMbText = Read-EnvValue -Path $Pending -Name "STAGING_SIZE_MB"
     $diskNumberText = Read-EnvValue -Path $Pending -Name "SYSTEM_DISK_NUMBER"
     $systemPartitionNumberText = Read-EnvValue -Path $Pending -Name "SYSTEM_PARTITION_NUMBER"
     $initialSystemSizeText = Read-EnvValue -Path $Pending -Name "SYSTEM_PARTITION_SIZE_BYTES"
@@ -131,11 +132,18 @@ try {
     }
 
     $expectedMb = [int][double]::Parse($expectedMbText, [Globalization.CultureInfo]::InvariantCulture)
+    $stagingMb = if ($stagingMbText) {
+        [int][double]::Parse($stagingMbText, [Globalization.CultureInfo]::InvariantCulture)
+    } else {
+        $expectedMb
+    }
     $diskNumber = [int]$diskNumberText
     $systemPartitionNumber = [int]$systemPartitionNumberText
     $initialSystemSize = [int64]$initialSystemSizeText
     $minBytes = [int64]([Math]::Max(1024, $expectedMb - 1024)) * 1MB
     $maxBytes = [int64]($expectedMb + 1024) * 1MB
+    $stagingMinBytes = [int64]([Math]::Max(1024, $stagingMb - 1024)) * 1MB
+    $stagingMaxBytes = [int64]($stagingMb + 1024) * 1MB
 
     $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
     if ($systemPartition.DiskNumber -ne $diskNumber -or $systemPartition.PartitionNumber -ne $systemPartitionNumber) {
@@ -146,17 +154,13 @@ try {
         throw "Windows system disk identity changed; refusing rollback."
     }
 
-    # A candidate must be unique, on the exact Windows disk, after C:, within
-    # the requested size window, and either carry the temporary label/letter or
-    # already be the ext4 partition produced by the live installer.
+    # A candidate must be unique, on the exact Windows disk, after C:, and
+    # either be the known FAT32 staging/final size or the final ext4 size.
     $partitions = Get-Partition -DiskNumber $diskNumber | Sort-Object Offset
     $candidates = @()
 
     foreach ($partition in $partitions) {
         if ($partition.PartitionNumber -eq $systemPartition.PartitionNumber) {
-            continue
-        }
-        if ($partition.Size -lt $minBytes -or $partition.Size -gt $maxBytes) {
             continue
         }
         if ($partition.Offset -lt $systemPartition.Offset) {
@@ -177,6 +181,16 @@ try {
         $isTemporaryFat = ($label -eq "LIBERTIX" -or $letter -eq "Z")
         $isLinux = ($fs -match "^(ext2|ext3|ext4)$")
         if (-not $isTemporaryFat -and -not $isLinux) {
+            continue
+        }
+
+        $matchesFinalSize = ($partition.Size -ge $minBytes -and $partition.Size -le $maxBytes)
+        $matchesStagingSize = (
+            $partition.Size -ge $stagingMinBytes -and
+            $partition.Size -le $stagingMaxBytes
+        )
+        if (($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
+            ($isLinux -and -not $matchesFinalSize)) {
             continue
         }
 

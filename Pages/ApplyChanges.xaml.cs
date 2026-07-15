@@ -31,6 +31,8 @@ namespace Libertix.Pages
         private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
         private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
         private const int Aria2MaxConnections = 5;
+        private const double BiosFat32DirectLimitMB = 31 * 1024;
+        private const double BiosFat32StagingSizeMB = 8 * 1024;
         private const string WindowsShareRoot = @"C:\ProgramData\Libertix\WindowsShare";
         private const string Ext4SetupFileName = "ext4-win-driver.exe";
         private const string Ext4SetupSha256 = "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031";
@@ -633,12 +635,17 @@ namespace Libertix.Pages
             Log("Waiting for disk to update...");
             await Task.Delay(3000, _installationCancellation.Token);
 
-            // Step 2: Create FAT32 partition in the free space (no offset - goes right after Windows).
-            // It is intentionally sized like the final Linux partition; the live installer reformats it.
+            // Step 2: Create FAT32 in the free space immediately after Windows.
+            // Windows cannot reliably format FAT32 above 32 GB, so large Linux
+            // allocations use an 8 GB staging partition that the live expands.
+            double biosStagingMB = GetBiosFat32PartitionSizeMB(requestedLinuxMB);
             UpdateProgress(30, Application.Current.Resources["ApplyChangesStep2"] as string ?? "Creating FAT32 boot partition (Z:)...");
-            Log($"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
+            if (biosStagingMB < requestedLinuxMB)
+                Log($"Step 2: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; the live will expand it to {_linuxSizeGB:N0}GB...");
+            else
+                Log($"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
 
-            bool step2Success = await CreateFat32PartitionSimpleAsync(requestedLinuxMB);
+            bool step2Success = await CreateFat32PartitionSimpleAsync(biosStagingMB);
             ThrowIfCancellationRequested();
             if (!step2Success)
             {
@@ -871,8 +878,8 @@ namespace Libertix.Pages
             // Done
             UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
             Log("Installation preparation completed successfully!");
-            Log($"- FAT32 live partition: Z: ({_linuxSizeGB:N0}GB, final Linux slot)");
-            Log("- The live installer will reformat Z: as ext4 instead of deleting/recreating the MBR entry");
+            Log($"- FAT32 live partition: Z: ({biosStagingMB / 1024:N0}GB staging, {_linuxSizeGB:N0}GB reserved for Linux)");
+            Log("- The live installer will expand it if needed, then reformat it as ext4 without deleting/recreating the MBR entry");
             Log("- ISO contents copied to Z:");
             Log("- GRUB4DOS bootloader installed");
             Log("- Boot entry 'Install Linux' added to Windows Boot Manager");
@@ -1638,10 +1645,12 @@ try {{
                     // pending.env lets the startup guard identify the expected
                     // temporary partition size without hardcoding UI choices.
                     string metadataPath = Path.Combine(RecoveryRoot, "pending.env");
+                    double stagingSizeMB = GetBiosFat32PartitionSizeMB(requestedLinuxMB);
                     string metadata = string.Join(Environment.NewLine, new[]
                     {
                         "LIBERTIX_INSTALL_PENDING=true",
                         $"LINUX_SIZE_MB={requestedLinuxMB:F0}",
+                        $"STAGING_SIZE_MB={stagingSizeMB:F0}",
                         $"SYSTEM_DRIVE={_storagePreflight.SystemDrive}",
                         $"SYSTEM_DISK_NUMBER={_storagePreflight.SystemDiskNumber}",
                         $"SYSTEM_PARTITION_NUMBER={_storagePreflight.SystemPartitionNumber}",
@@ -1959,6 +1968,13 @@ exit";
                 if (File.Exists(diskpartScript))
                     File.Delete(diskpartScript);
             }
+        }
+
+        private static double GetBiosFat32PartitionSizeMB(double requestedLinuxMB)
+        {
+            return requestedLinuxMB > BiosFat32DirectLimitMB
+                ? BiosFat32StagingSizeMB
+                : requestedLinuxMB;
         }
 
         private async Task<(bool success, string output)> RunDiskpartWithResultAsync(string scriptPath)
