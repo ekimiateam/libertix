@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-state-v1.json",
+  "title": "Libertix Installation Execution State",
+  "description": "Durable progress and compensation state for one installation plan.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planId",
+    "revision",
+    "status",
+    "phase",
+    "activeStep",
+    "completedSteps",
+    "compensatedSteps",
+    "failure",
+    "updatedAtUtc"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "running",
+        "failed",
+        "rollback-running",
+        "rolled-back",
+        "succeeded"
+      ]
+    },
+    "phase": {
+      "enum": [
+        "windows",
+        "live",
+        "target",
+        "rollback",
+        "complete"
+      ]
+    },
+    "activeStep": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "completedSteps": {
+      "$ref": "#/$defs/stepList"
+    },
+    "compensatedSteps": {
+      "$ref": "#/$defs/stepList"
+    },
+    "failure": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/failure"
+        }
+      ]
+    },
+    "updatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "stepList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(windows|live|target)\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "component"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "component": {
+          "enum": [
+            "windows",
+            "live",
+            "target",
+            "rollback"
+          ]
+        }
+      }
+    }
+  }
+}

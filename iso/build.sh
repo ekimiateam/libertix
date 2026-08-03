@@ -98,6 +98,27 @@ install_live_installer_assets() {
         "$WORKDIR/chroot/usr/local/sbin/libertix-copy-logs"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-install-platform-common.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-install-platform-common.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-storage-common.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-storage-common.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-install-runtime-common.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-install-runtime-common.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-i18n.py" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-i18n.py"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-i18n.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-i18n.sh"
+    install -m 0644 -D "$ROOT_DIR/assets/live/libertix-translations.json" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-translations.json"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-target-common.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-target-common.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-rollback-common.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-rollback-common.sh"
+    if [ "$FIRMWARE_MODE" = "bios" ]; then
+        install -m 0755 -D "$ROOT_DIR/assets/live/libertix-bios-adapter.sh" \
+            "$WORKDIR/chroot/usr/local/lib/libertix/libertix-bios-adapter.sh"
+    else
+        install -m 0755 -D "$ROOT_DIR/assets/live/libertix-uefi-adapter.sh" \
+            "$WORKDIR/chroot/usr/local/lib/libertix/libertix-uefi-adapter.sh"
+    fi
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-runner-stage-common.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-runner-stage-common.sh"
     install -m 0755 -D "$ISO_DIR/live/cleanup-bcd.py" \
@@ -149,6 +170,7 @@ write_live_config() {
         printf '%q' "$1"
     }
     cat > "$WORKDIR/iso_build/config.txt" <<CONFIGFILE
+LANGUAGE_CODE=$(shell_quote "$LANGUAGE_CODE")
 SYSTEM_LANG=$(shell_quote "$SYSTEM_LANG")
 KEYBOARD_LAYOUT=$(shell_quote "$KEYBOARD_LAYOUT")
 KEYBOARD_MODEL=$(shell_quote "$KEYBOARD_MODEL")

@@ -15,10 +15,24 @@ function Write-Result {
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $exe = [string]$config.executable
 $taskName = [string]$config.task_name
+$filepoolBaseUrl = [string]$config.filepool_base_url
 
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw ("Libertix.exe local est introuvable: " + $exe)
 }
+
+$parsedFilepoolUri = $null
+if (
+    [string]::IsNullOrWhiteSpace($filepoolBaseUrl) -or
+    -not [Uri]::TryCreate($filepoolBaseUrl, [UriKind]::Absolute, [ref]$parsedFilepoolUri) -or
+    $parsedFilepoolUri.Scheme -notin @("http", "https") -or
+    -not [string]::IsNullOrEmpty($parsedFilepoolUri.UserInfo) -or
+    -not [string]::IsNullOrEmpty($parsedFilepoolUri.Query) -or
+    -not [string]::IsNullOrEmpty($parsedFilepoolUri.Fragment)
+) {
+    throw "filepool_base_url must be an absolute HTTP(S) URL without credentials, a query or a fragment"
+}
+$filepoolBaseUrl = $parsedFilepoolUri.AbsoluteUri.TrimEnd("/")
 
 # Le lancement administrateur interactif est nécessaire pour le parcours
 # d'installation. sshd seul démarre trop souvent le processus dans une session
@@ -37,7 +51,7 @@ finally {
 }
 
 $time = (Get-Date).AddMinutes(1).ToString("HH:mm")
-$quotedExe = '"' + $exe + '"'
+$taskCommand = '"{0}" --filepool-base-url "{1}"' -f $exe, $filepoolBaseUrl
 $interactiveSession = Get-Process -Name explorer -ErrorAction Stop |
     Sort-Object StartTime -Descending |
     Select-Object -First 1 -ExpandProperty SessionId
@@ -45,7 +59,7 @@ $interactiveSession = Get-Process -Name explorer -ErrorAction Stop |
 $createOutput = schtasks.exe `
     /Create `
     /TN $taskName `
-    /TR $quotedExe `
+    /TR $taskCommand `
     /SC ONCE `
     /ST $time `
     /RL HIGHEST `

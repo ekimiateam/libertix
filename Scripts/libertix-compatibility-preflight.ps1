@@ -1,10 +1,12 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 
 [CmdletBinding()]
 param(
     [int]$MinimumLinuxSizeGB = 20,
     [int]$MinimumMemoryMB = 2048,
-    [int]$LowMemoryThresholdMB = 4096
+    [int]$LowMemoryThresholdMB = 4096,
+    [ValidateSet("en", "fr", "es", "ja")]
+    [string]$LanguageCode = "en"
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,9 +27,76 @@ function Stop-Compatibility {
     throw "[$Code] $Message"
 }
 
+$checkMessages = @{
+    en = @{
+        COMPAT_010_PRIVILEGES = "Checking administrator privileges"
+        COMPAT_020_PLATFORM = "Checking Windows, architecture, and memory"
+        COMPAT_030_FIRMWARE = "Checking firmware and Secure Boot"
+        COMPAT_040_STORAGE = "Checking the system disk and storage controller"
+        COMPAT_050_FILESYSTEM = "Checking NTFS, BitLocker, and shrinkable space"
+    }
+    fr = @{
+        COMPAT_010_PRIVILEGES = "Vérification des droits administrateur"
+        COMPAT_020_PLATFORM = "Vérification de Windows, de l'architecture et de la mémoire"
+        COMPAT_030_FIRMWARE = "Vérification du firmware et du démarrage sécurisé"
+        COMPAT_040_STORAGE = "Vérification du disque système et du contrôleur"
+        COMPAT_050_FILESYSTEM = "Vérification de NTFS, BitLocker et de l'espace réductible"
+    }
+    es = @{
+        COMPAT_010_PRIVILEGES = "Comprobación de los privilegios de administrador"
+        COMPAT_020_PLATFORM = "Comprobación de Windows, la arquitectura y la memoria"
+        COMPAT_030_FIRMWARE = "Comprobación del firmware y del arranque seguro"
+        COMPAT_040_STORAGE = "Comprobación del disco del sistema y del controlador de almacenamiento"
+        COMPAT_050_FILESYSTEM = "Comprobación de NTFS, BitLocker y del espacio reducible"
+    }
+    ja = @{
+        COMPAT_010_PRIVILEGES = "管理者権限を確認しています"
+        COMPAT_020_PLATFORM = "Windows、アーキテクチャ、メモリを確認しています"
+        COMPAT_030_FIRMWARE = "ファームウェアとセキュア ブートを確認しています"
+        COMPAT_040_STORAGE = "システム ディスクとストレージ コントローラーを確認しています"
+        COMPAT_050_FILESYSTEM = "NTFS、BitLocker、縮小可能な領域を確認しています"
+    }
+}
+
+$warningMessages = @{
+    en = @{
+        LOW_MEMORY = "Limited memory ({0} MB): Libertix will use low-memory mode without copying the entire live system to RAM."
+        BITLOCKER = "BitLocker is active; Libertix will decrypt it only after your final confirmation."
+        MULTIPLE_DISKS = "{0} internal disks are visible; the live system will require an exact match with the Windows disk."
+    }
+    fr = @{
+        LOW_MEMORY = "Mémoire limitée ({0} Mio): Libertix utilisera le mode faible mémoire sans copie intégrale du live en RAM."
+        BITLOCKER = "BitLocker est actif; Libertix le déchiffrera uniquement après votre confirmation finale."
+        MULTIPLE_DISKS = "{0} disques internes sont visibles; le live exigera une correspondance exacte avec le disque Windows."
+    }
+    es = @{
+        LOW_MEMORY = "Memoria limitada ({0} MB): Libertix usará el modo de poca memoria sin copiar todo el sistema live en la RAM."
+        BITLOCKER = "BitLocker está activo; Libertix solo lo descifrará después de su confirmación final."
+        MULTIPLE_DISKS = "Hay {0} discos internos visibles; el sistema live exigirá una coincidencia exacta con el disco de Windows."
+    }
+    ja = @{
+        LOW_MEMORY = "メモリが限られています ({0} MB)。Libertix はライブ システム全体を RAM にコピーせず、低メモリ モードを使用します。"
+        BITLOCKER = "BitLocker が有効です。Libertix は最終確認後にのみ暗号化を解除します。"
+        MULTIPLE_DISKS = "{0} 台の内蔵ディスクが検出されました。ライブ システムでは Windows ディスクとの完全一致が必要です。"
+    }
+}
+
 function Write-Check {
-    param([string]$Code, [string]$Message)
-    Write-Output ("CHECK={0}: {1}" -f $Code, $Message)
+    param([string]$Code)
+    $message = $checkMessages[$LanguageCode][$Code]
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = $checkMessages.en[$Code]
+    }
+    Write-Output ("CHECK={0}: {1}" -f $Code, $message)
+}
+
+function Write-LocalizedWarning {
+    param([string]$Key, [object[]]$FormatArguments = @())
+    $message = $warningMessages[$LanguageCode][$Key]
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        $message = $warningMessages.en[$Key]
+    }
+    Write-Result "WARNING" ($message -f $FormatArguments)
 }
 
 function Get-FirmwareMode {
@@ -207,14 +276,14 @@ function Test-NvramAndBootNext {
 }
 
 try {
-    Write-Check "COMPAT_010_PRIVILEGES" "Vérification des droits administrateur"
+    Write-Check "COMPAT_010_PRIVILEGES"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         Stop-Compatibility "COMPAT_E_ADMIN_REQUIRED" "Libertix doit être lancé en administrateur."
     }
 
-    Write-Check "COMPAT_020_PLATFORM" "Vérification de Windows, de l'architecture et de la mémoire"
+    Write-Check "COMPAT_020_PLATFORM"
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
     if ([int]$os.ProductType -ne 1) {
         Stop-Compatibility "COMPAT_E_OS_UNSUPPORTED" "Seules les éditions clientes de Windows sont prises en charge."
@@ -230,10 +299,10 @@ try {
     }
     $lowMemory = $memoryMB -lt $LowMemoryThresholdMB
     if ($lowMemory) {
-        Write-Result "WARNING" "Mémoire limitée ($memoryMB Mio): Libertix utilisera le mode faible mémoire sans copie intégrale du live en RAM."
+        Write-LocalizedWarning "LOW_MEMORY" @($memoryMB)
     }
 
-    Write-Check "COMPAT_030_FIRMWARE" "Vérification du firmware et du démarrage sécurisé"
+    Write-Check "COMPAT_030_FIRMWARE"
     $firmware = Get-FirmwareMode
     $secureBootEnabled = $false
     $nvramPassed = $false
@@ -257,7 +326,7 @@ try {
         }
     }
 
-    Write-Check "COMPAT_040_STORAGE" "Vérification du disque système et du contrôleur"
+    Write-Check "COMPAT_040_STORAGE"
     $systemDrive = [Environment]::GetEnvironmentVariable("SystemDrive").TrimEnd("\")
     if ($systemDrive -notmatch "^[A-Za-z]:$") {
         Stop-Compatibility "COMPAT_E_SYSTEM_DRIVE" "Le volume système Windows est invalide."
@@ -319,7 +388,7 @@ try {
         }
     }
 
-    Write-Check "COMPAT_050_FILESYSTEM" "Vérification de NTFS, BitLocker et de l'espace réductible"
+    Write-Check "COMPAT_050_FILESYSTEM"
     $volume = Get-Volume -DriveLetter $systemDrive.Substring(0, 1) -ErrorAction Stop
     if ([string]$volume.FileSystem -ne "NTFS" -or [string]$volume.HealthStatus -ne "Healthy") {
         Stop-Compatibility "COMPAT_E_NTFS_HEALTH" "Le volume Windows doit être un NTFS sain; état détecté: $($volume.FileSystem)/$($volume.HealthStatus)."
@@ -341,11 +410,11 @@ try {
     }
     $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
     if (-not $bitLocker.Safe) {
-        Write-Result "WARNING" "BitLocker est actif; Libertix le déchiffrera uniquement après votre confirmation finale."
+        Write-LocalizedWarning "BITLOCKER"
     }
     $fixedDisks = @(Get-Disk | Where-Object { $_.BusType -notin @("USB", "File Backed Virtual") })
     if ($fixedDisks.Count -gt 1) {
-        Write-Result "WARNING" "$($fixedDisks.Count) disques internes sont visibles; le live exigera une correspondance exacte avec le disque Windows."
+        Write-LocalizedWarning "MULTIPLE_DISKS" @($fixedDisks.Count)
     }
 
     Write-Result "PREFLIGHT_OK" "true"

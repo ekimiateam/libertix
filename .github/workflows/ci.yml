@@ -1,6 +1,7 @@
 name: Continuous integration
 
 on:
+  workflow_call:
   push:
     branches:
       - dev
@@ -62,6 +63,19 @@ jobs:
           while IFS= read -r -d '' script; do
             bash -n "$script"
           done < <(git ls-files -z '*.sh')
+
+      - name: Run ShellCheck
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck -x -S error
+
+      - name: Validate versioned JSON contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m json.tool schemas/installation-plan.schema.json >/dev/null
+          python -m json.tool schemas/installation-state.schema.json >/dev/null
 
   wpf:
     name: Build WPF (.NET Framework 4.8)

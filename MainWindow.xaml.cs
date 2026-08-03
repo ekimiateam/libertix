@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Navigation;
 using Libertix.Helpers;
+using Libertix.Dialogs;
 using Libertix.Pages;
 using Libertix.Models;
 
@@ -16,6 +17,7 @@ namespace Libertix
     {
         private readonly InstallationState _installationState;
         private readonly TrayIconController _trayIcon;
+        private readonly object _welcomeContent;
         private bool _hiddenInTray;
         private bool _allowClose;
 
@@ -23,6 +25,7 @@ namespace Libertix
         {
             _installationState = ((App)Application.Current).InstallationState;
             InitializeComponent();
+            _welcomeContent = MainFrame.Content;
             _trayIcon = new TrayIconController(RestoreFromTray);
             _installationState.InstallationRunningChanged += InstallationState_InstallationRunningChanged;
 
@@ -71,18 +74,20 @@ namespace Libertix
                 return;
             }
 
-            var result = MessageBox.Show(
-                ResourceText("CloseConfirmationMessage", "Voulez-vous vraiment fermer Libertix ?"),
-                ResourceText("CloseConfirmationTitle", "Fermer Libertix"),
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
-            if (result != MessageBoxResult.Yes)
+            e.Cancel = true;
+            bool confirmed = LocalizedConfirmationDialog.Show(
+                this,
+                ResourceText("CloseConfirmationTitle", "Close Libertix"),
+                ResourceText("CloseConfirmationMessage", "Do you really want to close Libertix?"),
+                ResourceText("ConfirmationYes", "Yes"),
+                ResourceText("ConfirmationNo", "No"));
+            if (!confirmed)
             {
-                e.Cancel = true;
                 return;
             }
 
             _allowClose = true;
+            e.Cancel = false;
             base.OnClosing(e);
         }
 
@@ -142,6 +147,45 @@ namespace Libertix
                 MainFrame,
                 new CompatibilityCheck(_installationState),
                 TimeSpan.FromSeconds(0.3));
+        }
+
+        private void AboutButton_Click(object sender, RoutedEventArgs e)
+        {
+            NavigationHelper.NavigateWithAnimationInFrame(
+                MainFrame,
+                new About(),
+                TimeSpan.FromSeconds(0.3));
+        }
+
+        /// <summary>
+        /// Restores the original welcome content after leaving an auxiliary page.
+        /// The installation navigation stack is intentionally not involved.
+        /// </summary>
+        public void ReturnToWelcome()
+        {
+            // The welcome view is a XAML element rather than a Page. NavigationHelper
+            // animates that element directly when About is opened, so its animation
+            // clocks must be removed before the same instance is reused. Otherwise a
+            // second navigation can leave the frame transparent after Get Started.
+            if (_welcomeContent is UIElement welcomeElement)
+            {
+                welcomeElement.BeginAnimation(UIElement.OpacityProperty, null);
+                welcomeElement.Opacity = 1.0;
+            }
+
+            if (_welcomeContent is FrameworkElement welcomeFrameworkElement)
+            {
+                welcomeFrameworkElement.BeginAnimation(FrameworkElement.MarginProperty, null);
+                welcomeFrameworkElement.Margin = new Thickness(0);
+            }
+
+            // Return through the Frame journal when About was reached by navigation.
+            // Assigning Frame.Content directly leaves NavigationService on the About
+            // entry and the following animated navigation can render an empty frame.
+            if (MainFrame.CanGoBack)
+                MainFrame.GoBack();
+            else
+                MainFrame.Content = _welcomeContent;
         }
 
         private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)

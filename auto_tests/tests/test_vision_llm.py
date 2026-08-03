@@ -364,7 +364,12 @@ def test_install_progress_uses_short_english_prompt_and_thinking_budget(
 
     monkeypatch.setattr(httpx, "post", fake_post)
     VisionLLMClient(
-        "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
+        "key",
+        "https://example.test/v1",
+        "thinking-model",
+        1,
+        reasoning_effort="medium",
+        max_attempts=1,
     ).analyze_install_progress(image, "vm2", "Windows UEFI")
 
     messages = captured_payload["messages"]
@@ -372,6 +377,7 @@ def test_install_progress_uses_short_english_prompt_and_thinking_budget(
     assert messages[0]["content"] == INSTALL_PROGRESS_SYSTEM_PROMPT
     assert len(INSTALL_PROGRESS_SYSTEM_PROMPT) < 1400
     assert captured_payload["max_tokens"] == 2048
+    assert captured_payload["reasoning"] == {"effort": "medium"}
 
 
 def test_install_progress_normalizes_contradictory_final_reboot_json(

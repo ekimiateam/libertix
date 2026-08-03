@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1375" viewBox="0 0 1400 1375" role="img" aria-labelledby="title desc">
+  <title id="title">Libertix — installation BIOS et UEFI</title>
+  <desc id="desc">Comparaison détaillée en neuf étapes des installations BIOS MBR et UEFI GPT, depuis Windows jusqu’au menu GRUB final.</desc>
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.12" /></filter>
+  </defs>
+  <rect width="1400" height="1375" fill="#ffffff" />
+
+  <rect x="70" y="25" width="1260" height="70" rx="14" fill="#25233a" />
+  <text x="700" y="69" text-anchor="middle" fill="#ffffff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="28" font-weight="700">Libertix — installation BIOS et UEFI</text>
+
+  <rect x="350" y="125" width="700" height="78" rx="14" fill="#f3f4f6" stroke="#9ca3af" stroke-width="2" filter="url(#shadow)" />
+  <text x="700" y="158" text-anchor="middle" fill="#111827" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="19" font-weight="700">Libertix.exe sous Windows</text>
+  <text x="700" y="184" text-anchor="middle" fill="#374151" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15">Contrôle de compatibilité · choix du système, de la taille, du compte et du partage</text>
+
+  <text x="455" y="224" fill="#1e3a8a" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" font-weight="700">BIOS</text>
+  <text x="920" y="224" fill="#4c1d95" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15" font-weight="700">UEFI</text>
+
+  <rect x="70" y="255" width="600" height="980" rx="16" fill="#eff6ff" stroke="#93c5fd" stroke-width="2" />
+  <rect x="730" y="255" width="600" height="980" rx="16" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="2" />
+  <rect x="105" y="280" width="530" height="50" rx="12" fill="#2563eb" />
+  <rect x="765" y="280" width="530" height="50" rx="12" fill="#7c3aed" />
+  <text x="370" y="313" text-anchor="middle" fill="#ffffff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="21" font-weight="700">BIOS / MBR</text>
+  <text x="1030" y="313" text-anchor="middle" fill="#ffffff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="21" font-weight="700">UEFI / GPT</text>
+
+  <path d="M620 203 V230 H370 V270" fill="none" stroke="#2563eb" stroke-width="3" />
+  <polygon points="362,270 378,270 370,280" fill="#2563eb" />
+  <path d="M780 203 V230 H1030 V270" fill="none" stroke="#7c3aed" stroke-width="3" />
+  <polygon points="1022,270 1038,270 1030,280" fill="#7c3aed" />
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" fill="#172554">
+    <rect x="120" y="350" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="377" font-size="17" font-weight="700">1 · Réduire Windows C:</text><text x="145" y="401" font-size="13.5">La taille choisie pour Linux devient de l’espace libre</text>
+    <rect x="120" y="446" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="473" font-size="17" font-weight="700">2 · Créer la partition live FAT32</text><text x="145" y="497" font-size="13.5">Elle occupe directement l’emplacement final de Linux</text>
+    <rect x="120" y="542" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="569" font-size="17" font-weight="700">3 · Préparer les fichiers d’installation</text><text x="145" y="593" font-size="13.5">Mini-live sur FAT32 · ISO Linux conservée sur C:</text>
+    <rect x="120" y="638" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="665" font-size="17" font-weight="700">4 · Programmer le prochain démarrage</text><text x="145" y="689" font-size="13.5">BCD Windows lance GRUB4DOS une seule fois</text>
+    <rect x="120" y="734" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="761" font-size="17" font-weight="700">5 · Redémarrer sur le live Libertix</text><text x="145" y="785" font-size="13.5">Le mini-live démarre depuis la partition FAT32</text>
+    <rect x="120" y="830" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="857" font-size="17" font-weight="700">6 · Revérifier le disque</text><text x="145" y="881" font-size="13.5">Le live retrouve Windows, la partition live et la récupération</text>
+    <rect x="120" y="926" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="953" font-size="17" font-weight="700">7 · Transformer la partition en Linux</text><text x="145" y="977" font-size="13.5">La même partition FAT32 est reformatée en ext4</text>
+    <rect x="120" y="1022" width="500" height="68" rx="11" fill="#ffffff" stroke="#60a5fa" stroke-width="2" />
+    <text x="145" y="1049" font-size="17" font-weight="700">8 · Installer et configurer Linux</text><text x="145" y="1073" font-size="13.5">ISO de C: extraite · compte, langue et partage appliqués</text>
+    <rect x="120" y="1118" width="500" height="68" rx="11" fill="#dbeafe" stroke="#2563eb" stroke-width="2" />
+    <text x="145" y="1145" font-size="17" font-weight="700">9 · Installer le démarrage final</text><text x="145" y="1169" font-size="13.5">GRUB BIOS est écrit sur le disque puis tout est vérifié</text>
+  </g>
+
+  <g fill="#2563eb" stroke="#2563eb" stroke-width="2.5">
+    <path d="M370 418 V438" fill="none" /><polygon points="363,437 377,437 370,446" />
+    <path d="M370 514 V534" fill="none" /><polygon points="363,533 377,533 370,542" />
+    <path d="M370 610 V630" fill="none" /><polygon points="363,629 377,629 370,638" />
+    <path d="M370 706 V726" fill="none" /><polygon points="363,725 377,725 370,734" />
+    <path d="M370 802 V822" fill="none" /><polygon points="363,821 377,821 370,830" />
+    <path d="M370 898 V918" fill="none" /><polygon points="363,917 377,917 370,926" />
+    <path d="M370 994 V1014" fill="none" /><polygon points="363,1013 377,1013 370,1022" />
+    <path d="M370 1090 V1110" fill="none" /><polygon points="363,1109 377,1109 370,1118" />
+  </g>
+
+  <g font-family="Inter,Segoe UI,Arial,sans-serif" fill="#2e1065">
+    <rect x="780" y="350" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="377" font-size="17" font-weight="700">1 · Vérifier le firmware UEFI</text><text x="805" y="401" font-size="13.5">Secure Boot, NVRAM, BootNext et accès à C:</text>
+    <rect x="780" y="446" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="473" font-size="17" font-weight="700">2 · Réduire Windows C:</text><text x="805" y="497" font-size="13.5">Toute la taille choisie pour Linux devient de l’espace libre</text>
+    <rect x="780" y="542" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="569" font-size="17" font-weight="700">3 · Créer la partition live FAT32</text><text x="805" y="593" font-size="13.5">LIBERTIXEFI utilise 8 Gio si Linux dépasse 31 Gio</text>
+    <rect x="780" y="638" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="665" font-size="17" font-weight="700">4 · Préparer les fichiers d’installation</text><text x="805" y="689" font-size="13.5">Mini-live sur LIBERTIXEFI · ISO Linux conservée sur C:</text>
+    <rect x="780" y="734" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="761" font-size="17" font-weight="700">5 · Programmer le prochain démarrage</text><text x="805" y="785" font-size="13.5">Chargeur temporaire dans l’ESP + BootNext vérifié</text>
+    <rect x="780" y="830" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="857" font-size="17" font-weight="700">6 · Redémarrer sur le live Libertix</text><text x="805" y="881" font-size="13.5">Le firmware charge le mini-live une seule fois</text>
+    <rect x="780" y="926" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="953" font-size="17" font-weight="700">7 · Revérifier et agrandir la partition</text><text x="805" y="977" font-size="13.5">Le boot temporaire est retiré puis FAT32 atteint la taille choisie</text>
+    <rect x="780" y="1022" width="500" height="68" rx="11" fill="#ffffff" stroke="#a78bfa" stroke-width="2" />
+    <text x="805" y="1049" font-size="17" font-weight="700">8 · Installer et configurer Linux</text><text x="805" y="1073" font-size="13.5">ext4 · ISO de C: extraite · compte, langue et partage</text>
+    <rect x="780" y="1118" width="500" height="68" rx="11" fill="#ede9fe" stroke="#7c3aed" stroke-width="2" />
+    <text x="805" y="1145" font-size="17" font-weight="700">9 · Installer le démarrage final</text><text x="805" y="1169" font-size="13.5">GRUB UEFI signé est installé puis tout est vérifié</text>
+  </g>
+
+  <g fill="#7c3aed" stroke="#7c3aed" stroke-width="2.5">
+    <path d="M1030 418 V438" fill="none" /><polygon points="1023,437 1037,437 1030,446" />
+    <path d="M1030 514 V534" fill="none" /><polygon points="1023,533 1037,533 1030,542" />
+    <path d="M1030 610 V630" fill="none" /><polygon points="1023,629 1037,629 1030,638" />
+    <path d="M1030 706 V726" fill="none" /><polygon points="1023,725 1037,725 1030,734" />
+    <path d="M1030 802 V822" fill="none" /><polygon points="1023,821 1037,821 1030,830" />
+    <path d="M1030 898 V918" fill="none" /><polygon points="1023,917 1037,917 1030,926" />
+    <path d="M1030 994 V1014" fill="none" /><polygon points="1023,1013 1037,1013 1030,1022" />
+    <path d="M1030 1090 V1110" fill="none" /><polygon points="1023,1109 1037,1109 1030,1118" />
+  </g>
+
+  <path d="M370 1186 V1240 H530 V1270" fill="none" stroke="#16a34a" stroke-width="3" />
+  <polygon points="522,1270 538,1270 530,1280" fill="#16a34a" />
+  <path d="M1030 1186 V1240 H870 V1270" fill="none" stroke="#16a34a" stroke-width="3" />
+  <polygon points="862,1270 878,1270 870,1280" fill="#16a34a" />
+  <rect x="250" y="1280" width="900" height="70" rx="14" fill="#dcfce7" stroke="#16a34a" stroke-width="2" filter="url(#shadow)" />
+  <text x="700" y="1310" text-anchor="middle" fill="#14532d" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="20" font-weight="700">Résultat : GRUB affiche Linux et Windows</text>
+  <text x="700" y="1335" text-anchor="middle" fill="#166534" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="14">La partition de récupération est conservée. Pendant la préparation Windows, une erreur ou une annulation déclenche le rollback.</text>
+</svg>

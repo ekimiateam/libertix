@@ -7,13 +7,14 @@ using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
 using Libertix.Helpers;
+using Libertix.Installation;
 
 namespace Libertix.Pages
 {
     /// <summary>
     /// Windows privilege, firmware, storage-preflight, and process helpers.
-    /// This is a structural split only; the installation sequence remains in
-    /// ApplyChanges.xaml.cs and calls these methods exactly as before.
+    /// Firmware-specific orchestrators call these shared helpers without
+    /// duplicating the platform checks or native process contracts.
     /// </summary>
     public partial class ApplyChanges
     {
@@ -87,7 +88,7 @@ namespace Libertix.Pages
                 "PREFLIGHT_OK", "FIRMWARE", "SYSTEM_DRIVE", "SYSTEM_DISK_NUMBER",
                 "SYSTEM_PARTITION_NUMBER", "SYSTEM_PARTITION_OFFSET", "SYSTEM_PARTITION_SIZE",
                 "BOOT_PARTITION_NUMBER", "BOOT_PARTITION_OFFSET", "BOOT_PARTITION_SIZE",
-                "SYSTEM_DISK_UNIQUE_ID", "SYSTEM_DISK_SIZE", "PARTITION_STYLE",
+                "SYSTEM_DISK_UNIQUE_ID", "SYSTEM_DISK_SIZE", "LOGICAL_SECTOR_SIZE", "PARTITION_STYLE",
                 "RECOVERY_PARTITION_NUMBER", "RECOVERY_PARTITION_OFFSET", "RECOVERY_PARTITION_SIZE",
                 "BITLOCKER_SAFE", "BITLOCKER_STATE", "BITLOCKER_CONVERSION_STATUS",
                 "BITLOCKER_ENCRYPTION_PERCENTAGE", "BITLOCKER_PROTECTION_STATUS"
@@ -113,6 +114,7 @@ namespace Libertix.Pages
                 BootPartitionSize = long.Parse(values["BOOT_PARTITION_SIZE"], CultureInfo.InvariantCulture),
                 SystemDiskUniqueId = values["SYSTEM_DISK_UNIQUE_ID"],
                 SystemDiskSize = long.Parse(values["SYSTEM_DISK_SIZE"], CultureInfo.InvariantCulture),
+                LogicalSectorSize = int.Parse(values["LOGICAL_SECTOR_SIZE"], CultureInfo.InvariantCulture),
                 PartitionStyle = values["PARTITION_STYLE"],
                 RecoveryPartitionNumber = int.Parse(values["RECOVERY_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
                 RecoveryPartitionOffset = long.Parse(values["RECOVERY_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
@@ -194,12 +196,24 @@ namespace Libertix.Pages
             return "'" + value.Replace("'", "'\\''") + "'";
         }
 
-        private (int exitCode, string output, string error) RunProcess(string fileName, string arguments, int waitMs)
+        private static Encoding GetWindowsConsoleEncoding()
+        {
+            // Native Windows console tools such as bcdedit emit text in the
+            // active OEM code page, not UTF-8 or the ANSI code page.
+            return Encoding.GetEncoding(CultureInfo.CurrentCulture.TextInfo.OEMCodePage);
+        }
+
+        private (int exitCode, string output, string error) RunProcess(
+            string fileName,
+            string arguments,
+            int waitMs,
+            Encoding encoding = null)
         {
             WindowsProcessResult result = WindowsProcessRunner.Run(
                 fileName,
                 arguments,
-                TimeSpan.FromMilliseconds(waitMs));
+                TimeSpan.FromMilliseconds(waitMs),
+                encoding);
             string error = result.TimedOut
                 ? $"Process timed out after {waitMs} ms. {result.StandardError}".Trim()
                 : result.StandardError;

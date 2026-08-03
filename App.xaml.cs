@@ -25,6 +25,9 @@ namespace Libertix
             ApplicationLogger.Write("Libertix.exe startup.");
             RegisterApplicationErrorLogging();
 
+            if (!TryConfigureFilepool(e.Args))
+                return;
+
             if (!IsRunningAsAdministrator())
             {
                 ApplicationLogger.Write("Startup refused: administrator privileges are missing.");
@@ -43,6 +46,36 @@ namespace Libertix
                 InstallationState.UefiRecoveryStatePath = recoveryStatePath;
 
             base.OnStartup(e);
+        }
+
+        private static bool TryConfigureFilepool(string[] args)
+        {
+            if (!StartupOptions.TryParse(args, out StartupOptions options, out string error))
+            {
+                RejectInvalidStartupOptions(error);
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(options.FilepoolBaseUrlOverride) &&
+                !FilepoolConfig.TryUseOverride(options.FilepoolBaseUrlOverride, out error))
+            {
+                RejectInvalidStartupOptions(error);
+                return false;
+            }
+
+            ApplicationLogger.Write($"Filepool base URL: {FilepoolConfig.BaseUrl}");
+            return true;
+        }
+
+        private static void RejectInvalidStartupOptions(string error)
+        {
+            ApplicationLogger.Write("Startup refused: " + error);
+            MessageBox.Show(
+                error,
+                "Libertix - invalid startup option",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Current.Shutdown(2);
         }
 
         protected override void OnExit(ExitEventArgs e)

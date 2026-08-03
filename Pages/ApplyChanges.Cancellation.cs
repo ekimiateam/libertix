@@ -5,7 +5,9 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using Libertix.Dialogs;
 using Libertix.Helpers;
+using Libertix.Installation;
 
 namespace Libertix.Pages
 {
@@ -66,20 +68,23 @@ namespace Libertix.Pages
             if (!_isRunning || _installationCancellation.IsCancellationRequested)
                 return;
 
-            var confirmation = MessageBox.Show(
-                Application.Current.Resources["ApplyChangesCancelConfirm"] as string ??
-                    "Annuler l'installation et restaurer Windows ?",
-                Application.Current.Resources["WarningTitle"] as string ?? "Avertissement",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
-            if (confirmation != MessageBoxResult.Yes)
+            bool confirmed = LocalizedConfirmationDialog.Show(
+                Application.Current.MainWindow,
+                Localized("WarningTitle", "Warning"),
+                Localized(
+                    "ApplyChangesCancelConfirm",
+                    "Cancel the installation and restore Windows?"),
+                Localized("ConfirmationYes", "Yes"),
+                Localized("ConfirmationNo", "No"));
+            if (!confirmed)
                 return;
 
             CancelInstallationButton.IsEnabled = false;
             UpdateProgress(
                 (int)ProgressBar.Value,
-                Application.Current.Resources["ApplyChangesCancelInProgress"] as string ??
-                    "Annulation demandée. Restauration de Windows en cours...");
+                Localized(
+                    "ApplyChangesCancelInProgress",
+                    "Cancellation requested. Restoring Windows..."));
             Log("User requested installation cancellation.");
             _installationCancellation.Cancel();
             await TerminateActiveProcessTreeAsync();
@@ -93,11 +98,19 @@ namespace Libertix.Pages
             _cancellationHandled = true;
             CancelInstallationButton.IsEnabled = false;
             Log("Cancellation acknowledged; starting controlled rollback.");
-            UpdateProgress(0, "Annulation en cours, restauration de Windows...");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesRollbackInProgress",
+                    "Cancellation in progress. Restoring Windows..."));
 
             if (_activeFirmware == FirmwareType.Bios && _biosRecoveryGuardInstalled)
             {
-                await FailBiosPreparationAndRollbackAsync("Installation annulée par l'utilisateur");
+                await FailBiosPreparationAndRollbackAsync(
+                    "Installation cancelled by the user",
+                    Localized(
+                        "ApplyChangesCancelledRestored",
+                        "Installation cancelled. Windows has been restored."));
                 return;
             }
 
@@ -109,7 +122,11 @@ namespace Libertix.Pages
 
             CleanupPendingWindowsSharePayload();
             Log("Installation cancelled before any disk change.");
-            UpdateProgress(0, "Installation annulée avant toute modification du disque.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesCancelledBeforeDiskChange",
+                    "Installation cancelled before any disk change."));
             FinishInstallation(enableBackButton: true);
         }
 
@@ -123,6 +140,16 @@ namespace Libertix.Pages
                 "WindowsPowerShell\\v1.0\\powershell.exe",
                 "powershell.exe");
 
+            // PowerShell owns the UEFI state while it runs. Reload its latest
+            // durable snapshot before recording the cancellation transition so
+            // the GUI never overwrites newer completed steps with stale data.
+            ReloadExecutionState();
+            RecordExecutionFailure(
+                "UEFI_INSTALLATION_CANCELLED",
+                "Installation cancelled by the user.",
+                InstallationPhase.Windows);
+            BeginExecutionRollback();
+
             int exitCode = await RunStreamingProcessAsync(
                 powershell,
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert",
@@ -130,8 +157,6 @@ namespace Libertix.Pages
                 line => Log($"ROLLBACK: {line}"),
                 observeCancellation: false);
 
-            if (_activeUefiRecovery != null)
-                DeleteUefiRecoverySession(_activeUefiRecovery);
             CleanupPendingWindowsSharePayload();
 
             if (exitCode == 0)
@@ -143,33 +168,51 @@ namespace Libertix.Pages
                         "return to its initial state.");
                     UpdateProgress(
                         0,
-                        "Disque et démarrage restaurés, mais BitLocker doit être réactivé dans Windows.");
+                        Localized(
+                            "ApplyChangesBitLockerReenable",
+                            "Disk and boot restored, but BitLocker must be re-enabled in Windows."));
                     FinishInstallation(enableBackButton: false);
                     MessageBox.Show(
-                        "L'installation a été annulée et les modifications disque/démarrage ont été " +
-                        "restaurées. BitLocker a toutefois terminé ou poursuivi son déchiffrement et " +
-                        "ne peut pas être réactivé automatiquement sur cette édition de Windows. " +
-                        "Réactivez le chiffrement dans les paramètres Windows avant de considérer " +
-                        "la restauration comme complète.",
-                        "Libertix - BitLocker à réactiver",
+                        Localized(
+                            "ApplyChangesBitLockerReenableDetails",
+                            "The installation was cancelled and disk/boot changes were restored. " +
+                            "BitLocker continued or completed decryption and cannot be re-enabled " +
+                            "automatically on this Windows edition. Re-enable encryption in Windows " +
+                            "settings before considering recovery complete."),
+                        Localized(
+                            "ApplyChangesBitLockerReenableTitle",
+                            "Libertix - Re-enable BitLocker"),
                         MessageBoxButton.OK,
                         MessageBoxImage.Warning);
                     return;
                 }
 
+                // Keep the recovered state on disk for diagnostics. Recovery
+                // cleanup is deliberately separate from proving the rollback.
+                CompleteExecutionRollback();
                 Log("UEFI cancellation rollback completed and verified.");
-                UpdateProgress(0, "Installation annulée. Windows a été restauré.");
+                UpdateProgress(
+                    0,
+                    Localized(
+                        "ApplyChangesCancelledRestored",
+                        "Installation cancelled. Windows has been restored."));
                 FinishInstallation(enableBackButton: true);
                 return;
             }
 
             Log($"CRITICAL: UEFI cancellation rollback failed with rc={exitCode}.");
-            UpdateProgress(0, "Rollback incomplet. Une intervention manuelle est requise.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesRollbackIncomplete",
+                    "Rollback incomplete. Manual intervention is required."));
             FinishInstallation(enableBackButton: false);
             MessageBox.Show(
-                "L'installation a été annulée, mais le rollback UEFI n'a pas pu être vérifié. " +
-                "Ne redémarrez pas et consultez C:\\LibertixInstallLogs.",
-                "Libertix - rollback incomplet",
+                Localized(
+                    "ApplyChangesUefiRollbackIncompleteDetails",
+                    "The installation was cancelled, but the UEFI rollback could not be verified. " +
+                    "Do not restart; review C:\\LibertixInstallLogs."),
+                Localized("ApplyChangesRollbackIncompleteTitle", "Libertix - Incomplete rollback"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
         }

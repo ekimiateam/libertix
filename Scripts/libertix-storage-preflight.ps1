@@ -184,6 +184,7 @@ try {
     Write-Result "BOOT_PARTITION_SIZE" $boot.Size
     Write-Result "SYSTEM_DISK_UNIQUE_ID" $disk.UniqueId
     Write-Result "SYSTEM_DISK_SIZE" $disk.Size
+    Write-Result "LOGICAL_SECTOR_SIZE" $disk.LogicalSectorSize
     Write-Result "PARTITION_STYLE" $disk.PartitionStyle
     Write-Result "RECOVERY_PARTITION_NUMBER" $recovery.PartitionNumber
     Write-Result "RECOVERY_PARTITION_OFFSET" $recovery.Offset

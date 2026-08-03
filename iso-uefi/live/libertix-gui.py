@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import contextlib
+import importlib.util
 import os
 import re
 import subprocess
-import tkinter as tk
 import time
+import tkinter as tk
 from pathlib import Path
-
 
 LOG_DIR = Path("/run/libertix")
 LOG = LOG_DIR / "install.log"
@@ -18,31 +19,50 @@ DEV_FILE = LOG_DIR / "dev-terminal"
 READY_FILE = LOG_DIR / "gui-ready"
 HEARTBEAT_FILE = LOG_DIR / "gui-heartbeat"
 BUILD_ID_FILE = Path("/etc/libertix-build-id")
+I18N_MODULE_PATH = Path("/usr/local/lib/libertix/libertix-i18n.py")
+
+
+def load_i18n_module():
+    spec = importlib.util.spec_from_file_location("libertix_i18n", I18N_MODULE_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load translation helper: {I18N_MODULE_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+I18N_MODULE = load_i18n_module()
+TRANSLATIONS = I18N_MODULE.load_catalogue(os.environ.get("LANGUAGE_CODE"))
+
+
+def tr(key: str, **values: object) -> str:
+    return I18N_MODULE.translate(TRANSLATIONS, key, **values)
+
 
 STAGES = {
-    "runner-start": ("Demarrage de l'installateur", 1),
-    "005-wait-prereqs": ("Detection du live et du disque", 3),
-    "006-clean-windows-live-boot": ("Nettoyage du boot temporaire Windows", 5),
-    "025-live-preflight": ("Verification finale de compatibilite", 16),
-    "027-windows-live-boot-cleaned": ("Boot temporaire nettoye", 17),
-    "010-read-config": ("Lecture de la configuration", 10),
-    "020-detect-disk": ("Detection des partitions", 14),
-    "030-check-mint-iso": ("Verification de l'ISO Mint", 18),
-    "035-umount-windows": ("Liberation de la partition Windows", 22),
-    "040-unmount-target-disk": ("Liberation du disque cible", 26),
-    "050-assert-live-detached": ("Verification du live en RAM", 30),
-    "060-set-mbr-type-83": ("Preparation de la partition Linux", 34),
-    "060-set-linux-partition-type": ("Preparation de la partition Linux", 34),
-    "070-wipefs-live-part": ("Nettoyage de l'ancien systeme de fichiers", 38),
-    "080-mkfs-ext4": ("Creation du systeme de fichiers Linux", 42),
-    "090-mount-target": ("Montage de la cible Linux", 46),
-    "100-remount-windows-ro": ("Remontage lecture seule de Windows", 50),
-    "110-loop-mount-mint-iso": ("Montage de l'ISO Mint", 54),
-    "120-unsquashfs": ("Extraction de Mint", 64),
-    "130-target-system-config": ("Configuration du systeme installe", 76),
-    "140-install-bootloader": ("Installation du bootloader", 90),
-    "150-final-verify": ("Verification finale", 98),
-    "installer-success": ("Installation terminee", 100),
+    "runner-start": ("stage_runner_start", 1),
+    "005-wait-prereqs": ("stage_005_wait_prereqs", 3),
+    "006-clean-windows-live-boot": ("stage_006_clean_windows_live_boot", 5),
+    "025-live-preflight": ("stage_025_live_preflight", 16),
+    "027-windows-live-boot-cleaned": ("stage_027_windows_live_boot_cleaned", 17),
+    "010-read-config": ("stage_010_read_config", 10),
+    "020-detect-disk": ("stage_020_detect_disk", 14),
+    "030-check-mint-iso": ("stage_030_check_mint_iso", 18),
+    "035-umount-windows": ("stage_035_umount_windows", 22),
+    "040-unmount-target-disk": ("stage_040_unmount_target_disk", 26),
+    "050-assert-live-detached": ("stage_050_assert_live_detached", 30),
+    "060-set-mbr-type-83": ("stage_060_linux_partition", 34),
+    "060-set-linux-partition-type": ("stage_060_linux_partition", 34),
+    "070-wipefs-live-part": ("stage_070_wipefs_live_part", 38),
+    "080-mkfs-ext4": ("stage_080_mkfs_ext4", 42),
+    "090-mount-target": ("stage_090_mount_target", 46),
+    "100-remount-windows-ro": ("stage_100_remount_windows_ro", 50),
+    "110-loop-mount-mint-iso": ("stage_110_loop_mount_mint_iso", 54),
+    "120-unsquashfs": ("stage_120_unsquashfs", 64),
+    "130-target-system-config": ("stage_130_target_system_config", 76),
+    "140-install-bootloader": ("stage_140_install_bootloader", 90),
+    "150-final-verify": ("stage_150_final_verify", 98),
+    "installer-success": ("stage_installer_success", 100),
 }
 
 UNSQUASHFS_STAGE_START = 54
@@ -123,8 +143,9 @@ def parse_env(path: Path) -> dict[str, str]:
 
 def stage_info(stage: str) -> tuple[str, int]:
     if stage.startswith("installer-failed-"):
-        return "Installation echouee", 100
-    return STAGES.get(stage, (stage or "Etat inconnu", 1))
+        return tr("stage_installer_failed"), 100
+    key, percent = STAGES.get(stage, ("", 1))
+    return (tr(key) if key else stage or tr("unknown_state")), percent
 
 
 def progress_info(stage: str) -> tuple[str, int, str]:
@@ -135,8 +156,8 @@ def progress_info(stage: str) -> tuple[str, int, str]:
             percent = UNSQUASHFS_STAGE_START + (
                 (UNSQUASHFS_STAGE_END - UNSQUASHFS_STAGE_START) * sub_percent // 100
             )
-            return label, percent, f"Extraction Mint: {sub_percent}%"
-        return label, UNSQUASHFS_STAGE_START, "Extraction Mint: initialisation"
+            return label, percent, tr("extraction_progress", percent=sub_percent)
+        return label, UNSQUASHFS_STAGE_START, tr("extraction_initializing")
     return label, percent, ""
 
 
@@ -148,11 +169,11 @@ def short_failure_message(rc: str) -> str:
     values = parse_env(FAIL_FILE)
     lines: list[str] = []
     if values.get("stage"):
-        lines.append(f"Etape: {values['stage']}")
+        lines.append(tr("failure_stage", stage=values["stage"]))
     if values.get("error"):
         lines.append(values["error"])
     elif values.get("cmd"):
-        lines.append(f"Commande: {values['cmd']}")
+        lines.append(tr("failure_command", command=values["cmd"]))
     if values.get("rc"):
         lines.append(f"rc={values['rc']}")
 
@@ -168,9 +189,7 @@ class LibertixGui:
         self.root.configure(bg="#0b1020", cursor="left_ptr")
         self.root.overrideredirect(True)
         self.root.attributes("-fullscreen", True)
-        self.root.geometry(
-            f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0"
-        )
+        self.root.geometry(f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0")
         for sequence in (
             "<F12>",
             "<KeyPress-F12>",
@@ -204,7 +223,7 @@ class LibertixGui:
 
         self.subtitle = tk.Label(
             self.container,
-            text="Installation automatique",
+            text=tr("automatic_installation"),
             fg="#9fb3c8",
             bg="#0b1020",
             font=("DejaVu Sans", 18),
@@ -213,7 +232,7 @@ class LibertixGui:
 
         self.stage_label = tk.Label(
             self.container,
-            text="Demarrage",
+            text=tr("starting"),
             fg="#f8fafc",
             bg="#0b1020",
             font=("DejaVu Sans", 26, "bold"),
@@ -257,7 +276,7 @@ class LibertixGui:
 
         self.message_label = tk.Label(
             self.container,
-            text="Preparation...",
+            text=tr("preparing"),
             fg="#d1d5db",
             bg="#0b1020",
             font=("DejaVu Sans", 16),
@@ -271,7 +290,7 @@ class LibertixGui:
 
         self.details_button = tk.Button(
             self.button_bar,
-            text="Plus de details",
+            text=tr("more_details"),
             command=self.toggle_details,
             font=("DejaVu Sans", 14),
             padx=18,
@@ -281,7 +300,7 @@ class LibertixGui:
 
         self.reboot_button = tk.Button(
             self.button_bar,
-            text="Redemarrer",
+            text=tr("reboot"),
             command=self.reboot,
             font=("DejaVu Sans", 14, "bold"),
             padx=22,
@@ -310,7 +329,7 @@ class LibertixGui:
 
         self.footer = tk.Label(
             self.container,
-            text="F12: mode terminal",
+            text=tr("terminal_hint"),
             fg="#64748b",
             bg="#0b1020",
             font=("DejaVu Sans", 11),
@@ -324,9 +343,7 @@ class LibertixGui:
         self.root.after(200, self.refresh)
         self.root.after(120, self.animate_progress)
 
-    def scaled(
-        self, width: int, height: int, base: int, minimum: int, maximum: int
-    ) -> int:
+    def scaled(self, width: int, height: int, base: int, minimum: int, maximum: int) -> int:
         scale = min(width / 1024, height / 768)
         return max(minimum, min(maximum, int(base * scale)))
 
@@ -394,9 +411,7 @@ class LibertixGui:
         self.progress_canvas.pack(fill=tk.X, pady=(0, 8), after=self.code_label)
         self.percent_label.pack(anchor="e", pady=(0, 2), after=self.progress_canvas)
         self.subprogress_label.pack(anchor="e", pady=(0, 20), after=self.percent_label)
-        self.message_label.pack(
-            anchor="w", fill=tk.X, pady=(0, 18), after=self.subprogress_label
-        )
+        self.message_label.pack(anchor="w", fill=tk.X, pady=(0, 18), after=self.subprogress_label)
 
     def unpack_summary_widgets(self) -> None:
         for widget in (
@@ -434,7 +449,7 @@ class LibertixGui:
     def toggle_details(self) -> None:
         self.details_visible = not self.details_visible
         self.details_button.configure(
-            text="Masquer les details" if self.details_visible else "Plus de details"
+            text=tr("hide_details") if self.details_visible else tr("more_details")
         )
         if self.details_visible:
             self.unpack_summary_widgets()
@@ -451,10 +466,8 @@ class LibertixGui:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         DEV_FILE.write_text(f"true {time.time():.3f}\n")
         for path in (READY_FILE, HEARTBEAT_FILE):
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 path.unlink()
-            except FileNotFoundError:
-                pass
         subprocess.run(
             ["chvt", "1"],
             stdout=subprocess.DEVNULL,
@@ -464,7 +477,7 @@ class LibertixGui:
         self.root.after(50, self.root.destroy)
 
     def reboot(self) -> None:
-        self.reboot_button.configure(state=tk.DISABLED, text="Redemarrage en cours...")
+        self.reboot_button.configure(state=tk.DISABLED, text=tr("rebooting"))
         subprocess.Popen(
             ["systemctl", "reboot", "-i"],
             stdout=subprocess.DEVNULL,
@@ -476,18 +489,12 @@ class LibertixGui:
         width = max(self.progress_canvas.winfo_width(), 1)
         height = max(self.progress_canvas.winfo_height(), 1)
         filled = int(width * max(0, min(self.current_percent, 100)) / 100)
-        self.progress_canvas.create_rectangle(
-            0, 0, width, height, fill="#1f2937", outline=""
-        )
-        self.progress_canvas.create_rectangle(
-            0, 0, filled, height, fill="#38bdf8", outline=""
-        )
+        self.progress_canvas.create_rectangle(0, 0, width, height, fill="#1f2937", outline="")
+        self.progress_canvas.create_rectangle(0, 0, filled, height, fill="#38bdf8", outline="")
         self.percent_label.configure(text=f"{self.current_percent}%")
         self.subprogress_label.configure(text=self.subprogress_text)
 
-    def set_progress(
-        self, percent: int, *, running: bool, subprogress: str = ""
-    ) -> None:
+    def set_progress(self, percent: int, *, running: bool, subprogress: str = "") -> None:
         self.current_percent = max(0, min(percent, 100))
         self.progress_running = running
         self.subprogress_text = subprogress
@@ -498,9 +505,7 @@ class LibertixGui:
             self.progress_tick = (self.progress_tick + 1) % 4
             base_text = self.subprogress_text.rstrip(".")
             if base_text:
-                self.subprogress_label.configure(
-                    text=base_text + "." * self.progress_tick
-                )
+                self.subprogress_label.configure(text=base_text + "." * self.progress_tick)
         self.root.after(500, self.animate_progress)
 
     def refresh(self) -> None:
@@ -519,21 +524,21 @@ class LibertixGui:
 
         if success == "true":
             self.message_label.configure(
-                text="Installation terminee et verifiee. Redemarrage automatique dans quelques secondes.",
+                text=tr("success_message"),
                 fg="#bbf7d0",
             )
             self.reboot_button.pack_forget()
         elif success == "false" and rc is not None:
             if rollback == "completed":
                 self.message_label.configure(
-                    text=f"Erreur pendant l'installation.\nRollback Windows termine et verifie.\n{short_failure_message(rc)}",
+                    text=tr("failure_rollback_complete") + "\n" + short_failure_message(rc),
                     fg="#fecaca",
                 )
                 if not self.reboot_button.winfo_ismapped():
                     self.reboot_button.pack(side=tk.LEFT, padx=(12, 0))
             else:
                 self.message_label.configure(
-                    text=f"Erreur pendant l'installation.\nROLLBACK NON VERIFIE: ne redemarrez pas.\n{short_failure_message(rc)}",
+                    text=tr("failure_rollback_unverified") + "\n" + short_failure_message(rc),
                     fg="#fecaca",
                 )
                 self.reboot_button.pack_forget()

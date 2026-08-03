@@ -13,6 +13,8 @@ namespace Libertix.Models
         public string IsoInstaller { get; set; }
         public string IsoInstallerFileName { get; set; }
         public string IsoSha256 { get; set; }
+        public string UefiIsoUrl { get; set; }
+        public string UefiIsoSha256 { get; set; }
         public string IsoInstallerSha256 { get; set; }
         public double SizeInGB { get; set; }
 

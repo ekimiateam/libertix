@@ -98,6 +98,8 @@ namespace Libertix
                             string.IsNullOrWhiteSpace(distroJson.IsoInstaller) ||
                             string.IsNullOrWhiteSpace(distroJson.IsoInstallerFileName) ||
                             !Regex.IsMatch(distroJson.IsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
+                            string.IsNullOrWhiteSpace(distroJson.UefiIsoUrl) ||
+                            !Regex.IsMatch(distroJson.UefiIsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
                             !Regex.IsMatch(distroJson.IsoInstallerSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
                             distroJson.SizeInGB < 20)
                         {
@@ -112,6 +114,8 @@ namespace Libertix
                             IsoInstaller = FilepoolConfig.ResolveUrl(distroJson.IsoInstaller),
                             IsoInstallerFileName = distroJson.IsoInstallerFileName,
                             IsoSha256 = distroJson.IsoSha256,
+                            UefiIsoUrl = FilepoolConfig.ResolveUrl(distroJson.UefiIsoUrl),
+                            UefiIsoSha256 = distroJson.UefiIsoSha256,
                             IsoInstallerSha256 = distroJson.IsoInstallerSha256,
                             SizeInGB = distroJson.SizeInGB
                         });

@@ -18,6 +18,14 @@ from app.services.common import ResultBuilder
 from app.services.reset import RESET_SNAPSHOT, ResetService
 from app.services.validation import ValidationService
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def read_repo(relative_path: str) -> str:
+    """Read project sources independently of pytest's working directory."""
+
+    return (REPO_ROOT / relative_path).read_text(encoding="utf-8-sig")
+
 
 def settings(**overrides: object) -> Settings:
     values = {
@@ -31,6 +39,7 @@ def settings(**overrides: object) -> Settings:
         "build_vm_host": "192.168.1.138",
         "build_vm_user": "admin",
         "build_vm_password": "secret",
+        "filepool_base_url": "http://192.168.1.170:8000/filepool",
         "repository_url": "https://github.com/ekimiateam/libertix.git",
         "smb_root": "/root/smb",
         "llm_api_url": "http://192.168.1.247:8000/v1",
@@ -85,16 +94,9 @@ def settings(**overrides: object) -> Settings:
 def apply_changes_source() -> str:
     """Return all files that form the ApplyChanges partial class."""
 
-    root = Path(__file__).resolve().parents[2]
     return "\n".join(
-        (root / path).read_text(encoding="utf-8-sig")
-        for path in (
-            "Pages/ApplyChanges.xaml.cs",
-            "Pages/ApplyChanges.Cancellation.cs",
-            "Pages/ApplyChanges.Downloads.cs",
-            "Pages/ApplyChanges.System.cs",
-            "Pages/ApplyChanges.Types.cs",
-        )
+        path.read_text(encoding="utf-8-sig")
+        for path in sorted((REPO_ROOT / "Pages").glob("ApplyChanges*.cs"))
     )
 
 
@@ -109,6 +111,20 @@ def test_share_path_translation() -> None:
 def test_smb_root_is_strictly_guarded() -> None:
     with pytest.raises(ValidationError):
         settings(smb_root="/")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://192.168.1.170/filepool",
+        "http://user:password@192.168.1.170/filepool",
+        "http://192.168.1.170/filepool?token=secret",
+        "http://192.168.1.170/filepool#fragment",
+    ],
+)
+def test_filepool_base_url_rejects_unsafe_values(url: str) -> None:
+    with pytest.raises(ValidationError):
+        settings(filepool_base_url=url)
 
 
 def test_reset_scope_is_exact() -> None:
@@ -1058,6 +1074,12 @@ def test_automation_uefi_monitor_stops_on_live_boot_not_windows_progress() -> No
         )
         is True
     )
+    assert (
+        service._uefi_reboot_or_live_started(  # noqa: SLF001
+            "Linux Mint GNU/Linux  Windows Boot Manager  Shutdown  Advanced options",
+        )
+        is True
+    )
 
 
 def test_automation_uefi_monitor_stops_when_mint_desktop_is_seen_after_reboot(
@@ -1113,7 +1135,7 @@ def test_automation_uefi_monitor_stops_when_mint_desktop_is_seen_after_reboot(
 
 
 def test_bios_final_grub_waits_for_manual_selection() -> None:
-    grub_defaults = Path("../iso/target/configure-target.sh").read_text(encoding="utf-8")
+    grub_defaults = read_repo("iso/target/configure-target.sh")
 
     assert "GRUB_TIMEOUT=-1" in grub_defaults
     assert "GRUB_RECORDFAIL_TIMEOUT=-1" in grub_defaults
@@ -1121,14 +1143,15 @@ def test_bios_final_grub_waits_for_manual_selection() -> None:
 
 
 def test_bios_installer_keeps_windows_boot_partition_active() -> None:
-    installer = Path("../iso/live/install-mint.sh").read_text(encoding="utf-8")
-    preflight = Path("../Scripts/libertix-storage-preflight.ps1").read_text(encoding="utf-8")
+    installer = read_repo("iso/live/install-mint.sh")
+    bios_adapter = read_repo("assets/live/libertix-bios-adapter.sh")
+    preflight = read_repo("Scripts/libertix-storage-preflight.ps1")
 
     assert "WINDOWS_BOOT_PARTITION_OFFSET_BYTES" in installer
     assert 'set "$NEW_PART_NUM" boot off' in installer
     assert 'set "$WINDOWS_BOOT_PART_NUM" boot on' in installer
     assert 'set "$NEW_PART_NUM" boot on' not in installer
-    assert "final verify: Windows boot partition is not active" in installer
+    assert "final verify: Windows boot partition is not active" in bios_adapter
     assert 'Write-Result "BOOT_PARTITION_OFFSET"' in preflight
 
     awk_program = """
@@ -1154,16 +1177,18 @@ def test_bios_installer_keeps_windows_boot_partition_active() -> None:
 
 
 def test_uefi_recovery_guard_uses_exact_windows_manifest() -> None:
-    installer = Path("../iso-uefi/live/install-mint.sh").read_text(encoding="utf-8")
+    installer = read_repo("iso-uefi/live/install-mint.sh")
+    runtime = read_repo("assets/live/libertix-install-runtime-common.sh")
 
-    assert 'partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES"' in installer
-    assert 'recovery_size=$(blockdev --getsize64 "$recovery_part"' in installer
-    assert 'recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES' in installer
-    assert "Windows recovery partition changed" not in installer
+    assert "assert_recovery_unchanged_or_die" in installer
+    assert 'partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES"' in runtime
+    assert 'recovery_size=$(blockdev --getsize64 "$recovery_partition"' in runtime
+    assert '"$recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES"' in runtime
+    assert "Windows recovery partition size changed" in runtime
 
 
 def test_uefi_bitlocker_wait_uses_monotonic_timer() -> None:
-    script = Path("../Scripts/libertix-uefi-install.ps1").read_text(encoding="utf-8")
+    script = read_repo("Scripts/uefi/Libertix.Uefi.Storage.ps1")
 
     assert "[System.Diagnostics.Stopwatch]::StartNew()" in script
     assert "$decryptionTimer.Elapsed -lt $maxDecryptionWait" in script
@@ -1171,8 +1196,13 @@ def test_uefi_bitlocker_wait_uses_monotonic_timer() -> None:
 
 
 def test_live_installers_require_exact_disk_and_recovery_manifest() -> None:
-    for path in ("../iso/live/install-mint.sh", "../iso-uefi/live/install-mint.sh"):
-        installer = Path(path).read_text(encoding="utf-8")
+    storage = read_repo("assets/live/libertix-storage-common.sh")
+    runtime = read_repo("assets/live/libertix-install-runtime-common.sh")
+    assert "resolve_target_disk_from_manifest" in storage
+    assert "assert_recovery_unchanged_or_die" in runtime
+
+    for path in ("iso/live/install-mint.sh", "iso-uefi/live/install-mint.sh"):
+        installer = read_repo(path)
         assert "resolve_target_disk_from_manifest" in installer
         assert "WINDOWS_PARTITION_OFFSET_BYTES" in installer
         assert "INSTALLER_PARTITION_OFFSET_BYTES" in installer
@@ -1183,19 +1213,18 @@ def test_live_installers_require_exact_disk_and_recovery_manifest() -> None:
 
 
 def test_uefi_one_shot_does_not_reorder_bootorder() -> None:
-    script = Path("../Scripts/libertix-uefi-install.ps1").read_text(encoding="utf-8")
+    script = read_repo("Scripts/uefi/Libertix.Uefi.Firmware.ps1")
+    staging = read_repo("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     function_body = script.split("function Set-NativeUefiBootOrderOnce", 1)[1].split(
         "function Get-FirmwareBootNumberByDescription", 1
     )[0]
 
     assert 'Set-FirmwareVariable -Name "BootOrder"' not in function_body
-    assert 'Set-FirmwareVariable -Name "BootNext"' in script
+    assert 'Set-FirmwareVariable -Name "BootNext"' in staging
 
 
 def test_uefi_recovery_tasks_are_not_clock_boundary_dependent() -> None:
-    script = Path("../Scripts/libertix-register-uefi-recovery-tasks.ps1").read_text(
-        encoding="utf-8"
-    )
+    script = read_repo("Scripts/libertix-register-uefi-recovery-tasks.ps1")
     source = apply_changes_source()
 
     assert "New-ScheduledTaskTrigger -AtStartup" in script
@@ -1210,7 +1239,7 @@ def test_uefi_recovery_tasks_are_not_clock_boundary_dependent() -> None:
 
 def test_wpf_storage_preflight_fails_closed() -> None:
     source = apply_changes_source()
-    preflight = Path("../Scripts/libertix-storage-preflight.ps1").read_text(encoding="utf-8")
+    preflight = read_repo("Scripts/libertix-storage-preflight.ps1")
 
     assert "DetectFirmwareTypeOrThrow" in source
     assert "Installation was stopped before any disk change" in source

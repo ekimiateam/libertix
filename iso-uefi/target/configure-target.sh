@@ -89,7 +89,7 @@ configure_locale() {
     cat > /etc/default/locale <<EOF
 LANG=$SYSTEM_LANG
 LC_ALL=$SYSTEM_LANG
-LANGUAGE=${SYSTEM_LANG%%_*}
+LANGUAGE=$LANGUAGE_CODE
 EOF
 }
 

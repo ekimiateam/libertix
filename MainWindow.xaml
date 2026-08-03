@@ -55,6 +55,14 @@
                         </ComboBox>
                     </StackPanel>
 
+                    <Button Content="{DynamicResource AboutButton}"
+                            Style="{StaticResource ModernButton}"
+                            Width="160"
+                            Height="42"
+                            HorizontalAlignment="Center"
+                            Margin="0,24,0,0"
+                            Click="AboutButton_Click"/>
+
                     <!-- Debug Navigation -->
                     <StackPanel x:Name="DebugPanel"
                                 Orientation="Horizontal"

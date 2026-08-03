@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -49,10 +50,12 @@ class Settings(BaseSettings):
     smb_root: str
     source_dir_name: str = "Libertix-source"
     release_dir_name: str = "Libertix-release"
+    filepool_base_url: str
 
     llm_api_url: str
     llm_api_key: SecretStr
     llm_model: str
+    llm_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     llm_timeout_seconds: float = 180
     llm_max_attempts: int = 3
     llm_retry_base_seconds: float = 3
@@ -78,6 +81,24 @@ class Settings(BaseSettings):
         if value.rstrip("/") != "/root/smb":
             raise ValueError("smb_root doit rester strictement /root/smb")
         return "/root/smb"
+
+    @field_validator("filepool_base_url")
+    @classmethod
+    def validate_filepool_base_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "filepool_base_url must be an absolute HTTP(S) URL without credentials, "
+                "a query or a fragment"
+            )
+        return value.rstrip("/")
 
     @model_validator(mode="after")
     def validate_vm_identity(self) -> Settings:

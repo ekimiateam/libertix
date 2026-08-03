@@ -33,6 +33,12 @@ project.lock.json
 project.fragment.lock.json
 artifacts/
 
+# Python-generated files
+__pycache__/
+*.py[cod]
+.coverage
+.coverage.*
+
 # Rider
 .idea/
 *.sln.iml
@@ -61,3 +67,6 @@ auto_tests/app/filepool/*.zip
 auto_tests/known_hosts
 auto_tests/logs/
 auto_tests/tools/__pycache__/
+
+# Local Markdown reports preserved outside the versioned documentation
+/local-markdown/

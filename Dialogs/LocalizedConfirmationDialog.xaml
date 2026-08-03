@@ -1,0 +1,44 @@
+<Window x:Class="Libertix.Dialogs.LocalizedConfirmationDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="520"
+        SizeToContent="Height"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource PrimaryBackground}">
+    <Grid Margin="28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="24" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="MessageText"
+                   FontSize="17"
+                   Foreground="{StaticResource TextPrimary}"
+                   TextWrapping="Wrap" />
+
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="16" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Button x:Name="NoButton"
+                    Grid.Column="0"
+                    Height="48"
+                    IsCancel="True"
+                    Style="{StaticResource ModernButton}"
+                    Click="NoButton_Click" />
+            <Button x:Name="YesButton"
+                    Grid.Column="2"
+                    Height="48"
+                    IsDefault="True"
+                    Background="{StaticResource AccentColor}"
+                    Style="{StaticResource ModernButton}"
+                    Click="YesButton_Click" />
+        </Grid>
+    </Grid>
+</Window>

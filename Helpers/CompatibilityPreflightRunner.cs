@@ -36,10 +36,14 @@ namespace Libertix.Helpers
                     "Le composant de vérification de compatibilité est absent.",
                     scriptPath);
 
-            return await Task.Run(() => RunProcess(scriptPath, onOutput));
+            string languageCode = Localization.CurrentLanguage;
+            return await Task.Run(() => RunProcess(scriptPath, languageCode, onOutput));
         }
 
-        private static CompatibilityInfo RunProcess(string scriptPath, Action<string> onOutput)
+        private static CompatibilityInfo RunProcess(
+            string scriptPath,
+            string languageCode,
+            Action<string> onOutput)
         {
             string powershell = ResolvePowerShell();
             var output = new StringBuilder();
@@ -50,7 +54,8 @@ namespace Libertix.Helpers
             var startInfo = new ProcessStartInfo
             {
                 FileName = powershell,
-                Arguments = "-NoProfile -ExecutionPolicy Bypass -File " + QuoteArgument(scriptPath),
+                Arguments = "-NoProfile -ExecutionPolicy Bypass -File " +
+                    QuoteArgument(scriptPath) + " -LanguageCode " + QuoteArgument(languageCode),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,

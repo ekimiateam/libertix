@@ -1,0 +1,405 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v1.json",
+  "title": "Libertix Installation Plan",
+  "description": "Versioned contract shared by the Windows application, the live installer, the installed target and rollback tooling.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planId",
+    "createdAtUtc",
+    "firmware",
+    "distribution",
+    "locale",
+    "account",
+    "disk",
+    "features",
+    "runtime"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "createdAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "firmware": {
+      "enum": [
+        "bios",
+        "uefi"
+      ]
+    },
+    "distribution": {
+      "$ref": "#/$defs/distribution"
+    },
+    "locale": {
+      "$ref": "#/$defs/locale"
+    },
+    "account": {
+      "$ref": "#/$defs/account"
+    },
+    "disk": {
+      "$ref": "#/$defs/disk"
+    },
+    "features": {
+      "$ref": "#/$defs/features"
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    }
+  },
+  "$defs": {
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "installerIsoFileName",
+        "installerIsoUrl",
+        "installerIsoWindowsPath",
+        "installerIsoSha256",
+        "liveIsoUrl",
+        "liveIsoSha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installerIsoFileName": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "installerIsoUrl": {
+          "type": "string",
+          "minLength": 1
+        },
+        "installerIsoWindowsPath": {
+          "type": "string",
+          "pattern": "^[A-Za-z]:[\\\\/]"
+        },
+        "installerIsoSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "liveIsoUrl": {
+          "type": "string",
+          "minLength": 1
+        },
+        "liveIsoSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "locale": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "languageCode",
+        "systemLanguage",
+        "keyboardLayout",
+        "keyboardModel",
+        "timezone"
+      ],
+      "properties": {
+        "languageCode": {
+          "type": "string",
+          "enum": ["en", "fr", "es", "ja"]
+        },
+        "systemLanguage": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keyboardLayout": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keyboardModel": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timezone": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "username",
+        "passwordHash",
+        "computerName"
+      ],
+      "properties": {
+        "username": {
+          "type": "string",
+          "pattern": "^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$"
+        },
+        "passwordHash": {
+          "type": "string",
+          "pattern": "^\\$6\\$.+"
+        },
+        "computerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 63
+        }
+      }
+    },
+    "disk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "uniqueId",
+        "sizeBytes",
+        "logicalSectorSizeBytes",
+        "partitionStyle",
+        "systemDrive",
+        "windows",
+        "boot",
+        "recovery",
+        "installer"
+      ],
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uniqueId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sizeBytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "logicalSectorSizeBytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "partitionStyle": {
+          "enum": [
+            "MBR",
+            "GPT"
+          ]
+        },
+        "systemDrive": {
+          "type": "string",
+          "pattern": "^[A-Z]:$"
+        },
+        "windows": {
+          "$ref": "#/$defs/partitionIdentity"
+        },
+        "boot": {
+          "$ref": "#/$defs/partitionIdentity"
+        },
+        "recovery": {
+          "$ref": "#/$defs/partitionIdentity"
+        },
+        "installer": {
+          "$ref": "#/$defs/installerPartition"
+        }
+      }
+    },
+    "partitionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "offsetBytes",
+        "sizeBytes"
+      ],
+      "properties": {
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offsetBytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "sizeBytes": {
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "installerPartition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number",
+        "offsetBytes",
+        "finalSizeBytes",
+        "stagingSizeBytes"
+      ],
+      "properties": {
+        "number": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "integer",
+              "minimum": 1
+            }
+          ]
+        },
+        "offsetBytes": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/positiveInteger"
+            }
+          ]
+        },
+        "finalSizeBytes": {
+          "type": "integer",
+          "minimum": 21474836480,
+          "multipleOf": 1073741824
+        },
+        "stagingSizeBytes": {
+          "type": "integer",
+          "minimum": 8589934592,
+          "multipleOf": 1073741824
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shareWindowsFilesInLinux",
+        "shareLinuxFilesInWindows",
+        "windowsProfilesJsonBase64"
+      ],
+      "properties": {
+        "shareWindowsFilesInLinux": {
+          "type": "boolean"
+        },
+        "shareLinuxFilesInWindows": {
+          "type": "boolean"
+        },
+        "windowsProfilesJsonBase64": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lowMemoryMode",
+        "bootStrategy",
+        "recoveryRootWindows",
+        "recoveryRunId"
+      ],
+      "properties": {
+        "lowMemoryMode": {
+          "type": "boolean"
+        },
+        "bootStrategy": {
+          "enum": [
+            "bios-grub4dos",
+            "uefi-boot-next",
+            "uefi-firmware-boot-order"
+          ]
+        },
+        "recoveryRootWindows": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recoveryRunId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "firmware": {
+            "const": "bios"
+          }
+        },
+        "required": [
+          "firmware"
+        ]
+      },
+      "then": {
+        "properties": {
+          "disk": {
+            "properties": {
+              "partitionStyle": {
+                "const": "MBR"
+              }
+            }
+          },
+          "runtime": {
+            "properties": {
+              "bootStrategy": {
+                "const": "bios-grub4dos"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "firmware": {
+            "const": "uefi"
+          }
+        },
+        "required": [
+          "firmware"
+        ]
+      },
+      "then": {
+        "properties": {
+          "disk": {
+            "properties": {
+              "partitionStyle": {
+                "const": "GPT"
+              }
+            }
+          },
+          "runtime": {
+            "properties": {
+              "bootStrategy": {
+                "enum": [
+                  "uefi-boot-next",
+                  "uefi-firmware-boot-order"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

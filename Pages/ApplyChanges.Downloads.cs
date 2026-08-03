@@ -25,7 +25,7 @@ namespace Libertix.Pages
                 progressStart: 60,
                 progressSpan: 20,
                 label: "ISO",
-                progressMessage: "Downloading...");
+                progressMessage: Localized("ApplyChangesDownloading", "Downloading..."));
         }
 
         private async Task<bool> DownloadInstallerIsoAsync(string url, string destinationPath)
@@ -39,7 +39,9 @@ namespace Libertix.Pages
                 progressStart: 85,
                 progressSpan: 10,
                 label: "Linux installer ISO",
-                progressMessage: "Downloading Linux ISO...");
+                progressMessage: Localized(
+                    "ApplyChangesDownloadingLinuxIso",
+                    "Downloading Linux ISO..."));
         }
 
         private async Task<bool> DownloadFileWithRetriesAsync(
@@ -250,7 +252,13 @@ namespace Libertix.Pages
                     Dispatcher.Invoke(() => Log($"{label} size: {totalMB:N0} MB (attempt {attempt}/{attempts})"));
 
                     using (var contentStream = await response.Content.ReadAsStreamAsync())
-                    using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize, true))
+                    using (var fileStream = new FileStream(
+                        destinationPath,
+                        FileMode.Create,
+                        FileAccess.Write,
+                        FileShare.None,
+                        bufferSize,
+                        true))
                     {
                         var buffer = new byte[bufferSize];
                         long totalRead = 0;
@@ -277,7 +285,10 @@ namespace Libertix.Pages
                                 Dispatcher.Invoke(() =>
                                 {
                                     var overallProgress = progressStart + (progressPercent * progressSpan / 100);
-                                    UpdateProgress(overallProgress, $"{progressMessage} {downloadedMB:N0}/{totalMB:N0} MB ({progressPercent}%)");
+                                    UpdateProgress(
+                                        overallProgress,
+                                        $"{progressMessage} {downloadedMB:N0}/{totalMB:N0} MB "
+                                        + $"({progressPercent}%)");
                                 });
                                 lastProgressUpdate = DateTime.Now;
                             }
@@ -285,7 +296,9 @@ namespace Libertix.Pages
 
                         if (totalBytes > 0 && totalRead != totalBytes)
                         {
-                            throw new IOException($"Downloaded size mismatch for {url}: expected {totalBytes} bytes, got {totalRead} bytes");
+                            throw new IOException(
+                                $"Downloaded size mismatch for {url}: expected {totalBytes} bytes, "
+                                + $"got {totalRead} bytes");
                         }
                     }
                 }

@@ -30,6 +30,8 @@ GUI_LOCK="/tmp/.X0-lock"
 GUI_VT=7
 LOG_COPY_STATUS="not-attempted"
 
+. /usr/local/lib/libertix/libertix-i18n.sh
+load_libertix_translations
 . /usr/local/lib/libertix/libertix-runner-stage-common.sh
 
 mkdir -p "$LOG_DIR"
@@ -171,7 +173,7 @@ stage_label_dynamic() {
     if [ "$stage" = "120-unsquashfs" ]; then
         sub="$(unsquashfs_subpercent)"
         if [ -n "$sub" ]; then
-            printf 'Extraction de Mint (%s%%)\n' "$sub"
+            printf '%s (%s%%)\n' "$LIBERTIX_I18N_STAGE_120_UNSQUASHFS" "$sub"
             return 0
         fi
     fi
@@ -202,7 +204,7 @@ render_boot_logo() {
 |_____|_|_.__/ \___|_|   \__|_/_/\_\
 ============================================================
 LOGO
-        printf "\nDemarrage de l'installation...\n"
+        printf '\n%s\n' "$LIBERTIX_I18N_INSTALLATION_STARTING"
         printf 'Build: %s\n' "$(build_id)"
     } | write_tty1_screen
 }
@@ -223,8 +225,8 @@ screen_header() {
  ============================================================
 LOGO
     printf ' Build: %s\n' "$(build_id)"
-    printf ' Etape: %s\n' "$(stage_label_dynamic "$stage")"
-    printf ' Code : %s\n\n' "$stage"
+    printf ' %s %s\n' "$LIBERTIX_I18N_STEP" "$(stage_label_dynamic "$stage")"
+    printf ' %s %s\n\n' "$LIBERTIX_I18N_CODE" "$stage"
     printf ' '
     progress_bar "$percent" 48
     printf '\n'
@@ -240,13 +242,13 @@ render_progress() {
     [ -n "$lines" ] || lines="$(tail -8 "$LOG" 2>/dev/null || true)"
     {
         screen_header
-        printf '\n Action en cours:\n'
+        printf '\n %s\n' "$LIBERTIX_I18N_CURRENT_ACTION"
         printf ' %s\n\n' "$(stage_label_dynamic "$(current_stage)")"
-        printf ' Derniers evenements:\n'
+        printf ' %s\n' "$LIBERTIX_I18N_RECENT_EVENTS"
         printf '%s\n' "$lines" | clip_tty_lines | sed 's/^/  /'
         printf '\n ------------------------------------------------------------\n'
-        printf ' Raccourcis: [D] Plus de details\n'
-        printf ' Logs: /run/libertix/install.log\n'
+        printf ' %s\n' "$LIBERTIX_I18N_SHORTCUTS_DETAILS"
+        printf ' %s\n' "$LIBERTIX_I18N_LOGS_PATH"
     } | write_tty1_screen
 }
 
@@ -258,14 +260,15 @@ render_details() {
     {
         printf '\033[?25l'
         printf ' ============================================================\n'
-        printf ' Libertix DEV | Build: %s\n' "$(build_id)"
-        printf ' Etape: %s | Code: %s\n' \
-            "$(stage_label_dynamic "$(current_stage)")" "$(current_stage)"
+        printf ' %s | Build: %s\n' "$LIBERTIX_I18N_DEV_TITLE" "$(build_id)"
+        printf ' %s %s | %s %s\n' "$LIBERTIX_I18N_STEP" \
+            "$(stage_label_dynamic "$(current_stage)")" \
+            "$LIBERTIX_I18N_CODE" "$(current_stage)"
         printf ' ============================================================\n'
-        printf ' install.log (les %s dernieres lignes):\n' "$log_lines"
+        printf ' %s %s\n' "$LIBERTIX_I18N_LAST_LOG_LINES" "$log_lines"
         tail -n "$log_lines" "$LOG" 2>/dev/null | clip_tty_lines | sed 's/^/  /'
         printf ' ------------------------------------------------------------\n'
-        printf ' [D] Progression | Journal complet: /run/libertix/install.log\n'
+        printf ' %s\n' "$LIBERTIX_I18N_PROGRESS_SHORTCUT"
     } | write_tty1_screen
 }
 
@@ -537,12 +540,12 @@ success_screen_and_reboot() {
         else
             {
                 screen_header
-                printf '\n Installation terminee et verifiee.\n'
-                printf ' Redemarrage automatique dans %s seconde(s).\n\n' "$remaining"
+                printf '\n %s\n' "$LIBERTIX_I18N_INSTALLATION_SUCCESS"
+                printf ' %s\n\n' "${LIBERTIX_I18N_AUTOMATIC_REBOOT//\{seconds\}/$remaining}"
                 if [ "$LOG_COPY_STATUS" = "success" ]; then
-                    printf ' Logs verifies dans C:\\LibertixInstallLogs.\n'
+                    printf ' %s\n' "$LIBERTIX_I18N_LOGS_VERIFIED_WINDOWS"
                 else
-                    printf ' ATTENTION: copie des logs Windows en echec.\n'
+                    printf ' %s\n' "$LIBERTIX_I18N_LOGS_COPY_FAILED"
                 fi
             } | write_tty1_screen
         fi
@@ -587,18 +590,18 @@ failure_screen_loop() {
         else
             {
                 screen_header
-                printf '\n ERREUR: installation arretee avec rc=%s\n\n' "$rc"
-                printf ' Etape: %s\n\n' "$(current_stage)"
+                printf '\n %s\n\n' "${LIBERTIX_I18N_INSTALLATION_STOPPED//\{rc\}/$rc}"
+                printf ' %s %s\n\n' "$LIBERTIX_I18N_STEP" "$(current_stage)"
                 if [ -s "$FAIL_FILE" ]; then
-                    printf ' Message:\n'
+                    printf ' %s\n' "$LIBERTIX_I18N_MESSAGE"
                     sed 's/^/  /' "$FAIL_FILE"
                     printf '\n'
                 fi
-                printf ' Dernieres lignes:\n'
+                printf ' %s\n' "$LIBERTIX_I18N_RECENT_LINES"
                 tail -10 "$LOG" 2>/dev/null | clip_tty_lines | sed 's/^/  /'
                 printf '\n ------------------------------------------------------------\n'
-                printf ' Raccourcis: [R] Reboot   [D] Plus de details\n'
-                printf ' Logs: /run/libertix/install.log\n'
+                printf ' %s\n' "$LIBERTIX_I18N_SHORTCUTS_FAILURE"
+                printf ' %s\n' "$LIBERTIX_I18N_LOGS_PATH"
             } | write_tty1_screen
             render_serial_status
         fi

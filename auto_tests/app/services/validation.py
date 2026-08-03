@@ -36,6 +36,7 @@ class ValidationService:
             settings.llm_api_url,
             settings.llm_model,
             settings.llm_timeout_seconds,
+            reasoning_effort=settings.llm_reasoning_effort,
             max_attempts=settings.llm_max_attempts,
             retry_base_seconds=settings.llm_retry_base_seconds,
         )
@@ -556,7 +557,11 @@ class ValidationService:
             response = self.run_windows_script(
                 ssh,
                 script_name="launch_libertix_elevated.ps1",
-                config={"executable": str(executable), "task_name": task_name},
+                config={
+                    "executable": str(executable),
+                    "task_name": task_name,
+                    "filepool_base_url": self.settings.filepool_base_url,
+                },
                 step="vm.launch_elevated",
                 timeout=90,
             )

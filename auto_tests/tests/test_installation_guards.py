@@ -7,6 +7,8 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -18,14 +20,8 @@ def read_apply_changes() -> str:
     """Read the complete ApplyChanges partial class as one reviewable source."""
 
     return "\n".join(
-        read(path)
-        for path in (
-            "Pages/ApplyChanges.xaml.cs",
-            "Pages/ApplyChanges.Cancellation.cs",
-            "Pages/ApplyChanges.Downloads.cs",
-            "Pages/ApplyChanges.System.cs",
-            "Pages/ApplyChanges.Types.cs",
-        )
+        path.read_text(encoding="utf-8-sig")
+        for path in sorted((ROOT / "Pages").glob("ApplyChanges*.cs"))
     )
 
 
@@ -77,6 +73,51 @@ def test_live_boot_mode_function_is_fail_closed(
     assert "LIVE_E_TORAM_BOOT" in rejected_normal.stdout
 
 
+@pytest.mark.parametrize(
+    ("disk", "number", "expected"),
+    [
+        ("/dev/sda", "3", "/dev/sda3"),
+        ("/dev/nvme0n1", "4", "/dev/nvme0n1p4"),
+        ("/dev/mmcblk0", "2", "/dev/mmcblk0p2"),
+    ],
+)
+def test_shared_storage_builds_partition_paths_for_supported_device_names(
+    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
+    disk: str,
+    number: str,
+    expected: str,
+) -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+
+    result = run_shell_function(library, "partition_path", disk, number)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    ("windows_path", "expected"),
+    [
+        (
+            r"C:\Users\oem\AppData\Local\Temp\Libertix\mint.iso",
+            "Users/oem/AppData/Local/Temp/Libertix/mint.iso",
+        ),
+        (r"D:\mint.iso", "mint.iso"),
+    ],
+)
+def test_shared_storage_converts_windows_paths_without_losing_segments(
+    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
+    windows_path: str,
+    expected: str,
+) -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+
+    result = run_shell_function(library, "windows_path_to_relative", windows_path)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == expected
+
+
 def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
     apply_changes = read_apply_changes()
     uefi = read("Scripts/libertix-uefi-install.ps1")
@@ -84,29 +125,49 @@ def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
         assert ". /usr/local/lib/libertix/libertix-install-platform-common.sh" in installer
 
     assert "ConfigureBiosLowMemoryBootAsync" in apply_changes
-    assert "LowMemoryMode = lowMemoryMode" in apply_changes
+    assert "LowMemoryMode =" in apply_changes
+    assert "compatibility.LowMemoryMode" in apply_changes
     assert "$LowMemoryMode" in uefi
-    assert "findiso=/libertix-live.iso" in uefi
+    assert "findiso=/libertix-live.iso" in read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
 
 
-def test_runner_stage_functions_return_stable_labels_and_percentages(
-    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
-) -> None:
-    library = ROOT / "assets/live/libertix-runner-stage-common.sh"
+def run_localized_stage_function(function: str, argument: str) -> subprocess.CompletedProcess[str]:
+    shell_helper = ROOT / "assets/live/libertix-i18n.sh"
+    python_helper = ROOT / "assets/live/libertix-i18n.py"
+    stage_library = ROOT / "assets/live/libertix-runner-stage-common.sh"
+    script = '. "$1"; LANGUAGE_CODE=en; load_libertix_translations "$2"; . "$3"; "$4" "$5"'
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "libertix-stage-test",
+            str(shell_helper),
+            str(python_helper),
+            str(stage_library),
+            function,
+            argument,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
-    label = run_shell_function(library, "libertix_stage_label", "120-unsquashfs")
-    percent = run_shell_function(library, "libertix_stage_percent", "120-unsquashfs")
-    unknown_label = run_shell_function(library, "libertix_stage_label", "custom-stage")
+
+def test_runner_stage_functions_return_stable_labels_and_percentages() -> None:
+    label = run_localized_stage_function("libertix_stage_label", "120-unsquashfs")
+    percent = run_localized_stage_function("libertix_stage_percent", "120-unsquashfs")
+    unknown_label = run_localized_stage_function("libertix_stage_label", "custom-stage")
 
     assert label.returncode == 0
-    assert label.stdout.strip() == "Extraction de Mint"
+    assert label.stdout.strip() == "Extracting Mint"
     assert percent.returncode == 0
     assert percent.stdout.strip() == "64"
     assert unknown_label.stdout.strip() == "custom-stage"
 
 
 def test_uefi_copy_preserves_live_boot_case_sensitive_names() -> None:
-    uefi = read("Scripts/libertix-uefi-install.ps1")
+    uefi = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
 
     assert '$actualLiveDirectories[0].Name -cne "live"' in uefi
     assert "Live directory name case normalization failed" in uefi
@@ -117,7 +178,9 @@ def test_uefi_copy_preserves_live_boot_case_sensitive_names() -> None:
 
 def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
     fallback = read("Pages/UefiBootFallback.xaml.cs")
-    uefi = read("Scripts/libertix-uefi-install.ps1")
+    orchestration = read("Scripts/libertix-uefi-install.ps1")
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
     transaction_module = read("Scripts/modules/Libertix.Transaction.psm1")
 
     assert "-BootStrategy FirmwareBootOrder -ReusePreparedInstaller" in fallback
@@ -126,17 +189,17 @@ def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
     )[1]
     assert "-Force" not in fallback_command
 
-    assert "function Save-PreparedInstallerManifest" in uefi
-    assert "function Assert-PreparedInstallerManifest" in uefi
+    assert "function Save-PreparedInstallerManifest" in transaction
+    assert "function Assert-PreparedInstallerManifest" in transaction
     assert '"live\\filesystem.squashfs"' in transaction_module
     assert '"live\\initrd.img"' in transaction_module
     assert '"live\\vmlinuz"' in transaction_module
     assert '"EFI\\BOOT\\BOOTX64.EFI"' in transaction_module
-    assert "Prepared installer SHA256 manifest verified" in uefi
-    assert "Temporary ESP loader SHA256 verified" in uefi
+    assert "Prepared installer SHA256 manifest verified" in transaction
+    assert "Temporary ESP loader SHA256 verified" in staging
 
-    reuse_path = uefi.split("try {\n    if ($ReusePreparedInstaller)", 1)[1].split(
-        "    Test-LibertixLiveConfig\n    Test-LibertixSecureBootCompatibility", 1
+    reuse_path = orchestration.split("try {\n    if ($ReusePreparedInstaller)", 1)[1].split(
+        "\n    Test-LibertixLiveConfig\n", 1
     )[0]
     assert "Get-ReusablePreparedInstallerPartition" in reuse_path
     assert "Assert-PreparedInstallerManifest" in reuse_path
@@ -146,7 +209,7 @@ def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
     assert "Start-RobustDownload" not in reuse_path
     assert "FALLBACK_REUSED_PREPARED_INSTALLER=true" in reuse_path
 
-    boot_setup = uefi.split("function Set-LibertixUefiBootEntry", 1)[1]
+    boot_setup = staging.split("function Set-LibertixUefiBootEntry", 1)[1]
     assert "Remove-LibertixTemporaryFirmwareEntries" in boot_setup
     assert 'Remove-FirmwareVariable -Name "BootNext"' in boot_setup
     assert "Firmware BootOrder fallback verified" in boot_setup
@@ -165,15 +228,21 @@ def test_live_manifest_survives_detached_toram_medium_and_fat_name_case() -> Non
     apply_changes = read_apply_changes()
     assert 'NormalizeRootFileNameCase(@"Z:\\", "config.txt")' in apply_changes
 
-    for installer in (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")):
+    adapters = (
+        read("assets/live/libertix-bios-adapter.sh"),
+        read("assets/live/libertix-uefi-adapter.sh"),
+    )
+    for installer, adapter in zip(
+        (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")),
+        adapters,
+        strict=True,
+    ):
         assert "find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt" in installer
         assert (
             'mounted_config=$(find "$config_mount" -maxdepth 1 -type f -iname config.txt'
             in installer
         )
-        assert (
-            "Prerequisite timeout: disk_ready=$disk_ready config_ready=$config_ready" in installer
-        )
+        assert "Prerequisite timeout: disk_ready=$disk_ready config_ready=$config_ready" in adapter
 
 
 def test_sharing_options_reach_both_live_installers() -> None:
@@ -278,6 +347,8 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     assert "_installationCancellation.Cancel()" in cancellation
     assert 'Arguments = $"/PID {processId} /T /F"' in cancellation
     assert "FailBiosPreparationAndRollbackAsync" in cancellation
+    assert '"ApplyChangesCancelledRestored"' in cancellation
+    assert '"Installation cancelled. Windows has been restored."' in cancellation
     assert "QuoteArgument(scriptPath)} -Revert" in cancellation
     assert "observeCancellation: false" in cancellation
     assert "catch (OperationCanceledException)" in apply_changes
@@ -286,20 +357,21 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
 def test_uefi_cancellation_does_not_claim_bitlocker_was_restored_when_it_changed() -> None:
     cancellation = read("Pages/ApplyChanges.Cancellation.cs")
     system = read("Pages/ApplyChanges.System.cs")
-    types = read("Pages/ApplyChanges.Types.cs")
+    storage = read("Installation/StoragePreflightInfo.cs")
 
     for field in (
         "BitLockerConversionStatus",
         "BitLockerEncryptionPercentage",
         "BitLockerProtectionStatus",
     ):
-        assert field in types
+        assert field in storage
         assert field in system
         assert field in cancellation
     assert "BitLockerMatchesPreflightStateAfterCancellationAsync" in cancellation
     assert "BitLocker did not " in cancellation
     assert "return to its initial state." in cancellation
-    assert "BitLocker doit être réactivé dans Windows" in cancellation
+    assert '"ApplyChangesBitLockerReenable"' in cancellation
+    assert "BitLocker must be re-enabled in Windows" in cancellation
 
 
 def test_windows_close_behavior_uses_tray_while_installation_runs() -> None:
@@ -309,7 +381,10 @@ def test_windows_close_behavior_uses_tray_while_installation_runs() -> None:
 
     assert "if (_installationState.IsInstallationRunning)" in main
     assert "HideInTrayDuringInstallation();" in main
-    assert "MessageBoxButton.YesNo" in main
+    assert "LocalizedConfirmationDialog.Show(" in main
+    assert 'ResourceText("ConfirmationYes", "Yes")' in main
+    assert 'ResourceText("ConfirmationNo", "No")' in main
+    assert "MessageBoxButton.YesNo" not in main
     assert "InstallationRunningChanged" in main
     assert "RestoreFromTray();" in main
     assert "ShowBalloonTip" in tray
@@ -358,11 +433,22 @@ def test_windows_preparation_log_is_persisted_for_every_gui_line() -> None:
     assert "AppendPersistentLog(line);" in apply_changes
 
 
+def test_filepool_defaults_to_production_and_supports_an_explicit_override() -> None:
+    filepool = read("Helpers/FilepoolConfig.cs")
+    startup = read("Helpers/StartupOptions.cs")
+    app = read("App.xaml.cs")
+    launch = read("auto_tests/app/scripts/launch_libertix_elevated.ps1")
+
+    assert 'ProductionBaseUrl = "https://ekimia.fr/libertix"' in filepool
+    assert 'FilepoolOption = "--filepool-base-url"' in startup
+    assert "FilepoolConfig.TryUseOverride(options.FilepoolBaseUrlOverride" in app
+    assert '--filepool-base-url "{1}"' in launch
+
+
 def test_uefi_early_revert_does_not_require_absent_transaction_state() -> None:
-    script = read("Scripts/libertix-uefi-install.ps1")
-    revert = script.split("function Invoke-Revert", 1)[1].split(
-        "function New-OrReuseInstallerPartition", 1
-    )[0]
+    revert = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1").split("function Invoke-Revert", 1)[
+        1
+    ]
 
     assert "Remove-LibertixInstallerPartitionIfPresent" in revert
     assert "No transaction state found; C: was not resized by this run." in revert
@@ -382,8 +468,46 @@ def test_uefi_revert_does_not_require_download_configuration() -> None:
     assert "New-LibertixDownloadUrls" in downloads
 
 
-def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
+def test_uefi_plan_config_does_not_require_legacy_account_or_locale_fields() -> None:
     script = read("Scripts/libertix-uefi-install.ps1")
+    config_block = script.split("if (-not [string]::IsNullOrWhiteSpace($ConfigPath))", 1)[1].split(
+        "# New callers pass a validated plan", 1
+    )[0]
+
+    legacy_fields = (
+        "LinuxUsername",
+        "LinuxPasswordHash",
+        "LinuxComputerName",
+        "SystemLang",
+        "KeyboardLayout",
+        "KeyboardModel",
+        "Timezone",
+    )
+    for field in legacy_fields:
+        assert f'Properties.Name -contains "{field}"' in config_block
+        assert f"$config.{field}" in config_block
+
+
+def test_powershell_atomic_writers_use_real_same_directory_backups() -> None:
+    for module_path in (
+        "Scripts/modules/Libertix.InstallationPlan.psm1",
+        "Scripts/modules/Libertix.InstallationState.psm1",
+    ):
+        module = read(module_path)
+        atomic_writer = module.split("function Write-Libertix", 1)[1].split(
+            "function Read-Libertix", 1
+        )[0]
+
+        assert "$backupPath = Join-Path" in atomic_writer
+        assert "$directory" in atomic_writer
+        assert "ToString('N')).bak\"" in atomic_writer
+        assert "[IO.File]::Replace($temporaryPath, $fullPath, $backupPath)" in atomic_writer
+        assert "[IO.File]::Replace($temporaryPath, $fullPath, $null)" not in atomic_writer
+        assert "[IO.File]::Delete($backupPath)" in atomic_writer
+
+
+def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
+    script = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
         "function Get-ReusablePreparedInstallerPartition", 1
     )[0]
@@ -408,7 +532,7 @@ def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
 
 
 def test_uefi_dismount_closes_only_explorer_windows_on_temporary_drive() -> None:
-    script = read("Scripts/libertix-uefi-install.ps1")
+    script = read("Scripts/uefi/Libertix.Uefi.Storage.ps1")
     close_explorer = script.split("function Close-ExplorerWindowsForDrive", 1)[1].split(
         "function Dismount-Letter", 1
     )[0]
@@ -427,38 +551,48 @@ def test_uefi_dismount_closes_only_explorer_windows_on_temporary_drive() -> None
     assert "EnsureClosed($nativeHandle, 5000)" in close_explorer
     assert "return !IsWindow(hWnd);" in close_explorer
     assert "$driveReferencePattern" in close_explorer
+    assert '$windowClass -eq "#32770"' in close_explorer
+    assert "$IncludeErrorDialogs" in close_explorer
+    assert "-IncludeErrorDialogs" in dismount
+    assert "-RetryCount 25" in dismount
     assert "Close-ExplorerWindowsForDrive -Letter $Letter" in dismount
 
 
 def test_uefi_large_linux_partition_uses_fat32_staging_and_full_reservation() -> None:
-    script = read("Scripts/libertix-uefi-install.ps1")
+    script = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
         "function Get-ReusablePreparedInstallerPartition", 1
     )[0]
 
-    assert "$requestedBytes = $requestedSizeMB * 1MB" in create_or_reuse
-    assert "$stagingSizeGB = if ($SizeGB -gt 31) { 8 } else { $SizeGB }" in create_or_reuse
+    assert (
+        "$requestedBytes = [int64]$installationPlan.disk.installer.finalSizeBytes"
+        in create_or_reuse
+    )
+    assert (
+        "$stagingBytes = [int64]$installationPlan.disk.installer.stagingSizeBytes"
+        in create_or_reuse
+    )
+    assert "$legacyStagingSizeGB = if ($SizeGB -gt 31) { 8 } else { $SizeGB }" in create_or_reuse
     assert "$need = $requestedBytes + $minFree" in create_or_reuse
     assert "$shrinkBytes = $requestedBytes" in create_or_reuse
     assert "-Size $stagingBytes" in create_or_reuse
 
 
 def test_bios_large_linux_partition_uses_fat32_staging_and_full_reservation() -> None:
-    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    apply_changes = read("Pages/ApplyChanges.Bios.cs")
     partitioning = apply_changes.split("private async Task ExecutePartitioningAsync", 1)[1].split(
         "private async Task FailBiosPreparationAndRollbackAsync", 1
     )[0]
 
-    assert "BiosFat32DirectLimitMB = 31 * 1024" in apply_changes
-    assert "BiosFat32StagingSizeMB = 8 * 1024" in apply_changes
-    assert "GetBiosFat32PartitionSizeMB(requestedLinuxMB)" in partitioning
+    assert "InstallationSizePolicy.FromRequestedGigabytes" in apply_changes
+    assert "installationSizes.StagingSizeMiB" in partitioning
     assert "ShrinkWindowsPartitionAsync(requestedLinuxMB)" in partitioning
     assert "CreateFat32PartitionSimpleAsync(biosStagingMB)" in partitioning
     assert "the live will expand it" in partitioning
 
 
 def test_bios_recovery_guard_accepts_staging_or_final_partition_size() -> None:
-    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    apply_changes = read("Pages/ApplyChanges.Windows.cs")
     recovery = read("Scripts/libertix-recovery-guard.ps1")
 
     assert '$"STAGING_SIZE_MB={stagingSizeMB:F0}"' in apply_changes
@@ -469,7 +603,7 @@ def test_bios_recovery_guard_accepts_staging_or_final_partition_size() -> None:
 
 
 def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
-    script = read("Scripts/libertix-uefi-install.ps1")
+    script = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
         "function Get-ReusablePreparedInstallerPartition", 1
     )[0]
@@ -484,13 +618,12 @@ def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
 
 
 def test_uefi_low_memory_boot_files_are_writable_and_revert_removes_iso() -> None:
-    script = read("Scripts/libertix-uefi-install.ps1")
-    install = script.split("function Install-LibertixIsoToPartition", 1)[1].split(
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    install = staging.split("function Install-LibertixIsoToPartition", 1)[1].split(
         "function Set-LibertixUefiBootEntry", 1
     )[0]
-    revert = script.split("function Invoke-Revert", 1)[1].split(
-        "function New-OrReuseInstallerPartition", 1
-    )[0]
+    revert = transaction.split("function Invoke-Revert", 1)[1]
 
     attributes_position = install.index("attrib -R -S -H $bootConfig.FullName")
     write_position = install.index(
@@ -535,7 +668,7 @@ def test_bios_live_expands_fat32_staging_before_ext4_format() -> None:
 
 
 def test_uefi_iso_download_uses_the_canonical_url_without_cache_busting() -> None:
-    script = read("Scripts/libertix-uefi-install.ps1")
+    script = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     download = script.split("function Install-LibertixIsoToPartition", 1)[1].split(
         "function Set-LibertixUefiBootEntry", 1
     )[0]
@@ -560,8 +693,19 @@ def test_bios_iso_output_name_matches_the_filepool_contract() -> None:
     assert "/workspace/libertix-installer.iso" not in docker_builder
 
 
+def test_legacy_ci_entry_point_reuses_the_single_ci_policy() -> None:
+    workflow = read(".github/workflows/ci.yml")
+    compatibility_entry = read(".github/workflows/dotnet-desktop.yml")
+
+    assert "workflow_call:" in workflow
+    assert "uses: ./.github/workflows/ci.yml" in compatibility_entry
+    assert "msbuild " not in compatibility_entry
+    assert "python -m pytest" not in compatibility_entry
+    assert "build-isos-docker.sh" not in compatibility_entry
+
+
 def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
-    script = read("Scripts/libertix-uefi-install.ps1")
+    script = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
     bits = script.split("function Start-BitsDownload", 1)[1].split("function Get-Aria2Exe", 1)[0]
     robust = script.split("function Start-RobustDownload", 1)[1].split(
         "function Ensure-MintIsoOnWindows", 1

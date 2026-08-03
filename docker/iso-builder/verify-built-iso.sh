@@ -38,8 +38,40 @@ compare_rootfs_file usr/local/sbin/libertix-gui /workspace/iso-uefi/live/liberti
 compare_rootfs_file usr/local/sbin/libertix-copy-logs /workspace/assets/live/libertix-copy-logs.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-install-platform-common.sh \
     /workspace/assets/live/libertix-install-platform-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-storage-common.sh \
+    /workspace/assets/live/libertix-storage-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-install-runtime-common.sh \
+    /workspace/assets/live/libertix-install-runtime-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-i18n.py \
+    /workspace/assets/live/libertix-i18n.py
+compare_rootfs_file usr/local/lib/libertix/libertix-i18n.sh \
+    /workspace/assets/live/libertix-i18n.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-translations.json \
+    /workspace/assets/live/libertix-translations.json
+compare_rootfs_file usr/local/lib/libertix/libertix-target-common.sh \
+    /workspace/assets/live/libertix-target-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-rollback-common.sh \
+    /workspace/assets/live/libertix-rollback-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-runner-stage-common.sh \
     /workspace/assets/live/libertix-runner-stage-common.sh
+
+case "$mode" in
+    bios)
+        expected_adapter=libertix-bios-adapter.sh
+        unexpected_adapter=libertix-uefi-adapter.sh
+        ;;
+    uefi)
+        expected_adapter=libertix-uefi-adapter.sh
+        unexpected_adapter=libertix-bios-adapter.sh
+        ;;
+esac
+compare_rootfs_file "usr/local/lib/libertix/$expected_adapter" \
+    "/workspace/assets/live/$expected_adapter"
+if unsquashfs -ll "$squashfs" "usr/local/lib/libertix/$unexpected_adapter" 2>/dev/null \
+    | grep -q "squashfs-root/usr/local/lib/libertix/$unexpected_adapter"; then
+    echo "Built $mode rootfs contains unexpected adapter $unexpected_adapter" >&2
+    exit 1
+fi
 compare_rootfs_file usr/local/lib/libertix/cleanup-bcd.py "$source_dir/live/cleanup-bcd.py"
 compare_rootfs_file usr/local/lib/libertix/configure-target.sh \
     "$source_dir/target/configure-target.sh"
