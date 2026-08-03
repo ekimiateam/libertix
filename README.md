@@ -2,8 +2,9 @@
 
 > [!IMPORTANT]
 > The code on the `main` branch is currently **not up to date**. All development and changes
-> happen on the --->>> [`dev`](https://github.com/ekimiateam/libertix/tree/dev) <<<--- branch, where beta
-> releases are published. Since the project is currently in beta, the "final files" (Windows
+> happen on the
+> #### **-->** [`dev`](https://github.com/ekimiateam/libertix/tree/dev) **<--** branch, where beta releases are published.
+> Since the project is currently in beta, the "final files" (Windows
 > application, scripts and ISO images) live on the `dev` branch, not on `main`. If you want to
 > test Libertix, use the `dev` branch.
 >
