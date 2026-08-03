@@ -234,6 +234,20 @@ artifacts.
 Additional UEFI boot details are documented in
 [`docs/UEFI_BOOTNEXT_BOOTORDER.md`](docs/UEFI_BOOTNEXT_BOOTORDER.md).
 
+## Community and acknowledgements
+
+Libertix is developed by Félix ([felix068](https://github.com/felix068)) and Ekimia, with
+contributions from Michel Memeteau, MopigamesYT / Margot and Aamir Shahzad. Thank you to everyone
+who has contributed code, tests, issue reports and documentation.
+
+The project has also been made possible by its donors. Public supporters of the Libertix campaign
+include **Olivier**, **Boyka**, **Coin des Geeks** and **Matthieu**. The campaign exceeded its
+€3,000 goal through 41 donations. We are grateful to every donor, including those who chose to
+remain anonymous.
+
+To help fund continued development and testing, visit the
+[Libertix donation campaign](https://ekimia.fr/donations/campagne-libertix/).
+
 ## Contributing
 
 Development takes place on the `dev` branch. Keep firmware-neutral behavior in the shared plan and
