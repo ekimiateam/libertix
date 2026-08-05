@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
+import ipaddress
+from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -19,7 +20,6 @@ class VMConfig(BaseModel):
     vmid: int = Field(gt=0)
     firmware: Literal["bios", "uefi"]
     vnc_keyboard_layout: Literal["fr", "us"] = "us"
-    disable_defender_for_automation: bool = False
     automation_enabled: bool = False
 
 
@@ -50,9 +50,14 @@ class Settings(BaseSettings):
     repository_url: str
     repository_branch: str = "dev"
     smb_root: str
+    allowed_smb_roots: tuple[str, ...] = Field(min_length=1)
+    allowed_proxmox_vmids: tuple[int, ...] = Field(min_length=1)
     source_dir_name: str = "Libertix-source"
     release_dir_name: str = "Libertix-release"
     filepool_base_url: str
+    development_static_ipv4_prefix_length: int = Field(ge=1, le=30)
+    development_static_ipv4_gateway: str
+    development_dns_servers: tuple[str, ...] = Field(min_length=1)
 
     llm_api_url: str
     llm_api_key: SecretStr
@@ -85,9 +90,31 @@ class Settings(BaseSettings):
     @field_validator("smb_root")
     @classmethod
     def validate_smb_root(cls, value: str) -> str:
-        if value.rstrip("/") != "/root/smb":
-            raise ValueError("smb_root doit rester strictement /root/smb")
-        return "/root/smb"
+        normalized = str(PurePosixPath(value))
+        if not normalized.startswith("/") or len(PurePosixPath(normalized).parts) < 3:
+            raise ValueError("smb_root must be an absolute, dedicated subdirectory")
+        return normalized
+
+    @field_validator("allowed_smb_roots")
+    @classmethod
+    def validate_allowed_smb_roots(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(str(PurePosixPath(value)) for value in values)
+        if any(
+            not value.startswith("/") or len(PurePosixPath(value).parts) < 3 for value in normalized
+        ):
+            raise ValueError("allowed_smb_roots must contain only dedicated absolute paths")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("allowed_smb_roots must not contain duplicates")
+        return normalized
+
+    @field_validator("allowed_proxmox_vmids")
+    @classmethod
+    def validate_allowed_proxmox_vmids(cls, values: tuple[int, ...]) -> tuple[int, ...]:
+        if any(value <= 0 for value in values):
+            raise ValueError("allowed_proxmox_vmids must contain only positive VM IDs")
+        if len(values) != len(set(values)):
+            raise ValueError("allowed_proxmox_vmids must not contain duplicates")
+        return values
 
     @field_validator("filepool_base_url")
     @classmethod
@@ -107,6 +134,25 @@ class Settings(BaseSettings):
             )
         return value.rstrip("/")
 
+    @field_validator("development_static_ipv4_gateway")
+    @classmethod
+    def validate_development_gateway(cls, value: str) -> str:
+        try:
+            return str(ipaddress.IPv4Address(value))
+        except ipaddress.AddressValueError as error:
+            raise ValueError("development_static_ipv4_gateway must be IPv4") from error
+
+    @field_validator("development_dns_servers")
+    @classmethod
+    def validate_development_dns_servers(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            normalized = tuple(str(ipaddress.IPv4Address(value)) for value in values)
+        except ipaddress.AddressValueError as error:
+            raise ValueError("development_dns_servers must contain only IPv4 addresses") from error
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("development_dns_servers must not contain duplicates")
+        return normalized
+
     @model_validator(mode="after")
     def validate_vm_identity(self) -> Settings:
         names = [vm.name.casefold() for vm in self.vms]
@@ -115,8 +161,10 @@ class Settings(BaseSettings):
             raise ValueError("VM names must be unique")
         if len(vmids) != len(set(vmids)):
             raise ValueError("VM IDs must be unique")
-        if not set(vmids).issubset({500, 501, 502}):
-            raise ValueError("Only Proxmox VM IDs 500, 501 and 502 are allowed")
+        if self.smb_root not in self.allowed_smb_roots:
+            raise ValueError("smb_root is outside allowed_smb_roots")
+        if not set(vmids).issubset(set(self.allowed_proxmox_vmids)):
+            raise ValueError("A configured VM ID is outside allowed_proxmox_vmids")
         return self
 
 

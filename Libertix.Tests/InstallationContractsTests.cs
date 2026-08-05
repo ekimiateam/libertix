@@ -12,31 +12,218 @@ namespace Libertix.Tests
         private const string PlanId = "0123456789abcdef0123456789abcdef";
 
         [TestMethod]
-        public void DevelopmentSshOptionAcceptsOnlyTheTestSubnet()
+        public void DevelopmentSshOptionsAcceptACompleteNetworkProfile()
         {
             bool parsed = StartupOptions.TryParse(
-                new[] { "--dev-ssh-static-ip", "192.168.1.240" },
+                new[]
+                {
+                    "--dev-ssh-static-ip", "10.42.7.20",
+                    "--dev-ssh-prefix-length", "23",
+                    "--dev-ssh-gateway", "10.42.6.1",
+                    "--dev-ssh-dns", "9.9.9.9",
+                    "--dev-ssh-dns", "1.1.1.1"
+                },
                 out StartupOptions options,
                 out string error);
 
             Assert.IsTrue(parsed, error);
-            Assert.AreEqual("192.168.1.240", options.DevelopmentSshStaticIpv4Address);
+            Assert.AreEqual("10.42.7.20", options.DevelopmentSshStaticIpv4Address);
+            Assert.AreEqual(23, options.DevelopmentSshStaticIpv4PrefixLength);
+            Assert.AreEqual("10.42.6.1", options.DevelopmentSshStaticIpv4Gateway);
+            CollectionAssert.AreEqual(
+                new[] { "9.9.9.9", "1.1.1.1" },
+                new System.Collections.Generic.List<string>(
+                    options.DevelopmentSshDnsServers));
         }
 
         [DataTestMethod]
-        [DataRow("192.168.1.1")]
-        [DataRow("192.168.1.255")]
-        [DataRow("192.168.2.20")]
-        [DataRow("not-an-address")]
-        public void DevelopmentSshOptionRejectsUnsafeAddresses(string address)
+        [DataRow("10.42.6.0", "23", "10.42.6.1", "9.9.9.9")]
+        [DataRow("10.42.7.255", "23", "10.42.6.1", "9.9.9.9")]
+        [DataRow("10.42.7.20", "23", "10.43.0.1", "9.9.9.9")]
+        [DataRow("10.42.7.20", "31", "10.42.7.21", "9.9.9.9")]
+        [DataRow("not-an-address", "24", "10.42.7.1", "9.9.9.9")]
+        [DataRow("127.0.0.2", "24", "127.0.0.1", "9.9.9.9")]
+        [DataRow("169.254.10.2", "24", "169.254.10.1", "9.9.9.9")]
+        [DataRow("224.0.0.2", "24", "224.0.0.1", "9.9.9.9")]
+        public void DevelopmentSshOptionsRejectUnsafeProfiles(
+            string address,
+            string prefix,
+            string gateway,
+            string dns)
         {
             bool parsed = StartupOptions.TryParse(
-                new[] { "--dev-ssh-static-ip", address },
+                new[]
+                {
+                    "--dev-ssh-static-ip", address,
+                    "--dev-ssh-prefix-length", prefix,
+                    "--dev-ssh-gateway", gateway,
+                    "--dev-ssh-dns", dns
+                },
+                out _,
+                out _);
+
+            Assert.IsFalse(parsed);
+        }
+
+        [TestMethod]
+        public void DevelopmentSshOptionsRequireTheCompleteProfile()
+        {
+            bool parsed = StartupOptions.TryParse(
+                new[] { "--dev-ssh-static-ip", "10.42.7.20" },
                 out _,
                 out string error);
 
             Assert.IsFalse(parsed);
-            StringAssert.Contains(error, "192.168.1.0/24");
+            StringAssert.Contains(error, "requires");
+        }
+
+        [TestMethod]
+        public void NvramWriteProbeCanBeSkippedOnlyByExplicitOption()
+        {
+            Assert.IsTrue(StartupOptions.TryParse(
+                Array.Empty<string>(),
+                out StartupOptions defaults,
+                out string defaultError), defaultError);
+            Assert.IsFalse(defaults.SkipNvramWriteProbe);
+
+            Assert.IsTrue(StartupOptions.TryParse(
+                new[] { "--skip-nvram-write-probe" },
+                out StartupOptions optedOut,
+                out string optOutError), optOutError);
+            Assert.IsTrue(optedOut.SkipNvramWriteProbe);
+        }
+
+        [TestMethod]
+        public void NvramWriteProbeSkipOptionCannotBeRepeated()
+        {
+            bool parsed = StartupOptions.TryParse(
+                new[] { "--skip-nvram-write-probe", "--skip-nvram-write-probe" },
+                out _,
+                out string error);
+
+            Assert.IsFalse(parsed);
+            StringAssert.Contains(error, "can only be specified once");
+        }
+
+        [TestMethod]
+        public void StartupOptionsRejectUnknownArguments()
+        {
+            bool parsed = StartupOptions.TryParse(
+                new[] { "--dev-ssh-dsn", "9.9.9.9" },
+                out _,
+                out string error);
+
+            Assert.IsFalse(parsed);
+            StringAssert.Contains(error, "Unknown Libertix option");
+        }
+
+        [TestMethod]
+        public void StartupOptionsAcceptInternalUefiRecoveryArguments()
+        {
+            bool parsed = StartupOptions.TryParse(
+                new[]
+                {
+                    "--uefi-bootnext-failed",
+                    "--uefi-recovery-state",
+                    @"C:\ProgramData\Libertix\UefiRecovery\state.json"
+                },
+                out _,
+                out string error);
+
+            Assert.IsTrue(parsed, error);
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorAcceptsCanonicalUefiPlan()
+        {
+            InstallationPlanValidator.Validate(CreateValidPlan());
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorRejectsFirmwarePartitionMismatch()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "UEFI plan requires a GPT disk");
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorRejectsNoncanonicalStagingSize()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.Installer.StagingSizeBytes = 9L * InstallationSizePolicy.BytesPerGiB;
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "shared FAT32 staging policy");
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorAcceptsAlignedFourKnGeometry()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.LogicalSectorSizeBytes = 4096;
+
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorRejectsUnsupportedLogicalSectorSize()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.LogicalSectorSizeBytes = 1024;
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "must be either 512 or 4096");
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorRejectsPartitionOffsetOutsideLogicalSectors()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.LogicalSectorSizeBytes = 4096;
+            plan.Disk.Windows.OffsetBytes += 512;
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "disk.windows.offsetBytes must align");
+        }
+
+        [TestMethod]
+        public void AtomicJsonFileReplacesCompleteUtf8DocumentWithoutTemporaryResidue()
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "libertix-tests-" + Guid.NewGuid());
+            string path = Path.Combine(directory, "state.json");
+            try
+            {
+                AtomicJsonFile.Write(path, "{\"revision\":1}");
+                AtomicJsonFile.Write(path, "{\"revision\":2,\"label\":\"été\"}");
+
+                byte[] bytes = File.ReadAllBytes(path);
+                CollectionAssert.AreEqual(
+                    System.Text.Encoding.UTF8.GetBytes("{\"revision\":2,\"label\":\"été\"}\n"),
+                    bytes);
+                CollectionAssert.AreEqual(
+                    Array.Empty<string>(),
+                    Directory.GetFiles(directory, "*.tmp"));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, true);
+            }
         }
 
         [DataTestMethod]
@@ -55,25 +242,6 @@ namespace Libertix.Tests
             Assert.AreEqual(expectedStagingGiB, sizes.StagingSizeGiB);
         }
 
-        [DataTestMethod]
-        [DataRow(21474836480L, 21474836480L, true)]
-        [DataRow(21474836480L, 21473787904L, true)]
-        [DataRow(21474836480L, 21475885056L, true)]
-        [DataRow(21474836480L, 21473787903L, false)]
-        [DataRow(21474836480L, 21475885057L, false)]
-        [DataRow(0L, 0L, false)]
-        public void StagingSizeValidationAllowsOnlyOneAlignmentUnit(
-            long expectedBytes,
-            long observedBytes,
-            bool expectedResult)
-        {
-            Assert.AreEqual(
-                expectedResult,
-                InstallationSizePolicy.IsObservedStagingSizeAcceptable(
-                    expectedBytes,
-                    observedBytes));
-        }
-
         [TestMethod]
         public void SuccessfulStateCannotRetainFailureDetails()
         {
@@ -90,6 +258,19 @@ namespace Libertix.Tests
 
             Assert.ThrowsException<InvalidOperationException>(
                 () => InstallationStateMachine.ValidateState(machine.State));
+        }
+
+        [TestMethod]
+        public void ProgressIsStoredAsValidatedStructuredState()
+        {
+            InstallationStateMachine machine = InstallationStateMachine.Create(PlanId);
+
+            machine.SetProgress("installer-iso-download", 37, 48);
+
+            Assert.AreEqual("installer-iso-download", machine.State.Progress.Stage);
+            Assert.AreEqual(37, machine.State.Progress.OverallPercent);
+            Assert.AreEqual(48, machine.State.Progress.DetailPercent);
+            InstallationStateMachine.ValidateState(machine.State);
         }
 
         [TestMethod]
@@ -160,6 +341,126 @@ namespace Libertix.Tests
             Assert.AreEqual(expectedLayout, resolved.Layout);
             Assert.AreEqual(expectedVariant, resolved.Variant);
             Assert.AreEqual(expectedFallback, resolved.UsedFallback);
+        }
+
+        [TestMethod]
+        public void InstallationPlanAcceptsClonedWindowsGeometryWithPreservedGap()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.Windows.SizeBytes += 256L * 1024L;
+
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsUnexpectedInstallerOffset()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.Installer.OffsetBytes += 1024L * 1024L;
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        [TestMethod]
+        public void InstallationPlanAcceptsReservedPrimaryMbrOffset()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Firmware = InstallationFirmware.Bios;
+            plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+            plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+            plan.Disk.Installer.OffsetBytes -= 1024L * 1024L;
+
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsReservedMbrOffsetForUefi()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.Installer.OffsetBytes -= 1024L * 1024L;
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        private static InstallationPlan CreateValidPlan()
+        {
+            const long GiB = InstallationSizePolicy.BytesPerGiB;
+            return new InstallationPlan
+            {
+                PlanId = PlanId,
+                CreatedAtUtc = DateTimeOffset.Parse("2026-08-05T12:00:00Z"),
+                Firmware = InstallationFirmware.Uefi,
+                Distribution = new InstallationDistribution
+                {
+                    Name = "Linux Mint",
+                    InstallerIsoFileName = "mint.iso",
+                    InstallerIsoUrl = "https://example.test/mint.iso",
+                    InstallerIsoWindowsPath = @"C:\mint.iso",
+                    InstallerIsoSha256 = new string('b', 64),
+                    LiveIsoUrl = "https://example.test/libertix-installer-uefi.iso",
+                    LiveIsoSha256 = new string('c', 64)
+                },
+                Locale = new InstallationLocale
+                {
+                    LanguageCode = "en",
+                    SystemLanguage = "en_US.UTF-8",
+                    KeyboardLayout = "us",
+                    KeyboardModel = "pc105",
+                    Timezone = "Etc/UTC"
+                },
+                Account = new InstallationAccount
+                {
+                    Username = "test",
+                    PasswordHash = "$6$salt$hash",
+                    ComputerName = "libertix-test"
+                },
+                Disk = new InstallationDisk
+                {
+                    Number = 0,
+                    UniqueId = "test-disk",
+                    SizeBytes = 256L * GiB,
+                    LogicalSectorSizeBytes = 512,
+                    PartitionStyle = InstallationPartitionStyle.Gpt,
+                    SystemDrive = "C:",
+                    Windows = new PartitionIdentity
+                    {
+                        Number = 3,
+                        OffsetBytes = 2L * GiB,
+                        SizeBytes = 180L * GiB
+                    },
+                    Boot = new PartitionIdentity
+                    {
+                        Number = 1,
+                        OffsetBytes = 1L * 1024 * 1024,
+                        SizeBytes = 100L * 1024 * 1024
+                    },
+                    Recovery = new PartitionIdentity
+                    {
+                        Number = 4,
+                        OffsetBytes = 240L * GiB,
+                        SizeBytes = 1L * GiB
+                    },
+                    Installer = new InstallerPartitionPlan
+                    {
+                        Number = 5,
+                        OffsetBytes = 142L * GiB,
+                        FinalSizeBytes = 40L * GiB,
+                        StagingSizeBytes = 8L * GiB
+                    }
+                },
+                Features = new InstallationFeatures
+                {
+                    WindowsProfilesJsonBase64 = "W10="
+                },
+                Runtime = new InstallationRuntime
+                {
+                    BootStrategy = InstallationBootStrategy.UefiBootNext,
+                    RecoveryRootWindows = @"C:\ProgramData\Libertix\Recovery",
+                    RecoveryRunId = new string('d', 32)
+                }
+            };
         }
     }
 }

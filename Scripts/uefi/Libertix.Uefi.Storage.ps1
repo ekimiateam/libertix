@@ -304,7 +304,12 @@ public static class LibertixExplorerWindowApi {
         Write-Log "Could not inspect Explorer windows for ${normalizedLetter}:; continuing." "Gray"
     } finally {
         if ($shell) {
-            try { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) } catch {}
+            try {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+            } catch {
+                # COM cleanup is best-effort after Explorer inspection; the
+                # process teardown releases any remaining proxy reference.
+            }
         }
     }
 
@@ -553,7 +558,12 @@ function Set-WindowsVolumeReadableFromLinux {
                 $samePercentCount = 0
                 $lastEncryptedPercent = $encryptedPercent
             }
-            Write-LibertixProgress -Stage "windows-decryption" -Percent ([int][math]::Round($encryptedPercent))
+            $decryptedPercent = 100 - $encryptedPercent
+            $overallPercent = 18 + [int][math]::Round($decryptedPercent * 10 / 100)
+            Write-LibertixProgress `
+                -Stage "windows-decryption" `
+                -Percent $overallPercent `
+                -DetailPercent $encryptedPercent
             Write-Log "Waiting for $SystemDrive decryption... $encryptedPercent% encrypted, protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
         } else {
             Write-Log "Waiting for $SystemDrive decryption... status=$($bitlockerVolume.VolumeStatus), protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"

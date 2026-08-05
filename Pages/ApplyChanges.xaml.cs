@@ -41,10 +41,12 @@ namespace Libertix.Pages
         private static readonly ArtifactCatalog Artifacts =
             ArtifactCatalog.LoadFromApplicationDirectory();
         private bool _isRunning = false;
-        private bool _uefiDownloadingInstallerIso = false;
+        private int _lastUefiProgressRevision = -1;
         private StoragePreflightInfo _storagePreflight;
         private bool _biosRecoveryGuardInstalled;
         private string _biosInstallerDriveLetter;
+        private bool _logOutputAutoScroll = true;
+        private bool _expandedLogOutputAutoScroll = true;
 
         private string BiosInstallerRoot
         {
@@ -208,45 +210,81 @@ namespace Libertix.Pages
         private void Log(string message)
         {
             string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+            bool forceScrollToEnd =
+                message.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) ||
+                message.StartsWith("CRITICAL:", StringComparison.OrdinalIgnoreCase);
             Dispatcher.Invoke(() =>
             {
-                AppendLogLine(LogOutput, line);
+                if (forceScrollToEnd)
+                {
+                    _logOutputAutoScroll = true;
+                    _expandedLogOutputAutoScroll = true;
+                }
+                AppendLogLine(LogOutput, line, forceScrollToEnd);
                 if (ExpandedLogsOverlay.Visibility == Visibility.Visible)
-                    AppendLogLine(ExpandedLogOutput, line);
+                    AppendLogLine(ExpandedLogOutput, line, forceScrollToEnd);
             });
             AppendPersistentLog(line);
             ApplicationLogger.Write($"INSTALLATION: {message}");
         }
 
-        private static void AppendLogLine(TextBox output, string line)
+        private void AppendLogLine(TextBox output, string line, bool forceScrollToEnd)
         {
-            const double bottomTolerance = 4.0;
-            bool wasAtBottom =
-                output.ExtentHeight <= output.ViewportHeight ||
-                output.VerticalOffset >=
-                    output.ExtentHeight - output.ViewportHeight - bottomTolerance;
             double previousOffset = output.VerticalOffset;
 
             output.AppendText(line + Environment.NewLine);
             // TextBox updates its scroll extent after the append has returned.
-            // Apply the decision on the next layout pass: follow new lines only
-            // when the user was already at the bottom, otherwise preserve the
-            // exact manual reading position.
+            // Re-check the user's state on the next layout pass. This avoids a
+            // queued append overriding a manual scroll that happened meanwhile.
             output.Dispatcher.BeginInvoke(
                 DispatcherPriority.Background,
                 new Action(() =>
                 {
-                    if (wasAtBottom)
+                    if (forceScrollToEnd || IsAutoScrollEnabled(output))
                         output.ScrollToEnd();
                     else
                         output.ScrollToVerticalOffset(previousOffset);
                 }));
         }
 
+        private void LogOutput_ScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            // Content growth changes the scroll extent before ScrollToEnd runs.
+            // Only a pure viewport movement represents a user scroll decision.
+            if (e.ExtentHeightChange != 0 || !(sender is TextBox output))
+                return;
+
+            SetAutoScrollEnabled(output, IsAtBottom(output));
+        }
+
+        private static bool IsAtBottom(TextBox output)
+        {
+            const double bottomTolerance = 4.0;
+            return output.ExtentHeight <= output.ViewportHeight ||
+                output.VerticalOffset >=
+                    output.ExtentHeight - output.ViewportHeight - bottomTolerance;
+        }
+
+        private bool IsAutoScrollEnabled(TextBox output)
+        {
+            return ReferenceEquals(output, ExpandedLogOutput)
+                ? _expandedLogOutputAutoScroll
+                : _logOutputAutoScroll;
+        }
+
+        private void SetAutoScrollEnabled(TextBox output, bool enabled)
+        {
+            if (ReferenceEquals(output, ExpandedLogOutput))
+                _expandedLogOutputAutoScroll = enabled;
+            else
+                _logOutputAutoScroll = enabled;
+        }
+
         private void ExpandLogsButton_Click(object sender, RoutedEventArgs e)
         {
             ExpandedLogOutput.Text = LogOutput.Text;
             ExpandedLogsOverlay.Visibility = Visibility.Visible;
+            _expandedLogOutputAutoScroll = true;
             ExpandedLogOutput.ScrollToEnd();
             ExpandedLogOutput.Focus();
         }

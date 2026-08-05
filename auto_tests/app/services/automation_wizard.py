@@ -14,7 +14,12 @@ from vncdotool import api
 from app.clients.vnc import VNCClient
 from app.config import VMConfig
 from app.errors import WorkflowError
-from app.services.automation_types import AutomationOptions, Point, WizardProfile
+from app.services.automation_types import (
+    AutomationOptions,
+    Point,
+    WizardLayout,
+    WizardProfile,
+)
 from app.services.common import ResultBuilder
 from tools.azerty_qwerty import azerty_to_qwerty
 
@@ -24,8 +29,29 @@ logger = logging.getLogger(__name__)
 class WizardAutomationMixin:
     """Drive and validate wizard pages through the configured VNC desktop."""
 
-    BIOS_WARNING_ACKNOWLEDGEMENT = Point(430, 575)
-    UEFI_WARNING_ACKNOWLEDGEMENT = Point(430, 566)
+    # VNC cannot discover WPF controls semantically. Keep the two validated
+    # layouts centralized so UI changes update one explicit contract instead of
+    # leaving unrelated pixel literals throughout the navigation workflow.
+    BIOS_LAYOUT = WizardLayout(
+        welcome_next=Point(512, 403),
+        distribution=Point(145, 395),
+        next_button=Point(919, 628),
+        sharing_next=Point(899, 588),
+        username=Point(512, 220),
+        password=Point(512, 333),
+        password_confirmation=Point(512, 445),
+        warning_acknowledgement=Point(430, 575),
+    )
+    UEFI_LAYOUT = WizardLayout(
+        welcome_next=Point(512, 403),
+        distribution=Point(220, 389),
+        next_button=Point(838, 614),
+        sharing_next=Point(822, 579),
+        username=Point(508, 223),
+        password=Point(508, 330),
+        password_confirmation=Point(508, 438),
+        warning_acknowledgement=Point(430, 566),
+    )
 
     def _click_wizard(
         self,
@@ -43,23 +69,21 @@ class WizardAutomationMixin:
             if not options.apply:
                 result.ok(
                     "automation.launch_only_stop",
-                    "Arrêt volontaire après lancement visible de l'interface "
+                    "Stopped intentionally after the interface became visible: "
                     f"{profile.launch_only_label}",
                     target=vm.vnc,
                     vm=vm.name,
                 )
                 return None
 
-            if profile.name == "uefi":
-                self._click_wizard_uefi(client, vm, options, result)
-            else:
-                self._click_wizard_bios(client, vm, options, result)
+            layout = self.UEFI_LAYOUT if profile.name == "uefi" else self.BIOS_LAYOUT
+            self._click_wizard_path(client, vm, options, result, layout)
         except WorkflowError:
             raise
         except Exception as exc:
             raise WorkflowError(
                 "automation.vnc_click",
-                "Automatisation VNC impossible",
+                "VNC automation failed",
                 details={"vm": vm.name, "address": vm.vnc, "error": str(exc)},
             ) from exc
         finally:
@@ -68,7 +92,7 @@ class WizardAutomationMixin:
                     client.disconnect()
                 except Exception:
                     logger.warning(
-                        "Fermeture VNC imparfaite",
+                        "VNC connection did not close cleanly",
                         extra={"step": "automation.vnc_close", "target": vm.vnc},
                     )
 
@@ -76,20 +100,23 @@ class WizardAutomationMixin:
             return self._monitor_until_live_boot(vm, result, profile.name)
         return None
 
-    def _click_wizard_bios(
-        self, client: object, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
+    def _click_wizard_path(
+        self,
+        client: object,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+        layout: WizardLayout,
     ) -> None:
-        # Coordinates are relative to REFERENCE_WIDTH/HEIGHT and scaled in
-        # _click. They match the VM500 BIOS wizard path validated by VNC.
-        self._click(client, vm, Point(512, 403), 2.0)
+        self._click(client, vm, layout.welcome_next, 2.0)
         self._capture_from_client(client, vm, "01-distro", result)
         self._navigate_to_account(
             client,
             vm,
-            welcome_point=Point(512, 403),
-            distro_point=Point(145, 395),
-            next_point=Point(919, 628),
-            sharing_point=Point(899, 588),
+            welcome_point=layout.welcome_next,
+            distro_point=layout.distribution,
+            next_point=layout.next_button,
+            sharing_point=layout.sharing_next,
             username=options.linux_username,
             result=result,
         )
@@ -97,9 +124,9 @@ class WizardAutomationMixin:
         self._fill_account_fields(
             client,
             vm,
-            username_point=Point(512, 220),
-            password_point=Point(512, 333),
-            confirmation_point=Point(512, 445),
+            username_point=layout.username,
+            password_point=layout.password,
+            confirmation_point=layout.password_confirmation,
             username=options.linux_username,
             password=options.linux_password,
         )
@@ -116,7 +143,7 @@ class WizardAutomationMixin:
             result=result,
         )
 
-        self._click(client, vm, Point(919, 628), 2.0)
+        self._click(client, vm, layout.next_button, 2.0)
         warning_capture, warning_capture_latest = self._capture_wizard_pair(
             client, vm, "05-warning", result
         )
@@ -129,65 +156,8 @@ class WizardAutomationMixin:
             result=result,
         )
 
-        self._click(client, vm, self.BIOS_WARNING_ACKNOWLEDGEMENT, 0.5)
-        self._click(client, vm, Point(919, 628), 10.0)
-        self._capture_from_client(client, vm, "06-apply-started", result)
-
-    def _click_wizard_uefi(
-        self, client: object, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
-    ) -> None:
-        # Coordinates match the manually validated VM502 / 1280x800 UEFI wizard path,
-        # converted back to the same 1024x768 reference system used by _click().
-        self._click(client, vm, Point(512, 403), 2.0)
-        self._capture_from_client(client, vm, "01-distro", result)
-        self._navigate_to_account(
-            client,
-            vm,
-            welcome_point=Point(512, 403),
-            distro_point=Point(220, 389),
-            next_point=Point(838, 614),
-            sharing_point=Point(822, 579),
-            username=options.linux_username,
-            result=result,
-        )
-
-        self._fill_account_fields(
-            client,
-            vm,
-            username_point=Point(508, 223),
-            password_point=Point(508, 330),
-            confirmation_point=Point(508, 438),
-            username=options.linux_username,
-            password=options.linux_password,
-        )
-        time.sleep(0.5)
-        account_capture, account_capture_latest = self._capture_wizard_pair(
-            client, vm, "04-account-filled", result
-        )
-        self._assert_wizard_state(
-            account_capture,
-            vm,
-            latest_capture=account_capture_latest,
-            expected_screen="account",
-            expected_username=options.linux_username,
-            result=result,
-        )
-
-        self._click(client, vm, Point(838, 614), 2.0)
-        warning_capture, warning_capture_latest = self._capture_wizard_pair(
-            client, vm, "05-warning", result
-        )
-        self._assert_wizard_state(
-            warning_capture,
-            vm,
-            latest_capture=warning_capture_latest,
-            expected_screen="warning",
-            expected_username=options.linux_username,
-            result=result,
-        )
-
-        self._click(client, vm, self.UEFI_WARNING_ACKNOWLEDGEMENT, 0.5)
-        self._click(client, vm, Point(838, 614), 10.0)
+        self._click(client, vm, layout.warning_acknowledgement, 0.5)
+        self._click(client, vm, layout.next_button, 10.0)
         self._capture_from_client(client, vm, "06-apply-started", result)
 
     def _navigate_to_account(
@@ -224,7 +194,7 @@ class WizardAutomationMixin:
                     raise
                 result.ok(
                     "automation.wizard_vision_retry",
-                    "Verdict LLM temporairement invalide; nouvelle capture sans clic",
+                    "Temporarily invalid LLM verdict; capturing again without clicking",
                     target=vm.vnc,
                     vm=vm.name,
                     attempt=attempt,
@@ -254,7 +224,7 @@ class WizardAutomationMixin:
             ):
                 result.ok(
                     "automation.compatibility_wait",
-                    "Préflight de compatibilité encore en cours",
+                    "Compatibility preflight is still running",
                     **context,
                 )
                 time.sleep(2)
@@ -284,12 +254,12 @@ class WizardAutomationMixin:
             ):
                 raise WorkflowError(
                     "automation.wizard_navigation",
-                    "Erreur visible pendant la navigation de l'assistant",
+                    "Visible error while navigating the wizard",
                     details=context,
                 )
             result.ok(
                 "automation.wizard_navigation",
-                "Page de l'assistant identifiée avant navigation",
+                "Wizard page identified before navigation",
                 **context,
             )
             if verdict.detected_screen != last_screen:
@@ -312,7 +282,7 @@ class WizardAutomationMixin:
             elif verdict.detected_screen in {"warning", "apply"}:
                 raise WorkflowError(
                     "automation.wizard_navigation",
-                    "L'assistant a dépassé l'écran compte de manière inattendue",
+                    "The wizard unexpectedly advanced past the account screen",
                     details=context,
                 )
             elif (
@@ -324,7 +294,7 @@ class WizardAutomationMixin:
                 time.sleep(3)
                 result.ok(
                     "automation.dismiss_windows_security_uac",
-                    "UAC retardé de Sécurité Windows fermé sans autoriser de modification",
+                    "Delayed Windows Security UAC closed without authorizing a change",
                     target=vm.vnc,
                     vm=vm.name,
                 )
@@ -338,7 +308,7 @@ class WizardAutomationMixin:
                 time.sleep(3)
                 result.ok(
                     "automation.dismiss_windows_security_window",
-                    "Fenêtre Windows Security fermée pour rendre Libertix au premier plan",
+                    "Windows Security window closed to bring Libertix to the foreground",
                     target=vm.vnc,
                     vm=vm.name,
                 )
@@ -347,7 +317,7 @@ class WizardAutomationMixin:
 
         raise WorkflowError(
             "automation.wizard_navigation",
-            "Timeout en attendant l'écran de création du compte",
+            "Timed out waiting for the account creation screen",
             details={"vm": vm.name, "target": vm.vnc},
         )
 
@@ -405,12 +375,12 @@ class WizardAutomationMixin:
         ):
             raise WorkflowError(
                 "automation.wizard_state",
-                "État critique de l'assistant non confirmé; Apply est bloqué",
+                "Critical wizard state not confirmed; Apply is blocked",
                 details=context,
             )
         result.ok(
             "automation.wizard_state",
-            "État critique de l'assistant confirmé avant de continuer",
+            "Critical wizard state confirmed before continuing",
             **context,
         )
 
@@ -435,12 +405,12 @@ class WizardAutomationMixin:
         if not path.is_file() or path.stat().st_size == 0:
             raise WorkflowError(
                 "automation.capture",
-                "Capture VNC absente ou vide",
+                "VNC capture is missing or empty",
                 details={"vm": vm.name, "path": str(path)},
             )
         result.ok(
             "automation.capture",
-            "Capture UI enregistrée",
+            "UI capture saved",
             target=vm.vnc,
             vm=vm.name,
             label=label,
@@ -471,7 +441,7 @@ class WizardAutomationMixin:
         if not (0 <= point.x < vm.screen_width and 0 <= point.y < vm.screen_height):
             raise WorkflowError(
                 "automation.click",
-                "Coordonnées VNC hors écran",
+                "VNC coordinates are outside the display",
                 details={"vm": vm.name, "x": point.x, "y": point.y},
             )
         client.mouseMove(point.x, point.y)

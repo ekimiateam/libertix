@@ -26,7 +26,10 @@ function Get-MountedIsoDrive {
                         Where-Object { $_.PSObject.Properties.Name -contains "DriveLetter" -and $_.DriveLetter } |
                         Select-Object -ExpandProperty DriveLetter
                 )
-            } catch {}
+            } catch {
+                # A mounted image can transiently omit its volume association;
+                # the partition query below provides the independent fallback.
+            }
             try {
                 $letters += @(
                     $image | Get-Disk -ErrorAction SilentlyContinue |
@@ -34,7 +37,10 @@ function Get-MountedIsoDrive {
                         Where-Object { $_.DriveLetter } |
                         Select-Object -ExpandProperty DriveLetter
                 )
-            } catch {}
+            } catch {
+                # Storage WMI can lag behind Mount-DiskImage. The bounded retry
+                # loop repeats both discovery paths until the drive appears.
+            }
         }
         $letter = $letters |
             Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |

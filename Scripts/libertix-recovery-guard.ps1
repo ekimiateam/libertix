@@ -252,12 +252,19 @@ try {
     $stagingMbText = Read-EnvValue -Path $Pending -Name "STAGING_SIZE_MB"
     $diskNumberText = Read-EnvValue -Path $Pending -Name "SYSTEM_DISK_NUMBER"
     $systemPartitionNumberText = Read-EnvValue -Path $Pending -Name "SYSTEM_PARTITION_NUMBER"
+    $initialSystemOffsetText = Read-EnvValue -Path $Pending -Name "SYSTEM_PARTITION_OFFSET"
     $initialSystemSizeText = Read-EnvValue -Path $Pending -Name "SYSTEM_PARTITION_SIZE_BYTES"
     $expectedDiskId = Read-EnvValue -Path $Pending -Name "SYSTEM_DISK_UNIQUE_ID"
     $recoveryPartitionOffsetText = Read-EnvValue `
         -Path $Pending `
         -Name "RECOVERY_PARTITION_OFFSET_BYTES"
-    if (-not $expectedMbText -or -not $diskNumberText -or -not $systemPartitionNumberText -or -not $initialSystemSizeText) {
+    if (
+        -not $expectedMbText -or
+        -not $diskNumberText -or
+        -not $systemPartitionNumberText -or
+        -not $initialSystemOffsetText -or
+        -not $initialSystemSizeText
+    ) {
         throw "Pending metadata is incomplete; refusing heuristic rollback."
     }
 
@@ -269,16 +276,34 @@ try {
     }
     $diskNumber = [int]$diskNumberText
     $systemPartitionNumber = [int]$systemPartitionNumberText
+    $initialSystemOffset = [int64]$initialSystemOffsetText
     $initialSystemSize = [int64]$initialSystemSizeText
     $recoveryPartitionOffset = if ($recoveryPartitionOffsetText) {
         [int64]$recoveryPartitionOffsetText
     } else {
         0
     }
-    $minBytes = [int64]([Math]::Max(1024, $expectedMb - 1024)) * 1MB
-    $maxBytes = [int64]($expectedMb + 1024) * 1MB
-    $stagingMinBytes = [int64]([Math]::Max(1024, $stagingMb - 1024)) * 1MB
-    $stagingMaxBytes = [int64]($stagingMb + 1024) * 1MB
+    [int64]$partitionSizeTolerance = 1MB
+    [int64]$expectedBytes = [int64]$expectedMb * 1MB
+    [int64]$stagingBytes = [int64]$stagingMb * 1MB
+    [int64]$minBytes = $expectedBytes - $partitionSizeTolerance
+    if ($minBytes -lt 1) {
+        $minBytes = 1
+    }
+    $maxBytes = $expectedBytes + $partitionSizeTolerance
+    [int64]$stagingMinBytes = $stagingBytes - $partitionSizeTolerance
+    if ($stagingMinBytes -lt 1) {
+        $stagingMinBytes = 1
+    }
+    $stagingMaxBytes = $stagingBytes + $partitionSizeTolerance
+    $alignmentPadding = ($initialSystemOffset + $initialSystemSize) % 1MB
+    $expectedTransactionOffset = `
+        $initialSystemOffset + $initialSystemSize - $alignmentPadding - $expectedBytes
+    $candidateOffsets = @(
+        [int64]($expectedTransactionOffset - 1MB),
+        [int64]$expectedTransactionOffset,
+        [int64]($expectedTransactionOffset + 1MB)
+    )
 
     $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     if ($systemPartition.DiskNumber -ne $diskNumber -or $systemPartition.PartitionNumber -ne $systemPartitionNumber) {
@@ -289,8 +314,10 @@ try {
         throw "Windows system disk identity changed; refusing rollback."
     }
 
-    # A candidate must be unique, on the exact Windows disk, after the system partition, and
-    # either be the known FAT32 staging/final size or the final ext4 size.
+    # Windows may represent the fourth MBR slot as an extended container and a
+    # logical partition one alignment unit later. Accept only the three exact
+    # offsets produced by the old layout, the current logical layout, or a
+    # primary-partition layout, and never treat the container itself as data.
     $partitions = Get-Partition -DiskNumber $diskNumber | Sort-Object Offset
     $candidates = @()
 
@@ -298,7 +325,10 @@ try {
         if ($partition.PartitionNumber -eq $systemPartition.PartitionNumber) {
             continue
         }
-        if ($partition.Offset -lt $systemPartition.Offset) {
+        if (
+            [int]$partition.MbrType -in @(5, 15, 133) -or
+            [int64]$partition.Offset -notin $candidateOffsets
+        ) {
             continue
         }
 
@@ -315,7 +345,8 @@ try {
 
         $isTemporaryFat = ($label -eq "LIBERTIX")
         $isLinux = ($fs -match "^(ext2|ext3|ext4)$")
-        if (-not $isTemporaryFat -and -not $isLinux) {
+        $isRawTransaction = [string]::IsNullOrWhiteSpace($fs)
+        if (-not $isTemporaryFat -and -not $isLinux -and -not $isRawTransaction) {
             continue
         }
 
@@ -324,8 +355,11 @@ try {
             $partition.Size -ge $stagingMinBytes -and
             $partition.Size -le $stagingMaxBytes
         )
-        if (($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
-            ($isLinux -and -not $matchesFinalSize)) {
+        if (
+            ($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
+            ($isLinux -and -not $matchesFinalSize) -or
+            ($isRawTransaction -and -not $matchesStagingSize)
+        ) {
             continue
         }
 
@@ -359,15 +393,24 @@ try {
             -RecoveryPartitionOffset $recoveryPartitionOffset
     } else {
         Write-RecoveryLog "No transaction partition exists; checking whether only the system partition needs extension."
+        Remove-EmptyTransactionExtendedContainer `
+            -DiskNumber $diskNumber `
+            -TransactionOffset $expectedTransactionOffset `
+            -TransactionSize $stagingBytes `
+            -SystemPartitionEnd ([int64]$systemPartition.Offset + [int64]$systemPartition.Size) `
+            -RecoveryPartitionOffset $recoveryPartitionOffset
     }
 
     $currentSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    if ($currentSystemPartition.Size -lt $initialSystemSize) {
+    if ($currentSystemPartition.Size -ne $initialSystemSize) {
         $supported = Wait-SystemDriveResizeCapacity `
             -DiskNumber $diskNumber `
             -RequiredSize $initialSystemSize
-        if ($supported.SizeMax -lt $initialSystemSize) {
-            throw "$SystemDrive cannot be restored to its initial size ($initialSystemSize); SizeMax=$($supported.SizeMax)."
+        if ($supported.SizeMin -gt $initialSystemSize -or $supported.SizeMax -lt $initialSystemSize) {
+            throw (
+                "$SystemDrive cannot be restored to its initial size ($initialSystemSize); " +
+                "SizeMin=$($supported.SizeMin), SizeMax=$($supported.SizeMax)."
+            )
         }
         Write-RecoveryLog "Restoring $SystemDrive to its exact initial size: $initialSystemSize bytes."
         Resize-Partition -DriveLetter $SystemDriveLetter -Size $initialSystemSize -ErrorAction Stop
@@ -401,7 +444,7 @@ try {
     Remove-TemporaryBootPayload
 
     $finalSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    if ($finalSystemPartition.Size -lt $initialSystemSize) {
+    if ($finalSystemPartition.Size -ne $initialSystemSize) {
         throw "$SystemDrive rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
     }
 

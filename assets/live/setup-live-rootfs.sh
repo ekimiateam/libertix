@@ -1,5 +1,6 @@
 #!/bin/bash
-set -e
+set -Eeuo pipefail
+
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -7,7 +8,7 @@ firmware_mode="${LIBERTIX_FIRMWARE_MODE:?LIBERTIX_FIRMWARE_MODE is required}"
 packages=(
     linux-image-amd64 live-boot live-boot-initramfs-tools live-config
     live-config-systemd systemd-sysv initramfs-tools parted fdisk e2fsprogs
-    squashfs-tools dosfstools ntfs-3g python3-hivex sudo nano util-linux coreutils
+    squashfs-tools dosfstools ntfs-3g python3-hivex python3-jsonschema sudo nano util-linux coreutils
     psmisc lsof xserver-xorg-core xserver-xorg-input-libinput xserver-xorg-video-vesa
     xserver-xorg-video-fbdev x11-xserver-utils python3-tk kbd
     fonts-dejavu-core fonts-noto-cjk imagemagick grub-common plymouth

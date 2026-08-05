@@ -69,7 +69,14 @@ namespace Libertix.Helpers
                 Task<string> errorTask = process.StandardError.ReadToEndAsync();
                 if (!process.WaitForExit(checked((int)timeout.TotalMilliseconds)))
                 {
-                    try { process.Kill(); } catch { }
+                    try
+                    {
+                        process.Kill();
+                    }
+                    catch
+                    {
+                        // The child may have exited at the timeout boundary.
+                    }
                     Task.WaitAll(new Task[] { outputTask, errorTask }, 2000);
                     return new WindowsProcessResult
                     {

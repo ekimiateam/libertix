@@ -28,6 +28,22 @@ function Assert-LibertixExecutionState {
     if ([int]$State.revision -lt 0) {
         throw "Libertix execution state revision cannot be negative."
     }
+    if ($State.PSObject.Properties.Name -contains "progress" -and $null -ne $State.progress) {
+        $progress = $State.progress
+        if ([string]$progress.stage -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
+            throw "Libertix execution state progress stage is invalid."
+        }
+        $overallPercent = [int]$progress.overallPercent
+        if ($overallPercent -lt 0 -or $overallPercent -gt 100) {
+            throw "Libertix execution state overall progress is invalid."
+        }
+        if ($progress.PSObject.Properties.Name -contains "detailPercent" -and $null -ne $progress.detailPercent) {
+            $detailPercent = [int]$progress.detailPercent
+            if ($detailPercent -lt 0 -or $detailPercent -gt 100) {
+                throw "Libertix execution state detailed progress is invalid."
+            }
+        }
+    }
     if ([string]$State.status -notin $script:ValidStatuses) {
         throw "Libertix execution state status is invalid."
     }
@@ -187,6 +203,10 @@ function New-LibertixExecutionState {
         completedSteps = @()
         compensatedSteps = @()
         failure = $null
+        progress = [ordered]@{
+            stage = "initializing"
+            overallPercent = 0
+        }
         updatedAtUtc = [DateTime]::UtcNow.ToString("o")
     }
     Write-LibertixExecutionStateAtomic -Path $Path -State $state
@@ -237,6 +257,37 @@ function Start-LibertixExecutionStep {
         $state.phase = $transitionPhase
         $state.activeStep = $transitionStep
     }
+}
+
+function Set-LibertixExecutionProgress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[a-z0-9]+(?:-[a-z0-9]+)*$')]
+        [string]$Stage,
+        [Parameter(Mandatory = $true)][ValidateRange(0, 100)][int]$OverallPercent,
+        [ValidateRange(0, 100)][Nullable[int]]$DetailPercent = $null
+    )
+
+    return Update-LibertixExecutionState `
+        -Path $Path `
+        -TransitionArguments @($Stage, $OverallPercent, $DetailPercent) `
+        -Transition {
+            param($state, $progressStage, $progressOverall, $progressDetail)
+            $progress = [ordered]@{
+                stage = $progressStage
+                overallPercent = $progressOverall
+            }
+            if ($null -ne $progressDetail) {
+                $progress.detailPercent = [int]$progressDetail
+            }
+            if ($state.PSObject.Properties.Name -contains "progress") {
+                $state.progress = $progress
+            } else {
+                $state | Add-Member -NotePropertyName progress -NotePropertyValue $progress
+            }
+        }
 }
 
 function Complete-LibertixExecutionStep {
@@ -355,6 +406,7 @@ Export-ModuleMember -Function `
     Read-LibertixExecutionState, `
     Write-LibertixExecutionStateAtomic, `
     New-LibertixExecutionState, `
+    Set-LibertixExecutionProgress, `
     Start-LibertixExecutionStep, `
     Complete-LibertixExecutionStep, `
     Set-LibertixExecutionFailure, `

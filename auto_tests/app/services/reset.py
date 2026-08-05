@@ -36,23 +36,23 @@ class ResetService:
             else:
                 result.ok(
                     "reset.scope",
-                    "Reset sélectif demandé: /root/smb est conservé",
+                    "Selective reset requested: /root/smb is preserved",
                     targets=[str(vmid) for vmid in vmids],
                 )
             self._restore_snapshots(locations, vmids, result)
             if selectors is None:
                 return result.success(
-                    "Reset terminé pour /root/smb et les VM "
+                    "Reset completed for /root/smb and VMs "
                     + ", ".join(str(vmid) for vmid in reset_vm_ids)
                 )
-            return result.success("Reset terminé pour " + ", ".join(str(vmid) for vmid in vmids))
+            return result.success("Reset completed for " + ", ".join(str(vmid) for vmid in vmids))
         except WorkflowError as exc:
             return result.failure(exc)
         except Exception as exc:
-            logger.exception("Erreur interne inattendue pendant le reset")
+            logger.exception("Unexpected internal error during reset")
             return result.failure(
                 WorkflowError(
-                    "internal", "Erreur interne inattendue", details={"type": type(exc).__name__}
+                    "internal", "Unexpected internal error", details={"type": type(exc).__name__}
                 )
             )
 
@@ -72,7 +72,7 @@ class ResetService:
         if selectors is None:
             return tuple(vm.vmid for vm in self.settings.vms)
         if not selectors:
-            raise WorkflowError("reset.selector", "Aucune VM demandée")
+            raise WorkflowError("reset.selector", "No VM requested")
 
         aliases: dict[str, int] = {
             "500": 500,
@@ -98,7 +98,7 @@ class ResetService:
             if vmid is None:
                 raise WorkflowError(
                     "reset.selector",
-                    "VM inconnue pour le reset",
+                    "Unknown VM requested for reset",
                     details={"selector": selector},
                 )
             if vmid not in selected:
@@ -114,19 +114,21 @@ class ResetService:
                 locations[vmid] = node
                 result.ok(
                     "proxmox.preflight",
-                    "VM et snapshot vérifiés",
+                    "VM and snapshot verified",
                     target=str(vmid),
                     node=node,
                     snapshot=RESET_SNAPSHOT,
                 )
         if set(locations) != set(vmids):
-            raise WorkflowError("proxmox.guard", "La garde de périmètre du reset a échoué")
+            raise WorkflowError("proxmox.guard", "Reset scope guard failed")
         return locations
 
     def _empty_smb(self, result: ResultBuilder) -> None:
         s = self.settings
-        if s.smb_root != "/root/smb":
-            raise WorkflowError("reset.guard", "Suppression refusée hors de /root/smb")
+        if s.smb_root not in s.allowed_smb_roots:
+            raise WorkflowError(
+                "reset.guard", "SMB cleanup refused outside the configured allowlist"
+            )
         with SSHClient(
             s.main_ssh_host,
             s.main_ssh_user,
@@ -149,11 +151,11 @@ class ResetService:
             if verification.stdout:
                 raise WorkflowError(
                     "reset.verify_smb_empty",
-                    "Le dossier /root/smb n'est pas vide après suppression",
+                    "The /root/smb directory is not empty after deletion",
                 )
         result.ok(
             "reset.empty_smb",
-            "Contenu de /root/smb supprimé et état vide vérifié",
+            "/root/smb contents deleted and empty state verified",
             target=s.main_ssh_host,
         )
 
@@ -164,7 +166,7 @@ class ResetService:
             if vmid not in locations:
                 raise WorkflowError(
                     "proxmox.guard",
-                    "VM hors garde ou localisation absente",
+                    "VM is outside the guard or its location is missing",
                     details={"vmid": vmid},
                 )
 
@@ -180,7 +182,7 @@ class ResetService:
                 vmid, node = future.result()
                 result.ok(
                     "proxmox.rollback",
-                    "Snapshot restauré avec succès",
+                    "Snapshot restored successfully",
                     target=str(vmid),
                     node=node,
                     snapshot=RESET_SNAPSHOT,

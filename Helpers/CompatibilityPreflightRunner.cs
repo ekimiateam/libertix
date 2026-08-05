@@ -24,7 +24,9 @@ namespace Libertix.Helpers
 
     public static class CompatibilityPreflightRunner
     {
-        public static async Task<CompatibilityInfo> RunAsync(Action<string> onOutput)
+        public static async Task<CompatibilityInfo> RunAsync(
+            Action<string> onOutput,
+            bool skipNvramWriteProbe = false)
         {
             string scriptPath = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
@@ -37,12 +39,17 @@ namespace Libertix.Helpers
                     scriptPath);
 
             string languageCode = Localization.CurrentLanguage;
-            return await Task.Run(() => RunProcess(scriptPath, languageCode, onOutput));
+            return await Task.Run(() => RunProcess(
+                scriptPath,
+                languageCode,
+                skipNvramWriteProbe,
+                onOutput));
         }
 
         private static CompatibilityInfo RunProcess(
             string scriptPath,
             string languageCode,
+            bool skipNvramWriteProbe,
             Action<string> onOutput)
         {
             string powershell = ResolvePowerShell();
@@ -51,11 +58,15 @@ namespace Libertix.Helpers
             var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var warnings = new List<string>();
 
+            string arguments = "-NoProfile -ExecutionPolicy Bypass -File " +
+                QuoteArgument(scriptPath) + " -LanguageCode " + QuoteArgument(languageCode);
+            if (skipNvramWriteProbe)
+                arguments += " -SkipNvramWriteProbe";
+
             var startInfo = new ProcessStartInfo
             {
                 FileName = powershell,
-                Arguments = "-NoProfile -ExecutionPolicy Bypass -File " +
-                    QuoteArgument(scriptPath) + " -LanguageCode " + QuoteArgument(languageCode),
+                Arguments = arguments,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
@@ -91,7 +102,15 @@ namespace Libertix.Helpers
                 process.BeginErrorReadLine();
                 if (!process.WaitForExit((int)WindowsProcessTimeouts.CompatibilityPreflight.TotalMilliseconds))
                 {
-                    try { process.Kill(); } catch { }
+                    try
+                    {
+                        process.Kill();
+                    }
+                    catch
+                    {
+                        // The process can exit after the timeout is observed
+                        // but before the termination request reaches it.
+                    }
                     throw new CompatibilityPreflightException(
                         "COMPAT_E_TIMEOUT",
                         "The compatibility check exceeded ten minutes.",
@@ -134,6 +153,7 @@ namespace Libertix.Helpers
                 BitLockerState = Require(values, "BITLOCKER_STATE"),
                 SecureBootEnabled = IsTrue(values, "SECURE_BOOT_ENABLED"),
                 NvramProbePassed = IsTrue(values, "NVRAM_PROBE_PASSED"),
+                NvramProbeSkipped = IsTrue(values, "NVRAM_PROBE_SKIPPED"),
                 Warnings = warnings.ToArray()
             };
         }

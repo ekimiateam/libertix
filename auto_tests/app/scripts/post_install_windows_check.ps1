@@ -72,6 +72,54 @@ try {
             Assert-Condition ($volume.HealthStatus -eq "Healthy") "C: is not healthy."
             Assert-Condition ($disk.HealthStatus -eq "Healthy") "The Windows disk is not healthy."
         }
+        "system_resources" {
+            $systemDrive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+            $operatingSystem = Get-CimInstance Win32_OperatingSystem
+            $computerSystem = Get-CimInstance Win32_ComputerSystem
+            Write-Output ("C_FREE_BYTES={0}" -f $systemDrive.FreeSpace)
+            Write-Output ("FREE_PHYSICAL_KIB={0}" -f $operatingSystem.FreePhysicalMemory)
+            Write-Output ("TOTAL_MEMORY_BYTES={0}" -f $computerSystem.TotalPhysicalMemory)
+            Assert-Condition ([uint64]$systemDrive.FreeSpace -gt 2GB) "C: has less than 2 GiB free."
+            Assert-Condition ([uint64]$operatingSystem.FreePhysicalMemory -gt 262144) "Windows has less than 256 MiB free physical memory."
+            Assert-Condition ([uint64]$computerSystem.TotalPhysicalMemory -gt 2GB) "Windows has less than 2 GiB total memory."
+        }
+        "partition_layout" {
+            $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+            $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
+            $partitions = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop)
+            $partitions | Format-Table PartitionNumber, DriveLetter, Type, GptType, MbrType, Size -AutoSize
+            if ([string]$config.expected_firmware -eq "uefi") {
+                Assert-Condition ($systemDisk.PartitionStyle -eq "GPT") "The UEFI system disk is not GPT."
+            } else {
+                Assert-Condition ($systemDisk.PartitionStyle -eq "MBR") "The BIOS system disk is not MBR."
+            }
+            Assert-Condition (-not $systemDisk.IsOffline) "The Windows system disk is offline."
+            Assert-Condition (-not $systemDisk.IsReadOnly) "The Windows system disk is read-only."
+            Assert-Condition ($partitions.Count -ge 3) "The system disk has too few partitions after installation."
+        }
+        "boot_partition" {
+            $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+            $partitions = @(Get-Partition -DiskNumber $systemPartition.DiskNumber -ErrorAction Stop)
+            if ([string]$config.expected_firmware -eq "uefi") {
+                $bootPartitions = @($partitions | Where-Object {
+                    $_.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
+                })
+                Assert-Condition ($bootPartitions.Count -eq 1) "The UEFI system disk does not contain exactly one ESP."
+                Assert-Condition ([uint64]$bootPartitions[0].Size -ge 64MB) "The EFI system partition is unexpectedly small."
+            } else {
+                $bootPartitions = @($partitions | Where-Object { $_.IsActive })
+                Assert-Condition ($bootPartitions.Count -eq 1) "The BIOS system disk does not contain exactly one active partition."
+            }
+            $bootPartitions | Format-Table PartitionNumber, Type, GptType, MbrType, IsActive, Size -AutoSize
+        }
+        "boot_configuration" {
+            $entries = @(& bcdedit.exe /enum all 2>&1)
+            $entries | ForEach-Object { Write-Output $_ }
+            Assert-Condition ($LASTEXITCODE -eq 0) "bcdedit failed to enumerate the boot configuration."
+            $text = $entries -join "`n"
+            Assert-Condition ($text -match "(?i)winload[.]e(?:xe|fi)") "The Windows loader is absent from BCD."
+            Assert-Condition ($text -notmatch "(?i)Libertix Installer|mint[.]iso|grldr") "A temporary Libertix boot entry remains in BCD."
+        }
         "recovery" {
             $recoveryPartitions = @(Get-Partition | Where-Object {
                 $_.Type -match "Recovery" -or
@@ -119,6 +167,31 @@ try {
             })) "Windows has no usable IPv4 gateway."
             Resolve-DnsName -Name "ekimia.fr" -Type A -ErrorAction Stop |
                 Format-Table Name, Type, IPAddress -AutoSize
+        }
+        "locale" {
+            $systemLocale = Get-WinSystemLocale
+            $languages = @(Get-WinUserLanguageList)
+            $timeZone = Get-TimeZone
+            Write-Output ("SYSTEM_LOCALE={0}" -f $systemLocale.Name)
+            Write-Output ("LANGUAGES={0}" -f (($languages.LanguageTag) -join ","))
+            Write-Output ("TIME_ZONE={0}" -f $timeZone.Id)
+            Assert-Condition (-not [string]::IsNullOrWhiteSpace($systemLocale.Name)) "Windows has no system locale."
+            Assert-Condition ($languages.Count -ge 1) "Windows has no user language."
+            Assert-Condition (-not [string]::IsNullOrWhiteSpace($timeZone.Id)) "Windows has no time zone."
+        }
+        "ssh_service" {
+            $service = Get-Service -Name "sshd" -ErrorAction Stop
+            $configuration = Get-CimInstance Win32_Service -Filter "Name='sshd'"
+            $service | Format-List Name, Status, StartType
+            Assert-Condition ($service.Status -eq "Running") "The Windows SSH service is not running."
+            Assert-Condition ($configuration.StartMode -eq "Auto") "The Windows SSH service is not configured for automatic startup."
+        }
+        "core_services" {
+            $names = @("EventLog", "PlugPlay", "RpcSs", "Schedule")
+            $services = @(Get-Service -Name $names -ErrorAction Stop)
+            $services | Format-Table Name, Status, StartType -AutoSize
+            $stopped = @($services | Where-Object { $_.Status -ne "Running" })
+            Assert-Condition ($stopped.Count -eq 0) "One or more core Windows services are stopped."
         }
         "hibernation" {
             $hibernateEnabled = (Test-Path -LiteralPath "C:\hiberfil.sys")
@@ -178,6 +251,16 @@ try {
             $shortcuts = @(Get-ChildItem -Path "C:\Users\*\Links\Linux_*_read-only.lnk" -File -ErrorAction SilentlyContinue)
             $shortcuts | Format-Table FullName, Length, LastWriteTime -AutoSize
             Assert-Condition ($shortcuts.Count -ge 1) "No Linux read-only Explorer shortcut exists."
+        }
+        "sharing_tasks" {
+            $mountTasks = @(Get-ScheduledTask -TaskName "LibertixLinuxReadOnly" -ErrorAction SilentlyContinue)
+            $pinTasks = @(Get-ScheduledTask -TaskName "LibertixLinuxReadOnlyPin_*" -ErrorAction SilentlyContinue)
+            $mountTasks | Format-Table TaskName, State -AutoSize
+            $pinTasks | Format-Table TaskName, State -AutoSize
+            Assert-Condition ($mountTasks.Count -eq 1) "The Linux read-only mount task is missing or duplicated."
+            Assert-Condition ($mountTasks[0].State -ne "Disabled") "The Linux read-only mount task is disabled."
+            Assert-Condition ($pinTasks.Count -ge 1) "No Linux Explorer shortcut task exists."
+            Assert-Condition (@($pinTasks | Where-Object { $_.State -eq "Disabled" }).Count -eq 0) "A Linux Explorer shortcut task is disabled."
         }
         "cross_os_hash" {
             Assert-Condition (-not [string]::IsNullOrWhiteSpace([string]$config.windows_sha256)) "The Linux-side Windows-file hash is unavailable."

@@ -18,10 +18,21 @@ class Point:
 
 
 @dataclass(frozen=True)
+class WizardLayout:
+    welcome_next: Point
+    distribution: Point
+    next_button: Point
+    sharing_next: Point
+    username: Point
+    password: Point
+    password_confirmation: Point
+    warning_acknowledgement: Point
+
+
+@dataclass(frozen=True)
 class WizardProfile:
     name: str
     vm_name: str
     vm_host: str
     vmid: int
     launch_only_label: str
-    disable_defender_for_automation: bool = False

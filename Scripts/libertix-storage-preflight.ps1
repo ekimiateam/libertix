@@ -113,6 +113,15 @@ try {
     if ([string]$disk.PartitionStyle -ne $expectedStyle) {
         throw "Partition style mismatch: expected $expectedStyle, detected $($disk.PartitionStyle)."
     }
+    if (
+        $ExpectedFirmware -eq "BIOS" -and
+        @(
+            Get-Partition -DiskNumber $partition.DiskNumber -ErrorAction Stop |
+                Where-Object { [int]$_.MbrType -in @(5, 15, 133) }
+        ).Count -ne 0
+    ) {
+        throw "An existing MBR extended partition makes this BIOS layout unsafe to modify."
+    }
 
     $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
     if (-not $bitLocker.Safe -and $DecryptBitLocker) {
@@ -149,6 +158,12 @@ try {
         throw "Exactly one Windows recovery partition is required; detected $(@($recoveryPartitions).Count)."
     }
     $recovery = $recoveryPartitions[0]
+    if (
+        [int64]$recovery.Offset -le [int64]$partition.Offset -or
+        [int64]$partition.Size -gt [int64]$recovery.Offset - [int64]$partition.Offset
+    ) {
+        throw "The Windows recovery partition must follow the Windows system partition."
+    }
 
     if ($ExpectedFirmware -eq "UEFI") {
         $bootPartitions = @(

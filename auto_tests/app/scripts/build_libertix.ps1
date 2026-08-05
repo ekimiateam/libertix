@@ -134,7 +134,7 @@ function Copy-WithRobocopy {
     $output = & robocopy.exe @args
     $code = $LASTEXITCODE
     if ($code -gt 7) {
-        throw ("Échec robocopy, code={0}; sortie={1}" -f $code, ($output -join " | "))
+        throw ("Robocopy failed, code={0}; output={1}" -f $code, ($output -join " | "))
     }
 }
 
@@ -154,7 +154,7 @@ function Get-FreeDriveLetter {
         }
     }
 
-    throw "Aucune lettre de lecteur libre pour monter le partage Samba"
+    throw "No free drive letter is available to mount the Samba share"
 }
 
 function Convert-SharePathToMappedPath {
@@ -223,7 +223,7 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
-        throw ("Source Libertix introuvable sur Samba: " + $sourcePath)
+        throw ("Libertix source was not found on Samba: " + $sourcePath)
     }
 
     New-Item -ItemType Directory -Path $srcLocal -Force | Out-Null
@@ -234,15 +234,15 @@ try {
 
     $solution = Join-Path $srcLocal "Libertix.sln"
     if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
-        throw "Libertix.sln absent dans la copie temporaire"
+        throw "Libertix.sln is missing from the temporary copy"
     }
 
     $msbuild = Find-VisualStudioMSBuild
     if (-not $msbuild) {
         throw (
-            "MSBuild Visual Studio introuvable. Cette VM a besoin de Visual Studio Build Tools " +
-            "avec le workload Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools pour compiler " +
-            "ce projet WPF .NET Framework 4.8 sans modifier le repo."
+            "Visual Studio MSBuild was not found. This VM requires Visual Studio Build Tools " +
+            "with the Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools workload to build " +
+            "this .NET Framework 4.8 WPF project without modifying the repository."
         )
     }
 
@@ -261,17 +261,17 @@ try {
             "/v:minimal",
             "/nologo"
         ) `
-        -FailureMessage "Compilation Libertix échouée" |
+        -FailureMessage "Libertix compilation failed" |
         Out-Null
 
     $testAssembly = Join-Path $srcLocal "Libertix.Tests\bin\Release\Libertix.Tests.dll"
     if (-not (Test-Path -LiteralPath $testAssembly -PathType Leaf)) {
-        throw "Libertix.Tests.dll absent après compilation Release"
+        throw "Libertix.Tests.dll is missing after the Release build"
     }
 
     $testRunner = Find-VisualStudioTestRunner
     if (-not $testRunner) {
-        throw "vstest.console.exe introuvable dans l'installation Visual Studio"
+        throw "vstest.console.exe was not found in the Visual Studio installation"
     }
 
     $adapterPath = Get-ChildItem `
@@ -284,7 +284,7 @@ try {
         Select-Object -First 1
 
     if (-not $adapterPath) {
-        throw "Adaptateur MSTest introuvable après restauration NuGet"
+        throw "MSTest adapter was not found after NuGet restore"
     }
 
     Invoke-Native `
@@ -295,7 +295,7 @@ try {
             "/Platform:x64",
             "/Logger:console;verbosity=minimal"
         ) `
-        -FailureMessage "Tests C# Libertix échoués" |
+        -FailureMessage "Libertix C# tests failed" |
         Out-Null
 
     $exe = Get-ChildItem -LiteralPath $srcLocal -Recurse -Filter "Libertix.exe" |
@@ -304,7 +304,7 @@ try {
         Select-Object -First 1
 
     if (-not $exe) {
-        throw "Libertix.exe absent après compilation Release"
+        throw "Libertix.exe is missing after the Release build"
     }
 
     $releaseStaging = "$releasePath.staging-$([Guid]::NewGuid().ToString('N'))"
@@ -315,7 +315,7 @@ try {
 
     $stagedExe = Join-Path $releaseStaging "Libertix.exe"
     if (-not (Test-Path -LiteralPath $stagedExe -PathType Leaf)) {
-        throw "Libertix.exe absent dans Libertix-release après copie"
+        throw "Libertix.exe is missing from Libertix-release after copying"
     }
     $finalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedExe).Hash.ToLowerInvariant()
 
@@ -337,7 +337,7 @@ try {
     $finalExe = Join-Path $releasePath "Libertix.exe"
     $publishedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $finalExe).Hash.ToLowerInvariant()
     if ($publishedHash -ne $finalHash) {
-        throw "Le hash de Libertix.exe a changé pendant la publication"
+        throw "The Libertix.exe hash changed during publication"
     }
     if ($releaseBackup) {
         Remove-Item -LiteralPath $releaseBackup -Recurse -Force

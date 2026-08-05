@@ -61,6 +61,6 @@ def cleanup_capture_workspaces(settings: Settings) -> None:
                 path.unlink()
         except OSError:
             logger.warning(
-                "Impossible de supprimer un ancien espace de captures",
+                "Failed to remove a stale capture workspace",
                 extra={"step": "capture.cleanup", "target": str(path)},
             )

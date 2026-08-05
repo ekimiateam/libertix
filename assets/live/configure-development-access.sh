@@ -3,13 +3,10 @@ set -Eeuo pipefail
 
 [ "${DEVELOPMENT_SSH_ENABLED:-false}" = "true" ] || exit 0
 
-[[ "$DEVELOPMENT_STATIC_IPV4_ADDRESS" =~ ^192\.168\.1\.([0-9]{1,3})$ ]]
-last_octet="${BASH_REMATCH[1]}"
-[ "$last_octet" -gt 1 ] && [ "$last_octet" -lt 255 ]
-[ "$DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH" = "24" ]
-[ "$DEVELOPMENT_STATIC_IPV4_GATEWAY" = "192.168.1.1" ]
-[ "$DEVELOPMENT_DNS_PRIMARY" = "8.8.8.8" ]
-[ "$DEVELOPMENT_DNS_SECONDARY" = "1.1.1.1" ]
+[ -n "$DEVELOPMENT_STATIC_IPV4_ADDRESS" ]
+[ -n "$DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH" ]
+[ -n "$DEVELOPMENT_STATIC_IPV4_GATEWAY" ]
+[ -n "$DEVELOPMENT_DNS_SERVERS" ]
 id "$USERNAME" >/dev/null 2>&1
 
 # A high-priority generic Ethernet profile lets the installed system retain
@@ -29,7 +26,7 @@ autoconnect-priority=1000
 [ipv4]
 method=manual
 address1=$DEVELOPMENT_STATIC_IPV4_ADDRESS/$DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH,$DEVELOPMENT_STATIC_IPV4_GATEWAY
-dns=$DEVELOPMENT_DNS_PRIMARY;$DEVELOPMENT_DNS_SECONDARY;
+dns=$DEVELOPMENT_DNS_SERVERS;
 dns-priority=-100
 never-default=false
 

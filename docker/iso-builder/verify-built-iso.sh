@@ -46,6 +46,12 @@ compare_rootfs_file usr/local/lib/libertix/libertix-install-runtime-common.sh \
     /workspace/assets/live/libertix-install-runtime-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.py \
     /workspace/assets/live/libertix-installation-plan.py
+compare_rootfs_file usr/local/lib/libertix/libertix_json_schema.py \
+    /workspace/assets/live/libertix_json_schema.py
+compare_rootfs_file usr/local/lib/libertix/schemas/installation-plan.schema.json \
+    /workspace/schemas/installation-plan.schema.json
+compare_rootfs_file usr/local/lib/libertix/schemas/installation-state.schema.json \
+    /workspace/schemas/installation-state.schema.json
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.sh \
     /workspace/assets/live/libertix-installation-plan.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-live-context.sh \
@@ -92,7 +98,7 @@ if unsquashfs -ll "$squashfs" "usr/local/lib/libertix/$unexpected_adapter" 2>/de
     echo "Built $mode rootfs contains unexpected adapter $unexpected_adapter" >&2
     exit 1
 fi
-compare_rootfs_file usr/local/lib/libertix/cleanup-bcd.py "$source_dir/live/cleanup-bcd.py"
+compare_rootfs_file usr/local/lib/libertix/cleanup-bcd.py /workspace/assets/live/cleanup-bcd.py
 compare_rootfs_file usr/local/lib/libertix/cleanup-bcd-main.py \
     /workspace/assets/live/cleanup-bcd-main.py
 compare_rootfs_file usr/local/lib/libertix/configure-target.sh \
@@ -100,16 +106,16 @@ compare_rootfs_file usr/local/lib/libertix/configure-target.sh \
 compare_rootfs_file usr/local/lib/libertix/configure-target-main.sh \
     /workspace/assets/live/configure-target-main.sh
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.sh \
-    "$source_dir/target/first-boot-resize.sh"
+    /workspace/assets/live/first-boot-resize.sh
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.service \
-    "$source_dir/target/first-boot-resize.service"
+    /workspace/assets/live/first-boot-resize.service
 compare_rootfs_file usr/local/lib/libertix/10_libertix /workspace/grub/10_libertix
 compare_rootfs_file usr/local/lib/libertix/render-libertix-menu.py \
     /workspace/grub/render-libertix-menu.py
 compare_rootfs_file etc/systemd/system/libertix-install.service \
     "$source_dir/systemd/libertix-install.service"
 compare_rootfs_file etc/systemd/system/getty@tty2.service.d/override.conf \
-    "$source_dir/systemd/getty-tty2-override.conf"
+    /workspace/assets/live/getty-tty2-override.conf
 compare_rootfs_file usr/share/plymouth/themes/libertix/libertix.plymouth \
     /workspace/assets/plymouth/libertix.plymouth
 compare_rootfs_file usr/share/plymouth/themes/libertix/libertix.script \
@@ -127,6 +133,7 @@ xorriso -osirrox on -indev "$image" \
     -extract /boot/grub/themes/Libertix "$workdir/theme" >/dev/null 2>&1
 python3 /workspace/iso-tools/render-boot-config.py \
     --arguments /workspace/Scripts/config/Libertix.BootArguments.json \
+    --grub-menu-template /workspace/Scripts/config/Libertix.LiveGrubMenu.cfg.in \
     --template "$source_dir/boot/grub.cfg" \
     --output "$workdir/expected-grub.cfg"
 cmp "$workdir/expected-grub.cfg" "$workdir/grub.cfg"
@@ -138,6 +145,14 @@ for binary in usr/bin/magick usr/bin/grub-mkfont usr/bin/xrandr usr/sbin/plymout
         exit 1
     }
 done
+
+ssh_first_boot="$workdir/ssh-first-boot.sh"
+unsquashfs -cat "$squashfs" \
+    usr/local/lib/libertix/libertix-development-ssh-first-boot.sh \
+    > "$ssh_first_boot"
+cmp /workspace/assets/live/libertix-development-ssh-first-boot.sh "$ssh_first_boot"
+grep -Fq 'Acquire::http::No-Cache=true' "$ssh_first_boot"
+grep -Fq 'max_attempts=6' "$ssh_first_boot"
 
 xorriso -osirrox on -indev "$image" \
     -extract /libertix-packages.txt "$workdir/packages.txt" >/dev/null 2>&1

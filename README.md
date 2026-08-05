@@ -8,29 +8,6 @@ configures a dual-boot menu for either BIOS/MBR or UEFI/GPT machines.
 > Libertix modifies disk partitions and boot configuration. Back up important data before using it.
 > The compatibility checks deliberately reject layouts that cannot be handled safely.
 
-## What Libertix does
-
-1. Checks the firmware, disk layout, storage controller, available memory, BitLocker state and
-   shrinkable space before changing the disk. On UEFI systems, this check temporarily writes and
-   restores a firmware boot variable to verify that the later one-shot boot can be trusted.
-2. Builds and persists one installation plan describing the selected disk, Windows and Recovery
-   partitions, requested Linux size, staging size and expected file hashes.
-3. Shrinks the Windows partition while preserving the detected Recovery partition.
-4. Creates a temporary FAT32 staging partition and configures a one-time boot into the matching
-   Libertix live image.
-5. The live environment verifies the plan again, expands the staging partition to the requested
-   Linux size, formats it as ext4 and installs Linux Mint.
-6. Installs the final GRUB bootloader and adds Linux Mint, Windows, shutdown and advanced options to
-   the boot menu.
-7. Records each completed stage so an intercepted cancellation or failure can run and verify the
-   appropriate rollback.
-
-The BIOS and UEFI paths produce separate ISO images, but share the installation plan, size rules,
-state tracking, target configuration and rollback logic. Only the firmware-specific boot operations
-remain separate.
-
-![Libertix BIOS and UEFI installation workflows](docs/assets/libertix-installation-workflows.svg)
-
 ## Architecture overview
 
 Libertix is split into three execution environments: the Windows application prepares the machine,
@@ -46,8 +23,8 @@ flowchart TB
         Preflight["Compatibility preflight<br/>firmware, storage, BitLocker and shrinkable space"]
         Plan["Typed installation plan<br/>disk identity, partitions, hashes, locale and features"]
         State["Persisted state machine<br/>completed stages, failure and rollback state"]
-        BiosPrep["BIOS adapter<br/>FAT32 staging, GRUB4DOS and temporary BCD entry"]
-        UefiPrep["UEFI adapter<br/>FAT32 staging, EFI files and BootNext or BootOrder fallback"]
+        BiosPrep["Windows BIOS preparation<br/>recovery guard, shrink, staging, media and GRUB4DOS"]
+        UefiPrep["Windows UEFI preparation<br/>recovery guard, shrink, staging, EFI media and firmware boot"]
     end
 
     Filepool["Filepool<br/>Mint ISO, Libertix ISO, boot files and verified hashes"]
@@ -121,10 +98,18 @@ flowchart TB
   calculate its own disk values.
 - `Installation/` contains the typed plan, size policy, validation and persisted state machine used
   to keep BIOS and UEFI behavior consistent.
-- `Pages/ApplyChanges.Bios.cs` and `Scripts/uefi/` are firmware adapters. They implement only the
-  temporary boot operations that genuinely differ between BIOS and UEFI.
-- `assets/live/` contains the shared live installer. The `iso/` and `iso-uefi/` directories add the
-  minimum boot files and settings needed for their firmware.
+- `Pages/ApplyChanges.Bios.cs` owns the complete Windows-side BIOS preparation: recovery guard,
+  hibernation policy, shrink validation, FAT32 staging, live and distribution media, GRUB4DOS and
+  the temporary BCD boot sequence.
+- `Pages/ApplyChanges.Uefi.cs`, `Scripts/modules/` and `Scripts/uefi/` own the Windows-side UEFI
+  preparation. The C# layer starts and observes the operation; the PowerShell modules implement
+  staging, EFI media, firmware variables, transaction state and Windows-side rollback.
+- `assets/live/` contains the shared live orchestrator and the small BIOS/UEFI adapters used after
+  reboot. `iso/live/install-mint.sh`, `iso/live/libertix-runner.sh` and their `iso-uefi/live/`
+  counterparts are the actual image entry points; each is a thin wrapper that selects the firmware
+  mode and executes the shared implementation.
+- `iso/` and `iso-uefi/` contain the remaining firmware-specific boot inputs used to construct the
+  two distinct live images.
 - The recovery path reads the persisted state and compensates only operations that were completed;
   it then verifies the disk and boot state before reporting a successful rollback.
 - `auto_tests/` builds and deploys the current working tree, controls the three authorized test VMs
@@ -173,14 +158,27 @@ fragments.
 Automated development installations also use an explicit static-address option:
 
 ```powershell
-.\Libertix.exe --filepool-base-url "http://127.0.0.1:8000/filepool" `
-  --dev-ssh-static-ip "192.168.1.240"
+.\Libertix.exe --filepool-base-url "http://192.0.2.10:8000/filepool" `
+  --dev-ssh-static-ip "192.0.2.50" `
+  --dev-ssh-prefix-length 24 `
+  --dev-ssh-gateway "192.0.2.1" `
+  --dev-ssh-dns "9.9.9.9" `
+  --dev-ssh-dns "1.1.1.1"
 ```
 
-`--dev-ssh-static-ip` is intentionally absent from production launches. It configures the installed
-system with the supplied `/24` address, gateway `192.168.1.1`, DNS servers `8.8.8.8` and `1.1.1.1`,
-then installs and enables password SSH for the Linux account created by Libertix. The option accepts
-only usable addresses in `192.168.1.0/24`.
+These development options are intentionally absent from production launches. They configure the
+installed system with the supplied IPv4 profile, then install and enable password SSH for the Linux
+account created by Libertix. The address, prefix, gateway and at least one DNS server form one
+mandatory profile; providing only part of it is rejected. Repeat `--dev-ssh-dns` to configure more
+than one resolver. Libertix rejects network, broadcast, loopback, multicast and link-local addresses,
+prefixes outside `/1` through `/30`, and gateways outside the selected subnet.
+
+On UEFI systems the compatibility preflight normally verifies firmware support by writing,
+reading and restoring a temporary NVRAM variable and `BootNext`. Diagnostic environments that
+cannot permit this write can explicitly use `--skip-nvram-write-probe`. The preflight records the
+probe as skipped and warns that `BootNext` support is unproven; it never reports the skipped probe
+as successful. This option reduces compatibility assurance and is not intended for normal
+installations.
 
 ## Build the Windows application
 
@@ -236,11 +234,12 @@ artifacts.
 ## Source layout
 
 - `Installation/` — typed installation plan, validation, size policy and persisted state machine
-- `Pages/ApplyChanges.*.cs` — Windows orchestration split by responsibility and firmware adapter
+- `Pages/ApplyChanges.*.cs` — Windows orchestration, including the complete BIOS preparation and
+  the C# control layer for the PowerShell UEFI workflow
 - `Scripts/modules/` — shared PowerShell plan, state, download, storage and rollback functions
 - `Scripts/uefi/` — operations that are specific to UEFI preparation
-- `assets/live/` — shared live installer runtime plus BIOS and UEFI adapters
-- `iso/` and `iso-uefi/` — firmware-specific ISO build inputs
+- `assets/live/` — shared live installer, runner, target configuration and firmware adapters
+- `iso/` and `iso-uefi/` — firmware-specific boot inputs and thin live entry wrappers
 - `schemas/` — versioned JSON contracts for the plan and execution state
 - `auto_tests/` — API, VM automation, visual checks and regression tests
 

@@ -60,18 +60,21 @@ function Restore-LibertixSystemDriveInitialSize {
         throw "$systemDrive disk identity changed; refusing rollback resize."
     }
     $initialSize = [int64]$State.OriginalCSize
-    if ($partition.Size -lt $initialSize) {
+    if ($partition.Size -ne $initialSize) {
         $supported = Wait-LibertixSystemDriveResizeCapacity `
             -DriveLetter $driveLetter `
             -DiskNumber ([int]$partition.DiskNumber) `
             -RequiredSize $initialSize
-        if ($supported.SizeMax -lt $initialSize) {
-            throw "$systemDrive cannot be restored to its initial size; SizeMax=$($supported.SizeMax)."
+        if ($supported.SizeMin -gt $initialSize -or $supported.SizeMax -lt $initialSize) {
+            throw (
+                "$systemDrive cannot be restored to its initial size; " +
+                "SizeMin=$($supported.SizeMin), SizeMax=$($supported.SizeMax)."
+            )
         }
         Resize-Partition -DriveLetter $driveLetter -Size $initialSize -ErrorAction Stop
     }
     $verified = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
-    if ($verified.Size -lt $initialSize) {
+    if ($verified.Size -ne $initialSize) {
         throw "$systemDrive rollback size verification failed."
     }
 }

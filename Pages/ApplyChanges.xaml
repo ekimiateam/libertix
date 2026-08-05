@@ -67,6 +67,7 @@
                              FontSize="12"
                              IsReadOnly="True"
                              VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.ScrollChanged="LogOutput_ScrollChanged"
                              TextWrapping="Wrap"/>
 
                     <Button x:Name="ExpandLogsButton"
@@ -146,6 +147,7 @@
                              IsReadOnly="True"
                              VerticalScrollBarVisibility="Auto"
                              HorizontalScrollBarVisibility="Auto"
+                             ScrollViewer.ScrollChanged="LogOutput_ScrollChanged"
                              TextWrapping="NoWrap"/>
 
                     <Button Grid.Row="2"

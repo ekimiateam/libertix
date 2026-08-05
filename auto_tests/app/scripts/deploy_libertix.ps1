@@ -27,7 +27,7 @@ function Copy-WithRobocopy {
 
     $code = $LASTEXITCODE
     if ($code -gt 7) {
-        throw ("Échec robocopy, code={0}; sortie={1}" -f $code, ($output -join " | "))
+        throw ("Robocopy failed, code={0}; output={1}" -f $code, ($output -join " | "))
     }
 }
 
@@ -47,7 +47,7 @@ function Get-FreeDriveLetter {
         }
     }
 
-    throw "Aucune lettre de lecteur libre pour monter le partage Samba"
+    throw "No free drive letter is available to mount the Samba share"
 }
 
 function Convert-SharePathToMappedPath {
@@ -99,7 +99,7 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
-        throw "Dossier release absent du partage Samba"
+        throw "The release directory is missing from the Samba share"
     }
 
     $documents = [Environment]::GetFolderPath("MyDocuments")
@@ -124,13 +124,13 @@ try {
 
     $localExe = Join-Path $target $config.relative_executable
     if (-not (Test-Path -LiteralPath $localExe -PathType Leaf)) {
-        throw "Libertix.exe absent après copie locale"
+        throw "Libertix.exe is missing after the local copy"
     }
     $sourceExe = Join-Path $sourcePath $config.relative_executable
     $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceExe).Hash.ToLowerInvariant()
     $localHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $localExe).Hash.ToLowerInvariant()
     if ($sourceHash -ne $localHash) {
-        throw "Le hash de Libertix.exe local ne correspond pas à la release Samba"
+        throw "The local Libertix.exe hash does not match the Samba release"
     }
 
     Write-Result -Name "LOCAL_EXE" -Value $localExe

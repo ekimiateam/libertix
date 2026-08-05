@@ -13,8 +13,29 @@ function Get-LibertixStagingGrubConfig {
     $bootArguments = Get-Content -LiteralPath $argumentsPath -Raw -ErrorAction Stop |
         ConvertFrom-Json -ErrorAction Stop
     $normalArguments = [string]$bootArguments.normal
-    if ([string]::IsNullOrWhiteSpace($normalArguments) -or $normalArguments -match "[`r`n]") {
-        throw "Shared normal live boot arguments must be a non-empty single line."
+    $verboseArguments = [string]$bootArguments.verbose
+    foreach ($entry in @(
+        @{ Name = "normal"; Value = $normalArguments },
+        @{ Name = "verbose"; Value = $verboseArguments }
+    )) {
+        if ([string]::IsNullOrWhiteSpace($entry.Value) -or $entry.Value -match "[`r`n]") {
+            throw "Shared $($entry.Name) live boot arguments must be a non-empty single line."
+        }
+    }
+
+    $menuTemplatePath = Join-Path $PSScriptRoot "..\config\Libertix.LiveGrubMenu.cfg.in"
+    if (-not (Test-Path -LiteralPath $menuTemplatePath -PathType Leaf)) {
+        throw "Shared live GRUB menu template is missing: $menuTemplatePath"
+    }
+    $menuEntries = Get-Content -LiteralPath $menuTemplatePath -Raw -ErrorAction Stop
+    $menuEntries = $menuEntries.Replace(
+        "@LIBERTIX_NORMAL_KERNEL_ARGUMENTS@",
+        $normalArguments)
+    $menuEntries = $menuEntries.Replace(
+        "@LIBERTIX_VERBOSE_KERNEL_ARGUMENTS@",
+        $verboseArguments)
+    if ($menuEntries -match "@LIBERTIX_[A-Z0-9_]+@") {
+        throw "Shared live GRUB menu template contains an unresolved token."
     }
 
     return @"
@@ -26,10 +47,7 @@ set hidden_timeout_quiet=true
 
 search --no-floppy --label $InstallerLabel --set=root
 
-menuentry "Install Linux Mint (Automatic)" {
-    linux /live/vmlinuz $normalArguments
-    initrd /live/initrd.img
-}
+$($menuEntries.TrimEnd())
 "@
 }
 
@@ -46,12 +64,25 @@ function Write-Log {
 function Write-LibertixProgress {
     param(
         [Parameter(Mandatory = $true)][ValidatePattern('^[a-z0-9-]+$')][string]$Stage,
-        [Parameter(Mandatory = $true)][ValidateRange(0, 100)][int]$Percent
+        [Parameter(Mandatory = $true)][ValidateRange(0, 100)][int]$Percent,
+        [ValidateRange(0, 100)][Nullable[int]]$DetailPercent = $null
     )
 
-    # Human-readable logs are localized and may change wording. This stable
-    # protocol lets the WPF UI react without parsing presentation text.
-    Write-Output "LIBERTIX_PROGRESS $Stage $Percent"
+    if (Test-LibertixTrackedExecution) {
+        $progressArguments = @{
+            Path = $ExecutionStatePath
+            Stage = $Stage
+            OverallPercent = $Percent
+        }
+        # PowerShell validates an explicitly bound null value before entering
+        # the target function. Omit this optional argument when a stage has no
+        # secondary percentage so the target's nullable default can apply.
+        if ($null -ne $DetailPercent) {
+            $progressArguments.DetailPercent = [int]$DetailPercent
+        }
+        $null = Set-LibertixExecutionProgress @progressArguments
+    }
+    Write-Log "Progress: stage=$Stage overall=$Percent detail=$DetailPercent"
 }
 
 function Test-LibertixTrackedExecution {

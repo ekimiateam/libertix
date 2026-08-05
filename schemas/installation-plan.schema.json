@@ -189,7 +189,10 @@
           "$ref": "#/$defs/positiveInteger"
         },
         "logicalSectorSizeBytes": {
-          "$ref": "#/$defs/positiveInteger"
+          "enum": [
+            512,
+            4096
+          ]
         },
         "partitionStyle": {
           "enum": [
@@ -350,26 +353,29 @@
           "const": true
         },
         "staticIpv4Address": {
-          "type": "string",
-          "pattern": "^192\\.168\\.1\\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$"
+          "$ref": "#/$defs/ipv4"
         },
         "staticIpv4PrefixLength": {
-          "const": 24
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
         },
         "staticIpv4Gateway": {
-          "const": "192.168.1.1"
+          "$ref": "#/$defs/ipv4"
         },
         "dnsServers": {
           "type": "array",
-          "prefixItems": [
-            { "const": "8.8.8.8" },
-            { "const": "1.1.1.1" }
-          ],
-          "items": false,
-          "minItems": 2,
-          "maxItems": 2
+          "items": {
+            "$ref": "#/$defs/ipv4"
+          },
+          "minItems": 1,
+          "uniqueItems": true
         }
       }
+    },
+    "ipv4": {
+      "type": "string",
+      "pattern": "^(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})(?:\\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}$"
     },
     "sha256": {
       "type": "string",

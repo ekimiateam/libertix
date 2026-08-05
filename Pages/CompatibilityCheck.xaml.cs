@@ -46,7 +46,11 @@ namespace Libertix.Pages
 
             try
             {
-                CompatibilityInfo info = await CompatibilityPreflightRunner.RunAsync(AppendDetail);
+                bool skipNvramWriteProbe =
+                    ((App)Application.Current).RuntimeOptions.SkipNvramWriteProbe;
+                CompatibilityInfo info = await CompatibilityPreflightRunner.RunAsync(
+                    AppendDetail,
+                    skipNvramWriteProbe);
                 _installationState.Compatibility = info;
                 CheckProgress.IsIndeterminate = false;
                 CheckProgress.Value = 100;

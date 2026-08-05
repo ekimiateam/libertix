@@ -18,6 +18,7 @@ namespace Libertix.Models
         public string BitLockerState { get; set; }
         public bool SecureBootEnabled { get; set; }
         public bool NvramProbePassed { get; set; }
+        public bool NvramProbeSkipped { get; set; }
         public string[] Warnings { get; set; } = new string[0];
     }
 }

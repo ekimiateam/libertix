@@ -42,6 +42,7 @@ render_boot_config() {
     python3 "$ROOT_DIR/iso-tools/render-boot-config.py" \
         --arguments "$ROOT_DIR/Scripts/config/Libertix.BootArguments.json" \
         --template "$template" \
+        --grub-menu-template "$ROOT_DIR/Scripts/config/Libertix.LiveGrubMenu.cfg.in" \
         --output "$output"
 }
 
@@ -88,7 +89,7 @@ configure_live_system() {
         "$WORKDIR/chroot/usr/share/plymouth/themes/libertix/libertix.script"
     install -m 0644 -D "$ROOT_DIR/assets/grub-theme/right_down_border.png" \
         "$WORKDIR/chroot/usr/share/plymouth/themes/libertix/logo.png"
-    install -m 0755 "$ROOT_DIR/iso-uefi/live/setup-live-rootfs.sh" "$WORKDIR/chroot/setup.sh"
+    install -m 0755 "$ROOT_DIR/assets/live/setup-live-rootfs.sh" "$WORKDIR/chroot/setup.sh"
     chroot "$WORKDIR/chroot" /usr/bin/env LIBERTIX_FIRMWARE_MODE="$FIRMWARE_MODE" /setup.sh
     rm -f "$WORKDIR/chroot/setup.sh"
 
@@ -114,6 +115,12 @@ install_live_installer_assets() {
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-install-runtime-common.sh"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-installation-plan.py" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-installation-plan.py"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix_json_schema.py" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix_json_schema.py"
+    install -m 0644 -D "$ROOT_DIR/schemas/installation-plan.schema.json" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/schemas/installation-plan.schema.json"
+    install -m 0644 -D "$ROOT_DIR/schemas/installation-state.schema.json" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/schemas/installation-state.schema.json"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-installation-plan.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-installation-plan.sh"
     install -m 0755 -D "$ROOT_DIR/assets/live/configure-development-access.sh" \
@@ -149,7 +156,7 @@ install_live_installer_assets() {
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-runner-stage-common.sh"
     install -m 0644 -D "$ROOT_DIR/assets/live/libertix-stages.tsv" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-stages.tsv"
-    install -m 0755 -D "$ISO_DIR/live/cleanup-bcd.py" \
+    install -m 0755 -D "$ROOT_DIR/assets/live/cleanup-bcd.py" \
         "$WORKDIR/chroot/usr/local/lib/libertix/cleanup-bcd.py"
     install -m 0755 -D "$ROOT_DIR/assets/live/cleanup-bcd-main.py" \
         "$WORKDIR/chroot/usr/local/lib/libertix/cleanup-bcd-main.py"
@@ -161,9 +168,9 @@ install_live_installer_assets() {
         "$WORKDIR/chroot/usr/local/lib/libertix/10_libertix"
     install -m 0755 -D "$ROOT_DIR/grub/render-libertix-menu.py" \
         "$WORKDIR/chroot/usr/local/lib/libertix/render-libertix-menu.py"
-    install -m 0755 -D "$ISO_DIR/target/first-boot-resize.sh" \
+    install -m 0755 -D "$ROOT_DIR/assets/live/first-boot-resize.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/first-boot-resize.sh"
-    install -m 0644 -D "$ISO_DIR/target/first-boot-resize.service" \
+    install -m 0644 -D "$ROOT_DIR/assets/live/first-boot-resize.service" \
         "$WORKDIR/chroot/usr/local/lib/libertix/first-boot-resize.service"
     install -m 0644 -D "$ISO_DIR/systemd/libertix-install.service" \
         "$WORKDIR/chroot/etc/systemd/system/libertix-install.service"
@@ -171,7 +178,7 @@ install_live_installer_assets() {
     ln -sf /etc/systemd/system/libertix-install.service \
         "$WORKDIR/chroot/etc/systemd/system/multi-user.target.wants/libertix-install.service"
 
-    install -m 0644 -D "$ISO_DIR/systemd/getty-tty2-override.conf" \
+    install -m 0644 -D "$ROOT_DIR/assets/live/getty-tty2-override.conf" \
         "$WORKDIR/chroot/etc/systemd/system/getty@tty2.service.d/override.conf"
     cp -a "$ROOT_DIR/assets/grub-theme" \
         "$WORKDIR/chroot/usr/local/lib/libertix/grub-theme-source"

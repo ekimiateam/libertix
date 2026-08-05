@@ -6,9 +6,9 @@
     "isoUrl": "libertix-installer-bios.iso",
     "isoInstaller": "mint.iso",
     "isoInstallerFileName": "mint.iso",
-    "isoSha256": "ddf2a3d797d1b657c5f852c226242d300f8d53649a9c8abbd71c567f6ebccbf9",
+    "isoSha256": "69f47c6765a727498119b7a54868b33a6c3cf5941cd7c5f18b9d0edc5a695a9e",
     "uefiIsoUrl": "libertix-installer-uefi.iso",
-    "uefiIsoSha256": "418abf9a5da61474cbf697b662572ecb0522a47d59a8eea8598789acd938f26e",
+    "uefiIsoSha256": "4037b3907809128839c8d43929eb58fbddfc686c8371ad2614a108fb6ae5c7ab",
     "isoInstallerSha256": "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4",
     "sizeInGB": 20
   }

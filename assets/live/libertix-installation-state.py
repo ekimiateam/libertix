@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -12,6 +13,8 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from libertix_json_schema import validate_json_schema
 
 HEX_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 STEP_PATTERN = re.compile(r"^(windows|live|target)\.[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -44,6 +47,11 @@ def require_step(step: str) -> str:
 
 
 def validate_state(value: Any) -> dict[str, Any]:
+    try:
+        validate_json_schema("installation-state.schema.json", value)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise StateTransitionError(f"execution state schema validation failed: {error}") from error
+
     if not isinstance(value, dict):
         raise StateTransitionError("execution state must be an object")
     if value.get("schemaVersion") != 1:
@@ -90,10 +98,7 @@ def validate_state(value: Any) -> dict[str, Any]:
     if failure is not None:
         if not isinstance(failure, dict):
             raise StateTransitionError("failure must be an object or null")
-        if (
-            not str(failure.get("code", "")).strip()
-            or not str(failure.get("message", "")).strip()
-        ):
+        if not str(failure.get("code", "")).strip() or not str(failure.get("message", "")).strip():
             raise StateTransitionError("failure code and message are required")
         if failure.get("component") not in FAILURE_COMPONENTS:
             raise StateTransitionError("failure component is invalid")
@@ -101,17 +106,12 @@ def validate_state(value: Any) -> dict[str, Any]:
         # Pending, running, and successful states cannot describe an inactive
         # failure.
         if status in {"pending", "running", "succeeded"}:
-            raise StateTransitionError(
-                "only failed and rollback states can carry failure details"
-            )
+            raise StateTransitionError("only failed and rollback states can carry failure details")
     if status == "rollback-running" and value["phase"] != "rollback":
         raise StateTransitionError("rollback-running requires the rollback phase")
     if status in TERMINAL_STATUSES and value["phase"] != "complete":
         raise StateTransitionError("terminal states require the complete phase")
-    if (
-        status in {"failed", "rollback-running"} | TERMINAL_STATUSES
-        and active_step is not None
-    ):
+    if status in {"failed", "rollback-running"} | TERMINAL_STATUSES and active_step is not None:
         raise StateTransitionError(
             "failed, rollback, and terminal states cannot have an active step"
         )
@@ -122,9 +122,7 @@ def read_state(path: Path) -> dict[str, Any]:
     try:
         return validate_state(json.loads(path.read_text(encoding="utf-8-sig")))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise StateTransitionError(
-            f"cannot read execution state {path}: {error}"
-        ) from error
+        raise StateTransitionError(f"cannot read execution state {path}: {error}") from error
 
 
 def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
@@ -144,10 +142,8 @@ def write_state_atomic(path: Path, state: dict[str, Any]) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary_path, path)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             temporary_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def touch(state: dict[str, Any]) -> None:
@@ -225,9 +221,7 @@ def complete_rollback(state: dict[str, Any]) -> None:
 
 def complete_installation(state: dict[str, Any]) -> None:
     if state["status"] != "running" or state["activeStep"] is not None:
-        raise StateTransitionError(
-            "installation can complete only between successful steps"
-        )
+        raise StateTransitionError("installation can complete only between successful steps")
     state.update(status="succeeded", phase="complete")
     touch(state)
 
@@ -267,9 +261,7 @@ def main() -> int:
     args = parse_args()
     if args.command == "init":
         if not HEX_ID_PATTERN.fullmatch(args.plan_id):
-            raise StateTransitionError(
-                "planId must contain 32 lowercase hexadecimal characters"
-            )
+            raise StateTransitionError("planId must contain 32 lowercase hexadecimal characters")
         state = {
             "schemaVersion": 1,
             "planId": args.plan_id,

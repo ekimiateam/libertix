@@ -395,7 +395,11 @@ try {
     }
     throw "Specify -Finalize, -Mount or -Pin."
 } catch {
-    try { Write-ShareLog "ERROR: $($_.Exception.Message)" } catch { }
+    try {
+        Write-ShareLog "ERROR: $($_.Exception.Message)"
+    } catch {
+        # Logging must never replace the original sharing error.
+    }
     Write-Error $_.Exception.Message
     exit 1
 }

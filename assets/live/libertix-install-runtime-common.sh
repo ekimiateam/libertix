@@ -249,7 +249,11 @@ assert_not_mounted_or_open() {
         debug_partition_users "$partition"
         return 1
     fi
-    if fuser -m "$partition" >/tmp/libertix-fuser.txt 2>&1; then
+    # `fuser -m` treats the argument as a file on its containing filesystem.
+    # For a node under /dev that can report unrelated processes using /dev and
+    # falsely claim the detached partition is busy. Query the block device
+    # itself after findmnt has already ruled out an active mount.
+    if fuser "$partition" >/tmp/libertix-fuser.txt 2>&1; then
         echo "ERROR: $partition still has users"
         cat /tmp/libertix-fuser.txt
         debug_partition_users "$partition"

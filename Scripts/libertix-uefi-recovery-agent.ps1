@@ -269,7 +269,11 @@ try {
     Write-AgentLog "BootNext returned to Windows without a live marker; waiting for the interactive fallback prompt."
     exit 0
 } catch {
-    try { Write-AgentLog "ERROR: $($_.Exception.Message)" } catch {}
+    try {
+        Write-AgentLog "ERROR: $($_.Exception.Message)"
+    } catch {
+        # Logging must never replace the original recovery error.
+    }
     Write-Error $_.Exception.Message
     exit 1
 }

@@ -60,7 +60,7 @@ class ValidationService:
             selected_vms = self.select_vms(vm_selectors)
             executable = self.prepare_server(result, source=source)
             windows_path = self.to_windows_share_path(executable)
-            result.ok("release.path", "Chemin de l'exécutable résolu", path=str(windows_path))
+            result.ok("release.path", "Executable path resolved", path=str(windows_path))
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
                 futures = {
                     executor.submit(self._validate_vm_isolated, vm, windows_path, on_step): vm
@@ -81,14 +81,14 @@ class ValidationService:
                     )
             count = len(selected_vms)
             plural = "s" if count > 1 else ""
-            return result.success(f"Validation terminée avec succès sur {count} VM{plural}")
+            return result.success(f"Validation completed successfully on {count} VM{plural}")
         except WorkflowError as exc:
             return result.failure(exc)
         except Exception as exc:
-            logger.exception("Erreur interne inattendue")
+            logger.exception("Unexpected internal error")
             return result.failure(
                 WorkflowError(
-                    "internal", "Erreur interne inattendue", details={"type": type(exc).__name__}
+                    "internal", "Unexpected internal error", details={"type": type(exc).__name__}
                 )
             )
         finally:
@@ -130,7 +130,7 @@ class ValidationService:
         if unknown:
             raise WorkflowError(
                 "validation.select_vms",
-                "Sélecteur VM inconnu",
+                "Unknown VM selector",
                 details={
                     "unknown": unknown,
                     "accepted_examples": [
@@ -180,7 +180,7 @@ class ValidationService:
         if not script_path.is_file():
             raise WorkflowError(
                 step,
-                "Script PowerShell introuvable",
+                "PowerShell script not found",
                 details={"path": str(script_path), "script": script_name},
             )
 
@@ -239,8 +239,8 @@ class ValidationService:
             ssh.run(
                 "set -eu; "
                 f"p={shlex.quote(s.smb_root)}; "
-                'if [ ! -e "$p" ]; then echo "Chemin absent: $p" >&2; exit 10; fi; '
-                'if [ ! -d "$p" ]; then echo "Pas un dossier: $p" >&2; exit 11; fi; '
+                'if [ ! -e "$p" ]; then echo "Path is missing: $p" >&2; exit 10; fi; '
+                'if [ ! -d "$p" ]; then echo "Not a directory: $p" >&2; exit 11; fi; '
                 'if [ ! -w "$p" ]; then '
                 'echo "Dossier non inscriptible: $p" >&2; exit 12; fi',
                 step="server.check_smb",
@@ -248,7 +248,7 @@ class ValidationService:
             )
             result.ok(
                 "server.check_smb",
-                "Le dossier /root/smb existe et est accessible",
+                "The /root/smb directory exists and is accessible",
                 target=s.main_ssh_host,
             )
 
@@ -266,7 +266,7 @@ class ValidationService:
                 )
                 result.ok(
                     "server.ensure_tools",
-                    "Prérequis git disponible",
+                    "Git prerequisite available",
                     target=s.main_ssh_host,
                     source="remote",
                 )
@@ -297,12 +297,12 @@ class ValidationService:
                 if not re.fullmatch(r"[0-9a-f]{40}", revision):
                     raise WorkflowError(
                         "server.source_revision",
-                        "Révision Git source invalide",
+                        "Invalid source Git revision",
                         details={"revision": revision},
                     )
                 result.ok(
                     "server.clone",
-                    "Clone Libertix présent, origine et branche vérifiées",
+                    "Libertix clone present with verified origin and branch",
                     target=s.main_ssh_host,
                     branch=s.repository_branch,
                     revision=revision,
@@ -323,7 +323,7 @@ class ValidationService:
         if not (root / "Libertix.sln").is_file() or not (root / "Libertix.csproj").is_file():
             raise WorkflowError(
                 "server.copy_local_source",
-                "Le working tree local ne contient pas les fichiers projet Libertix attendus",
+                "The local working tree does not contain the expected Libertix project files",
                 details={"path": str(root)},
             )
 
@@ -361,7 +361,7 @@ class ValidationService:
             )
             result.ok(
                 "server.copy_local_source",
-                "Working tree local copié vers Samba",
+                "Local working tree copied to Samba",
                 target=s.main_ssh_host,
                 source="local",
                 local_path=str(root),
@@ -417,18 +417,18 @@ class ValidationService:
         if not final_exe:
             raise WorkflowError(
                 "build_vm.compile",
-                "La VM de compilation n'a pas confirmé le chemin final",
+                "The build VM did not confirm the final path",
                 details={"target": s.build_vm_host},
             )
         result.ok(
             "build_vm.compile",
-            "Libertix compilé sur la VM Windows et copié vers Samba",
+            "Libertix compiled on the Windows VM and copied to Samba",
             target=s.build_vm_host,
             msbuild=values.get("MSBUILD"),
             vstest=values.get("VSTEST"),
             executable_sha256=values.get("FINAL_EXE_SHA256"),
             temp_build_dir=values.get("TEMP_BUILD_DIR"),
-            cleanup="dossier temporaire, script et config supprimés en fin de commande",
+            cleanup="temporary directory, script, and config removed after the command",
         )
         return PurePosixPath(f"{s.smb_root}/{s.release_dir_name}/Libertix.exe")
 
@@ -437,7 +437,7 @@ class ValidationService:
         try:
             relative = path.relative_to(root)
         except ValueError as exc:
-            raise WorkflowError("release.path", "Exécutable situé hors de /root/smb") from exc
+            raise WorkflowError("release.path", "Executable is outside /root/smb") from exc
         return PureWindowsPath("Z:/") / PureWindowsPath(*relative.parts)
 
     def _validate_vm(
@@ -446,7 +446,7 @@ class ValidationService:
         local_executable = self.deploy_to_documents(vm, executable)
         result.ok(
             "vm.deploy",
-            "Release copiée depuis Samba vers le dossier Documents",
+            "Release copied from Samba to the Documents directory",
             target=vm.host,
             vm=vm.name,
             executable=str(local_executable),
@@ -454,16 +454,16 @@ class ValidationService:
         launch = self._launch_interactive(vm, local_executable, result)
         result.ok(
             "vm.launch",
-            "Libertix lancé dans la session graphique et processus confirmé",
+            "Libertix launched in the graphical session and process confirmed",
             target=vm.host,
             vm=vm.name,
             **launch,
         )
-        logger.info("Attente avant capture", extra={"step": "vm.wait", "target": vm.host})
+        logger.info("Waiting before capture", extra={"step": "vm.wait", "target": vm.host})
         time.sleep(self.settings.launch_wait_seconds)
         result.ok(
             "vm.wait",
-            "Attente post-lancement terminée",
+            "Post-launch wait completed",
             target=vm.host,
             seconds=self.settings.launch_wait_seconds,
         )
@@ -471,14 +471,14 @@ class ValidationService:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         capture = self._capture_dir / f"{vm.name}-{stamp}.png"
         self.vnc.capture(vm.vnc, capture)
-        result.ok("vnc.capture", "Capture VNC enregistrée", target=vm.vnc, path=str(capture))
+        result.ok("vnc.capture", "VNC capture saved", target=vm.vnc, path=str(capture))
 
         verdict = self.vision_llm.analyze(capture, vm.name, vm.os)
         context = verdict.model_dump()
         if not verdict.valid:
             raise WorkflowError(
                 "llm.verdict",
-                "La validation visuelle signale un problème",
+                "Visual validation reported a problem",
                 details={"vm": vm.name, **context},
             )
         result.ok("llm.verdict", "Validation visuelle positive", target=vm.name, **context)
@@ -492,14 +492,14 @@ class ValidationService:
         result = ResultBuilder("validation", on_step=on_step)
         try:
             self._validate_vm(vm, executable, result)
-            return result.success(f"Validation terminée avec succès sur {vm.name}")
+            return result.success(f"Validation completed successfully on {vm.name}")
         except WorkflowError as exc:
             return result.failure(exc)
         except Exception as exc:
             return result.failure(
                 WorkflowError(
                     "vm.validation.internal_error",
-                    f"Erreur inattendue pendant la validation de {vm.name}",
+                    f"Unexpected error while validating {vm.name}",
                     details={
                         "vm": vm.name,
                         "host": vm.host,
@@ -516,7 +516,7 @@ class ValidationService:
         except ValueError as exc:
             raise WorkflowError(
                 "vm.deploy",
-                "L'exécutable n'est pas situé dans le dossier de release Samba",
+                "The executable is not inside the Samba release directory",
                 details={"executable": str(executable)},
             ) from exc
 
@@ -548,7 +548,7 @@ class ValidationService:
         ):
             raise WorkflowError(
                 "vm.deploy",
-                "Le chemin local de Libertix n'a pas été confirmé",
+                "The local Libertix path was not confirmed",
                 details={"vm": vm.name, "host": vm.host},
             )
         return PureWindowsPath(values["LOCAL_EXE"])
@@ -569,6 +569,13 @@ class ValidationService:
                     "task_name": task_name,
                     "filepool_base_url": self.settings.filepool_base_url,
                     "development_static_ipv4": vm.host,
+                    "development_static_ipv4_prefix_length": (
+                        self.settings.development_static_ipv4_prefix_length
+                    ),
+                    "development_static_ipv4_gateway": (
+                        self.settings.development_static_ipv4_gateway
+                    ),
+                    "development_dns_servers": list(self.settings.development_dns_servers),
                 },
                 step="vm.launch_elevated",
                 timeout=90,
@@ -579,13 +586,13 @@ class ValidationService:
         if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
             raise WorkflowError(
                 "vm.launch_elevated",
-                "Processus Libertix administrateur non confirmé",
+                "Elevated Libertix process was not confirmed",
                 details={"vm": vm.name, "host": vm.host, "stdout": response.stdout[-4000:]},
             )
         if PureWindowsPath(values.get("EXECUTABLE", "")) != executable:
             raise WorkflowError(
                 "vm.launch_elevated",
-                "Le processus lancé ne correspond pas à l'exécutable déployé",
+                "The launched process does not match the deployed executable",
                 details={"vm": vm.name, "expected": str(executable)},
             )
         return {

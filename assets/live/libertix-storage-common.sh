@@ -106,7 +106,7 @@ mbr_empty_container_from_machine_output() {
                 sub(/s$/, "", end)
                 start += 0
                 end += 0
-                if (start <= installer && installer <= end && end + 1 == recovery) {
+                if (start <= installer && installer <= end && end < recovery) {
                     candidate = number ":" start ":" end
                     candidate_count++
                 }
@@ -153,7 +153,7 @@ mbr_owned_logical_layout_from_machine_output() {
             for (number in primary_start) {
                 if (primary_start[number] < logical_start &&
                     primary_end[number] >= logical_end &&
-                    primary_end[number] + 1 == recovery) {
+                    primary_end[number] < recovery) {
                     container_number = number
                     container_start = primary_start[number]
                     container_end = primary_end[number]
@@ -181,11 +181,31 @@ partitions_of_disk() {
 partition_start_bytes() {
     local disk="$1"
     local partition="$2"
-    local start_sector logical_sector_size
+    local start_sector
 
+    [ -b "$disk" ] || return 1
     start_sector=$(cat "/sys/class/block/$(basename "$partition")/start" 2>/dev/null) || return 1
-    logical_sector_size=$(blockdev --getss "$disk" 2>/dev/null) || return 1
-    echo "$((start_sector * logical_sector_size))"
+    kernel_sector_to_bytes "$start_sector"
+}
+
+kernel_sector_to_bytes() {
+    local start_sector="$1"
+
+    [ "$start_sector" -ge 0 ] 2>/dev/null || return 2
+    # Linux exports partition start offsets in fixed 512-byte sectors even on
+    # 4Kn devices. Multiplying by the device logical sector size would move
+    # every recorded offset by a factor of eight on those disks.
+    echo "$((start_sector * 512))"
+}
+
+bytes_to_logical_sectors() {
+    local bytes="$1"
+    local logical_sector_size="$2"
+
+    [ "$bytes" -ge 0 ] 2>/dev/null || return 2
+    case "$logical_sector_size" in 512|4096) ;; *) return 2 ;; esac
+    [ "$((bytes % logical_sector_size))" -eq 0 ] || return 1
+    echo "$((bytes / logical_sector_size))"
 }
 
 partition_at_offset() {

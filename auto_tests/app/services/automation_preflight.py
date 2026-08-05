@@ -34,7 +34,7 @@ class AutomationPreflight:
             proxmox.assert_snapshot(node, vmid, RESET_SNAPSHOT)
             result.ok(
                 "automation.rollback_preflight",
-                "VM et snapshot vérifiés avant automation",
+                "VM and snapshot verified before automation",
                 target=str(vmid),
                 node=node,
                 snapshot=RESET_SNAPSHOT,
@@ -42,7 +42,7 @@ class AutomationPreflight:
             proxmox.rollback(node, vmid, RESET_SNAPSHOT)
             result.ok(
                 "automation.reset_vm_done",
-                f"Reset VM{vmid} terminé: snapshot clean2 restauré et tâche Proxmox validée",
+                f"VM{vmid} reset completed: clean2 restored and Proxmox task verified",
                 target=str(vmid),
                 node=node,
                 snapshot=RESET_SNAPSHOT,
@@ -62,7 +62,7 @@ class AutomationPreflight:
                 locations[profile.vmid] = node
                 result.ok(
                     "automation.rollback_preflight",
-                    "VM et snapshot vérifiés avant automation",
+                    "VM and snapshot verified before automation",
                     target=str(profile.vmid),
                     node=node,
                     snapshot=RESET_SNAPSHOT,
@@ -81,7 +81,7 @@ class AutomationPreflight:
                 vmid, node = future.result()
                 result.ok(
                     "automation.reset_vm_done",
-                    f"Reset VM{vmid} terminé: snapshot clean2 restauré et tâche Proxmox validée",
+                    f"VM{vmid} reset completed: clean2 restored and Proxmox task verified",
                     target=str(vmid),
                     node=node,
                     snapshot=RESET_SNAPSHOT,
@@ -102,7 +102,7 @@ class AutomationPreflight:
         if not isinstance(data, dict):
             raise WorkflowError(
                 "automation.vm_status",
-                "Réponse Proxmox invalide pendant la vérification d'état VM",
+                "Invalid Proxmox response while checking VM status",
                 details={"vmid": vmid, "node": node},
             )
         qmpstatus = str(data.get("qmpstatus") or "")
@@ -110,12 +110,12 @@ class AutomationPreflight:
         if qmpstatus == "io-error":
             raise WorkflowError(
                 "automation.vm_io_error",
-                "Automation refusée: la VM est en io-error Proxmox avant rollback",
+                "Automation refused: the VM is in Proxmox io-error before rollback",
                 details={"vmid": vmid, "node": node, "status": status, "qmpstatus": qmpstatus},
             )
         result.ok(
             "automation.vm_status",
-            "État VM Proxmox vérifié avant rollback",
+            "Proxmox VM status verified before rollback",
             target=str(vmid),
             node=node,
             status=status,
@@ -138,7 +138,7 @@ class AutomationPreflight:
             if not isinstance(data, dict):
                 raise WorkflowError(
                     "automation.storage",
-                    "Réponse Proxmox invalide pendant la vérification stockage",
+                    "Invalid Proxmox response while checking storage",
                     details={"node": node, "storage": "local-lvm"},
                 )
             total = int(data.get("total") or 0)
@@ -152,7 +152,7 @@ class AutomationPreflight:
             if available < minimum_free:
                 raise WorkflowError(
                     "automation.storage_headroom",
-                    "Automation refusée: marge local-lvm insuffisante pour éviter un io-error",
+                    "Automation refused: insufficient local-lvm headroom to avoid io-error",
                     details={
                         "node": node,
                         "storage": "local-lvm",
@@ -163,7 +163,7 @@ class AutomationPreflight:
                 )
             result.ok(
                 "automation.storage_headroom",
-                "Marge local-lvm vérifiée avant rollback",
+                "local-lvm headroom verified before rollback",
                 target=node,
                 storage="local-lvm",
                 available_gib=round(available / GIB, 2),

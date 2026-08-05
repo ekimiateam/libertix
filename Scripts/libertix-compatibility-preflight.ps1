@@ -6,7 +6,8 @@ param(
     [int]$MinimumMemoryMB = 2048,
     [int]$LowMemoryThresholdMB = 4096,
     [ValidateSet("en", "fr", "es", "ja")]
-    [string]$LanguageCode = "en"
+    [string]$LanguageCode = "en",
+    [switch]$SkipNvramWriteProbe
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,21 +71,25 @@ $warningMessages = @{
         LOW_MEMORY = "Limited memory ({0} MB): Libertix will use low-memory mode without copying the entire live system to RAM."
         BITLOCKER = "BitLocker is active; Libertix will decrypt it only after your final confirmation."
         MULTIPLE_DISKS = "{0} internal disks are visible; the live system will require an exact match with the Windows disk."
+        NVRAM_PROBE_SKIPPED = "The firmware NVRAM write test was explicitly skipped; UEFI BootNext support has not been proven."
     }
     fr = @{
         LOW_MEMORY = "Mémoire limitée ({0} Mio): Libertix utilisera le mode faible mémoire sans copie intégrale du live en RAM."
         BITLOCKER = "BitLocker est actif; Libertix le déchiffrera uniquement après votre confirmation finale."
         MULTIPLE_DISKS = "{0} disques internes sont visibles; le live exigera une correspondance exacte avec le disque Windows."
+        NVRAM_PROBE_SKIPPED = "Le test d'écriture NVRAM du firmware a été explicitement ignoré; la prise en charge UEFI BootNext n'est pas prouvée."
     }
     es = @{
         LOW_MEMORY = "Memoria limitada ({0} MB): Libertix usará el modo de poca memoria sin copiar todo el sistema live en la RAM."
         BITLOCKER = "BitLocker está activo; Libertix solo lo descifrará después de su confirmación final."
         MULTIPLE_DISKS = "Hay {0} discos internos visibles; el sistema live exigirá una coincidencia exacta con el disco de Windows."
+        NVRAM_PROBE_SKIPPED = "La prueba de escritura NVRAM del firmware se omitió explícitamente; la compatibilidad con UEFI BootNext no está demostrada."
     }
     ja = @{
         LOW_MEMORY = "メモリが限られています ({0} MB)。Libertix はライブ システム全体を RAM にコピーせず、低メモリ モードを使用します。"
         BITLOCKER = "BitLocker が有効です。Libertix は最終確認後にのみ暗号化を解除します。"
         MULTIPLE_DISKS = "{0} 台の内蔵ディスクが検出されました。ライブ システムでは Windows ディスクとの完全一致が必要です。"
+        NVRAM_PROBE_SKIPPED = "ファームウェア NVRAM 書き込みテストは明示的に省略されました。UEFI BootNext 対応は確認されていません。"
     }
 }
 
@@ -112,13 +117,16 @@ $errorMessages = @{
         COMPAT_E_DISK_NOT_WRITABLE = "The system disk is offline or read-only."
         COMPAT_E_STORAGE_BUS_UNSUPPORTED = "The system disk uses the '{0}' bus, which the Libertix live system does not support reliably."
         COMPAT_E_STORAGE_BUS_UNKNOWN = "The '{0}' storage bus is not in the list tested by Libertix."
+        COMPAT_E_STORAGE_CONTROLLER_QUERY = "Windows could not inspect storage controller class '{0}' within {1} seconds: {2}"
         COMPAT_E_INTEL_RST_RAID = "Intel RST/VMD/Optane/VROC is active. The Linux live system may not see the disk; switch the controller to AHCI using your vendor's procedure without breaking Windows."
         COMPAT_E_AMD_RAID = "An AMD RAID controller is active and is not supported by this Libertix live system."
         COMPAT_E_HARDWARE_RAID = "A hardware RAID controller was detected; Libertix cannot guarantee its Linux geometry."
         COMPAT_E_SECTOR_SIZE_UNSUPPORTED = "Sector sizes of {0}/{1} bytes are not supported."
         COMPAT_E_PARTITION_STYLE = "{0} firmware requires a {1} disk; this disk is {2}."
         COMPAT_E_MBR_PRIMARY_LIMIT = "The MBR disk already has four partitions; no primary Linux partition can be added."
+        COMPAT_E_MBR_EXTENDED_LAYOUT = "The BIOS disk already contains an extended MBR partition; this layout cannot be changed safely."
         COMPAT_E_RECOVERY_LAYOUT = "Exactly one Windows recovery partition is required; {0} were detected."
+        COMPAT_E_RECOVERY_POSITION = "The Windows recovery partition must follow the Windows system partition."
         COMPAT_E_ESP_LAYOUT = "Exactly one EFI system partition is required; {0} were detected."
         COMPAT_E_NTFS_HEALTH = "The Windows volume must be a healthy NTFS volume; detected state: {0}/{1}."
         COMPAT_E_NTFS_SCAN = "The NTFS scan did not confirm a healthy file system: {0}"
@@ -147,13 +155,16 @@ $errorMessages = @{
         COMPAT_E_DISK_NOT_WRITABLE = "Le disque système est hors ligne ou en lecture seule."
         COMPAT_E_STORAGE_BUS_UNSUPPORTED = "Le disque système utilise le bus '{0}', qui n'est pas pris en charge de manière fiable par le live Libertix."
         COMPAT_E_STORAGE_BUS_UNKNOWN = "Le bus de stockage '{0}' n'est pas dans la liste testée par Libertix."
+        COMPAT_E_STORAGE_CONTROLLER_QUERY = "Windows n'a pas pu examiner la classe de contrôleur de stockage '{0}' dans un délai de {1} secondes : {2}"
         COMPAT_E_INTEL_RST_RAID = "Intel RST/VMD/Optane/VROC est actif. Le live Linux peut ne pas voir le disque; passez le contrôleur en AHCI selon la procédure du constructeur sans casser Windows."
         COMPAT_E_AMD_RAID = "Un contrôleur AMD RAID est actif et n'est pas pris en charge par ce live Libertix."
         COMPAT_E_HARDWARE_RAID = "Un contrôleur RAID matériel a été détecté; sa géométrie Linux n'est pas garantie par Libertix."
         COMPAT_E_SECTOR_SIZE_UNSUPPORTED = "Les secteurs {0}/{1} octets ne sont pas pris en charge."
         COMPAT_E_PARTITION_STYLE = "Le firmware {0} nécessite un disque {1}; le disque est {2}."
         COMPAT_E_MBR_PRIMARY_LIMIT = "Le disque MBR possède déjà quatre partitions; aucune partition primaire Linux ne peut être ajoutée."
+        COMPAT_E_MBR_EXTENDED_LAYOUT = "Le disque BIOS contient déjà une partition MBR étendue; cette disposition ne peut pas être modifiée en toute sécurité."
         COMPAT_E_RECOVERY_LAYOUT = "Une partition de récupération Windows unique est requise; {0} ont été détectées."
+        COMPAT_E_RECOVERY_POSITION = "La partition de récupération Windows doit se trouver après la partition système Windows."
         COMPAT_E_ESP_LAYOUT = "Une partition système EFI unique est requise; {0} ont été détectées."
         COMPAT_E_NTFS_HEALTH = "Le volume Windows doit être un NTFS sain; état détecté : {0}/{1}."
         COMPAT_E_NTFS_SCAN = "L'analyse NTFS n'a pas confirmé un système de fichiers sain : {0}"
@@ -182,13 +193,16 @@ $errorMessages = @{
         COMPAT_E_DISK_NOT_WRITABLE = "El disco del sistema está sin conexión o es de solo lectura."
         COMPAT_E_STORAGE_BUS_UNSUPPORTED = "El disco del sistema usa el bus '{0}', que el sistema live de Libertix no admite de forma fiable."
         COMPAT_E_STORAGE_BUS_UNKNOWN = "El bus de almacenamiento '{0}' no está en la lista probada por Libertix."
+        COMPAT_E_STORAGE_CONTROLLER_QUERY = "Windows no pudo examinar la clase de controladora de almacenamiento '{0}' en {1} segundos: {2}"
         COMPAT_E_INTEL_RST_RAID = "Intel RST/VMD/Optane/VROC está activo. Es posible que el live de Linux no vea el disco; cambie la controladora a AHCI siguiendo el procedimiento del fabricante sin dañar Windows."
         COMPAT_E_AMD_RAID = "Hay una controladora AMD RAID activa que este sistema live de Libertix no admite."
         COMPAT_E_HARDWARE_RAID = "Se detectó una controladora RAID por hardware; Libertix no puede garantizar su geometría en Linux."
         COMPAT_E_SECTOR_SIZE_UNSUPPORTED = "Los sectores de {0}/{1} bytes no son compatibles."
         COMPAT_E_PARTITION_STYLE = "El firmware {0} requiere un disco {1}; el disco es {2}."
         COMPAT_E_MBR_PRIMARY_LIMIT = "El disco MBR ya tiene cuatro particiones; no se puede añadir ninguna partición primaria de Linux."
+        COMPAT_E_MBR_EXTENDED_LAYOUT = "El disco BIOS ya contiene una partición MBR extendida; esta disposición no se puede modificar de forma segura."
         COMPAT_E_RECOVERY_LAYOUT = "Se requiere exactamente una partición de recuperación de Windows; se detectaron {0}."
+        COMPAT_E_RECOVERY_POSITION = "La partición de recuperación de Windows debe estar después de la partición del sistema Windows."
         COMPAT_E_ESP_LAYOUT = "Se requiere exactamente una partición de sistema EFI; se detectaron {0}."
         COMPAT_E_NTFS_HEALTH = "El volumen de Windows debe ser un NTFS en buen estado; estado detectado: {0}/{1}."
         COMPAT_E_NTFS_SCAN = "El análisis NTFS no confirmó un sistema de archivos en buen estado: {0}"
@@ -217,13 +231,16 @@ $errorMessages = @{
         COMPAT_E_DISK_NOT_WRITABLE = "システム ディスクがオフラインまたは読み取り専用です。"
         COMPAT_E_STORAGE_BUS_UNSUPPORTED = "システム ディスクは '{0}' バスを使用しており、Libertix ライブ システムでは確実にサポートできません。"
         COMPAT_E_STORAGE_BUS_UNKNOWN = "ストレージ バス '{0}' は Libertix がテストした一覧に含まれていません。"
+        COMPAT_E_STORAGE_CONTROLLER_QUERY = "Windows は {1} 秒以内にストレージ コントローラー クラス '{0}' を確認できませんでした: {2}"
         COMPAT_E_INTEL_RST_RAID = "Intel RST/VMD/Optane/VROC が有効です。Linux ライブ環境がディスクを認識できない可能性があります。Windows を壊さないよう、メーカーの手順に従ってコントローラーを AHCI に切り替えてください。"
         COMPAT_E_AMD_RAID = "AMD RAID コントローラーが有効ですが、この Libertix ライブ システムではサポートされていません。"
         COMPAT_E_HARDWARE_RAID = "ハードウェア RAID コントローラーが検出されました。Libertix は Linux 側のジオメトリを保証できません。"
         COMPAT_E_SECTOR_SIZE_UNSUPPORTED = "{0}/{1} バイトのセクターはサポートされていません。"
         COMPAT_E_PARTITION_STYLE = "{0} ファームウェアには {1} ディスクが必要ですが、このディスクは {2} です。"
         COMPAT_E_MBR_PRIMARY_LIMIT = "MBR ディスクには既に 4 つのパーティションがあり、Linux 用の基本パーティションを追加できません。"
+        COMPAT_E_MBR_EXTENDED_LAYOUT = "BIOS ディスクには既存の MBR 拡張パーティションがあるため、この構成を安全に変更できません。"
         COMPAT_E_RECOVERY_LAYOUT = "Windows 回復パーティションはちょうど 1 つ必要ですが、{0} 個検出されました。"
+        COMPAT_E_RECOVERY_POSITION = "Windows 回復パーティションは Windows システム パーティションより後に配置する必要があります。"
         COMPAT_E_ESP_LAYOUT = "EFI システム パーティションはちょうど 1 つ必要ですが、{0} 個検出されました。"
         COMPAT_E_NTFS_HEALTH = "Windows ボリュームは正常な NTFS である必要があります。検出された状態: {0}/{1}。"
         COMPAT_E_NTFS_SCAN = "NTFS スキャンで正常なファイル システムを確認できませんでした: {0}"
@@ -303,6 +320,27 @@ function Get-BitLockerState {
         Safe = $safe
         State = if ($safe) { "FullyDecrypted" } else { "EncryptedOrProtected" }
     }
+}
+
+function Get-StorageControllerNames {
+    $operationTimeoutSeconds = 15
+    $names = @()
+    foreach ($className in @("Win32_IDEController", "Win32_SCSIController")) {
+        try {
+            $names += @(
+                Get-CimInstance `
+                    -ClassName $className `
+                    -OperationTimeoutSec $operationTimeoutSeconds `
+                    -ErrorAction Stop |
+                    ForEach-Object { $_.Name }
+            )
+        } catch {
+            Stop-Compatibility `
+                "COMPAT_E_STORAGE_CONTROLLER_QUERY" `
+                @($className, $operationTimeoutSeconds, $_.Exception.Message)
+        }
+    }
+    return @($names | Where-Object { $_ })
 }
 
 function Get-SecureBootDbCertificates {
@@ -429,6 +467,12 @@ function Test-NvramAndBootNext {
 }
 
 try {
+    $geometryModule = Join-Path $PSScriptRoot "modules\Libertix.StorageGeometry.psm1"
+    if (-not (Test-Path -LiteralPath $geometryModule -PathType Leaf)) {
+        throw "Libertix storage geometry module is missing: $geometryModule"
+    }
+    Import-Module -Name $geometryModule -Force -ErrorAction Stop
+
     Write-Check "COMPAT_010_PRIVILEGES"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -459,6 +503,7 @@ try {
     $firmware = Get-FirmwareMode
     $secureBootEnabled = $false
     $nvramPassed = $false
+    $nvramSkipped = $false
     if ($firmware -eq "UEFI") {
         try { $secureBootEnabled = [bool](Confirm-SecureBootUEFI -ErrorAction Stop) }
         catch { Stop-Compatibility "COMPAT_E_SECURE_BOOT_STATE" @($_.Exception.Message) }
@@ -472,10 +517,15 @@ try {
                 Stop-Compatibility "COMPAT_E_SECURE_BOOT_THIRD_PARTY_CA"
             }
         }
-        try { Test-NvramAndBootNext; $nvramPassed = $true }
-        catch {
-            if ($_.Exception.Message -match "^\[(COMPAT_[A-Z0-9_]+)\]\s*(.*)$") { throw }
-            Stop-Compatibility "COMPAT_E_NVRAM_TEST_FAILED" @($_.Exception.Message)
+        if ($SkipNvramWriteProbe) {
+            $nvramSkipped = $true
+            Write-LocalizedWarning "NVRAM_PROBE_SKIPPED"
+        } else {
+            try { Test-NvramAndBootNext; $nvramPassed = $true }
+            catch {
+                if ($_.Exception.Message -match "^\[(COMPAT_[A-Z0-9_]+)\]\s*(.*)$") { throw }
+                Stop-Compatibility "COMPAT_E_NVRAM_TEST_FAILED" @($_.Exception.Message)
+            }
         }
     }
 
@@ -501,10 +551,7 @@ try {
         Stop-Compatibility "COMPAT_E_STORAGE_BUS_UNKNOWN" @($busType)
     }
 
-    $controllerNames = @(
-        Get-CimInstance Win32_IDEController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }
-        Get-CimInstance Win32_SCSIController -ErrorAction SilentlyContinue | ForEach-Object { $_.Name }
-    ) | Where-Object { $_ }
+    $controllerNames = @(Get-StorageControllerNames)
     $controllerText = $controllerNames -join " | "
     if ($controllerText -match "(?i)Intel.*(RST|Rapid Storage|VMD|Volume Management|Optane|VROC|RAID)") {
         Stop-Compatibility "COMPAT_E_INTEL_RST_RAID"
@@ -515,7 +562,12 @@ try {
     if ($controllerText -match "(?i)(MegaRAID|Smart Array|PERC|Adaptec|Broadcom.*RAID|LSI.*RAID)") {
         Stop-Compatibility "COMPAT_E_HARDWARE_RAID"
     }
-    if ($disk.LogicalSectorSize -notin @(512, 4096) -or $disk.PhysicalSectorSize -notin @(512, 4096)) {
+    if (
+        $disk.LogicalSectorSize -notin @(512, 4096) -or
+        $disk.PhysicalSectorSize -notin @(512, 4096) -or
+        $disk.PhysicalSectorSize -lt $disk.LogicalSectorSize -or
+        $disk.PhysicalSectorSize % $disk.LogicalSectorSize -ne 0
+    ) {
         Stop-Compatibility "COMPAT_E_SECTOR_SIZE_UNSUPPORTED" @($disk.LogicalSectorSize, $disk.PhysicalSectorSize)
     }
     $expectedStyle = if ($firmware -eq "UEFI") { "GPT" } else { "MBR" }
@@ -524,6 +576,12 @@ try {
     }
 
     $allPartitions = @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop)
+    if (
+        $firmware -eq "BIOS" -and
+        @($allPartitions | Where-Object { [int]$_.MbrType -in @(5, 15, 133) }).Count -ne 0
+    ) {
+        Stop-Compatibility "COMPAT_E_MBR_EXTENDED_LAYOUT"
+    }
     if ($firmware -eq "BIOS" -and $allPartitions.Count -ge 4) {
         Stop-Compatibility "COMPAT_E_MBR_PRIMARY_LIMIT"
     }
@@ -533,6 +591,12 @@ try {
     })
     if ($recovery.Count -ne 1) {
         Stop-Compatibility "COMPAT_E_RECOVERY_LAYOUT" @($recovery.Count)
+    }
+    if (
+        [int64]$recovery[0].Offset -le [int64]$partition.Offset -or
+        [int64]$partition.Size -gt [int64]$recovery[0].Offset - [int64]$partition.Offset
+    ) {
+        Stop-Compatibility "COMPAT_E_RECOVERY_POSITION"
     }
     if ($firmware -eq "UEFI") {
         $esp = @($allPartitions | Where-Object { $_.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}" })
@@ -556,7 +620,18 @@ try {
         Stop-Compatibility "COMPAT_E_NTFS_SCAN_FAILED" @($_.Exception.Message)
     }
     $supportedSize = Get-PartitionSupportedSize -DriveLetter $systemDrive.Substring(0, 1) -ErrorAction Stop
-    [long]$shrinkAvailable = [long]$partition.Size - [long]$supportedSize.SizeMin
+    [long]$alignmentPadding = Get-LibertixPartitionEndAlignmentPadding `
+        -PartitionOffsetBytes ([int64]$partition.Offset) `
+        -PartitionSizeBytes ([int64]$partition.Size) `
+        -LogicalSectorSizeBytes ([int64]$disk.LogicalSectorSize)
+    [long]$shrinkAvailable = `
+        [long]$partition.Size - [long]$supportedSize.SizeMin - $alignmentPadding
+    if ($firmware -eq "BIOS") {
+        # Windows normally represents a fourth MBR partition as a logical
+        # partition inside an extended container. Reserve one alignment unit
+        # for its EBR metadata so the wizard never offers an uncreatable size.
+        $shrinkAvailable -= Get-LibertixPartitionAlignmentBytes
+    }
     [long]$requiredShrink = ([long]$MinimumLinuxSizeGB + 2L) * 1GB
     if ($shrinkAvailable -lt $requiredShrink) {
         Stop-Compatibility "COMPAT_E_SHRINK_SPACE" @([math]::Round($shrinkAvailable / 1GB, 1), [math]::Round($requiredShrink / 1GB, 1))
@@ -587,6 +662,7 @@ try {
     Write-Result "BITLOCKER_STATE" $bitLocker.State
     Write-Result "SECURE_BOOT_ENABLED" $secureBootEnabled.ToString().ToLowerInvariant()
     Write-Result "NVRAM_PROBE_PASSED" $nvramPassed.ToString().ToLowerInvariant()
+    Write-Result "NVRAM_PROBE_SKIPPED" $nvramSkipped.ToString().ToLowerInvariant()
     exit 0
 } catch {
     $code = "COMPAT_E_UNEXPECTED"

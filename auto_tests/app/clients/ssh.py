@@ -12,6 +12,36 @@ from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_HOST_KEY_TYPES = {
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-rsa",
+}
+
+
+class PersistFirstHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Persist one explicitly authorized first-seen key for this test run."""
+
+    def __init__(self, known_hosts_path: Path) -> None:
+        self.known_hosts_path = known_hosts_path
+
+    def missing_host_key(
+        self,
+        client: paramiko.SSHClient,
+        hostname: str,
+        key: paramiko.PKey,
+    ) -> None:
+        key_type = key.get_name()
+        if key_type not in SUPPORTED_HOST_KEY_TYPES:
+            raise paramiko.SSHException(f"Unsupported SSH host key type: {key_type}")
+
+        self.known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
+        client.get_host_keys().add(hostname, key_type, key)
+        client.save_host_keys(str(self.known_hosts_path))
+        self.known_hosts_path.chmod(0o600)
+
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -30,7 +60,7 @@ class SSHClient:
         known_hosts_path: str | Path,
         port: int = 22,
         connect_timeout: float = 15,
-        strict_host_key: bool = True,
+        trust_on_first_use: bool = False,
     ) -> None:
         self.host = host
         self.username = username
@@ -38,25 +68,27 @@ class SSHClient:
         self.known_hosts_path = Path(known_hosts_path)
         self.port = port
         self.connect_timeout = connect_timeout
-        self.strict_host_key = strict_host_key
+        self.trust_on_first_use = trust_on_first_use
         self._client: paramiko.SSHClient | None = None
         self.server_key_sha256: str | None = None
 
     def __enter__(self) -> SSHClient:
-        logger.info("Connexion SSH", extra={"step": "ssh.connect", "target": self.host})
+        logger.info("SSH connection attempt", extra={"step": "ssh.connect", "target": self.host})
         client = paramiko.SSHClient()
         try:
             # Automation controls disks and boot state, so a first-seen host key
             # must never be trusted implicitly. The operator owns this file and
             # must update it deliberately when a VM or server key changes.
-            if self.strict_host_key:
+            if not self.trust_on_first_use:
                 client.load_host_keys(str(self.known_hosts_path))
                 client.set_missing_host_key_policy(paramiko.RejectPolicy())
             else:
-                # Reinstalling a test VM creates a new SSH host key. The
-                # post-install suite records that ephemeral key but must not
-                # pollute the trusted Windows/server known-hosts inventory.
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                # A reinstall creates a new Linux host key. Record the first
+                # key in this run's isolated workspace; Paramiko then rejects
+                # any key change on later connection attempts.
+                if self.known_hosts_path.is_file():
+                    client.load_host_keys(str(self.known_hosts_path))
+                client.set_missing_host_key_policy(PersistFirstHostKeyPolicy(self.known_hosts_path))
             client.connect(
                 self.host,
                 port=self.port,
@@ -77,7 +109,7 @@ class SSHClient:
             client.close()
             raise WorkflowError(
                 "ssh.connect",
-                "Connexion SSH impossible",
+                "SSH connection failed",
                 details={
                     "host": self.host,
                     "exception_type": type(exc).__name__,
@@ -85,13 +117,15 @@ class SSHClient:
                 },
             ) from exc
         self._client = client
-        logger.info("Connexion SSH établie", extra={"step": "ssh.connect", "target": self.host})
+        logger.info(
+            "SSH connection established", extra={"step": "ssh.connect", "target": self.host}
+        )
         return self
 
     def __exit__(self, *_args: object) -> None:
         if self._client:
             self._client.close()
-            logger.info("Connexion SSH fermée", extra={"step": "ssh.close", "target": self.host})
+            logger.info("SSH connection closed", extra={"step": "ssh.close", "target": self.host})
 
     def run(
         self,
@@ -104,8 +138,8 @@ class SSHClient:
         stdin_data: str | None = None,
     ) -> CommandResult:
         if not self._client:
-            raise WorkflowError(step, "Client SSH non connecté", details={"host": self.host})
-        logger.info("Commande distante démarrée", extra={"step": step, "target": self.host})
+            raise WorkflowError(step, "SSH client is not connected", details={"host": self.host})
+        logger.info("Remote command started", extra={"step": step, "target": self.host})
         try:
             stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
             if stdin_data is not None:
@@ -137,26 +171,26 @@ class SSHClient:
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             raise WorkflowError(
                 step,
-                "Échec d'exécution de la commande distante",
+                "Remote command execution failed",
                 details={
                     "host": self.host,
-                    "command": "[COMMANDE SENSIBLE MASQUÉE]" if sensitive else command,
+                    "command": "[SENSITIVE COMMAND REDACTED]" if sensitive else command,
                     "exception_type": type(exc).__name__,
                     "error": str(exc),
                 },
             ) from exc
         logger.info(
-            "Commande distante terminée (code=%s)",
+            "Remote command completed (code=%s)",
             exit_code,
             extra={"step": step, "target": self.host},
         )
         if check and exit_code != 0:
             raise WorkflowError(
                 step,
-                "La commande distante a échoué",
+                "Remote command failed",
                 details={
                     "host": self.host,
-                    "command": "[COMMANDE SENSIBLE MASQUÉE]" if sensitive else command,
+                    "command": "[SENSITIVE COMMAND REDACTED]" if sensitive else command,
                     "exit_code": exit_code,
                     "stdout": out[-4000:],
                     "stderr": err[-4000:],
@@ -166,15 +200,15 @@ class SSHClient:
 
     def upload_text(self, remote_path: str, content: str, *, step: str) -> None:
         if not self._client:
-            raise WorkflowError(step, "Client SSH non connecté", details={"host": self.host})
-        logger.info("Upload texte SSH démarré", extra={"step": step, "target": self.host})
+            raise WorkflowError(step, "SSH client is not connected", details={"host": self.host})
+        logger.info("SSH text upload started", extra={"step": step, "target": self.host})
         try:
             with self._client.open_sftp() as sftp, sftp.open(remote_path, "wb") as remote:
                 remote.write(content.encode("utf-8-sig"))
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             raise WorkflowError(
                 step,
-                "Upload texte SSH impossible",
+                "SSH text upload failed",
                 details={
                     "host": self.host,
                     "remote_path": remote_path,
@@ -182,20 +216,20 @@ class SSHClient:
                     "error": str(exc),
                 },
             ) from exc
-        logger.info("Upload texte SSH terminé", extra={"step": step, "target": self.host})
+        logger.info("SSH text upload completed", extra={"step": step, "target": self.host})
 
     def upload_file(self, local_path: str | Path, remote_path: str, *, step: str) -> None:
         if not self._client:
-            raise WorkflowError(step, "Client SSH non connecté", details={"host": self.host})
+            raise WorkflowError(step, "SSH client is not connected", details={"host": self.host})
         local = Path(local_path)
-        logger.info("Upload fichier SSH démarré", extra={"step": step, "target": self.host})
+        logger.info("SSH file upload started", extra={"step": step, "target": self.host})
         try:
             with self._client.open_sftp() as sftp:
                 sftp.put(str(local), remote_path)
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             raise WorkflowError(
                 step,
-                "Upload fichier SSH impossible",
+                "SSH file upload failed",
                 details={
                     "host": self.host,
                     "local_path": str(local),
@@ -204,4 +238,4 @@ class SSHClient:
                     "error": str(exc),
                 },
             ) from exc
-        logger.info("Upload fichier SSH terminé", extra={"step": step, "target": self.host})
+        logger.info("SSH file upload completed", extra={"step": step, "target": self.host})

@@ -43,7 +43,8 @@ function Assert-LibertixPositiveInteger {
 function Assert-LibertixPartitionIdentity {
     param(
         [Parameter(Mandatory = $true)][object]$Partition,
-        [Parameter(Mandatory = $true)][string]$Path
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][int64]$LogicalSectorSizeBytes
     )
 
     $number = Assert-LibertixPlanProperty -Object $Partition -Name "number" -Path "$Path.number"
@@ -53,6 +54,12 @@ function Assert-LibertixPartitionIdentity {
     Assert-LibertixPositiveInteger -Value $number -Path "$Path.number"
     Assert-LibertixPositiveInteger -Value $offset -Path "$Path.offsetBytes"
     Assert-LibertixPositiveInteger -Value $size -Path "$Path.sizeBytes"
+    if (
+        [int64]$offset % $LogicalSectorSizeBytes -ne 0 -or
+        [int64]$size % $LogicalSectorSizeBytes -ne 0
+    ) {
+        throw "Installation plan $Path geometry must align to disk.logicalSectorSizeBytes."
+    }
 }
 
 function Assert-LibertixSha256 {
@@ -63,6 +70,108 @@ function Assert-LibertixSha256 {
 
     if ([string]$Value -notmatch '^[0-9a-f]{64}$') {
         throw "Installation plan field $Path must be a lowercase SHA-256 hash."
+    }
+}
+
+function ConvertTo-LibertixIpv4Integer {
+    param([Parameter(Mandatory = $true)][System.Net.IPAddress]$Address)
+
+    $octets = $Address.GetAddressBytes()
+    return [uint64](
+        ([uint64]$octets[0] * 16777216) +
+        ([uint64]$octets[1] * 65536) +
+        ([uint64]$octets[2] * 256) +
+        [uint64]$octets[3]
+    )
+}
+
+function Test-LibertixIpv4ConfigurationAddress {
+    param([Parameter(Mandatory = $true)][System.Net.IPAddress]$Address)
+
+    $octets = $Address.GetAddressBytes()
+    return (
+        $octets[0] -ne 0 -and
+        $octets[0] -ne 127 -and
+        -not ($octets[0] -eq 169 -and $octets[1] -eq 254) -and
+        $octets[0] -lt 224
+    )
+}
+
+function Assert-LibertixDevelopmentNetwork {
+    param([Parameter(Mandatory = $true)][object]$Development)
+
+    $staticAddress = [string](Assert-LibertixPlanProperty `
+        -Object $Development `
+        -Name "staticIpv4Address" `
+        -Path "development.staticIpv4Address")
+    $gateway = [string](Assert-LibertixPlanProperty `
+        -Object $Development `
+        -Name "staticIpv4Gateway" `
+        -Path "development.staticIpv4Gateway")
+    [System.Net.IPAddress]$parsedAddress = $null
+    [System.Net.IPAddress]$parsedGateway = $null
+    if (
+        -not [System.Net.IPAddress]::TryParse($staticAddress, [ref]$parsedAddress) -or
+        $parsedAddress.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork
+    ) {
+        throw "Installation plan development.staticIpv4Address must be IPv4."
+    }
+    if (-not (Test-LibertixIpv4ConfigurationAddress -Address $parsedAddress)) {
+        throw "Installation plan development.staticIpv4Address is not a configurable unicast address."
+    }
+    if (
+        -not [System.Net.IPAddress]::TryParse($gateway, [ref]$parsedGateway) -or
+        $parsedGateway.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork
+    ) {
+        throw "Installation plan development.staticIpv4Gateway must be IPv4."
+    }
+    if (-not (Test-LibertixIpv4ConfigurationAddress -Address $parsedGateway)) {
+        throw "Installation plan development.staticIpv4Gateway is not a configurable unicast address."
+    }
+
+    $prefixLength = [int](Assert-LibertixPlanProperty `
+        -Object $Development `
+        -Name "staticIpv4PrefixLength" `
+        -Path "development.staticIpv4PrefixLength")
+    if ($prefixLength -lt 1 -or $prefixLength -gt 30) {
+        throw "Installation plan development.staticIpv4PrefixLength must be between 1 and 30."
+    }
+
+    [uint64]$hostCount = [math]::Pow(2, 32 - $prefixLength)
+    [uint64]$addressValue = ConvertTo-LibertixIpv4Integer -Address $parsedAddress
+    [uint64]$gatewayValue = ConvertTo-LibertixIpv4Integer -Address $parsedGateway
+    [uint64]$network = [math]::Floor($addressValue / $hostCount) * $hostCount
+    [uint64]$broadcast = $network + $hostCount - 1
+    if ($addressValue -eq $network -or $addressValue -eq $broadcast) {
+        throw "Installation plan development.staticIpv4Address must be a usable host address."
+    }
+    if (
+        $gatewayValue -le $network -or $gatewayValue -ge $broadcast -or
+        $gatewayValue -eq $addressValue
+    ) {
+        throw "Installation plan development.staticIpv4Gateway must be a different usable address in the same subnet."
+    }
+
+    $dnsServers = @(Assert-LibertixPlanProperty `
+        -Object $Development `
+        -Name "dnsServers" `
+        -Path "development.dnsServers")
+    if ($dnsServers.Count -lt 1) {
+        throw "Installation plan development.dnsServers must contain at least one IPv4 address."
+    }
+    $uniqueDns = @{}
+    foreach ($dnsServer in $dnsServers) {
+        [System.Net.IPAddress]$parsedDns = $null
+        if (
+            -not [System.Net.IPAddress]::TryParse([string]$dnsServer, [ref]$parsedDns) -or
+            $parsedDns.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork
+        ) {
+            throw "Installation plan development.dnsServers must contain only IPv4 addresses."
+        }
+        if ($uniqueDns.ContainsKey($parsedDns.ToString())) {
+            throw "Installation plan development.dnsServers must not contain duplicates."
+        }
+        $uniqueDns[$parsedDns.ToString()] = $true
     }
 }
 
@@ -177,12 +286,19 @@ function Assert-LibertixInstallationPlan {
     if ([string]$disk.systemDrive -notmatch '^[A-Z]:$') {
         throw "Installation plan disk.systemDrive must be an uppercase Windows drive such as C:."
     }
-    Assert-LibertixPositiveInteger `
-        -Value (Assert-LibertixPlanProperty -Object $disk -Name "sizeBytes" -Path "disk.sizeBytes") `
-        -Path "disk.sizeBytes"
-    Assert-LibertixPositiveInteger `
-        -Value (Assert-LibertixPlanProperty -Object $disk -Name "logicalSectorSizeBytes" -Path "disk.logicalSectorSizeBytes") `
+    $diskSize = Assert-LibertixPlanProperty -Object $disk -Name "sizeBytes" -Path "disk.sizeBytes"
+    $logicalSectorSize = Assert-LibertixPlanProperty `
+        -Object $disk `
+        -Name "logicalSectorSizeBytes" `
         -Path "disk.logicalSectorSizeBytes"
+    Assert-LibertixPositiveInteger -Value $diskSize -Path "disk.sizeBytes"
+    Assert-LibertixPositiveInteger -Value $logicalSectorSize -Path "disk.logicalSectorSizeBytes"
+    if ([int64]$logicalSectorSize -notin @(512, 4096)) {
+        throw "Installation plan disk.logicalSectorSizeBytes must be either 512 or 4096."
+    }
+    if ([int64]$diskSize % [int64]$logicalSectorSize -ne 0) {
+        throw "Installation plan disk.sizeBytes must align to disk.logicalSectorSizeBytes."
+    }
 
     $partitionStyle = [string](Assert-LibertixPlanProperty -Object $disk -Name "partitionStyle" -Path "disk.partitionStyle")
     $expectedStyle = if ($firmware -eq "bios") { "MBR" } else { "GPT" }
@@ -192,7 +308,44 @@ function Assert-LibertixInstallationPlan {
 
     foreach ($name in @("windows", "boot", "recovery")) {
         $partition = Assert-LibertixPlanProperty -Object $disk -Name $name -Path "disk.$name"
-        Assert-LibertixPartitionIdentity -Partition $partition -Path "disk.$name"
+        Assert-LibertixPartitionIdentity `
+            -Partition $partition `
+            -Path "disk.$name" `
+            -LogicalSectorSizeBytes ([int64]$logicalSectorSize)
+    }
+
+    $fixedPartitionNames = @("windows", "boot", "recovery")
+    $fixedExtents = @{}
+    foreach ($name in $fixedPartitionNames) {
+        $partition = $disk.$name
+        [int64]$partitionOffset = [int64]$partition.offsetBytes
+        [int64]$partitionSize = [int64]$partition.sizeBytes
+        if (
+            $partitionSize -gt [int64]$diskSize -or
+            $partitionOffset -gt [int64]$diskSize - $partitionSize
+        ) {
+            throw "Installation plan disk.$name must fit within disk.sizeBytes."
+        }
+        $fixedExtents[$name] = @(
+            $partitionOffset,
+            [int64]($partitionOffset + $partitionSize)
+        )
+    }
+    foreach ($pair in @(
+        @("windows", "boot"),
+        @("windows", "recovery"),
+        @("boot", "recovery")
+    )) {
+        $left = $fixedExtents[$pair[0]]
+        $right = $fixedExtents[$pair[1]]
+        if ($left[0] -lt $right[1] -and $right[0] -lt $left[1]) {
+            throw "Installation plan disk.$($pair[0]) and disk.$($pair[1]) overlap."
+        }
+    }
+    [int64]$windowsEnd = $fixedExtents["windows"][1]
+    [int64]$recoveryOffset = $fixedExtents["recovery"][0]
+    if ($windowsEnd -gt $recoveryOffset) {
+        throw "Installation plan disk.recovery must follow the original Windows partition."
     }
 
     $installer = Assert-LibertixPlanProperty -Object $disk -Name "installer" -Path "disk.installer"
@@ -204,6 +357,9 @@ function Assert-LibertixInstallationPlan {
     if ($null -ne $installerNumber) {
         Assert-LibertixPositiveInteger -Value $installerNumber -Path "disk.installer.number"
         Assert-LibertixPositiveInteger -Value $installerOffset -Path "disk.installer.offsetBytes"
+        if ([int64]$installerOffset % [int64]$logicalSectorSize -ne 0) {
+            throw "Installation plan disk.installer.offsetBytes must align to disk.logicalSectorSizeBytes."
+        }
     }
     $finalSize = Assert-LibertixPlanProperty -Object $installer -Name "finalSizeBytes" -Path "disk.installer.finalSizeBytes"
     $stagingSize = Assert-LibertixPlanProperty -Object $installer -Name "stagingSizeBytes" -Path "disk.installer.stagingSizeBytes"
@@ -226,6 +382,28 @@ function Assert-LibertixInstallationPlan {
     }
     if ([int64]$stagingSize -ne $expectedStagingSizeGiB * $script:BytesPerGiB) {
         throw "Installation plan stagingSizeBytes does not match the shared FAT32 staging policy."
+    }
+    if ($null -ne $installerOffset) {
+        [int64]$alignmentPadding = $windowsEnd % 1MB
+        if ([int64]$finalSize -gt $windowsEnd - $alignmentPadding) {
+            throw "Installation plan finalSizeBytes exceeds the original Windows extent."
+        }
+        [int64]$expectedInstallerOffset = `
+            $windowsEnd - $alignmentPadding - [int64]$finalSize
+        [int64]$primaryMbrOffset = $expectedInstallerOffset - 1MB
+        $offsetMatches = (
+            [int64]$installerOffset -eq $expectedInstallerOffset -or
+            ($partitionStyle -eq "MBR" -and [int64]$installerOffset -eq $primaryMbrOffset)
+        )
+        if (-not $offsetMatches) {
+            throw "Installation plan installer offset does not match the aligned Windows shrink geometry."
+        }
+        if (
+            [int64]$finalSize -gt $recoveryOffset -or
+            [int64]$installerOffset -gt $recoveryOffset - [int64]$finalSize
+        ) {
+            throw "Installation plan installer final extent would overlap Recovery."
+        }
     }
 
     $features = Assert-LibertixPlanProperty -Object $Plan -Name "features" -Path "features"
@@ -286,50 +464,7 @@ function Assert-LibertixInstallationPlan {
         if ($enableSsh -isnot [bool] -or -not $enableSsh) {
             throw "Installation plan development.enableSsh must be true."
         }
-        $staticAddress = [string](Assert-LibertixPlanProperty `
-            -Object $development `
-            -Name "staticIpv4Address" `
-            -Path "development.staticIpv4Address")
-        [System.Net.IPAddress]$parsedAddress = $null
-        if (
-            -not [System.Net.IPAddress]::TryParse($staticAddress, [ref]$parsedAddress) -or
-            $parsedAddress.AddressFamily -ne
-                [System.Net.Sockets.AddressFamily]::InterNetwork
-        ) {
-            throw "Installation plan development.staticIpv4Address must be IPv4."
-        }
-        $octets = $parsedAddress.GetAddressBytes()
-        if (
-            $octets[0] -ne 192 -or $octets[1] -ne 168 -or $octets[2] -ne 1 -or
-            $octets[3] -le 1 -or $octets[3] -ge 255
-        ) {
-            throw "Installation plan development.staticIpv4Address must be usable in 192.168.1.0/24."
-        }
-        $prefixLength = Assert-LibertixPlanProperty `
-            -Object $development `
-            -Name "staticIpv4PrefixLength" `
-            -Path "development.staticIpv4PrefixLength"
-        if ([int]$prefixLength -ne 24) {
-            throw "Installation plan development.staticIpv4PrefixLength must be 24."
-        }
-        $gateway = [string](Assert-LibertixPlanProperty `
-            -Object $development `
-            -Name "staticIpv4Gateway" `
-            -Path "development.staticIpv4Gateway")
-        if ($gateway -ne "192.168.1.1") {
-            throw "Installation plan development.staticIpv4Gateway must be 192.168.1.1."
-        }
-        $dnsServers = @(Assert-LibertixPlanProperty `
-            -Object $development `
-            -Name "dnsServers" `
-            -Path "development.dnsServers")
-        if (
-            $dnsServers.Count -ne 2 -or
-            [string]$dnsServers[0] -ne "8.8.8.8" -or
-            [string]$dnsServers[1] -ne "1.1.1.1"
-        ) {
-            throw "Installation plan development.dnsServers must contain 8.8.8.8 then 1.1.1.1."
-        }
+        Assert-LibertixDevelopmentNetwork -Development $development
     }
 
     return $Plan

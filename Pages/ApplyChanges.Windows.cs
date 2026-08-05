@@ -1,21 +1,10 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Linq;
-using System.Net.Http;
-using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
-using System.Windows;
-using System.Windows.Controls;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -50,8 +39,16 @@ namespace Libertix.Pages
                         if (excludedProfiles.Contains(profileName)) continue;
                         profiles.Add(profileName);
                     }
-                    catch (UnauthorizedAccessException) { }
-                    catch (IOException) { }
+                    catch (UnauthorizedAccessException)
+                    {
+                        // Service and protected profiles are intentionally
+                        // excluded when Windows denies enumeration.
+                    }
+                    catch (IOException)
+                    {
+                        // Profiles can disappear while the user directory is
+                        // enumerated; only stable profiles are published.
+                    }
                 }
             }
             profiles.Sort(StringComparer.OrdinalIgnoreCase);
@@ -113,8 +110,9 @@ namespace Libertix.Pages
                     }
                 }
 
-                long expectedLinuxSize = checked(
-                    (long)Math.Max(20, (int)Math.Round(_linuxSizeGB)) * 1024L * 1024L * 1024L);
+                long expectedLinuxSize = InstallationSizePolicy
+                    .FromRequestedGigabytes(_linuxSizeGB)
+                    .FinalSizeBytes;
                 string configPath = Path.Combine(WindowsShareRoot, "config.json");
                 File.WriteAllText(
                     configPath,
@@ -150,7 +148,11 @@ namespace Libertix.Pages
                 if (File.Exists(marker) && Directory.Exists(WindowsShareRoot))
                     Directory.Delete(WindowsShareRoot, true);
             }
-            catch { }
+            catch
+            {
+                // The installed sharing task also removes stale payloads. A
+                // locked file here must not hide the primary rollback result.
+            }
         }
 
         private static string FormatOptionalBool(bool? value)
@@ -396,6 +398,7 @@ namespace Libertix.Pages
                 $"-DiskNumber {_storagePreflight.SystemDiskNumber} " +
                 $"-DiskUniqueId {QuoteArgument(_storagePreflight.SystemDiskUniqueId)} " +
                 $"-WindowsPartitionOffsetBytes {_storagePreflight.SystemPartitionOffset} " +
+                $"-RecoveryPartitionOffsetBytes {_storagePreflight.RecoveryPartitionOffset} " +
                 $"-SizeBytes {sizeBytes}";
             var processResult = await Task.Run(() => RunProcess(
                 powershell,

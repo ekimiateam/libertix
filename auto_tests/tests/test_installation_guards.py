@@ -11,6 +11,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# This module checks source packaging, cross-language wiring and operation order
+# that cannot be imported on the Linux test runner. Executable C# behavior lives
+# in Libertix.Tests; end-to-end behavior is exercised by the VM automation.
+
 
 def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8-sig")
@@ -116,6 +120,52 @@ def test_shared_storage_converts_windows_paths_without_losing_segments(
 
     assert result.returncode == 0
     assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    ("kernel_sector", "expected_bytes"),
+    [("0", "0"), ("2048", "1048576"), ("524288", "268435456")],
+)
+def test_shared_storage_converts_kernel_start_sectors_as_fixed_512_byte_units(
+    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
+    kernel_sector: str,
+    expected_bytes: str,
+) -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+
+    result = run_shell_function(library, "kernel_sector_to_bytes", kernel_sector)
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == expected_bytes
+
+
+@pytest.mark.parametrize(
+    ("offset_bytes", "logical_sector", "expected_sector", "accepted"),
+    [
+        ("1048576", "512", "2048", True),
+        ("1048576", "4096", "256", True),
+        ("262144", "4096", "64", True),
+        ("262145", "4096", "", False),
+    ],
+)
+def test_shared_storage_converts_byte_offsets_to_device_logical_sectors(
+    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
+    offset_bytes: str,
+    logical_sector: str,
+    expected_sector: str,
+    accepted: bool,
+) -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+
+    result = run_shell_function(
+        library,
+        "bytes_to_logical_sectors",
+        offset_bytes,
+        logical_sector,
+    )
+
+    assert (result.returncode == 0) is accepted
+    assert result.stdout.strip() == expected_sector
 
 
 @pytest.mark.parametrize(
@@ -237,6 +287,30 @@ def test_mbr_owned_logical_layout_resolves_vm500_geometry() -> None:
     assert result.stdout.strip() == "5:91174912:133115903:3:91172864:133115903"
 
 
+def test_mbr_owned_logical_layout_preserves_a_gap_before_recovery() -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+    layout = """BYT;
+/dev/sda:134217728s:scsi:512:512:msdos:ATA QEMU HARDDISK:;
+1:2048s:104447s:102400s:ntfs::boot;
+2:104448s:91172628s:91068181s:ntfs::;
+3:91172864s:133115903s:41943040s:::lba;
+5:91174912s:133115903s:41940992s:ext4::;
+4:133117952s:134213631s:1095680s:ntfs::msftres;
+"""
+    command = 'source "$1"; mbr_owned_logical_layout_from_machine_output "$2" "$3"'
+
+    result = subprocess.run(
+        ["bash", "-c", command, "mbr-owned-gap", str(library), "91174912", "133117952"],
+        input=layout,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "5:91174912:133115903:3:91172864:133115903"
+
+
 def test_mbr_owned_logical_layout_rejects_an_unowned_second_logical_partition() -> None:
     library = ROOT / "assets/live/libertix-storage-common.sh"
     layout = """BYT;
@@ -260,6 +334,16 @@ def test_mbr_owned_logical_layout_rejects_an_unowned_second_logical_partition() 
 
     assert result.returncode == 2
     assert result.stdout == ""
+
+
+def test_detached_partition_check_does_not_query_the_dev_mount() -> None:
+    runtime = (ROOT / "assets/live/libertix-install-runtime-common.sh").read_text(encoding="utf-8")
+    detached_check = runtime.split("assert_not_mounted_or_open() {", 1)[1].split(
+        "mount_ntfs_rw_or_die() {", 1
+    )[0]
+
+    assert 'fuser "$partition"' in detached_check
+    assert 'fuser -m "$partition"' not in detached_check
 
 
 @pytest.mark.parametrize(("raw_type", "normalized"), [(" f \n", "f"), ("0x0F\n", "f")])
@@ -304,6 +388,39 @@ def test_bios_rollback_removes_only_a_proven_empty_extended_container() -> None:
     assert 'fuser -m "$NEW_PART"' not in rollback
     assert 'fuser "$NEW_PART"' in rollback
     assert "/holders" in rollback
+
+
+def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
+    plan = read("assets/live/libertix-installation-plan.py")
+    loader = read("assets/live/libertix-installation-plan.sh")
+    rollback = read("assets/live/libertix-rollback-common.sh")
+
+    assert '"WINDOWS_PARTITION_SIZE_BYTES"' in plan
+    assert "WINDOWS_PARTITION_SIZE_BYTES" in loader
+    assert "WINDOWS_PARTITION_OFFSET_BYTES + WINDOWS_PARTITION_SIZE_BYTES" in rollback
+    assert '"$((original_end_sector - 1))s"' in rollback
+    assert 'resize_end="100%"' not in rollback
+
+
+def test_windows_rollbacks_require_the_exact_original_system_partition_size() -> None:
+    shared_rollback = read("Scripts/modules/Libertix.Rollback.psm1")
+    bios_guard = read("Scripts/libertix-recovery-guard.ps1")
+
+    assert "$partition.Size -ne $initialSize" in shared_rollback
+    assert "$verified.Size -ne $initialSize" in shared_rollback
+    assert "$supported.SizeMin -gt $initialSize" in shared_rollback
+    assert "$currentSystemPartition.Size -ne $initialSystemSize" in bios_guard
+    assert "$finalSystemPartition.Size -ne $initialSystemSize" in bios_guard
+    assert "$supported.SizeMin -gt $initialSystemSize" in bios_guard
+    assert "$expectedTransactionOffset" in bios_guard
+    assert "$candidateOffsets" in bios_guard
+    assert "[int64]$partition.Offset -notin $candidateOffsets" in bios_guard
+    assert "[int]$partition.MbrType -in @(5, 15, 133)" in bios_guard
+    assert "$isRawTransaction" in bios_guard
+    assert "[int64]$partitionSizeTolerance = 1MB" in bios_guard
+    assert "[int64]$minBytes" in bios_guard
+    assert "[int64]$stagingMinBytes" in bios_guard
+    assert "[Math]::Max" not in bios_guard
 
 
 def test_final_verification_counts_mbr_slots_instead_of_lsblk_children() -> None:
@@ -592,7 +709,7 @@ def test_ext4_setup_payload_matches_pinned_release_hash() -> None:
 
 
 def test_live_gui_uses_the_proven_direct_xorg_path() -> None:
-    rootfs = read("iso-uefi/live/setup-live-rootfs.sh")
+    rootfs = read("assets/live/setup-live-rootfs.sh")
     runner = read("assets/live/libertix-runner-main.sh")
 
     assert "xinit" not in runner
@@ -683,17 +800,56 @@ def test_installation_log_controls_preserve_manual_scroll_and_button_layout() ->
 
     expand = xaml.split('x:Name="ExpandLogsButton"', 1)[1].split("/>", 1)[0]
     cancel = xaml.split('x:Name="CancelInstallationButton"', 1)[1].split("/>", 1)[0]
-    append = apply_changes.split("private static void AppendLogLine", 1)[1].split(
+    append = apply_changes.split("private void AppendLogLine", 1)[1].split(
         "private void ExpandLogsButton_Click", 1
     )[0]
 
     assert 'Height="50"' in expand
     assert 'HorizontalAlignment="Right"' in cancel
-    assert "bool wasAtBottom" in append
+    assert xaml.count('ScrollViewer.ScrollChanged="LogOutput_ScrollChanged"') == 2
     assert "double previousOffset" in append
     assert "DispatcherPriority.Background" in append
+    assert "forceScrollToEnd || IsAutoScrollEnabled(output)" in append
+    assert "SetAutoScrollEnabled(output, IsAtBottom(output))" in append
     assert "output.ScrollToEnd()" in append
     assert "output.ScrollToVerticalOffset(previousOffset)" in append
+
+
+def test_optional_uefi_detail_progress_is_not_bound_as_null() -> None:
+    execution = read("Scripts/uefi/Libertix.Uefi.Execution.ps1")
+    progress = execution.split("function Write-LibertixProgress", 1)[1].split(
+        "function Test-LibertixTrackedExecution", 1
+    )[0]
+
+    assert "if ($null -ne $DetailPercent)" in progress
+    assert "$progressArguments.DetailPercent = [int]$DetailPercent" in progress
+    assert "Set-LibertixExecutionProgress @progressArguments" in progress
+    assert "-DetailPercent $DetailPercent" not in progress
+
+
+def test_bios_adapter_resolves_partition_table_without_ambient_state() -> None:
+    bios = read("assets/live/libertix-bios-adapter.sh")
+
+    assert "bios_partition_table_or_die()" in bios
+    assert bios.count("bios_partition_table_or_die >/dev/null") == 2
+    assert "$PART_TABLE" not in bios
+
+
+def test_uefi_adapter_resolves_partition_table_without_ambient_state() -> None:
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    assert "uefi_partition_table_or_die()" in uefi
+    assert uefi.count('partition_table="$(uefi_partition_table_or_die)"') == 2
+    assert "$PART_TABLE" not in uefi
+
+
+def test_live_unhandled_exit_guard_routes_nounset_failures_to_rollback() -> None:
+    main = read("assets/live/libertix-install-main.sh")
+
+    assert "on_exit()" in main
+    assert "trap on_exit EXIT" in main
+    assert "set +u" in main
+    assert 'fail_and_exit "$rc" "unhandled shell exit' in main
 
 
 def test_windows_boot_tasks_do_not_launch_visible_command_windows() -> None:
@@ -726,9 +882,15 @@ def test_filepool_defaults_to_production_and_supports_an_explicit_override() -> 
     assert 'ProductionBaseUrl = "https://ekimia.fr/libertix"' in filepool
     assert 'FilepoolOption = "--filepool-base-url"' in startup
     assert 'DevelopmentSshStaticIpOption = "--dev-ssh-static-ip"' in startup
+    assert 'DevelopmentSshPrefixLengthOption = "--dev-ssh-prefix-length"' in startup
+    assert 'DevelopmentSshGatewayOption = "--dev-ssh-gateway"' in startup
+    assert 'DevelopmentSshDnsOption = "--dev-ssh-dns"' in startup
     assert "FilepoolConfig.TryUseOverride(options.FilepoolBaseUrlOverride" in app
     assert '--filepool-base-url "{1}"' in launch
     assert '--dev-ssh-static-ip "{0}"' in launch
+    assert '--dev-ssh-prefix-length "{0}"' in launch
+    assert '--dev-ssh-gateway "{0}"' in launch
+    assert '--dev-ssh-dns "{0}"' in launch
 
 
 def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None:
@@ -741,7 +903,12 @@ def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None
     assert '[ "${DEVELOPMENT_SSH_ENABLED:-false}" = "true" ] || exit 0' in target
     assert "autoconnect-priority=1000" in target
     assert "address1=$DEVELOPMENT_STATIC_IPV4_ADDRESS/" in target
-    assert "apt-get -o Acquire::Retries=3 install" in first_boot
+    assert "command -v sshd >/dev/null 2>&1 && return 0" in first_boot
+    assert "local attempt max_attempts=6 retry_delay_seconds" in first_boot
+    assert "Acquire::http::No-Cache=true" in first_boot
+    assert "Acquire::https::No-Cache=true" in first_boot
+    assert first_boot.index("update \\") < first_boot.index("install -y --no-install-recommends")
+    assert "retry_delay_seconds=$((attempt * 10))" in first_boot
     assert "openssh-server" in first_boot
     assert "PasswordAuthentication yes" in first_boot
     assert "PermitRootLogin no" in first_boot
@@ -750,6 +917,8 @@ def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None
     assert "After=network-online.target" in unit
     assert '"development_static_ipv4": vm.host' in automation
     assert '"development_static_ipv4": vm.host' in validation
+    assert '"development_dns_servers": list(self.settings.development_dns_servers)' in automation
+    assert '"development_dns_servers": list(self.settings.development_dns_servers)' in validation
 
 
 def test_windows_integrity_check_preserves_preexisting_boot_drive_letter() -> None:
@@ -880,8 +1049,11 @@ def test_uefi_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
         in create_or_reuse
     )
     assert "$stagingSizeGB = [int]($stagingBytes / 1GB)" in create_or_reuse
-    assert "$need = $requestedBytes + $minFree" in create_or_reuse
-    assert "$shrinkBytes = $requestedBytes" in create_or_reuse
+    assert "$requiredFreeBytes = $shrinkBytes + $minimumFreeBytes" in create_or_reuse
+    assert "$freeSpaceAccountingToleranceBytes = 16MB" in create_or_reuse
+    assert "Get-Volume -DriveLetter $SystemDriveLetter" in create_or_reuse
+    assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes" in create_or_reuse
     assert "-Size $stagingBytes" in create_or_reuse
 
 
@@ -951,9 +1123,72 @@ def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
     save_position = create_or_reuse.index(
         "Save-TransactionPartitionState -Partition $newPartition", create_position
     )
+    geometry_position = create_or_reuse.index(
+        "Windows created the installer partition with unexpected geometry", create_position
+    )
     format_position = create_or_reuse.index("\n    Format-Volume `", create_position)
 
-    assert create_position < save_position < format_position
+    assert create_position < save_position < geometry_position < format_position
+
+
+def test_windows_staging_size_is_exact_across_bios_and_uefi() -> None:
+    bios_plan = read("Pages/ApplyChanges.Plan.cs")
+    bios_storage = read("Scripts/libertix-bios-storage.ps1")
+    uefi_execution = read("Scripts/uefi/Libertix.Uefi.Execution.ps1")
+    size_policy = read("Installation/InstallationSizePolicy.cs")
+
+    assert "if (size != installer.StagingSizeBytes)" in bios_plan
+    assert "IsObservedStagingSizeAcceptable" not in size_policy
+    assert "[int64]$verifiedPartition.Size -ne $SizeBytes" in bios_storage
+    assert (
+        "[int64]$Partition.Size -ne [int64]$installationPlan.disk.installer.stagingSizeBytes"
+    ) in uefi_execution
+
+
+def test_uefi_shrink_limit_is_measured_from_the_current_partition_size() -> None:
+    script = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
+        "function Get-ReusablePreparedInstallerPartition", 1
+    )[0]
+
+    assert (
+        "$maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin" in create_or_reuse
+    )
+    assert "$supported.SizeMax - $supported.SizeMin" not in create_or_reuse
+
+
+def test_uefi_shrink_uses_shared_geometry_for_partition_creation() -> None:
+    script = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
+        "function Get-ReusablePreparedInstallerPartition", 1
+    )[0]
+
+    assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes" in create_or_reuse
+    hibernation_position = create_or_reuse.index("Set-HibernateEnabled -Enabled $false")
+    free_space_position = create_or_reuse.index(
+        "$systemVolume = Get-Volume -DriveLetter $SystemDriveLetter"
+    )
+    assert hibernation_position < free_space_position
+    assert "-Size ($systemPartition.Size - $shrinkBytes)" in create_or_reuse
+    assert "Windows partition geometry does not match the aligned shrink target" in create_or_reuse
+    assert "-Size $stagingBytes" in create_or_reuse
+    assert "-Offset $installerOffsetBytes" in create_or_reuse
+    assert "-Alignment ([int64]$shrinkGeometry.AlignmentBytes)" in create_or_reuse
+
+
+def test_bios_storage_uses_the_same_alignment_geometry_as_uefi() -> None:
+    script = read("Scripts/libertix-bios-storage.ps1")
+
+    assert '"modules\\Libertix.StorageGeometry.psm1"' in script
+    assert "Get-LibertixPartitionEndAlignmentPadding" in script
+    assert "$maximumAllocationBytes" in script
+    assert "[int64]$maximumAllocationBytes" in script
+    assert "[Math]::Max" not in script
+    assert "$allocationWithMbrMetadata = $SizeBytes + $partitionAlignmentBytes" in script
+    assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in script
+    assert "-Offset $containerOffsetBytes" in script
+    assert "-Alignment $partitionAlignmentBytes" in script
 
 
 def test_uefi_low_memory_boot_files_are_writable_and_revert_uses_transaction_state() -> None:
@@ -978,15 +1213,14 @@ def test_uefi_low_memory_boot_files_are_writable_and_revert_uses_transaction_sta
 
 def test_uefi_live_expands_fat32_staging_before_ext4_format() -> None:
     installer = read("assets/live/libertix-install-main.sh")
-    reuse = installer.split('if [ -n "$LIVE_PART" ]', 1)[1].split(
-        'elif [ "$PART_TABLE" = "msdos" ]', 1
-    )[0]
+    reuse = installer.split(
+        'echo "=== Reusing live partition $LIVE_PART as final Linux partition ==="', 1
+    )[1].split("prepare_installer_partition_for_target_format_or_die", 1)[0]
 
     assert "requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
     assert 'desired_partition_bytes="$requested_partition_bytes"' in reuse
-    assert (
-        "recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))" in reuse
-    )
+    assert "recovery_start_sector=$(bytes_to_logical_sectors" in reuse
+    assert '"$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector_bytes"' in reuse
     assert 'run_logged parted -s "$DISK" unit s resizepart' in reuse
     assert 'expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART"' in reuse
     assert '"$expanded_partition_bytes" -eq "$desired_partition_bytes"' in reuse
@@ -995,15 +1229,14 @@ def test_uefi_live_expands_fat32_staging_before_ext4_format() -> None:
 
 def test_bios_live_expands_fat32_staging_before_ext4_format() -> None:
     installer = read("assets/live/libertix-install-main.sh")
-    reuse = installer.split('if [ -n "$LIVE_PART" ]', 1)[1].split(
-        'elif [ "$PART_TABLE" = "msdos" ]', 1
-    )[0]
+    reuse = installer.split(
+        'echo "=== Reusing live partition $LIVE_PART as final Linux partition ==="', 1
+    )[1].split("prepare_installer_partition_for_target_format_or_die", 1)[0]
 
     assert "requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
     assert 'desired_partition_bytes="$requested_partition_bytes"' in reuse
-    assert (
-        "recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))" in reuse
-    )
+    assert "recovery_start_sector=$(bytes_to_logical_sectors" in reuse
+    assert '"$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector_bytes"' in reuse
     assert 'run_logged parted -s "$DISK" unit s resizepart' in reuse
     assert 'expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART"' in reuse
     assert '"$expanded_partition_bytes" -eq "$desired_partition_bytes"' in reuse
@@ -1053,17 +1286,6 @@ def test_wpf_and_automation_require_the_same_minimum_password_length() -> None:
     assert "linux_password: str = Field(min_length=8" in api_models
 
 
-def test_legacy_ci_entry_point_reuses_the_single_ci_policy() -> None:
-    workflow = read(".github/workflows/ci.yml")
-    compatibility_entry = read(".github/workflows/dotnet-desktop.yml")
-
-    assert "workflow_call:" in workflow
-    assert "uses: ./.github/workflows/ci.yml" in compatibility_entry
-    assert "msbuild " not in compatibility_entry
-    assert "python -m pytest" not in compatibility_entry
-    assert "build-isos-docker.sh" not in compatibility_entry
-
-
 def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     script = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
     bits = script.split("function Start-BitsDownload", 1)[1].split("function Get-Aria2Exe", 1)[0]
@@ -1083,7 +1305,7 @@ def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
 
 
 def test_terminal_fallback_does_not_reset_video_mode_on_redraw() -> None:
-    rootfs = read("iso-uefi/live/setup-live-rootfs.sh")
+    rootfs = read("assets/live/setup-live-rootfs.sh")
     runner = read("assets/live/libertix-runner-main.sh")
 
     assert "write_tty1_screen" in runner
@@ -1097,7 +1319,7 @@ def test_terminal_fallback_does_not_reset_video_mode_on_redraw() -> None:
 
 
 def test_live_rootfs_masks_unused_serial_login_prompt() -> None:
-    rootfs = read("iso-uefi/live/setup-live-rootfs.sh")
+    rootfs = read("assets/live/setup-live-rootfs.sh")
 
     assert "ln -sf /dev/null /etc/systemd/system/serial-getty@ttyS0.service" in rootfs
 
@@ -1183,6 +1405,62 @@ def test_compatibility_runner_drains_async_output_before_parsing_final_fields() 
     diagnostics_position = runner.index("string diagnostics =", drain_position)
 
     assert timeout_position < drain_position < diagnostics_position
+
+
+def test_storage_controller_inventory_has_a_bounded_fail_closed_timeout() -> None:
+    script = read("Scripts/libertix-compatibility-preflight.ps1")
+    helper = script.split("function Get-StorageControllerNames", 1)[1].split(
+        "function Get-SecureBootDbCertificates", 1
+    )[0]
+
+    assert "$operationTimeoutSeconds = 15" in helper
+    assert "-OperationTimeoutSec $operationTimeoutSeconds" in helper
+    assert "-ErrorAction Stop" in helper
+    assert "Stop-Compatibility `" in helper
+    assert '"COMPAT_E_STORAGE_CONTROLLER_QUERY"' in helper
+    assert "SilentlyContinue" not in helper
+
+
+def test_compatibility_shrink_capacity_reserves_cloned_layout_alignment() -> None:
+    script = read("Scripts/libertix-compatibility-preflight.ps1")
+
+    assert '"modules\\Libertix.StorageGeometry.psm1"' in script
+    assert "$alignmentPadding = Get-LibertixPartitionEndAlignmentPadding" in script
+    assert "[long]$partition.Size - [long]$supportedSize.SizeMin - $alignmentPadding" in script
+    assert '$firmware -eq "BIOS"' in script
+    assert "$shrinkAvailable -= Get-LibertixPartitionAlignmentBytes" in script
+    assert "$disk.PhysicalSectorSize % $disk.LogicalSectorSize -ne 0" in script
+
+
+def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
+    page = read("Pages/ResizeDisk.xaml.cs")
+
+    assert "_initialFreeSpace =" in page
+    assert "systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0" in page
+    assert "_initialFreeSpace = Math.Round" not in page
+    assert "_installationState.Compatibility?.ShrinkAvailableBytes" in page
+    available_linux_size = (
+        "Math.Min(\n"
+        "            _initialFreeSpace - MinimumWindowsFree,\n"
+        "            _shrinkAvailableSpace)"
+    )
+    assert available_linux_size in page
+
+
+def test_nvram_write_probe_opt_out_is_explicit_and_never_reported_as_passed() -> None:
+    startup = read("Helpers/StartupOptions.cs")
+    page = read("Pages/CompatibilityCheck.xaml.cs")
+    runner = read("Helpers/CompatibilityPreflightRunner.cs")
+    script = read("Scripts/libertix-compatibility-preflight.ps1")
+
+    assert 'SkipNvramWriteProbeOption = "--skip-nvram-write-probe"' in startup
+    assert "RuntimeOptions.SkipNvramWriteProbe" in page
+    assert 'arguments += " -SkipNvramWriteProbe"' in runner
+    assert "[switch]$SkipNvramWriteProbe" in script
+    skipped_branch = script.split("if ($SkipNvramWriteProbe) {", 1)[1].split("} else {", 1)[0]
+    assert "$nvramSkipped = $true" in skipped_branch
+    assert "$nvramPassed = $true" not in skipped_branch
+    assert 'Write-Result "NVRAM_PROBE_SKIPPED"' in script
 
 
 def test_windows_manifest_declares_supported_platform_dpi_and_long_paths() -> None:

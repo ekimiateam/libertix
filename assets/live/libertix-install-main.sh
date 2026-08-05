@@ -30,6 +30,7 @@ RECOVERY_GEOMETRY_BEFORE=""
 # ERR can fire during bootstrap and rollback must never fail because of `set -u`.
 TARGET_DISK_SIZE_BYTES=""
 WINDOWS_PARTITION_OFFSET_BYTES=""
+WINDOWS_PARTITION_SIZE_BYTES=""
 WINDOWS_BOOT_PARTITION_OFFSET_BYTES=""
 INSTALLER_PARTITION_OFFSET_BYTES=""
 EXPECTED_PARTITION_STYLE=""
@@ -75,6 +76,26 @@ on_err() {
 }
 trap on_err ERR
 
+on_exit() {
+    local rc="$?"
+
+    trap - ERR EXIT
+    if [ "$rc" -eq 0 ]; then
+        exit 0
+    fi
+
+    # Bash does not run ERR traps for every fatal expansion error, including an
+    # unset variable under `set -u`. Keep this final guard outside nounset mode
+    # so an unexpected shell exit still reaches the shared rollback engine.
+    set +u
+    if declare -F fail_and_exit >/dev/null 2>&1 \
+        && [ "${INSTALL_SUCCESS:-false}" = false ] \
+        && [ "${ROLLBACK_ATTEMPTED:-false}" = false ]; then
+        fail_and_exit "$rc" "unhandled shell exit at stage ${CURRENT_STAGE:-bootstrap}"
+    fi
+    exit "$rc"
+}
+
 . /usr/local/lib/libertix/libertix-install-platform-common.sh
 . /usr/local/lib/libertix/libertix-storage-common.sh
 . /usr/local/lib/libertix/libertix-install-runtime-common.sh
@@ -87,6 +108,7 @@ if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
 else
     . /usr/local/lib/libertix/libertix-uefi-adapter.sh
 fi
+trap on_exit EXIT
 
 echo "Libertix build: $(cat /etc/libertix-build-id 2>/dev/null || echo unknown)"
 wait_for_prereqs
@@ -124,12 +146,6 @@ LIVE_PART=$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || t
 
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$DISK"
 
-PART_TABLE=$(parted -sm "$DISK" print 2>/dev/null | awk -F: 'NR==2{print $6}')
-PART_COUNT=$(partition_count "$DISK")
-MBR_PRIMARY_SLOT_COUNT=0
-if [ "$PART_TABLE" = "msdos" ]; then
-    MBR_PRIMARY_SLOT_COUNT=$(mbr_primary_slot_count "$DISK")
-fi
 RECOVERY_GEOMETRY_BEFORE="$(recovery_geometry "$DISK")"
 [ -n "$RECOVERY_GEOMETRY_BEFORE" ] && echo "Recovery partition geometry before install: $RECOVERY_GEOMETRY_BEFORE"
 
@@ -165,75 +181,6 @@ if [ "$LIBERTIX_FIRMWARE_MODE" = "uefi" ]; then
     write_windows_recovery_marker_best_effort "live-started" 0
 fi
 
-# Windows already reserved the full requested Linux size; this is only the
-# reference used to decide whether any additional live-side shrink is needed.
-LINUX_SIZE_MB=$((LINUX_SIZE_GB * 1024))
-
-CURRENT_FREE_MB=0
-while IFS= read -r line; do
-    if echo "$line" | grep -qi "Free Space"; then
-        vals=($(echo "$line" | grep -oE '[0-9]+(\.[0-9]+)?MB' | sed 's/MB//'))
-        [ "${#vals[@]}" -ge 3 ] && {
-            sz=${vals[2]%%.*}
-            [ "$sz" -gt "$CURRENT_FREE_MB" ] 2>/dev/null && CURRENT_FREE_MB=$sz
-        }
-    fi
-done <<< "$(parted "$DISK" unit MB print free 2>/dev/null)"
-
-echo "Current free space: ${CURRENT_FREE_MB}MB"
-echo "Desired Linux size: ${LINUX_SIZE_MB}MB (${LINUX_SIZE_GB}GB)"
-
-ADDITIONAL_SHRINK_MB=$((LINUX_SIZE_MB - CURRENT_FREE_MB))
-
-if [ -n "$LIVE_PART" ] && [ "$(parent_disk_from_part "$LIVE_PART")" = "$DISK" ]; then
-    echo "Live partition already exists at $LIVE_PART; skipping live-side Windows shrink."
-    echo "Windows/Libertix created this partition at the final Linux size."
-    ADDITIONAL_SHRINK_MB=0
-fi
-
-if [ "$ADDITIONAL_SHRINK_MB" -gt 1024 ]; then
-    echo "=== Additional NTFS shrinking needed: ${ADDITIONAL_SHRINK_MB}MB ==="
-
-    NEW_WINDOWS_SIZE_MB=$((WINDOWS_SIZE - ADDITIONAL_SHRINK_MB))
-
-    if [ "$NEW_WINDOWS_SIZE_MB" -lt 20480 ]; then
-        echo "WARNING: New Windows size would be less than 20GB, limiting shrink"
-        NEW_WINDOWS_SIZE_MB=20480
-        ADDITIONAL_SHRINK_MB=$((WINDOWS_SIZE - NEW_WINDOWS_SIZE_MB))
-    fi
-
-    echo "Shrinking Windows from ${WINDOWS_SIZE}MB to ${NEW_WINDOWS_SIZE_MB}MB..."
-
-    umount "$WINDOWS_PART" 2>/dev/null || true
-
-    # Shrink the NTFS filesystem before moving its partition boundary. Reversing
-    # this order can cut live filesystem data from the block device.
-    echo "Checking NTFS filesystem..."
-    ntfsfix "$WINDOWS_PART" || die "NTFS pre-resize check failed"
-
-    NEW_SIZE_BYTES=$((NEW_WINDOWS_SIZE_MB * 1024 * 1024))
-    echo "Resizing NTFS to ${NEW_WINDOWS_SIZE_MB}MB..."
-    ntfsresize -f -s "${NEW_SIZE_BYTES}" "$WINDOWS_PART" <<< "y" || \
-        die "ntfsresize failed; the partition table was not changed"
-
-    PART_NUM=$(echo "$WINDOWS_PART" | grep -oE '[0-9]+$')
-    echo "Resizing partition table..."
-    parted -s "$DISK" resizepart "$PART_NUM" "${NEW_WINDOWS_SIZE_MB}MB" 2>/dev/null || \
-        die "parted failed after NTFS resize; rollback is required"
-
-    sync
-    partprobe "$DISK" 2>/dev/null || true
-    sleep 2
-
-    WINDOWS_SIZE=$(($(blockdev --getsize64 "$WINDOWS_PART" 2>/dev/null || echo 0) / 1024 / 1024))
-    echo "Windows partition now: ${WINDOWS_SIZE}MB"
-    [ "$WINDOWS_SIZE" -ge "$((NEW_WINDOWS_SIZE_MB - 8))" ] && \
-        [ "$WINDOWS_SIZE" -le "$((NEW_WINDOWS_SIZE_MB + 8))" ] || \
-        die "Windows partition size verification failed after resize"
-else
-    echo "No additional shrinking needed (current free space is sufficient)"
-fi
-
 mark "030-check-mint-iso"
 ISO_WINDOWS_REL=$(windows_path_to_relative "$ISO_WINDOWS_PATH")
 ISO_SOURCE="/mnt/windows/$ISO_WINDOWS_REL"
@@ -249,87 +196,53 @@ run_logged umount /mnt/windows
 NEW_PART=""
 NEW_PART_NUM=""
 
-if [ -n "$LIVE_PART" ] && [ "$(parent_disk_from_part "$LIVE_PART")" = "$DISK" ]; then
-    echo "=== Reusing live partition $LIVE_PART as final Linux partition ==="
-    echo "The validated staging partition will become the final Linux partition."
-    mark "040-unmount-target-disk"
-    unmount_target_disk_partitions
-    assert_no_target_disk_mounts
-    NEW_PART="$LIVE_PART"
-    NEW_PART_NUM=$(partition_number "$NEW_PART")
-    mark "050-assert-live-detached"
-    assert_not_mounted_or_open "$NEW_PART"
+[ "$(parent_disk_from_part "$LIVE_PART")" = "$DISK" ] || \
+    die "installer partition is not on the validated target disk"
+echo "=== Reusing live partition $LIVE_PART as final Linux partition ==="
+echo "The validated staging partition will become the final Linux partition."
+mark "040-unmount-target-disk"
+unmount_target_disk_partitions
+assert_no_target_disk_mounts
+NEW_PART="$LIVE_PART"
+NEW_PART_NUM=$(partition_number "$NEW_PART")
+mark "050-assert-live-detached"
+assert_not_mounted_or_open "$NEW_PART"
 
-    # Windows may deliberately create a small FAT32 staging partition when
-    # the requested Linux size exceeds the historical Windows FAT32 limit.
-    # C: has already been shrunk by the complete requested size, leaving the
-    # remainder contiguous after this partition. Expand it before mkfs.ext4.
-    current_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
-    requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))
-    desired_partition_bytes="$requested_partition_bytes"
-    if [ "$current_partition_bytes" -lt "$requested_partition_bytes" ]; then
-        logical_sector_bytes=$(blockdev --getss "$DISK" 2>/dev/null || echo 0)
-        [ "$logical_sector_bytes" -gt 0 ] || die "cannot determine target disk logical sector size"
-        partition_start_sector=$(cat "/sys/class/block/$(basename "$NEW_PART")/start" 2>/dev/null || echo 0)
-        [ "$partition_start_sector" -gt 0 ] || die "cannot determine installer partition start sector"
-        recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))
-        maximum_partition_bytes=$(((recovery_start_sector - partition_start_sector) * logical_sector_bytes))
-        desired_partition_bytes=$(installer_partition_target_bytes \
-            "$requested_partition_bytes" "$maximum_partition_bytes") || \
-            die "requested Linux partition would overlap the Windows recovery partition"
+# Windows may deliberately create a small FAT32 staging partition when the
+# requested Linux size exceeds the historical Windows FAT32 limit. C: has
+# already been shrunk by the complete requested size, leaving the remainder
+# contiguous after this partition. Expand it before mkfs.ext4.
+current_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
+requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))
+desired_partition_bytes="$requested_partition_bytes"
+if [ "$current_partition_bytes" -lt "$requested_partition_bytes" ]; then
+    logical_sector_bytes=$(blockdev --getss "$DISK" 2>/dev/null || echo 0)
+    [ "$logical_sector_bytes" -gt 0 ] || die "cannot determine target disk logical sector size"
+    partition_start_sector=$(bytes_to_logical_sectors \
+        "$INSTALLER_PARTITION_OFFSET_BYTES" "$logical_sector_bytes") || \
+        die "installer partition offset is not aligned to the logical sector size"
+    recovery_start_sector=$(bytes_to_logical_sectors \
+        "$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector_bytes") || \
+        die "recovery partition offset is not aligned to the logical sector size"
+    maximum_partition_bytes=$(((recovery_start_sector - partition_start_sector) * logical_sector_bytes))
+    desired_partition_bytes=$(installer_partition_target_bytes \
+        "$requested_partition_bytes" "$maximum_partition_bytes") || \
+        die "requested Linux partition would overlap the Windows recovery partition"
 
-        if [ "$current_partition_bytes" -lt "$desired_partition_bytes" ]; then
-            desired_partition_sectors=$((desired_partition_bytes / logical_sector_bytes))
-            desired_end_sector=$((partition_start_sector + desired_partition_sectors - 1))
-            echo "Expanding FAT32 staging partition from $current_partition_bytes to $desired_partition_bytes bytes before ext4 format"
-            run_logged parted -s "$DISK" unit s resizepart "$NEW_PART_NUM" "${desired_end_sector}s"
-            sync
-            partprobe "$DISK" 2>/dev/null || true
-            udevadm settle 2>/dev/null || true
-            sleep 2
-        fi
-
-        expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
-        [ "$expanded_partition_bytes" -eq "$desired_partition_bytes" ] || \
-            die "installer partition expansion verification failed: expected $desired_partition_bytes, got $expanded_partition_bytes"
+    if [ "$current_partition_bytes" -lt "$desired_partition_bytes" ]; then
+        desired_partition_sectors=$((desired_partition_bytes / logical_sector_bytes))
+        desired_end_sector=$((partition_start_sector + desired_partition_sectors - 1))
+        echo "Expanding FAT32 staging partition from $current_partition_bytes to $desired_partition_bytes bytes before ext4 format"
+        run_logged parted -s "$DISK" unit s resizepart "$NEW_PART_NUM" "${desired_end_sector}s"
+        sync
+        partprobe "$DISK" 2>/dev/null || true
+        udevadm settle 2>/dev/null || true
+        sleep 2
     fi
-elif [ "$PART_TABLE" = "msdos" ] && [ "$MBR_PRIMARY_SLOT_COUNT" -ge 4 ]; then
-    echo "ERROR: MBR has $MBR_PRIMARY_SLOT_COUNT primary slots and no removable live partition was found"
-    echo "Refusing to delete or move the Windows recovery partition"
-    print_disk_state "no live partition found"
-    die "MBR full and no live partition found"
-fi
 
-if [ -z "$NEW_PART" ]; then
-    # Find free space and create partition. This path is only used when the live
-    # media is not on the target disk.
-    unmount_target_disk_partitions
-    assert_no_target_disk_mounts
-    partprobe "$DISK" 2>/dev/null || true; sleep 1
-    max_size=0; best_start=""; best_end=""
-    while IFS= read -r line; do
-        if echo "$line" | grep -qi "Free Space"; then
-            vals=($(echo "$line" | grep -oE '[0-9]+(\.[0-9]+)?MB' | sed 's/MB//'))
-            [ "${#vals[@]}" -ge 3 ] || continue
-            sz=${vals[2]%%.*}
-            [ "$sz" -gt "$max_size" ] 2>/dev/null && { max_size=$sz; best_start=${vals[0]%%.*}; best_end=${vals[1]%%.*}; }
-        fi
-    done <<< "$(parted "$DISK" unit MB print free 2>/dev/null)"
-
-    [ "$max_size" -lt 5000 ] && die "<5GB free"
-
-    echo "Creating Linux partition (${max_size}MB)"
-    parted -s "$DISK" mkpart primary ext4 "${best_start}MB" "${best_end}MB"
-    sync; partprobe "$DISK" 2>/dev/null || true; sleep 2
-
-    for i in 1 2 3 4 5; do
-        tp=$(partition_path "$DISK" "$i")
-        [ -b "$tp" ] || continue
-        fs=$(blkid -s TYPE -o value "$tp" 2>/dev/null || echo "")
-        [ -z "$fs" ] && { NEW_PART="$tp"; break; }
-    done
-    [ -z "$NEW_PART" ] && NEW_PART=$(lsblk -nr -o NAME,TYPE "$DISK" | awk '$2=="part"{p="/dev/"$1}END{print p}')
-    NEW_PART_NUM=$(echo "$NEW_PART" | grep -oE '[0-9]+$')
+    expanded_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
+    [ "$expanded_partition_bytes" -eq "$desired_partition_bytes" ] || \
+        die "installer partition expansion verification failed: expected $desired_partition_bytes, got $expanded_partition_bytes"
 fi
 
 prepare_installer_partition_for_target_format_or_die

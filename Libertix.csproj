@@ -98,6 +98,7 @@
     <Compile Include="Installation\InstallationPlan.cs" />
     <Compile Include="Installation\InstallationPlanSerializer.cs" />
     <Compile Include="Installation\InstallationPlanValidator.cs" />
+    <Compile Include="Installation\Ipv4NetworkPolicy.cs" />
     <Compile Include="Installation\InstallationSizePolicy.cs" />
     <Compile Include="Installation\InstallationStateMachine.cs" />
     <Compile Include="Installation\InstallationStateStore.cs" />
@@ -233,6 +234,9 @@
     <Content Include="Scripts\config\Libertix.BootArguments.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\config\Libertix.LiveGrubMenu.cfg.in">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\config\Libertix.Artifacts.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -297,6 +301,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.InstallationState.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.StorageGeometry.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Tools\aria2\aria2c.exe">

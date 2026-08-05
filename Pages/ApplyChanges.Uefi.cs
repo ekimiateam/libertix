@@ -1,21 +1,14 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Linq;
-using System.Net.Http;
-using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -116,7 +109,15 @@ namespace Libertix.Pages
             }
             finally
             {
-                try { if (File.Exists(configPath)) File.Delete(configPath); } catch { }
+                try
+                {
+                    if (File.Exists(configPath))
+                        File.Delete(configPath);
+                }
+                catch (Exception ex)
+                {
+                    Log($"Temporary UEFI configuration cleanup failed: {ex.Message}");
+                }
             }
 
             if (_installationCancellation.IsCancellationRequested || exitCode == -2)
@@ -267,7 +268,11 @@ namespace Libertix.Pages
                 if (Directory.Exists(recovery.RecoveryRoot))
                     Directory.Delete(recovery.RecoveryRoot, true);
             }
-            catch { }
+            catch
+            {
+                // Recovery session cleanup is best-effort. The scheduled
+                // recovery guard owns the same directory and can remove it.
+            }
         }
 
         private static string WriteProtectedUefiConfig(object config)
@@ -301,47 +306,36 @@ namespace Libertix.Pages
                 return;
 
             Log(line);
+            RefreshUefiProgressFromExecutionState();
+        }
 
-            var progressEvent = Regex.Match(
-                line,
-                @"^LIBERTIX_PROGRESS (?<stage>[a-z0-9-]+) (?<percent>\d{1,3})$");
-            if (progressEvent.Success &&
-                int.TryParse(progressEvent.Groups["percent"].Value, out int eventPercent))
+        private void RefreshUefiProgressFromExecutionState()
+        {
+            try
             {
-                HandleUefiProgressEvent(
-                    progressEvent.Groups["stage"].Value,
-                    Math.Max(0, Math.Min(100, eventPercent)));
-                return;
+                InstallationExecutionState state = InstallationStateStore.Read(_executionStatePath);
+                if (state.Progress == null || state.Revision <= _lastUefiProgressRevision)
+                    return;
+
+                _lastUefiProgressRevision = state.Revision;
+                HandleUefiProgressEvent(state.Progress);
             }
-
-            var ariaProgress = Regex.Match(line, @"\((\d{1,3})%\)");
-            if (ariaProgress.Success && int.TryParse(ariaProgress.Groups[1].Value, out int percent))
+            catch (IOException)
             {
-                int clamped = Math.Max(0, Math.Min(100, percent));
-                if (_uefiDownloadingInstallerIso)
-                {
-                    UpdateProgress(
-                        62 + (clamped * 10 / 100),
-                        LocalizedFormat(
-                            "ApplyChangesDownloadingUefiIsoPercent",
-                            "Downloading Libertix UEFI ISO... {0}%",
-                            clamped));
-                }
-                else
-                {
-                    UpdateProgress(
-                        30 + (clamped * 15 / 100),
-                        LocalizedFormat(
-                            "ApplyChangesDownloadingMintPercent",
-                            "Downloading Mint ISO... {0}%",
-                            clamped));
-                }
+                // Atomic replacement can briefly race with a log callback. The
+                // next output line reloads the complete document.
+            }
+            catch (JsonException)
+            {
+                // A transient read never changes UI state. The persisted
+                // execution ledger remains authoritative on the next callback.
             }
         }
 
-        private void HandleUefiProgressEvent(string stage, int percent)
+        private void HandleUefiProgressEvent(InstallationProgress progress)
         {
-            switch (stage)
+            int percent = progress.OverallPercent;
+            switch (progress.Stage)
             {
                 case "secure-boot":
                     UpdateProgress(percent, Localized("ApplyChangesCheckingSecureBoot", "Checking Secure Boot..."));
@@ -355,7 +349,15 @@ namespace Libertix.Pages
                             _storagePreflight.SystemDrive));
                     break;
                 case "windows-decryption":
-                    UpdateDecryptionProgressFromEncryptedPercent(percent);
+                    int encryptedPercent = progress.DetailPercent ?? 100;
+                    int decryptedPercent = 100 - encryptedPercent;
+                    UpdateProgress(
+                        percent,
+                        LocalizedFormat(
+                            "ApplyChangesDecryptingWindowsPercent",
+                            "Decrypting Windows {0}: {1}%",
+                            _storagePreflight.SystemDrive,
+                            decryptedPercent));
                     break;
                 case "windows-decryption-complete":
                     UpdateProgress(
@@ -366,18 +368,15 @@ namespace Libertix.Pages
                             _storagePreflight.SystemDrive));
                     break;
                 case "installer-iso-download":
-                    _uefiDownloadingInstallerIso = false;
                     UpdateProgress(percent, Localized("ApplyChangesDownloadingMint", "Downloading Mint ISO..."));
                     break;
                 case "installer-iso-ready":
-                    _uefiDownloadingInstallerIso = false;
                     UpdateProgress(percent, Localized("ApplyChangesMintReady", "Mint ISO ready"));
                     break;
                 case "staging-partition":
                     UpdateProgress(percent, Localized("ApplyChangesCreatingUefiPartition", "Creating UEFI installer partition..."));
                     break;
                 case "live-iso-download":
-                    _uefiDownloadingInstallerIso = true;
                     UpdateProgress(percent, Localized("ApplyChangesDownloadingUefiIso", "Downloading Libertix UEFI ISO..."));
                     break;
                 case "live-iso-copy":
@@ -390,19 +389,6 @@ namespace Libertix.Pages
                     UpdateProgress(percent, Localized("ApplyChangesUefiComplete", "UEFI preparation complete"));
                     break;
             }
-        }
-
-        private void UpdateDecryptionProgressFromEncryptedPercent(double encryptedPercent)
-        {
-            int decryptedPercent = Math.Max(0, Math.Min(100, (int)Math.Round(100 - encryptedPercent)));
-            int overallProgress = 18 + (decryptedPercent * 10 / 100);
-            UpdateProgress(
-                overallProgress,
-                LocalizedFormat(
-                    "ApplyChangesDecryptingWindowsPercent",
-                    "Decrypting Windows {0}: {1}%",
-                    _storagePreflight.SystemDrive,
-                    decryptedPercent));
         }
 
     }

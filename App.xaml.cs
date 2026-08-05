@@ -69,7 +69,8 @@ namespace Libertix
             {
                 ApplicationLogger.Write(
                     "Development SSH/static network enabled for " +
-                    options.DevelopmentSshStaticIpv4Address + ".");
+                    options.DevelopmentSshStaticIpv4Address + "/" +
+                    options.DevelopmentSshStaticIpv4PrefixLength + ".");
             }
             return true;
         }
@@ -122,7 +123,11 @@ namespace Libertix
                 if (path.StartsWith(root, StringComparison.OrdinalIgnoreCase) && File.Exists(path))
                     return path;
             }
-            catch { }
+            catch
+            {
+                // Invalid or inaccessible command-line paths are rejected like
+                // paths outside the protected recovery directory.
+            }
             return null;
         }
 

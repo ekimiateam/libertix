@@ -94,9 +94,12 @@ menu, boots Linux, runs the Linux checks over SSH, creates and hashes the sharin
 Windows for the next boot, and runs the Windows checks over SSH. A failed check does not skip the
 remaining checks, but it makes the final operation result fail.
 
-For full installations, the service launches Libertix with `--dev-ssh-static-ip` set to the selected
-VM's Windows address. The installed Linux system therefore retains that address and enables SSH for
-the account supplied in the automation request. Production launches do not enable this behavior.
+For full installations, the service launches Libertix with a complete development network profile:
+`--dev-ssh-static-ip`, `--dev-ssh-prefix-length`, `--dev-ssh-gateway`, and one
+`--dev-ssh-dns` argument per configured resolver. The address is the selected VM's Windows address;
+the prefix, gateway and DNS servers come from `.env`. The installed Linux system therefore retains
+the configured address and enables SSH for the account supplied in the automation request.
+Production launches do not enable this behavior.
 
 ## Local files
 

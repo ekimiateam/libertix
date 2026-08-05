@@ -75,7 +75,7 @@ def _optimized_image(image_path: Path) -> str:
     except (OSError, ValueError) as exc:
         raise WorkflowError(
             "llm.image",
-            "Lecture ou optimisation de la capture impossible",
+            "Capture reading or optimization failed",
             details={"path": str(image_path), "error": str(exc)},
         ) from exc
 

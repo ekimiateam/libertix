@@ -112,35 +112,51 @@ delete_transaction_partition_best_effort() {
     fi
 }
 
-rollback_recovery_start_sector() {
-    local logical_sector geometry start
-
-    if [ "${RECOVERY_PARTITION_OFFSET_BYTES:-0}" -gt 0 ] 2>/dev/null; then
-        logical_sector=$(blockdev --getss "$1" 2>/dev/null || echo 512)
-        echo "$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector))"
-        return 0
-    fi
-
-    geometry="$(recovery_geometry "$1")"
-    [ -n "$geometry" ] || return 0
-    start="$(printf '%s\n' "$geometry" | awk -F: '{print $2; exit}')"
-    start="${start%s}"
-    [ -n "$start" ] && printf '%s\n' "$start"
-}
-
 restore_windows_partition_best_effort() {
-    local windows_number recovery_start resize_end
+    local logical_sector original_end_bytes original_end_sector
+    local recovery_start_sector windows_number
 
     windows_number="$(partition_number "$WINDOWS_PART")"
-    recovery_start="$(rollback_recovery_start_sector "$DISK" || true)"
-    if [ -n "$recovery_start" ]; then
-        resize_end="$((recovery_start - 1))s"
-    else
-        resize_end="100%"
-    fi
+    logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || echo 0)"
+    [ "$logical_sector" -eq 512 ] || [ "$logical_sector" -eq 4096 ] || {
+        echo "ROLLBACK: unsupported logical sector size: $logical_sector"
+        return 1
+    }
+    [ "${WINDOWS_PARTITION_OFFSET_BYTES:-0}" -gt 0 ] 2>/dev/null || {
+        echo "ROLLBACK: original Windows partition offset is unavailable"
+        return 1
+    }
+    [ "${WINDOWS_PARTITION_SIZE_BYTES:-0}" -gt 0 ] 2>/dev/null || {
+        echo "ROLLBACK: original Windows partition size is unavailable"
+        return 1
+    }
 
-    echo "ROLLBACK: resizing Windows partition $WINDOWS_PART to $resize_end"
-    parted -s "$DISK" unit s resizepart "$windows_number" "$resize_end" || {
+    original_end_bytes=$((WINDOWS_PARTITION_OFFSET_BYTES + WINDOWS_PARTITION_SIZE_BYTES))
+    original_end_sector="$(bytes_to_logical_sectors \
+        "$original_end_bytes" "$logical_sector")" || {
+        echo "ROLLBACK: original Windows partition end is not sector-aligned"
+        return 1
+    }
+    [ "$original_end_sector" -gt 0 ] || {
+        echo "ROLLBACK: original Windows partition geometry is invalid"
+        return 1
+    }
+    recovery_start_sector="$(bytes_to_logical_sectors \
+        "$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector")" || {
+        echo "ROLLBACK: recovery partition offset is not sector-aligned"
+        return 1
+    }
+    [ "$original_end_sector" -le "$recovery_start_sector" ] || {
+        echo "ROLLBACK: original Windows partition would overlap Recovery"
+        return 1
+    }
+
+    # Recovery must reproduce the captured geometry, not consume every sector
+    # before Recovery. Cloned layouts may intentionally contain a pre-existing
+    # gap, and growing C: into that gap would make rollback non-reversible.
+    echo "ROLLBACK: restoring Windows partition $WINDOWS_PART to its original end"
+    parted -s "$DISK" unit s resizepart \
+        "$windows_number" "$((original_end_sector - 1))s" || {
         echo "ROLLBACK: partition resize failed"
         return 1
     }

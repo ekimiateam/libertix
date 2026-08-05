@@ -327,7 +327,15 @@ namespace Libertix.Pages
             }
             catch
             {
-                try { process.Kill(); } catch { }
+                try
+                {
+                    process.Kill();
+                }
+                catch
+                {
+                    // The process can exit between taskkill failure and this
+                    // fallback, so there is nothing left to terminate.
+                }
             }
         }
 

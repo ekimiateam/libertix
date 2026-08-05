@@ -1,4 +1,5 @@
 ﻿using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Windows;
 
@@ -12,6 +13,7 @@ using System.Windows;
 [assembly: AssemblyCulture("")]
 
 [assembly: ComVisible(false)]
+[assembly: InternalsVisibleTo("Libertix.Tests")]
 
 [assembly: ThemeInfo(
     ResourceDictionaryLocation.None,

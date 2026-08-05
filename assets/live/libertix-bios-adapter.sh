@@ -223,8 +223,10 @@ firmware_cleanup_partition_container_best_effort() {
 
     logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || true)"
     [ "${logical_sector:-0}" -gt 0 ] 2>/dev/null || return 1
-    installer_sector="$((INSTALLER_PARTITION_OFFSET_BYTES / logical_sector))"
-    recovery_sector="$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector))"
+    installer_sector="$(bytes_to_logical_sectors \
+        "$INSTALLER_PARTITION_OFFSET_BYTES" "$logical_sector")" || return 1
+    recovery_sector="$(bytes_to_logical_sectors \
+        "$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector")" || return 1
 
     if extended_row="$(
         printf '%s\n' "$layout" |
@@ -296,13 +298,25 @@ firmware_write_failure_marker_best_effort() {
     return 0
 }
 
+bios_partition_table_or_die() {
+    local partition_table
+
+    partition_table="$(
+        parted -sm "$DISK" print 2>/dev/null |
+            awk -F: 'NR == 2 { print tolower($6); exit }'
+    )"
+    [ "$partition_table" = "msdos" ] || \
+        die "BIOS adapter expected an MBR partition table, got ${partition_table:-unknown}"
+    printf '%s\n' "$partition_table"
+}
+
 prepare_installer_partition_for_target_format_or_die() {
     local layout logical_sector installer_sector recovery_sector owned_layout
     local logical_number logical_start logical_end
     local extended_number extended_start extended_end extended_type
     local original_size new_end new_size
 
-    [ "$PART_TABLE" = "msdos" ] || return 0
+    bios_partition_table_or_die >/dev/null
     [ "$SHARE_LINUX_FILES_IN_WINDOWS" = "true" ] || return 0
     [ "${NEW_PART_NUM:-0}" -ge 5 ] 2>/dev/null || return 0
 
@@ -312,8 +326,12 @@ prepare_installer_partition_for_target_format_or_die() {
     logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || true)"
     [ "${logical_sector:-0}" -gt 0 ] 2>/dev/null || \
         die "cannot determine the MBR logical sector size"
-    installer_sector="$((INSTALLER_PARTITION_OFFSET_BYTES / logical_sector))"
-    recovery_sector="$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector))"
+    installer_sector="$(bytes_to_logical_sectors \
+        "$INSTALLER_PARTITION_OFFSET_BYTES" "$logical_sector")" || \
+        die "the MBR staging offset is not aligned to the logical sector size"
+    recovery_sector="$(bytes_to_logical_sectors \
+        "$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector")" || \
+        die "the MBR recovery offset is not aligned to the logical sector size"
 
     owned_layout="$(
         printf '%s\n' "$layout" |
@@ -494,8 +512,7 @@ set_linux_partition_type_or_die() {
     [ -n "$NEW_PART_NUM" ] || die "Linux partition number missing"
 
     mark "060-set-linux-partition-type"
-    [ "$PART_TABLE" = "msdos" ] || \
-        die "BIOS adapter expected an MBR partition table, got $PART_TABLE"
+    bios_partition_table_or_die >/dev/null
     echo "Setting MBR partition $NEW_PART_NUM type to Linux (0x83)"
     run_logged sfdisk --part-type "$DISK" "$NEW_PART_NUM" 83 || \
         die "failed to set Linux MBR type on $NEW_PART"

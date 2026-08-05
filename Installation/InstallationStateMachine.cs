@@ -14,6 +14,9 @@ namespace Libertix.Installation
         private static readonly Regex StepPattern = new Regex(
             "^(windows|live|target)\\.[a-z0-9]+(?:-[a-z0-9]+)*$",
             RegexOptions.CultureInvariant);
+        private static readonly Regex ProgressStagePattern = new Regex(
+            "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            RegexOptions.CultureInvariant);
 
         private static readonly HashSet<string> KnownPhases = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -40,8 +43,31 @@ namespace Libertix.Installation
                 PlanId = planId,
                 Status = InstallationStatus.Pending,
                 Phase = InstallationPhase.Windows,
+                Progress = new InstallationProgress
+                {
+                    Stage = "initializing",
+                    OverallPercent = 0
+                },
                 UpdatedAtUtc = DateTimeOffset.UtcNow
             });
+        }
+
+        public void SetProgress(string stage, int overallPercent, int? detailPercent = null)
+        {
+            if (string.IsNullOrWhiteSpace(stage) || !ProgressStagePattern.IsMatch(stage))
+                throw new ArgumentException("A stable progress stage is required.", nameof(stage));
+            if (overallPercent < 0 || overallPercent > 100)
+                throw new ArgumentOutOfRangeException(nameof(overallPercent));
+            if (detailPercent.HasValue && (detailPercent.Value < 0 || detailPercent.Value > 100))
+                throw new ArgumentOutOfRangeException(nameof(detailPercent));
+
+            State.Progress = new InstallationProgress
+            {
+                Stage = stage,
+                OverallPercent = overallPercent,
+                DetailPercent = detailPercent
+            };
+            Touch();
         }
 
         public void StartStep(string step)
@@ -170,6 +196,17 @@ namespace Libertix.Installation
             }
             if (state.CompletedSteps == null || state.CompensatedSteps == null)
                 throw new InvalidOperationException("Execution state step lists are required.");
+            if (state.Progress != null &&
+                (string.IsNullOrWhiteSpace(state.Progress.Stage) ||
+                 !ProgressStagePattern.IsMatch(state.Progress.Stage) ||
+                 state.Progress.OverallPercent < 0 ||
+                 state.Progress.OverallPercent > 100 ||
+                 (state.Progress.DetailPercent.HasValue &&
+                  (state.Progress.DetailPercent.Value < 0 ||
+                   state.Progress.DetailPercent.Value > 100))))
+            {
+                throw new InvalidOperationException("Execution state progress is invalid.");
+            }
             if (state.CompletedSteps.Distinct(StringComparer.Ordinal).Count() != state.CompletedSteps.Count)
                 throw new InvalidOperationException("Execution state contains duplicate completed steps.");
             if (state.CompensatedSteps.Distinct(StringComparer.Ordinal).Count() != state.CompensatedSteps.Count)

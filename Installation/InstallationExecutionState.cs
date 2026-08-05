@@ -38,8 +38,25 @@ namespace Libertix.Installation
         [JsonPropertyName("failure")]
         public InstallationFailure Failure { get; set; }
 
+        [JsonPropertyName("progress")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public InstallationProgress Progress { get; set; }
+
         [JsonPropertyName("updatedAtUtc")]
         public DateTimeOffset UpdatedAtUtc { get; set; }
+    }
+
+    public sealed class InstallationProgress
+    {
+        [JsonPropertyName("stage")]
+        public string Stage { get; set; }
+
+        [JsonPropertyName("overallPercent")]
+        public int OverallPercent { get; set; }
+
+        [JsonPropertyName("detailPercent")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? DetailPercent { get; set; }
     }
 
     public sealed class InstallationFailure

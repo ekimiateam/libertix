@@ -71,6 +71,9 @@
         }
       ]
     },
+    "progress": {
+      "$ref": "#/$defs/progress"
+    },
     "updatedAtUtc": {
       "type": "string",
       "format": "date-time"
@@ -109,6 +112,30 @@
             "target",
             "rollback"
           ]
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "overallPercent"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "overallPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "detailPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
         }
       }
     }

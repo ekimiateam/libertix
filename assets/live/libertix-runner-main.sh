@@ -1,4 +1,8 @@
 #!/bin/bash
+# Do not enable errexit or pipefail here. This process supervises the strict
+# installer, records its exact exit code, and must remain alive to render the
+# rollback result when UI probes or best-effort diagnostics fail. The installer
+# itself runs with set -Eeuo pipefail and owns transactional failure handling.
 set -u
 trap '' HUP
 
@@ -505,12 +509,12 @@ write_failure_result() {
     local rollback
     rollback="$(grep '^LIBERTIX_INSTALL_ROLLBACK=' "$LOG" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
     [ -n "$rollback" ] || rollback="unknown"
-echo "installer-failed-rc-$rc" > "$STAGE_FILE"
-if [ -s "$FAIL_FILE" ]; then
-    echo "runner_rc=$rc" >> "$FAIL_FILE"
-else
-    echo "rc=$rc" > "$FAIL_FILE"
-fi
+    echo "installer-failed-rc-$rc" > "$STAGE_FILE"
+    if [ -s "$FAIL_FILE" ]; then
+        echo "runner_rc=$rc" >> "$FAIL_FILE"
+    else
+        echo "rc=$rc" > "$FAIL_FILE"
+    fi
     {
         echo "LIBERTIX_INSTALL_SUCCESS=false"
         echo "LIBERTIX_INSTALL_RUN_ID=$RUN_ID"

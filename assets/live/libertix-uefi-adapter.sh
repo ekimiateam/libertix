@@ -324,6 +324,19 @@ firmware_prepare_rollback_best_effort() {
     cleanup_final_uefi_bootloader_best_effort || true
 }
 
+uefi_partition_table_or_die() {
+    local partition_table
+
+    partition_table="$(
+        parted -sm "$DISK" print 2>/dev/null |
+            awk -F: 'NR == 2 { print tolower($6); exit }'
+    )"
+    case "$partition_table" in
+        gpt|msdos) printf '%s\n' "$partition_table" ;;
+        *) die "UEFI adapter cannot determine the partition table on $DISK" ;;
+    esac
+}
+
 firmware_resolve_rollback_partition() {
     local candidate
 
@@ -522,12 +535,13 @@ cleanup_final_uefi_bootloader_best_effort() {
 
 set_linux_partition_type_or_die() {
     local linux_gpt_guid="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
-    local parttype expected
+    local partition_table parttype expected
 
     [ -n "$NEW_PART_NUM" ] || die "Linux partition number missing"
 
     mark "060-set-linux-partition-type"
-    if [ "$PART_TABLE" = "msdos" ]; then
+    partition_table="$(uefi_partition_table_or_die)"
+    if [ "$partition_table" = "msdos" ]; then
         echo "Setting MBR partition $NEW_PART_NUM type to Linux (0x83)"
         run_logged sfdisk --part-type "$DISK" "$NEW_PART_NUM" 83 || \
             die "failed to set Linux MBR type on $NEW_PART"
@@ -542,7 +556,7 @@ set_linux_partition_type_or_die() {
     partprobe "$DISK" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
-    if [ "$PART_TABLE" != "msdos" ]; then
+    if [ "$partition_table" != "msdos" ]; then
         parttype="$(lsblk -dnro PARTTYPE "$NEW_PART" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
         expected="$(echo "$linux_gpt_guid" | tr '[:upper:]' '[:lower:]')"
         [ "$parttype" = "$expected" ] || \
@@ -556,9 +570,10 @@ prepare_installer_partition_for_target_format_or_die() {
 
 verify_linux_partition_type_or_die() {
     local linux_gpt_guid="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
-    local parttype expected
+    local partition_table parttype expected
 
-    [ "$PART_TABLE" != "msdos" ] || return 0
+    partition_table="$(uefi_partition_table_or_die)"
+    [ "$partition_table" != "msdos" ] || return 0
 
     partprobe "$DISK" 2>/dev/null || true
     udevadm settle 2>/dev/null || true

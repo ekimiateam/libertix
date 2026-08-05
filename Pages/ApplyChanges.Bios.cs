@@ -1,21 +1,17 @@
+// Windows-side BIOS installation workflow.
+//
+// This partial class arms recovery before disk changes, creates the reusable
+// FAT32 staging slot, publishes the validated installation plan, and installs
+// the one-shot GRUB4DOS bridge. The live environment owns conversion to ext4,
+// target extraction, final GRUB installation, verification, and live rollback.
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
-using System.Runtime.InteropServices;
-using System.Security.AccessControl;
-using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -33,6 +29,29 @@ namespace Libertix.Pages
             InstallationSizes installationSizes =
                 InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB);
 
+            if (!await PrepareBiosPartitionAsync(installationSizes) ||
+                !await PrepareBiosLiveMediaAsync(distribution) ||
+                !await PrepareBiosTemporaryBootAsync())
+            {
+                return;
+            }
+
+            UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
+            Log("Installation preparation completed successfully!");
+            Log($"- FAT32 live partition: {_biosInstallerDriveLetter}: ({installationSizes.StagingSizeMiB / 1024:N0}GB staging, {_linuxSizeGB:N0}GB reserved for Linux)");
+            Log("- The live installer will expand it if needed, then reformat it as ext4 without deleting/recreating the MBR entry");
+            Log($"- ISO contents copied to {_biosInstallerDriveLetter}:");
+            Log("- GRUB4DOS bootloader installed");
+            Log("- Boot entry 'Install Linux' added to Windows Boot Manager");
+            Log("- Next reboot will automatically boot the Linux installer");
+            Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
+
+            RebootButton.Visibility = Visibility.Visible;
+            FinishInstallation(enableBackButton: false);
+        }
+
+        private async Task<bool> PrepareBiosPartitionAsync(InstallationSizes installationSizes)
+        {
             double requestedLinuxMB = installationSizes.FinalSizeMiB;
 
             Log("Installing Windows recovery guard...");
@@ -51,7 +70,7 @@ namespace Libertix.Pages
                 Log("ERROR: Failed to install Windows recovery guard");
                 UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
                 FinishInstallation(enableBackButton: true);
-                return;
+                return false;
             }
             CompleteExecutionStep(InstallationStep.WindowsRecoveryArmed);
 
@@ -60,7 +79,7 @@ namespace Libertix.Pages
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Windows hibernation could not be disabled safely");
-                return;
+                return false;
             }
 
             // Query SizeMin after disabling Fast Startup because hiberfil.sys is
@@ -74,19 +93,18 @@ namespace Libertix.Pages
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Windows does not expose enough shrinkable space for the requested Linux size");
-                return;
+                return false;
             }
 
             UpdateProgress(10, Application.Current.Resources["ApplyChangesStep1"] as string ?? "Shrinking Windows partition...");
             Log($"Step 1: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
-
             StartExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
-            bool step1Success = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
+            bool shrinkSucceeded = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
             ThrowIfCancellationRequested();
-            if (!step1Success)
+            if (!shrinkSucceeded)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to shrink Windows partition (step 1)");
-                return;
+                return false;
             }
             CompleteExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
 
@@ -97,16 +115,10 @@ namespace Libertix.Pages
                 30,
                 Application.Current.Resources["ApplyChangesStep2"] as string
                     ?? "Creating FAT32 boot partition...");
-            if (biosStagingMB < requestedLinuxMB)
-            {
-                Log(
-                    $"Step 2: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; "
-                    + $"the live will expand it to {_linuxSizeGB:N0}GB...");
-            }
-            else
-            {
-                Log($"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
-            }
+            Log(
+                biosStagingMB < requestedLinuxMB
+                    ? $"Step 2: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; the live will expand it to {_linuxSizeGB:N0}GB..."
+                    : $"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
 
             StartExecutionStep(InstallationStep.WindowsInstallerPartitionCreated);
             _biosInstallerDriveLetter = await CreateFat32PartitionSimpleAsync(biosStagingMB);
@@ -114,7 +126,7 @@ namespace Libertix.Pages
             if (string.IsNullOrWhiteSpace(_biosInstallerDriveLetter))
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to create FAT32 partition");
-                return;
+                return false;
             }
             await UpdateInstallerPartitionIdentityAsync(_biosInstallerDriveLetter[0]);
             CompleteExecutionStep(InstallationStep.WindowsInstallerPartitionCreated);
@@ -130,17 +142,23 @@ namespace Libertix.Pages
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Windows Recovery Environment could not be re-enabled after partitioning");
-                return;
+                return false;
             }
 
             Log("Step 3: No second shrink needed; live partition will become the Linux partition.");
             UpdateProgress(50, Application.Current.Resources["ApplyChangesWaitDisk"] as string ?? "Waiting for disk update...");
-            string isoUrl = distribution.LiveIsoUrl;
+            return true;
+        }
 
+        private async Task<bool> PrepareBiosLiveMediaAsync(
+            InstallationDistribution distribution)
+        {
+            string isoUrl = distribution.LiveIsoUrl;
             if (string.IsNullOrEmpty(isoUrl))
             {
-                await FailBiosPreparationAndRollbackAsync("No ISO URL found for selected distribution");
-                return;
+                await FailBiosPreparationAndRollbackAsync(
+                    "No ISO URL found for selected distribution");
+                return false;
             }
 
             UpdateProgress(55, Localized("ApplyChangesDownloadingIso", "Downloading ISO..."));
@@ -150,8 +168,7 @@ namespace Libertix.Pages
             string tempIsoPath = Path.Combine(Path.GetTempPath(), "libertix_installer.iso");
             string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
             string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
-            bool downloadSuccess = false;
-
+            bool downloadSuccess;
             if (File.Exists(localIsoPath))
             {
                 Log($"Found local ISO: {localIsoName}, copying...");
@@ -169,12 +186,16 @@ namespace Libertix.Pages
             if (!downloadSuccess)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to download ISO");
-                return;
+                return false;
             }
-            if (!await VerifySha256Async(tempIsoPath, distribution.LiveIsoSha256, "Libertix BIOS ISO"))
+            if (!await VerifySha256Async(
+                tempIsoPath,
+                distribution.LiveIsoSha256,
+                "Libertix BIOS ISO"))
             {
-                await FailBiosPreparationAndRollbackAsync("Libertix BIOS ISO integrity verification failed");
-                return;
+                await FailBiosPreparationAndRollbackAsync(
+                    "Libertix BIOS ISO integrity verification failed");
+                return false;
             }
             ThrowIfCancellationRequested();
             CompleteExecutionStep(InstallationStep.WindowsArtifactsVerified);
@@ -182,22 +203,22 @@ namespace Libertix.Pages
             UpdateProgress(80, Localized("ApplyChangesCopyingIsoContents", "Copying ISO contents..."));
             Log($"Step 5: Mounting ISO and copying contents to {BiosInstallerRoot}...");
             StartExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
-
-            bool copySuccess = await MountAndCopyIsoAsync(tempIsoPath);
+            bool copySucceeded = await MountAndCopyIsoAsync(tempIsoPath);
             ThrowIfCancellationRequested();
-            if (!copySuccess)
+            if (!copySucceeded)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to copy ISO contents");
-                return;
+                return false;
             }
 
-            bool biosLowMemoryMode =
-                _installationState.Compatibility is CompatibilityInfo biosCompatibility &&
-                biosCompatibility.LowMemoryMode;
-            if (biosLowMemoryMode && !await ConfigureBiosLowMemoryBootAsync(tempIsoPath))
+            bool lowMemoryMode =
+                _installationState.Compatibility is CompatibilityInfo compatibility &&
+                compatibility.LowMemoryMode;
+            if (lowMemoryMode && !await ConfigureBiosLowMemoryBootAsync(tempIsoPath))
             {
-                await FailBiosPreparationAndRollbackAsync("Failed to configure low-memory live boot");
-                return;
+                await FailBiosPreparationAndRollbackAsync(
+                    "Failed to configure low-memory live boot");
+                return false;
             }
 
             try
@@ -211,53 +232,8 @@ namespace Libertix.Pages
                 // the staging volume, and rollback can remove it later.
             }
 
-            // The large distribution ISO stays on NTFS because the FAT32
-            // staging volume must remain small enough for Windows to format.
-            if (!string.IsNullOrEmpty(distribution.InstallerIsoUrl) &&
-                !string.IsNullOrEmpty(distribution.InstallerIsoFileName))
-            {
-                UpdateProgress(85, Localized("ApplyChangesDownloadingLinuxIso", "Downloading Linux installer ISO..."));
-                Log($"Step 6: Downloading Linux installer from {distribution.InstallerIsoUrl}...");
-
-                string installerPath = distribution.InstallerIsoWindowsPath;
-                Directory.CreateDirectory(Path.GetDirectoryName(installerPath));
-                string localInstallerPath = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    distribution.InstallerIsoFileName);
-                bool installerDownloadSuccess = false;
-
-                if (File.Exists(localInstallerPath))
-                {
-                    Log($"Found local installer ISO: {distribution.InstallerIsoFileName}, copying...");
-                    await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
-                    ThrowIfCancellationRequested();
-                    installerDownloadSuccess = true;
-                    UpdateProgress(95, Localized("ApplyChangesLinuxIsoCopied", "Linux installer copied from local folder"));
-                }
-                else
-                {
-                    installerDownloadSuccess = await DownloadInstallerIsoAsync(
-                        distribution.InstallerIsoUrl,
-                        installerPath);
-                }
-                ThrowIfCancellationRequested();
-
-                if (!installerDownloadSuccess)
-                {
-                    await FailBiosPreparationAndRollbackAsync("Failed to download Linux installer ISO");
-                    return;
-                }
-                if (!await VerifySha256Async(
-                    installerPath,
-                    distribution.InstallerIsoSha256,
-                    "Mint ISO"))
-                {
-                    await FailBiosPreparationAndRollbackAsync("Mint ISO integrity verification failed");
-                    return;
-                }
-                ThrowIfCancellationRequested();
-                Log($"Linux installer saved to {installerPath}");
-            }
+            if (!await PrepareBiosDistributionIsoAsync(distribution))
+                return false;
 
             // The live must consume the same validated plan that authorized the
             // Windows-side disk changes; no second shell contract is generated.
@@ -265,7 +241,67 @@ namespace Libertix.Pages
             PublishInstallationContextToLive(BiosInstallerRoot);
             Log($"Installation plan published to {BiosInstallerRoot}installation-plan.json.");
             CompleteExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
+            return true;
+        }
 
+        private async Task<bool> PrepareBiosDistributionIsoAsync(
+            InstallationDistribution distribution)
+        {
+            // The large distribution ISO stays on NTFS because the FAT32
+            // staging volume must remain small enough for Windows to format.
+            if (string.IsNullOrEmpty(distribution.InstallerIsoUrl) ||
+                string.IsNullOrEmpty(distribution.InstallerIsoFileName))
+            {
+                return true;
+            }
+
+            UpdateProgress(85, Localized("ApplyChangesDownloadingLinuxIso", "Downloading Linux installer ISO..."));
+            Log($"Step 6: Downloading Linux installer from {distribution.InstallerIsoUrl}...");
+
+            string installerPath = distribution.InstallerIsoWindowsPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(installerPath));
+            string localInstallerPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                distribution.InstallerIsoFileName);
+            bool downloadSuccess;
+            if (File.Exists(localInstallerPath))
+            {
+                Log($"Found local installer ISO: {distribution.InstallerIsoFileName}, copying...");
+                await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
+                ThrowIfCancellationRequested();
+                downloadSuccess = true;
+                UpdateProgress(95, Localized("ApplyChangesLinuxIsoCopied", "Linux installer copied from local folder"));
+            }
+            else
+            {
+                downloadSuccess = await DownloadInstallerIsoAsync(
+                    distribution.InstallerIsoUrl,
+                    installerPath);
+            }
+            ThrowIfCancellationRequested();
+
+            if (!downloadSuccess)
+            {
+                await FailBiosPreparationAndRollbackAsync(
+                    "Failed to download Linux installer ISO");
+                return false;
+            }
+            if (!await VerifySha256Async(
+                installerPath,
+                distribution.InstallerIsoSha256,
+                "Mint ISO"))
+            {
+                await FailBiosPreparationAndRollbackAsync(
+                    "Mint ISO integrity verification failed");
+                return false;
+            }
+            ThrowIfCancellationRequested();
+            Log($"Linux installer saved to {installerPath}");
+            return true;
+        }
+
+        private async Task<bool> PrepareBiosTemporaryBootAsync()
+        {
             // GRUB4DOS is only a temporary Windows Boot Manager bridge. The
             // live installer removes these files before touching Linux.
             UpdateProgress(96, Localized("ApplyChangesDownloadingBootloader", "Downloading bootloader files..."));
@@ -278,42 +314,44 @@ namespace Libertix.Pages
                 ["grldr"] = Artifacts.Grub4Dos.LoaderSha256,
                 ["grldr.mbr"] = Artifacts.Grub4Dos.MbrLoaderSha256
             };
-            foreach (var file in grubFiles)
+            foreach (string file in grubFiles)
             {
-                string url = $"{FilepoolConfig.BaseUrl}/{file}";
-                string destPath = Path.Combine(_storagePreflight.SystemDrive + @"\", file);
-                string localFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
-                bool success = false;
-
-                if (File.Exists(localFile))
+                string destinationPath = Path.Combine(
+                    _storagePreflight.SystemDrive + @"\",
+                    file);
+                string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
+                bool ready = false;
+                if (File.Exists(localPath))
                 {
                     Log($"Found local {file}, copying...");
                     try
                     {
-                        File.Copy(localFile, destPath, true);
-                        success = true;
+                        File.Copy(localPath, destinationPath, true);
+                        ready = true;
                     }
                     catch (Exception ex)
                     {
                         Log($"ERROR: Failed to copy local {file}: {ex.Message}");
                     }
                 }
-
-                if (!success)
+                if (!ready)
                 {
-                    success = await DownloadFileAsync(url, destPath);
+                    ready = await DownloadFileAsync(
+                        $"{FilepoolConfig.BaseUrl}/{file}",
+                        destinationPath);
                 }
                 ThrowIfCancellationRequested();
 
-                if (!success)
+                if (!ready)
                 {
                     await FailBiosPreparationAndRollbackAsync($"Failed to obtain {file}");
-                    return;
+                    return false;
                 }
-                if (!await VerifySha256Async(destPath, grubHashes[file], file))
+                if (!await VerifySha256Async(destinationPath, grubHashes[file], file))
                 {
-                    await FailBiosPreparationAndRollbackAsync($"Integrity verification failed for {file}");
-                    return;
+                    await FailBiosPreparationAndRollbackAsync(
+                        $"Integrity verification failed for {file}");
+                    return false;
                 }
                 Log($"Ready: {file} at {_storagePreflight.SystemDrive}\\");
             }
@@ -324,42 +362,32 @@ namespace Libertix.Pages
                 string menu = LiveBootArguments
                     .LoadFromApplicationDirectory()
                     .CreateGrub4DosMenu();
-                File.WriteAllText(menuPath, menu, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                File.WriteAllText(
+                    menuPath,
+                    menu,
+                    new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
                 Log($"Ready: menu.lst at {_storagePreflight.SystemDrive}\\");
             }
             catch (Exception ex)
             {
                 await FailBiosPreparationAndRollbackAsync(
                     $"Failed to create GRUB4DOS menu from shared boot arguments: {ex.Message}");
-                return;
+                return false;
             }
 
             // A one-shot boot sequence keeps Windows as the default BCD entry
             // if the live installer cannot finish.
             UpdateProgress(98, Localized("ApplyChangesConfiguringBootEntry", "Configuring boot entry..."));
             Log("Step 9: Configuring GRUB4DOS boot entry...");
-
             bool bootConfigured = await ConfigureBootEntryAsync();
             ThrowIfCancellationRequested();
             if (!bootConfigured)
             {
                 await FailBiosPreparationAndRollbackAsync("Failed to configure boot entry");
-                return;
+                return false;
             }
             CompleteExecutionStep(InstallationStep.WindowsTemporaryBootPrepared);
-
-            UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
-            Log("Installation preparation completed successfully!");
-            Log($"- FAT32 live partition: {_biosInstallerDriveLetter}: ({biosStagingMB / 1024:N0}GB staging, {_linuxSizeGB:N0}GB reserved for Linux)");
-            Log("- The live installer will expand it if needed, then reformat it as ext4 without deleting/recreating the MBR entry");
-            Log($"- ISO contents copied to {_biosInstallerDriveLetter}:");
-            Log("- GRUB4DOS bootloader installed");
-            Log("- Boot entry 'Install Linux' added to Windows Boot Manager");
-            Log("- Next reboot will automatically boot the Linux installer");
-            Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
-
-            RebootButton.Visibility = Visibility.Visible;
-            FinishInstallation(enableBackButton: false);
+            return true;
         }
 
         private async Task FailBiosPreparationAndRollbackAsync(
@@ -596,6 +624,9 @@ namespace Libertix.Pages
             return await Task.Run(() =>
             {
                 string mountedDrive = "";
+                string powershell = ResolveSystemExecutable(
+                    "WindowsPowerShell\\v1.0\\powershell.exe",
+                    "powershell.exe");
 
                 try
                 {
@@ -605,7 +636,7 @@ namespace Libertix.Pages
                         "libertix-disk-image.ps1");
 
                     var mountResult = RunProcess(
-                        "powershell.exe",
+                        powershell,
                         $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
                         $"-Action Mount -ImagePath {QuoteArgument(isoPath)}",
                         (int)WindowsProcessTimeouts.DiskImageOperation.TotalMilliseconds);
@@ -668,7 +699,7 @@ namespace Libertix.Pages
                     {
                         Dispatcher.Invoke(() => Log("Dismounting ISO..."));
                         var unmountResult = RunProcess(
-                            "powershell.exe",
+                            powershell,
                             $"-NoProfile -ExecutionPolicy Bypass -File " +
                             $"{QuoteArgument(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Scripts", "libertix-disk-image.ps1"))} " +
                             $"-Action Dismount -ImagePath {QuoteArgument(isoPath)}",

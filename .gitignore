@@ -3,6 +3,7 @@ bin/
 obj/
 
 # User-specific files
+.env
 *.rsuser
 *.suo
 *.user
@@ -49,7 +50,8 @@ __pycache__/
 
 # Local ISO/build artifacts
 *.iso
-*.iso.bak-*
+*.iso.*
+build-logs/
 
 # auto_tests runtime artifacts
 auto_tests/.env
@@ -61,8 +63,9 @@ auto_tests/captures/
 auto_tests/*.log
 auto_tests/**/*.pyc
 auto_tests/app/filepool/*.iso
-auto_tests/app/filepool/*.iso.bak-*
+auto_tests/app/filepool/*.iso.*
 auto_tests/app/filepool/*.zip
+auto_tests/app/filepool/distros.json.*
 auto_tests/known_hosts
 auto_tests/logs/
 auto_tests/tools/__pycache__/

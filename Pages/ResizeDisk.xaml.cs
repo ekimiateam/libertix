@@ -221,9 +221,15 @@ namespace Libertix.Pages
                 .FirstOrDefault(d => d.IsReady && string.Equals(d.Name, systemRoot, StringComparison.OrdinalIgnoreCase));
             if (systemDrive == null)
                 throw new InvalidOperationException($"System drive not found: {systemRoot}");
-            _totalSpace = Math.Round(systemDrive.TotalSize / 1024.0 / 1024.0 / 1024.0);
-            WindowsUsedSpace = Math.Round((systemDrive.TotalSize - systemDrive.AvailableFreeSpace) / 1024.0 / 1024.0 / 1024.0);
-            _initialFreeSpace = Math.Round(systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0);
+            _totalSpace = systemDrive.TotalSize / 1024.0 / 1024.0 / 1024.0;
+            WindowsUsedSpace =
+                (systemDrive.TotalSize - systemDrive.AvailableFreeSpace) /
+                1024.0 / 1024.0 / 1024.0;
+            // Keep the exact byte-derived value for policy decisions. Rounding
+            // up here can offer a Linux size that the storage layer must reject
+            // later when the machine is close to the minimum Windows reserve.
+            _initialFreeSpace =
+                systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0;
             _shrinkAvailableSpace = Math.Max(
                 0,
                 (_installationState.Compatibility?.ShrinkAvailableBytes ?? 0) /

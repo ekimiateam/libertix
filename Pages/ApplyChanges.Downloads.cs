@@ -91,12 +91,12 @@ namespace Libertix.Pages
                 }
                 catch (OperationCanceledException)
                 {
-                    try { if (File.Exists(destinationPath)) File.Delete(destinationPath); } catch { }
+                    DeleteDownloadArtifactBestEffort(destinationPath, label);
                     throw;
                 }
                 catch (Exception ex)
                 {
-                    try { if (File.Exists(destinationPath)) File.Delete(destinationPath); } catch { }
+                    DeleteDownloadArtifactBestEffort(destinationPath, label);
                     Dispatcher.Invoke(() => Log($"{label} download attempt {attempt}/{attempts} failed: {ex.Message}"));
                     if (attempt == attempts)
                         return false;
@@ -180,7 +180,7 @@ namespace Libertix.Pages
             if (exitCode != 0)
             {
                 Dispatcher.Invoke(() => Log($"{label}: aria2 failed with rc={exitCode}, using HTTP fallback"));
-                try { if (File.Exists(aria2OutputPath)) File.Delete(aria2OutputPath); } catch { }
+                DeleteDownloadArtifactBestEffort(aria2OutputPath, label);
                 return false;
             }
 
@@ -195,10 +195,32 @@ namespace Libertix.Pages
                 if (File.Exists(destinationPath))
                     File.Delete(destinationPath);
                 File.Move(aria2OutputPath, destinationPath);
-                try { Directory.Delete(downloadDir, true); } catch { }
+                try
+                {
+                    Directory.Delete(downloadDir, true);
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.Invoke(() =>
+                        Log($"{label}: temporary download directory cleanup failed: {ex.Message}"));
+                }
             }
 
             return true;
+        }
+
+        private void DeleteDownloadArtifactBestEffort(string path, string label)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.Invoke(() =>
+                    Log($"{label}: partial download cleanup failed: {ex.Message}"));
+            }
         }
 
         private void HandleAria2DownloadOutput(

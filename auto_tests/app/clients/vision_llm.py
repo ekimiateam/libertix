@@ -72,7 +72,7 @@ class VisionLLMClient:
         return payload
 
     def analyze(self, image_path: Path, vm_name: str, vm_os: str) -> VisionVerdict:
-        logger.info("Analyse vision LLM démarrée", extra={"step": "llm.analyze", "target": vm_name})
+        logger.info("LLM vision analysis started", extra={"step": "llm.analyze", "target": vm_name})
         image = self._optimized_image(image_path)
         user_prompt = (
             f"Classify the visible Libertix welcome screen on {vm_name} ({vm_os}). "
@@ -120,10 +120,10 @@ class VisionLLMClient:
                 message = response.json()["choices"][0]["message"]
                 content = message["content"]
                 if not isinstance(content, str) or not content.strip():
-                    raise ValueError("Le LLM n'a produit aucun contenu JSON visible")
+                    raise ValueError("The LLM produced no visible JSON content")
                 verdict = VisionVerdict.model_validate(json.loads(content))
                 logger.info(
-                    "Analyse vision LLM terminée",
+                    "LLM vision analysis completed",
                     extra={"step": "llm.analyze", "target": vm_name},
                 )
                 return verdict
@@ -148,13 +148,13 @@ class VisionLLMClient:
                     self._wait_before_retry(response, attempt, vm_name)
                     continue
                 raise self._error(exc, vm_name, response, attempt) from exc
-        raise WorkflowError("llm.analyze", "Nombre maximal de tentatives LLM dépassé")
+        raise WorkflowError("llm.analyze", "Maximum LLM attempt count exceeded")
 
     def analyze_install_progress(
         self, image_path: Path, vm_name: str, vm_os: str
     ) -> InstallProgressVerdict:
         logger.info(
-            "Analyse progression installation démarrée",
+            "Installation progress analysis started",
             extra={"step": "llm.install_progress", "target": vm_name},
         )
         image = self._optimized_image(image_path)
@@ -224,8 +224,8 @@ class VisionLLMClient:
                             "still_in_progress": False,
                             "error_visible": False,
                             "summary": (
-                                f"{verdict.summary} Verdict normalisé depuis les preuves "
-                                "visibles: 100 %, état final et bouton Redémarrer."
+                                f"{verdict.summary} Verdict normalized from visible evidence: "
+                                "100%, final state, and Restart button."
                             ),
                         }
                     )
@@ -238,7 +238,7 @@ class VisionLLMClient:
                             "still_in_progress": True,
                             "summary": (
                                 f"{verdict.summary} "
-                                "Verdict de fin ignore: une progression active est visible."
+                                "Final verdict ignored because active progress is visible."
                             ),
                         }
                     )
@@ -264,7 +264,7 @@ class VisionLLMClient:
                     self._wait_before_retry(response, attempt, vm_name)
                     continue
                 raise self._progress_error(exc, vm_name, response, attempt) from exc
-        raise WorkflowError("llm.install_progress", "Nombre maximal de tentatives LLM dépassé")
+        raise WorkflowError("llm.install_progress", "Maximum LLM attempt count exceeded")
 
     def analyze_wizard_state(
         self,
@@ -372,7 +372,7 @@ class VisionLLMClient:
                 message = response.json()["choices"][0]["message"]
                 content = message.get("content")
                 if not isinstance(content, str) or not content.strip():
-                    raise ValueError("Le LLM n'a produit aucun verdict d'écran")
+                    raise ValueError("The LLM produced no screen verdict")
                 verdict = WizardStateVerdict.model_validate(self._load_wizard_json(content))
                 visible_evidence = f"{verdict.summary}\n{verdict.visible_text}"
                 if (
@@ -407,8 +407,8 @@ class VisionLLMClient:
                         update={
                             "no_blocking_error": True,
                             "summary": (
-                                f"{verdict.summary} Verdict normalisé: l'écran et les champs "
-                                "critiques sont confirmés, sans erreur Libertix visible."
+                                f"{verdict.summary} Verdict normalized: the screen and critical "
+                                "fields are confirmed with no visible Libertix error."
                             ),
                         }
                     )
@@ -434,7 +434,7 @@ class VisionLLMClient:
                     self._wait_before_retry(response, attempt, vm_name)
                     continue
                 raise self._wizard_error(exc, vm_name, response, attempt) from exc
-        raise WorkflowError("llm.wizard_state", "Nombre maximal de tentatives LLM dépassé")
+        raise WorkflowError("llm.wizard_state", "Maximum LLM attempt count exceeded")
 
     _load_wizard_json = staticmethod(load_wizard_json)
     _optimized_image = staticmethod(optimize_image)
@@ -451,7 +451,7 @@ class VisionLLMClient:
                 retry_after = float(response.headers.get("retry-after", "0"))
         delay = max(retry_after, self.retry_base_seconds * (2 ** (attempt - 1)))
         logger.warning(
-            "Nouvelle tentative LLM dans %.1fs (%s/%s)",
+            "Retrying LLM request in %.1fs (%s/%s)",
             delay,
             attempt,
             self.max_attempts,
@@ -465,7 +465,7 @@ class VisionLLMClient:
     ) -> WorkflowError:
         return WorkflowError(
             "llm.analyze",
-            "Réponse LLM absente, invalide ou non conforme au schéma JSON strict",
+            "LLM response is missing, invalid, or does not match the strict JSON schema",
             details={
                 "vm": vm_name,
                 "attempt": attempt,
@@ -482,7 +482,7 @@ class VisionLLMClient:
     ) -> WorkflowError:
         return WorkflowError(
             "llm.install_progress",
-            "Réponse LLM de progression absente, invalide ou non conforme",
+            "LLM progress response is missing, invalid, or non-conforming",
             details={
                 "vm": vm_name,
                 "attempt": attempt,
@@ -499,7 +499,7 @@ class VisionLLMClient:
     ) -> WorkflowError:
         return WorkflowError(
             "llm.wizard_state",
-            "État critique de l'assistant non confirmé par le LLM",
+            "The LLM did not confirm the critical wizard state",
             details={
                 "vm": vm_name,
                 "attempt": attempt,

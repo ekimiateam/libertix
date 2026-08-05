@@ -51,14 +51,14 @@ class InstallationMonitoringMixin:
             last_context = context
             result.ok(
                 "automation.monitor_installation",
-                f"Capture de progression {firmware.upper()} analysée par le LLM",
+                f"{firmware.upper()} progress capture analyzed by the LLM",
                 **context,
             )
             rollback_text = f"{verdict.visible_text}\n{verdict.summary}"
             if self._rollback_in_progress(rollback_text):
                 result.ok(
                     "automation.rollback_in_progress",
-                    f"Rollback {firmware.upper()} détecté; suivi maintenu jusqu'au verdict",
+                    f"{firmware.upper()} rollback detected; monitoring until final verdict",
                     **context,
                 )
                 continue
@@ -66,9 +66,9 @@ class InstallationMonitoringMixin:
             if rollback_outcome is not None:
                 context["rollback_outcome"] = rollback_outcome
                 message = (
-                    f"Installation {firmware.upper()} échouée après rollback vérifié"
+                    f"{firmware.upper()} installation failed after verified rollback"
                     if rollback_outcome == "verified"
-                    else f"Installation {firmware.upper()} échouée avec rollback incomplet"
+                    else f"{firmware.upper()} installation failed with incomplete rollback"
                 )
                 raise WorkflowError(
                     "automation.monitor_installation",
@@ -81,14 +81,14 @@ class InstallationMonitoringMixin:
             ):
                 result.ok(
                     "automation.display_transition",
-                    f"Transition d'affichage {firmware.upper()} détectée; suivi maintenu",
+                    f"{firmware.upper()} display transition detected; monitoring continues",
                     **context,
                 )
                 continue
             if verdict.error_visible or verdict.blocking_problem_visible:
                 raise WorkflowError(
                     "automation.monitor_installation",
-                    f"Erreur visible pendant l'installation {firmware.upper()}",
+                    f"Visible error during {firmware.upper()} installation",
                     details=context,
                 )
             if (
@@ -98,7 +98,7 @@ class InstallationMonitoringMixin:
             ):
                 result.ok(
                     "automation.preparation_finished",
-                    f"Préparation {firmware.upper()} terminée; validation du redémarrage",
+                    f"{firmware.upper()} preparation completed; validating reboot",
                     **context,
                 )
                 self._click_reboot_after_preparation(vm, result)
@@ -112,7 +112,7 @@ class InstallationMonitoringMixin:
             if self._reboot_or_live_started(final_boot_evidence):
                 result.ok(
                     "automation.installed_boot_menu_seen",
-                    f"Menu de démarrage installé {firmware.upper()} confirmé visuellement",
+                    f"Installed {firmware.upper()} boot menu confirmed visually",
                     **context,
                 )
                 return "boot-menu"
@@ -123,13 +123,13 @@ class InstallationMonitoringMixin:
             ):
                 result.ok(
                     "automation.installation_finished",
-                    f"Installation {firmware.upper()} terminée et bureau Linux démarré",
+                    f"{firmware.upper()} installation completed and Linux desktop started",
                     **context,
                 )
                 return "linux-desktop"
         raise WorkflowError(
             "automation.monitor_installation",
-            f"Timeout en attendant le reboot Windows vers le live {firmware.upper()}",
+            f"Timed out waiting for Windows to reboot into the {firmware.upper()} live",
             details=last_context or {"vm": vm.name, "target": vm.vnc},
         )
 
@@ -274,14 +274,14 @@ class InstallationMonitoringMixin:
             self._capture_from_client(client, vm, "reboot-accepted", result)
             result.ok(
                 "automation.reboot_clicked",
-                "Commande de redémarrage envoyée après verdict LLM de fin",
+                "Reboot command sent after final LLM verdict",
                 target=vm.vnc,
                 vm=vm.name,
             )
         except Exception as exc:
             raise WorkflowError(
                 "automation.reboot_click",
-                "Impossible de cliquer le redémarrage final",
+                "Failed to click the final reboot control",
                 details={"vm": vm.name, "target": vm.vnc, "error": str(exc)},
             ) from exc
         finally:

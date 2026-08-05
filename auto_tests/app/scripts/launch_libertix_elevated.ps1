@@ -23,9 +23,30 @@ $developmentStaticIpv4 = if (
 } else {
     ""
 }
+$developmentPrefixLength = if (
+    $config.PSObject.Properties.Name -contains "development_static_ipv4_prefix_length"
+) {
+    [int]$config.development_static_ipv4_prefix_length
+} else {
+    0
+}
+$developmentGateway = if (
+    $config.PSObject.Properties.Name -contains "development_static_ipv4_gateway"
+) {
+    [string]$config.development_static_ipv4_gateway
+} else {
+    ""
+}
+$developmentDnsServers = if (
+    $config.PSObject.Properties.Name -contains "development_dns_servers"
+) {
+    @($config.development_dns_servers)
+} else {
+    @()
+}
 
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-    throw ("Libertix.exe local est introuvable: " + $exe)
+    throw ("Local Libertix.exe was not found: " + $exe)
 }
 
 $parsedFilepoolUri = $null
@@ -43,6 +64,7 @@ $filepoolBaseUrl = $parsedFilepoolUri.AbsoluteUri.TrimEnd("/")
 
 if (-not [string]::IsNullOrWhiteSpace($developmentStaticIpv4)) {
     [System.Net.IPAddress]$parsedDevelopmentAddress = $null
+    [System.Net.IPAddress]$parsedDevelopmentGateway = $null
     if (
         -not [System.Net.IPAddress]::TryParse(
             $developmentStaticIpv4,
@@ -53,14 +75,42 @@ if (-not [string]::IsNullOrWhiteSpace($developmentStaticIpv4)) {
     ) {
         throw "development_static_ipv4 must be an IPv4 address"
     }
-    $octets = $parsedDevelopmentAddress.GetAddressBytes()
     if (
-        $octets[0] -ne 192 -or $octets[1] -ne 168 -or $octets[2] -ne 1 -or
-        $octets[3] -le 1 -or $octets[3] -ge 255
+        $developmentPrefixLength -lt 1 -or $developmentPrefixLength -gt 30
     ) {
-        throw "development_static_ipv4 must be usable in 192.168.1.0/24"
+        throw "development_static_ipv4_prefix_length must be between 1 and 30"
+    }
+    if (
+        -not [System.Net.IPAddress]::TryParse(
+            $developmentGateway,
+            [ref]$parsedDevelopmentGateway
+        ) -or
+        $parsedDevelopmentGateway.AddressFamily -ne
+            [System.Net.Sockets.AddressFamily]::InterNetwork
+    ) {
+        throw "development_static_ipv4_gateway must be an IPv4 address"
+    }
+    if ($developmentDnsServers.Count -lt 1) {
+        throw "development_dns_servers must contain at least one IPv4 address"
+    }
+    $normalizedDnsServers = @()
+    foreach ($dnsServer in $developmentDnsServers) {
+        [System.Net.IPAddress]$parsedDnsServer = $null
+        if (
+            -not [System.Net.IPAddress]::TryParse(
+                [string]$dnsServer,
+                [ref]$parsedDnsServer
+            ) -or
+            $parsedDnsServer.AddressFamily -ne
+                [System.Net.Sockets.AddressFamily]::InterNetwork
+        ) {
+            throw "development_dns_servers must contain only IPv4 addresses"
+        }
+        $normalizedDnsServers += $parsedDnsServer.ToString()
     }
     $developmentStaticIpv4 = $parsedDevelopmentAddress.ToString()
+    $developmentGateway = $parsedDevelopmentGateway.ToString()
+    $developmentDnsServers = $normalizedDnsServers
 }
 
 # SSH starts elevated processes in a non-interactive session. A scheduled task
@@ -82,6 +132,11 @@ $time = (Get-Date).AddMinutes(1).ToString("HH:mm")
 $taskCommand = '"{0}" --filepool-base-url "{1}"' -f $exe, $filepoolBaseUrl
 if (-not [string]::IsNullOrEmpty($developmentStaticIpv4)) {
     $taskCommand += ' --dev-ssh-static-ip "{0}"' -f $developmentStaticIpv4
+    $taskCommand += ' --dev-ssh-prefix-length "{0}"' -f $developmentPrefixLength
+    $taskCommand += ' --dev-ssh-gateway "{0}"' -f $developmentGateway
+    foreach ($dnsServer in $developmentDnsServers) {
+        $taskCommand += ' --dev-ssh-dns "{0}"' -f $dnsServer
+    }
 }
 $interactiveSession = Get-Process -Name explorer -ErrorAction Stop |
     Sort-Object StartTime -Descending |
@@ -98,12 +153,12 @@ $createOutput = schtasks.exe `
     /F 2>&1
 
 if ($LASTEXITCODE -ne 0) {
-    throw ("Création tâche planifiée Libertix échouée; sortie=" + ($createOutput -join " | "))
+    throw ("Failed to create the Libertix scheduled task; output=" + ($createOutput -join " | "))
 }
 
 $runOutput = schtasks.exe /Run /TN $taskName 2>&1
 if ($LASTEXITCODE -ne 0) {
-    throw ("Lancement tâche planifiée Libertix échoué; sortie=" + ($runOutput -join " | "))
+    throw ("Failed to start the Libertix scheduled task; output=" + ($runOutput -join " | "))
 }
 
 $process = $null
@@ -130,7 +185,7 @@ if (-not $process) {
     finally {
         $ErrorActionPreference = $oldPreference
     }
-    throw ("Libertix ne tourne pas après lancement administrateur; tâche=" + ($taskState -join " | "))
+    throw ("Libertix is not running after elevated launch; task=" + ($taskState -join " | "))
 }
 
 $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction Stop

@@ -8,6 +8,8 @@ import pytest
 from pydantic import ValidationError
 
 import app.services.automation as automation_module
+import app.services.automation_monitoring as automation_monitoring_module
+import app.services.automation_wizard as automation_wizard_module
 from app.clients.ssh import CommandResult
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vision_models import InstallProgressVerdict
@@ -15,8 +17,9 @@ from app.clients.vnc import VNCClient
 from app.config import Settings
 from app.errors import WorkflowError
 from app.models import ValidationRequest
-from app.services.automation import AutomationOptions, AutomationService, Point
+from app.services.automation import AutomationService
 from app.services.automation_postinstall import CrossOsArtifacts
+from app.services.automation_types import AutomationOptions, Point
 from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
 from app.services.reset import RESET_SNAPSHOT, ResetService
@@ -26,8 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_warning_acknowledgement_points_match_current_wizard_layout() -> None:
-    assert Point(430, 575) == WizardAutomationMixin.BIOS_WARNING_ACKNOWLEDGEMENT
-    assert Point(430, 566) == WizardAutomationMixin.UEFI_WARNING_ACKNOWLEDGEMENT
+    assert Point(430, 575) == WizardAutomationMixin.BIOS_LAYOUT.warning_acknowledgement
+    assert Point(430, 566) == WizardAutomationMixin.UEFI_LAYOUT.warning_acknowledgement
 
 
 def test_vnc_text_typing_uses_vncdotool_literal_minus(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -110,8 +113,13 @@ def settings(**overrides: object) -> Settings:
         "build_vm_password": "secret",
         "ssh_known_hosts": "/tmp/libertix-test-known-hosts",
         "filepool_base_url": "http://192.168.1.170:8000/filepool",
+        "development_static_ipv4_prefix_length": 24,
+        "development_static_ipv4_gateway": "192.168.1.1",
+        "development_dns_servers": ("8.8.8.8", "1.1.1.1"),
         "repository_url": "https://github.com/ekimiateam/libertix.git",
         "smb_root": "/root/smb",
+        "allowed_smb_roots": ("/root/smb",),
+        "allowed_proxmox_vmids": (500, 501, 502),
         "llm_api_url": "http://192.168.1.247:8000/v1",
         "llm_api_key": "secret",
         "llm_model": "Qwen3.6-35B-A3B-Thinking",
@@ -140,7 +148,6 @@ def settings(**overrides: object) -> Settings:
                 "screen_height": 800,
                 "vmid": 501,
                 "firmware": "uefi",
-                "disable_defender_for_automation": True,
                 "automation_enabled": True,
             },
             {
@@ -308,7 +315,7 @@ def test_absolute_vnc_click_is_not_scaled() -> None:
     service._click_absolute(client, vm, Point(1045, 643), 0)  # noqa: SLF001
 
     assert events == [("move", 1045, 643), ("press", 1)]
-    with pytest.raises(WorkflowError, match="hors écran"):
+    with pytest.raises(WorkflowError, match="outside the display"):
         service._click_absolute(client, vm, Point(1280, 643), 0)  # noqa: SLF001
 
 
@@ -323,8 +330,8 @@ def test_sharing_page_uses_its_own_scaled_next_button(monkeypatch: pytest.Monkey
     screens = iter(("sharing", "account"))
     monotonic_values = iter((0.0, 0.0, 400.0, 350.0))
 
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(automation_module.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_wizard_module.time, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(
         service,
         "_capture_from_client",
@@ -402,7 +409,7 @@ def test_navigation_closes_windows_security_after_defender_preparation(
         )
     )
 
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_from_client",
@@ -446,7 +453,7 @@ def test_navigation_retries_invalid_llm_verdict_without_clicking(
     )
     calls = 0
 
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_from_client",
@@ -495,7 +502,7 @@ def test_navigation_accepts_compatibility_progress_without_false_error(
         mousePress=lambda button: events.append(("press", button)),
     )
 
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_from_client",
@@ -573,7 +580,7 @@ def test_navigation_ignores_desktop_weather_warning_on_distro(
             ("account", True, "Créez votre compte Linux"),
         )
     )
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_from_client",
@@ -624,7 +631,7 @@ def test_validation_vm_selector_accepts_aliases() -> None:
 def test_validation_vm_selector_rejects_unknown() -> None:
     service = ValidationService(settings())
 
-    with pytest.raises(Exception, match="Sélecteur VM inconnu"):
+    with pytest.raises(Exception, match="Unknown VM selector"):
         service.select_vms(["not-a-vm"])
 
 
@@ -689,6 +696,9 @@ def test_automation_launch_passes_the_windows_address_to_the_dev_ssh_option(
         assert script_name == "launch_libertix_elevated.ps1"
         assert step == "automation.launch_elevated"
         assert config["development_static_ipv4"] == vm.host
+        assert config["development_static_ipv4_prefix_length"] == 24
+        assert config["development_static_ipv4_gateway"] == "192.168.1.1"
+        assert config["development_dns_servers"] == ["8.8.8.8", "1.1.1.1"]
         return SimpleNamespace(
             stdout=(
                 "PID=1234\nSESSION_ID=2\nTASK_NAME=LibertixAutoInstall_vm1\n"
@@ -712,21 +722,21 @@ def test_automation_scope_accepts_vm500() -> None:
     service = AutomationService(settings())
     selected = service.validation.select_vms(["vm1"])
 
-    service._assert_autoclick_scope(selected, ["vm1"])  # noqa: SLF001
+    service._automation_profiles(selected, ["vm1"])  # noqa: SLF001
 
 
 def test_automation_scope_accepts_vm502_uefi() -> None:
     service = AutomationService(settings())
     selected = service.validation.select_vms(["vm3"])
 
-    service._assert_autoclick_scope(selected, ["vm3"])  # noqa: SLF001
+    service._automation_profiles(selected, ["vm3"])  # noqa: SLF001
 
 
 def test_automation_scope_accepts_vm501_uefi() -> None:
     service = AutomationService(settings())
     selected = service.validation.select_vms(["vm2"])
 
-    service._assert_autoclick_scope(selected, ["vm2"])  # noqa: SLF001
+    service._automation_profiles(selected, ["vm2"])  # noqa: SLF001
 
 
 def test_automation_scope_accepts_all_validated_vms() -> None:
@@ -751,7 +761,7 @@ def test_automation_refuses_vm_already_in_io_error() -> None:
     service = AutomationService(settings())
 
     with pytest.raises(WorkflowError, match="io-error"):
-        service._assert_vm_not_in_io_error(  # noqa: SLF001
+        service.preflight.assert_vm_not_in_io_error(
             FakeProxmox(), "node-a", 500, ResultBuilder("automation")
         )
 
@@ -764,8 +774,8 @@ def test_automation_refuses_low_local_lvm_headroom() -> None:
 
     service = AutomationService(settings())
 
-    with pytest.raises(WorkflowError, match="local-lvm insuffisante"):
-        service._assert_proxmox_storage_headroom(  # noqa: SLF001
+    with pytest.raises(WorkflowError, match="insufficient local-lvm"):
+        service.preflight.assert_proxmox_storage_headroom(
             FakeProxmox(),
             {500: "node-a", 501: "node-a", 502: "node-a"},
             3,
@@ -782,34 +792,13 @@ def test_automation_reports_local_lvm_headroom() -> None:
     service = AutomationService(settings())
     result = ResultBuilder("automation")
 
-    service._assert_proxmox_storage_headroom(  # noqa: SLF001
+    service.preflight.assert_proxmox_storage_headroom(
         FakeProxmox(), {500: "node-a", 501: "node-a", 502: "node-a"}, 3, result
     )
 
     assert result.steps[-1].step == "automation.storage_headroom"
     assert result.steps[-1].context["available_gib"] == 70
     assert result.steps[-1].context["required_gib"] == 60
-
-
-@pytest.mark.parametrize(
-    ("prepared", "realtime", "exclusion", "expected"),
-    (
-        ("realtime-disabled", "false", r"C:\release", True),
-        ("exclusion-only", "true", r"C:\release", True),
-        ("realtime-disabled", "true", r"C:\release", False),
-        ("true", "false", r"C:\release", False),
-        ("exclusion-only", "true", "", False),
-    ),
-)
-def test_defender_preparation_contract(
-    prepared: str, realtime: str, exclusion: str, expected: bool
-) -> None:
-    assert (
-        AutomationService._defender_preparation_is_valid(  # noqa: SLF001
-            prepared, realtime, exclusion
-        )
-        is expected
-    )
 
 
 def test_apply_requires_visual_monitoring() -> None:
@@ -839,7 +828,7 @@ def test_wizard_account_guard_is_fail_closed(tmp_path: Path) -> None:
     )
     vm = service.validation.select_vms(["vm1"])[0]
 
-    with pytest.raises(WorkflowError, match="Apply est bloqué"):
+    with pytest.raises(WorkflowError, match="Apply is blocked"):
         service._assert_wizard_state(  # noqa: SLF001
             tmp_path / "account.png",
             vm,
@@ -904,8 +893,8 @@ def test_automation_scope_rejects_unvalidated_vm() -> None:
     )
     selected = service.validation.select_vms(["vm1", "vm4"])
 
-    with pytest.raises(Exception, match="Auto-click Libertix refusé"):
-        service._assert_autoclick_scope(selected, ["vm1", "vm4"])  # noqa: SLF001
+    with pytest.raises(Exception, match="Libertix auto-click refused"):
+        service._automation_profiles(selected, ["vm1", "vm4"])  # noqa: SLF001
 
 
 def test_automation_logs_vm500_reset_before_ui(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -946,7 +935,7 @@ def test_automation_logs_vm500_reset_before_ui(monkeypatch: pytest.MonkeyPatch) 
         ("rollback", 500, RESET_SNAPSHOT),
     ]
     assert result.steps[-1].step == "automation.reset_vm_done"
-    assert "Reset VM500 terminé" in result.steps[-1].message
+    assert "VM500 reset completed" in result.steps[-1].message
 
 
 def test_automation_logs_vm502_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -987,7 +976,7 @@ def test_automation_logs_vm502_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -
         ("rollback", 502, RESET_SNAPSHOT),
     ]
     assert result.steps[-1].step == "automation.reset_vm_done"
-    assert "Reset VM502 terminé" in result.steps[-1].message
+    assert "VM502 reset completed" in result.steps[-1].message
 
 
 def test_automation_logs_vm501_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1028,7 +1017,7 @@ def test_automation_logs_vm501_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -
         ("rollback", 501, RESET_SNAPSHOT),
     ]
     assert result.steps[-1].step == "automation.reset_vm_done"
-    assert "Reset VM501 terminé" in result.steps[-1].message
+    assert "VM501 reset completed" in result.steps[-1].message
 
 
 def test_automation_apply_false_only_launches_ui(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -1054,8 +1043,8 @@ def test_automation_apply_false_only_launches_ui(monkeypatch: pytest.MonkeyPatch
             self.disconnected = True
 
     fake_client = FakeClient()
-    monkeypatch.setattr(automation_module.api, "connect", lambda _address: fake_client)
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_wizard_module.api, "connect", lambda _address: fake_client)
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     service = AutomationService(settings(capture_dir=tmp_path))
     vm = service.validation.select_vms(["vm1"])[0]
     profile = service._automation_profile_for_vm(vm)  # noqa: SLF001
@@ -1244,7 +1233,7 @@ def test_automation_monitor_stops_when_mint_desktop_is_seen_after_reboot(
             ),
         )
     )
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_with_name",
@@ -1299,7 +1288,7 @@ def test_automation_monitor_labels_final_grub_menu_before_generic_finished_flag(
             ),
         )
     )
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_with_name",
@@ -1357,7 +1346,7 @@ def test_automation_monitor_keeps_waiting_during_inactive_reboot_display(
             ),
         )
     )
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_with_name",
@@ -1404,7 +1393,7 @@ def test_automation_monitor_waits_for_the_final_rollback_verdict(
             ),
         )
     )
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_with_name",
@@ -1421,7 +1410,7 @@ def test_automation_monitor_waits_for_the_final_rollback_verdict(
         service._monitor_until_live_boot(vm, result, "bios")  # noqa: SLF001
 
     assert raised.value.details["rollback_outcome"] == "verified"
-    assert "rollback vérifié" in raised.value.message
+    assert "verified rollback" in raised.value.message
     assert (
         len([step for step in result.steps if step.step == "automation.monitor_installation"]) == 2
     )
@@ -1448,7 +1437,7 @@ def test_automation_monitor_reports_an_incomplete_rollback_immediately(
         summary="Manual intervention is required.",
         visible_text="Rollback incomplete. Manual intervention is required.",
     )
-    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         service,
         "_capture_with_name",
@@ -1465,7 +1454,7 @@ def test_automation_monitor_reports_an_incomplete_rollback_immediately(
         service._monitor_until_live_boot(vm, result, "bios")  # noqa: SLF001
 
     assert raised.value.details["rollback_outcome"] == "incomplete"
-    assert "rollback incomplet" in raised.value.message
+    assert "incomplete rollback" in raised.value.message
 
 
 def test_bios_final_grub_waits_for_manual_selection() -> None:
@@ -1545,8 +1534,10 @@ def test_live_installers_require_exact_disk_and_recovery_manifest() -> None:
     assert "INSTALLER_PARTITION_OFFSET_BYTES" in installer
     assert "RECOVERY_PARTITION_OFFSET_BYTES" in installer
     assert "RECOVERY_PARTITION_SIZE_BYTES" in installer
-    assert "ntfsresize failed; the partition table was not changed" in installer
-    assert "WARNING: ntfsresize failed, continuing" not in installer
+    assert 'NEW_PART="$LIVE_PART"' in installer
+    assert "ntfsresize" not in installer
+    assert "mkpart primary ext4" not in installer
+    assert 'parted "$DISK" unit MB print free' not in installer
 
 
 def test_uefi_one_shot_does_not_reorder_bootorder() -> None:
@@ -1606,6 +1597,20 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     service._run_linux_checks(ssh, vm, options, result)  # type: ignore[arg-type]  # noqa: SLF001
 
     tests = [step.context["test"] for step in result.steps]
+    assert {
+        "linux.hostname",
+        "linux.locale",
+        "linux.keyboard",
+        "linux.timezone",
+        "linux.root_uuid",
+        "linux.ssh_security",
+        "linux.development_profile",
+        "linux.boot_mode_files",
+        "linux.sharing_policy",
+        "linux.desktop_stack",
+        "linux.first_boot_cleanup",
+        "linux.system_resources",
+    } <= set(tests)
     assert "linux.time_sync" in tests
     assert "linux.package_database" in tests
     assert "linux.name_resolution" in tests
@@ -1616,9 +1621,14 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     )
     assert len(ssh.calls) == len(tests)
     sudo_calls = [(command, kwargs) for command, kwargs in ssh.calls if command.startswith("sudo ")]
-    assert len(sudo_calls) == 2
+    assert len(sudo_calls) == 6
     assert all("test-passphrase" not in command for command, _kwargs in sudo_calls)
     assert all(kwargs["stdin_data"] == "test-passphrase\n" for _command, kwargs in sudo_calls)
+    commands = "\n".join(command for command, _kwargs in ssh.calls)
+    assert "address1=192.168.1.240/24,192.168.1.1" in commands
+    assert "default via 192.168.1.1" in commands
+    assert "8.8.8.8" in commands
+    assert "1.1.1.1" in commands
 
 
 def test_post_install_grub_selection_uses_vision_before_typing(
@@ -1767,10 +1777,17 @@ def test_windows_post_install_script_exposes_every_requested_check() -> None:
         "identity",
         "firmware",
         "system_volume",
+        "system_resources",
+        "partition_layout",
+        "boot_partition",
+        "boot_configuration",
         "recovery",
         "bitlocker",
         "temporary_artifacts",
         "network",
+        "locale",
+        "ssh_service",
+        "core_services",
         "hibernation",
         "ext4_driver",
         "ext4_readonly_mount",
@@ -1778,6 +1795,7 @@ def test_windows_post_install_script_exposes_every_requested_check() -> None:
         "linux_home_hash",
         "ext4_write_denied",
         "explorer_shortcut",
+        "sharing_tasks",
         "cross_os_hash",
         "dism_check_health",
         "sfc_verify_only",

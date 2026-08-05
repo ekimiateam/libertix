@@ -18,14 +18,14 @@ class VNCClient:
     def _vncdotool_address(address: str) -> str:
         host, separator, display = address.rpartition(":")
         if not separator or not host or not display.isdigit():
-            raise WorkflowError("vnc.address", "Adresse VNC invalide", details={"address": address})
+            raise WorkflowError("vnc.address", "Invalid VNC address", details={"address": address})
         # vncdotool expects host::port, while Proxmox exposes host:display and
         # maps display N to TCP port 5900 + N.
         return f"{host}::{5900 + int(display)}"
 
     def capture(self, address: str, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        logger.info("Capture VNC démarrée", extra={"step": "vnc.capture", "target": address})
+        logger.info("VNC capture started", extra={"step": "vnc.capture", "target": address})
         client = None
         try:
             client = api.connect(self._vncdotool_address(address))
@@ -38,7 +38,7 @@ class VNCClient:
             destination.unlink(missing_ok=True)
             raise WorkflowError(
                 "vnc.capture",
-                "Capture VNC impossible",
+                "VNC capture failed",
                 details={"address": address, "error": str(exc)},
             ) from exc
         finally:
@@ -51,9 +51,9 @@ class VNCClient:
                     )
         if not destination.is_file() or destination.stat().st_size == 0:
             raise WorkflowError(
-                "vnc.capture", "La capture VNC est absente ou vide", details={"address": address}
+                "vnc.capture", "The VNC capture is missing or empty", details={"address": address}
             )
-        logger.info("Capture VNC réussie", extra={"step": "vnc.capture", "target": address})
+        logger.info("VNC capture completed", extra={"step": "vnc.capture", "target": address})
         return destination
 
     def launch_desktop_shortcut(self, address: str, *, width: int, height: int) -> None:
@@ -76,7 +76,7 @@ class VNCClient:
         except Exception as exc:
             raise WorkflowError(
                 "vnc.launch",
-                "Impossible d'activer le raccourci Libertix sur le bureau",
+                "Failed to activate the Libertix desktop shortcut",
                 details={"address": address, "error": str(exc)},
             ) from exc
         finally:

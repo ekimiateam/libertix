@@ -69,12 +69,21 @@ class FakeParamikoClient:
         self.missing_host_key_policy: object | None = None
         self.closed = False
         self.last_stdin: FakeStdin | None = None
+        self.host_keys = ssh_module.paramiko.HostKeys()
+        self.saved_host_keys: str | None = None
 
     def load_host_keys(self, path: str) -> None:
         self.loaded_host_keys = path
 
     def set_missing_host_key_policy(self, policy: object) -> None:
         self.missing_host_key_policy = policy
+
+    def get_host_keys(self):
+        return self.host_keys
+
+    def save_host_keys(self, path: str) -> None:
+        self.saved_host_keys = path
+        self.host_keys.save(path)
 
     def connect(self, host: str, **kwargs: object) -> None:
         self.connect_kwargs = {"host": host, **kwargs}
@@ -145,7 +154,7 @@ def test_ssh_failure_never_exposes_a_sensitive_command(monkeypatch: pytest.Monke
             sensitive=True,
         )
 
-    assert caught.value.details["command"] == "[COMMANDE SENSIBLE MASQUÉE]"
+    assert caught.value.details["command"] == "[SENSITIVE COMMAND REDACTED]"
     assert "top-secret" not in str(caught.value.as_dict())
     assert caught.value.details["exit_code"] == 5
 
@@ -168,6 +177,35 @@ def test_ssh_client_writes_sensitive_input_to_stdin(monkeypatch: pytest.MonkeyPa
     assert transport.last_stdin is not None
     assert transport.last_stdin.content == "secret\n"
     assert transport.channel.input_closed is True
+
+
+def test_ssh_tofu_persists_first_key_in_isolated_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    transport = FakeParamikoClient()
+    monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
+    known_hosts = tmp_path / "run" / "linux-known-hosts"
+
+    with SSHClient(
+        "example.test",
+        "oem",
+        "secret",
+        known_hosts_path=known_hosts,
+        trust_on_first_use=True,
+    ):
+        policy = transport.missing_host_key_policy
+        assert isinstance(policy, ssh_module.PersistFirstHostKeyPolicy)
+        policy.missing_host_key(
+            transport,
+            "example.test",
+            ssh_module.paramiko.RSAKey.generate(1024),
+        )
+
+    assert transport.loaded_host_keys is None
+    assert transport.saved_host_keys == str(known_hosts)
+    assert known_hosts.is_file()
+    assert known_hosts.stat().st_mode & 0o777 == 0o600
 
 
 def test_ssh_connection_failure_closes_the_partial_transport(
@@ -250,7 +288,7 @@ def test_vnc_capture_failure_removes_only_its_incomplete_output(
     destination = tmp_path / "capture.png"
     destination.write_bytes(b"stale")
 
-    with pytest.raises(WorkflowError, match="Capture VNC impossible"):
+    with pytest.raises(WorkflowError, match="VNC capture failed"):
         VNCClient().capture("192.0.2.10:12", destination)
 
     assert not destination.exists()

@@ -60,7 +60,7 @@ class PostInstallValidationMixin:
             result=result,
             username=options.linux_username,
             password=options.linux_password,
-            strict_host_key=False,
+            trust_on_first_use=True,
             probe="printf LIBERTIX_LINUX_READY",
             expected="LIBERTIX_LINUX_READY",
             phase="linux",
@@ -93,7 +93,7 @@ class PostInstallValidationMixin:
             result=result,
             username=vm.username,
             password=self.settings.windows_ssh_password.get_secret_value(),
-            strict_host_key=True,
+            trust_on_first_use=False,
             probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
             expected="LIBERTIX_WINDOWS_READY",
             phase="windows",
@@ -143,7 +143,7 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
         username: str,
         password: str,
-        strict_host_key: bool,
+        trust_on_first_use: bool,
         probe: str,
         expected: str,
         phase: str,
@@ -159,10 +159,14 @@ class PostInstallValidationMixin:
                 vm.host,
                 username,
                 password,
-                known_hosts_path=self.settings.ssh_known_hosts,
+                known_hosts_path=(
+                    self._capture_dir / f"{vm.name}-linux-known-hosts"
+                    if trust_on_first_use
+                    else self.settings.ssh_known_hosts
+                ),
                 port=self.settings.ssh_port,
                 connect_timeout=self.settings.ssh_timeout_seconds,
-                strict_host_key=strict_host_key,
+                trust_on_first_use=trust_on_first_use,
             )
             try:
                 client.__enter__()
@@ -251,7 +255,22 @@ class PostInstallValidationMixin:
         firmware_test = (
             "test -d /sys/firmware/efi" if vm.firmware == "uefi" else "test ! -d /sys/firmware/efi"
         )
-        expected_ip = shlex.quote(f"{vm.host}/24")
+        prefix_length = self.settings.development_static_ipv4_prefix_length
+        gateway = self.settings.development_static_ipv4_gateway
+        dns_servers = self.settings.development_dns_servers
+        expected_ip = shlex.quote(f"{vm.host}/{prefix_length}")
+        expected_profile = shlex.quote(f"address1={vm.host}/{prefix_length},{gateway}")
+        expected_gateway = shlex.quote(f"default via {gateway}")
+        dns_checks = "; ".join(
+            f"resolvectl dns | grep -Fq -- {shlex.quote(server)}" for server in dns_servers
+        )
+        boot_mode_test = (
+            "findmnt /boot/efi; "
+            'test "$(findmnt -n -o FSTYPE /boot/efi)" = vfat; '
+            "find /boot/efi/EFI -type f -iname '*.efi' -print -quit | grep -q ."
+            if vm.firmware == "uefi"
+            else "test -s /boot/grub/i386-pc/core.img"
+        )
         checks = (
             RemoteCheck("linux.identity", f'test "$(id -un)" = {username}; id'),
             RemoteCheck(
@@ -262,6 +281,29 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck("linux.kernel", "uname -a; test -r /proc/version"),
             RemoteCheck(
+                "linux.hostname",
+                'test -s /etc/hostname; test "$(hostname)" = "$(cat /etc/hostname)"; '
+                'getent hosts "$(hostname)"',
+            ),
+            RemoteCheck(
+                "linux.locale",
+                '. /etc/default/locale; test -n "${LANG:-}"; '
+                "expected=$(printf '%s' \"$LANG\" | tr '[:upper:]' '[:lower:]' | "
+                "sed 's/utf-8/utf8/'); "
+                "locale -a | tr '[:upper:]' '[:lower:]' | grep -Fx \"$expected\"",
+            ),
+            RemoteCheck(
+                "linux.keyboard",
+                '. /etc/default/keyboard; test -n "${XKBLAYOUT:-}"; '
+                "test -x /usr/local/bin/libertix-apply-keyboard-once; "
+                "test -s /etc/xdg/autostart/libertix-keyboard.desktop",
+            ),
+            RemoteCheck(
+                "linux.timezone",
+                "test -L /etc/localtime; test -s /etc/timezone; "
+                'test "$(timedatectl show -p Timezone --value)" = "$(cat /etc/timezone)"',
+            ),
+            RemoteCheck(
                 "linux.firmware", f"{firmware_test}; test -r /sys/class/dmi/id/product_name"
             ),
             RemoteCheck(
@@ -269,6 +311,12 @@ class PostInstallValidationMixin:
                 "findmnt -n -o FSTYPE,OPTIONS /; "
                 'test "$(findmnt -n -o FSTYPE /)" = ext4; '
                 "findmnt -n -o OPTIONS / | grep -qw rw",
+            ),
+            RemoteCheck(
+                "linux.root_uuid",
+                'root_uuid="$(findmnt -n -o UUID /)"; test -n "$root_uuid"; '
+                'grep -Eq "^UUID=$root_uuid[[:space:]]+/[[:space:]]+ext4([[:space:]]|$)" '
+                "/etc/fstab",
             ),
             RemoteCheck("linux.fstab", "findmnt --verify --verbose --tab-file /etc/fstab"),
             RemoteCheck(
@@ -284,6 +332,26 @@ class PostInstallValidationMixin:
                 "systemctl is-enabled ssh; systemctl is-active ssh",
             ),
             RemoteCheck(
+                "linux.ssh_security",
+                "sshd -T | grep -Fx 'permitrootlogin no'; "
+                "sshd -T | grep -Fx 'passwordauthentication yes'; "
+                f"sshd -T | grep -Eq '^allowusers .*\\b{username}\\b'",
+                requires_sudo=True,
+            ),
+            RemoteCheck(
+                "linux.development_profile",
+                "test -e /var/lib/libertix/development-ssh-ready; "
+                f"grep -Fx {username} /etc/libertix/development-ssh-user; "
+                'test "$(stat -c %a /etc/NetworkManager/system-connections/'
+                'libertix-development-static.nmconnection)" = 600; '
+                "grep -Fq 'method=manual' /etc/NetworkManager/system-connections/"
+                "libertix-development-static.nmconnection; "
+                f"grep -Fq -- {expected_profile} "
+                "/etc/NetworkManager/system-connections/"
+                "libertix-development-static.nmconnection",
+                requires_sudo=True,
+            ),
+            RemoteCheck(
                 "linux.static_ipv4",
                 "ip -4 -o addr show scope global; "
                 "ip -4 -o addr show scope global | "
@@ -291,13 +359,11 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck(
                 "linux.gateway",
-                "ip -4 route; ip -4 route show default | "
-                "grep -Eq '^default via 192[.]168[.]1[.]1( |$)'",
+                f"ip -4 route; ip -4 route show default | grep -Fq -- {expected_gateway}",
             ),
             RemoteCheck(
                 "linux.dns",
-                "resolvectl dns; resolvectl dns | grep -Fq '8.8.8.8'; "
-                "resolvectl dns | grep -Fq '1.1.1.1'",
+                f"resolvectl dns; {dns_checks}",
             ),
             RemoteCheck(
                 "linux.grub",
@@ -307,6 +373,7 @@ class PostInstallValidationMixin:
                 "/boot/grub/grub.cfg",
                 requires_sudo=True,
             ),
+            RemoteCheck("linux.boot_mode_files", boot_mode_test, requires_sudo=True),
             RemoteCheck(
                 "linux.boot_artifacts",
                 "find /boot -maxdepth 1 -type f -name 'vmlinuz-*' "
@@ -319,6 +386,29 @@ class PostInstallValidationMixin:
                 "findmnt /mnt/windows; findmnt -n -o FSTYPE /mnt/windows | "
                 "grep -Eq '^(fuseblk|ntfs3)$'; "
                 "findmnt -n -o OPTIONS /mnt/windows | grep -qw rw",
+            ),
+            RemoteCheck(
+                "linux.sharing_policy",
+                "grep -Fx true /etc/libertix/share-linux-in-windows; "
+                "grep -Eq '^UUID=.*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab",
+            ),
+            RemoteCheck(
+                "linux.desktop_stack",
+                "test \"$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\\n' "
+                "cinnamon lightdm | grep -c '^ii ')\" = 2; systemctl is-active lightdm",
+            ),
+            RemoteCheck(
+                "linux.first_boot_cleanup",
+                "test ! -e /etc/systemd/system/first-boot-resize.service; "
+                "test ! -e /usr/local/bin/first-boot-resize.sh; "
+                "test -s /var/log/libertix/first-boot-resize.log",
+                requires_sudo=True,
+            ),
+            RemoteCheck(
+                "linux.system_resources",
+                'test "$(df --output=avail -B1 / | tail -1)" -gt 1073741824; '
+                'test "$(df --output=iavail / | tail -1)" -gt 10000; '
+                "test \"$(awk '/MemTotal:/ {print $2}' /proc/meminfo)\" -gt 1048576",
             ),
             RemoteCheck(
                 "linux.failed_units",
@@ -514,10 +604,17 @@ class PostInstallValidationMixin:
             "identity",
             "firmware",
             "system_volume",
+            "system_resources",
+            "partition_layout",
+            "boot_partition",
+            "boot_configuration",
             "recovery",
             "bitlocker",
             "temporary_artifacts",
             "network",
+            "locale",
+            "ssh_service",
+            "core_services",
             "hibernation",
             "ext4_driver",
             "ext4_readonly_mount",
@@ -525,6 +622,7 @@ class PostInstallValidationMixin:
             "linux_home_hash",
             "ext4_write_denied",
             "explorer_shortcut",
+            "sharing_tasks",
             "cross_os_hash",
             "dism_check_health",
             "sfc_verify_only",

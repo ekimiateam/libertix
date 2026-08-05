@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import logging
 import tempfile
-import time as time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PureWindowsPath
-
-from vncdotool import api as api
 
 from app.clients.proxmox import ProxmoxClient
 from app.clients.vision_llm import VisionLLMClient
@@ -19,7 +16,6 @@ from app.services.automation_monitoring import InstallationMonitoringMixin
 from app.services.automation_postinstall import PostInstallValidationMixin
 from app.services.automation_preflight import AutomationPreflight
 from app.services.automation_types import AutomationOptions, WizardProfile
-from app.services.automation_types import Point as Point
 from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
 from app.services.validation import ValidationService
@@ -81,7 +77,7 @@ class AutomationService(
             if apply and not monitor_iso:
                 raise WorkflowError(
                     "automation.monitor_required",
-                    "Apply exige la surveillance visuelle jusqu'au démarrage du live",
+                    "Apply requires visual monitoring until the live environment starts",
                 )
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
@@ -93,7 +89,7 @@ class AutomationService(
             windows_path = self.validation.to_windows_share_path(executable)
             result.ok(
                 "automation.release_path",
-                "Exécutable Libertix prêt pour automatisation UI",
+                "Libertix executable ready for UI automation",
                 path=str(windows_path),
             )
             options = AutomationOptions(
@@ -125,27 +121,25 @@ class AutomationService(
                     return OperationResult(
                         status="error",
                         operation="automation",
-                        message=f"Automation échouée sur une ou plusieurs VM: {messages}",
+                        message=f"Automation failed on one or more VMs: {messages}",
                         steps=result.steps,
                     )
             suffix = (
-                "installation et validations Linux/Windows terminées"
+                "installation and Linux/Windows validation completed"
                 if apply and monitor_iso
-                else "clic Apply envoyé sans validation de fin"
+                else "Apply click sent without final-state validation"
                 if apply
-                else "interface lancée uniquement"
+                else "interface launched only"
             )
-            return result.success(
-                f"Automatisation Libertix sur {len(selected_vms)} VM(s): {suffix}"
-            )
+            return result.success(f"Libertix automation on {len(selected_vms)} VM(s): {suffix}")
         except WorkflowError as exc:
             return result.failure(exc)
         except Exception as exc:
-            logger.exception("Erreur interne inattendue pendant l'automatisation UI")
+            logger.exception("Unexpected internal error during UI automation")
             return result.failure(
                 WorkflowError(
                     "automation.internal",
-                    "Erreur interne inattendue",
+                    "Unexpected internal error",
                     details={"type": type(exc).__name__},
                 )
             )
@@ -162,7 +156,6 @@ class AutomationService(
             vm_host=vm.host,
             vmid=vm.vmid,
             launch_only_label=vm.firmware.upper(),
-            disable_defender_for_automation=vm.disable_defender_for_automation,
         )
 
     def _automation_profiles(
@@ -190,9 +183,9 @@ class AutomationService(
 
         raise WorkflowError(
             "automation.scope",
-            "Auto-click Libertix refusé: cette option est validée uniquement "
-            "sur VM500/vm1 BIOS, VM501/vm2 UEFI et VM502/vm3 UEFI. "
-            "Utilise ?vm=vm1, ?vm=vm2, ?vm=vm3 ou un body vms explicite.",
+            "Libertix auto-click refused: this option is validated only on "
+            "VM500/vm1 BIOS, VM501/vm2 UEFI, and VM502/vm3 UEFI. Use ?vm=vm1, "
+            "?vm=vm2, ?vm=vm3, or an explicit vms request body.",
             details={
                 "requested_selectors": list(selectors or []),
                 "selected_vms": [vm.name for vm in selected_vms],
@@ -206,11 +199,6 @@ class AutomationService(
                 ],
             },
         )
-
-    def _assert_autoclick_scope(
-        self, selected_vms: Sequence[VMConfig], selectors: Sequence[str] | None
-    ) -> None:
-        self._automation_profiles(selected_vms, selectors)
 
     def _proxmox(self) -> ProxmoxClient:
         s = self.settings
@@ -232,25 +220,6 @@ class AutomationService(
     ) -> None:
         self.preflight.restore_clean_snapshots(result, profiles)
 
-    def _assert_vm_not_in_io_error(
-        self, proxmox: ProxmoxClient, node: str, vmid: int, result: ResultBuilder
-    ) -> None:
-        self.preflight.assert_vm_not_in_io_error(proxmox, node, vmid, result)
-
-    def _assert_proxmox_storage_headroom(
-        self,
-        proxmox: ProxmoxClient,
-        locations: dict[int, str],
-        vm_count: int,
-        result: ResultBuilder,
-    ) -> None:
-        self.preflight.assert_proxmox_storage_headroom(
-            proxmox,
-            locations,
-            vm_count,
-            result,
-        )
-
     def _run_vm_isolated(
         self,
         vm: VMConfig,
@@ -261,11 +230,10 @@ class AutomationService(
     ) -> OperationResult:
         result = ResultBuilder("automation", on_step=on_step)
         try:
-            self._prepare_vm_for_automation(vm, profile, result)
             local_executable = self.validation.deploy_to_documents(vm, executable)
             result.ok(
                 "automation.deploy",
-                "Release Libertix copiée localement avant automatisation",
+                "Libertix release copied locally before automation",
                 target=vm.host,
                 vm=vm.name,
                 executable=str(local_executable),
@@ -273,7 +241,7 @@ class AutomationService(
             launch = self._launch_elevated(vm, local_executable)
             result.ok(
                 "automation.launch_elevated",
-                "Libertix lancé en administrateur via tâche planifiée interactive",
+                "Libertix launched as administrator through an interactive scheduled task",
                 target=vm.host,
                 vm=vm.name,
                 **launch,
@@ -287,56 +255,9 @@ class AutomationService(
                         details={"vm": vm.name, "host": vm.host},
                     )
                 self._run_post_install_validation(vm, options, result, monitor_outcome)
-            return result.success(f"Automatisation terminée sur {vm.name}")
+            return result.success(f"Automation completed on {vm.name}")
         except WorkflowError as exc:
             return result.failure(exc)
-
-    def _prepare_vm_for_automation(
-        self, vm: VMConfig, profile: WizardProfile, result: ResultBuilder
-    ) -> None:
-        if not profile.disable_defender_for_automation:
-            return
-        with self.validation.ssh(
-            vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
-        ) as ssh:
-            response = self.validation.run_windows_script(
-                ssh,
-                script_name="prepare_automation_vm.ps1",
-                config={
-                    "release_dir_name": self.settings.release_dir_name,
-                    "disable_defender": True,
-                },
-                step="automation.prepare_vm",
-                timeout=90,
-            )
-        values = self.validation.parse_powershell_results(
-            response.stdout,
-            prefixes=("DEFENDER_PREPARED", "DEFENDER_REALTIME", "DEFENDER_EXCLUSION"),
-        )
-        prepared_state = values.get("DEFENDER_PREPARED", "").casefold()
-        realtime_state = values.get("DEFENDER_REALTIME", "").casefold()
-        exclusion = values.get("DEFENDER_EXCLUSION", "").strip()
-        if not self._defender_preparation_is_valid(prepared_state, realtime_state, exclusion):
-            raise WorkflowError(
-                "automation.prepare_vm",
-                "La préparation Defender demandée n'est pas vérifiée",
-                details={"vm": vm.name, "host": vm.host, **values},
-            )
-        result.ok(
-            "automation.prepare_vm",
-            "VM préparée avant automation UI",
-            target=vm.host,
-            vm=vm.name,
-            **values,
-        )
-
-    @staticmethod
-    def _defender_preparation_is_valid(
-        prepared_state: str, realtime_state: str, exclusion: str
-    ) -> bool:
-        if not exclusion or prepared_state not in {"realtime-disabled", "exclusion-only"}:
-            return False
-        return prepared_state != "realtime-disabled" or realtime_state == "false"
 
     def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:
         task_name = f"LibertixAutoInstall_{vm.name}"
@@ -353,6 +274,13 @@ class AutomationService(
                     "task_name": task_name,
                     "filepool_base_url": self.settings.filepool_base_url,
                     "development_static_ipv4": vm.host,
+                    "development_static_ipv4_prefix_length": (
+                        self.settings.development_static_ipv4_prefix_length
+                    ),
+                    "development_static_ipv4_gateway": (
+                        self.settings.development_static_ipv4_gateway
+                    ),
+                    "development_dns_servers": list(self.settings.development_dns_servers),
                 },
                 step="automation.launch_elevated",
                 timeout=90,
@@ -363,13 +291,13 @@ class AutomationService(
         if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
             raise WorkflowError(
                 "automation.launch_elevated",
-                "Processus Libertix administrateur non confirmé",
+                "Elevated Libertix process was not confirmed",
                 details={"vm": vm.name, "host": vm.host, "stdout": response.stdout[-4000:]},
             )
         if PureWindowsPath(values.get("EXECUTABLE", "")) != executable:
             raise WorkflowError(
                 "automation.launch_elevated",
-                "Le processus lancé ne correspond pas à l'exécutable déployé",
+                "The launched process does not match the deployed executable",
                 details={"vm": vm.name, "expected": str(executable)},
             )
         return {

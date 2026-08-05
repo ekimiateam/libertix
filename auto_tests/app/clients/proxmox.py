@@ -47,7 +47,7 @@ class ProxmoxClient:
         self.client.close()
 
     def _request(self, method: str, path: str, *, step: str) -> object:
-        logger.info("Requête Proxmox", extra={"step": step, "target": path})
+        logger.info("Proxmox request", extra={"step": step, "target": path})
         try:
             response = self.client.request(method, f"{self.base_url}{path}")
             response.raise_for_status()
@@ -56,7 +56,7 @@ class ProxmoxClient:
             response = getattr(exc, "response", None)
             raise WorkflowError(
                 step,
-                "Échec de l'appel Proxmox",
+                "Proxmox request failed",
                 details={
                     "path": path,
                     "http_status": getattr(response, "status_code", None),
@@ -69,19 +69,19 @@ class ProxmoxClient:
     def locate_vm(self, vmid: int) -> str:
         nodes = self._request("GET", "/nodes", step="proxmox.list_nodes")
         if not isinstance(nodes, list):
-            raise WorkflowError("proxmox.list_nodes", "Format de liste des nœuds invalide")
+            raise WorkflowError("proxmox.list_nodes", "Invalid node-list response")
         for item in nodes:
             if not isinstance(item, dict) or not item.get("node"):
                 continue
             node = str(item["node"])
             path = f"/nodes/{node}/qemu/{vmid}/status/current"
-            logger.info("Recherche VM ciblée", extra={"step": "proxmox.locate_vm", "target": path})
+            logger.info("Looking up target VM", extra={"step": "proxmox.locate_vm", "target": path})
             try:
                 response = self.client.get(f"{self.base_url}{path}")
             except httpx.HTTPError as exc:
                 raise WorkflowError(
                     "proxmox.locate_vm",
-                    "Échec réseau pendant la recherche de la VM ciblée",
+                    "Network failure while locating target VM",
                     details={"vmid": vmid, "node": node, "error": str(exc)},
                 ) from exc
             if response.status_code == 200:
@@ -89,7 +89,7 @@ class ProxmoxClient:
             if response.status_code in (401, 403):
                 raise WorkflowError(
                     "proxmox.permissions",
-                    "Le token Proxmox n'a pas le droit VM.Audit sur la VM ciblée",
+                    "The Proxmox token lacks VM.Audit on the target VM",
                     details={
                         "vmid": vmid,
                         "node": node,
@@ -100,10 +100,10 @@ class ProxmoxClient:
             if response.status_code != 404:
                 raise WorkflowError(
                     "proxmox.locate_vm",
-                    "Réponse inattendue pour la VM ciblée",
+                    "Unexpected target VM response",
                     details={"vmid": vmid, "node": node, "http_status": response.status_code},
                 )
-        raise WorkflowError("proxmox.locate_vm", "VM ciblée introuvable", details={"vmid": vmid})
+        raise WorkflowError("proxmox.locate_vm", "Target VM not found", details={"vmid": vmid})
 
     def assert_snapshot(self, node: str, vmid: int, snapshot: str) -> None:
         data = self._request(
@@ -117,7 +117,7 @@ class ProxmoxClient:
         if snapshot not in names:
             raise WorkflowError(
                 "proxmox.check_snapshot",
-                "Snapshot requis absent",
+                "Required snapshot is missing",
                 details={"vmid": vmid, "snapshot": snapshot},
             )
 
@@ -128,7 +128,7 @@ class ProxmoxClient:
             step="proxmox.rollback",
         )
         if not isinstance(data, str) or not data.startswith("UPID:"):
-            raise WorkflowError("proxmox.rollback", "UPID Proxmox invalide", details={"vmid": vmid})
+            raise WorkflowError("proxmox.rollback", "Invalid Proxmox UPID", details={"vmid": vmid})
         self._wait_task(node, data, vmid)
 
     def _wait_task(self, node: str, upid: str, vmid: int) -> None:
@@ -142,11 +142,11 @@ class ProxmoxClient:
                 if data.get("exitstatus") != "OK":
                     raise WorkflowError(
                         "proxmox.wait_task",
-                        "Rollback Proxmox en échec",
+                        "Proxmox rollback failed",
                         details={"vmid": vmid, "exitstatus": data.get("exitstatus")},
                     )
                 return
             time.sleep(2)
         raise WorkflowError(
-            "proxmox.wait_task", "Délai du rollback dépassé", details={"vmid": vmid}
+            "proxmox.wait_task", "Rollback timeout exceeded", details={"vmid": vmid}
         )

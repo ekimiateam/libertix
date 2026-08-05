@@ -50,15 +50,22 @@ function New-OrReuseInstallerPartition {
     }
     $stagingSizeGB = [int]($stagingBytes / 1GB)
     $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    $systemVolume = Get-Volume -DriveLetter $SystemDriveLetter -ErrorAction Stop
+    $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
 
-    $minFree = 10GB
-    $need = $requestedBytes + $minFree
-
-    if ($systemVolume.SizeRemaining -lt $need) {
-        throw "Not enough free space on $SystemDrive (need ~$( [math]::Round($need / 1GB, 1) ) GB)."
+    $shrinkGeometry = Get-LibertixAlignedShrinkGeometry `
+        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
+        -PartitionSizeBytes ([int64]$systemPartition.Size) `
+        -RequestedAllocationBytes $requestedBytes `
+        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
+    $shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes
+    $installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
+    $recoveryOffsetBytes = [int64]$installationPlan.disk.recovery.offsetBytes
+    if (
+        $requestedBytes -gt $recoveryOffsetBytes -or
+        $installerOffsetBytes -gt $recoveryOffsetBytes - $requestedBytes
+    ) {
+        throw "The requested Linux partition would overlap Windows Recovery."
     }
-
     if ($stagingSizeGB -lt $SizeGB) {
         Write-Log "Reserving ${SizeGB}GB for Linux with a compatible ${stagingSizeGB}GB FAT32 staging partition '$InstallerLabel'..." "Cyan"
     } else {
@@ -77,19 +84,51 @@ function New-OrReuseInstallerPartition {
         Set-HibernateEnabled -Enabled $false
     }
 
+    # Read free space after hibernation has been disabled. hiberfil.sys can be
+    # several GiB, so checking the earlier volume snapshot rejects layouts that
+    # become safely shrinkable as part of this transaction. A bounded tolerance
+    # absorbs only the small transaction/log writes made between the wizard and
+    # this check; SizeMin remains the authoritative fail-closed resize guard.
+    [int64]$minimumFreeBytes = 10GB
+    [int64]$freeSpaceAccountingToleranceBytes = 16MB
+    [int64]$requiredFreeBytes = $shrinkBytes + $minimumFreeBytes
+    $systemVolume = Get-Volume -DriveLetter $SystemDriveLetter -ErrorAction Stop
+    [int64]$remainingBytes = [int64]$systemVolume.SizeRemaining
+    if ($remainingBytes + $freeSpaceAccountingToleranceBytes -lt $requiredFreeBytes) {
+        throw (
+            "Not enough free space on $SystemDrive " +
+            "(available=$remainingBytes bytes, required=$requiredFreeBytes bytes)."
+        )
+    }
+    if ($remainingBytes -lt $requiredFreeBytes) {
+        Write-Log (
+            "Free-space accounting is within the bounded 16 MiB tolerance: " +
+            "available=$remainingBytes required=$requiredFreeBytes."
+        ) "Yellow"
+    }
+
     $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
-    $shrinkBytes = $requestedBytes
-    $maxShrink = $supported.SizeMax - $supported.SizeMin
+    $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
     if ($shrinkBytes -gt $maxShrink) {
         throw "Cannot shrink $SystemDrive by ${SizeGB}GB (max ~$( [math]::Round($maxShrink / 1GB, 1) ) GB)."
     }
 
     Start-LibertixTrackedStep -Step "windows.system-volume-shrunk"
+    # A cloned Windows partition can end between 1 MiB boundaries. Move its
+    # new end back to the preceding boundary so CreatePartition does not lose
+    # part of the requested extent while aligning the staging partition.
     Resize-Partition `
         -DriveLetter $SystemDriveLetter `
         -Size ($systemPartition.Size - $shrinkBytes) `
         -ErrorAction Stop
     Start-Sleep -Seconds 2
+    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
+    if (
+        [int64]$systemPartition.Offset -ne [int64]$installationPlan.disk.windows.offsetBytes -or
+        [int64]$systemPartition.Size -ne [int64]$shrinkGeometry.TargetSizeBytes
+    ) {
+        throw "Windows partition geometry does not match the aligned shrink target."
+    }
     Complete-LibertixTrackedStep -Step "windows.system-volume-shrunk"
 
     # Let Mount Manager choose the next available access path. A fixed letter
@@ -99,16 +138,27 @@ function New-OrReuseInstallerPartition {
     $newPartition = New-Partition `
         -DiskNumber $systemPartition.DiskNumber `
         -Size $stagingBytes `
-        -AssignDriveLetter
+        -Offset $installerOffsetBytes `
+        -Alignment ([int64]$shrinkGeometry.AlignmentBytes) `
+        -AssignDriveLetter `
+        -ErrorAction Stop
+
+    # Persist the returned identity before checking any postcondition. A RAW
+    # partition with unexpected geometry still belongs to this transaction and
+    # must remain discoverable by rollback.
+    Save-TransactionPartitionState -Partition $newPartition
+
+    if (
+        [int64]$newPartition.Offset -ne $installerOffsetBytes -or
+        [int64]$newPartition.Size -ne $stagingBytes
+    ) {
+        throw "Windows created the installer partition with unexpected geometry."
+    }
 
     $createdDriveLetter = [string]$newPartition.DriveLetter
     if ([string]::IsNullOrWhiteSpace($createdDriveLetter)) {
         throw "Windows created the installer partition but did not assign a drive letter."
     }
-
-    # Persist ownership before formatting. If Format-Volume fails, rollback
-    # must still be able to identify and remove this exact RAW partition.
-    Save-TransactionPartitionState -Partition $newPartition
 
     Format-Volume `
         -DriveLetter $createdDriveLetter `
@@ -336,7 +386,10 @@ function Install-LibertixIsoToPartition {
         try {
             Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue |
                 Out-Null
-        } catch {}
+        } catch {
+            # Dismount is best-effort because the primary copy failure must be
+            # preserved and Windows releases the read-only image at process exit.
+        }
 
         Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -484,7 +537,12 @@ function Set-LibertixUefiBootEntry {
     if ($fallbackOrder.Count -eq 0 -or [uint16]$fallbackOrder[0] -ne $firmwareEntry.BootNumber) {
         throw "BCD firmware fallback did not place $($firmwareEntry.BootVariable) first in UEFI BootOrder."
     }
-    try { Remove-FirmwareVariable -Name "BootNext" } catch {}
+    try {
+        Remove-FirmwareVariable -Name "BootNext"
+    } catch {
+        # Some firmware refuses deletion when BootNext is already absent. The
+        # verified BootOrder entry still provides the required fallback boot.
+    }
     Update-TransactionFirmwareState `
         -BootNumber $firmwareEntry.BootNumber `
         -BootVariable $firmwareEntry.BootVariable `

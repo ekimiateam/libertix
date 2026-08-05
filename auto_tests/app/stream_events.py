@@ -101,7 +101,7 @@ class StreamEventProjector:
                         "step": "automation.llm_response_normalized",
                         "status": "ok",
                         "message": (
-                            "Réponse LLM non stricte normalisée; détails conservés dans le journal"
+                            "Non-strict LLM response normalized; details retained in the log"
                         ),
                         "context": {"vm": vm, "analysis_source": source},
                     },
@@ -137,7 +137,7 @@ class StreamEventProjector:
             "data": {
                 "step": "automation.wizard_phase",
                 "status": "ok",
-                "message": f"Assistant Libertix: étape {phase}",
+                "message": f"Libertix wizard phase: {phase}",
                 "context": {"vm": vm, "phase": phase},
             },
         }
@@ -153,21 +153,21 @@ class StreamEventProjector:
             )
         )
         phases = (
-            (("decrypt", "dechiffr"), "windows-decryption", "Déchiffrement de Windows"),
-            (("uefi iso", "iso uefi"), "uefi-installer-download", "Téléchargement du live UEFI"),
+            (("decrypt", "dechiffr"), "windows-decryption", "Windows decryption"),
+            (("uefi iso", "iso uefi"), "uefi-installer-download", "UEFI live download"),
             (
                 ("mint iso", "iso mint", "linux iso", "iso d installation linux"),
                 "linux-iso-download",
-                "Téléchargement de l’ISO Linux",
+                "Linux ISO download",
             ),
-            (("extract", "extraction"), "linux-extraction", "Extraction du système Linux"),
+            (("extract", "extraction"), "linux-extraction", "Linux system extraction"),
             (
                 ("configur", "installed system"),
                 "target-configuration",
-                "Configuration du système installé",
+                "Installed system configuration",
             ),
-            (("cleaning", "nettoyage"), "filesystem-cleanup", "Nettoyage du système de fichiers"),
-            (("boot menu", "windows boot manager"), "installed-boot", "Menu dual-boot détecté"),
+            (("cleaning", "nettoyage"), "filesystem-cleanup", "Filesystem cleanup"),
+            (("boot menu", "windows boot manager"), "installed-boot", "Dual-boot menu detected"),
         )
         for markers, phase_id, message in phases:
             if any(marker in text for marker in markers):

@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using Libertix.Helpers;
@@ -58,9 +59,8 @@ namespace Libertix.Pages
                 : Guid.NewGuid().ToString("N");
             LinuxKeyboardConfiguration keyboard = WindowsKeyboardLayout.ResolveActive(
                 Localization.GetKeyboardLayout());
-            string developmentIpv4 = ((App)Application.Current)
-                .RuntimeOptions
-                .DevelopmentSshStaticIpv4Address;
+            StartupOptions startupOptions = ((App)Application.Current).RuntimeOptions;
+            string developmentIpv4 = startupOptions.DevelopmentSshStaticIpv4Address;
             _installationPlan = new InstallationPlan
             {
                 PlanId = planId,
@@ -132,9 +132,10 @@ namespace Libertix.Pages
                     {
                         EnableSsh = true,
                         StaticIpv4Address = developmentIpv4,
-                        StaticIpv4PrefixLength = 24,
-                        StaticIpv4Gateway = "192.168.1.1",
-                        DnsServers = new[] { "8.8.8.8", "1.1.1.1" }
+                        StaticIpv4PrefixLength =
+                            startupOptions.DevelopmentSshStaticIpv4PrefixLength.Value,
+                        StaticIpv4Gateway = startupOptions.DevelopmentSshStaticIpv4Gateway,
+                        DnsServers = startupOptions.DevelopmentSshDnsServers.ToArray()
                     }
             };
 
@@ -193,9 +194,10 @@ namespace Libertix.Pages
             InstallerPartitionPlan installer = _installationPlan.Disk.Installer;
             installer.Number = number;
             installer.OffsetBytes = offset;
-            if (!InstallationSizePolicy.IsObservedStagingSizeAcceptable(
-                installer.StagingSizeBytes,
-                size))
+            // MSFT_Disk.CreatePartition treats Size as an exact request and
+            // returns an error when that extent cannot be created. Accepting a
+            // different size here would hide a provider or geometry mismatch.
+            if (size != installer.StagingSizeBytes)
             {
                 throw new InvalidOperationException(
                     $"Installer staging size mismatch: expected {installer.StagingSizeBytes}, got {size}.");

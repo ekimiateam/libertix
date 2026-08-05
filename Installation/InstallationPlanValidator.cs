@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Net;
-using System.Net.Sockets;
 using System.Text.RegularExpressions;
 
 namespace Libertix.Installation
@@ -169,7 +167,15 @@ namespace Libertix.Installation
             Require(disk.Number >= 0, errors, "disk.number cannot be negative.");
             RequireNotBlank(disk.UniqueId, "disk.uniqueId", errors);
             RequirePositive(disk.SizeBytes, "disk.sizeBytes", errors);
-            RequirePositive(disk.LogicalSectorSizeBytes, "disk.logicalSectorSizeBytes", errors);
+            bool sectorSizeIsSupported =
+                disk.LogicalSectorSizeBytes == 512 || disk.LogicalSectorSizeBytes == 4096;
+            Require(sectorSizeIsSupported, errors,
+                "disk.logicalSectorSizeBytes must be either 512 or 4096.");
+            if (sectorSizeIsSupported)
+            {
+                Require(disk.SizeBytes % disk.LogicalSectorSizeBytes == 0, errors,
+                    "disk.sizeBytes must align to disk.logicalSectorSizeBytes.");
+            }
             Require(
                 !string.IsNullOrEmpty(disk.SystemDrive) &&
                 disk.SystemDrive.Length == 2 &&
@@ -189,15 +195,88 @@ namespace Libertix.Installation
                     errors, "A UEFI plan requires a GPT disk.");
             }
 
-            ValidatePartition(disk.Windows, "disk.windows", errors);
-            ValidatePartition(disk.Boot, "disk.boot", errors);
-            ValidatePartition(disk.Recovery, "disk.recovery", errors);
-            ValidateInstallerPartition(disk.Installer, errors);
+            ValidatePartition(disk.Windows, "disk.windows", disk.LogicalSectorSizeBytes, errors);
+            ValidatePartition(disk.Boot, "disk.boot", disk.LogicalSectorSizeBytes, errors);
+            ValidatePartition(disk.Recovery, "disk.recovery", disk.LogicalSectorSizeBytes, errors);
+            ValidateInstallerPartition(disk.Installer, disk.LogicalSectorSizeBytes, errors);
+            ValidateDiskGeometry(disk, errors);
+        }
+
+        private static void ValidateDiskGeometry(
+            InstallationDisk disk,
+            ICollection<string> errors)
+        {
+            if (disk.Windows == null || disk.Boot == null || disk.Recovery == null ||
+                disk.Installer == null || disk.SizeBytes <= 0)
+            {
+                return;
+            }
+
+            PartitionIdentity[] fixedPartitions = { disk.Windows, disk.Boot, disk.Recovery };
+            string[] fixedPartitionNames = { "disk.windows", "disk.boot", "disk.recovery" };
+            var ends = new long[fixedPartitions.Length];
+            for (int index = 0; index < fixedPartitions.Length; index++)
+            {
+                PartitionIdentity partition = fixedPartitions[index];
+                if (partition.OffsetBytes <= 0 || partition.SizeBytes <= 0 ||
+                    partition.SizeBytes > disk.SizeBytes ||
+                    partition.OffsetBytes > disk.SizeBytes - partition.SizeBytes)
+                {
+                    errors.Add($"{fixedPartitionNames[index]} must fit within disk.sizeBytes.");
+                    return;
+                }
+                ends[index] = partition.OffsetBytes + partition.SizeBytes;
+            }
+
+            for (int left = 0; left < fixedPartitions.Length; left++)
+            {
+                for (int right = left + 1; right < fixedPartitions.Length; right++)
+                {
+                    bool overlap =
+                        fixedPartitions[left].OffsetBytes < ends[right] &&
+                        fixedPartitions[right].OffsetBytes < ends[left];
+                    Require(!overlap, errors,
+                        $"{fixedPartitionNames[left]} and {fixedPartitionNames[right]} overlap.");
+                }
+            }
+
+            long windowsEnd = ends[0];
+            Require(windowsEnd <= disk.Recovery.OffsetBytes, errors,
+                "disk.recovery must start at or after the original Windows partition end.");
+
+            if (!disk.Installer.OffsetBytes.HasValue ||
+                disk.Installer.FinalSizeBytes <= 0 ||
+                disk.LogicalSectorSizeBytes <= 0)
+            {
+                return;
+            }
+
+            const long partitionAlignmentBytes = 1024L * 1024L;
+            long alignmentPadding = windowsEnd % partitionAlignmentBytes;
+            if (disk.Installer.FinalSizeBytes > windowsEnd - alignmentPadding)
+            {
+                errors.Add("disk.installer.finalSizeBytes exceeds the original Windows extent.");
+                return;
+            }
+            long expectedOffset = windowsEnd - alignmentPadding - disk.Installer.FinalSizeBytes;
+            long primaryMbrOffset = expectedOffset - partitionAlignmentBytes;
+            bool offsetMatches = disk.Installer.OffsetBytes.Value == expectedOffset ||
+                (string.Equals(disk.PartitionStyle, "MBR", StringComparison.Ordinal) &&
+                 disk.Installer.OffsetBytes.Value == primaryMbrOffset);
+            Require(offsetMatches, errors,
+                "disk.installer.offsetBytes does not match the aligned Windows shrink geometry.");
+            Require(
+                disk.Installer.FinalSizeBytes <= disk.Recovery.OffsetBytes &&
+                disk.Installer.OffsetBytes.Value <=
+                    disk.Recovery.OffsetBytes - disk.Installer.FinalSizeBytes,
+                errors,
+                "disk.installer final extent would overlap disk.recovery.");
         }
 
         private static void ValidatePartition(
             PartitionIdentity partition,
             string name,
+            int logicalSectorSizeBytes,
             ICollection<string> errors)
         {
             if (partition == null)
@@ -209,10 +288,18 @@ namespace Libertix.Installation
             Require(partition.Number >= 1, errors, $"{name}.number must be positive.");
             RequirePositive(partition.OffsetBytes, $"{name}.offsetBytes", errors);
             RequirePositive(partition.SizeBytes, $"{name}.sizeBytes", errors);
+            if (logicalSectorSizeBytes == 512 || logicalSectorSizeBytes == 4096)
+            {
+                Require(partition.OffsetBytes % logicalSectorSizeBytes == 0, errors,
+                    $"{name}.offsetBytes must align to disk.logicalSectorSizeBytes.");
+                Require(partition.SizeBytes % logicalSectorSizeBytes == 0, errors,
+                    $"{name}.sizeBytes must align to disk.logicalSectorSizeBytes.");
+            }
         }
 
         private static void ValidateInstallerPartition(
             InstallerPartitionPlan installer,
+            int logicalSectorSizeBytes,
             ICollection<string> errors)
         {
             if (installer == null)
@@ -226,7 +313,14 @@ namespace Libertix.Installation
             if (installer.Number.HasValue)
                 Require(installer.Number.Value >= 1, errors, "disk.installer.number must be positive.");
             if (installer.OffsetBytes.HasValue)
+            {
                 RequirePositive(installer.OffsetBytes.Value, "disk.installer.offsetBytes", errors);
+                if (logicalSectorSizeBytes == 512 || logicalSectorSizeBytes == 4096)
+                {
+                    Require(installer.OffsetBytes.Value % logicalSectorSizeBytes == 0, errors,
+                        "disk.installer.offsetBytes must align to disk.logicalSectorSizeBytes.");
+                }
+            }
 
             RequirePositive(installer.FinalSizeBytes, "disk.installer.finalSizeBytes", errors);
             RequirePositive(installer.StagingSizeBytes, "disk.installer.stagingSizeBytes", errors);
@@ -339,36 +433,18 @@ namespace Libertix.Installation
 
             Require(development.EnableSsh, errors,
                 "development.enableSsh must be true when development options are present.");
-            Require(IsDevelopmentIpv4Address(development.StaticIpv4Address), errors,
-                "development.staticIpv4Address must be usable in 192.168.1.0/24.");
-            Require(development.StaticIpv4PrefixLength == 24, errors,
-                "development.staticIpv4PrefixLength must be 24.");
-            Require(string.Equals(
-                    development.StaticIpv4Gateway,
-                    "192.168.1.1",
-                    StringComparison.Ordinal),
-                errors,
-                "development.staticIpv4Gateway must be 192.168.1.1.");
-            Require(
-                development.DnsServers != null &&
-                development.DnsServers.Length == 2 &&
-                string.Equals(development.DnsServers[0], "8.8.8.8", StringComparison.Ordinal) &&
-                string.Equals(development.DnsServers[1], "1.1.1.1", StringComparison.Ordinal),
-                errors,
-                "development.dnsServers must contain 8.8.8.8 then 1.1.1.1.");
-        }
-
-        private static bool IsDevelopmentIpv4Address(string value)
-        {
-            if (!IPAddress.TryParse(value, out IPAddress address) ||
-                address.AddressFamily != AddressFamily.InterNetwork)
+            if (!Ipv4NetworkPolicy.TryValidate(
+                development.StaticIpv4Address,
+                development.StaticIpv4PrefixLength,
+                development.StaticIpv4Gateway,
+                development.DnsServers,
+                out _,
+                out _,
+                out _,
+                out string networkError))
             {
-                return false;
+                errors.Add("development network is invalid: " + networkError);
             }
-
-            byte[] octets = address.GetAddressBytes();
-            return octets[0] == 192 && octets[1] == 168 && octets[2] == 1 &&
-                octets[3] > 1 && octets[3] < 255;
         }
 
         private static void RequireHttpUri(

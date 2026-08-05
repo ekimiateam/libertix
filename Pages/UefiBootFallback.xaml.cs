@@ -178,7 +178,15 @@ namespace Libertix.Pages
                     if (!process.WaitForExit(
                         (int)WindowsProcessTimeouts.RecoveryOperation.TotalMilliseconds))
                     {
-                        try { process.Kill(); } catch { }
+                        try
+                        {
+                            process.Kill();
+                        }
+                        catch
+                        {
+                            // A process that exits at the timeout boundary no
+                            // longer needs to be terminated.
+                        }
                         Dispatcher.BeginInvoke(new Action(() =>
                             Log(Localization.GetString("UefiFallbackTimeoutLog"))));
                         return -1;

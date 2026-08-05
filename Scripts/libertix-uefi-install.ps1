@@ -25,6 +25,7 @@ $bootStrategyWasSpecified = $PSBoundParameters.ContainsKey("BootStrategy")
 $requiredModules = @(
     "Libertix.InstallationPlan.psm1",
     "Libertix.InstallationState.psm1",
+    "Libertix.StorageGeometry.psm1",
     "Libertix.Process.psm1",
     "Libertix.Firmware.psm1",
     "Libertix.Download.psm1",

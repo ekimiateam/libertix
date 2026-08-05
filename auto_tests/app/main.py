@@ -58,7 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def authorize(x_api_key: str = Header(..., alias="X-API-Key")) -> None:
         expected = configured.api_access_token.get_secret_value()
         if not hmac.compare_digest(x_api_key, expected):
-            raise HTTPException(status_code=401, detail="Clé API invalide")
+            raise HTTPException(status_code=401, detail="Invalid API key")
 
     async def execute(
         operation: str,
@@ -141,7 +141,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         result = ResetService(configured).run(selectors, on_step=on_step)
                     events.put(projector.project_result(result))
                 except Exception as exc:
-                    logger.exception("Erreur interne inattendue dans le flux %s", operation)
+                    logger.exception("Unexpected internal error in %s stream", operation)
                     result = OperationResult(
                         status="error",
                         operation=operation,
@@ -150,7 +150,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             StepResult(
                                 step=f"{operation}.internal_error",
                                 status="error",
-                                message="Erreur interne inattendue; consulter les logs serveur",
+                                message="Unexpected internal error; inspect the server logs",
                                 context={
                                     "exception_type": type(exc).__name__,
                                 },

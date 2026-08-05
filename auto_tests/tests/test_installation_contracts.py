@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -20,7 +21,11 @@ def load_live_module(relative_path: str, module_name: str) -> ModuleType:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load live helper: {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(path.parent))
     return module
 
 
@@ -96,7 +101,7 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             },
             "installer": {
                 "number": 4,
-                "offsetBytes": 220 * GIB,
+                "offsetBytes": (201 - final_size_gib) * GIB,
                 "finalSizeBytes": final_size_gib * GIB,
                 "stagingSizeBytes": staging_size_gib * GIB,
             },
@@ -134,6 +139,7 @@ def test_bios_and_uefi_use_the_same_size_policy(
     assert exported["LINUX_SIZE_GB"] == str(final_size_gib)
     assert exported["LANGUAGE_CODE"] == "fr"
     assert exported["KEYBOARD_VARIANT"] == ""
+    assert exported["WINDOWS_PARTITION_SIZE_BYTES"] == str(200 * GIB)
     assert exported["INSTALLER_FINAL_SIZE_BYTES"] == str(final_size_gib * GIB)
     assert exported["INSTALLER_STAGING_SIZE_BYTES"] == str(staging_size_gib * GIB)
 
@@ -182,21 +188,20 @@ def test_development_ssh_network_is_validated_and_exported(
     plan = make_plan("uefi", 40)
     plan["development"] = {
         "enableSsh": True,
-        "staticIpv4Address": "192.168.1.241",
-        "staticIpv4PrefixLength": 24,
-        "staticIpv4Gateway": "192.168.1.1",
-        "dnsServers": ["8.8.8.8", "1.1.1.1"],
+        "staticIpv4Address": "10.42.7.20",
+        "staticIpv4PrefixLength": 23,
+        "staticIpv4Gateway": "10.42.6.1",
+        "dnsServers": ["9.9.9.9", "1.1.1.1"],
     }
 
     validated = plan_module.validate_plan(plan, require_installer=True)
     exported = plan_module.shell_values(validated)
 
     assert exported["DEVELOPMENT_SSH_ENABLED"] == "true"
-    assert exported["DEVELOPMENT_STATIC_IPV4_ADDRESS"] == "192.168.1.241"
-    assert exported["DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH"] == "24"
-    assert exported["DEVELOPMENT_STATIC_IPV4_GATEWAY"] == "192.168.1.1"
-    assert exported["DEVELOPMENT_DNS_PRIMARY"] == "8.8.8.8"
-    assert exported["DEVELOPMENT_DNS_SECONDARY"] == "1.1.1.1"
+    assert exported["DEVELOPMENT_STATIC_IPV4_ADDRESS"] == "10.42.7.20"
+    assert exported["DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH"] == "23"
+    assert exported["DEVELOPMENT_STATIC_IPV4_GATEWAY"] == "10.42.6.1"
+    assert exported["DEVELOPMENT_DNS_SERVERS"] == "9.9.9.9;1.1.1.1"
     validate_schema_document("installation-plan.schema.json", plan)
 
 
@@ -209,14 +214,28 @@ def test_plan_without_development_access_exports_disabled_defaults(
     assert exported["DEVELOPMENT_STATIC_IPV4_ADDRESS"] == ""
 
 
+def test_live_plan_runtime_rejects_properties_outside_the_shared_schema(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 40)
+    plan["unexpectedRuntimeField"] = True
+
+    with pytest.raises(plan_module.PlanValidationError, match="schema validation failed"):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
         ("enableSsh", False),
-        ("staticIpv4Address", "192.168.2.241"),
-        ("staticIpv4PrefixLength", 16),
-        ("staticIpv4Gateway", "192.168.1.254"),
-        ("dnsServers", ["1.1.1.1", "8.8.8.8"]),
+        ("staticIpv4Address", "10.42.6.0"),
+        ("staticIpv4PrefixLength", 31),
+        ("staticIpv4Gateway", "10.43.0.1"),
+        ("dnsServers", ["1.1.1.1", "1.1.1.1"]),
+        ("staticIpv4Address", "127.0.0.2"),
+        ("staticIpv4Address", "169.254.10.2"),
+        ("staticIpv4Address", "224.0.0.2"),
+        ("staticIpv4Gateway", "127.0.0.1"),
     ],
 )
 def test_development_ssh_network_rejects_noncanonical_values(
@@ -227,10 +246,10 @@ def test_development_ssh_network_rejects_noncanonical_values(
     plan = make_plan("uefi", 40)
     development = {
         "enableSsh": True,
-        "staticIpv4Address": "192.168.1.241",
-        "staticIpv4PrefixLength": 24,
-        "staticIpv4Gateway": "192.168.1.1",
-        "dnsServers": ["8.8.8.8", "1.1.1.1"],
+        "staticIpv4Address": "10.42.7.20",
+        "staticIpv4PrefixLength": 23,
+        "staticIpv4Gateway": "10.42.6.1",
+        "dnsServers": ["9.9.9.9", "1.1.1.1"],
     }
     development[field] = value
     plan["development"] = development
@@ -258,6 +277,93 @@ def test_plan_rejects_noncanonical_staging_sizes(
     installer = plan["disk"]["installer"]  # type: ignore[index]
     installer["finalSizeBytes"] = final_size_bytes
     installer["stagingSizeBytes"] = staging_size_bytes
+
+    with pytest.raises(plan_module.PlanValidationError):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_plan_accepts_aligned_four_kn_partition_geometry(plan_module: ModuleType) -> None:
+    plan = make_plan("uefi", 40)
+    plan["disk"]["logicalSectorSizeBytes"] = 4096  # type: ignore[index]
+
+    plan_module.validate_plan(plan, require_installer=True)
+    validate_schema_document("installation-plan.schema.json", plan)
+
+
+@pytest.mark.parametrize("logical_sector_size", [256, 1024, 8192])
+def test_plan_rejects_unsupported_logical_sector_sizes(
+    plan_module: ModuleType,
+    logical_sector_size: int,
+) -> None:
+    plan = make_plan("uefi", 40)
+    plan["disk"]["logicalSectorSizeBytes"] = logical_sector_size  # type: ignore[index]
+
+    with pytest.raises(plan_module.PlanValidationError):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_plan_rejects_partition_offsets_between_four_kn_sectors(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 40)
+    disk = plan["disk"]  # type: ignore[assignment]
+    disk["logicalSectorSizeBytes"] = 4096
+    disk["windows"]["offsetBytes"] += 512
+
+    with pytest.raises(plan_module.PlanValidationError, match="must align"):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_plan_accepts_cloned_windows_geometry_with_preserved_gap(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 24)
+    disk = plan["disk"]  # type: ignore[assignment]
+    disk["windows"]["sizeBytes"] += 256 * 1024
+    disk["installer"]["offsetBytes"] = (
+        disk["windows"]["offsetBytes"]
+        + disk["windows"]["sizeBytes"]
+        - 256 * 1024
+        - disk["installer"]["finalSizeBytes"]
+    )
+
+    plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_plan_rejects_installer_offset_not_derived_from_original_windows_geometry(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 24)
+    plan["disk"]["installer"]["offsetBytes"] += 1024 * 1024  # type: ignore[index]
+
+    with pytest.raises(plan_module.PlanValidationError, match="aligned Windows shrink geometry"):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_bios_plan_accepts_primary_partition_after_reserved_mbr_metadata(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("bios", 24)
+    plan["disk"]["installer"]["offsetBytes"] -= 1024 * 1024  # type: ignore[index]
+
+    plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_uefi_plan_rejects_bios_primary_partition_offset(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 24)
+    plan["disk"]["installer"]["offsetBytes"] -= 1024 * 1024  # type: ignore[index]
+
+    with pytest.raises(plan_module.PlanValidationError, match="aligned Windows shrink geometry"):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_plan_rejects_recovery_before_original_windows_end(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 24)
+    plan["disk"]["recovery"]["offsetBytes"] = 190 * GIB  # type: ignore[index]
 
     with pytest.raises(plan_module.PlanValidationError):
         plan_module.validate_plan(plan, require_installer=True)
@@ -295,6 +401,27 @@ def test_failure_and_rollback_preserve_the_completed_step_ledger(
     assert state["phase"] == "complete"
     assert state["completedSteps"] == ["windows.system-volume-shrunk"]
     assert state["compensatedSteps"] == ["windows.system-volume-shrunk"]
+
+
+def test_live_state_runtime_rejects_properties_outside_the_shared_schema(
+    state_module: ModuleType,
+) -> None:
+    state = {
+        "schemaVersion": 1,
+        "planId": "a" * 32,
+        "revision": 0,
+        "status": "pending",
+        "phase": "windows",
+        "activeStep": None,
+        "completedSteps": [],
+        "compensatedSteps": [],
+        "failure": None,
+        "updatedAtUtc": "2026-07-15T12:00:00Z",
+        "unexpectedRuntimeField": True,
+    }
+
+    with pytest.raises(state_module.StateTransitionError, match="schema validation failed"):
+        state_module.validate_state(state)
 
 
 def test_contract_implementations_share_the_same_policy_constants() -> None:
@@ -349,6 +476,30 @@ def test_firmware_wrappers_delegate_to_shared_implementations() -> None:
     assert "LIBERTIX_FIRMWARE_MODE=uefi" in target_uefi
     assert "configure-target-main.sh" in target_bios
     assert "configure-target-main.sh" in target_uefi
+
+
+@pytest.mark.parametrize("firmware", ["iso", "iso-uefi"])
+def test_grub_images_render_the_shared_menu_fragment(
+    tmp_path: Path,
+    firmware: str,
+) -> None:
+    renderer = load_live_module(
+        "iso-tools/render-boot-config.py",
+        f"libertix_boot_renderer_{firmware.replace('-', '_')}",
+    )
+    output = tmp_path / firmware / "grub.cfg"
+
+    renderer.render(
+        ROOT / "Scripts/config/Libertix.BootArguments.json",
+        ROOT / firmware / "boot/grub.cfg",
+        ROOT / "Scripts/config/Libertix.LiveGrubMenu.cfg.in",
+        output,
+    )
+
+    rendered = output.read_text(encoding="utf-8")
+    assert rendered.count('menuentry "Install Linux Mint (Automatic)"') == 1
+    assert rendered.count('menuentry "Install (Verbose mode)"') == 1
+    assert "@LIBERTIX_" not in rendered
 
 
 def test_versioned_schemas_accept_documents_used_by_runtime_validators() -> None:
