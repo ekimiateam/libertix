@@ -12,11 +12,14 @@ namespace Libertix.Helpers
     {
         private readonly Icon _icon;
         private readonly NotifyIcon _notifyIcon;
+        private readonly ToolStripMenuItem _openMenuItem;
 
-        public TrayIconController(Action restoreWindow)
+        public TrayIconController(Action restoreWindow, string openLabel)
         {
             if (restoreWindow == null)
                 throw new ArgumentNullException(nameof(restoreWindow));
+            if (string.IsNullOrWhiteSpace(openLabel))
+                throw new ArgumentException("The tray menu label is required.", nameof(openLabel));
 
             _icon = LoadLibertixIcon();
             _notifyIcon = new NotifyIcon
@@ -28,8 +31,16 @@ namespace Libertix.Helpers
             _notifyIcon.DoubleClick += (_, __) => restoreWindow();
 
             var menu = new ContextMenuStrip();
-            menu.Items.Add("Ouvrir Libertix", null, (_, __) => restoreWindow());
+            _openMenuItem = new ToolStripMenuItem(openLabel, null, (_, __) => restoreWindow());
+            menu.Items.Add(_openMenuItem);
             _notifyIcon.ContextMenuStrip = menu;
+        }
+
+        public void SetOpenLabel(string openLabel)
+        {
+            if (string.IsNullOrWhiteSpace(openLabel))
+                throw new ArgumentException("The tray menu label is required.", nameof(openLabel));
+            _openMenuItem.Text = openLabel;
         }
 
         public void Show(string title, string message)
@@ -60,7 +71,7 @@ namespace Libertix.Helpers
             {
                 var resource = System.Windows.Application.GetResourceStream(
                     new Uri(
-                        "pack://application:,,,/Resources/Images/Icon.ico",
+                        "pack://application:,,,/Resources/Images/icon.ico",
                         UriKind.Absolute));
                 if (resource?.Stream != null)
                 {

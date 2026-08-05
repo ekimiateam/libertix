@@ -1,15 +1,18 @@
-using System.Runtime.InteropServices;
+using System.Net.Http;
 using Libertix.Installation;
 
 namespace Libertix.Pages
 {
-    /// <summary>
-    /// Native firmware interop kept with the ApplyChanges partial class. The
-    /// managed storage contracts live in Installation/StoragePreflightInfo.cs.
-    /// </summary>
     public partial class ApplyChanges
     {
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool GetFirmwareType(out FirmwareType firmwareType);
+        private static readonly HttpClient SharedHttpClient = new HttpClient
+        {
+            Timeout = System.Threading.Timeout.InfiniteTimeSpan
+        };
+
+        private static bool GetFirmwareType(out FirmwareType firmwareType)
+        {
+            return FirmwareInterop.TryGetFirmwareType(out firmwareType);
+        }
     }
 }

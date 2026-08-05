@@ -24,27 +24,6 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges
     {
-        private async Task<string> RunDiskpartAndGetOutputAsync(string scriptPath)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    var result = RunProcess(
-                        "diskpart.exe",
-                        $"/s \"{scriptPath}\"",
-                        waitMs: (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds);
-                    if (result.exitCode != 0)
-                        return $"Error: diskpart failed rc={result.exitCode}\n{result.output}\n{result.error}";
-                    return result.output;
-                }
-                catch (Exception ex)
-                {
-                    return $"Error: {ex.Message}";
-                }
-            });
-        }
-
         private async Task<int> RunStreamingProcessAsync(
             string fileName,
             string arguments,
@@ -120,10 +99,11 @@ namespace Libertix.Pages
         {
             try
             {
-                using (var client = new HttpClient())
+                using (var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    _installationCancellation.Token))
                 {
-                    client.Timeout = TimeSpan.FromMinutes(5);
-                    using (var response = await client.GetAsync(url, _installationCancellation.Token))
+                    timeoutCancellation.CancelAfter(TimeSpan.FromMinutes(5));
+                    using (var response = await SharedHttpClient.GetAsync(url, timeoutCancellation.Token))
                     {
                         response.EnsureSuccessStatusCode();
                         var data = await response.Content.ReadAsByteArrayAsync();
@@ -190,43 +170,5 @@ namespace Libertix.Pages
             }
         }
 
-        private async Task<(bool success, string output)> RunDiskpartWithResultAsync(string scriptPath)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    var result = RunProcess(
-                        "diskpart.exe",
-                        $"/s \"{scriptPath}\"",
-                        (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds);
-                    string output = result.output;
-                    string error = result.error;
-
-                    Dispatcher.Invoke(() =>
-                    {
-                        if (!string.IsNullOrWhiteSpace(output))
-                            Log(output);
-                        if (!string.IsNullOrWhiteSpace(error))
-                            Log($"ERROR: {error}");
-                    });
-
-                    // Check for error keywords in output.
-                    bool hasError = output.ToLower().Contains("introuvable") ||
-                                   output.ToLower().Contains("erreur") ||
-                                   output.ToLower().Contains("error") ||
-                                   output.ToLower().Contains("failed") ||
-                                   output.ToLower().Contains("impossible") ||
-                                   output.ToLower().Contains("insuffisant");
-
-                    return (result.exitCode == 0 && !hasError, output);
-                }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() => Log($"Exception: {ex.Message}"));
-                    return (false, ex.Message);
-                }
-            });
-        }
     }
 }

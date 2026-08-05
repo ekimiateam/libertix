@@ -18,6 +18,9 @@ namespace Libertix.Pages
         {
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
+            HibernationNotice.Visibility = _installationState.Sharing.ShareWindowsFilesInLinux
+                ? Visibility.Visible
+                : Visibility.Collapsed;
         }
 
         private void ConfirmCheckBox_Changed(object sender, RoutedEventArgs e)

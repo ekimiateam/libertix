@@ -2,6 +2,55 @@
 
 # Persistent transaction state and verified rollback orchestration.
 
+function Save-LibertixTransactionStateAtomic {
+    # Invoke-Revert depends entirely on this document to know whether the
+    # Windows volume must be grown back and to which size. A torn write would
+    # make rollback impossible after that volume has already been shrunk, so
+    # publish it with the same-directory atomic rename used for the plan
+    # and execution state. Depth 8 covers the nested SHA-256 maps.
+    param([Parameter(Mandatory = $true)][object]$State)
+
+    $fullPath = [IO.Path]::GetFullPath($TransactionStatePath)
+    $directory = [IO.Path]::GetDirectoryName($fullPath)
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    $temporaryPath = Join-Path $directory ".$(Split-Path -Leaf $fullPath).$([Guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = Join-Path $directory ".$(Split-Path -Leaf $fullPath).$([Guid]::NewGuid().ToString('N')).bak"
+    try {
+        $json = $State | ConvertTo-Json -Depth 8
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $stream = New-Object IO.FileStream(
+            $temporaryPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+        try {
+            $writer = New-Object IO.StreamWriter($stream, $encoding)
+            try {
+                $writer.Write($json)
+                $writer.Write("`n")
+                $writer.Flush()
+                $stream.Flush($true)
+            } finally {
+                $writer.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+
+        if ([IO.File]::Exists($fullPath)) {
+            [IO.File]::Replace($temporaryPath, $fullPath, $backupPath)
+        } else {
+            [IO.File]::Move($temporaryPath, $fullPath)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
+        if ([IO.File]::Exists($backupPath)) { [IO.File]::Delete($backupPath) }
+    }
+}
+
 function Save-TransactionPreparationState {
     param([Parameter(Mandatory = $true)]$SystemPartition)
 
@@ -10,6 +59,7 @@ function Save-TransactionPreparationState {
         Version = 1
         DiskNumber = [int]$SystemPartition.DiskNumber
         DiskUniqueId = [string]$disk.UniqueId
+        SystemDrive = $SystemDrive
         OriginalCSize = [int64]$SystemPartition.Size
         PartitionNumber = 0
         PartitionOffset = 0
@@ -24,11 +74,13 @@ function Save-TransactionPreparationState {
         FirmwareEntryId = ""
         EspLoaderSha256 = @{}
         InstallerFileSha256 = @{}
+        OriginalHibernateEnabled = Get-HibernateEnabled
+        LowMemoryMode = [bool]$LowMemoryMode
         CreatedUtc = [DateTime]::UtcNow.ToString("o")
     }
     $directory = Split-Path -Parent $TransactionStatePath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $state | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $TransactionStatePath -Encoding UTF8
+    Save-LibertixTransactionStateAtomic -State $state
 }
 
 function Save-TransactionPartitionState {
@@ -39,12 +91,17 @@ function Save-TransactionPartitionState {
     $originalCSize = if ($existing -and $existing.OriginalCSize) {
         [int64]$existing.OriginalCSize
     } else {
-        [int64](Get-Partition -DriveLetter C -ErrorAction Stop).Size
+        [int64](Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop).Size
     }
     $state = [ordered]@{
         Version = 1
         DiskNumber = [int]$Partition.DiskNumber
         DiskUniqueId = [string]$disk.UniqueId
+        SystemDrive = if (
+            $existing -and
+            $existing.PSObject.Properties.Name -contains "SystemDrive" -and
+            $existing.SystemDrive
+        ) { [string]$existing.SystemDrive } else { $SystemDrive }
         OriginalCSize = $originalCSize
         PartitionNumber = [int]$Partition.PartitionNumber
         PartitionOffset = [int64]$Partition.Offset
@@ -59,11 +116,28 @@ function Save-TransactionPartitionState {
         FirmwareEntryId = if ($existing) { [string]$existing.FirmwareEntryId } else { "" }
         EspLoaderSha256 = if ($existing -and $existing.EspLoaderSha256) { $existing.EspLoaderSha256 } else { @{} }
         InstallerFileSha256 = if ($existing -and $existing.InstallerFileSha256) { $existing.InstallerFileSha256 } else { @{} }
+        OriginalHibernateEnabled = if (
+            $existing -and
+            $existing.PSObject.Properties.Name -contains "OriginalHibernateEnabled" -and
+            $null -ne $existing.OriginalHibernateEnabled
+        ) {
+            $existing.OriginalHibernateEnabled
+        } else {
+            Get-HibernateEnabled
+        }
+        LowMemoryMode = if (
+            $existing -and
+            $existing.PSObject.Properties.Name -contains "LowMemoryMode"
+        ) {
+            [bool]$existing.LowMemoryMode
+        } else {
+            [bool]$LowMemoryMode
+        }
         CreatedUtc = [DateTime]::UtcNow.ToString("o")
     }
     $directory = Split-Path -Parent $TransactionStatePath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $state | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $TransactionStatePath -Encoding UTF8
+    Save-LibertixTransactionStateAtomic -State $state
 }
 
 function Get-TransactionPartitionState {
@@ -90,7 +164,7 @@ function Save-PreparedInstallerManifest {
         -RelativePaths (Get-InstallerManifestRelativePaths)
     $state | Add-Member -NotePropertyName InstallerFileSha256 -NotePropertyValue $manifest -Force
     $state | Add-Member -NotePropertyName InstallerManifestUtc -NotePropertyValue ([DateTime]::UtcNow.ToString("o")) -Force
-    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $TransactionStatePath -Encoding UTF8
+    Save-LibertixTransactionStateAtomic -State $state
     Write-Log "Prepared installer SHA256 manifest saved ($($manifest.Count) files)." "Green"
 }
 
@@ -144,7 +218,7 @@ function Update-TransactionFirmwareState {
     $state | Add-Member -NotePropertyName EspLoaderSha256 -NotePropertyValue $EspLoaderSha256 -Force
     $state | Add-Member -NotePropertyName OriginalBootOrder -NotePropertyValue @($OriginalBootOrder | ForEach-Object { [int]$_ }) -Force
     $state | Add-Member -NotePropertyName BootPreparedUtc -NotePropertyValue ([DateTime]::UtcNow.ToString("o")) -Force
-    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $TransactionStatePath -Encoding UTF8
+    Save-LibertixTransactionStateAtomic -State $state
 }
 
 function Get-VerifiedTransactionPartition {
@@ -161,21 +235,21 @@ function Get-VerifiedTransactionPartition {
         throw "UEFI transaction partition identity does not match the saved state."
     }
 
-    $matches = @(
+    $partitionMatches = @(
         Get-Partition -DiskNumber $diskNumber -ErrorAction Stop |
             Where-Object {
                 [int64]$_.Offset -eq [int64]$state.PartitionOffset -and
                 [int64]$_.Size -eq [int64]$state.PartitionSize
             }
     )
-    if ($matches.Count -ne 1) {
+    if ($partitionMatches.Count -ne 1) {
         throw "UEFI transaction partition geometry does not resolve to exactly one partition."
     }
-    $partition = $matches[0]
+    $partition = $partitionMatches[0]
     if ([int]$state.PartitionNumber -ne [int]$partition.PartitionNumber) {
         Write-Log "Windows renumbered the transaction partition from $($state.PartitionNumber) to $($partition.PartitionNumber); updating saved state." "Yellow"
         $state.PartitionNumber = [int]$partition.PartitionNumber
-        $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $TransactionStatePath -Encoding UTF8
+        Save-LibertixTransactionStateAtomic -State $state
     }
     return $partition
 }
@@ -202,22 +276,41 @@ function Invoke-Revert {
         if ($esp) { Dismount-Letter -Letter $EspLetter }
     }
 
-    Remove-LibertixInstallerPartitionIfPresent
     $rollbackState = Get-TransactionPartitionState
-    if ($LowMemoryMode -and (Test-Path -LiteralPath $LowMemoryIsoPath -PathType Leaf)) {
+    Remove-LibertixInstallerPartitionIfPresent
+    $transactionUsedLowMemory = (
+        $rollbackState -and
+        $rollbackState.PSObject.Properties.Name -contains "LowMemoryMode" -and
+        [bool]$rollbackState.LowMemoryMode
+    )
+    if ($transactionUsedLowMemory -and (Test-Path -LiteralPath $LowMemoryIsoPath -PathType Leaf)) {
         Write-Log "Removing low-memory live ISO: $LowMemoryIsoPath" "Cyan"
         Remove-Item -LiteralPath $LowMemoryIsoPath -Force -ErrorAction Stop
     }
     if (-not $rollbackState) {
-        # No transaction state means the workflow failed before C: was resized.
+        # No transaction state means the workflow failed before Windows was resized.
         # Remove-LibertixInstallerPartitionIfPresent already refuses to continue
         # if an unowned LIBERTIXEFI partition exists, so there is nothing left
         # to restore in this early-failure case.
-        Write-Log "No transaction state found; C: was not resized by this run." "Gray"
+        Write-Log "No transaction state found; $SystemDrive was not resized by this run." "Gray"
         Write-Log "Revert complete." "Green"
         return
     }
-    Restore-LibertixCDriveInitialSize -State $rollbackState
+    Restore-LibertixSystemDriveInitialSize -State $rollbackState
+
+    # Hibernation is switched off so that the installed Linux can safely mount
+    # Windows read-write. A rollback removes that Linux installation, so the
+    # user's original setting must come back with it.
+    if (
+        $rollbackState.PSObject.Properties.Name -contains "OriginalHibernateEnabled" -and
+        $null -ne $rollbackState.OriginalHibernateEnabled
+    ) {
+        $originalHibernate = [bool]$rollbackState.OriginalHibernateEnabled
+        if ($originalHibernate -ne (Get-HibernateEnabled)) {
+            Set-HibernateEnabled -Enabled $originalHibernate
+        }
+    }
+
     Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction SilentlyContinue
 
     Write-Log "Revert complete." "Green"

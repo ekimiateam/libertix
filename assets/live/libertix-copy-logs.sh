@@ -13,7 +13,8 @@ target=""
 
 cleanup_mount() {
     if $restore_ro && [ -n "$target" ]; then
-        mount -o remount,ro "$target" >> "$DEBUG_LOG" 2>&1 || true
+        umount "$target" >> "$DEBUG_LOG" 2>&1 || true
+        mount -t ntfs-3g -o ro "$win" "$target" >> "$DEBUG_LOG" 2>&1 || true
     fi
     if $mounted_here && [ -n "$target" ]; then
         umount "$target" >> "$DEBUG_LOG" 2>&1 || true
@@ -45,7 +46,13 @@ mounted_target="$(findmnt -rn -S "$win" -o TARGET 2>/dev/null | head -1 || true)
 if [ -n "$mounted_target" ]; then
     target="$mounted_target"
     if findmnt -rn -T "$target" -o OPTIONS 2>/dev/null | tr ',' '\n' | grep -qx ro; then
-        mount -o remount,rw "$target" >> "$DEBUG_LOG" 2>&1 || fail "cannot remount $target read-write"
+        # FUSE NTFS mounts do not reliably support a read-only to read-write
+        # remount. The installer is already terminal here, so release its ISO
+        # loop first and recreate the Windows mount with explicit write access.
+        umount /mnt/iso >> "$DEBUG_LOG" 2>&1 || true
+        umount "$target" >> "$DEBUG_LOG" 2>&1 || fail "cannot unmount $target before log copy"
+        mount -t ntfs-3g -o rw "$win" "$target" >> "$DEBUG_LOG" 2>&1 || \
+            fail "cannot mount $target read-write"
         restore_ro=true
     fi
 else

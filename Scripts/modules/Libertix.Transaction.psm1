@@ -8,7 +8,7 @@ function Get-InstallerManifestRelativePaths {
         "EFI\LibertixInstaller\shimx64.efi", "EFI\LibertixInstaller\grubx64.efi",
         "EFI\LibertixInstaller\mmx64.efi", "EFI\LibertixInstaller\grub.cfg",
         "boot\grub\grub.cfg", "live\vmlinuz", "live\initrd.img",
-        "live\filesystem.squashfs", "config.txt"
+        "live\filesystem.squashfs", "installation-plan.json"
     )
 }
 

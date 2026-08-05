@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<9", "pytest-cov>=5,<7", "ruff>=0.8,<1"]
+dev = ["jsonschema>=4,<5", "pytest>=8,<9", "pytest-cov>=5,<7", "ruff>=0.8,<1"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

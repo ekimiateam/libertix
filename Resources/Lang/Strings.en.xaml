@@ -2,20 +2,15 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
     
-    <!-- MainWindow -->
     <system:String x:Key="Welcome">Welcome to Libertix!</system:String>
     <system:String x:Key="Subtitle">A simple and modern Linux installer</system:String>
     <system:String x:Key="GetStarted">Get Started</system:String>
     <system:String x:Key="Language">Language</system:String>
 
-    <!-- ChooseDistro -->
     <system:String x:Key="ChooseDistroTitle">Choose your flavor of Linux!</system:String>
     
-    <!-- Distro Descriptions -->
-    <system:String x:Key="ZorinDescription">A powerful, secure and easy to use operating system designed for everyone.</system:String>
     <system:String x:Key="UbuntuDescription">Fast, free and full of new features. Ubuntu is the world's favourite Linux operating system.</system:String>
 
-    <!-- ResizeDisk -->
     <system:String x:Key="ResizeDiskTitle">Resize Your Disk</system:String>
     <system:String x:Key="Windows">Windows</system:String>
     <system:String x:Key="Linux">Linux</system:String>
@@ -23,31 +18,44 @@
     <system:String x:Key="FreeUpSpace">Your system needs more free space to install Linux. Please free up some space and try again.</system:String>
     <system:String x:Key="OpenDiskCleanup">Open Disk Cleanup</system:String>
 
-    <!-- AccountCreation -->
     <system:String x:Key="AccountCreationTitle">Create Your Linux Account</system:String>
     <system:String x:Key="Username">Username</system:String>
     <system:String x:Key="Password">Password</system:String>
     <system:String x:Key="ConfirmPassword">Confirm Password</system:String>
     <system:String x:Key="ComputerName">Computer Name</system:String>
 
-    <!-- Common -->
     <system:String x:Key="Back">Back</system:String>
     <system:String x:Key="Next">Next</system:String>
     
-    <!-- Errors -->
+    <system:String x:Key="ResizeDiskSizeEmpty">Size cannot be empty</system:String>
+    <system:String x:Key="ResizeDiskSizeTooSmall">Size must be at least {0} GB</system:String>
+    <system:String x:Key="ResizeDiskNotEnoughSpace">Not enough free space. Windows needs {0} GB free and Linux needs at least {1} GB</system:String>
+    <system:String x:Key="ResizeDiskSizeTooLarge">Size cannot exceed {0:N0} GB (Windows needs {1} GB free)</system:String>
+    <system:String x:Key="ResizeDiskInvalidNumber">Please enter a valid number</system:String>
+    <system:String x:Key="ResizeDiskNoSpace">Not enough disk space for installation.</system:String>
+    <system:String x:Key="ResizeDiskErrorTitle">Disk size error</system:String>
+    <system:String x:Key="ResizeDiskWindowsUsedSpace">Windows used space: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeSpace">Windows free space: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskIsoSize">Installer ISO: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskLinuxMinimum">Minimum Linux space: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskAdditionalSpace">Additional space needed: {0:N1} GB</system:String>
+    <system:String x:Key="ErrorTitle">Error</system:String>
     <system:String x:Key="DistroLoadError">Failed to load the list of distributions. Please check your internet connection and try again.</system:String>
 
-    <!-- Password Validation -->
     <system:String x:Key="PasswordRequired">Password is required</system:String>
-    <system:String x:Key="PasswordTooShort">Password must be at least 4 characters</system:String>
-    <system:String x:Key="PasswordTooLong">Password must be 8 characters or less</system:String>
+    <system:String x:Key="PasswordTooShort">Password must be at least 8 characters</system:String>
+    <system:String x:Key="PasswordTooLong">Password must not exceed 128 characters</system:String>
+    <system:String x:Key="UsernameRequired">Username is required</system:String>
+    <system:String x:Key="UsernameInvalid">Username must start with a letter and contain only lowercase letters, numbers, or hyphens</system:String>
+    <system:String x:Key="ConfirmPasswordRequired">Please confirm your password</system:String>
+    <system:String x:Key="PasswordsDoNotMatch">Passwords do not match</system:String>
+    <system:String x:Key="ComputerNameRequired">Computer name is required</system:String>
+    <system:String x:Key="ComputerNameInvalid">Computer name must start with a letter and contain only lowercase letters, numbers, or hyphens</system:String>
 
-    <!-- Partition Warning -->
     <system:String x:Key="PartitionWarningTitle">WARNING: Non-standard partition configuration</system:String>
     <system:String x:Key="PartitionWarningMessage">This installer has NOT been tested on this partition layout. Continuing is HIGHLY DISCOURAGED unless you know EXACTLY what you are doing.</system:String>
     <system:String x:Key="PartitionWarningCheckbox">I understand</system:String>
 
-    <!-- Warning Confirmation -->
     <system:String x:Key="WarningTitle">Warning</system:String>
     <system:String x:Key="WarningMessage">You are about to make significant changes to your disk partitions. This operation will modify your hard drive and install a dual-boot system alongside Windows.</system:String>
     <system:String x:Key="WarningRisks">RISKS:
@@ -61,12 +69,12 @@
 - Have a Windows recovery USB ready
 - Have someone with technical knowledge available if needed
 - Do NOT interrupt the installation process once started</system:String>
+    <system:String x:Key="WarningHibernationNotice">Windows hibernation and Fast Startup will be disabled while Windows file sharing is enabled. This prevents Linux from writing to an NTFS volume whose metadata is still cached by Windows.</system:String>
     <system:String x:Key="WarningConfirmCheckbox">I understand the risks and have backed up my important data</system:String>
     <system:String x:Key="WarningConfirmButton">I Understand</system:String>
 
-    <!-- Compatibility check -->
     <system:String x:Key="CompatibilityTitle">Compatibility check</system:String>
-    <system:String x:Key="CompatibilityDescription">Libertix checks memory, firmware, and storage before continuing.</system:String>
+    <system:String x:Key="CompatibilityDescription">Libertix checks memory, firmware, and storage before continuing. On UEFI systems, the firmware test temporarily writes and then restores a boot variable.</system:String>
     <system:String x:Key="CompatibilityStarting">Starting checks...</system:String>
     <system:String x:Key="CompatibilityRetry">Try again</system:String>
     <system:String x:Key="CompatibilityContinue">Continue</system:String>
@@ -76,7 +84,6 @@
     <system:String x:Key="CompatibilityWarningPrefix">WARNING: </system:String>
     <system:String x:Key="CompatibilityUnexpectedPrefix">COMPAT_E_UNEXPECTED: </system:String>
 
-    <!-- File sharing -->
     <system:String x:Key="SharingTitle">File sharing</system:String>
     <system:String x:Key="SharingDescription">Choose which files are accessible from each system.</system:String>
     <system:String x:Key="SharingWindowsToLinuxTitle">Show Windows files in Mint</system:String>
@@ -84,7 +91,6 @@
     <system:String x:Key="SharingLinuxToWindowsTitle">Show Linux files in Windows (read-only)</system:String>
     <system:String x:Key="SharingLinuxToWindowsDescription">Windows will be able to view Linux files without modifying the ext4 partition.</system:String>
 
-    <!-- UEFI boot fallback -->
     <system:String x:Key="UefiFallbackTitle">UEFI boot did not start the installer</system:String>
     <system:String x:Key="UefiFallbackDescription">Windows returned without the live marker. Libertix kept a verified local copy and can use the validated UEFI firmware entry to restart the live system.</system:String>
     <system:String x:Key="UefiFallbackChecking">Checking recovery state...</system:String>
@@ -108,7 +114,6 @@
     <system:String x:Key="UefiFallbackRestoreFailed">UEFI restoration failed.</system:String>
     <system:String x:Key="UefiFallbackTimeoutLog">ERROR: recovery process timed out after 30 minutes</system:String>
 
-    <!-- Apply Changes -->
     <system:String x:Key="ApplyChangesTitle">Apply Changes</system:String>
     <system:String x:Key="ApplyChangesWaiting">Ready to start partitioning</system:String>
     <system:String x:Key="ApplyChangesSummary">Installation Summary</system:String>
@@ -117,7 +122,7 @@
     <system:String x:Key="ApplyChangesUsername">Username:</system:String>
     <system:String x:Key="ApplyChangesStart">Start Installation</system:String>
     <system:String x:Key="ApplyChangesStep1">Shrinking Windows partition for Linux...</system:String>
-    <system:String x:Key="ApplyChangesStep2">Creating FAT32 live/Linux partition (Z:)...</system:String>
+    <system:String x:Key="ApplyChangesStep2">Creating FAT32 live/Linux partition...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">Waiting for disk update...</system:String>
     <system:String x:Key="ApplyChangesStep3">Shrinking Windows partition for Linux...</system:String>
     <system:String x:Key="ApplyChangesComplete">Partitioning complete!</system:String>
@@ -135,14 +140,14 @@
     <system:String x:Key="ApplyChangesPreparingWindowsShare">Preparing Windows file sharing...</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">Preparing UEFI installation...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Checking Secure Boot...</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindowsInit">Initializing Windows C: decryption...</system:String>
-    <system:String x:Key="ApplyChangesWindowsDecrypted">Windows C: decrypted</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindows">Decrypting Windows C:...</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Decrypting Windows C: {0}%</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindowsInit">Initializing Windows {0} decryption...</system:String>
+    <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} decrypted</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindows">Decrypting Windows {0}...</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Decrypting Windows {0}: {1}%</system:String>
     <system:String x:Key="ApplyChangesDownloading">Downloading...</system:String>
     <system:String x:Key="ApplyChangesDownloadingIso">Downloading ISO...</system:String>
     <system:String x:Key="ApplyChangesIsoCopied">ISO copied from local folder</system:String>
-    <system:String x:Key="ApplyChangesCopyingIsoContents">Copying ISO contents to Z:...</system:String>
+    <system:String x:Key="ApplyChangesCopyingIsoContents">Copying ISO contents...</system:String>
     <system:String x:Key="ApplyChangesDownloadingLinuxIso">Downloading Linux installer ISO...</system:String>
     <system:String x:Key="ApplyChangesLinuxIsoCopied">Linux installer copied from local folder</system:String>
     <system:String x:Key="ApplyChangesWritingConfiguration">Writing configuration...</system:String>
@@ -167,15 +172,15 @@
     <system:String x:Key="ApplyChangesBitLockerReenableDetails">The installation was cancelled and disk/boot changes were restored. BitLocker continued or completed decryption and cannot be re-enabled automatically on this Windows edition. Re-enable encryption in Windows settings before considering recovery complete.</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenableTitle">Libertix - Re-enable BitLocker</system:String>
     <system:String x:Key="ApplyChangesRollbackIncompleteTitle">Libertix - Incomplete rollback</system:String>
-    <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">The installation was cancelled, but the UEFI rollback could not be verified. Do not restart; review C:\LibertixInstallLogs.</system:String>
-    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">Preparation failed and automatic rollback could not be verified. Do not restart the installation; review C:\LibertixInstallRecovery\recovery.log.</system:String>
+    <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">The installation was cancelled, but the UEFI rollback could not be verified. Do not restart; review {0}.</system:String>
+    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">Preparation failed and automatic rollback could not be verified. Do not restart the installation; review {0}.</system:String>
     <system:String x:Key="CloseConfirmationTitle">Close Libertix</system:String>
     <system:String x:Key="CloseConfirmationMessage">Do you really want to close Libertix?</system:String>
     <system:String x:Key="TrayInstallTitle">Libertix installation in progress</system:String>
     <system:String x:Key="TrayInstallMessage">The installation is still running. Double-click the Libertix icon near the clock to reopen the window.</system:String>
+    <system:String x:Key="TrayOpenLibertix">Open Libertix</system:String>
     <system:String x:Key="PartitionSafetyBlockMessage">Installation is blocked until this safety check is resolved.</system:String>
 
-    <!-- About -->
     <system:String x:Key="AboutButton">About</system:String>
     <system:String x:Key="AboutTitle">About Libertix</system:String>
     <system:String x:Key="AboutSubtitle">The people and community who make a safe Linux dual-boot installation possible.</system:String>

@@ -5,9 +5,9 @@
       xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
       xmlns:local="clr-namespace:Libertix.Pages"
       mc:Ignorable="d"
-      Title="Warning">
+      Title="{DynamicResource WarningTitle}">
 
-    <Grid Background="#232136">
+    <Grid Background="{DynamicResource PrimaryBackground}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -15,61 +15,62 @@
         </Grid.RowDefinitions>
 
         <Label Grid.Row="0"
-               Content="Warning ⚠"
+               Content="{DynamicResource WarningTitle}"
                HorizontalAlignment="Center"
                Margin="20"
                FontSize="48"
                FontWeight="Light"
-               Foreground="#eb6f92"/>
+               Foreground="{DynamicResource ErrorColor}"/>
 
         <StackPanel Grid.Row="1"
                     Width="600"
                     VerticalAlignment="Center">
 
-            <!-- Warning Icon -->
-
-            <!-- Warning Message -->
-            <!-- Warning Icon -->
-
-            <!-- Warning Message -->
-            <Border Background="#2a273f"
+            <Border Background="{DynamicResource SecondaryBackground}"
                     CornerRadius="8"
                     Padding="20"
-                    BorderBrush="#eb6f92"
+                    BorderBrush="{DynamicResource ErrorColor}"
                     BorderThickness="2">
                 <StackPanel>
                     <TextBlock Text="{DynamicResource WarningMessage}"
-                               Foreground="#E0DEF4"
+                               Foreground="{DynamicResource TextPrimary}"
                                FontSize="16"
                                TextWrapping="Wrap"
                                TextAlignment="Center"
                                Margin="0,0,0,15"/>
 
                     <TextBlock Text="{DynamicResource WarningRisks}"
-                               Foreground="#f6c177"
+                               Foreground="{DynamicResource WarningColor}"
                                FontSize="14"
                                TextWrapping="Wrap"
                                TextAlignment="Left"
                                Margin="0,0,0,15"/>
 
                     <TextBlock Text="{DynamicResource WarningRecommendations}"
-                               Foreground="#9ccfd8"
+                               Foreground="{DynamicResource AccentColor}"
+                               FontSize="14"
+                               TextWrapping="Wrap"
+                               TextAlignment="Left"
+                               Margin="0,0,0,15"/>
+
+                    <TextBlock x:Name="HibernationNotice"
+                               Text="{DynamicResource WarningHibernationNotice}"
+                               Foreground="{DynamicResource WarningColor}"
                                FontSize="14"
                                TextWrapping="Wrap"
                                TextAlignment="Left"/>
                 </StackPanel>
             </Border>
 
-            <!-- Confirmation Checkbox -->
             <CheckBox x:Name="ConfirmCheckBox"
                       Margin="0,20,0,0"
-                      Foreground="#E0DEF4"
+                      Foreground="{DynamicResource TextPrimary}"
                       FontSize="14"
                       Checked="ConfirmCheckBox_Changed"
                       Unchecked="ConfirmCheckBox_Changed">
                 <TextBlock Text="{DynamicResource WarningConfirmCheckbox}"
                            TextWrapping="Wrap"
-                           Foreground="#E0DEF4"/>
+                           Foreground="{DynamicResource TextPrimary}"/>
             </CheckBox>
         </StackPanel>
 

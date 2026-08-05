@@ -2,6 +2,8 @@
 
 # UEFI firmware variables, BCD integration, and Secure Boot checks.
 
+$script:LibertixFirmwarePrivilegeEnabled = $false
+
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -44,14 +46,14 @@ function Assert-LibertixPlanMatchesCurrentStorage {
 
     foreach ($name in @("boot", "recovery")) {
         $expected = $installationPlan.disk.$name
-        $matches = @(
+        $partitionMatches = @(
             Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop |
                 Where-Object {
                     [int64]$_.Offset -eq [int64]$expected.offsetBytes -and
                     [int64]$_.Size -eq [int64]$expected.sizeBytes
                 }
         )
-        if ($matches.Count -ne 1) {
+        if ($partitionMatches.Count -ne 1) {
             throw "Windows $name partition no longer matches the installation plan."
         }
     }
@@ -212,11 +214,19 @@ public static class LibertixFirmwareApi {
 "@
 }
 
+function Enable-FirmwareAccessOnce {
+    if ($script:LibertixFirmwarePrivilegeEnabled) {
+        return
+    }
+    Initialize-FirmwareApi
+    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    $script:LibertixFirmwarePrivilegeEnabled = $true
+}
+
 function Test-FirmwareVariableExists {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    Initialize-FirmwareApi
-    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $buffer = New-Object byte[] 65536
     $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
@@ -226,8 +236,7 @@ function Test-FirmwareVariableExists {
 function Get-FirmwareVariableBytes {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    Initialize-FirmwareApi
-    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $buffer = New-Object byte[] 65536
     $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
@@ -246,8 +255,7 @@ function Set-FirmwareVariable {
         [Parameter(Mandatory = $true)][byte[]]$Value
     )
 
-    Initialize-FirmwareApi
-    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $attributes = [uint32]0x00000007
     $ok = [LibertixFirmwareApi]::SetFirmwareEnvironmentVariableEx(
@@ -267,8 +275,7 @@ function Set-FirmwareVariable {
 function Remove-FirmwareVariable {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    Initialize-FirmwareApi
-    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $attributes = [uint32]0x00000007
     [LibertixFirmwareApi]::DeleteFirmwareEnvironmentVariable($Name, $global, $attributes) |
@@ -298,21 +305,22 @@ function Get-BcdFirmwareEntryIdsByDescription {
     param([Parameter(Mandatory = $true)][string[]]$Descriptions)
 
     $firmwareText = Invoke-BcdeditCommand -Arguments @("/enum", "firmware", "/v")
-    $firmwareEntries = $firmwareText -split "`r?`n"
     $identifiers = New-Object System.Collections.Generic.List[string]
-    $current = $null
-    foreach ($line in $firmwareEntries) {
-        if ($line -match "^(identificateur|identifier)\s+(\{[^}]+\})") {
-            $current = $Matches[2]
-            continue
-        }
-
+    foreach ($entryBlock in ($firmwareText -split "(?:`r?`n){2,}")) {
         foreach ($description in $Descriptions) {
-            if ($line -match "^description\s+$([regex]::Escape($description))$" -and $current) {
-                $identifiers.Add($current)
-                $current = $null
-                break
+            $descriptionAtLineEnd = "(?m)^[^`r`n]+\s+$([regex]::Escape($description))\s*$"
+            if ($entryBlock -notmatch $descriptionAtLineEnd) {
+                continue
             }
+            # bcdedit localizes field labels but keeps object identifiers in
+            # braces. Match the stable identifier token only after the exact
+            # description has selected the entry block.
+            $identifierMatch = [regex]::Match($entryBlock, "\{[0-9a-fA-F-]+\}")
+            if (-not $identifierMatch.Success) {
+                throw "A BCD firmware entry named '$description' has no object identifier."
+            }
+            $identifiers.Add($identifierMatch.Value)
+            break
         }
     }
 
@@ -402,8 +410,22 @@ function Set-NativeUefiBootOrderOnce {
         throw "Cannot find Libertix installer partition by drive ${InstallerDrive} or disk $InstallerDiskNumber partition $InstallerPartitionNumber."
     }
 
+    # Skip the numbers the firmware already advertises before probing, so the
+    # common case costs a handful of NVRAM reads instead of a linear scan in
+    # which every step re-enables the privilege and allocates a 64 KiB buffer.
+    $usedNumbers = @{}
+    foreach ($known in @(
+        ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder")
+        ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext")
+    )) {
+        $usedNumbers[[int]$known] = $true
+    }
+
     $bootNumber = $null
     for ($candidate = 0x0000; $candidate -le 0xFFFF; $candidate++) {
+        if ($usedNumbers.ContainsKey($candidate)) {
+            continue
+        }
         $name = "Boot{0:X4}" -f $candidate
         if (-not (Test-FirmwareVariableExists -Name $name)) {
             $bootNumber = [uint16]$candidate
@@ -505,10 +527,11 @@ function New-LibertixBcdFirmwareEntry {
     )
 
     $copyText = Invoke-BcdeditCommand -Arguments @("/copy", "{bootmgr}", "/d", $InstallerBootDescription)
-    if ($copyText -notmatch "(\{[0-9a-fA-F-]+\})") {
+    $entryIdMatch = [regex]::Match($copyText, "(\{[0-9a-fA-F-]+\})")
+    if (-not $entryIdMatch.Success) {
         throw "Could not parse firmware entry identifier from bcdedit output: $copyText"
     }
-    $entryId = $Matches[1]
+    $entryId = $entryIdMatch.Groups[1].Value
 
     Invoke-BcdeditCommand -Arguments @("/set", $entryId, "device", "partition=$EspDrive") | Out-Null
     Invoke-BcdeditCommand -Arguments @("/set", $entryId, "path", $LoaderPath) | Out-Null
@@ -606,6 +629,7 @@ function Get-SecureBootDbCertificates {
 }
 
 function Test-LibertixSecureBootCompatibility {
+    Write-LibertixProgress -Stage "secure-boot" -Percent 8
     Write-Log "Checking Secure Boot certificate compatibility..." "Cyan"
 
     try {

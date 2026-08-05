@@ -46,6 +46,10 @@ namespace Libertix.Installation
 
         public void StartStep(string step)
         {
+            // Validate the requested transition before mutating the in-memory
+            // document. PowerShell and Python follow the same rule, and callers
+            // must never observe a partially changed state after an exception.
+            string phase = GetStepPhase(step);
             EnsureNotTerminal();
             if (State.Status == InstallationStatus.RollbackRunning)
                 throw new InvalidOperationException("Installation steps cannot start during rollback.");
@@ -54,7 +58,14 @@ namespace Libertix.Installation
             if (State.CompletedSteps.Contains(step, StringComparer.Ordinal))
                 throw new InvalidOperationException($"Step '{step}' is already complete.");
 
-            State.Phase = GetStepPhase(step);
+            // A recovery retry may legitimately resume after a recorded failure.
+            // Drop that failure here: without this, the ledger can reach
+            // 'succeeded' while still carrying the diagnostics of a run that did
+            // not succeed, and no later transition would ever clear it.
+            if (State.Status == InstallationStatus.Failed)
+                State.Failure = null;
+
+            State.Phase = phase;
             State.ActiveStep = step;
             State.Status = InstallationStatus.Running;
             Touch();
@@ -177,6 +188,17 @@ namespace Libertix.Installation
                  !IsFailureComponent(state.Failure.Component)))
             {
                 throw new InvalidOperationException("Execution state has invalid failure details.");
+            }
+            // Rollback states retain the originating failure as diagnostics.
+            // Pending, running, and successful states cannot carry one because
+            // it would describe an error that is not active in that lifecycle.
+            if ((state.Status == InstallationStatus.Pending ||
+                 state.Status == InstallationStatus.Running ||
+                 state.Status == InstallationStatus.Succeeded) &&
+                state.Failure != null)
+            {
+                throw new InvalidOperationException(
+                    "Only failed and rollback execution states can carry failure details.");
             }
             if (state.Status == InstallationStatus.RollbackRunning && state.Phase != InstallationPhase.Rollback)
                 throw new InvalidOperationException("A running rollback requires the rollback phase.");

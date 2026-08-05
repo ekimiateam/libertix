@@ -8,31 +8,14 @@ param(
     [switch]$Force = $false,
     [switch]$Revert = $false,
     [switch]$SkipInstaller = $false,
-    [int]$InstallerPartitionSizeGB = 20,
     [string]$FilepoolBaseUrl = "",
     [string]$Aria2ExePath = "",
     [ValidateRange(1, 5)]
     [int]$Aria2Connections = 5,
-    [string]$LinuxUsername = "",
-    [string]$LinuxPasswordHash = "",
-    [string]$LinuxComputerName = "",
-    [ValidateSet("en", "fr", "es", "ja")]
-    [string]$LanguageCode = "en",
-    [string]$SystemLang = "en_US.UTF-8",
-    [string]$KeyboardLayout = "us",
-    [string]$KeyboardModel = "pc105",
-    [string]$Timezone = "UTC",
     [ValidateSet("BootNext", "FirmwareBootOrder")]
     [string]$BootStrategy = "BootNext",
     [switch]$ReusePreparedInstaller = $false,
-    [string]$RecoveryRoot = "",
-    [string]$RecoveryRunId = "",
-    [bool]$LowMemoryMode = $false,
-    [bool]$ShareWindowsFilesInLinux = $true,
-    [bool]$ShareLinuxFilesInWindows = $true,
-    [string]$WindowsProfilesJsonBase64 = "W10=",
-    [switch]$PreserveConfig = $false,
-    [switch]$InsecureTls = $false
+    [switch]$PreserveConfig = $false
 )
 
 Set-StrictMode -Version Latest
@@ -84,58 +67,11 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
         if ($config.PSObject.Properties.Name -contains "ExecutionStatePath") {
             $ExecutionStatePath = [string]$config.ExecutionStatePath
         }
-        if ($config.PSObject.Properties.Name -contains "InstallerPartitionSizeGB") {
-            $InstallerPartitionSizeGB = [int]$config.InstallerPartitionSizeGB
-        }
         $FilepoolBaseUrl = [string]$config.FilepoolBaseUrl
         $Aria2ExePath = [string]$config.Aria2ExePath
         $Aria2Connections = [int]$config.Aria2Connections
-        # Account and locale values moved into InstallationPlan. Keep these
-        # guarded reads only for legacy recovery configs that still carry them.
-        if ($config.PSObject.Properties.Name -contains "LinuxUsername") {
-            $LinuxUsername = [string]$config.LinuxUsername
-        }
-        if ($config.PSObject.Properties.Name -contains "LinuxPasswordHash") {
-            $LinuxPasswordHash = [string]$config.LinuxPasswordHash
-        }
-        if ($config.PSObject.Properties.Name -contains "LinuxComputerName") {
-            $LinuxComputerName = [string]$config.LinuxComputerName
-        }
-        if ($config.PSObject.Properties.Name -contains "LanguageCode") {
-            $LanguageCode = [string]$config.LanguageCode
-        }
-        if ($config.PSObject.Properties.Name -contains "SystemLang") {
-            $SystemLang = [string]$config.SystemLang
-        }
-        if ($config.PSObject.Properties.Name -contains "KeyboardLayout") {
-            $KeyboardLayout = [string]$config.KeyboardLayout
-        }
-        if ($config.PSObject.Properties.Name -contains "KeyboardModel") {
-            $KeyboardModel = [string]$config.KeyboardModel
-        }
-        if ($config.PSObject.Properties.Name -contains "Timezone") {
-            $Timezone = [string]$config.Timezone
-        }
         if (-not $bootStrategyWasSpecified -and $config.PSObject.Properties.Name -contains "BootStrategy") {
             $BootStrategy = [string]$config.BootStrategy
-        }
-        if ($config.PSObject.Properties.Name -contains "RecoveryRoot") {
-            $RecoveryRoot = [string]$config.RecoveryRoot
-        }
-        if ($config.PSObject.Properties.Name -contains "RecoveryRunId") {
-            $RecoveryRunId = [string]$config.RecoveryRunId
-        }
-        if ($config.PSObject.Properties.Name -contains "LowMemoryMode") {
-            $LowMemoryMode = [bool]$config.LowMemoryMode
-        }
-        if ($config.PSObject.Properties.Name -contains "ShareWindowsFilesInLinux") {
-            $ShareWindowsFilesInLinux = [bool]$config.ShareWindowsFilesInLinux
-        }
-        if ($config.PSObject.Properties.Name -contains "ShareLinuxFilesInWindows") {
-            $ShareLinuxFilesInWindows = [bool]$config.ShareLinuxFilesInWindows
-        }
-        if ($config.PSObject.Properties.Name -contains "WindowsProfilesJsonBase64") {
-            $WindowsProfilesJsonBase64 = [string]$config.WindowsProfilesJsonBase64
         }
     } finally {
         if (-not $PreserveConfig) {
@@ -144,8 +80,6 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
     }
 }
 
-# New callers pass a validated plan. Legacy command-line parameters remain as
-# a compatibility boundary for recovery tools and direct script diagnostics.
 $installationPlan = $null
 if (-not [string]::IsNullOrWhiteSpace($InstallationPlanPath)) {
     $installationPlan = Read-LibertixInstallationPlan -Path $InstallationPlanPath
@@ -158,20 +92,10 @@ if (-not [string]::IsNullOrWhiteSpace($InstallationPlanPath)) {
         throw "Installation plan finalSizeBytes must be an exact number of GiB."
     }
     $InstallerPartitionSizeGB = [int]($finalSizeBytes / 1GB)
-    $LinuxUsername = [string]$installationPlan.account.username
-    $LinuxPasswordHash = [string]$installationPlan.account.passwordHash
-    $LinuxComputerName = [string]$installationPlan.account.computerName
-    $LanguageCode = [string]$installationPlan.locale.languageCode
-    $SystemLang = [string]$installationPlan.locale.systemLanguage
-    $KeyboardLayout = [string]$installationPlan.locale.keyboardLayout
-    $KeyboardModel = [string]$installationPlan.locale.keyboardModel
-    $Timezone = [string]$installationPlan.locale.timezone
     $RecoveryRoot = [string]$installationPlan.runtime.recoveryRootWindows
     $RecoveryRunId = [string]$installationPlan.runtime.recoveryRunId
     $LowMemoryMode = [bool]$installationPlan.runtime.lowMemoryMode
     $ShareWindowsFilesInLinux = [bool]$installationPlan.features.shareWindowsFilesInLinux
-    $ShareLinuxFilesInWindows = [bool]$installationPlan.features.shareLinuxFilesInWindows
-    $WindowsProfilesJsonBase64 = [string]$installationPlan.features.windowsProfilesJsonBase64
     if (-not $bootStrategyWasSpecified) {
         $BootStrategy = switch ([string]$installationPlan.runtime.bootStrategy) {
             "uefi-boot-next" { "BootNext" }
@@ -189,6 +113,21 @@ if (-not [string]::IsNullOrWhiteSpace($InstallationPlanPath)) {
     }
 }
 
+if (-not $Revert -and $null -eq $installationPlan) {
+    throw "InstallationPlanPath is required for every UEFI preparation workflow."
+}
+
+$SystemDrive = if ($installationPlan) {
+    [string]$installationPlan.disk.systemDrive
+} else {
+    [string]$env:SystemDrive
+}
+if ($SystemDrive -notmatch "^[A-Za-z]:$") {
+    throw "Invalid Windows system drive: $SystemDrive"
+}
+$SystemDrive = $SystemDrive.ToUpperInvariant()
+$SystemDriveLetter = $SystemDrive.TrimEnd(":")
+
 # A rollback only consumes the transaction state stored on disk. It must remain
 # available even when no download configuration is supplied by the caller.
 if (-not $Revert) {
@@ -203,87 +142,40 @@ if (-not $Revert) {
     $FilepoolBaseUrl = $FilepoolBaseUrl.TrimEnd("/")
 }
 
-# Networking defaults
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-if ($InsecureTls) {
-    try {
-        Add-Type @"
-using System.Net;
-using System.Security.Cryptography.X509Certificates;
-public class TrustAllCertsPolicy : ICertificatePolicy {
-    public bool CheckValidationResult(ServicePoint srvPoint, X509Certificate certificate, WebRequest request, int certificateProblem) {
-        return true;
-    }
-}
-"@
-    } catch {}
 
-    [System.Net.ServicePointManager]::CertificatePolicy =
-        New-Object TrustAllCertsPolicy
-
-    if (
-        -not (
-            [System.Management.Automation.PSTypeName]`
-                "ServerCertificateValidationCallback"
-        ).Type
-    ) {
-        $certCallback = @"
-using System;
-using System.Net;
-using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
-public class ServerCertificateValidationCallback {
-    public static void Ignore() {
-        ServicePointManager.ServerCertificateValidationCallback +=
-            delegate(object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors) { return true; };
-    }
-}
-"@
-        try { Add-Type $certCallback } catch {}
-    }
-
-    try { [ServerCertificateValidationCallback]::Ignore() } catch {}
-}
-
-# Downloads
-$Aria2ZipName = "aria2-64.zip"
+# Download hashes and names are shared with the WPF path so an artifact update
+# cannot silently reach only one firmware workflow.
+$artifactCatalogPath = Join-Path $PSScriptRoot "config\Libertix.Artifacts.json"
+$artifactCatalog = Get-Content -LiteralPath $artifactCatalogPath -Raw -ErrorAction Stop |
+    ConvertFrom-Json -ErrorAction Stop
+$Aria2ZipName = [string]$artifactCatalog.aria2.archiveFileName
 $downloadUrls = $null
 if (-not $Revert) {
     $downloadUrls = New-LibertixDownloadUrls `
         -FilepoolBaseUrl $FilepoolBaseUrl `
         -Aria2ZipName $Aria2ZipName
 }
-$InstallerIsoUrl = if ($installationPlan) {
-    [string]$installationPlan.distribution.liveIsoUrl
-} elseif ($downloadUrls) { $downloadUrls.InstallerIso } else { "" }
+$InstallerIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoUrl } else { "" }
 $InstallerIsoName = "libertix-installer-uefi.iso"
-$InstallerIsoSha256 = if ($installationPlan) {
-    [string]$installationPlan.distribution.liveIsoSha256
-} else { "3a6db211fcd2d9b437c5c906a3c508203bd1636bb27e40904e9891079f054a97" }
-$MintIsoUrl = if ($installationPlan) {
-    [string]$installationPlan.distribution.installerIsoUrl
-} elseif ($downloadUrls) { $downloadUrls.MintIso } else { "" }
-$MintIsoPath = if ($installationPlan) {
-    [string]$installationPlan.distribution.installerIsoWindowsPath
-} else { "$env:SystemDrive\mint.iso" }
-$MintIsoSha256 = if ($installationPlan) {
-    [string]$installationPlan.distribution.installerIsoSha256
-} else { "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4" }
+$InstallerIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoSha256 } else { "" }
+$MintIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoUrl } else { "" }
+$MintIsoPath = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoWindowsPath } else { "" }
+$MintIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoSha256 } else { "" }
 $Aria2ZipUrl = if ($downloadUrls) { $downloadUrls.Aria2Zip } else { "" }
-$Aria2ZipSha256 = "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288"
-$Aria2ExeSha256 = "be2099c214f63a3cb4954b09a0becd6e2e34660b886d4c898d260febfe9d70c2"
-$Aria2CacheDir = "$env:SystemDrive\LibertixTools\aria2"
-$Aria2DownloadDir = "$env:SystemDrive\LibertixTools\downloads"
-$LowMemoryIsoPath = "$env:SystemDrive\libertix-live.iso"
+$Aria2ZipSha256 = [string]$artifactCatalog.aria2.archiveSha256
+$Aria2ExeSha256 = [string]$artifactCatalog.aria2.executableSha256
+$Aria2CacheDir = "$SystemDrive\LibertixTools\aria2"
+$Aria2DownloadDir = "$SystemDrive\LibertixTools\downloads"
+$LowMemoryIsoPath = "$SystemDrive\libertix-live.iso"
 
-# Defaults
 $EspLetter = "Y"
 $InstallerLetter = "X"
 $InstallerLabel = "LIBERTIXEFI"
 $InstallerBootDescription = "Libertix UEFI Installer"
 $InstallerEspDirectory = "EFI\LibertixInstaller"
-$TransactionStatePath = "$env:SystemDrive\LibertixTools\uefi-transaction.json"
+$TransactionStatePath = "$SystemDrive\LibertixTools\uefi-transaction.json"
 
 if ($BootStrategy -notin @("BootNext", "FirmwareBootOrder")) {
     throw "Unsupported UEFI boot strategy: $BootStrategy"
@@ -312,7 +204,6 @@ try {
         if ($BootStrategy -ne "FirmwareBootOrder") {
             throw "Prepared installer reuse is only valid with FirmwareBootOrder."
         }
-        Test-LibertixLiveConfig
         $info = Get-ReusablePreparedInstallerPartition
         $drive = $info["Drive"]
         Assert-PreparedInstallerManifest -InstallerDrive $drive
@@ -328,18 +219,23 @@ try {
             -ReusePreparedInstaller
         Complete-LibertixTrackedStep -Step "windows.temporary-boot-prepared"
         Publish-LibertixInstallationContext -PartitionDrive $drive
+        # The fallback changes the published plan after validating the original
+        # media. Refresh the manifest so another guarded retry validates the
+        # exact plan that is now present on the staging volume.
+        Save-PreparedInstallerManifest -InstallerDrive $drive
         Dismount-Letter -Letter ($drive.TrimEnd(":"))
         Write-Log "FALLBACK_REUSED_PREPARED_INSTALLER=true" "Green"
         Write-Log "Preparation complete; waiting for the user interface to confirm restart." "Cyan"
         exit 0
     }
 
-    Test-LibertixLiveConfig
     Assert-LibertixPlanMatchesCurrentStorage
     Test-LibertixSecureBootCompatibility
-    Ensure-WindowsVolumeReadableFromLinux
+    Set-WindowsVolumeReadableFromLinux
     Start-LibertixTrackedStep -Step "windows.artifacts-verified"
-    Ensure-MintIsoOnWindows
+    Write-LibertixProgress -Stage "installer-iso-download" -Percent 30
+    Set-MintIsoOnWindows
+    Write-LibertixProgress -Stage "installer-iso-ready" -Percent 45
     Complete-LibertixTrackedStep -Step "windows.artifacts-verified"
 
     if ($SkipInstaller) {
@@ -347,6 +243,7 @@ try {
         exit 0
     }
 
+    Write-LibertixProgress -Stage "staging-partition" -Percent 52
     $info = New-OrReuseInstallerPartition -SizeGB $InstallerPartitionSizeGB
     $drive = $info["Drive"]
     $installerDiskNumber = [int]$info["DiskNumber"]
@@ -354,10 +251,11 @@ try {
 
     Start-LibertixTrackedStep -Step "windows.live-media-prepared"
     Install-LibertixIsoToPartition -PartitionDrive $drive
-    Write-LibertixLiveConfig -PartitionDrive $drive
+    Publish-LibertixInstallationContext -PartitionDrive $drive
     Complete-LibertixTrackedStep -Step "windows.live-media-prepared"
 
     Start-LibertixTrackedStep -Step "windows.temporary-boot-prepared"
+    Write-LibertixProgress -Stage "temporary-boot" -Percent 90
     Set-LibertixUefiBootEntry `
         -InstallerDrive $drive `
         -InstallerDiskNumber $installerDiskNumber `
@@ -369,6 +267,7 @@ try {
     Dismount-Letter -Letter ($drive.TrimEnd(":"))
 
     Write-Host ""
+    Write-LibertixProgress -Stage "complete" -Percent 100
     Write-Log "Complete. Next boot should start Libertix UEFI installer once." "Green"
     Write-Host ""
     Write-Host "First boot: signed shim/GRUB should start the Libertix live installer." `

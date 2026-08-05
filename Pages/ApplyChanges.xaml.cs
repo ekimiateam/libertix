@@ -29,17 +29,32 @@ namespace Libertix.Pages
         private readonly InstallationState _installationState;
         private double _linuxSizeGB;
         private const string RecoveryTaskName = "LibertixInstallRecovery";
-        private const string RecoveryRoot = @"C:\LibertixInstallRecovery";
+        private static readonly string WindowsSystemDrive =
+            Path.GetPathRoot(Environment.SystemDirectory);
+        private static readonly string RecoveryRoot =
+            Path.Combine(WindowsSystemDrive, "LibertixInstallRecovery");
         private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
         private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
         private const int Aria2MaxConnections = 5;
-        private const string WindowsShareRoot = @"C:\ProgramData\Libertix\WindowsShare";
-        private const string Ext4SetupFileName = "ext4-win-driver.exe";
-        private const string Ext4SetupSha256 = "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031";
+        private static readonly string WindowsShareRoot =
+            Path.Combine(WindowsSystemDrive, @"ProgramData\Libertix\WindowsShare");
+        private static readonly ArtifactCatalog Artifacts =
+            ArtifactCatalog.LoadFromApplicationDirectory();
         private bool _isRunning = false;
         private bool _uefiDownloadingInstallerIso = false;
         private StoragePreflightInfo _storagePreflight;
         private bool _biosRecoveryGuardInstalled;
+        private string _biosInstallerDriveLetter;
+
+        private string BiosInstallerRoot
+        {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(_biosInstallerDriveLetter))
+                    throw new InvalidOperationException("BIOS installer drive is not mounted.");
+                return _biosInstallerDriveLetter + @":\";
+            }
+        }
 
         public ApplyChanges() : this(((App)Application.Current).InstallationState)
         {
@@ -56,20 +71,13 @@ namespace Libertix.Pages
 
         private async void ApplyChanges_Loaded(object sender, RoutedEventArgs e)
         {
-            // Partition validation is now done in ChooseDistro page
             await StartInstallationAsync();
         }
 
         private void LoadSummary()
         {
-            // Load Linux size from saved state
-            var stateKey = $"ResizeDisk_{_installationState.SelectedDistro?.Name}";
-            var state = StateManager.GetState(stateKey);
-            if (state?.State is System.Collections.Generic.Dictionary<string, double> savedState &&
-                savedState.TryGetValue("LinuxSize", out var linuxSize))
-            {
+            if (_installationState.SelectedLinuxSizeGiB is double linuxSize)
                 _linuxSizeGB = linuxSize;
-            }
         }
 
         private void BackButton_Click(object sender, RoutedEventArgs e)

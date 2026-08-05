@@ -7,8 +7,8 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-# Les seules sorties structurées attendues par Python sont les lignes NAME=VALUE.
-# Tout le reste sert au diagnostic en cas d'erreur.
+# Python parses only NAME=VALUE lines. Other output remains human-readable
+# diagnostic context and must not imitate that protocol.
 function Write-Result {
     param([string]$Name, [string]$Value)
     Write-Output ("{0}={1}" -f $Name, $Value)
@@ -42,9 +42,8 @@ function Invoke-Native {
 }
 
 function Find-VisualStudioMSBuild {
-    # Pour ce projet WPF .NET Framework 4.8 ancien format, le MSBuild du .NET SDK
-    # ou le vieux MSBuild C:\Windows\Microsoft.NET\Framework* ne suffit pas :
-    # il faut le MSBuild installé avec Visual Studio / Build Tools Desktop.
+    # This legacy .NET Framework WPF project requires the Visual Studio MSBuild.
+    # The .NET SDK and Framework-directory MSBuild cannot resolve its toolchain.
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
         $found = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
@@ -67,6 +66,45 @@ function Find-VisualStudioMSBuild {
     )
 
     return $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+}
+
+function Find-VisualStudioTestRunner {
+    # Use the runner from the same Visual Studio installation as MSBuild so
+    # classic .NET Framework tests do not depend on a separately installed SDK.
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+        $installationPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
+            -property installationPath 2>$null | Select-Object -First 1
+        if ($installationPath) {
+            $candidate = Join-Path $installationPath `
+                "Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe"
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                return $candidate
+            }
+        }
+    }
+
+    $cmd = Get-Command vstest.console.exe -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return $cmd.Source
+    }
+
+    # Build hosts intentionally stay minimal. The test project pins the full
+    # runner in NuGet, keeping this validation reproducible and disposable.
+    $packageRunner = Get-ChildItem `
+        -LiteralPath (Join-Path $env:NUGET_PACKAGES "microsoft.testplatform") `
+        -Filter "vstest.console.exe" `
+        -File `
+        -Recurse `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match "tools\\net462\\" } |
+        Sort-Object FullName -Descending |
+        Select-Object -First 1
+    if ($packageRunner) {
+        return $packageRunner.FullName
+    }
+
+    return $null
 }
 
 function Copy-WithRobocopy {
@@ -104,8 +142,9 @@ function Get-FreeDriveLetter {
     $used = @{}
     Get-PSDrive -PSProvider FileSystem | ForEach-Object { $used[$_.Name.ToUpperInvariant()] = $true }
     Get-SmbMapping -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.LocalPath -match "^([A-Z]):$") {
-            $used[$Matches[1].ToUpperInvariant()] = $true
+        $driveMatch = [regex]::Match([string]$_.LocalPath, "^([A-Z]):$")
+        if ($driveMatch.Success) {
+            $used[$driveMatch.Groups[1].Value.ToUpperInvariant()] = $true
         }
     }
 
@@ -148,16 +187,16 @@ $srcLocal = Join-Path $temp "source"
 $releaseStaging = $null
 $releaseBackup = $null
 
-# Important pour la VM 192.168.1.138, utilisée aussi manuellement :
-# le cache NuGet reste dans le dossier temporaire du build et disparaît au cleanup.
+# Keep the NuGet cache inside the disposable build directory so the shared
+# build host retains no package state from an automation run.
 $env:NUGET_PACKAGES = Join-Path $temp "nuget-packages"
 
 try {
     $sourcePath = $config.source
     $releasePath = $config.release
 
-    # On ne crée pas de mapping persistant. Si le partage est déjà accessible,
-    # on ne touche pas à la configuration existante de l'utilisateur.
+    # Preserve any working user share configuration. Create only a temporary
+    # mapping when the UNC path is not already accessible.
     if (-not (Test-Path -LiteralPath $config.share)) {
         Get-SmbMapping -ErrorAction SilentlyContinue |
             Where-Object { $_.RemotePath -eq $config.share -and $_.LocalPath } |
@@ -189,9 +228,8 @@ try {
 
     New-Item -ItemType Directory -Path $srcLocal -Force | Out-Null
 
-    # Le repo original reste sur Samba. On compile uniquement une copie locale
-    # temporaire pour éviter les problèmes de locks et pour pouvoir supprimer
-    # tous les artefacts intermédiaires en fin de run.
+    # Build a local disposable copy because compiling on Samba causes file-lock
+    # races and would leave intermediate artifacts in the source tree.
     Copy-WithRobocopy -Source $sourcePath -Destination $srcLocal -ExtraArgs @("/XD", ".git", "bin", "obj")
 
     $solution = Join-Path $srcLocal "Libertix.sln"
@@ -208,9 +246,8 @@ try {
         )
     }
 
-    # Build du repo tel quel : pas de patch temporaire de .cs/.csproj.
-    # Si cette commande échoue, l'erreur MSBuild complète est remontée dans
-    # le JSON API via stderr.
+    # Build the source tree without runtime patches so stderr describes the
+    # exact version that the API was asked to publish.
     Invoke-Native `
         -FilePath $msbuild `
         -Arguments @(
@@ -225,6 +262,40 @@ try {
             "/nologo"
         ) `
         -FailureMessage "Compilation Libertix échouée" |
+        Out-Null
+
+    $testAssembly = Join-Path $srcLocal "Libertix.Tests\bin\Release\Libertix.Tests.dll"
+    if (-not (Test-Path -LiteralPath $testAssembly -PathType Leaf)) {
+        throw "Libertix.Tests.dll absent après compilation Release"
+    }
+
+    $testRunner = Find-VisualStudioTestRunner
+    if (-not $testRunner) {
+        throw "vstest.console.exe introuvable dans l'installation Visual Studio"
+    }
+
+    $adapterPath = Get-ChildItem `
+        -LiteralPath (Join-Path $env:NUGET_PACKAGES "mstest.testadapter") `
+        -Directory `
+        -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object { Join-Path $_.FullName "build\net462" } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
+        Select-Object -First 1
+
+    if (-not $adapterPath) {
+        throw "Adaptateur MSTest introuvable après restauration NuGet"
+    }
+
+    Invoke-Native `
+        -FilePath $testRunner `
+        -Arguments @(
+            $testAssembly,
+            "/TestAdapterPath:$adapterPath",
+            "/Platform:x64",
+            "/Logger:console;verbosity=minimal"
+        ) `
+        -FailureMessage "Tests C# Libertix échoués" |
         Out-Null
 
     $exe = Get-ChildItem -LiteralPath $srcLocal -Recurse -Filter "Libertix.exe" |
@@ -274,13 +345,14 @@ try {
     }
 
     Write-Result -Name "MSBUILD" -Value $msbuild
+    Write-Result -Name "VSTEST" -Value $testRunner
     Write-Result -Name "TEMP_BUILD_DIR" -Value $temp
     Write-Result -Name "FINAL_EXE" -Value $finalExe
     Write-Result -Name "FINAL_EXE_SHA256" -Value $publishedHash
 }
 finally {
-    # Nettoyage systématique : source copiée, packages NuGet temporaires et
-    # éventuels bin/obj de build disparaissent même en cas d'erreur.
+    # Always remove copied sources and build caches, including after a failed
+    # build, because this host is also used for independent manual builds.
     if (Test-Path -LiteralPath $temp) {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }

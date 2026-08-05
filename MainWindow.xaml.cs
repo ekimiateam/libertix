@@ -26,23 +26,21 @@ namespace Libertix
             _installationState = ((App)Application.Current).InstallationState;
             InitializeComponent();
             _welcomeContent = MainFrame.Content;
-            _trayIcon = new TrayIconController(RestoreFromTray);
             _installationState.InstallationRunningChanged += InstallationState_InstallationRunningChanged;
 
-            // Detect Windows language and set as default
             string windowsLang = Localization.GetWindowsLanguageCode();
-            int langIndex = 0; // Default to English
-
-            switch (windowsLang)
+            foreach (ComboBoxItem languageItem in LanguageComboBox.Items)
             {
-                case "en": langIndex = 0; break;
-                case "fr": langIndex = 1; break;
-                case "es": langIndex = 2; break;
-                case "ja": langIndex = 3; break;
+                if (string.Equals(languageItem.Tag as string, windowsLang, StringComparison.OrdinalIgnoreCase))
+                {
+                    LanguageComboBox.SelectedItem = languageItem;
+                    break;
+                }
             }
-
-            LanguageComboBox.SelectedIndex = langIndex;
             Localization.SetLanguage(windowsLang);
+            _trayIcon = new TrayIconController(
+                RestoreFromTray,
+                ResourceText("TrayOpenLibertix", "Open Libertix"));
 
             if (_installationState.UefiRecoveryStatePath is string recoveryStatePath &&
                 !string.IsNullOrWhiteSpace(recoveryStatePath))
@@ -54,9 +52,6 @@ namespace Libertix
                         TimeSpan.Zero)));
             }
 
-/*#if DEBUG
-            DebugPanel.Visibility = Visibility.Visible;
-#endif*/
         }
 
         protected override void OnClosing(CancelEventArgs e)
@@ -108,10 +103,10 @@ namespace Libertix
             _hiddenInTray = true;
             Hide();
             _trayIcon.Show(
-                ResourceText("TrayInstallTitle", "Installation Libertix en cours"),
+                ResourceText("TrayInstallTitle", "Libertix installation in progress"),
                 ResourceText(
                     "TrayInstallMessage",
-                    "L'installation continue en arrière-plan. Double-cliquez sur l'icône Libertix près de l'horloge pour rouvrir la fenêtre."));
+                    "The installation is still running. Double-click the Libertix icon near the clock to reopen the window."));
         }
 
         private void RestoreFromTray()
@@ -142,7 +137,9 @@ namespace Libertix
 
         private void Button_Click(object sender, RoutedEventArgs e)
         {
-            StateManager.ClearState("ChooseDistro"); // Clear state when starting fresh
+            _installationState.SelectedDistro = null;
+            _installationState.SelectedLinuxSizeGiB = null;
+            _installationState.Account = null;
             NavigationHelper.NavigateWithAnimationInFrame(
                 MainFrame,
                 new CompatibilityCheck(_installationState),
@@ -194,51 +191,7 @@ namespace Libertix
             {
                 string cultureName = item.Tag.ToString();
                 Localization.SetLanguage(cultureName);
-            }
-        }
-
-        private void LanguageSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
-            {
-                string lang = (string)item.Tag;
-                Localization.SetLanguage(lang);
-            }
-        }
-
-        private void DebugPageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (DebugPageComboBox.SelectedItem is ComboBoxItem item)
-            {
-                string pageName = item.Tag.ToString();
-                Page targetPage = null;
-
-                switch (pageName)
-                {
-                    case "ChooseDistro":
-                        targetPage = new ChooseDistro(_installationState);
-                        break;
-                    case "ResizeDisk":
-                        targetPage = new ResizeDisk(_installationState);
-                        break;
-                    case "AccountCreation":
-                        targetPage = new AccountCreation(_installationState);
-                        break;
-                    case "WarningConfirmation":
-                        targetPage = new WarningConfirmation(_installationState);
-                        break;
-                    case "ApplyChanges":
-                        targetPage = new ApplyChanges(_installationState);
-                        break;
-                }
-
-                if (targetPage != null)
-                {
-                    NavigationHelper.NavigateWithAnimationInFrame(
-                        MainFrame,
-                        targetPage,
-                        TimeSpan.FromSeconds(0.3));
-                }
+                _trayIcon?.SetOpenLabel(ResourceText("TrayOpenLibertix", "Open Libertix"));
             }
         }
     }

@@ -2,20 +2,15 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
     
-    <!-- MainWindow -->
     <system:String x:Key="Welcome">¡Bienvenido a Libertix!</system:String>
     <system:String x:Key="Subtitle">Un instalador de Linux simple y moderno</system:String>
     <system:String x:Key="GetStarted">Comenzar</system:String>
     <system:String x:Key="Language">Idioma</system:String>
 
-    <!-- ChooseDistro -->
     <system:String x:Key="ChooseDistroTitle">Elija su versión de Linux</system:String>
     
-    <!-- Distro Descriptions -->
-    <system:String x:Key="ZorinDescription">Un sistema operativo potente, seguro y fácil de usar, diseñado para todos.</system:String>
     <system:String x:Key="UbuntuDescription">Rápido, gratuito y lleno de nuevas características. Ubuntu es el sistema Linux preferido en el mundo.</system:String>
 
-    <!-- ResizeDisk -->
     <system:String x:Key="ResizeDiskTitle">Redimensiona tu disco</system:String>
     <system:String x:Key="Windows">Windows</system:String>
     <system:String x:Key="Linux">Linux</system:String>
@@ -23,31 +18,44 @@
     <system:String x:Key="FreeUpSpace">Tu sistema necesita más espacio libre para instalar Linux. Libera algo de espacio e inténtalo de nuevo.</system:String>
     <system:String x:Key="OpenDiskCleanup">Abrir limpieza de disco</system:String>
 
-    <!-- AccountCreation -->
     <system:String x:Key="AccountCreationTitle">Crea tu cuenta de Linux</system:String>
     <system:String x:Key="Username">Nombre de usuario</system:String>
     <system:String x:Key="Password">Contraseña</system:String>
     <system:String x:Key="ConfirmPassword">Confirmar contraseña</system:String>
     <system:String x:Key="ComputerName">Nombre del equipo</system:String>
 
-    <!-- Common -->
     <system:String x:Key="Back">Atrás</system:String>
     <system:String x:Key="Next">Siguiente</system:String>
     
-    <!-- Errors -->
+    <system:String x:Key="ResizeDiskSizeEmpty">El tamaño no puede estar vacío</system:String>
+    <system:String x:Key="ResizeDiskSizeTooSmall">El tamaño debe ser de al menos {0} GB</system:String>
+    <system:String x:Key="ResizeDiskNotEnoughSpace">Espacio libre insuficiente. Windows necesita {0} GB libres y Linux al menos {1} GB</system:String>
+    <system:String x:Key="ResizeDiskSizeTooLarge">El tamaño no puede superar {0:N0} GB (Windows necesita {1} GB libres)</system:String>
+    <system:String x:Key="ResizeDiskInvalidNumber">Introduzca un número válido</system:String>
+    <system:String x:Key="ResizeDiskNoSpace">Espacio en disco insuficiente para la instalación.</system:String>
+    <system:String x:Key="ResizeDiskErrorTitle">Error de tamaño de disco</system:String>
+    <system:String x:Key="ResizeDiskWindowsUsedSpace">Espacio usado por Windows: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeSpace">Espacio libre de Windows: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskIsoSize">ISO de instalación: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskLinuxMinimum">Espacio mínimo para Linux: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskAdditionalSpace">Espacio adicional necesario: {0:N1} GB</system:String>
+    <system:String x:Key="ErrorTitle">Error</system:String>
     <system:String x:Key="DistroLoadError">No se pudo cargar la lista de distribuciones. Por favor, compruebe su conexión a Internet e inténtelo de nuevo.</system:String>
 
-    <!-- Password Validation -->
     <system:String x:Key="PasswordRequired">La contraseña es obligatoria</system:String>
-    <system:String x:Key="PasswordTooShort">La contraseña debe tener al menos 4 caracteres</system:String>
-    <system:String x:Key="PasswordTooLong">La contraseña debe tener 8 caracteres o menos</system:String>
+    <system:String x:Key="PasswordTooShort">La contraseña debe tener al menos 8 caracteres</system:String>
+    <system:String x:Key="PasswordTooLong">La contraseña no debe superar los 128 caracteres</system:String>
+    <system:String x:Key="UsernameRequired">El nombre de usuario es obligatorio</system:String>
+    <system:String x:Key="UsernameInvalid">El nombre de usuario debe comenzar por una letra y contener solo letras minúsculas, números o guiones</system:String>
+    <system:String x:Key="ConfirmPasswordRequired">Confirme su contraseña</system:String>
+    <system:String x:Key="PasswordsDoNotMatch">Las contraseñas no coinciden</system:String>
+    <system:String x:Key="ComputerNameRequired">El nombre del equipo es obligatorio</system:String>
+    <system:String x:Key="ComputerNameInvalid">El nombre del equipo debe comenzar por una letra y contener solo letras minúsculas, números o guiones</system:String>
 
-    <!-- Partition Warning -->
     <system:String x:Key="PartitionWarningTitle">ADVERTENCIA: Configuración de partición no estándar</system:String>
     <system:String x:Key="PartitionWarningMessage">Este instalador NO ha sido probado en esta configuración de particiones. Continuar NO SE RECOMIENDA a menos que sepa EXACTAMENTE lo que está haciendo.</system:String>
     <system:String x:Key="PartitionWarningCheckbox">Entiendo</system:String>
 
-    <!-- Warning Confirmation -->
     <system:String x:Key="WarningTitle">Advertencia</system:String>
     <system:String x:Key="WarningMessage">Está a punto de realizar cambios significativos en las particiones de su disco. Esta operación modificará su disco duro e instalará un sistema de arranque dual junto con Windows.</system:String>
     <system:String x:Key="WarningRisks">RIESGOS:
@@ -61,12 +69,12 @@
 - Tenga un USB de recuperación de Windows listo
 - Tenga a alguien con conocimientos técnicos disponible si es necesario
 - NO interrumpa el proceso de instalación una vez iniciado</system:String>
+    <system:String x:Key="WarningHibernationNotice">La hibernación y el inicio rápido de Windows se desactivarán mientras esté habilitado el uso compartido de archivos de Windows. Esto evita que Linux escriba en un volumen NTFS cuyos metadatos aún están almacenados en caché por Windows.</system:String>
     <system:String x:Key="WarningConfirmCheckbox">Entiendo los riesgos y he respaldado mis datos importantes</system:String>
     <system:String x:Key="WarningConfirmButton">Entiendo, Continuar</system:String>
 
-    <!-- Comprobación de compatibilidad -->
     <system:String x:Key="CompatibilityTitle">Comprobación de compatibilidad</system:String>
-    <system:String x:Key="CompatibilityDescription">Libertix comprueba la memoria, el firmware y el almacenamiento antes de continuar.</system:String>
+    <system:String x:Key="CompatibilityDescription">Libertix comprueba la memoria, el firmware y el almacenamiento antes de continuar. En sistemas UEFI, la prueba del firmware escribe temporalmente una variable de arranque y después la restaura.</system:String>
     <system:String x:Key="CompatibilityStarting">Iniciando comprobaciones...</system:String>
     <system:String x:Key="CompatibilityRetry">Reintentar</system:String>
     <system:String x:Key="CompatibilityContinue">Continuar</system:String>
@@ -76,7 +84,6 @@
     <system:String x:Key="CompatibilityWarningPrefix">ADVERTENCIA: </system:String>
     <system:String x:Key="CompatibilityUnexpectedPrefix">COMPAT_E_UNEXPECTED: </system:String>
 
-    <!-- Uso compartido de archivos -->
     <system:String x:Key="SharingTitle">Uso compartido de archivos</system:String>
     <system:String x:Key="SharingDescription">Elija qué archivos estarán disponibles desde cada sistema.</system:String>
     <system:String x:Key="SharingWindowsToLinuxTitle">Mostrar los archivos de Windows en Mint</system:String>
@@ -84,7 +91,6 @@
     <system:String x:Key="SharingLinuxToWindowsTitle">Mostrar los archivos de Linux en Windows (solo lectura)</system:String>
     <system:String x:Key="SharingLinuxToWindowsDescription">Windows podrá consultar los archivos de Linux sin modificar la partición ext4.</system:String>
 
-    <!-- Recuperación del arranque UEFI -->
     <system:String x:Key="UefiFallbackTitle">El arranque UEFI no inició el instalador</system:String>
     <system:String x:Key="UefiFallbackDescription">Windows regresó sin el marcador del sistema live. Libertix conservó una copia local verificada y puede usar la entrada UEFI validada para reiniciar el sistema live.</system:String>
     <system:String x:Key="UefiFallbackChecking">Comprobando el estado de recuperación...</system:String>
@@ -108,7 +114,6 @@
     <system:String x:Key="UefiFallbackRestoreFailed">Falló la restauración UEFI.</system:String>
     <system:String x:Key="UefiFallbackTimeoutLog">ERROR: el proceso de recuperación superó el límite de 30 minutos</system:String>
 
-    <!-- Apply Changes -->
     <system:String x:Key="ApplyChangesTitle">Aplicar cambios</system:String>
     <system:String x:Key="ApplyChangesWaiting">Listo para iniciar el particionamiento</system:String>
     <system:String x:Key="ApplyChangesSummary">Resumen de la instalacion</system:String>
@@ -117,7 +122,7 @@
     <system:String x:Key="ApplyChangesUsername">Nombre de usuario:</system:String>
     <system:String x:Key="ApplyChangesStart">Iniciar instalacion</system:String>
     <system:String x:Key="ApplyChangesStep1">Reduciendo particion de Windows para Linux...</system:String>
-    <system:String x:Key="ApplyChangesStep2">Creando particion FAT32 de arranque (Z:)...</system:String>
+    <system:String x:Key="ApplyChangesStep2">Creando particion FAT32 de arranque...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">Esperando actualizacion del disco...</system:String>
     <system:String x:Key="ApplyChangesStep3">Reduciendo particion de Windows para Linux...</system:String>
     <system:String x:Key="ApplyChangesComplete">Particionamiento completado!</system:String>
@@ -135,14 +140,14 @@
     <system:String x:Key="ApplyChangesPreparingWindowsShare">Preparando el uso compartido de archivos de Windows...</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">Preparando la instalación UEFI...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Comprobando Secure Boot...</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindowsInit">Inicializando el descifrado de Windows C:...</system:String>
-    <system:String x:Key="ApplyChangesWindowsDecrypted">Windows C: descifrado</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindows">Descifrando Windows C:...</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Descifrando Windows C: {0}%</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindowsInit">Inicializando el descifrado de Windows {0}...</system:String>
+    <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} descifrado</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindows">Descifrando Windows {0}...</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Descifrando Windows {0}: {1}%</system:String>
     <system:String x:Key="ApplyChangesDownloading">Descargando...</system:String>
     <system:String x:Key="ApplyChangesDownloadingIso">Descargando ISO...</system:String>
     <system:String x:Key="ApplyChangesIsoCopied">ISO copiada desde la carpeta local</system:String>
-    <system:String x:Key="ApplyChangesCopyingIsoContents">Copiando el contenido de la ISO a Z:...</system:String>
+    <system:String x:Key="ApplyChangesCopyingIsoContents">Copiando el contenido de la ISO...</system:String>
     <system:String x:Key="ApplyChangesDownloadingLinuxIso">Descargando la ISO de instalación de Linux...</system:String>
     <system:String x:Key="ApplyChangesLinuxIsoCopied">ISO de instalación de Linux copiada desde la carpeta local</system:String>
     <system:String x:Key="ApplyChangesWritingConfiguration">Escribiendo la configuración...</system:String>
@@ -167,15 +172,15 @@
     <system:String x:Key="ApplyChangesBitLockerReenableDetails">La instalación se canceló y se restauraron los cambios de disco y arranque. BitLocker continuó o completó el descifrado y no puede reactivarse automáticamente en esta edición de Windows. Vuelva a activar el cifrado en la configuración de Windows antes de considerar completa la recuperación.</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenableTitle">Libertix - Reactivar BitLocker</system:String>
     <system:String x:Key="ApplyChangesRollbackIncompleteTitle">Libertix - Restauración incompleta</system:String>
-    <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">La instalación se canceló, pero no se pudo verificar la restauración UEFI. No reinicie y consulte C:\LibertixInstallLogs.</system:String>
-    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">La preparación falló y no se pudo verificar la restauración automática. No reinicie la instalación y consulte C:\LibertixInstallRecovery\recovery.log.</system:String>
+    <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">La instalación se canceló, pero no se pudo verificar la restauración UEFI. No reinicie y consulte {0}.</system:String>
+    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">La preparación falló y no se pudo verificar la restauración automática. No reinicie la instalación y consulte {0}.</system:String>
     <system:String x:Key="CloseConfirmationTitle">Cerrar Libertix</system:String>
     <system:String x:Key="CloseConfirmationMessage">Realmente desea cerrar Libertix?</system:String>
     <system:String x:Key="TrayInstallTitle">Instalacion de Libertix en curso</system:String>
     <system:String x:Key="TrayInstallMessage">La instalacion sigue ejecutandose. Haga doble clic en el icono de Libertix junto al reloj para volver a abrir la ventana.</system:String>
+    <system:String x:Key="TrayOpenLibertix">Abrir Libertix</system:String>
     <system:String x:Key="PartitionSafetyBlockMessage">La instalación está bloqueada hasta resolver este control de seguridad.</system:String>
 
-    <!-- Acerca de -->
     <system:String x:Key="AboutButton">Acerca de</system:String>
     <system:String x:Key="AboutTitle">Acerca de Libertix</system:String>
     <system:String x:Key="AboutSubtitle">Las personas y la comunidad que hacen posible una instalación segura de Linux con arranque dual.</system:String>

@@ -9,29 +9,71 @@ function Test-BitLockerVolumeReadable {
     return $false
 }
 
-function Restore-LibertixCDriveInitialSize {
+function Wait-LibertixSystemDriveResizeCapacity {
+    param(
+        [Parameter(Mandatory = $true)][string]$DriveLetter,
+        [Parameter(Mandatory = $true)][int]$DiskNumber,
+        [Parameter(Mandatory = $true)][int64]$RequiredSize,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        # Removing a partition updates the disk before every Storage CIM object
+        # sees the new free extent. Refresh both caches before trusting SizeMax.
+        Update-HostStorageCache -ErrorAction SilentlyContinue
+        Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
+
+        $partition = Get-Partition -DriveLetter $DriveLetter -ErrorAction Stop
+        $supported = Get-PartitionSupportedSize -DriveLetter $DriveLetter -ErrorAction Stop
+        if ($partition.Size -ge $RequiredSize -or $supported.SizeMax -ge $RequiredSize) {
+            return $supported
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            return $supported
+        }
+        Start-Sleep -Seconds 2
+    } while ($true)
+}
+
+function Restore-LibertixSystemDriveInitialSize {
     param([Parameter(Mandatory = $true)]$State)
     if (-not $State.OriginalCSize) {
-        throw "Cannot restore C: without the saved initial size."
+        throw "Cannot restore the Windows system volume without the saved initial size."
     }
-    $partition = Get-Partition -DriveLetter C -ErrorAction Stop
+    $hasSystemDrive = $State.PSObject.Properties.Name -contains "SystemDrive"
+    $systemDrive = if ($hasSystemDrive -and $State.SystemDrive) {
+        [string]$State.SystemDrive
+    } else {
+        [string]$env:SystemDrive
+    }
+    if ($systemDrive -notmatch "^[A-Za-z]:$") {
+        throw "Invalid system drive in rollback state: $systemDrive"
+    }
+    $driveLetter = $systemDrive.TrimEnd(":")
+    $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
     $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
     if (
         $partition.DiskNumber -ne [int]$State.DiskNumber -or
         ([string]$disk.UniqueId).Trim() -ne ([string]$State.DiskUniqueId).Trim()
     ) {
-        throw "C: disk identity changed; refusing rollback resize."
+        throw "$systemDrive disk identity changed; refusing rollback resize."
     }
     $initialSize = [int64]$State.OriginalCSize
     if ($partition.Size -lt $initialSize) {
-        $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
+        $supported = Wait-LibertixSystemDriveResizeCapacity `
+            -DriveLetter $driveLetter `
+            -DiskNumber ([int]$partition.DiskNumber) `
+            -RequiredSize $initialSize
         if ($supported.SizeMax -lt $initialSize) {
-            throw "C: cannot be restored to its initial size."
+            throw "$systemDrive cannot be restored to its initial size; SizeMax=$($supported.SizeMax)."
         }
-        Resize-Partition -DriveLetter C -Size $initialSize -ErrorAction Stop
+        Resize-Partition -DriveLetter $driveLetter -Size $initialSize -ErrorAction Stop
     }
-    $verified = Get-Partition -DriveLetter C -ErrorAction Stop
-    if ($verified.Size -lt $initialSize) { throw "C: rollback size verification failed." }
+    $verified = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
+    if ($verified.Size -lt $initialSize) {
+        throw "$systemDrive rollback size verification failed."
+    }
 }
 
-Export-ModuleMember -Function Test-BitLockerVolumeReadable, Restore-LibertixCDriveInitialSize
+Export-ModuleMember -Function Test-BitLockerVolumeReadable, Restore-LibertixSystemDriveInitialSize

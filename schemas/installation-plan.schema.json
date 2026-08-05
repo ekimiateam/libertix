@@ -52,6 +52,9 @@
     },
     "runtime": {
       "$ref": "#/$defs/runtime"
+    },
+    "development": {
+      "$ref": "#/$defs/development"
     }
   },
   "$defs": {
@@ -118,11 +121,15 @@
         },
         "keyboardLayout": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "keyboardVariant": {
+          "type": "string",
+          "pattern": "^[a-z0-9_-]*$"
         },
         "keyboardModel": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[a-z0-9_-]+$"
         },
         "timezone": {
           "type": "string",
@@ -325,6 +332,42 @@
             "null"
           ],
           "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    "development": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enableSsh",
+        "staticIpv4Address",
+        "staticIpv4PrefixLength",
+        "staticIpv4Gateway",
+        "dnsServers"
+      ],
+      "properties": {
+        "enableSsh": {
+          "const": true
+        },
+        "staticIpv4Address": {
+          "type": "string",
+          "pattern": "^192\\.168\\.1\\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$"
+        },
+        "staticIpv4PrefixLength": {
+          "const": 24
+        },
+        "staticIpv4Gateway": {
+          "const": "192.168.1.1"
+        },
+        "dnsServers": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "8.8.8.8" },
+            { "const": "1.1.1.1" }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
         }
       }
     },

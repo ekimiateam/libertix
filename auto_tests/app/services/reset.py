@@ -64,6 +64,8 @@ class ResetService:
             s.proxmox_token_secret.get_secret_value(),
             timeout=s.proxmox_timeout_seconds,
             task_timeout=s.proxmox_task_timeout_seconds,
+            verify_tls=s.proxmox_verify_tls,
+            ca_bundle=s.proxmox_ca_bundle,
         )
 
     def _selected_vmids(self, selectors: Sequence[str] | None) -> tuple[int, ...]:
@@ -129,6 +131,7 @@ class ResetService:
             s.main_ssh_host,
             s.main_ssh_user,
             s.main_ssh_password.get_secret_value(),
+            known_hosts_path=s.ssh_known_hosts,
             port=s.ssh_port,
             connect_timeout=s.ssh_timeout_seconds,
         ) as ssh:

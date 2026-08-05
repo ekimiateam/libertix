@@ -232,7 +232,14 @@
           </label>
           <label>
             Mot de passe Linux
-            <input id="linuxPassword" type="password" value="linux" autocomplete="off" />
+            <input
+              id="linuxPassword"
+              type="password"
+              minlength="8"
+              maxlength="128"
+              required
+              autocomplete="new-password"
+            />
           </label>
           <label>
             <input id="monitorIso" type="checkbox" checked />
@@ -383,7 +390,7 @@
           ...requestBody(),
           apply,
           linux_username: linuxUsernameInput.value || "test",
-          linux_password: linuxPasswordInput.value || "linux",
+          linux_password: linuxPasswordInput.value,
           monitor_iso: monitorIsoInput.checked,
         };
       }
@@ -493,12 +500,12 @@
             result.files.push(item);
             addStep({
               step: `filepool.${file}`,
-              status: response.ok ? "ok" : "problème",
+              status: response.ok ? "ok" : "error",
               message: response.ok ? "Fichier accessible" : `HTTP ${response.status}`,
               context: item,
             });
             if (!response.ok) {
-              result.status = "problème";
+              result.status = "error";
             }
           }
           rawResult.textContent = JSON.stringify(result, null, 2);
@@ -513,7 +520,7 @@
       function runValidation(stream) {
         const body = requestBody();
         if (stream) {
-          runStream("/api/v1/validation/stream", body, "validation stream");
+          runStream("/api/v1/validation/stream?format=ndjson", body, "validation stream");
           return;
         }
         runJson(
@@ -526,7 +533,7 @@
       function runAutomation(apply, stream) {
         const body = automationBody(apply);
         if (stream) {
-          runStream("/api/v1/automation/stream", body, apply ? "automation apply stream" : "automation launch-only stream");
+          runStream("/api/v1/automation/stream?format=ndjson", body, apply ? "automation apply stream" : "automation launch-only stream");
           return;
         }
         runJson(
@@ -541,7 +548,8 @@
         selectedVms().forEach((vm) => params.append("vm", vm));
         const suffix = params.toString() ? `?${params.toString()}` : "";
         if (stream) {
-          runStream(`/api/v1/reset/stream${suffix}`, {}, "reset stream");
+          const separator = suffix ? "&" : "?";
+          runStream(`/api/v1/reset/stream${suffix}${separator}format=ndjson`, {}, "reset stream");
           return;
         }
         runJson(`/api/v1/reset${suffix}`, { method: "POST", headers: apiHeaders() }, "reset");

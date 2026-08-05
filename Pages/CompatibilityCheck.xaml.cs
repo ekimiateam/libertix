@@ -3,7 +3,6 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media;
 using Libertix.Helpers;
 using Libertix.Models;
 
@@ -39,7 +38,7 @@ namespace Libertix.Pages
             _details.Clear();
             DetailsText.Text = string.Empty;
             StatusText.Text = Localization.GetString("CompatibilityRunning");
-            StatusText.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#E0DEF4"));
+            StatusText.Foreground = (System.Windows.Media.Brush)FindResource("TextPrimary");
             CheckProgress.IsIndeterminate = true;
             CheckProgress.Value = 0;
             ContinueButton.IsEnabled = false;
@@ -54,7 +53,7 @@ namespace Libertix.Pages
                 StatusText.Text = info.LowMemoryMode
                     ? Localization.GetString("CompatibilityLowMemorySuccess")
                     : Localization.GetString("CompatibilitySuccess");
-                StatusText.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#9CCFD8"));
+                StatusText.Foreground = (System.Windows.Media.Brush)FindResource("AccentColor");
                 ContinueButton.IsEnabled = true;
                 foreach (string warning in info.Warnings)
                     AppendDetail(Localization.GetString("CompatibilityWarningPrefix") + warning);
@@ -65,7 +64,7 @@ namespace Libertix.Pages
                 CheckProgress.IsIndeterminate = false;
                 CheckProgress.Value = 0;
                 StatusText.Text = ex.Code + " : " + ex.Message;
-                StatusText.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#EB6F92"));
+                StatusText.Foreground = (System.Windows.Media.Brush)FindResource("ErrorColor");
                 AppendDetail(ex.Diagnostics);
                 RetryButton.Visibility = Visibility.Visible;
             }
@@ -75,7 +74,7 @@ namespace Libertix.Pages
                 CheckProgress.IsIndeterminate = false;
                 CheckProgress.Value = 0;
                 StatusText.Text = Localization.GetString("CompatibilityUnexpectedPrefix") + ex.Message;
-                StatusText.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#EB6F92"));
+                StatusText.Foreground = (System.Windows.Media.Brush)FindResource("ErrorColor");
                 RetryButton.Visibility = Visibility.Visible;
             }
             finally

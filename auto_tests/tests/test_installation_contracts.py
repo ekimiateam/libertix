@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[2]
 GIB = 1024**3
@@ -38,6 +40,14 @@ def state_module() -> ModuleType:
     )
 
 
+@pytest.fixture(scope="module")
+def bcd_cleanup_module() -> ModuleType:
+    return load_live_module(
+        "assets/live/cleanup-bcd-main.py",
+        "libertix_bcd_cleanup_contract",
+    )
+
+
 def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
     """Build the smallest complete plan shared by BIOS and UEFI."""
 
@@ -61,6 +71,7 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             "languageCode": "fr",
             "systemLanguage": "fr_FR.UTF-8",
             "keyboardLayout": "fr",
+            "keyboardVariant": "",
             "keyboardModel": "pc105",
             "timezone": "Europe/Paris",
         },
@@ -122,6 +133,7 @@ def test_bios_and_uefi_use_the_same_size_policy(
 
     assert exported["LINUX_SIZE_GB"] == str(final_size_gib)
     assert exported["LANGUAGE_CODE"] == "fr"
+    assert exported["KEYBOARD_VARIANT"] == ""
     assert exported["INSTALLER_FINAL_SIZE_BYTES"] == str(final_size_gib * GIB)
     assert exported["INSTALLER_STAGING_SIZE_BYTES"] == str(staging_size_gib * GIB)
 
@@ -136,6 +148,8 @@ def test_bios_and_uefi_use_the_same_size_policy(
         (("features", "windowsProfilesJsonBase64"), ""),
         (("runtime", "recoveryRunId"), ""),
         (("locale", "languageCode"), "de"),
+        (("locale", "keyboardLayout"), "fr;touch /tmp/unsafe"),
+        (("locale", "keyboardVariant"), "intl;touch /tmp/unsafe"),
     ],
 )
 def test_shared_plan_rejects_ambiguous_or_unsafe_values(
@@ -146,6 +160,80 @@ def test_shared_plan_rejects_ambiguous_or_unsafe_values(
     plan = make_plan("uefi", 40)
     section, field = field_path
     plan[section][field] = invalid_value  # type: ignore[index]
+
+    with pytest.raises(plan_module.PlanValidationError):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_legacy_plan_without_keyboard_variant_uses_empty_variant(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 40)
+    del plan["locale"]["keyboardVariant"]  # type: ignore[index]
+
+    validated = plan_module.validate_plan(plan, require_installer=True)
+
+    assert plan_module.shell_values(validated)["KEYBOARD_VARIANT"] == ""
+
+
+def test_development_ssh_network_is_validated_and_exported(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 40)
+    plan["development"] = {
+        "enableSsh": True,
+        "staticIpv4Address": "192.168.1.241",
+        "staticIpv4PrefixLength": 24,
+        "staticIpv4Gateway": "192.168.1.1",
+        "dnsServers": ["8.8.8.8", "1.1.1.1"],
+    }
+
+    validated = plan_module.validate_plan(plan, require_installer=True)
+    exported = plan_module.shell_values(validated)
+
+    assert exported["DEVELOPMENT_SSH_ENABLED"] == "true"
+    assert exported["DEVELOPMENT_STATIC_IPV4_ADDRESS"] == "192.168.1.241"
+    assert exported["DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH"] == "24"
+    assert exported["DEVELOPMENT_STATIC_IPV4_GATEWAY"] == "192.168.1.1"
+    assert exported["DEVELOPMENT_DNS_PRIMARY"] == "8.8.8.8"
+    assert exported["DEVELOPMENT_DNS_SECONDARY"] == "1.1.1.1"
+    validate_schema_document("installation-plan.schema.json", plan)
+
+
+def test_plan_without_development_access_exports_disabled_defaults(
+    plan_module: ModuleType,
+) -> None:
+    exported = plan_module.shell_values(make_plan("bios", 20))
+
+    assert exported["DEVELOPMENT_SSH_ENABLED"] == "false"
+    assert exported["DEVELOPMENT_STATIC_IPV4_ADDRESS"] == ""
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("enableSsh", False),
+        ("staticIpv4Address", "192.168.2.241"),
+        ("staticIpv4PrefixLength", 16),
+        ("staticIpv4Gateway", "192.168.1.254"),
+        ("dnsServers", ["1.1.1.1", "8.8.8.8"]),
+    ],
+)
+def test_development_ssh_network_rejects_noncanonical_values(
+    plan_module: ModuleType,
+    field: str,
+    value: object,
+) -> None:
+    plan = make_plan("uefi", 40)
+    development = {
+        "enableSsh": True,
+        "staticIpv4Address": "192.168.1.241",
+        "staticIpv4PrefixLength": 24,
+        "staticIpv4Gateway": "192.168.1.1",
+        "dnsServers": ["8.8.8.8", "1.1.1.1"],
+    }
+    development[field] = value
+    plan["development"] = development
 
     with pytest.raises(plan_module.PlanValidationError):
         plan_module.validate_plan(plan, require_installer=True)
@@ -225,3 +313,119 @@ def test_contract_implementations_share_the_same_policy_constants() -> None:
     assert "MINIMUM_FINAL_SIZE_GIB = 20" in python
     assert "MAXIMUM_DIRECT_FAT32_SIZE_GIB = 31" in python
     assert "LARGE_INSTALLATION_STAGING_SIZE_GIB = 8" in python
+
+
+@pytest.mark.parametrize(
+    ("description", "path", "expected"),
+    [
+        ("Install Linux", r"\grldr.mbr", True),
+        ("Install Linux", "/grldr.mbr", True),
+        ("Libertix UEFI Installer", r"\EFI\BOOT\BOOTX64.EFI", True),
+        ("Windows Boot Manager", r"\EFI\Microsoft\Boot\bootmgfw.efi", False),
+        ("Firmware utility", r"\EFI\BOOT\BOOTX64.EFI", False),
+        ("Install Linux", r"\EFI\BOOT\BOOTX64.EFI", False),
+    ],
+)
+def test_bcd_cleanup_only_selects_owned_temporary_entries(
+    bcd_cleanup_module: ModuleType,
+    description: str,
+    path: str,
+    expected: bool,
+) -> None:
+    assert bcd_cleanup_module.is_libertix_temporary_entry(description, path) is expected
+
+
+def test_firmware_wrappers_delegate_to_shared_implementations() -> None:
+    runner_bios = (ROOT / "iso/live/libertix-runner.sh").read_text(encoding="utf-8-sig")
+    runner_uefi = (ROOT / "iso-uefi/live/libertix-runner.sh").read_text(encoding="utf-8-sig")
+    target_bios = (ROOT / "iso/target/configure-target.sh").read_text(encoding="utf-8-sig")
+    target_uefi = (ROOT / "iso-uefi/target/configure-target.sh").read_text(encoding="utf-8-sig")
+
+    assert "LIBERTIX_FIRMWARE_MODE=bios" in runner_bios
+    assert "LIBERTIX_FIRMWARE_MODE=uefi" in runner_uefi
+    assert "libertix-runner-main.sh" in runner_bios
+    assert "libertix-runner-main.sh" in runner_uefi
+    assert "LIBERTIX_FIRMWARE_MODE=bios" in target_bios
+    assert "LIBERTIX_FIRMWARE_MODE=uefi" in target_uefi
+    assert "configure-target-main.sh" in target_bios
+    assert "configure-target-main.sh" in target_uefi
+
+
+def test_versioned_schemas_accept_documents_used_by_runtime_validators() -> None:
+    plan = make_plan("uefi", 40)
+    state = {
+        "schemaVersion": 1,
+        "planId": "a" * 32,
+        "revision": 0,
+        "status": "pending",
+        "phase": "windows",
+        "activeStep": None,
+        "completedSteps": [],
+        "compensatedSteps": [],
+        "failure": None,
+        "updatedAtUtc": "2026-07-15T12:00:00Z",
+    }
+
+    validate_schema_document("installation-plan.schema.json", plan)
+    validate_schema_document("installation-state.schema.json", state)
+
+
+@pytest.mark.parametrize(
+    "invalid_state",
+    [
+        {
+            "status": "failed",
+            "phase": "windows",
+            "activeStep": None,
+            "failure": None,
+        },
+        {
+            "status": "succeeded",
+            "phase": "complete",
+            "activeStep": None,
+            "failure": {
+                "code": "stale",
+                "message": "stale failure",
+                "component": "windows",
+            },
+        },
+        {
+            "status": "rollback-running",
+            "phase": "windows",
+            "activeStep": None,
+            "failure": {
+                "code": "failure",
+                "message": "failure",
+                "component": "windows",
+            },
+        },
+    ],
+)
+def test_state_schema_rejects_contradictory_lifecycle_fields(
+    invalid_state: dict[str, object],
+) -> None:
+    state = {
+        "schemaVersion": 1,
+        "planId": "a" * 32,
+        "revision": 1,
+        "status": "running",
+        "phase": "windows",
+        "activeStep": "windows.preflight-verified",
+        "completedSteps": [],
+        "compensatedSteps": [],
+        "failure": None,
+        "updatedAtUtc": "2026-07-15T12:00:00Z",
+    }
+    state.update(invalid_state)
+
+    schema = json.loads(
+        (ROOT / "schemas/installation-state.schema.json").read_text(encoding="utf-8")
+    )
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    assert list(validator.iter_errors(state))
+
+
+def validate_schema_document(schema_name: str, document: dict[str, object]) -> None:
+    schema = json.loads((ROOT / "schemas" / schema_name).read_text(encoding="utf-8"))
+    Draft202012Validator(schema, format_checker=FormatChecker()).validate(document)

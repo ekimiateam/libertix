@@ -34,7 +34,9 @@ compare_rootfs_file() {
 
 compare_rootfs_file install-mint.sh "$source_dir/live/install-mint.sh"
 compare_rootfs_file usr/local/sbin/libertix-runner "$source_dir/live/libertix-runner.sh"
-compare_rootfs_file usr/local/sbin/libertix-gui /workspace/iso-uefi/live/libertix-gui.py
+compare_rootfs_file usr/local/lib/libertix/libertix-runner-main.sh \
+    /workspace/assets/live/libertix-runner-main.sh
+compare_rootfs_file usr/local/sbin/libertix-gui /workspace/assets/live/libertix-gui.py
 compare_rootfs_file usr/local/sbin/libertix-copy-logs /workspace/assets/live/libertix-copy-logs.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-install-platform-common.sh \
     /workspace/assets/live/libertix-install-platform-common.sh
@@ -42,6 +44,14 @@ compare_rootfs_file usr/local/lib/libertix/libertix-storage-common.sh \
     /workspace/assets/live/libertix-storage-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-install-runtime-common.sh \
     /workspace/assets/live/libertix-install-runtime-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.py \
+    /workspace/assets/live/libertix-installation-plan.py
+compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.sh \
+    /workspace/assets/live/libertix-installation-plan.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-live-context.sh \
+    /workspace/assets/live/libertix-live-context.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-install-main.sh \
+    /workspace/assets/live/libertix-install-main.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-i18n.py \
     /workspace/assets/live/libertix-i18n.py
 compare_rootfs_file usr/local/lib/libertix/libertix-i18n.sh \
@@ -50,10 +60,20 @@ compare_rootfs_file usr/local/lib/libertix/libertix-translations.json \
     /workspace/assets/live/libertix-translations.json
 compare_rootfs_file usr/local/lib/libertix/libertix-target-common.sh \
     /workspace/assets/live/libertix-target-common.sh
+compare_rootfs_file usr/local/lib/libertix/configure-development-access.sh \
+    /workspace/assets/live/configure-development-access.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-development-ssh-first-boot.sh \
+    /workspace/assets/live/libertix-development-ssh-first-boot.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-development-ssh.service \
+    /workspace/assets/live/libertix-development-ssh.service
+compare_rootfs_file usr/local/lib/libertix/libertix-apply-keyboard-once.sh \
+    /workspace/assets/live/libertix-apply-keyboard-once.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-rollback-common.sh \
     /workspace/assets/live/libertix-rollback-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-runner-stage-common.sh \
     /workspace/assets/live/libertix-runner-stage-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-stages.tsv \
+    /workspace/assets/live/libertix-stages.tsv
 
 case "$mode" in
     bios)
@@ -73,8 +93,12 @@ if unsquashfs -ll "$squashfs" "usr/local/lib/libertix/$unexpected_adapter" 2>/de
     exit 1
 fi
 compare_rootfs_file usr/local/lib/libertix/cleanup-bcd.py "$source_dir/live/cleanup-bcd.py"
+compare_rootfs_file usr/local/lib/libertix/cleanup-bcd-main.py \
+    /workspace/assets/live/cleanup-bcd-main.py
 compare_rootfs_file usr/local/lib/libertix/configure-target.sh \
     "$source_dir/target/configure-target.sh"
+compare_rootfs_file usr/local/lib/libertix/configure-target-main.sh \
+    /workspace/assets/live/configure-target-main.sh
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.sh \
     "$source_dir/target/first-boot-resize.sh"
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.service \
@@ -101,7 +125,11 @@ done < <(find /workspace/assets/grub-theme -type f | LC_ALL=C sort)
 xorriso -osirrox on -indev "$image" \
     -extract /boot/grub/grub.cfg "$workdir/grub.cfg" \
     -extract /boot/grub/themes/Libertix "$workdir/theme" >/dev/null 2>&1
-cmp "$source_dir/boot/grub.cfg" "$workdir/grub.cfg"
+python3 /workspace/iso-tools/render-boot-config.py \
+    --arguments /workspace/Scripts/config/Libertix.BootArguments.json \
+    --template "$source_dir/boot/grub.cfg" \
+    --output "$workdir/expected-grub.cfg"
+cmp "$workdir/expected-grub.cfg" "$workdir/grub.cfg"
 diff -qr /workspace/assets/grub-theme "$workdir/theme"
 
 for binary in usr/bin/magick usr/bin/grub-mkfont usr/bin/xrandr usr/sbin/plymouthd; do

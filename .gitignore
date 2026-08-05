@@ -53,7 +53,6 @@ __pycache__/
 
 # auto_tests runtime artifacts
 auto_tests/.env
-auto_tests/README.md
 auto_tests/.venv/
 auto_tests/__pycache__/
 auto_tests/.pytest_cache/

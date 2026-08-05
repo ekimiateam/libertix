@@ -188,14 +188,6 @@ namespace Libertix.Pages
             return quoted.ToString();
         }
 
-        private static string ShellQuoteValue(string value)
-        {
-            value = value ?? string.Empty;
-            if (value.Contains("\r") || value.Contains("\n"))
-                throw new InvalidOperationException("Config values cannot contain newlines");
-            return "'" + value.Replace("'", "'\\''") + "'";
-        }
-
         private static Encoding GetWindowsConsoleEncoding()
         {
             // Native Windows console tools such as bcdedit emit text in the

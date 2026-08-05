@@ -9,13 +9,13 @@ SourceMode = Literal["remote", "local"]
 
 class StepResult(BaseModel):
     step: str
-    status: Literal["ok", "problème"]
+    status: Literal["ok", "error"]
     message: str
     context: dict[str, Any] = Field(default_factory=dict)
 
 
 class OperationResult(BaseModel):
-    status: Literal["ok", "problème"]
+    status: Literal["ok", "error"]
     operation: Literal["validation", "reset", "automation"]
     message: str
     steps: list[StepResult] = Field(default_factory=list)
@@ -58,5 +58,5 @@ class AutomationRequest(ValidationRequest):
         max_length=32,
         pattern=r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$",
     )
-    linux_password: str = Field(default="linux", min_length=4, max_length=128)
+    linux_password: str = Field(min_length=8, max_length=128)
     monitor_iso: bool = Field(default=True)

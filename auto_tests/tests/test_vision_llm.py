@@ -5,7 +5,7 @@ import httpx
 import pytest
 from PIL import Image
 
-from app.clients.vision_llm import INSTALL_PROGRESS_SYSTEM_PROMPT, VisionLLMClient
+from app.clients.vision_llm import INSTALL_PROGRESS_SYSTEM_PROMPT, SYSTEM_PROMPT, VisionLLMClient
 from app.errors import WorkflowError
 
 
@@ -32,6 +32,39 @@ def test_llm_json_verdict(monkeypatch, tmp_path: Path) -> None:
         image, "vm1", "Windows"
     )
     assert verdict.valid is True
+
+
+def test_llm_uses_short_english_prompt(monkeypatch, tmp_path: Path) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    captured_payload: dict[str, object] = {}
+    content = json.dumps(
+        {
+            "no_visible_problem": True,
+            "libertix_running": True,
+            "welcome_message_ok": True,
+            "summary": "The welcome screen is visible.",
+            "visible_problems": [],
+        }
+    )
+
+    def fake_post(*_args, **kwargs):
+        captured_payload.update(kwargs["json"])
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze(image, "vm1", "Windows")
+
+    messages = captured_payload["messages"]
+    assert isinstance(messages, list)
+    assert messages[0]["content"] == SYSTEM_PROMPT
+    user_text = messages[1]["content"][0]["text"]
+    assert user_text.startswith("Classify the visible Libertix welcome screen")
+    assert len(user_text) < 180
 
 
 def test_llm_retries_after_rate_limit(monkeypatch, tmp_path: Path) -> None:
@@ -67,127 +100,6 @@ def test_llm_retries_after_rate_limit(monkeypatch, tmp_path: Path) -> None:
     assert calls == 2
 
 
-def test_install_progress_fallback_ignores_schema_instructions() -> None:
-    reasoning = """
-    Le contrat dit: error_visible=true si une erreur bloquante est visible.
-    En observant l'écran, Libertix télécharge encore l'ISO avec une barre de progression.
-    Aucune erreur n'est visible.
-    still_in_progress: true
-    iso_download_finished: false
-    error_visible: false
-    """
-
-    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
-
-    assert verdict["still_in_progress"] is True
-    assert verdict["iso_download_finished"] is False
-    assert verdict["error_visible"] is False
-
-
-def test_install_progress_fallback_never_uses_prompt_assignments_as_evidence() -> None:
-    reasoning = """
-    Schema rule: installation_finished=true when complete.
-    Fields to determine: reboot_prompt_visible=true.
-    The image is a Windows desktop showing Downloading Mint ISO... 42%.
-    Visible text: Downloading Mint ISO... 42% 1.2GiB/2.8GiB ETA 4m.
-    """
-
-    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
-
-    assert verdict["analysis_source"] == "reasoning_fallback"
-    assert verdict["installation_finished"] is False
-    assert verdict["reboot_prompt_visible"] is False
-    assert verdict["still_in_progress"] is True
-
-
-def test_install_progress_fallback_detects_insufficient_space_blocker() -> None:
-    reasoning = """
-    Image shows a modal saying Espace insuffisant.
-    Windows Free Space: 9,0 GB.
-    Required Linux Space: 30,0 GB.
-    Additional space needed: 21,0 GB.
-    The model accidentally writes iso_download_finished: true later in its reasoning.
-    error_visible: false
-    """
-
-    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
-
-    assert verdict["iso_download_finished"] is False
-    assert verdict["error_visible"] is True
-
-
-def test_install_progress_fallback_keeps_copying_iso_in_progress() -> None:
-    reasoning = """
-    Visible text:
-    Copying ISO contents to Z....
-    80%
-    ISO download completed.
-    Step 5: Mounting ISO and copying contents to Z:...
-    still_in_progress: true
-    error_visible: false
-    """
-
-    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
-
-    assert verdict["iso_download_finished"] is False
-    assert verdict["still_in_progress"] is True
-    assert verdict["error_visible"] is False
-
-
-def test_install_progress_fallback_rejects_reboot_prompt_during_linux_iso_download() -> None:
-    reasoning = """
-    Downloading Linux ISO... 2 261/2 914 MB (77%)
-    Progress bar says 92%.
-    The model accidentally writes reboot_prompt_visible: true later in its reasoning.
-    iso_download_finished: true
-    still_in_progress: true
-    error_visible: false
-    """
-
-    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
-
-    assert verdict["reboot_prompt_visible"] is False
-    assert verdict["installation_finished"] is False
-    assert verdict["still_in_progress"] is True
-
-
-def test_install_progress_fallback_does_not_turn_negative_error_text_into_error() -> None:
-    reasoning = """
-    Scene: Libertix installer.
-    Downloading Mint ISO... 35%
-    1.0GiB/2.8GiB (35%), ETA 29m52s.
-    Aucun message d'erreur n'est présent et aucune invite de redémarrage n'est visible.
-    error_visible: false
-    """
-
-    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
-
-    assert verdict["still_in_progress"] is True
-    assert verdict["error_visible"] is False
-
-
-def test_install_progress_fallback_accepts_final_reboot_screen() -> None:
-    reasoning = """
-    Visible text:
-    Partitionnement termine !
-    100%
-    Boot entry configured successfully.
-    GRUB4DOS installed.
-    Next reboot will automatically boot Install Linux.
-    Buttons: Retour, Redemarrer.
-    The model accidentally writes still_in_progress: true later in its reasoning.
-    error_visible: false
-    """
-
-    verdict = VisionLLMClient._progress_from_reasoning_text(reasoning)  # noqa: SLF001
-
-    assert verdict["iso_download_finished"] is True
-    assert verdict["installation_finished"] is True
-    assert verdict["reboot_prompt_visible"] is True
-    assert verdict["still_in_progress"] is False
-    assert verdict["error_visible"] is False
-
-
 def test_install_progress_accepts_llm_json_without_visible_text(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -220,9 +132,7 @@ def test_install_progress_accepts_llm_json_without_visible_text(
     assert verdict.visible_text
 
 
-def test_install_progress_reads_only_complete_json_from_reasoning(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_install_progress_rejects_complete_json_from_reasoning(monkeypatch, tmp_path: Path) -> None:
     image = tmp_path / "screen.png"
     Image.new("RGB", (32, 32), "white").save(image)
     final_json = json.dumps(
@@ -250,14 +160,10 @@ def test_install_progress_reads_only_complete_json_from_reasoning(
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    verdict = VisionLLMClient(
-        "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
-    ).analyze_install_progress(image, "vm2", "Windows UEFI")
-
-    assert verdict.analysis_source == "reasoning_json"
-    assert verdict.installation_finished is False
-    assert verdict.still_in_progress is True
-    assert verdict.visible_text == "Extraction de Mint 54%"
+    with pytest.raises(WorkflowError):
+        VisionLLMClient(
+            "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
+        ).analyze_install_progress(image, "vm2", "Windows UEFI")
 
 
 def test_install_progress_does_not_infer_state_from_reasoning_prose(
@@ -510,6 +416,41 @@ def test_wizard_reasoning_uses_only_complete_verdict_json() -> None:
     assert verdict["visible_text"] == "Linux Mint 22.3\nSuivant"
 
 
+def test_wizard_rejects_verdict_exposed_only_as_reasoning(monkeypatch, tmp_path: Path) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    reasoning = json.dumps(
+        {
+            "detected_screen": "warning",
+            "expected_screen_visible": True,
+            "no_blocking_error": True,
+            "username_visible": False,
+            "password_fields_filled": False,
+            "summary": "The warning screen is visible.",
+            "visible_text": "Warning Continue",
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": None, "reasoning": reasoning}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    with pytest.raises(WorkflowError):
+        VisionLLMClient(
+            "key", "https://example.test/v1", "thinking-model", 1, max_attempts=1
+        ).analyze_wizard_state(
+            image,
+            "vm2",
+            "Windows UEFI",
+            expected_screen="warning",
+            expected_username="test",
+        )
+
+
 def test_wizard_normalizes_bare_false_when_account_evidence_is_complete(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -543,4 +484,42 @@ def test_wizard_normalizes_bare_false_when_account_evidence_is_complete(
         expected_username="test",
     )
 
+    assert verdict.no_blocking_error is True
+
+
+def test_wizard_normalizes_contradictory_warning_enum_from_visible_controls(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "detected_screen": "sharing",
+            "expected_screen_visible": True,
+            "no_blocking_error": True,
+            "username_visible": False,
+            "password_fields_filled": False,
+            "summary": "The final warning page is visible.",
+            "visible_text": "Avertissement Je comprends les risques Je comprends",
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze_wizard_state(
+        image,
+        "vm2",
+        "Windows 11 UEFI",
+        expected_screen="warning",
+        expected_username="test",
+    )
+
+    assert verdict.detected_screen == "warning"
+    assert verdict.expected_screen_visible is True
     assert verdict.no_blocking_error is True

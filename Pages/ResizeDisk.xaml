@@ -24,8 +24,8 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
                         <Grid>
-                            <Ellipse Width="20" Height="20" Fill="#3e8fb0"/>
-                            <Ellipse Width="16" Height="16" Fill="#232136"/>
+                            <Ellipse Width="20" Height="20" Fill="{DynamicResource AccentColor}"/>
+                            <Ellipse Width="16" Height="16" Fill="{DynamicResource PrimaryBackground}"/>
                         </Grid>
                     </ControlTemplate>
                 </Setter.Value>
@@ -44,10 +44,10 @@
                             </Grid.RowDefinitions>
                             <Track Grid.Row="1" x:Name="PART_Track">
                                 <Track.DecreaseRepeatButton>
-                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="#3e8fb0"/>
+                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="{DynamicResource AccentColor}"/>
                                 </Track.DecreaseRepeatButton>
                                 <Track.IncreaseRepeatButton>
-                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="#363252"/>
+                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="{DynamicResource PanelBorder}"/>
                                 </Track.IncreaseRepeatButton>
                                 <Track.Thumb>
                                     <Thumb Style="{StaticResource SliderThumb}"/>
@@ -60,7 +60,7 @@
         </Style>
     </Page.Resources>
 
-    <Grid Background="#232136">
+    <Grid Background="{DynamicResource PrimaryBackground}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -74,47 +74,39 @@
                Margin="20"
                FontSize="48"
                FontWeight="Light"
-               Foreground="#E0DEF4"/>
+               Foreground="{DynamicResource TextPrimary}"/>
 
-        <!-- Disk visualization - GParted style -->
         <Border Grid.Row="1"
                 Height="100"
                 Margin="40,20"
                 BorderThickness="1"
-                BorderBrush="#908caa"
+                BorderBrush="{DynamicResource TextSecondary}"
                 CornerRadius="4"
                 ClipToBounds="True">
             <Grid x:Name="DiskVisualization">
                 <Grid.ColumnDefinitions>
-                    <!-- Windows partition (total) -->
                     <ColumnDefinition Width="{Binding WindowsPartitionPercentage}"/>
-                    <!-- Linux installation partition -->
                     <ColumnDefinition Width="{Binding LinuxPartitionPercentage}"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Windows Partition GParted style: 3 layers - ultra dark contour, dark used, light free -->
-                <Border Grid.Column="0" Background="#1e5570" CornerRadius="3" Padding="6">
+                <Border Grid.Column="0" Background="{DynamicResource WindowsPartitionColor}" CornerRadius="3" Padding="6">
                     <Grid>
-                        <!-- Inner fill showing used/free space proportion -->
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="{Binding WindowsUsedPercentage}"/>
                                 <ColumnDefinition Width="{Binding WindowsFreeInPartitionPercentage}"/>
                             </Grid.ColumnDefinitions>
-                            <!-- Used space - dark blue -->
-                            <Rectangle Grid.Column="0" Fill="#2d7090" RadiusX="2" RadiusY="2"/>
-                            <!-- Free space - light blue -->
-                            <Rectangle Grid.Column="1" Fill="#3e8fb0" RadiusX="2" RadiusY="2"/>
+                            <Rectangle Grid.Column="0" Fill="{DynamicResource WindowsPartitionDetailColor}" RadiusX="2" RadiusY="2"/>
+                            <Rectangle Grid.Column="1" Fill="{DynamicResource AccentColor}" RadiusX="2" RadiusY="2"/>
                         </Grid>
 
-                        <!-- Windows label centered -->
                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                             <TextBlock Text="{DynamicResource Windows}"
-                                       Foreground="#E0DEF4"
+                                       Foreground="{DynamicResource TextPrimary}"
                                        FontWeight="SemiBold"
                                        HorizontalAlignment="Center"/>
                             <TextBlock Text="{Binding WindowsFreeSpace, StringFormat={}{0:N0} GB free}"
-                                       Foreground="#E0DEF4"
+                                       Foreground="{DynamicResource TextPrimary}"
                                        FontSize="12"
                                        Opacity="0.8"
                                        HorizontalAlignment="Center"/>
@@ -122,16 +114,15 @@
                     </Grid>
                 </Border>
 
-                <!-- Linux Installation Partition -->
                 <Grid Grid.Column="1">
-                    <Rectangle Fill="#eb6f92" RadiusX="3" RadiusY="3"/>
+                    <Rectangle Fill="{DynamicResource ErrorColor}" RadiusX="3" RadiusY="3"/>
                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
                         <TextBlock Text="{DynamicResource Linux}"
-                                   Foreground="#232136"
+                                   Foreground="{DynamicResource PrimaryBackground}"
                                    FontWeight="SemiBold"
                                    HorizontalAlignment="Center"/>
                         <TextBlock Text="{Binding LinuxSize, StringFormat={}{0:N0} GB}"
-                                   Foreground="#232136"
+                                   Foreground="{DynamicResource PrimaryBackground}"
                                    FontSize="12"
                                    HorizontalAlignment="Center"/>
                     </StackPanel>
@@ -139,30 +130,28 @@
             </Grid>
         </Border>
 
-        <!-- Legend -->
         <StackPanel Grid.Row="1"
                     Orientation="Horizontal"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Bottom"
                     Margin="0,0,0,-5">
             <StackPanel Orientation="Horizontal" Margin="10,0">
-                <Rectangle Width="16" Height="16" Fill="#1e5570" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                <Rectangle Width="16" Height="16" Fill="{DynamicResource WindowsPartitionColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
                 <TextBlock Text="{Binding WindowsUsedSpace, StringFormat=Windows used: {0:N0} GB}"
-                           Foreground="#908caa" FontSize="11" VerticalAlignment="Center"/>
+                           Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="10,0">
-                <Rectangle Width="16" Height="16" Fill="#3e8fb0" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                <Rectangle Width="16" Height="16" Fill="{DynamicResource AccentColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
                 <TextBlock Text="{Binding WindowsFreeSpace, StringFormat=Windows free: {0:N0} GB}"
-                           Foreground="#908caa" FontSize="11" VerticalAlignment="Center"/>
+                           Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="10,0">
-                <Rectangle Width="16" Height="16" Fill="#eb6f92" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                <Rectangle Width="16" Height="16" Fill="{DynamicResource ErrorColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
                 <TextBlock Text="{Binding LinuxSize, StringFormat=Linux: {0:N0} GB}"
-                           Foreground="#908caa" FontSize="11" VerticalAlignment="Center"/>
+                           Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
             </StackPanel>
         </StackPanel>
 
-        <!-- Slider and size display -->
         <StackPanel Grid.Row="2" Margin="40,20">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -184,9 +173,9 @@
                          Width="80"
                          Height="30"
                          Margin="20,0,5,0"
-                         Background="#2a273f"
-                         Foreground="#E0DEF4"
-                         BorderBrush="#363252"
+                         Background="{DynamicResource SecondaryBackground}"
+                         Foreground="{DynamicResource TextPrimary}"
+                         BorderBrush="{DynamicResource PanelBorder}"
                          TextAlignment="Center"
                          VerticalContentAlignment="Center"
                          Text="{Binding ManualSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
@@ -196,42 +185,37 @@
                 
                 <TextBlock Grid.Column="2"
                           VerticalAlignment="Center"
-                          Foreground="#E0DEF4"
+                          Foreground="{DynamicResource TextPrimary}"
                           Text="GB"/>
             </Grid>
 
-            <!-- Size Error Message -->
             <TextBlock Margin="0,5,0,0"
-                       Foreground="#eb6f92"
+                       Foreground="{DynamicResource ErrorColor}"
                        Text="{Binding SizeErrorMessage}"
                        Visibility="{Binding HasSizeError, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
-            <!-- Size breakdown -->
             <Grid Margin="0,20,0,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Windows info -->
                 <StackPanel Grid.Column="0">
-                    <TextBlock Foreground="#3e8fb0" FontWeight="SemiBold"
+                    <TextBlock Foreground="{DynamicResource AccentColor}" FontWeight="SemiBold"
                                Text="{Binding WindowsTotalSpace, StringFormat=Windows: {0:N0} GB}"/>
-                    <TextBlock Foreground="#908caa" FontSize="12" Margin="10,2,0,0"
+                    <TextBlock Foreground="{DynamicResource TextSecondary}" FontSize="12" Margin="10,2,0,0"
                                Text="{Binding WindowsUsedSpace, StringFormat=Used: {0:N0} GB}"/>
-                    <TextBlock Foreground="#908caa" FontSize="12" Margin="10,2,0,0"
+                    <TextBlock Foreground="{DynamicResource TextSecondary}" FontSize="12" Margin="10,2,0,0"
                                Text="{Binding WindowsFreeSpace, StringFormat=Free: {0:N0} GB}"/>
                 </StackPanel>
 
-                <!-- Linux info -->
                 <StackPanel Grid.Column="1">
-                    <TextBlock Foreground="#eb6f92" FontWeight="SemiBold"
+                    <TextBlock Foreground="{DynamicResource ErrorColor}" FontWeight="SemiBold"
                                Text="{Binding LinuxSize, StringFormat=Linux: {0:N0} GB}"/>
                 </StackPanel>
             </Grid>
         </StackPanel>
 
-        <!-- Error Panel -->
         <controls:ErrorPanel x:Name="FallbackPanel"
                            Grid.Row="1"
                            Grid.RowSpan="2"

@@ -97,6 +97,13 @@ def validate_state(value: Any) -> dict[str, Any]:
             raise StateTransitionError("failure code and message are required")
         if failure.get("component") not in FAILURE_COMPONENTS:
             raise StateTransitionError("failure component is invalid")
+        # Rollback states retain the originating failure as diagnostics.
+        # Pending, running, and successful states cannot describe an inactive
+        # failure.
+        if status in {"pending", "running", "succeeded"}:
+            raise StateTransitionError(
+                "only failed and rollback states can carry failure details"
+            )
     if status == "rollback-running" and value["phase"] != "rollback":
         raise StateTransitionError("rollback-running requires the rollback phase")
     if status in TERMINAL_STATUSES and value["phase"] != "complete":
@@ -158,6 +165,11 @@ def start_step(state: dict[str, Any], step: str) -> None:
         raise StateTransitionError(f"step {state['activeStep']!r} is already active")
     if step in state["completedSteps"]:
         raise StateTransitionError(f"step {step!r} is already complete")
+    # A recovery retry may legitimately resume after a recorded failure. Drop
+    # that failure here: without this, the ledger can reach "succeeded" while
+    # still carrying the diagnostics of a run that did not succeed.
+    if state["status"] == "failed":
+        state["failure"] = None
     state.update(status="running", phase=phase, activeStep=step)
     touch(state)
 

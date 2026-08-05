@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import ssl
 import time
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
@@ -20,12 +22,21 @@ class ProxmoxClient:
         *,
         timeout: float,
         task_timeout: float,
+        verify_tls: bool = True,
+        ca_bundle: Path | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/") + "/api2/json"
         self.task_timeout = task_timeout
+
+        # TLS verification is the safe default. Private Proxmox deployments may
+        # opt into their own CA bundle; disabling verification requires an
+        # explicit runtime setting and is never hidden in the transport client.
+        tls_verification: bool | ssl.SSLContext = verify_tls
+        if ca_bundle is not None:
+            tls_verification = ssl.create_default_context(cafile=str(ca_bundle))
         self.client = httpx.Client(
             headers={"Authorization": f"PVEAPIToken={token_id}={token_secret}"},
-            verify=False,
+            verify=tls_verification,
             timeout=timeout,
         )
 

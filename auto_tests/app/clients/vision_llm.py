@@ -28,6 +28,7 @@ from app.clients.vision_models import (
 from app.clients.vision_models import (
     contains_install_blocker as _contains_install_blocker,
 )
+from app.clients.vision_models import contains_warning_screen as _contains_warning_screen
 from app.clients.vision_models import (
     contains_wizard_blocker as _contains_wizard_blocker,
 )
@@ -38,9 +39,6 @@ from app.clients.vision_parsing import (
 )
 from app.clients.vision_parsing import _load_wizard_json as load_wizard_json
 from app.clients.vision_parsing import _optimized_image as optimize_image
-from app.clients.vision_parsing import (
-    _progress_from_reasoning_text as progress_from_reasoning_text,
-)
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
@@ -77,14 +75,8 @@ class VisionLLMClient:
         logger.info("Analyse vision LLM démarrée", extra={"step": "llm.analyze", "target": vm_name})
         image = self._optimized_image(image_path)
         user_prompt = (
-            f"Analyse la capture jointe de {vm_name}, système {vm_os}. Vérifie séparément : "
-            "(1) qu'aucun problème, message d'erreur ou anomalie visuelle n'est visible "
-            "dans la fenêtre Libertix ; "
-            "(2) que l'application Libertix est réellement ouverte ; "
-            "(3) que le message de bienvenue Libertix est affiché correctement. "
-            "Ignore les problèmes du bureau Windows qui ne touchent pas Libertix. "
-            "RAPPEL FINAL : réponds uniquement avec l'objet JSON strict imposé, "
-            "sans aucun autre texte."
+            f"Classify the visible Libertix welcome screen on {vm_name} ({vm_os}). "
+            "Return only the required JSON object."
         )
         payload = self._with_reasoning(
             {
@@ -291,10 +283,9 @@ class VisionLLMClient:
             self._optimized_image(second_image_path) if second_image_path is not None else None
         )
         screen_instruction = (
-            "l'écran de création du compte, avec le nom utilisateur exact visible et les deux "
-            "champs de mot de passe visiblement remplis"
+            "the account page with the exact username and both password fields filled"
             if expected_screen == "account"
-            else "l'écran final d'avertissement avant application, sans erreur de validation"
+            else "the final warning page shown immediately before installation"
         )
         payload = self._with_reasoning(
             {
@@ -303,34 +294,19 @@ class VisionLLMClient:
                     {
                         "role": "system",
                         "content": (
-                            "Tu vérifies une étape critique de l'assistant Libertix. "
-                            "Réponds uniquement avec l'objet JSON strict demandé. "
-                            "Ne déduis rien qui n'est pas visible. Un mauvais écran met "
-                            "uniquement expected_screen_visible à false. Une erreur ou un champ "
-                            "invalide visible "
-                            "met no_blocking_error à false. Une image illisible met uniquement "
-                            "expected_screen_visible à false: elle ne prouve pas une erreur. "
-                            "IMPORTANT: no_blocking_error=false exige un message d'erreur concret "
-                            "recopié dans visible_text; une notification du bureau ou un simple "
-                            "doute "
-                            "ne constitue pas une erreur Libertix. "
-                            "Si la fenêtre Libertix est ouverte mais vide, partiellement dessinée, "
-                            "blanche/noire ou visiblement entre deux pages, classe "
-                            "detected_screen=other, "
-                            "expected_screen_visible=false et no_blocking_error=true: c'est un "
-                            "rendu transitoire qui doit être recapturé, pas une erreur. Ne "
-                            "qualifie jamais "
-                            "cet état de crash sans message d'erreur explicite dans Libertix. "
-                            "Quand deux captures sont fournies, elles sont chronologiques et "
-                            "espacées d'une seconde. Utilise la seconde comme état actuel. "
-                            "Si elles diffèrent, considère que Libertix change de page; "
-                            "ne transforme pas "
-                            "cette transition "
-                            "en erreur. "
-                            "Classe detected_screen parmi welcome, compatibility, distro, resize, "
-                            "sharing, account, warning, apply ou other. Sur compatibility, une "
-                            "erreur COMPAT_E_* ou un bouton Continuer désactivé met "
-                            "no_blocking_error à false."
+                            "Classify the current Libertix wizard page from visible evidence only. "
+                            "Return only the required JSON object. detected_screen must name the "
+                            "visible page. expected_screen_visible must be true exactly when "
+                            "detected_screen equals the requested page. Set "
+                            "no_blocking_error=false "
+                            "only when visible_text copies a concrete Libertix validation or error "
+                            "message. A blank, partial, black, white, or transitioning window is "
+                            "detected_screen=other, expected_screen_visible=false, and "
+                            "no_blocking_error=true. If two chronological captures are supplied, "
+                            "classify the second one. Valid screens: welcome, compatibility, "
+                            "distro, resize, sharing, account, warning, apply, other. A visible "
+                            "COMPAT_E_* error or disabled Continue button on compatibility is "
+                            "blocking."
                         ),
                     },
                     {
@@ -339,21 +315,16 @@ class VisionLLMClient:
                             {
                                 "type": "text",
                                 "text": (
-                                    f"Capture de {vm_name}, {vm_os}. Vérifie que l'image montre "
-                                    f"{screen_instruction}. Le nom attendu est exactement "
-                                    f"{expected_username!r}. Pour l'écran warning, "
-                                    "username_visible et "
-                                    "password_fields_filled peuvent rester false car les champs "
-                                    "ne sont "
-                                    "plus affichés. Recopie dans visible_text tout le texte "
-                                    "réellement "
-                                    "lisible dans Libertix: titre, étape, boutons, champs, "
-                                    "progression, avertissements et surtout le texte exact de "
-                                    "toute "
-                                    "erreur. Si aucun "
-                                    "texte Libertix n'est lisible, laisse visible_text vide et "
-                                    "traite "
-                                    "l'image comme un rendu transitoire sans erreur bloquante."
+                                    f"Current screen for {vm_name} ({vm_os}). Verify "
+                                    f"{screen_instruction}. The exact expected username is "
+                                    f"{expected_username!r}. On the warning page, username_visible "
+                                    "and password_fields_filled may be false because those fields "
+                                    "are no longer shown. Copy all decisive Libertix text into "
+                                    "visible_text, especially titles, controls, validation "
+                                    "messages, "
+                                    "and errors. If no Libertix text is readable, use an empty "
+                                    "visible_text and classify a transient state without inventing "
+                                    "an error."
                                 ),
                             },
                             {
@@ -399,11 +370,21 @@ class VisionLLMClient:
                 )
                 response.raise_for_status()
                 message = response.json()["choices"][0]["message"]
-                content = message.get("content") or message.get("reasoning")
+                content = message.get("content")
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("Le LLM n'a produit aucun verdict d'écran")
                 verdict = WizardStateVerdict.model_validate(self._load_wizard_json(content))
                 visible_evidence = f"{verdict.summary}\n{verdict.visible_text}"
+                if (
+                    expected_screen == "warning"
+                    and verdict.expected_screen_visible
+                    and verdict.detected_screen != "warning"
+                    and verdict.no_blocking_error
+                    and _contains_warning_screen(verdict.visible_text)
+                ):
+                    # The localized title and confirmation control are stronger
+                    # evidence than a contradictory enum emitted by the model.
+                    verdict = verdict.model_copy(update={"detected_screen": "warning"})
                 critical_fields_confirmed = (
                     expected_screen == "account"
                     and verdict.detected_screen == "account"
@@ -460,7 +441,6 @@ class VisionLLMClient:
     _load_progress_message_json = staticmethod(load_progress_message_json)
     _load_progress_json = staticmethod(load_progress_json)
     _load_json_object = staticmethod(load_json_object)
-    _progress_from_reasoning_text = staticmethod(progress_from_reasoning_text)
 
     def _wait_before_retry(
         self, response: httpx.Response | None, attempt: int, vm_name: str

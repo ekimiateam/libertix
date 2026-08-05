@@ -8,6 +8,35 @@
 # outside the common orchestrator.
 
 
+firmware_finalize_success_best_effort() {
+    local mountpoint="/mnt/libertix-windows-success"
+    local transaction_state="$mountpoint/LibertixTools/uefi-transaction.json"
+
+    # The Windows transaction document describes the temporary FAT32 staging
+    # geometry. Once final verification proves that this partition is the
+    # installed ext4 system, retaining that stale geometry would falsely imply
+    # that a later Windows-side rollback could still identify it safely.
+    mkdir -p "$mountpoint"
+    mountpoint -q "$mountpoint" && umount "$mountpoint" 2>/dev/null || true
+    if ! mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint" 2>/dev/null; then
+        echo "WARNING: cannot mount Windows to retire the completed UEFI transaction state"
+        return 0
+    fi
+
+    if [ -e "$transaction_state" ]; then
+        if rm -f -- "$transaction_state"; then
+            sync || true
+            echo "Retired completed UEFI transaction state."
+        else
+            echo "WARNING: cannot retire the completed UEFI transaction state"
+        fi
+    fi
+    umount "$mountpoint" 2>/dev/null || \
+        echo "WARNING: cannot unmount Windows after retiring the UEFI transaction state"
+    return 0
+}
+
+
 candidate_disks() {
     local disk
 
@@ -84,25 +113,6 @@ disk_matches_manifest() {
     [ "$(blkid -s TYPE -o value "$windows_candidate" 2>/dev/null || true)" = "ntfs" ] || return 1
 }
 
-find_biggest_windows_partition() {
-    local disk="$1"
-    local best=""
-    local best_size=0
-    local pdev pfs psize
-
-    while read -r pdev; do
-        [ -n "$pdev" ] || continue
-        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-        [ "$pfs" = "ntfs" ] || continue
-        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -gt 1000 ] && [ "$psize" -gt "$best_size" ]; then
-            best="$pdev"
-            best_size="$psize"
-        fi
-    done < <(partitions_of_disk "$disk")
-
-    echo "$best"
-}
 
 find_biggest_bitlocker_partition() {
     local disk="$1"
@@ -127,7 +137,8 @@ find_biggest_bitlocker_partition() {
 find_live_partition_on_disk() {
     local disk="$1"
     local pdev label pfs psize legacy_label
-    legacy_label="$(printf '%s%s' 'LINUX' 'GATE')"
+    # Partitions created before the project was renamed still carry this label.
+    legacy_label="LINUXGATE"
 
     while read -r pdev; do
         [ -n "$pdev" ] || continue
@@ -199,25 +210,6 @@ recovery_geometry() {
 }
 
 
-normalize_recovery_geometry() {
-    local geometry="$1"
-    local num start end size type
-
-    [ -n "$geometry" ] || return 0
-    num="$(printf '%s\n' "$geometry" | awk -F: '{print $1; exit}')"
-    start="$(printf '%s\n' "$geometry" | awk -F: '{print $2; exit}')"
-    end="$(printf '%s\n' "$geometry" | awk -F: '{print $3; exit}')"
-    size="$(printf '%s\n' "$geometry" | awk -F: '{print $4; exit}')"
-    type="$(printf '%s\n' "$geometry" | awk -F: '{print $5; exit}' | tr '[:upper:]' '[:lower:]')"
-
-    start="${start%s}"
-    end="${end%s}"
-    size="${size%s}"
-    type="${type:-unknown}"
-
-    [ -n "$num" ] && [ -n "$start" ] && [ -n "$end" ] && [ -n "$size" ] || return 0
-    printf '%s:%s:%s:%s:%s\n' "$num" "$start" "$end" "$size" "$type"
-}
 
 verify_fstab_or_die() {
     local target_root="$1" output rc
@@ -253,7 +245,7 @@ verify_fstab_or_die() {
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
     local windows_verify="/mnt/libertix-windows-final-verify"
-    local fs uuid count part_table esp_part esp_verify
+    local fs uuid primary_slot_count part_table esp_part esp_verify
 
     mark "150-final-verify"
     echo "FINAL VERIFY: checking installed system before success"
@@ -265,9 +257,10 @@ final_verify_or_die() {
     assert_recovery_unchanged_or_die
 
     part_table="$(parted -sm "$DISK" print 2>/dev/null | awk -F: 'NR==2{print $6}')"
-    count="$(partition_count "$DISK")"
     if [ "$part_table" = "msdos" ]; then
-        [ "$count" -le 4 ] || die "final verify: MBR partition count is $count"
+        primary_slot_count="$(mbr_primary_slot_count "$DISK")"
+        [ "$primary_slot_count" -le 4 ] || \
+            die "final verify: MBR primary slot count is $primary_slot_count"
     fi
 
     fs="$(blkid -s TYPE -o value "$NEW_PART" 2>/dev/null || true)"
@@ -358,8 +351,20 @@ firmware_rollback_partition_is_owned() {
         && [ "$(parent_disk_from_part "$partition")" = "$DISK" ]
 }
 
+firmware_cleanup_partition_container_best_effort() {
+    return 0
+}
+
 firmware_restore_boot_state_best_effort() {
-    parted -s "$DISK" set 1 boot on 2>/dev/null || true
+    # On GPT, parted's "boot" flag is the ESP flag. Resolve the real ESP instead
+    # of assuming partition 1, otherwise a rollback marks the wrong partition.
+    local esp_part esp_num
+    esp_part="$(find_esp_partition || true)"
+    [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 0
+    [ "$(parent_disk_from_part "$esp_part")" = "$DISK" ] || return 0
+    esp_num="$(partition_number "$esp_part")"
+    [ -n "$esp_num" ] || return 0
+    parted -s "$DISK" set "$esp_num" esp on 2>/dev/null || true
 }
 
 firmware_write_failure_marker_best_effort() {
@@ -384,15 +389,14 @@ wait_for_prereqs() {
         done < <(candidate_disks)
 
         for candidate in \
-            /run/live/medium/config.txt \
-            /lib/live/mount/medium/config.txt \
-            /lib/live/mount/rootfs/filesystem.squashfs/config.txt \
-            /cdrom/config.txt; do
+            /run/live/medium/installation-plan.json \
+            /lib/live/mount/medium/installation-plan.json \
+            /cdrom/installation-plan.json; do
             [ -f "$candidate" ] && { config_ready=1; break; }
         done
 
         if [ "$config_ready" -eq 0 ]; then
-            found_config=$(find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt -print -quit 2>/dev/null || true)
+            found_config=$(find /run/live /lib/live /cdrom -maxdepth 6 -name installation-plan.json -print -quit 2>/dev/null || true)
             [ -n "$found_config" ] && config_ready=1
         fi
 
@@ -546,6 +550,10 @@ set_linux_partition_type_or_die() {
     fi
 }
 
+prepare_installer_partition_for_target_format_or_die() {
+    return 0
+}
+
 verify_linux_partition_type_or_die() {
     local linux_gpt_guid="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
     local parttype expected
@@ -689,35 +697,6 @@ EOF
     umount "$esp_mount"
 }
 
-find_windows_os_partition_any() {
-    local best=""
-    local best_size=0
-    local candidate pdev pfs psize tmp
-
-    while read -r candidate; do
-        [ -n "$candidate" ] || continue
-        [ -b "$candidate" ] || continue
-        while read -r pdev; do
-            [ -n "$pdev" ] || continue
-            pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-            [ "$pfs" = "ntfs" ] || continue
-            psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-            [ "$psize" -gt 1000 ] || continue
-
-            tmp=$(mktemp -d)
-            if mount -t ntfs-3g -o ro "$pdev" "$tmp" 2>/dev/null; then
-                if [ -d "$tmp/Windows" ] && [ "$psize" -gt "$best_size" ]; then
-                    best="$pdev"
-                    best_size="$psize"
-                fi
-                umount "$tmp" 2>/dev/null || true
-            fi
-            rmdir "$tmp" 2>/dev/null || true
-        done < <(partitions_of_disk "$candidate")
-    done < <(candidate_disks)
-
-    echo "$best"
-}
 
 cleanup_temporary_uefi_bootentries() {
     local bootnum

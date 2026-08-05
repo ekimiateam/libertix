@@ -4,6 +4,8 @@ VisualStudioVersion = 18.3.11312.210 d18.3
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Libertix", "Libertix.csproj", "{0E3A4663-C258-4180-B222-4FF7990D73F9}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Libertix.Tests", "Libertix.Tests\Libertix.Tests.csproj", "{C8496B0F-D690-46AA-9DB3-A7905B736C69}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,6 +16,10 @@ Global
 		{0E3A4663-C258-4180-B222-4FF7990D73F9}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0E3A4663-C258-4180-B222-4FF7990D73F9}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0E3A4663-C258-4180-B222-4FF7990D73F9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C8496B0F-D690-46AA-9DB3-A7905B736C69}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C8496B0F-D690-46AA-9DB3-A7905B736C69}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C8496B0F-D690-46AA-9DB3-A7905B736C69}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C8496B0F-D690-46AA-9DB3-A7905B736C69}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

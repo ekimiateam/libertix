@@ -54,17 +54,17 @@ function Get-LinuxPartition {
     $tolerance = 256MB
     $expected = [int64]$Config.ExpectedLinuxPartitionSize
     $linuxGptType = "{0fc63daf-8483-4772-8e79-3d69d8477de4}"
-    $matches = @(
+    $linuxPartitions = @(
         Get-Partition -DiskNumber ([int]$Config.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
                 [math]::Abs([int64]$_.Size - $expected) -le $tolerance -and
                 ($_.GptType -eq $linuxGptType -or [int]$_.MbrType -eq 131 -or $_.Type -match "Linux")
             }
     )
-    if ($matches.Count -ne 1) {
-        throw "Expected exactly one Linux partition on disk $($Config.SystemDiskNumber); found $($matches.Count)."
+    if ($linuxPartitions.Count -ne 1) {
+        throw "Expected exactly one Linux partition on disk $($Config.SystemDiskNumber); found $($linuxPartitions.Count)."
     }
-    return $matches[0]
+    return $linuxPartitions[0]
 }
 
 function Set-ReadOnlyDriverPolicy {

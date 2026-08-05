@@ -1,3 +1,4 @@
+import re
 import subprocess
 import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -7,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 import app.services.automation as automation_module
+from app.clients.ssh import CommandResult
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vision_models import InstallProgressVerdict
 from app.clients.vnc import VNCClient
@@ -14,11 +16,78 @@ from app.config import Settings
 from app.errors import WorkflowError
 from app.models import ValidationRequest
 from app.services.automation import AutomationOptions, AutomationService, Point
+from app.services.automation_postinstall import CrossOsArtifacts
+from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
 from app.services.reset import RESET_SNAPSHOT, ResetService
 from app.services.validation import ValidationService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_warning_acknowledgement_points_match_current_wizard_layout() -> None:
+    assert Point(430, 575) == WizardAutomationMixin.BIOS_WARNING_ACKNOWLEDGEMENT
+    assert Point(430, 566) == WizardAutomationMixin.UEFI_WARNING_ACKNOWLEDGEMENT
+
+
+def test_vnc_text_typing_uses_vncdotool_literal_minus(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        def keyPress(self, key: str) -> None:  # noqa: N802
+            self.keys.append(key)
+
+    client = FakeClient()
+    monkeypatch.setattr("app.services.automation_wizard.time.sleep", lambda _seconds: None)
+
+    WizardAutomationMixin._type_text(client, "fr-FR", "us")
+
+    assert client.keys == ["f", "r", "minus", "F", "R"]
+
+
+def test_vnc_text_typing_pretranslates_for_french_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def __init__(self) -> None:
+            self.keys: list[str] = []
+
+        def keyPress(self, key: str) -> None:  # noqa: N802
+            self.keys.append(key)
+
+    client = FakeClient()
+    monkeypatch.setattr("app.services.automation_wizard.time.sleep", lambda _seconds: None)
+
+    WizardAutomationMixin._type_text(client, "test-passphrase", "fr")
+
+    assert "".join(client.keys) == "test6pqssphrqse"
+
+
+def test_vnc_select_all_releases_control_when_keypress_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingClient:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, str]] = []
+
+        def keyDown(self, key: str) -> None:  # noqa: N802
+            self.events.append(("down", key))
+
+        def keyPress(self, key: str) -> None:  # noqa: N802
+            self.events.append(("press", key))
+            raise RuntimeError("VNC write failed")
+
+        def keyUp(self, key: str) -> None:  # noqa: N802
+            self.events.append(("up", key))
+
+    client = FailingClient()
+    monkeypatch.setattr("app.services.automation_wizard.time.sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="VNC write failed"):
+        WizardAutomationMixin._select_all(client)
+
+    assert client.events == [("down", "ctrl"), ("press", "q"), ("up", "ctrl")]
 
 
 def read_repo(relative_path: str) -> str:
@@ -39,6 +108,7 @@ def settings(**overrides: object) -> Settings:
         "build_vm_host": "192.168.1.138",
         "build_vm_user": "admin",
         "build_vm_password": "secret",
+        "ssh_known_hosts": "/tmp/libertix-test-known-hosts",
         "filepool_base_url": "http://192.168.1.170:8000/filepool",
         "repository_url": "https://github.com/ekimiateam/libertix.git",
         "smb_root": "/root/smb",
@@ -151,7 +221,7 @@ def test_result_builder_cannot_report_success_after_failure() -> None:
 
     final = result.success("must not become successful")
 
-    assert final.status == "problème"
+    assert final.status == "error"
     assert final.steps[-1].step == "test.failure"
 
 
@@ -596,6 +666,48 @@ def test_launch_interactive_uses_elevated_scheduled_task(monkeypatch: pytest.Mon
     assert launch["launch_method"] == "scheduled_task_elevated"
 
 
+def test_automation_launch_passes_the_windows_address_to_the_dev_ssh_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSshContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+
+    def fake_run_windows_script(
+        *_args: object,
+        script_name: str,
+        config: dict[str, object],
+        step: str,
+        **_kwargs: object,
+    ) -> object:
+        assert script_name == "launch_libertix_elevated.ps1"
+        assert step == "automation.launch_elevated"
+        assert config["development_static_ipv4"] == vm.host
+        return SimpleNamespace(
+            stdout=(
+                "PID=1234\nSESSION_ID=2\nTASK_NAME=LibertixAutoInstall_vm1\n"
+                "EXECUTABLE=Z:\\Libertix-release\\Libertix.exe\n"
+            )
+        )
+
+    monkeypatch.setattr(service.validation, "ssh", lambda *_args, **_kwargs: FakeSshContext())
+    monkeypatch.setattr(service.validation, "run_windows_script", fake_run_windows_script)
+
+    launch = service._launch_elevated(  # noqa: SLF001
+        vm,
+        PureWindowsPath("Z:/Libertix-release/Libertix.exe"),
+    )
+
+    assert launch["pid"] == 1234
+    assert launch["session_id"] == 2
+
+
 def test_automation_scope_accepts_vm500() -> None:
     service = AutomationService(settings())
     selected = service.validation.select_vms(["vm1"])
@@ -710,7 +822,7 @@ def test_apply_requires_visual_monitoring() -> None:
         source="local",
     )
 
-    assert result.status == "problème"
+    assert result.status == "error"
     assert result.steps[-1].step == "automation.monitor_required"
 
 
@@ -1027,63 +1139,77 @@ def test_validation_run_removes_temporary_capture_workspace(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_automation_uefi_monitor_stops_on_live_boot_not_windows_progress() -> None:
+def test_automation_monitor_stops_only_on_the_installed_boot_menu() -> None:
     service = AutomationService(settings())
 
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "Downloading Mint ISO... 60% Windows desktop with Libertix wizard",
         )
         is False
     )
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "Gestionnaire de démarrage Windows; no Libertix installer visible",
         )
         is False
     )
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "Appliquer les modifications Creating UEFI installer partition "
             "C:\\LibertixTools\\downloads\\mint.iso",
         )
         is False
     )
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "Appliquer les modifications Copying UEFI installer... "
             "Mounting ISO... Copying ISO contents to X:... Libertix UEFI installer copied.",
         )
         is False
     )
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "vmlinuz initrd squashfs",
         )
         is False
     )
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "Installation automatique Code: 120-unsquashfs F12: mode terminal",
         )
-        is True
+        is False
     )
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "Code: 130-target-system-config Configuration du système installé (76%)",
         )
-        is True
+        is False
     )
     assert (
-        service._uefi_reboot_or_live_started(  # noqa: SLF001
+        service._reboot_or_live_started(  # noqa: SLF001
             "Linux Mint GNU/Linux  Windows Boot Manager  Shutdown  Advanced options",
         )
         is True
     )
+    assert (
+        service._reboot_or_live_started(  # noqa: SLF001
+            "Linux Mint GNU/Linux\nWindows\nShutdown\nAdvanced options",
+        )
+        is True
+    )
+    assert (
+        service._reboot_or_live_started(  # noqa: SLF001
+            "Linux Mint GNU/Linux\nWindows\nAdvanced options",
+        )
+        is False
+    )
 
 
-def test_automation_uefi_monitor_stops_when_mint_desktop_is_seen_after_reboot(
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+def test_automation_monitor_stops_when_mint_desktop_is_seen_after_reboot(
     monkeypatch: pytest.MonkeyPatch,
+    firmware: str,
 ) -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm3"])[0]
@@ -1097,6 +1223,15 @@ def test_automation_uefi_monitor_stops_when_mint_desktop_is_seen_after_reboot(
                 error_visible=False,
                 summary="Préparation UEFI terminée, bouton Redémarrer visible.",
                 visible_text="Libertix 100% Redémarrer",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=False,
+                installation_finished=False,
+                reboot_prompt_visible=False,
+                still_in_progress=True,
+                error_visible=False,
+                summary="Configuration du système installé à 76 %.",
+                visible_text="Code: 130-target-system-config 76%",
             ),
             InstallProgressVerdict(
                 iso_download_finished=True,
@@ -1128,14 +1263,213 @@ def test_automation_uefi_monitor_stops_when_mint_desktop_is_seen_after_reboot(
     )
     result = ResultBuilder("automation")
 
-    service._monitor_uefi_until_reboot(vm, result)  # noqa: SLF001
+    service._monitor_until_live_boot(vm, result, firmware)  # type: ignore[arg-type]  # noqa: SLF001
 
     assert reboot_clicks == ["vm3"]
-    assert result.steps[-1].step == "automation.uefi_installation_finished"
+    assert (
+        len([step for step in result.steps if step.step == "automation.monitor_installation"]) == 3
+    )
+    assert result.steps[-1].step == "automation.installation_finished"
+
+
+def test_automation_monitor_labels_final_grub_menu_before_generic_finished_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    verdicts = iter(
+        (
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=True,
+                reboot_prompt_visible=True,
+                still_in_progress=False,
+                error_visible=False,
+                summary="Windows preparation is complete.",
+                visible_text="Libertix 100% Redémarrer",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=True,
+                reboot_prompt_visible=False,
+                still_in_progress=False,
+                error_visible=False,
+                summary="The installed boot menu is visible.",
+                visible_text=("Linux Mint GNU/Linux\nWindows\nShutdown\nAdvanced options"),
+            ),
+        )
+    )
+    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"/tmp/{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda _capture, _name, _os: next(verdicts),
+    )
+    monkeypatch.setattr(service, "_click_reboot_after_preparation", lambda _vm, _result: None)
+    result = ResultBuilder("automation")
+
+    outcome = service._monitor_until_live_boot(vm, result, "bios")  # noqa: SLF001
+
+    assert outcome == "boot-menu"
+    assert result.steps[-1].step == "automation.installed_boot_menu_seen"
+
+
+def test_automation_monitor_keeps_waiting_during_inactive_reboot_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    verdicts = iter(
+        (
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=True,
+                reboot_prompt_visible=True,
+                still_in_progress=False,
+                error_visible=False,
+                summary="Windows preparation is complete.",
+                visible_text="Libertix 100% Redémarrer",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=False,
+                installation_finished=False,
+                reboot_prompt_visible=False,
+                still_in_progress=False,
+                error_visible=True,
+                summary="The VM display is inactive, so installation status cannot be determined.",
+                visible_text="Display output is not active.",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=False,
+                reboot_prompt_visible=False,
+                still_in_progress=False,
+                error_visible=False,
+                summary="The installed boot menu is visible.",
+                visible_text=(
+                    "Linux Mint GNU/Linux\nWindows Boot Manager\nShutdown\nAdvanced options"
+                ),
+            ),
+        )
+    )
+    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"/tmp/{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda _capture, _name, _os: next(verdicts),
+    )
+    monkeypatch.setattr(service, "_click_reboot_after_preparation", lambda _vm, _result: None)
+    result = ResultBuilder("automation")
+
+    service._monitor_until_live_boot(vm, result, "uefi")  # noqa: SLF001
+
+    assert any(step.step == "automation.display_transition" for step in result.steps)
+    assert result.steps[-1].step == "automation.installed_boot_menu_seen"
+
+
+def test_automation_monitor_waits_for_the_final_rollback_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    verdicts = iter(
+        (
+            InstallProgressVerdict(
+                iso_download_finished=False,
+                installation_finished=False,
+                reboot_prompt_visible=False,
+                still_in_progress=True,
+                error_visible=True,
+                summary="Preparation failed; rollback is running.",
+                visible_text="Error detected. Restoring Windows... 0%",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=False,
+                installation_finished=False,
+                reboot_prompt_visible=False,
+                still_in_progress=False,
+                error_visible=True,
+                summary="The preparation failed after recovery completed.",
+                visible_text="Preparation failed. Windows has been restored.",
+            ),
+        )
+    )
+    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"/tmp/{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda _capture, _name, _os: next(verdicts),
+    )
+    result = ResultBuilder("automation")
+
+    with pytest.raises(WorkflowError) as raised:
+        service._monitor_until_live_boot(vm, result, "bios")  # noqa: SLF001
+
+    assert raised.value.details["rollback_outcome"] == "verified"
+    assert "rollback vérifié" in raised.value.message
+    assert (
+        len([step for step in result.steps if step.step == "automation.monitor_installation"]) == 2
+    )
+    assert any(step.step == "automation.rollback_in_progress" for step in result.steps)
+    assert (
+        service._rollback_terminal_outcome(  # noqa: SLF001
+            "Rollback Windows terminé et vérifié."
+        )
+        == "verified"
+    )
+
+
+def test_automation_monitor_reports_an_incomplete_rollback_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    verdict = InstallProgressVerdict(
+        iso_download_finished=False,
+        installation_finished=False,
+        reboot_prompt_visible=False,
+        still_in_progress=False,
+        error_visible=True,
+        summary="Manual intervention is required.",
+        visible_text="Rollback incomplete. Manual intervention is required.",
+    )
+    monkeypatch.setattr(automation_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"/tmp/{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda _capture, _name, _os: verdict,
+    )
+    result = ResultBuilder("automation")
+
+    with pytest.raises(WorkflowError) as raised:
+        service._monitor_until_live_boot(vm, result, "bios")  # noqa: SLF001
+
+    assert raised.value.details["rollback_outcome"] == "incomplete"
+    assert "rollback incomplet" in raised.value.message
 
 
 def test_bios_final_grub_waits_for_manual_selection() -> None:
-    grub_defaults = read_repo("iso/target/configure-target.sh")
+    grub_defaults = read_repo("assets/live/configure-target-main.sh")
 
     assert "GRUB_TIMEOUT=-1" in grub_defaults
     assert "GRUB_RECORDFAIL_TIMEOUT=-1" in grub_defaults
@@ -1143,7 +1477,7 @@ def test_bios_final_grub_waits_for_manual_selection() -> None:
 
 
 def test_bios_installer_keeps_windows_boot_partition_active() -> None:
-    installer = read_repo("iso/live/install-mint.sh")
+    installer = read_repo("assets/live/libertix-install-main.sh")
     bios_adapter = read_repo("assets/live/libertix-bios-adapter.sh")
     preflight = read_repo("Scripts/libertix-storage-preflight.ps1")
 
@@ -1177,7 +1511,7 @@ def test_bios_installer_keeps_windows_boot_partition_active() -> None:
 
 
 def test_uefi_recovery_guard_uses_exact_windows_manifest() -> None:
-    installer = read_repo("iso-uefi/live/install-mint.sh")
+    installer = read_repo("assets/live/libertix-install-main.sh")
     runtime = read_repo("assets/live/libertix-install-runtime-common.sh")
 
     assert "assert_recovery_unchanged_or_die" in installer
@@ -1202,14 +1536,17 @@ def test_live_installers_require_exact_disk_and_recovery_manifest() -> None:
     assert "assert_recovery_unchanged_or_die" in runtime
 
     for path in ("iso/live/install-mint.sh", "iso-uefi/live/install-mint.sh"):
-        installer = read_repo(path)
-        assert "resolve_target_disk_from_manifest" in installer
-        assert "WINDOWS_PARTITION_OFFSET_BYTES" in installer
-        assert "INSTALLER_PARTITION_OFFSET_BYTES" in installer
-        assert "RECOVERY_PARTITION_OFFSET_BYTES" in installer
-        assert "RECOVERY_PARTITION_SIZE_BYTES" in installer
-        assert "ntfsresize failed; the partition table was not changed" in installer
-        assert "WARNING: ntfsresize failed, continuing" not in installer
+        wrapper = read_repo(path)
+        assert "libertix-install-main.sh" in wrapper
+
+    installer = read_repo("assets/live/libertix-install-main.sh")
+    assert "resolve_target_disk_from_manifest" in installer
+    assert "WINDOWS_PARTITION_OFFSET_BYTES" in installer
+    assert "INSTALLER_PARTITION_OFFSET_BYTES" in installer
+    assert "RECOVERY_PARTITION_OFFSET_BYTES" in installer
+    assert "RECOVERY_PARTITION_SIZE_BYTES" in installer
+    assert "ntfsresize failed; the partition table was not changed" in installer
+    assert "WARNING: ntfsresize failed, continuing" not in installer
 
 
 def test_uefi_one_shot_does_not_reorder_bootorder() -> None:
@@ -1246,3 +1583,203 @@ def test_wpf_storage_preflight_fails_closed() -> None:
     assert "SYSTEM_DISK_NUMBER" in preflight
     assert "BITLOCKER_SAFE" in preflight
     assert "Exactly one Windows recovery partition is required" in preflight
+
+
+def test_linux_post_install_checks_continue_after_one_failure() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    result = ResultBuilder("automation")
+
+    class FakeSSH:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def run(self, command: str, **kwargs) -> CommandResult:
+            self.calls.append((command, kwargs))
+            exit_code = 1 if "timedatectl" in command else 0
+            stderr = "clock not synchronized" if exit_code else ""
+            return CommandResult(stdout="diagnostic", stderr=stderr, exit_code=exit_code)
+
+    ssh = FakeSSH()
+    options = AutomationOptions(True, "test", "test-passphrase", True)
+
+    service._run_linux_checks(ssh, vm, options, result)  # type: ignore[arg-type]  # noqa: SLF001
+
+    tests = [step.context["test"] for step in result.steps]
+    assert "linux.time_sync" in tests
+    assert "linux.package_database" in tests
+    assert "linux.name_resolution" in tests
+    assert tests[-1] == "linux.name_resolution"
+    assert (
+        next(step for step in result.steps if step.context["test"] == "linux.time_sync").status
+        == "error"
+    )
+    assert len(ssh.calls) == len(tests)
+    sudo_calls = [(command, kwargs) for command, kwargs in ssh.calls if command.startswith("sudo ")]
+    assert len(sudo_calls) == 2
+    assert all("test-passphrase" not in command for command, _kwargs in sudo_calls)
+    assert all(kwargs["stdin_data"] == "test-passphrase\n" for _command, kwargs in sudo_calls)
+
+
+def test_post_install_grub_selection_uses_vision_before_typing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    result = ResultBuilder("automation")
+
+    class FakeVnc:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, object]] = []
+
+        def mouseMove(self, x: int, y: int) -> None:  # noqa: N802
+            self.events.append(("mouse", (x, y)))
+
+        def keyPress(self, key: str) -> None:  # noqa: N802
+            self.events.append(("key", key))
+
+        def disconnect(self) -> None:
+            self.events.append(("disconnect", None))
+
+    vnc = FakeVnc()
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"/tmp/{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda _capture, _name, _os: InstallProgressVerdict(
+            iso_download_finished=True,
+            installation_finished=True,
+            reboot_prompt_visible=False,
+            still_in_progress=False,
+            error_visible=False,
+            summary="The installed boot menu is visible.",
+            visible_text=("Linux Mint GNU/Linux\nWindows Boot Manager\nShutdown\nAdvanced options"),
+        ),
+    )
+    monkeypatch.setattr("app.services.automation_postinstall.api.connect", lambda _address: vnc)
+
+    selected = service._select_grub_entry_if_visible(  # noqa: SLF001
+        vm, result, "windows", 3
+    )
+
+    assert selected is True
+    assert vnc.events == [
+        ("mouse", (5, 5)),
+        ("key", "home"),
+        ("key", "down"),
+        ("key", "enter"),
+        ("disconnect", None),
+    ]
+    assert result.steps[-1].context["phase"] == "windows-boot"
+
+
+def test_linux_windows_reboot_password_is_sent_only_on_stdin() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    result = ResultBuilder("automation")
+
+    class FakeSSH:
+        command = ""
+        stdin_data = ""
+
+        def run(self, command: str, **kwargs) -> CommandResult:
+            self.command = command
+            self.stdin_data = kwargs["stdin_data"]
+            return CommandResult(stdout="", stderr="", exit_code=0)
+
+    ssh = FakeSSH()
+    options = AutomationOptions(True, "test", "test-passphrase", True)
+
+    service._request_windows_boot(  # type: ignore[arg-type]  # noqa: SLF001
+        ssh, vm, options, result
+    )
+
+    assert "test-passphrase" not in ssh.command
+    assert ssh.stdin_data == "test-passphrase\n"
+    assert "Windows Boot Manager" in ssh.command
+    assert result.steps[-1].status == "ok"
+
+
+def test_windows_post_install_checks_continue_after_one_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    result = ResultBuilder("automation")
+    called: list[str] = []
+
+    def fake_run_windows_script(_ssh, *, config, **_kwargs) -> CommandResult:
+        called.append(config["check"])
+        if config["check"] == "bitlocker":
+            raise WorkflowError(
+                "automation.test.windows",
+                "BitLocker diagnostic failure",
+                details={"exit_code": 1, "stderr": "not decrypted"},
+            )
+        return CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
+
+    monkeypatch.setattr(service.validation, "run_windows_script", fake_run_windows_script)
+    artifacts = CrossOsArtifacts(
+        windows_relative_path=r"Users\Public\Documents\probe.bin",
+        windows_sha256="a" * 64,
+        linux_relative_path="probe.bin",
+        linux_sha256="b" * 64,
+    )
+
+    service._run_windows_checks(  # noqa: SLF001
+        object(),
+        vm,
+        AutomationOptions(True, "test", "test-passphrase", True),
+        artifacts,
+        result,
+    )
+
+    assert "bitlocker" in called
+    assert called[-1] == "chkdsk_scan"
+    assert (
+        next(step for step in result.steps if step.context["test"] == "windows.bitlocker").status
+        == "error"
+    )
+    assert (
+        next(step for step in result.steps if step.context["test"] == "windows.chkdsk_scan").status
+        == "ok"
+    )
+
+
+def test_windows_post_install_script_exposes_every_requested_check() -> None:
+    script = read_repo("auto_tests/app/scripts/post_install_windows_check.ps1")
+    service_source = read_repo("auto_tests/app/services/automation_postinstall.py")
+
+    requested = set(re.findall(r'^\s+"([a-z0-9_]+)",?$', service_source, re.MULTILINE))
+    implemented = set(re.findall(r'^\s+"([a-z0-9_]+)" \{$', script, re.MULTILINE))
+
+    assert requested.intersection({"identity", "firmware", "cross_os_hash"}) <= implemented
+    assert "$linuxHomePath" in script
+    assert "$home =" not in script.casefold()
+    assert "Get-NetRoute `" in script
+    assert "$defaultRoutes.Count -ge 1" in script
+    assert 'NextHop -contains "192.168.1.1"' not in script
+    assert {
+        "identity",
+        "firmware",
+        "system_volume",
+        "recovery",
+        "bitlocker",
+        "temporary_artifacts",
+        "network",
+        "hibernation",
+        "ext4_driver",
+        "ext4_readonly_mount",
+        "linux_home",
+        "linux_home_hash",
+        "ext4_write_denied",
+        "explorer_shortcut",
+        "cross_os_hash",
+        "dism_check_health",
+        "sfc_verify_only",
+        "chkdsk_scan",
+    } <= implemented

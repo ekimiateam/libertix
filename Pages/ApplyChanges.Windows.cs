@@ -80,14 +80,18 @@ namespace Libertix.Pages
                     throw new FileNotFoundException("Windows sharing script is missing.", sourceScript);
                 File.Copy(sourceScript, targetScript, true);
 
-                string setupPath = Path.Combine(WindowsShareRoot, Ext4SetupFileName);
+                string setupPath = Path.Combine(WindowsShareRoot, Artifacts.Ext4Driver.FileName);
                 if (options.ShareLinuxFilesInWindows)
                 {
                     bool setupReady = File.Exists(setupPath) &&
-                        await VerifySha256Async(setupPath, Ext4SetupSha256, "ext4 Windows setup cache");
+                        await VerifySha256Async(
+                            setupPath,
+                            Artifacts.Ext4Driver.Sha256,
+                            "ext4 Windows setup cache");
                     if (!setupReady)
                     {
-                        string setupUrl = $"{FilepoolConfig.BaseUrl}/{Ext4SetupFileName}";
+                        string setupUrl =
+                            $"{FilepoolConfig.BaseUrl}/{Artifacts.Ext4Driver.FileName}";
                         if (!await DownloadFileWithRetriesAsync(
                             setupUrl,
                             setupPath,
@@ -101,7 +105,10 @@ namespace Libertix.Pages
                                 "ApplyChangesPreparingWindowsShare",
                                 "Preparing Windows file sharing...")))
                             return false;
-                        if (!await VerifySha256Async(setupPath, Ext4SetupSha256, "ext4 Windows setup"))
+                        if (!await VerifySha256Async(
+                            setupPath,
+                            Artifacts.Ext4Driver.Sha256,
+                            "ext4 Windows setup"))
                             return false;
                     }
                 }
@@ -118,7 +125,7 @@ namespace Libertix.Pages
                         ExpectedLinuxPartitionSize = expectedLinuxSize,
                         LinuxUsername = account.Username,
                         SetupPath = setupPath,
-                        SetupSha256 = Ext4SetupSha256
+                        SetupSha256 = Artifacts.Ext4Driver.Sha256
                     }),
                     new UTF8Encoding(false));
                 File.WriteAllText(
@@ -144,6 +151,64 @@ namespace Libertix.Pages
                     Directory.Delete(WindowsShareRoot, true);
             }
             catch { }
+        }
+
+        private static string FormatOptionalBool(bool? value)
+        {
+            return value.HasValue ? (value.Value ? "true" : "false") : "unknown";
+        }
+
+        /// <summary>
+        /// Reads whether Windows hibernation (and therefore Fast Startup) is on.
+        /// The registry value is used instead of parsing `powercfg /a`, whose
+        /// output is localized. Returns null when the state cannot be read.
+        /// </summary>
+        private static bool? GetHibernateEnabled()
+        {
+            try
+            {
+                using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"SYSTEM\CurrentControlSet\Control\Power"))
+                {
+                    object value = key?.GetValue("HibernateEnabled");
+                    if (value == null)
+                        return null;
+                    return Convert.ToInt32(value, CultureInfo.InvariantCulture) != 0;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Turns hibernation, and with it Windows Fast Startup, on or off.
+        /// Fast Startup turns "shut down" into a kernel hibernation: the NTFS
+        /// volume stays marked in-use with its metadata cached by Windows. The
+        /// installed system mounts Windows read-write from /etc/fstab when file
+        /// sharing is enabled, and writing to a hibernated NTFS volume corrupts
+        /// it once Windows resumes on its stale metadata. It must therefore stay
+        /// off for as long as Linux is installed, and only be restored by the
+        /// recovery guard when the installation is rolled back.
+        /// </summary>
+        private bool SetHibernateEnabled(bool enabled)
+        {
+            var result = RunProcess(
+                ResolveSystemExecutable("powercfg.exe", "powercfg.exe"),
+                enabled ? "/hibernate on" : "/hibernate off",
+                waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
+                encoding: GetWindowsConsoleEncoding());
+            Log($"Windows hibernation and Fast Startup set to {(enabled ? "on" : "off")}: " +
+                $"{(result.exitCode == 0 ? "OK" : "rc=" + result.exitCode)}");
+            bool? observed = GetHibernateEnabled();
+            if (result.exitCode != 0 || observed != enabled)
+            {
+                Log($"ERROR: Windows did not apply the requested hibernation state: " +
+                    $"requested={enabled}, observed={observed?.ToString() ?? "unknown"}.");
+                return false;
+            }
+            return true;
         }
 
         private async Task<bool> InstallWindowsRecoveryGuardAsync(double requestedLinuxMB)
@@ -205,6 +270,9 @@ namespace Libertix.Pages
                         $"RECOVERY_PARTITION_NUMBER={_storagePreflight.RecoveryPartitionNumber}",
                         $"RECOVERY_PARTITION_OFFSET_BYTES={_storagePreflight.RecoveryPartitionOffset}",
                         $"RECOVERY_PARTITION_SIZE_BYTES={_storagePreflight.RecoveryPartitionSize}",
+                        // Captured before Fast Startup is disabled so a rollback
+                        // can put the user's original setting back.
+                        $"ORIGINAL_HIBERNATE_ENABLED={FormatOptionalBool(GetHibernateEnabled())}",
                         $"CREATED_UTC={DateTime.UtcNow:O}"
                     });
                     File.WriteAllText(metadataPath, metadata + Environment.NewLine);
@@ -235,184 +303,26 @@ namespace Libertix.Pages
             });
         }
 
-        private async Task<(double freeSpaceSizeMB, double recoveryOffsetMB)> GetFreeSpaceInfoAsync()
-        {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"freespace_{Guid.NewGuid()}.txt");
 
-            try
-            {
-                // Query partition layout to find free space
-                string script = @"select disk 0
-list partition
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                string output = await RunDiskpartAndGetOutputAsync(diskpartScript);
-
-                // Parse partitions to find free space location
-                var partitions = new List<(int number, double offsetMB, double sizeMB)>();
-
-                var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (var line in lines)
-                {
-                    // Match: "Partition 2    Principale         127 G octets     51 M octets"
-                    // The first size is the partition size, the second is the offset
-                    var partitionMatch = Regex.Match(line, @"Partition\s+(\d+)", RegexOptions.IgnoreCase);
-                    if (!partitionMatch.Success)
-                        continue;
-
-                    int partitionNumber = int.Parse(partitionMatch.Groups[1].Value);
-
-                    // Find all size/offset values in the line
-                    var sizeMatches = Regex.Matches(line, @"(\d+)\s*(G|M|K)\s*o?", RegexOptions.IgnoreCase);
-
-                    if (sizeMatches.Count >= 2)
-                    {
-                        // First match = size, Second match = offset
-                        double sizeMB = ParseSizeToMB(sizeMatches[0]);
-                        double offsetMB = ParseSizeToMB(sizeMatches[1]);
-
-                        partitions.Add((partitionNumber, offsetMB, sizeMB));
-                        Log($"  Partition {partitionNumber}: size={sizeMB:N0}MB, offset={offsetMB:N0}MB");
-                    }
-                }
-
-                if (partitions.Count < 2)
-                {
-                    Log("ERROR: Could not find enough partitions to determine free space");
-                    return (0, 0);
-                }
-
-                // Sort by offset
-                partitions.Sort((a, b) => a.offsetMB.CompareTo(b.offsetMB));
-
-                // Find Windows partition (second partition after sorting) and where it ends
-                var windowsPartition = partitions[1];
-                double windowsEndMB = windowsPartition.offsetMB + windowsPartition.sizeMB;
-
-                // Find Recovery partition (last partition by offset)
-                var recoveryPartition = partitions[partitions.Count - 1];
-                double recoveryOffsetMB = recoveryPartition.offsetMB;
-
-                // Free space is between Windows end and Recovery start
-                double freeSpaceSizeMB = recoveryOffsetMB - windowsEndMB;
-
-                Log($"Windows ends at: {windowsEndMB:N0}MB");
-                Log($"Recovery starts at: {recoveryOffsetMB:N0}MB");
-                Log($"Free space size: {freeSpaceSizeMB:N0}MB");
-
-                return (freeSpaceSizeMB, recoveryOffsetMB);
-            }
-            catch (Exception ex)
-            {
-                Log($"Error getting free space info: {ex.Message}");
-                return (0, 0);
-            }
-            finally
-            {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
-            }
-        }
-
-        private double ParseSizeToMB(Match match)
-        {
-            double size = double.Parse(match.Groups[1].Value);
-            string unit = match.Groups[2].Value.ToUpper();
-
-            switch (unit)
-            {
-                case "G":
-                    return size * 1024;
-                case "K":
-                    return size / 1024;
-                default:
-                    return size;
-            }
-        }
 
         private async Task<double> QueryShrinkSpaceAsync()
         {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"querymax_{Guid.NewGuid()}.txt");
-
-            try
-            {
-                string systemDrive = Path.GetPathRoot(Environment.SystemDirectory).TrimEnd('\\');
-
-                string script = $@"rescan
-select volume {systemDrive[0]}
-shrink querymax
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                var (success, output) = await RunDiskpartWithResultAsync(diskpartScript);
-
-                // Parse the max shrink size from output
-                // French: "Le nombre maximal d'octets récupérables est :   12 GB (12445 Mo)"
-                // English: "The maximum number of reclaimable bytes is: 12 GB"
-                var match = Regex.Match(output, @"(\d+)\s*(?:GB|Go|G)\s*\((\d+)\s*Mo\)", RegexOptions.IgnoreCase);
-                if (match.Success)
-                {
-                    return double.Parse(match.Groups[2].Value); // Return MB value
-                }
-
-                // Try alternative pattern
-                match = Regex.Match(output, @"(\d+)\s*(?:MB|Mo|M)", RegexOptions.IgnoreCase);
-                if (match.Success)
-                {
-                    return double.Parse(match.Groups[1].Value);
-                }
-
-                return 0;
-            }
-            finally
-            {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
-            }
+            using (JsonDocument result = await RunBiosStorageActionAsync("QueryShrink"))
+                return result.RootElement.GetProperty("MaximumShrinkBytes").GetInt64() / 1048576d;
         }
 
         private async Task<bool> ShrinkWindowsPartitionAsync(double shrinkSizeMB)
         {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"shrink_{Guid.NewGuid()}.txt");
-
             try
             {
-                // Get system drive letter
-                string systemDrive = Path.GetPathRoot(Environment.SystemDirectory).TrimEnd('\\');
-
-                // Create diskpart script with rescan to refresh disk state
-                string script = $@"rescan
-list volume
-select volume {systemDrive[0]}
-shrink desired={shrinkSizeMB:F0}
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                Log($"Running diskpart: shrink {shrinkSizeMB:F0}MB from {systemDrive}");
-
-                var (success, output) = await RunDiskpartWithResultAsync(diskpartScript);
-
-                // Check if shrink was successful by looking for success message
-                if (output.Contains("réduit") || output.Contains("shrunk") || output.Contains("reduced"))
-                {
-                    return true;
-                }
-
-                // Check for specific error messages
-                if (output.Contains("insuffisant") || output.Contains("pas assez") || output.Contains("not enough"))
-                {
-                    Log("ERROR: Not enough space available for shrinking");
-                    return false;
-                }
-
-                return success;
+                long sizeBytes = checked((long)Math.Round(shrinkSizeMB * 1024d * 1024d));
+                using (await RunBiosStorageActionAsync("Shrink", sizeBytes)) { }
+                return true;
             }
-            finally
+            catch (Exception ex)
             {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
+                Log($"ERROR: Windows shrink failed: {ex.Message}");
+                return false;
             }
         }
 
@@ -439,79 +349,70 @@ exit";
                     return false;
                 }
 
-                var status = RunProcess(
-                    "reagentc.exe",
-                    "/info",
-                    waitMs: (int)WindowsProcessTimeouts.ServiceCommand.TotalMilliseconds);
-                if (status.exitCode != 0)
-                {
-                    Log($"ERROR: reagentc /info failed rc={status.exitCode}: {status.output} {status.error}".Trim());
-                    return false;
-                }
-
-                string normalizedStatus = RemoveDiacritics(status.output).ToLowerInvariant();
-                bool enabled = normalizedStatus.Contains("enabled") ||
-                    (normalizedStatus.Contains("active") && !normalizedStatus.Contains("desactive"));
-                if (!enabled)
-                {
-                    Log($"ERROR: WinRE is not enabled after refresh: {status.output}".Trim());
-                    return false;
-                }
-
+                // reagentc localizes every status label. Its documented exit
+                // code is the stable contract for /enable, while the storage
+                // preflight separately verifies the Recovery partition itself.
                 Log("Windows Recovery Environment is enabled on the final partition layout.");
                 return true;
             });
         }
 
-        private static string RemoveDiacritics(string value)
+        private async Task<string> CreateFat32PartitionSimpleAsync(double sizeMB)
         {
-            string decomposed = (value ?? string.Empty).Normalize(NormalizationForm.FormD);
-            var builder = new StringBuilder(decomposed.Length);
-            foreach (char character in decomposed)
-            {
-                if (CharUnicodeInfo.GetUnicodeCategory(character) != UnicodeCategory.NonSpacingMark)
-                    builder.Append(character);
-            }
-            return builder.ToString().Normalize(NormalizationForm.FormC);
-        }
-
-        private async Task<bool> CreateFat32PartitionSimpleAsync(double sizeMB)
-        {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"create_fat32_{Guid.NewGuid()}.txt");
-
             try
             {
-                // No offset is specified: diskpart places this at the first free
-                // slot after Windows, which is the slot the live installer reuses.
-                if (_storagePreflight == null)
-                    throw new InvalidOperationException("Storage preflight is missing.");
-
-                string script = $@"rescan
-select disk {_storagePreflight.SystemDiskNumber}
-create partition primary size={sizeMB:F0}
-format fs=fat32 quick label=LIBERTIX
-assign letter=Z
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                Log($"Diskpart command: create partition primary size={sizeMB:F0} (no offset)");
-                Log("Running diskpart to create FAT32 partition...");
-
-                var (success, output) = await RunDiskpartWithResultAsync(diskpartScript);
-
-                // Check for success indicators
-                if (output.Contains("créé") || output.Contains("created") || output.Contains("formaté") || output.Contains("formatted"))
-                {
-                    return true;
-                }
-
-                return success;
+                long sizeBytes = checked((long)Math.Round(sizeMB * 1024d * 1024d));
+                using (JsonDocument result = await RunBiosStorageActionAsync("CreateStaging", sizeBytes))
+                    return result.RootElement.GetProperty("DriveLetter").GetString();
             }
-            finally
+            catch (Exception ex)
             {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
+                Log($"ERROR: FAT32 staging partition creation failed: {ex.Message}");
+                return null;
             }
+        }
+
+        private async Task<JsonDocument> RunBiosStorageActionAsync(
+            string action,
+            long sizeBytes = 0)
+        {
+            if (_storagePreflight == null)
+                throw new InvalidOperationException("Storage preflight is missing.");
+
+            string scriptPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Scripts",
+                "libertix-bios-storage.ps1");
+            if (!File.Exists(scriptPath))
+                throw new FileNotFoundException("BIOS storage helper is missing.", scriptPath);
+
+            string powershell = ResolveSystemExecutable(
+                @"WindowsPowerShell\v1.0\powershell.exe",
+                "powershell.exe");
+            string arguments =
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                $"-Action {QuoteArgument(action)} " +
+                $"-SystemDrive {QuoteArgument(_storagePreflight.SystemDrive)} " +
+                $"-DiskNumber {_storagePreflight.SystemDiskNumber} " +
+                $"-DiskUniqueId {QuoteArgument(_storagePreflight.SystemDiskUniqueId)} " +
+                $"-WindowsPartitionOffsetBytes {_storagePreflight.SystemPartitionOffset} " +
+                $"-SizeBytes {sizeBytes}";
+            var processResult = await Task.Run(() => RunProcess(
+                powershell,
+                arguments,
+                (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds,
+                GetWindowsConsoleEncoding()));
+            if (processResult.exitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"BIOS storage action {action} failed with rc={processResult.exitCode}: " +
+                    $"{processResult.error} {processResult.output}".Trim());
+            }
+
+            string json = processResult.output?.Trim();
+            if (string.IsNullOrWhiteSpace(json))
+                throw new InvalidOperationException($"BIOS storage action {action} returned no result.");
+            return JsonDocument.Parse(json);
         }
     }
 }

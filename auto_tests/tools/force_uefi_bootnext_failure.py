@@ -26,6 +26,7 @@ def main() -> int:
         vm.host,
         vm.username,
         settings.windows_ssh_password.get_secret_value(),
+        known_hosts_path=settings.ssh_known_hosts,
         port=settings.ssh_port,
         connect_timeout=settings.ssh_timeout_seconds,
     ) as ssh:

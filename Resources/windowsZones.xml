@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<windowsZones cldrSource="unicode-org/cldr common/supplemental/windowsZones.xml">
+  <mapZone other="Dateline Standard Time" territory="001" type="Etc/GMT+12"/>
+  <mapZone other="UTC-11" territory="001" type="Etc/GMT+11"/>
+  <mapZone other="Aleutian Standard Time" territory="001" type="America/Adak"/>
+  <mapZone other="Hawaiian Standard Time" territory="001" type="Pacific/Honolulu"/>
+  <mapZone other="Marquesas Standard Time" territory="001" type="Pacific/Marquesas"/>
+  <mapZone other="Alaskan Standard Time" territory="001" type="America/Anchorage"/>
+  <mapZone other="UTC-09" territory="001" type="Etc/GMT+9"/>
+  <mapZone other="Pacific Standard Time (Mexico)" territory="001" type="America/Tijuana"/>
+  <mapZone other="UTC-08" territory="001" type="Etc/GMT+8"/>
+  <mapZone other="Pacific Standard Time" territory="001" type="America/Los_Angeles"/>
+  <mapZone other="US Mountain Standard Time" territory="001" type="America/Phoenix"/>
+  <mapZone other="Mountain Standard Time (Mexico)" territory="001" type="America/Mazatlan"/>
+  <mapZone other="Mountain Standard Time" territory="001" type="America/Denver"/>
+  <mapZone other="Yukon Standard Time" territory="001" type="America/Whitehorse"/>
+  <mapZone other="Central America Standard Time" territory="001" type="America/Guatemala"/>
+  <mapZone other="Central Standard Time" territory="001" type="America/Chicago"/>
+  <mapZone other="Easter Island Standard Time" territory="001" type="Pacific/Easter"/>
+  <mapZone other="Central Standard Time (Mexico)" territory="001" type="America/Mexico_City"/>
+  <mapZone other="Canada Central Standard Time" territory="001" type="America/Regina"/>
+  <mapZone other="SA Pacific Standard Time" territory="001" type="America/Bogota"/>
+  <mapZone other="Eastern Standard Time (Mexico)" territory="001" type="America/Cancun"/>
+  <mapZone other="Eastern Standard Time" territory="001" type="America/New_York"/>
+  <mapZone other="Haiti Standard Time" territory="001" type="America/Port-au-Prince"/>
+  <mapZone other="Cuba Standard Time" territory="001" type="America/Havana"/>
+  <mapZone other="US Eastern Standard Time" territory="001" type="America/Indianapolis"/>
+  <mapZone other="Turks And Caicos Standard Time" territory="001" type="America/Grand_Turk"/>
+  <mapZone other="Paraguay Standard Time" territory="001" type="America/Asuncion"/>
+  <mapZone other="Atlantic Standard Time" territory="001" type="America/Halifax"/>
+  <mapZone other="Venezuela Standard Time" territory="001" type="America/Caracas"/>
+  <mapZone other="Central Brazilian Standard Time" territory="001" type="America/Cuiaba"/>
+  <mapZone other="SA Western Standard Time" territory="001" type="America/La_Paz"/>
+  <mapZone other="Pacific SA Standard Time" territory="001" type="America/Santiago"/>
+  <mapZone other="Newfoundland Standard Time" territory="001" type="America/St_Johns"/>
+  <mapZone other="Tocantins Standard Time" territory="001" type="America/Araguaina"/>
+  <mapZone other="E. South America Standard Time" territory="001" type="America/Sao_Paulo"/>
+  <mapZone other="SA Eastern Standard Time" territory="001" type="America/Cayenne"/>
+  <mapZone other="Argentina Standard Time" territory="001" type="America/Buenos_Aires"/>
+  <mapZone other="Greenland Standard Time" territory="001" type="America/Godthab"/>
+  <mapZone other="Montevideo Standard Time" territory="001" type="America/Montevideo"/>
+  <mapZone other="Magallanes Standard Time" territory="001" type="America/Punta_Arenas"/>
+  <mapZone other="Saint Pierre Standard Time" territory="001" type="America/Miquelon"/>
+  <mapZone other="Bahia Standard Time" territory="001" type="America/Bahia"/>
+  <mapZone other="UTC-02" territory="001" type="Etc/GMT+2"/>
+  <mapZone other="Azores Standard Time" territory="001" type="Atlantic/Azores"/>
+  <mapZone other="Cape Verde Standard Time" territory="001" type="Atlantic/Cape_Verde"/>
+  <mapZone other="UTC" territory="001" type="Etc/UTC"/>
+  <mapZone other="GMT Standard Time" territory="001" type="Europe/London"/>
+  <mapZone other="Greenwich Standard Time" territory="001" type="Atlantic/Reykjavik"/>
+  <mapZone other="Sao Tome Standard Time" territory="001" type="Africa/Sao_Tome"/>
+  <mapZone other="Morocco Standard Time" territory="001" type="Africa/Casablanca"/>
+  <mapZone other="W. Europe Standard Time" territory="001" type="Europe/Berlin"/>
+  <mapZone other="Central Europe Standard Time" territory="001" type="Europe/Budapest"/>
+  <mapZone other="Romance Standard Time" territory="001" type="Europe/Paris"/>
+  <mapZone other="Central European Standard Time" territory="001" type="Europe/Warsaw"/>
+  <mapZone other="W. Central Africa Standard Time" territory="001" type="Africa/Lagos"/>
+  <mapZone other="Jordan Standard Time" territory="001" type="Asia/Amman"/>
+  <mapZone other="GTB Standard Time" territory="001" type="Europe/Bucharest"/>
+  <mapZone other="Middle East Standard Time" territory="001" type="Asia/Beirut"/>
+  <mapZone other="Egypt Standard Time" territory="001" type="Africa/Cairo"/>
+  <mapZone other="E. Europe Standard Time" territory="001" type="Europe/Chisinau"/>
+  <mapZone other="Syria Standard Time" territory="001" type="Asia/Damascus"/>
+  <mapZone other="West Bank Standard Time" territory="001" type="Asia/Hebron"/>
+  <mapZone other="South Africa Standard Time" territory="001" type="Africa/Johannesburg"/>
+  <mapZone other="FLE Standard Time" territory="001" type="Europe/Kiev"/>
+  <mapZone other="Israel Standard Time" territory="001" type="Asia/Jerusalem"/>
+  <mapZone other="South Sudan Standard Time" territory="001" type="Africa/Juba"/>
+  <mapZone other="Kaliningrad Standard Time" territory="001" type="Europe/Kaliningrad"/>
+  <mapZone other="Sudan Standard Time" territory="001" type="Africa/Khartoum"/>
+  <mapZone other="Libya Standard Time" territory="001" type="Africa/Tripoli"/>
+  <mapZone other="Namibia Standard Time" territory="001" type="Africa/Windhoek"/>
+  <mapZone other="Arabic Standard Time" territory="001" type="Asia/Baghdad"/>
+  <mapZone other="Turkey Standard Time" territory="001" type="Europe/Istanbul"/>
+  <mapZone other="Arab Standard Time" territory="001" type="Asia/Riyadh"/>
+  <mapZone other="Belarus Standard Time" territory="001" type="Europe/Minsk"/>
+  <mapZone other="Russian Standard Time" territory="001" type="Europe/Moscow"/>
+  <mapZone other="E. Africa Standard Time" territory="001" type="Africa/Nairobi"/>
+  <mapZone other="Iran Standard Time" territory="001" type="Asia/Tehran"/>
+  <mapZone other="Arabian Standard Time" territory="001" type="Asia/Dubai"/>
+  <mapZone other="Astrakhan Standard Time" territory="001" type="Europe/Astrakhan"/>
+  <mapZone other="Azerbaijan Standard Time" territory="001" type="Asia/Baku"/>
+  <mapZone other="Russia Time Zone 3" territory="001" type="Europe/Samara"/>
+  <mapZone other="Mauritius Standard Time" territory="001" type="Indian/Mauritius"/>
+  <mapZone other="Saratov Standard Time" territory="001" type="Europe/Saratov"/>
+  <mapZone other="Georgian Standard Time" territory="001" type="Asia/Tbilisi"/>
+  <mapZone other="Volgograd Standard Time" territory="001" type="Europe/Volgograd"/>
+  <mapZone other="Caucasus Standard Time" territory="001" type="Asia/Yerevan"/>
+  <mapZone other="Afghanistan Standard Time" territory="001" type="Asia/Kabul"/>
+  <mapZone other="West Asia Standard Time" territory="001" type="Asia/Tashkent"/>
+  <mapZone other="Ekaterinburg Standard Time" territory="001" type="Asia/Yekaterinburg"/>
+  <mapZone other="Pakistan Standard Time" territory="001" type="Asia/Karachi"/>
+  <mapZone other="Qyzylorda Standard Time" territory="001" type="Asia/Qyzylorda"/>
+  <mapZone other="India Standard Time" territory="001" type="Asia/Calcutta"/>
+  <mapZone other="Sri Lanka Standard Time" territory="001" type="Asia/Colombo"/>
+  <mapZone other="Nepal Standard Time" territory="001" type="Asia/Katmandu"/>
+  <mapZone other="Central Asia Standard Time" territory="001" type="Asia/Bishkek"/>
+  <mapZone other="Bangladesh Standard Time" territory="001" type="Asia/Dhaka"/>
+  <mapZone other="Omsk Standard Time" territory="001" type="Asia/Omsk"/>
+  <mapZone other="Myanmar Standard Time" territory="001" type="Asia/Rangoon"/>
+  <mapZone other="SE Asia Standard Time" territory="001" type="Asia/Bangkok"/>
+  <mapZone other="Altai Standard Time" territory="001" type="Asia/Barnaul"/>
+  <mapZone other="W. Mongolia Standard Time" territory="001" type="Asia/Hovd"/>
+  <mapZone other="North Asia Standard Time" territory="001" type="Asia/Krasnoyarsk"/>
+  <mapZone other="N. Central Asia Standard Time" territory="001" type="Asia/Novosibirsk"/>
+  <mapZone other="Tomsk Standard Time" territory="001" type="Asia/Tomsk"/>
+  <mapZone other="China Standard Time" territory="001" type="Asia/Shanghai"/>
+  <mapZone other="North Asia East Standard Time" territory="001" type="Asia/Irkutsk"/>
+  <mapZone other="Singapore Standard Time" territory="001" type="Asia/Singapore"/>
+  <mapZone other="W. Australia Standard Time" territory="001" type="Australia/Perth"/>
+  <mapZone other="Taipei Standard Time" territory="001" type="Asia/Taipei"/>
+  <mapZone other="Ulaanbaatar Standard Time" territory="001" type="Asia/Ulaanbaatar"/>
+  <mapZone other="Aus Central W. Standard Time" territory="001" type="Australia/Eucla"/>
+  <mapZone other="Transbaikal Standard Time" territory="001" type="Asia/Chita"/>
+  <mapZone other="Tokyo Standard Time" territory="001" type="Asia/Tokyo"/>
+  <mapZone other="North Korea Standard Time" territory="001" type="Asia/Pyongyang"/>
+  <mapZone other="Korea Standard Time" territory="001" type="Asia/Seoul"/>
+  <mapZone other="Yakutsk Standard Time" territory="001" type="Asia/Yakutsk"/>
+  <mapZone other="Cen. Australia Standard Time" territory="001" type="Australia/Adelaide"/>
+  <mapZone other="AUS Central Standard Time" territory="001" type="Australia/Darwin"/>
+  <mapZone other="E. Australia Standard Time" territory="001" type="Australia/Brisbane"/>
+  <mapZone other="AUS Eastern Standard Time" territory="001" type="Australia/Sydney"/>
+  <mapZone other="West Pacific Standard Time" territory="001" type="Pacific/Port_Moresby"/>
+  <mapZone other="Tasmania Standard Time" territory="001" type="Australia/Hobart"/>
+  <mapZone other="Vladivostok Standard Time" territory="001" type="Asia/Vladivostok"/>
+  <mapZone other="Lord Howe Standard Time" territory="001" type="Australia/Lord_Howe"/>
+  <mapZone other="Bougainville Standard Time" territory="001" type="Pacific/Bougainville"/>
+  <mapZone other="Russia Time Zone 10" territory="001" type="Asia/Srednekolymsk"/>
+  <mapZone other="Magadan Standard Time" territory="001" type="Asia/Magadan"/>
+  <mapZone other="Norfolk Standard Time" territory="001" type="Pacific/Norfolk"/>
+  <mapZone other="Sakhalin Standard Time" territory="001" type="Asia/Sakhalin"/>
+  <mapZone other="Central Pacific Standard Time" territory="001" type="Pacific/Guadalcanal"/>
+  <mapZone other="Russia Time Zone 11" territory="001" type="Asia/Kamchatka"/>
+  <mapZone other="New Zealand Standard Time" territory="001" type="Pacific/Auckland"/>
+  <mapZone other="UTC+12" territory="001" type="Etc/GMT-12"/>
+  <mapZone other="Fiji Standard Time" territory="001" type="Pacific/Fiji"/>
+  <mapZone other="Chatham Islands Standard Time" territory="001" type="Pacific/Chatham"/>
+  <mapZone other="UTC+13" territory="001" type="Etc/GMT-13"/>
+  <mapZone other="Tonga Standard Time" territory="001" type="Pacific/Tongatapu"/>
+  <mapZone other="Samoa Standard Time" territory="001" type="Pacific/Apia"/>
+  <mapZone other="Line Islands Standard Time" territory="001" type="Pacific/Kiritimati"/>
+</windowsZones>

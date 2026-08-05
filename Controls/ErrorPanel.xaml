@@ -11,7 +11,7 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type Thumb}">
-                        <Rectangle Fill="#908caa" 
+                        <Rectangle Fill="{DynamicResource TextSecondary}"
                                  RadiusX="4" 
                                  RadiusY="4"/>
                     </ControlTemplate>
@@ -26,7 +26,7 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type ScrollBar}">
                         <Grid>
-                            <Rectangle Fill="#363252" 
+                            <Rectangle Fill="{DynamicResource PanelBorder}"
                                      RadiusX="4" 
                                      RadiusY="4"/>
                             <Track x:Name="PART_Track" 
@@ -64,8 +64,8 @@
         </Style>
     </UserControl.Resources>
 
-    <Border Background="#2a273f"
-            BorderBrush="#eb6f92"
+    <Border Background="{DynamicResource SecondaryBackground}"
+            BorderBrush="{DynamicResource ErrorColor}"
             BorderThickness="1"
             CornerRadius="8"
             MaxWidth="{Binding MaxWidth, RelativeSource={RelativeSource AncestorType=UserControl}}"
@@ -77,7 +77,7 @@
                       Margin="40,30">
             <StackPanel>
                 <TextBlock Text="{Binding Title, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                      Foreground="#eb6f92"
+                      Foreground="{DynamicResource ErrorColor}"
                       FontSize="32"
                       FontWeight="Light"
                       TextAlignment="Center"
@@ -85,7 +85,7 @@
                       Margin="0,0,0,20"/>
             
             <TextBlock Text="{Binding Message, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                      Foreground="#e0def4"
+                      Foreground="{DynamicResource TextPrimary}"
                       FontSize="16"
                       TextAlignment="Center"
                       TextWrapping="Wrap"/>
@@ -95,7 +95,7 @@
                       IsExpanded="True">
                 <Expander.Header>
                     <TextBlock Text="System Requirements" 
-                             Foreground="#908caa"
+                             Foreground="{DynamicResource TextSecondary}"
                              FontSize="16"
                              FontWeight="SemiBold"/>
                 </Expander.Header>
@@ -106,7 +106,7 @@
                                 <Setter Property="Header">
                                     <Setter.Value>
                                         <TextBlock Text="System Requirements" 
-                                                 Foreground="#908caa"
+                                                 Foreground="{DynamicResource TextSecondary}"
                                                  FontSize="16"
                                                  FontWeight="SemiBold"/>
                                     </Setter.Value>
@@ -115,21 +115,19 @@
                         </Style.Triggers>
                     </Style>
                 </Expander.Style>
-                <Border Background="#363252" 
+                <Border Background="{DynamicResource PanelBorder}"
                         CornerRadius="4" 
                         Padding="20"
                         Margin="0,10,0,0">
                     <StackPanel>
-                        <!-- System Requirements -->
                         <TextBlock Text="{Binding Details, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                 Foreground="#e0def4"
+                                 Foreground="{DynamicResource TextPrimary}"
                                  FontFamily="Consolas"
                                  FontSize="14"
                                  TextWrapping="Wrap"/>
                         
-                        <!-- Additional Space Needed -->
                         <TextBlock Text="{Binding AdditionalDetails, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                 Foreground="#eb6f92"
+                                 Foreground="{DynamicResource ErrorColor}"
                                  FontSize="14"
                                  FontWeight="SemiBold"
                                  Margin="0,10,0,0"

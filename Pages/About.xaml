@@ -1,7 +1,7 @@
 <Page x:Class="Libertix.Pages.About"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      Background="#232136">
+      Background="{DynamicResource PrimaryBackground}">
     <Grid Margin="52,34">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -11,11 +11,11 @@
 
         <StackPanel Grid.Row="0">
             <TextBlock Text="{DynamicResource AboutTitle}"
-                       Foreground="#E0DEF4"
+                       Foreground="{DynamicResource TextPrimary}"
                        FontSize="40"
                        FontWeight="Light"/>
             <TextBlock Text="{DynamicResource AboutSubtitle}"
-                       Foreground="#908CAA"
+                       Foreground="{DynamicResource TextSecondary}"
                        FontSize="15"
                        Margin="0,8,0,22"
                        TextWrapping="Wrap"/>
@@ -23,12 +23,12 @@
 
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
             <StackPanel Margin="0,0,18,0">
-                <Border Background="#2A273F" CornerRadius="8" Padding="22" Margin="0,0,0,14">
+                <Border Background="{DynamicResource SecondaryBackground}" CornerRadius="8" Padding="22" Margin="0,0,0,14">
                     <StackPanel>
                         <TextBlock Text="{DynamicResource AboutProjectHeading}"
-                                   Foreground="#C4A7E7" FontSize="20" FontWeight="SemiBold"/>
+                                   Foreground="{DynamicResource HighlightColor}" FontSize="20" FontWeight="SemiBold"/>
                         <TextBlock Text="{DynamicResource AboutProjectBody}"
-                                   Foreground="#E0DEF4" FontSize="14" Margin="0,8,0,0"
+                                   Foreground="{DynamicResource TextPrimary}" FontSize="14" Margin="0,8,0,0"
                                    TextWrapping="Wrap" LineHeight="21"/>
                     </StackPanel>
                 </Border>
@@ -39,21 +39,21 @@
                         <ColumnDefinition Width="18"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <Border Grid.Column="0" Background="#2A273F" CornerRadius="8" Padding="22">
+                    <Border Grid.Column="0" Background="{DynamicResource SecondaryBackground}" CornerRadius="8" Padding="22">
                         <StackPanel>
                             <TextBlock Text="{DynamicResource AboutDevelopersHeading}"
-                                       Foreground="#C4A7E7" FontSize="20" FontWeight="SemiBold"/>
+                                       Foreground="{DynamicResource HighlightColor}" FontSize="20" FontWeight="SemiBold"/>
                             <TextBlock Text="{DynamicResource AboutDevelopersBody}"
-                                       Foreground="#E0DEF4" FontSize="14" Margin="0,8,0,0"
+                                       Foreground="{DynamicResource TextPrimary}" FontSize="14" Margin="0,8,0,0"
                                        TextWrapping="Wrap" LineHeight="21"/>
                         </StackPanel>
                     </Border>
-                    <Border Grid.Column="2" Background="#2A273F" CornerRadius="8" Padding="22">
+                    <Border Grid.Column="2" Background="{DynamicResource SecondaryBackground}" CornerRadius="8" Padding="22">
                         <StackPanel>
                             <TextBlock Text="{DynamicResource AboutDonorsHeading}"
-                                       Foreground="#C4A7E7" FontSize="20" FontWeight="SemiBold"/>
+                                       Foreground="{DynamicResource HighlightColor}" FontSize="20" FontWeight="SemiBold"/>
                             <TextBlock Text="{DynamicResource AboutDonorsBody}"
-                                       Foreground="#E0DEF4" FontSize="14" Margin="0,8,0,0"
+                                       Foreground="{DynamicResource TextPrimary}" FontSize="14" Margin="0,8,0,0"
                                        TextWrapping="Wrap" LineHeight="21"/>
                         </StackPanel>
                     </Border>

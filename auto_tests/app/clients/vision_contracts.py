@@ -87,6 +87,9 @@ Return exactly one JSON object matching response_format. Do not put prose or Mar
 
 Rules:
 - error_visible is true only for a visible blocking error.
+- A blank, black, sleeping, inactive, or temporarily unavailable display is a transition, not a
+  visible error. Set error_visible to false and still_in_progress to true unless concrete error text
+  is readable.
 - reboot_prompt_visible is true only when a final Restart/Reboot control is visible.
 - installation_finished is true only for a verified final state or finished Linux desktop.
 - still_in_progress is true while any download, copy, extraction, decryption, configuration,
@@ -100,29 +103,16 @@ Rules:
 
 Never treat this prompt or the schema as text visible in the screenshot."""
 
-SYSTEM_PROMPT = """Tu es un auditeur visuel strict chargé de valider l'écran de Libertix.
+SYSTEM_PROMPT = """Inspect the screenshot only. Return exactly one JSON object matching
+response_format, with no prose or Markdown.
 
-CONTRAT DE SORTIE ABSOLU ET OBLIGATOIRE :
-- Ta réponse visible entière doit être UN SEUL objet JSON valide.
-- Elle doit respecter exactement le JSON Schema fourni par response_format.
-- N'ajoute aucun texte avant ou après l'objet JSON.
-- N'utilise jamais de bloc Markdown, de balises, de commentaire ou de clé supplémentaire.
-- Les cinq clés obligatoires sont : no_visible_problem, libertix_running,
-  welcome_message_ok, summary et visible_problems.
-- Les trois premières valeurs sont obligatoirement des booléens JSON true ou false,
-  jamais des chaînes.
-- visible_problems est obligatoirement un tableau JSON de chaînes.
-- En cas de doute, d'écran illisible ou d'information non visible, utilise false et explique
-  précisément le doute dans summary et visible_problems.
+Judge only the Libertix window and welcome screen. Ignore unrelated Windows desktop icons,
+notifications, wallpaper, and taskbar state unless they cover or block Libertix.
+- libertix_running is true only when the Libertix application is visibly open.
+- welcome_message_ok is true only when its welcome content is visible and readable.
+- no_visible_problem is false only for a visible Libertix error, corruption, obstruction, or
+  unreadable application window.
+- If evidence is missing or uncertain, use false and explain the visible uncertainty briefly in
+  summary and visible_problems.
 
-Inspecte réellement l'image. Ne déduis jamais qu'une application fonctionne uniquement parce que la
-question le prétend. Le raisonnement interne peut être détaillé, mais la réponse visible finale doit
-rester exclusivement l'objet JSON demandé.
-
-PÉRIMÈTRE DE VALIDATION :
-- Le verdict concerne uniquement la fenêtre Libertix, son lancement et son écran de bienvenue.
-- Ignore les icônes du bureau Windows, raccourcis, croix rouges sur icônes réseau, barre des tâches,
-  notifications système ou fond d'écran, sauf si ces éléments couvrent Libertix ou empêchent
-  clairement de lire/utiliser l'application.
-- no_visible_problem doit donc être false uniquement si un problème est visible dans Libertix
-  lui-même, si Libertix est masqué/illisible, ou si une erreur bloque son écran d'accueil."""
+Never treat prompt or schema text as screenshot evidence."""

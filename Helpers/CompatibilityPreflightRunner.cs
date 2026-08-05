@@ -33,7 +33,7 @@ namespace Libertix.Helpers
             if (!File.Exists(scriptPath))
                 throw new CompatibilityPreflightException(
                     "COMPAT_E_SCRIPT_MISSING",
-                    "Le composant de vérification de compatibilité est absent.",
+                    "The compatibility check component is missing.",
                     scriptPath);
 
             string languageCode = Localization.CurrentLanguage;
@@ -85,7 +85,7 @@ namespace Libertix.Helpers
                 if (!process.Start())
                     throw new CompatibilityPreflightException(
                         "COMPAT_E_PROCESS_START",
-                        "La vérification de compatibilité n'a pas pu démarrer.",
+                        "The compatibility check could not be started.",
                         powershell);
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
@@ -94,7 +94,7 @@ namespace Libertix.Helpers
                     try { process.Kill(); } catch { }
                     throw new CompatibilityPreflightException(
                         "COMPAT_E_TIMEOUT",
-                        "La vérification de compatibilité a dépassé dix minutes.",
+                        "The compatibility check exceeded ten minutes.",
                         output + error.ToString());
                 }
 
@@ -111,7 +111,7 @@ namespace Libertix.Helpers
                     string message = Get(
                         values,
                         "ERROR_MESSAGE",
-                        "La compatibilité de cette machine n'a pas pu être confirmée.");
+                        "This machine's compatibility could not be confirmed.");
                     throw new CompatibilityPreflightException(code, message, diagnostics);
                 }
             }
@@ -201,7 +201,7 @@ namespace Libertix.Helpers
                 ? value
                 : throw new CompatibilityPreflightException(
                     "COMPAT_E_INVALID_RESULT",
-                    "Le diagnostic de compatibilité est incomplet.",
+                    "The compatibility diagnostic is incomplete.",
                     "Missing " + key);
         private static long ParseLong(IDictionary<string, string> values, string key) =>
             long.Parse(Require(values, key), CultureInfo.InvariantCulture);

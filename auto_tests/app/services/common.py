@@ -23,12 +23,21 @@ class ResultBuilder:
             self.on_step(item)
         logger.info(message, extra={"step": step, "target": str(context.get("target", ""))})
 
+    def error(self, step: str, message: str, **context: object) -> None:
+        """Record a failed check without interrupting the remaining suite."""
+
+        item = StepResult(step=step, status="error", message=message, context=context)
+        self.steps.append(item)
+        if self.on_step:
+            self.on_step(item)
+        logger.error(message, extra={"step": step, "target": str(context.get("target", ""))})
+
     def success(self, message: str) -> OperationResult:
-        if self._failed or any(step.status == "problème" for step in self.steps):
+        if self._failed or any(step.status == "error" for step in self.steps):
             return OperationResult(
-                status="problème",
+                status="error",
                 operation=self.operation,
-                message="problème: une étape fatale a échoué",
+                message="error: one or more steps failed",
                 steps=self.steps,  # type: ignore[arg-type]
             )
         return OperationResult(
@@ -42,9 +51,7 @@ class ResultBuilder:
         self._failed = True
         details = dict(error.details)
         details.setdefault("exception_type", type(error).__name__)
-        item = StepResult(
-            step=error.step, status="problème", message=error.message, context=details
-        )
+        item = StepResult(step=error.step, status="error", message=error.message, context=details)
         self.steps.append(item)
         if self.on_step:
             self.on_step(item)
@@ -52,8 +59,8 @@ class ResultBuilder:
             error.message, extra={"step": error.step, "target": str(details.get("host", ""))}
         )
         return OperationResult(
-            status="problème",
+            status="error",
             operation=self.operation,  # type: ignore[arg-type]
-            message=f"problème: {error.message}",
+            message=f"error: {error.message}",
             steps=self.steps,
         )

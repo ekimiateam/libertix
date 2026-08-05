@@ -18,6 +18,7 @@ class VMConfig(BaseModel):
     screen_height: int = Field(gt=0)
     vmid: int = Field(gt=0)
     firmware: Literal["bios", "uefi"]
+    vnc_keyboard_layout: Literal["fr", "us"] = "us"
     disable_defender_for_automation: bool = False
     automation_enabled: bool = False
 
@@ -44,6 +45,7 @@ class Settings(BaseSettings):
     build_vm_password: SecretStr
     ssh_port: int = 22
     ssh_timeout_seconds: float = 15
+    ssh_known_hosts: Path
     command_timeout_seconds: float = 180
     repository_url: str
     repository_branch: str = "dev"
@@ -63,13 +65,18 @@ class Settings(BaseSettings):
     proxmox_url: str
     proxmox_token_id: str
     proxmox_token_secret: SecretStr
+    proxmox_verify_tls: bool = True
+    proxmox_ca_bundle: Path | None = None
     proxmox_timeout_seconds: float = 30
     proxmox_task_timeout_seconds: float = 300
 
     capture_dir: Path = Path("/tmp/libertix-auto-tests-captures")
+    operation_log_dir: Path = Path(__file__).resolve().parents[1] / "logs"
     launch_wait_seconds: float = 2
     automation_monitor_interval_seconds: float = 30
     automation_monitor_timeout_seconds: float = 23400
+    post_install_boot_timeout_seconds: float = 1200
+    post_install_poll_interval_seconds: float = 10
     log_level: str = "INFO"
     api_access_token: SecretStr
 

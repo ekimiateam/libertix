@@ -16,13 +16,11 @@ namespace Libertix.Helpers
             double slideOffset = 100,
             bool slideLeft = true)
         {
-            // Ensure background color consistency
             if (newPage.Content is Grid grid)
             {
                 grid.Background = Brushes.Transparent;
             }
 
-            // Create animations
             var fadeOut = CreateFadeAnimation(1.0, 0.0, duration);
             var slideOut = CreateSlideAnimation(
                 new Thickness(0),
@@ -43,7 +41,6 @@ namespace Libertix.Helpers
                 newPage.BeginAnimation(FrameworkElement.MarginProperty, slideIn);
             };
 
-            // Start exit animations on current page
             if (navigation.Content is UIElement currentPage)
             {
                 currentPage.BeginAnimation(UIElement.OpacityProperty, fadeOut);

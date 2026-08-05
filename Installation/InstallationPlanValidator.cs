@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
 
 namespace Libertix.Installation
@@ -26,6 +28,10 @@ namespace Libertix.Installation
             "^[A-Za-z]:[\\\\/]",
             RegexOptions.CultureInvariant);
 
+        private static readonly Regex XkbNamePattern = new Regex(
+            "^[a-z0-9_-]+$",
+            RegexOptions.CultureInvariant);
+
         public static void Validate(InstallationPlan plan)
         {
             if (plan == null)
@@ -48,6 +54,7 @@ namespace Libertix.Installation
             ValidateDisk(plan.Firmware, plan.Disk, errors);
             ValidateFeatures(plan.Features, errors);
             ValidateRuntime(plan.Firmware, plan.Runtime, errors);
+            ValidateDevelopment(plan.Development, errors);
 
             if (errors.Count > 0)
                 throw new InstallationPlanValidationException(errors);
@@ -108,6 +115,15 @@ namespace Libertix.Installation
             RequireNotBlank(locale.SystemLanguage, "locale.systemLanguage", errors);
             RequireNotBlank(locale.KeyboardLayout, "locale.keyboardLayout", errors);
             RequireNotBlank(locale.KeyboardModel, "locale.keyboardModel", errors);
+            Require(XkbNamePattern.IsMatch(locale.KeyboardLayout ?? string.Empty), errors,
+                "locale.keyboardLayout is not a valid XKB layout name.");
+            Require(XkbNamePattern.IsMatch(locale.KeyboardModel ?? string.Empty), errors,
+                "locale.keyboardModel is not a valid XKB model name.");
+            Require(
+                string.IsNullOrEmpty(locale.KeyboardVariant) ||
+                XkbNamePattern.IsMatch(locale.KeyboardVariant),
+                errors,
+                "locale.keyboardVariant is not a valid XKB variant name.");
             RequireNotBlank(locale.Timezone, "locale.timezone", errors);
         }
 
@@ -312,6 +328,47 @@ namespace Libertix.Installation
                 Require(HexIdPattern.IsMatch(runtime.RecoveryRunId), errors,
                     "runtime.recoveryRunId must contain exactly 32 lowercase hexadecimal characters.");
             }
+        }
+
+        private static void ValidateDevelopment(
+            InstallationDevelopmentOptions development,
+            ICollection<string> errors)
+        {
+            if (development == null)
+                return;
+
+            Require(development.EnableSsh, errors,
+                "development.enableSsh must be true when development options are present.");
+            Require(IsDevelopmentIpv4Address(development.StaticIpv4Address), errors,
+                "development.staticIpv4Address must be usable in 192.168.1.0/24.");
+            Require(development.StaticIpv4PrefixLength == 24, errors,
+                "development.staticIpv4PrefixLength must be 24.");
+            Require(string.Equals(
+                    development.StaticIpv4Gateway,
+                    "192.168.1.1",
+                    StringComparison.Ordinal),
+                errors,
+                "development.staticIpv4Gateway must be 192.168.1.1.");
+            Require(
+                development.DnsServers != null &&
+                development.DnsServers.Length == 2 &&
+                string.Equals(development.DnsServers[0], "8.8.8.8", StringComparison.Ordinal) &&
+                string.Equals(development.DnsServers[1], "1.1.1.1", StringComparison.Ordinal),
+                errors,
+                "development.dnsServers must contain 8.8.8.8 then 1.1.1.1.");
+        }
+
+        private static bool IsDevelopmentIpv4Address(string value)
+        {
+            if (!IPAddress.TryParse(value, out IPAddress address) ||
+                address.AddressFamily != AddressFamily.InterNetwork)
+            {
+                return false;
+            }
+
+            byte[] octets = address.GetAddressBytes();
+            return octets[0] == 192 && octets[1] == 168 && octets[2] == 1 &&
+                octets[3] > 1 && octets[3] < 255;
         }
 
         private static void RequireHttpUri(

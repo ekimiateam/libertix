@@ -13,6 +13,7 @@ namespace Libertix.Installation
         public const int LargeInstallationStagingSizeGiB = 8;
         public const long BytesPerGiB = 1024L * 1024L * 1024L;
         public const long MebibytesPerGiB = 1024L;
+        public const long PartitionAlignmentToleranceBytes = 1024L * 1024L;
 
         public static InstallationSizes FromRequestedGigabytes(double requestedGigabytes)
         {
@@ -27,6 +28,20 @@ namespace Libertix.Installation
                 : finalSizeGiB;
 
             return new InstallationSizes(finalSizeGiB, stagingSizeGiB);
+        }
+
+        public static bool IsObservedStagingSizeAcceptable(long expectedBytes, long observedBytes)
+        {
+            if (expectedBytes <= 0 || observedBytes <= 0)
+                return false;
+
+            // Windows may trim one alignment unit from the requested partition
+            // size. The installation plan keeps the canonical whole-GiB policy,
+            // while this boundary check accepts only that storage-level rounding.
+            long difference = expectedBytes >= observedBytes
+                ? expectedBytes - observedBytes
+                : observedBytes - expectedBytes;
+            return difference <= PartitionAlignmentToleranceBytes;
         }
     }
 

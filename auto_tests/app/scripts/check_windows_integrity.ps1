@@ -70,6 +70,7 @@ Invoke-NativeCheck -Name "WINDOWS RECOVERY" -FilePath "reagentc.exe" -Arguments 
 Write-Section "BOOT CONFIGURATION"
 $mountedBootPartition = $null
 $bootLetter = $null
+$bootLetterWasAssigned = $false
 try {
     $espGuid = "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}"
     $mountedBootPartition = Get-Partition |
@@ -85,10 +86,14 @@ try {
     }
 
     if ($mountedBootPartition) {
-        $bootLetter = Get-FreeDriveLetter
-        Add-PartitionAccessPath -DiskNumber $mountedBootPartition.DiskNumber `
-            -PartitionNumber $mountedBootPartition.PartitionNumber `
-            -AccessPath "${bootLetter}:\" -ErrorAction Stop
+        $bootLetter = [string]$mountedBootPartition.DriveLetter
+        if ([string]::IsNullOrWhiteSpace($bootLetter)) {
+            $bootLetter = Get-FreeDriveLetter
+            Add-PartitionAccessPath -DiskNumber $mountedBootPartition.DiskNumber `
+                -PartitionNumber $mountedBootPartition.PartitionNumber `
+                -AccessPath "${bootLetter}:\" -ErrorAction Stop
+            $bootLetterWasAssigned = $true
+        }
 
         Write-Output ("BOOT_PARTITION={0}:{1}" -f $mountedBootPartition.DiskNumber,
             $mountedBootPartition.PartitionNumber)
@@ -122,7 +127,7 @@ try {
 } catch {
     Write-Output ("BOOT_CHECK_ERROR={0}" -f $_.Exception.Message)
 } finally {
-    if ($mountedBootPartition -and $bootLetter) {
+    if ($mountedBootPartition -and $bootLetterWasAssigned -and $bootLetter) {
         Remove-PartitionAccessPath -DiskNumber $mountedBootPartition.DiskNumber `
             -PartitionNumber $mountedBootPartition.PartitionNumber `
             -AccessPath "${bootLetter}:\" -ErrorAction SilentlyContinue
@@ -130,11 +135,15 @@ try {
 }
 
 Write-Section "LIBERTIX ARTIFACTS"
+$systemDrive = [string]$env:SystemDrive
+if ($systemDrive -notmatch '^[A-Za-z]:$') {
+    throw "Windows did not expose a valid system drive."
+}
 Write-Output ("TRANSACTION_STATE_PRESENT={0}" -f
-    (Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"))
+    (Test-Path -LiteralPath (Join-Path $systemDrive "LibertixTools\uefi-transaction.json")))
 Write-Output ("INSTALLER_VOLUME_PRESENT={0}" -f
     [bool](Get-Volume -FileSystemLabel "LIBERTIXEFI" -ErrorAction SilentlyContinue))
-$uefiRecoveryRoot = "C:\ProgramData\Libertix\UefiRecovery"
+$uefiRecoveryRoot = Join-Path $systemDrive "ProgramData\Libertix\UefiRecovery"
 $uefiRecoverySessions = @(
     Get-ChildItem -LiteralPath $uefiRecoveryRoot -Directory -ErrorAction SilentlyContinue
 )
@@ -159,7 +168,7 @@ if ($uefiRecoverySessions.Count -gt 0) {
     }
 }
 Write-Output ("BIOS_RECOVERY_ROOT_PRESENT={0}" -f
-    (Test-Path -LiteralPath "C:\LibertixInstallRecovery"))
+    (Test-Path -LiteralPath (Join-Path $systemDrive "LibertixInstallRecovery")))
 $libertixTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue |
     Where-Object { $_.TaskName -like "Libertix*" })
 $libertixTasks |

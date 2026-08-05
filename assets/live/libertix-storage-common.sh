@@ -44,8 +44,132 @@ windows_path_to_relative() {
     echo "$path"
 }
 
+installer_partition_target_bytes() {
+    local requested_bytes="$1"
+    local maximum_bytes="$2"
+    local alignment_tolerance_bytes="${3:-1048576}"
+    local shortfall_bytes
+
+    [ "$requested_bytes" -gt 0 ] 2>/dev/null || return 2
+    [ "$maximum_bytes" -gt 0 ] 2>/dev/null || return 2
+    [ "$alignment_tolerance_bytes" -ge 0 ] 2>/dev/null || return 2
+
+    if [ "$maximum_bytes" -ge "$requested_bytes" ]; then
+        echo "$requested_bytes"
+        return 0
+    fi
+
+    # An MBR logical partition needs an aligned EBR gap inside the extended
+    # partition. Windows reserves the requested allocation, but Linux may
+    # expose one alignment unit less payload space before Recovery begins.
+    shortfall_bytes=$((requested_bytes - maximum_bytes))
+    [ "$shortfall_bytes" -le "$alignment_tolerance_bytes" ] || return 1
+    echo "$maximum_bytes"
+}
+
 partition_count() {
     lsblk -nr -o NAME,TYPE "$1" | awk '$2=="part"{count++}END{print count+0}'
+}
+
+mbr_primary_slot_count_from_machine_output() {
+    awk -F: '
+        $1 ~ /^[0-9]+$/ && $1 >= 1 && $1 <= 4 {
+            count++
+        }
+        END { print count + 0 }
+    '
+}
+
+mbr_primary_slot_count() {
+    local disk="$1"
+
+    # MBR reserves numbers 1-4 for primary or extended slots; logical
+    # partitions start at 5. This numeric invariant is stable even when
+    # Parted's machine output omits the human-readable partition type.
+    parted -sm "$disk" print 2>/dev/null | mbr_primary_slot_count_from_machine_output
+}
+
+mbr_empty_container_from_machine_output() {
+    local installer_sector="$1"
+    local recovery_sector="$2"
+
+    awk -F: -v installer="$installer_sector" -v recovery="$recovery_sector" '
+        $1 ~ /^[0-9]+$/ {
+            number = $1 + 0
+            if (number >= 5) {
+                logical_partition_found = 1
+            }
+            if (number >= 1 && number <= 4) {
+                start = $2
+                end = $3
+                sub(/s$/, "", start)
+                sub(/s$/, "", end)
+                start += 0
+                end += 0
+                if (start <= installer && installer <= end && end + 1 == recovery) {
+                    candidate = number ":" start ":" end
+                    candidate_count++
+                }
+            }
+        }
+        END {
+            if (logical_partition_found) exit 2
+            if (candidate_count > 1) exit 3
+            if (candidate_count == 1) print candidate
+        }
+    '
+}
+
+mbr_owned_logical_layout_from_machine_output() {
+    local installer_sector="$1"
+    local recovery_sector="$2"
+
+    awk -F: -v installer="$installer_sector" -v recovery="$recovery_sector" '
+        $1 ~ /^[0-9]+$/ {
+            number = $1 + 0
+            start = $2
+            end = $3
+            sub(/s$/, "", start)
+            sub(/s$/, "", end)
+            start += 0
+            end += 0
+
+            if (number >= 5) {
+                logical_count++
+                if (start == installer && end < recovery) {
+                    owned_logical_count++
+                    logical_number = number
+                    logical_start = start
+                    logical_end = end
+                }
+            } else if (number >= 1 && number <= 4) {
+                primary_start[number] = start
+                primary_end[number] = end
+            }
+        }
+        END {
+            if (logical_count != 1 || owned_logical_count != 1) exit 2
+
+            for (number in primary_start) {
+                if (primary_start[number] < logical_start &&
+                    primary_end[number] >= logical_end &&
+                    primary_end[number] + 1 == recovery) {
+                    container_number = number
+                    container_start = primary_start[number]
+                    container_end = primary_end[number]
+                    container_count++
+                }
+            }
+
+            if (container_count != 1) exit 3
+            print logical_number ":" logical_start ":" logical_end ":" \
+                container_number ":" container_start ":" container_end
+        }
+    '
+}
+
+normalize_mbr_partition_type() {
+    tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | sed 's/^0x//; s/^0*//'
 }
 
 partitions_of_disk() {

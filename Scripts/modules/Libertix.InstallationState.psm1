@@ -87,6 +87,11 @@ function Assert-LibertixExecutionState {
             throw "Libertix execution state failure details are invalid."
         }
     }
+    # Rollback states retain the originating failure as diagnostics. Pending,
+    # running, and successful states cannot describe an inactive failure.
+    if ([string]$State.status -in @("pending", "running", "succeeded") -and $null -ne $State.failure) {
+        throw "Only failed and rollback execution states can carry failure details."
+    }
 
     return $State
 }
@@ -221,6 +226,12 @@ function Start-LibertixExecutionStep {
         }
         if ($transitionStep -in @($state.completedSteps)) {
             throw "Step '$transitionStep' is already complete."
+        }
+        # A recovery retry may legitimately resume after a recorded failure.
+        # Drop that failure here: without this, the ledger can reach 'succeeded'
+        # while still carrying the diagnostics of a run that did not succeed.
+        if ([string]$state.status -eq "failed") {
+            $state.failure = $null
         }
         $state.status = "running"
         $state.phase = $transitionPhase

@@ -33,6 +33,8 @@ mount_target_windows_partitions_read_only() {
 install_target_configuration_payload() {
     install -m 0755 /usr/local/lib/libertix/configure-target.sh \
         /mnt/target/tmp/libertix-configure-target.sh
+    install -m 0755 /usr/local/lib/libertix/configure-target-main.sh \
+        /mnt/target/tmp/configure-target-main.sh
     install -m 0755 /usr/local/lib/libertix/10_libertix \
         /mnt/target/tmp/10_libertix
     install -m 0755 /usr/local/lib/libertix/render-libertix-menu.py \
@@ -47,6 +49,14 @@ install_target_configuration_payload() {
         /mnt/target/usr/local/bin/first-boot-resize.sh
     install -m 0644 /usr/local/lib/libertix/first-boot-resize.service \
         /mnt/target/etc/systemd/system/first-boot-resize.service
+    install -m 0755 /usr/local/lib/libertix/libertix-apply-keyboard-once.sh \
+        /mnt/target/usr/local/bin/libertix-apply-keyboard-once
+    install -m 0755 /usr/local/lib/libertix/configure-development-access.sh \
+        /mnt/target/tmp/libertix-configure-development-access.sh
+    install -m 0755 /usr/local/lib/libertix/libertix-development-ssh-first-boot.sh \
+        /mnt/target/tmp/libertix-development-ssh-first-boot.sh
+    install -m 0644 /usr/local/lib/libertix/libertix-development-ssh.service \
+        /mnt/target/tmp/libertix-development-ssh.service
 }
 
 run_target_configuration() {
@@ -54,6 +64,7 @@ run_target_configuration() {
         LANGUAGE_CODE="$LANGUAGE_CODE" \
         SYSTEM_LANG="$SYSTEM_LANG" \
         KEYBOARD_LAYOUT="$KEYBOARD_LAYOUT" \
+        KEYBOARD_VARIANT="$KEYBOARD_VARIANT" \
         KEYBOARD_MODEL="$KEYBOARD_MODEL" \
         TIMEZONE="$TIMEZONE" \
         USERNAME="$USERNAME" \
@@ -65,12 +76,23 @@ run_target_configuration() {
         SHARE_WINDOWS_FILES_IN_LINUX="$SHARE_WINDOWS_FILES_IN_LINUX" \
         SHARE_LINUX_FILES_IN_WINDOWS="$SHARE_LINUX_FILES_IN_WINDOWS" \
         WINDOWS_PROFILES_JSON_BASE64="$WINDOWS_PROFILES_JSON_BASE64" \
+        DEVELOPMENT_SSH_ENABLED="$DEVELOPMENT_SSH_ENABLED" \
+        DEVELOPMENT_STATIC_IPV4_ADDRESS="$DEVELOPMENT_STATIC_IPV4_ADDRESS" \
+        DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH="$DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH" \
+        DEVELOPMENT_STATIC_IPV4_GATEWAY="$DEVELOPMENT_STATIC_IPV4_GATEWAY" \
+        DEVELOPMENT_DNS_PRIMARY="$DEVELOPMENT_DNS_PRIMARY" \
+        DEVELOPMENT_DNS_SECONDARY="$DEVELOPMENT_DNS_SECONDARY" \
         GRUB_RESOLUTION="$GRUB_RESOLUTION" \
+        LIBERTIX_FIRMWARE_MODE="$LIBERTIX_FIRMWARE_MODE" \
         /tmp/libertix-configure-target.sh
 
     rm -f /mnt/target/tmp/libertix-configure-target.sh \
+        /mnt/target/tmp/configure-target-main.sh \
         /mnt/target/tmp/10_libertix \
-        /mnt/target/tmp/render-libertix-menu.py
+        /mnt/target/tmp/render-libertix-menu.py \
+        /mnt/target/tmp/libertix-configure-development-access.sh \
+        /mnt/target/tmp/libertix-development-ssh-first-boot.sh \
+        /mnt/target/tmp/libertix-development-ssh.service
 }
 
 configure_target_system() {

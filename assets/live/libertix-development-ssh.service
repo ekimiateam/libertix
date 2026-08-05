@@ -1,0 +1,13 @@
+[Unit]
+Description=Enable Libertix development SSH access
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/libertix/development-ssh-ready
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/libertix-development-ssh-first-boot
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=multi-user.target

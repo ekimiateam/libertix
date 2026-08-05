@@ -7,7 +7,7 @@
       mc:Ignorable="d"
       Title="ApplyChanges">
 
-    <Grid Background="#232136">
+    <Grid Background="{DynamicResource PrimaryBackground}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -20,53 +20,48 @@
                Margin="20"
                FontSize="48"
                FontWeight="Light"
-               Foreground="#E0DEF4"/>
+               Foreground="{DynamicResource TextPrimary}"/>
 
         <StackPanel Grid.Row="1"
                     Width="600"
                     VerticalAlignment="Center">
 
-            <!-- Progress Section -->
             <Border x:Name="ProgressPanel"
-                    Background="#2a273f"
+                    Background="{DynamicResource SecondaryBackground}"
                     CornerRadius="8"
                     Padding="20"
-                    BorderBrush="#363252"
+                    BorderBrush="{DynamicResource PanelBorder}"
                     BorderThickness="1">
                 <StackPanel>
-                    <!-- Current Step -->
                     <TextBlock x:Name="CurrentStepText"
                                Text="{DynamicResource ApplyChangesWaiting}"
-                               Foreground="#E0DEF4"
+                               Foreground="{DynamicResource TextPrimary}"
                                FontSize="18"
                                FontWeight="SemiBold"
                                HorizontalAlignment="Center"
                                Margin="0,0,0,15"/>
 
-                    <!-- Progress Bar -->
                     <ProgressBar x:Name="ProgressBar"
                                  Height="20"
                                  Minimum="0"
                                  Maximum="100"
                                  Value="0"
-                                 Foreground="#3e8fb0"
-                                 Background="#363252"/>
+                                 Foreground="{DynamicResource AccentColor}"
+                                 Background="{DynamicResource PanelBorder}"/>
 
-                    <!-- Progress Percentage -->
                     <TextBlock x:Name="ProgressText"
                                Text="0%"
-                               Foreground="#908CAA"
+                               Foreground="{DynamicResource TextSecondary}"
                                FontSize="14"
                                HorizontalAlignment="Center"
                                Margin="0,10,0,0"/>
 
-                    <!-- Log Output -->
                     <TextBox x:Name="LogOutput"
                              Height="180"
                              Margin="0,20,0,0"
-                             Background="#1e1c31"
-                             Foreground="#908CAA"
-                             BorderBrush="#363252"
+                             Background="{DynamicResource DeepBackground}"
+                             Foreground="{DynamicResource TextSecondary}"
+                             BorderBrush="{DynamicResource PanelBorder}"
                              BorderThickness="1"
                              FontFamily="Consolas"
                              FontSize="12"
@@ -85,7 +80,6 @@
                 </StackPanel>
             </Border>
 
-            <!-- Summary Section -->
         </StackPanel>
 
         <Grid Grid.Row="2" Margin="20">
@@ -119,12 +113,12 @@
         <Grid x:Name="ExpandedLogsOverlay"
               Grid.RowSpan="3"
               Panel.ZIndex="10"
-              Background="#EE1E1C31"
+              Background="{DynamicResource OverlayBackground}"
               Visibility="Collapsed">
             <Border Margin="45"
                     Padding="20"
-                    Background="#2a273f"
-                    BorderBrush="#363252"
+                    Background="{DynamicResource SecondaryBackground}"
+                    BorderBrush="{DynamicResource PanelBorder}"
                     BorderThickness="1"
                     CornerRadius="8">
                 <Grid>
@@ -136,16 +130,16 @@
 
                     <TextBlock Grid.Row="0"
                                Text="{DynamicResource ApplyChangesLogsTitle}"
-                               Foreground="#E0DEF4"
+                               Foreground="{DynamicResource TextPrimary}"
                                FontSize="22"
                                FontWeight="SemiBold"
                                Margin="0,0,0,15"/>
 
                     <TextBox x:Name="ExpandedLogOutput"
                              Grid.Row="1"
-                             Background="#1e1c31"
-                             Foreground="#908CAA"
-                             BorderBrush="#363252"
+                             Background="{DynamicResource DeepBackground}"
+                             Foreground="{DynamicResource TextSecondary}"
+                             BorderBrush="{DynamicResource PanelBorder}"
                              BorderThickness="1"
                              FontFamily="Consolas"
                              FontSize="13"

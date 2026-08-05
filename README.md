@@ -11,7 +11,8 @@ configures a dual-boot menu for either BIOS/MBR or UEFI/GPT machines.
 ## What Libertix does
 
 1. Checks the firmware, disk layout, storage controller, available memory, BitLocker state and
-   shrinkable space before changing the disk.
+   shrinkable space before changing the disk. On UEFI systems, this check temporarily writes and
+   restores a firmware boot variable to verify that the later one-shot boot can be trusted.
 2. Builds and persists one installation plan describing the selected disk, Windows and Recovery
    partitions, requested Linux size, staging size and expected file hashes.
 3. Shrinks the Windows partition while preserving the detected Recovery partition.
@@ -168,6 +169,18 @@ Development and test runs can override it for one process without changing the p
 
 The override must be an absolute HTTP or HTTPS URL without embedded credentials, query parameters or
 fragments.
+
+Automated development installations also use an explicit static-address option:
+
+```powershell
+.\Libertix.exe --filepool-base-url "http://127.0.0.1:8000/filepool" `
+  --dev-ssh-static-ip "192.168.1.240"
+```
+
+`--dev-ssh-static-ip` is intentionally absent from production launches. It configures the installed
+system with the supplied `/24` address, gateway `192.168.1.1`, DNS servers `8.8.8.8` and `1.1.1.1`,
+then installs and enables password SSH for the Linux account created by Libertix. The option accepts
+only usable addresses in `192.168.1.0/24`.
 
 ## Build the Windows application
 

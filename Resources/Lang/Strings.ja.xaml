@@ -2,20 +2,15 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
     
-    <!-- MainWindow -->
     <system:String x:Key="Welcome">Libertixへようこそ！</system:String>
     <system:String x:Key="Subtitle">シンプルでモダンなLinuxインストーラー</system:String>
     <system:String x:Key="GetStarted">始める</system:String>
     <system:String x:Key="Language">言語</system:String>
 
-    <!-- ChooseDistro -->
     <system:String x:Key="ChooseDistroTitle">お好みのLinuxディストリビューションを選ぶ</system:String>
     
-    <!-- Distro Descriptions -->
-    <system:String x:Key="ZorinDescription">誰でも使える、安全で使いやすい強力なオペレーティングシステム。</system:String>
     <system:String x:Key="UbuntuDescription">高速、無料、新機能が充実。世界で最も人気のあるLinuxオペレーティングシステム。</system:String>
 
-    <!-- ResizeDisk -->
     <system:String x:Key="ResizeDiskTitle">ディスクのサイズを変更</system:String>
     <system:String x:Key="Windows">Windows</system:String>
     <system:String x:Key="Linux">Linux</system:String>
@@ -23,31 +18,44 @@
     <system:String x:Key="FreeUpSpace">Linuxをインストールするにはさらに空き領域が必要です。不要なファイルを削除して再試行してください。</system:String>
     <system:String x:Key="OpenDiskCleanup">ディスククリーンアップを開く</system:String>
 
-    <!-- AccountCreation -->
     <system:String x:Key="AccountCreationTitle">Linuxアカウントを作成</system:String>
     <system:String x:Key="Username">ユーザー名</system:String>
     <system:String x:Key="Password">パスワード</system:String>
     <system:String x:Key="ConfirmPassword">パスワードの確認</system:String>
     <system:String x:Key="ComputerName">コンピューター名</system:String>
 
-    <!-- Common -->
     <system:String x:Key="Back">戻る</system:String>
     <system:String x:Key="Next">次へ</system:String>
     
-    <!-- Errors -->
+    <system:String x:Key="ResizeDiskSizeEmpty">サイズを空にすることはできません</system:String>
+    <system:String x:Key="ResizeDiskSizeTooSmall">サイズは少なくとも {0} GB 必要です</system:String>
+    <system:String x:Key="ResizeDiskNotEnoughSpace">空き容量が不足しています。Windows には {0} GB の空きが、Linux には少なくとも {1} GB が必要です</system:String>
+    <system:String x:Key="ResizeDiskSizeTooLarge">サイズは {0:N0} GB を超えられません (Windows には {1} GB の空きが必要です)</system:String>
+    <system:String x:Key="ResizeDiskInvalidNumber">有効な数値を入力してください</system:String>
+    <system:String x:Key="ResizeDiskNoSpace">インストールに必要なディスク領域がありません。</system:String>
+    <system:String x:Key="ResizeDiskErrorTitle">ディスク サイズ エラー</system:String>
+    <system:String x:Key="ResizeDiskWindowsUsedSpace">Windows 使用領域: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeSpace">Windows 空き領域: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskIsoSize">インストーラー ISO: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskLinuxMinimum">Linux の最小領域: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskAdditionalSpace">追加で必要な領域: {0:N1} GB</system:String>
+    <system:String x:Key="ErrorTitle">エラー</system:String>
     <system:String x:Key="DistroLoadError">ディストリビューションのリストを読み込めませんでした。インターネット接続を確認して、もう一度お試しください。</system:String>
 
-    <!-- Password Validation -->
     <system:String x:Key="PasswordRequired">パスワードは必須です</system:String>
-    <system:String x:Key="PasswordTooShort">パスワードは4文字以上必要です</system:String>
-    <system:String x:Key="PasswordTooLong">パスワードは8文字以内にしてください</system:String>
+    <system:String x:Key="PasswordTooShort">パスワードは8文字以上必要です</system:String>
+    <system:String x:Key="PasswordTooLong">パスワードは128文字以内にしてください</system:String>
+    <system:String x:Key="UsernameRequired">ユーザー名は必須です</system:String>
+    <system:String x:Key="UsernameInvalid">ユーザー名は英字で始まり、小文字、数字、ハイフンのみを使用してください</system:String>
+    <system:String x:Key="ConfirmPasswordRequired">パスワードを確認してください</system:String>
+    <system:String x:Key="PasswordsDoNotMatch">パスワードが一致しません</system:String>
+    <system:String x:Key="ComputerNameRequired">コンピューター名は必須です</system:String>
+    <system:String x:Key="ComputerNameInvalid">コンピューター名は英字で始まり、小文字、数字、ハイフンのみを使用してください</system:String>
 
-    <!-- Partition Warning -->
     <system:String x:Key="PartitionWarningTitle">警告：非標準のパーティション構成</system:String>
     <system:String x:Key="PartitionWarningMessage">このインストーラーはこのパーティション構成でテストされていません。正確に何をしているか理解していない限り、続行は強くお勧めしません。</system:String>
     <system:String x:Key="PartitionWarningCheckbox">理解しました</system:String>
 
-    <!-- Warning Confirmation -->
     <system:String x:Key="WarningTitle">警告</system:String>
     <system:String x:Key="WarningMessage">ディスクパーティションに重大な変更を加えようとしています。この操作はハードドライブを変更し、Windowsと共にデュアルブートシステムをインストールします。</system:String>
     <system:String x:Key="WarningRisks">リスク：
@@ -61,12 +69,12 @@
 - Windows回復USBを用意してください
 - 必要に応じて技術的な知識のある人を近くに用意してください
 - インストールプロセスが開始したら中断しないでください</system:String>
+    <system:String x:Key="WarningHibernationNotice">Windows ファイル共有が有効な間は、Windows の休止状態と高速スタートアップが無効になります。これにより、Windows がメタデータをキャッシュしている NTFS ボリュームへ Linux が書き込むことを防ぎます。</system:String>
     <system:String x:Key="WarningConfirmCheckbox">リスクを理解し、重要なデータをバックアップしました</system:String>
     <system:String x:Key="WarningConfirmButton">理解しました、続行</system:String>
 
-    <!-- 互換性チェック -->
     <system:String x:Key="CompatibilityTitle">互換性チェック</system:String>
-    <system:String x:Key="CompatibilityDescription">続行する前に、Libertix がメモリ、ファームウェア、ストレージを確認します。</system:String>
+    <system:String x:Key="CompatibilityDescription">続行する前に、Libertix がメモリ、ファームウェア、ストレージを確認します。UEFI システムでは、ファームウェア検査が起動変数を一時的に書き込み、その後元に戻します。</system:String>
     <system:String x:Key="CompatibilityStarting">チェックを開始しています...</system:String>
     <system:String x:Key="CompatibilityRetry">再試行</system:String>
     <system:String x:Key="CompatibilityContinue">続行</system:String>
@@ -76,7 +84,6 @@
     <system:String x:Key="CompatibilityWarningPrefix">警告: </system:String>
     <system:String x:Key="CompatibilityUnexpectedPrefix">COMPAT_E_UNEXPECTED: </system:String>
 
-    <!-- ファイル共有 -->
     <system:String x:Key="SharingTitle">ファイル共有</system:String>
     <system:String x:Key="SharingDescription">各システムからアクセスできるファイルを選択してください。</system:String>
     <system:String x:Key="SharingWindowsToLinuxTitle">Windows のファイルを Mint に表示</system:String>
@@ -84,7 +91,6 @@
     <system:String x:Key="SharingLinuxToWindowsTitle">Linux のファイルを Windows に表示（読み取り専用）</system:String>
     <system:String x:Key="SharingLinuxToWindowsDescription">Windows は ext4 パーティションを変更せずに Linux のファイルを参照できます。</system:String>
 
-    <!-- UEFI ブート回復 -->
     <system:String x:Key="UefiFallbackTitle">UEFI ブートでインストーラーを起動できませんでした</system:String>
     <system:String x:Key="UefiFallbackDescription">live のマーカーがないまま Windows に戻りました。Libertix は検証済みのローカルコピーを保持しており、検証済みの UEFI ファームウェアエントリから live を再起動できます。</system:String>
     <system:String x:Key="UefiFallbackChecking">回復状態を確認しています...</system:String>
@@ -108,7 +114,6 @@
     <system:String x:Key="UefiFallbackRestoreFailed">UEFI の復元に失敗しました。</system:String>
     <system:String x:Key="UefiFallbackTimeoutLog">エラー: 回復処理が 30 分の制限時間を超えました</system:String>
 
-    <!-- Apply Changes -->
     <system:String x:Key="ApplyChangesTitle">変更を適用</system:String>
     <system:String x:Key="ApplyChangesWaiting">パーティション作成の準備完了</system:String>
     <system:String x:Key="ApplyChangesSummary">インストール概要</system:String>
@@ -117,7 +122,7 @@
     <system:String x:Key="ApplyChangesUsername">ユーザー名:</system:String>
     <system:String x:Key="ApplyChangesStart">インストール開始</system:String>
     <system:String x:Key="ApplyChangesStep1">Linux用にWindowsパーティションを縮小中...</system:String>
-    <system:String x:Key="ApplyChangesStep2">FAT32ブートパーティションを作成中（Z:）...</system:String>
+    <system:String x:Key="ApplyChangesStep2">FAT32ブートパーティションを作成中...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">ディスク更新を待機中...</system:String>
     <system:String x:Key="ApplyChangesStep3">Linux用にWindowsパーティションを縮小中...</system:String>
     <system:String x:Key="ApplyChangesComplete">パーティション作成完了！</system:String>
@@ -135,14 +140,14 @@
     <system:String x:Key="ApplyChangesPreparingWindowsShare">Windows ファイル共有を準備しています...</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">UEFI インストールを準備しています...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Secure Boot を確認しています...</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindowsInit">Windows C: の暗号化解除を初期化しています...</system:String>
-    <system:String x:Key="ApplyChangesWindowsDecrypted">Windows C: の暗号化を解除しました</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindows">Windows C: の暗号化を解除しています...</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Windows C: の暗号化を解除しています... {0}%</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindowsInit">Windows {0} の暗号化解除を初期化しています...</system:String>
+    <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} の暗号化を解除しました</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindows">Windows {0} の暗号化を解除しています...</system:String>
+    <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Windows {0} の暗号化を解除しています... {1}%</system:String>
     <system:String x:Key="ApplyChangesDownloading">ダウンロードしています...</system:String>
     <system:String x:Key="ApplyChangesDownloadingIso">ISO をダウンロードしています...</system:String>
     <system:String x:Key="ApplyChangesIsoCopied">ローカルフォルダーから ISO をコピーしました</system:String>
-    <system:String x:Key="ApplyChangesCopyingIsoContents">ISO の内容を Z: にコピーしています...</system:String>
+    <system:String x:Key="ApplyChangesCopyingIsoContents">ISO の内容をコピーしています...</system:String>
     <system:String x:Key="ApplyChangesDownloadingLinuxIso">Linux インストーラー ISO をダウンロードしています...</system:String>
     <system:String x:Key="ApplyChangesLinuxIsoCopied">ローカルフォルダーから Linux インストーラー ISO をコピーしました</system:String>
     <system:String x:Key="ApplyChangesWritingConfiguration">設定を書き込んでいます...</system:String>
@@ -167,15 +172,15 @@
     <system:String x:Key="ApplyChangesBitLockerReenableDetails">インストールはキャンセルされ、ディスクとブートの変更は復元されました。BitLocker の暗号化解除が継続または完了したため、この Windows エディションでは自動的に再有効化できません。復旧完了と判断する前に、Windows の設定で暗号化を再度有効にしてください。</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenableTitle">Libertix - BitLocker を再度有効化</system:String>
     <system:String x:Key="ApplyChangesRollbackIncompleteTitle">Libertix - ロールバック未完了</system:String>
-    <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">インストールはキャンセルされましたが、UEFI ロールバックを確認できませんでした。再起動せず、C:\LibertixInstallLogs を確認してください。</system:String>
-    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">準備に失敗し、自動ロールバックを確認できませんでした。インストールを再開せず、C:\LibertixInstallRecovery\recovery.log を確認してください。</system:String>
+    <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">インストールはキャンセルされましたが、UEFI ロールバックを確認できませんでした。再起動せず、{0} を確認してください。</system:String>
+    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">準備に失敗し、自動ロールバックを確認できませんでした。インストールを再開せず、{0} を確認してください。</system:String>
     <system:String x:Key="CloseConfirmationTitle">Libertix を閉じる</system:String>
     <system:String x:Key="CloseConfirmationMessage">Libertix を閉じてもよろしいですか？</system:String>
     <system:String x:Key="TrayInstallTitle">Libertix のインストール中</system:String>
     <system:String x:Key="TrayInstallMessage">インストールはバックグラウンドで続行中です。時計の近くにある Libertix アイコンをダブルクリックするとウィンドウを再表示できます。</system:String>
+    <system:String x:Key="TrayOpenLibertix">Libertix を開く</system:String>
     <system:String x:Key="PartitionSafetyBlockMessage">この安全性チェックが解決されるまでインストールはブロックされます。</system:String>
 
-    <!-- Libertix について -->
     <system:String x:Key="AboutButton">このアプリについて</system:String>
     <system:String x:Key="AboutTitle">Libertix について</system:String>
     <system:String x:Key="AboutSubtitle">安全な Linux デュアルブート環境を実現する開発者とコミュニティ。</system:String>

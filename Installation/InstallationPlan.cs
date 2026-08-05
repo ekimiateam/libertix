@@ -42,6 +42,10 @@ namespace Libertix.Installation
 
         [JsonPropertyName("runtime")]
         public InstallationRuntime Runtime { get; set; }
+
+        [JsonPropertyName("development")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public InstallationDevelopmentOptions Development { get; set; }
     }
 
     public static class InstallationFirmware
@@ -97,6 +101,9 @@ namespace Libertix.Installation
 
         [JsonPropertyName("keyboardLayout")]
         public string KeyboardLayout { get; set; }
+
+        [JsonPropertyName("keyboardVariant")]
+        public string KeyboardVariant { get; set; } = string.Empty;
 
         [JsonPropertyName("keyboardModel")]
         public string KeyboardModel { get; set; }
@@ -202,5 +209,23 @@ namespace Libertix.Installation
 
         [JsonPropertyName("recoveryRunId")]
         public string RecoveryRunId { get; set; }
+    }
+
+    public sealed class InstallationDevelopmentOptions
+    {
+        [JsonPropertyName("enableSsh")]
+        public bool EnableSsh { get; set; }
+
+        [JsonPropertyName("staticIpv4Address")]
+        public string StaticIpv4Address { get; set; }
+
+        [JsonPropertyName("staticIpv4PrefixLength")]
+        public int StaticIpv4PrefixLength { get; set; }
+
+        [JsonPropertyName("staticIpv4Gateway")]
+        public string StaticIpv4Gateway { get; set; }
+
+        [JsonPropertyName("dnsServers")]
+        public string[] DnsServers { get; set; }
     }
 }

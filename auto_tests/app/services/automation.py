@@ -16,6 +16,7 @@ from app.config import Settings, VMConfig
 from app.errors import WorkflowError
 from app.models import OperationResult, SourceMode, StepResult
 from app.services.automation_monitoring import InstallationMonitoringMixin
+from app.services.automation_postinstall import PostInstallValidationMixin
 from app.services.automation_preflight import AutomationPreflight
 from app.services.automation_types import AutomationOptions, WizardProfile
 from app.services.automation_types import Point as Point
@@ -26,7 +27,11 @@ from app.services.validation import ValidationService
 logger = logging.getLogger(__name__)
 
 
-class AutomationService(WizardAutomationMixin, InstallationMonitoringMixin):
+class AutomationService(
+    WizardAutomationMixin,
+    InstallationMonitoringMixin,
+    PostInstallValidationMixin,
+):
     """Automate the Libertix wizard through the real VNC desktop.
 
     The old standalone VM500 script was useful for proving the path. This
@@ -113,18 +118,18 @@ class AutomationService(WizardAutomationMixin, InstallationMonitoringMixin):
                 for future in as_completed(futures):
                     vm_result = future.result()
                     result.steps.extend(vm_result.steps)
-                    if vm_result.status == "problème":
+                    if vm_result.status == "error":
                         failures.append(vm_result)
                 if failures:
                     messages = "; ".join(item.message for item in failures)
                     return OperationResult(
-                        status="problème",
+                        status="error",
                         operation="automation",
                         message=f"Automation échouée sur une ou plusieurs VM: {messages}",
                         steps=result.steps,
                     )
             suffix = (
-                "préparation vérifiée jusqu'au démarrage du live"
+                "installation et validations Linux/Windows terminées"
                 if apply and monitor_iso
                 else "clic Apply envoyé sans validation de fin"
                 if apply
@@ -215,6 +220,8 @@ class AutomationService(WizardAutomationMixin, InstallationMonitoringMixin):
             s.proxmox_token_secret.get_secret_value(),
             timeout=s.proxmox_timeout_seconds,
             task_timeout=s.proxmox_task_timeout_seconds,
+            verify_tls=s.proxmox_verify_tls,
+            ca_bundle=s.proxmox_ca_bundle,
         )
 
     def _restore_clean_snapshot(self, result: ResultBuilder, profile: WizardProfile) -> None:
@@ -271,7 +278,15 @@ class AutomationService(WizardAutomationMixin, InstallationMonitoringMixin):
                 vm=vm.name,
                 **launch,
             )
-            self._click_wizard(vm, options, profile, result)
+            monitor_outcome = self._click_wizard(vm, options, profile, result)
+            if options.apply and options.monitor_iso:
+                if monitor_outcome is None:
+                    raise WorkflowError(
+                        "automation.post_install",
+                        "Installed-system monitoring ended without a boot outcome",
+                        details={"vm": vm.name, "host": vm.host},
+                    )
+                self._run_post_install_validation(vm, options, result, monitor_outcome)
             return result.success(f"Automatisation terminée sur {vm.name}")
         except WorkflowError as exc:
             return result.failure(exc)
@@ -337,6 +352,7 @@ class AutomationService(WizardAutomationMixin, InstallationMonitoringMixin):
                     "executable": str(executable),
                     "task_name": task_name,
                     "filepool_base_url": self.settings.filepool_base_url,
+                    "development_static_ipv4": vm.host,
                 },
                 step="automation.launch_elevated",
                 timeout=90,

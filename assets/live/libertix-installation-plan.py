@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import ipaddress
 import json
 import re
 import sys
@@ -20,6 +21,7 @@ LARGE_INSTALLATION_STAGING_SIZE_GIB = 8
 HEX_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 USERNAME_PATTERN = re.compile(r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$")
+XKB_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 
 
 class PlanValidationError(ValueError):
@@ -112,6 +114,14 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError("locale.languageCode must be one of: en, fr, es, ja")
     for name in ("systemLanguage", "keyboardLayout", "keyboardModel", "timezone"):
         require_text(require_property(locale, name, "locale"), f"locale.{name}")
+    for name in ("keyboardLayout", "keyboardModel"):
+        if not XKB_NAME_PATTERN.fullmatch(locale[name]):
+            raise PlanValidationError(f"locale.{name} is not a valid XKB name")
+    keyboard_variant = locale.get("keyboardVariant", "")
+    if not isinstance(keyboard_variant, str) or (
+        keyboard_variant and not XKB_NAME_PATTERN.fullmatch(keyboard_variant)
+    ):
+        raise PlanValidationError("locale.keyboardVariant is not a valid XKB variant name")
 
     account = require_mapping(root.get("account"), "account")
     if not USERNAME_PATTERN.fullmatch(str(account.get("username", ""))):
@@ -208,6 +218,40 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         if not HEX_ID_PATTERN.fullmatch(str(recovery_id)):
             raise PlanValidationError("runtime.recoveryRunId is invalid")
 
+    development = root.get("development")
+    if development is not None:
+        development = require_mapping(development, "development")
+        if development.get("enableSsh") is not True:
+            raise PlanValidationError("development.enableSsh must be true")
+        address_text = require_text(
+            development.get("staticIpv4Address"),
+            "development.staticIpv4Address",
+        )
+        try:
+            address = ipaddress.IPv4Address(address_text)
+        except ipaddress.AddressValueError as error:
+            raise PlanValidationError(
+                "development.staticIpv4Address must be IPv4"
+            ) from error
+        if address not in ipaddress.IPv4Network("192.168.1.0/24") or int(address) & 0xFF in {
+            0,
+            1,
+            255,
+        }:
+            raise PlanValidationError(
+                "development.staticIpv4Address must be usable in 192.168.1.0/24"
+            )
+        if development.get("staticIpv4PrefixLength") != 24:
+            raise PlanValidationError("development.staticIpv4PrefixLength must be 24")
+        if development.get("staticIpv4Gateway") != "192.168.1.1":
+            raise PlanValidationError(
+                "development.staticIpv4Gateway must be 192.168.1.1"
+            )
+        if development.get("dnsServers") != ["8.8.8.8", "1.1.1.1"]:
+            raise PlanValidationError(
+                "development.dnsServers must contain 8.8.8.8 then 1.1.1.1"
+            )
+
     return root
 
 
@@ -228,6 +272,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
     installer = disk["installer"]
     runtime = plan["runtime"]
     features = plan["features"]
+    development = plan.get("development")
 
     final_size = int(installer["finalSizeBytes"])
 
@@ -237,6 +282,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "LANGUAGE_CODE": locale["languageCode"],
         "SYSTEM_LANG": locale["systemLanguage"],
         "KEYBOARD_LAYOUT": locale["keyboardLayout"],
+        "KEYBOARD_VARIANT": locale.get("keyboardVariant", ""),
         "KEYBOARD_MODEL": locale["keyboardModel"],
         "TIMEZONE": locale["timezone"],
         "USERNAME": account["username"],
@@ -269,6 +315,18 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "SHARE_WINDOWS_FILES_IN_LINUX": str(features["shareWindowsFilesInLinux"]).lower(),
         "SHARE_LINUX_FILES_IN_WINDOWS": str(features["shareLinuxFilesInWindows"]).lower(),
         "WINDOWS_PROFILES_JSON_BASE64": features["windowsProfilesJsonBase64"],
+        "DEVELOPMENT_SSH_ENABLED": str(development is not None).lower(),
+        "DEVELOPMENT_STATIC_IPV4_ADDRESS": (
+            development["staticIpv4Address"] if development else ""
+        ),
+        "DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH": (
+            str(development["staticIpv4PrefixLength"]) if development else ""
+        ),
+        "DEVELOPMENT_STATIC_IPV4_GATEWAY": (
+            development["staticIpv4Gateway"] if development else ""
+        ),
+        "DEVELOPMENT_DNS_PRIMARY": development["dnsServers"][0] if development else "",
+        "DEVELOPMENT_DNS_SECONDARY": development["dnsServers"][1] if development else "",
     }
     return values
 

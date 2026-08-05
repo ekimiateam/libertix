@@ -1,33 +1,14 @@
 #!/bin/bash
 
-# Discover the requested UI language before the installer has parsed the full
-# plan. The live medium is already mounted when the runner starts.
+# Resolve the UI language from the validated installation plan loaded by the
+# runner before this helper is called.
 detect_libertix_language() {
-    local config candidate value
+    local value
 
     if [[ "${LANGUAGE_CODE:-}" =~ ^(en|fr|es|ja)$ ]]; then
         printf '%s\n' "$LANGUAGE_CODE"
         return 0
     fi
-
-    for config in \
-        /run/libertix/config.txt \
-        /run/live/medium/config.txt \
-        /lib/live/mount/medium/config.txt \
-        /cdrom/config.txt; do
-        [ -f "$config" ] || continue
-        candidate=$(sed -n 's/^LANGUAGE_CODE=//p' "$config" | tail -1)
-        candidate=${candidate#\"}
-        candidate=${candidate%\"}
-        candidate=${candidate#\'}
-        candidate=${candidate%\'}
-        case "$candidate" in
-            en|fr|es|ja)
-                printf '%s\n' "$candidate"
-                return 0
-                ;;
-        esac
-    done
 
     value=${SYSTEM_LANG:-en}
     case "$value" in

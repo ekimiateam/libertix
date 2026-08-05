@@ -177,7 +177,8 @@ function Start-Aria2Download {
     $downloadPath = $destinationFullPath
     if ($destinationDir -match '^[A-Za-z]:\\?$') {
         # aria2 rejects drive-root output directories on some Windows setups.
-        # Download to a normal directory first, then move atomically to C:\mint.iso.
+        # Download to a normal directory first, then move atomically to the
+        # destination on the Windows system volume.
         $downloadDir = $Aria2DownloadDir
         $downloadPath = Join-Path $downloadDir $destinationName
     }
@@ -251,7 +252,7 @@ function Start-RobustDownload {
     }
 }
 
-function Ensure-MintIsoOnWindows {
+function Set-MintIsoOnWindows {
     $existing = Get-Item -LiteralPath $MintIsoPath -ErrorAction SilentlyContinue
     if ($existing -and $existing.Length -gt 100MB) {
         $existingHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $MintIsoPath).Hash.ToLowerInvariant()

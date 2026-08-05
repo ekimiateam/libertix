@@ -18,6 +18,7 @@ class FakeChannel:
         self.stderr = bytearray(stderr)
         self.exit_code = exit_code
         self.closed = False
+        self.input_closed = False
 
     def recv_ready(self) -> bool:
         return bool(self.stdout)
@@ -44,15 +45,36 @@ class FakeChannel:
     def close(self) -> None:
         self.closed = True
 
+    def shutdown_write(self) -> None:
+        self.input_closed = True
+
+
+class FakeStdin:
+    def __init__(self, channel: FakeChannel) -> None:
+        self.channel = channel
+        self.content = ""
+
+    def write(self, content: str) -> None:
+        self.content += content
+
+    def flush(self) -> None:
+        pass
+
 
 class FakeParamikoClient:
     def __init__(self, channel: FakeChannel | None = None) -> None:
         self.channel = channel or FakeChannel()
         self.connect_kwargs: dict[str, object] | None = None
+        self.loaded_host_keys: str | None = None
+        self.missing_host_key_policy: object | None = None
         self.closed = False
+        self.last_stdin: FakeStdin | None = None
 
-    def set_missing_host_key_policy(self, _policy: object) -> None:
-        pass
+    def load_host_keys(self, path: str) -> None:
+        self.loaded_host_keys = path
+
+    def set_missing_host_key_policy(self, policy: object) -> None:
+        self.missing_host_key_policy = policy
 
     def connect(self, host: str, **kwargs: object) -> None:
         self.connect_kwargs = {"host": host, **kwargs}
@@ -60,7 +82,12 @@ class FakeParamikoClient:
     def exec_command(self, _command: str, *, timeout: float):
         assert timeout > 0
         stream = SimpleNamespace(channel=self.channel)
-        return None, stream, stream
+        self.last_stdin = FakeStdin(self.channel)
+        return self.last_stdin, stream, stream
+
+    def get_transport(self):
+        key = SimpleNamespace(asbytes=lambda: b"ephemeral-test-key")
+        return SimpleNamespace(get_remote_server_key=lambda: key)
 
     def close(self) -> None:
         self.closed = True
@@ -72,7 +99,14 @@ def test_ssh_client_connects_with_password_only_and_drains_both_streams(
     transport = FakeParamikoClient(FakeChannel(b"result\n", b"warning\n", 0))
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
 
-    with SSHClient("example.test", "oem", "secret", port=2222, connect_timeout=4) as client:
+    with SSHClient(
+        "example.test",
+        "oem",
+        "secret",
+        known_hosts_path="/tmp/test-known-hosts",
+        port=2222,
+        connect_timeout=4,
+    ) as client:
         result = client.run("hostname", step="ssh.hostname", timeout=5)
 
     assert result.stdout == "result"
@@ -90,6 +124,8 @@ def test_ssh_client_connects_with_password_only_and_drains_both_streams(
         "allow_agent": False,
     }
     assert transport.closed is True
+    assert transport.loaded_host_keys == "/tmp/test-known-hosts"
+    assert isinstance(transport.missing_host_key_policy, ssh_module.paramiko.RejectPolicy)
 
 
 def test_ssh_failure_never_exposes_a_sensitive_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +133,9 @@ def test_ssh_failure_never_exposes_a_sensitive_command(monkeypatch: pytest.Monke
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
 
     with (
-        SSHClient("example.test", "oem", "secret") as client,
+        SSHClient(
+            "example.test", "oem", "secret", known_hosts_path="/tmp/test-known-hosts"
+        ) as client,
         pytest.raises(WorkflowError) as caught,
     ):
         client.run(
@@ -110,6 +148,26 @@ def test_ssh_failure_never_exposes_a_sensitive_command(monkeypatch: pytest.Monke
     assert caught.value.details["command"] == "[COMMANDE SENSIBLE MASQUÉE]"
     assert "top-secret" not in str(caught.value.as_dict())
     assert caught.value.details["exit_code"] == 5
+
+
+def test_ssh_client_writes_sensitive_input_to_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = FakeParamikoClient()
+    monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
+
+    with SSHClient(
+        "example.test", "oem", "secret", known_hosts_path="/tmp/test-known-hosts"
+    ) as client:
+        client.run(
+            "sudo -S true",
+            step="ssh.stdin",
+            timeout=5,
+            sensitive=True,
+            stdin_data="secret\n",
+        )
+
+    assert transport.last_stdin is not None
+    assert transport.last_stdin.content == "secret\n"
+    assert transport.channel.input_closed is True
 
 
 def test_ssh_connection_failure_closes_the_partial_transport(
@@ -125,7 +183,7 @@ def test_ssh_connection_failure_closes_the_partial_transport(
 
     with (
         pytest.raises(WorkflowError) as caught,
-        SSHClient("example.test", "oem", "secret"),
+        SSHClient("example.test", "oem", "secret", known_hosts_path="/tmp/test-known-hosts"),
     ):
         pass
 

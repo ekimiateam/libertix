@@ -118,11 +118,227 @@ def test_shared_storage_converts_windows_paths_without_losing_segments(
     assert result.stdout.strip() == expected
 
 
+@pytest.mark.parametrize(
+    ("requested_bytes", "maximum_bytes", "expected_bytes", "accepted"),
+    [
+        (str(20 * 1024**3), str(20 * 1024**3), str(20 * 1024**3), True),
+        (
+            str(20 * 1024**3),
+            str(20 * 1024**3 - 1024**2),
+            str(20 * 1024**3 - 1024**2),
+            True,
+        ),
+        (str(20 * 1024**3), str(20 * 1024**3 - 1024**2 - 512), "", False),
+    ],
+)
+def test_shared_storage_bounds_mbr_alignment_shortfall(
+    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
+    requested_bytes: str,
+    maximum_bytes: str,
+    expected_bytes: str,
+    accepted: bool,
+) -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+
+    result = run_shell_function(
+        library,
+        "installer_partition_target_bytes",
+        requested_bytes,
+        maximum_bytes,
+    )
+
+    assert (result.returncode == 0) is accepted
+    assert result.stdout.strip() == expected_bytes
+
+
+def test_mbr_primary_slot_count_ignores_logical_partitions() -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+    # This is Parted 3.6 machine output from VM500. Unlike the human table, it
+    # omits the primary/extended/logical type column entirely.
+    layout = """BYT;
+/dev/sda:134217728s:scsi:512:512:msdos:ATA QEMU HARDDISK:;
+1:2048s:104447s:102400s:ntfs::boot;
+2:104448s:91172628s:91068181s:ntfs::;
+3:91172864s:133115903s:41943040s:::lba;
+5:91174912s:133115903s:41940992s:ext4::;
+4:133115904s:134213631s:1097728s:ntfs::msftres;
+"""
+    command = 'source "$1"; mbr_primary_slot_count_from_machine_output'
+
+    result = subprocess.run(
+        ["bash", "-c", command, "mbr-slot-test", str(library)],
+        input=layout,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "4"
+
+
+def test_mbr_empty_container_requires_the_logical_partition_to_be_gone() -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+    layout_with_logical = """BYT;
+/dev/sda:134217728s:scsi:512:512:msdos:ATA QEMU HARDDISK:;
+1:2048s:104447s:102400s:ntfs::boot;
+2:104448s:91172628s:91068181s:ntfs::;
+3:91172864s:133115903s:41943040s:::lba;
+5:91174912s:133115903s:41940992s:ext4::;
+4:133115904s:134213631s:1097728s:ntfs::msftres;
+"""
+    layout_without_logical = layout_with_logical.replace(
+        "5:91174912s:133115903s:41940992s:ext4::;\n", ""
+    )
+    command = 'source "$1"; mbr_empty_container_from_machine_output "$2" "$3"'
+
+    blocked = subprocess.run(
+        ["bash", "-c", command, "mbr-container-test", str(library), "91174912", "133115904"],
+        input=layout_with_logical,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    resolved = subprocess.run(
+        ["bash", "-c", command, "mbr-container-test", str(library), "91174912", "133115904"],
+        input=layout_without_logical,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert blocked.returncode == 2
+    assert blocked.stdout == ""
+    assert resolved.returncode == 0
+    assert resolved.stdout.strip() == "3:91172864:133115903"
+
+
+def test_mbr_owned_logical_layout_resolves_vm500_geometry() -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+    layout = """BYT;
+/dev/sda:134217728s:scsi:512:512:msdos:ATA QEMU HARDDISK:;
+1:2048s:104447s:102400s:ntfs::boot;
+2:104448s:91172628s:91068181s:ntfs::;
+3:91172864s:133115903s:41943040s:::lba;
+5:91174912s:133115903s:41940992s:ext4::;
+4:133115904s:134213631s:1097728s:ntfs::msftres;
+"""
+    command = 'source "$1"; mbr_owned_logical_layout_from_machine_output "$2" "$3"'
+
+    result = subprocess.run(
+        ["bash", "-c", command, "mbr-owned-layout", str(library), "91174912", "133115904"],
+        input=layout,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "5:91174912:133115903:3:91172864:133115903"
+
+
+def test_mbr_owned_logical_layout_rejects_an_unowned_second_logical_partition() -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+    layout = """BYT;
+/dev/sda:134217728s:scsi:512:512:msdos:ATA QEMU HARDDISK:;
+1:2048s:104447s:102400s:ntfs::boot;
+2:104448s:91172628s:91068181s:ntfs::;
+3:91172864s:133115903s:41943040s:::lba;
+5:91174912s:112146431s:20971520s:ext4::;
+6:112148480s:133115903s:20967424s:ext4::;
+4:133115904s:134213631s:1097728s:ntfs::msftres;
+"""
+    command = 'source "$1"; mbr_owned_logical_layout_from_machine_output "$2" "$3"'
+
+    result = subprocess.run(
+        ["bash", "-c", command, "mbr-owned-layout", str(library), "91174912", "133115904"],
+        input=layout,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize(("raw_type", "normalized"), [(" f \n", "f"), ("0x0F\n", "f")])
+def test_mbr_partition_type_normalization_ignores_sfdisk_spacing(
+    raw_type: str, normalized: str
+) -> None:
+    library = ROOT / "assets/live/libertix-storage-common.sh"
+    command = 'source "$1"; normalize_mbr_partition_type'
+
+    result = subprocess.run(
+        ["bash", "-c", command, "mbr-type-test", str(library)],
+        input=raw_type,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == normalized
+
+
+def test_bios_rollback_removes_only_a_proven_empty_extended_container() -> None:
+    rollback = read("assets/live/libertix-rollback-common.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    delete_index = rollback.index("delete_transaction_partition_best_effort || return 1")
+    cleanup_index = rollback.index("firmware_cleanup_partition_container_best_effort || return 1")
+    resize_index = rollback.index("if restore_windows_partition_best_effort; then")
+    assert delete_index < cleanup_index < resize_index
+
+    bios_cleanup = bios.split("firmware_cleanup_partition_container_best_effort()", 1)[1]
+    bios_cleanup = bios_cleanup.split("firmware_restore_boot_state_best_effort()", 1)[0]
+    assert "mbr_empty_container_from_machine_output" in bios_cleanup
+    assert 'sfdisk --part-type "$DISK" "$extended_number"' in bios_cleanup
+    assert 'parted -s "$DISK" rm "$extended_number"' in bios_cleanup
+    assert "firmware_cleanup_partition_container_best_effort()" in uefi
+
+    # -m is only defined for mounted filesystems and can report unrelated
+    # processes for raw block devices. Rollback checks the mount table, kernel
+    # holders, and direct device users separately instead.
+    assert 'fuser -m "$NEW_PART"' not in rollback
+    assert 'fuser "$NEW_PART"' in rollback
+    assert "/holders" in rollback
+
+
+def test_final_verification_counts_mbr_slots_instead_of_lsblk_children() -> None:
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    assert 'primary_slot_count="$(mbr_primary_slot_count "$DISK")"' in bios
+    assert 'primary_slot_count="$(mbr_primary_slot_count "$DISK")"' in uefi
+    assert "final verify: MBR partition count is" not in bios
+    assert "final verify: MBR partition count is" not in uefi
+
+
+def test_success_retires_stale_uefi_transaction_state_after_final_verification() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    verify_position = installer.index("final_verify_or_die")
+    finalize_position = installer.index("firmware_finalize_success_best_effort", verify_position)
+    success_position = installer.index("append_install_result true", finalize_position)
+
+    assert verify_position < finalize_position < success_position
+    assert "firmware_finalize_success_best_effort()" in bios
+    assert "uefi-transaction.json" in uefi
+    assert 'mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint"' in uefi
+    assert 'rm -f -- "$transaction_state"' in uefi
+
+
 def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
     apply_changes = read_apply_changes()
     uefi = read("Scripts/libertix-uefi-install.ps1")
-    for installer in (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")):
-        assert ". /usr/local/lib/libertix/libertix-install-platform-common.sh" in installer
+    installer = read("assets/live/libertix-install-main.sh")
+    assert ". /usr/local/lib/libertix/libertix-install-platform-common.sh" in installer
+    assert "libertix-install-main.sh" in read("iso/live/install-mint.sh")
+    assert "libertix-install-main.sh" in read("iso-uefi/live/install-mint.sh")
 
     assert "ConfigureBiosLowMemoryBootAsync" in apply_changes
     assert "LowMemoryMode =" in apply_changes
@@ -135,7 +351,11 @@ def run_localized_stage_function(function: str, argument: str) -> subprocess.Com
     shell_helper = ROOT / "assets/live/libertix-i18n.sh"
     python_helper = ROOT / "assets/live/libertix-i18n.py"
     stage_library = ROOT / "assets/live/libertix-runner-stage-common.sh"
-    script = '. "$1"; LANGUAGE_CODE=en; load_libertix_translations "$2"; . "$3"; "$4" "$5"'
+    stage_catalogue = ROOT / "assets/live/libertix-stages.tsv"
+    script = (
+        '. "$1"; LANGUAGE_CODE=en; load_libertix_translations "$2"; '
+        'LIBERTIX_STAGE_CATALOG="$3"; . "$4"; "$5" "$6"'
+    )
     return subprocess.run(
         [
             "bash",
@@ -144,6 +364,7 @@ def run_localized_stage_function(function: str, argument: str) -> subprocess.Com
             "libertix-stage-test",
             str(shell_helper),
             str(python_helper),
+            str(stage_catalogue),
             str(stage_library),
             function,
             argument,
@@ -199,7 +420,7 @@ def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
     assert "Temporary ESP loader SHA256 verified" in staging
 
     reuse_path = orchestration.split("try {\n    if ($ReusePreparedInstaller)", 1)[1].split(
-        "\n    Test-LibertixLiveConfig\n", 1
+        "\n    Assert-LibertixPlanMatchesCurrentStorage\n", 1
     )[0]
     assert "Get-ReusablePreparedInstallerPartition" in reuse_path
     assert "Assert-PreparedInstallerManifest" in reuse_path
@@ -215,6 +436,16 @@ def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
     assert "Firmware BootOrder fallback verified" in boot_setup
 
 
+def test_uefi_fallback_publishes_recovery_phase_atomically() -> None:
+    fallback = read("Pages/UefiBootFallback.xaml.cs")
+
+    save_state = fallback.split("private void SaveState()", 1)[1].split(
+        "private static string QuoteArgument", 1
+    )[0]
+    assert "AtomicJsonFile.Write(_statePath" in save_state
+    assert "File.WriteAllText" not in save_state
+
+
 def test_bios_copy_preserves_live_boot_case_sensitive_names() -> None:
     apply_changes = read_apply_changes()
 
@@ -224,33 +455,74 @@ def test_bios_copy_preserves_live_boot_case_sensitive_names() -> None:
     assert "Live directory name case normalization failed" in apply_changes
 
 
+def test_grub4dos_finds_the_staging_volume_instead_of_guessing_its_mbr_index() -> None:
+    boot_arguments = read("Installation/LiveBootArguments.cs")
+
+    assert '"find --set-root /installation-plan.json"' in boot_arguments
+    assert '"root (hd0,' not in boot_arguments
+
+
+def test_live_reuses_mbr_staging_partition_by_offset_not_windows_number() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+
+    assert (
+        'LIVE_PART=$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES"' in installer
+    )
+    assert "expected to reuse partition 3" not in installer
+
+
+def test_live_initializes_the_disk_name_before_target_configuration() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+    target = read("assets/live/libertix-target-common.sh")
+
+    assert 'DISKNAME=""' in installer
+    assert 'DISKNAME="$(basename "$DISK")"' in installer
+    assert 'DISKNAME="$DISKNAME"' in target
+
+
+def test_live_rollback_flag_is_initialized_before_any_error_trap() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+
+    assert "ROLLBACK_ATTEMPTED=false" in installer.split("trap on_err ERR", 1)[0]
+
+
+def test_mbr_logical_partition_accepts_only_one_alignment_unit_of_shortfall() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+    storage = read("assets/live/libertix-storage-common.sh")
+
+    assert "maximum_partition_bytes=" in installer
+    assert "installer_partition_target_bytes" in installer
+    assert 'alignment_tolerance_bytes="${3:-1048576}"' in storage
+
+
 def test_live_manifest_survives_detached_toram_medium_and_fat_name_case() -> None:
     apply_changes = read_apply_changes()
-    assert 'NormalizeRootFileNameCase(@"Z:\\", "config.txt")' in apply_changes
+    assert "PublishInstallationContextToLive" in apply_changes
+    assert "installation-plan.json" in apply_changes
 
     adapters = (
         read("assets/live/libertix-bios-adapter.sh"),
         read("assets/live/libertix-uefi-adapter.sh"),
     )
-    for installer, adapter in zip(
-        (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")),
-        adapters,
-        strict=True,
-    ):
-        assert "find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt" in installer
-        assert (
-            'mounted_config=$(find "$config_mount" -maxdepth 1 -type f -iname config.txt'
-            in installer
-        )
+    context = read("assets/live/libertix-live-context.sh")
+    assert "/run/live/medium/installation-plan.json" in context
+    assert 'plan="$mount_dir/installation-plan.json"' in context
+    for adapter in adapters:
+        assert "-name installation-plan.json" in adapter
         assert "Prerequisite timeout: disk_ready=$disk_ready config_ready=$config_ready" in adapter
 
 
 def test_sharing_options_reach_both_live_installers() -> None:
     apply_changes = read_apply_changes()
-    for installer in (read("iso/live/install-mint.sh"), read("iso-uefi/live/install-mint.sh")):
-        assert "SHARE_WINDOWS_FILES_IN_LINUX" in installer
-        assert "SHARE_LINUX_FILES_IN_WINDOWS" in installer
-        assert "WINDOWS_PROFILES_JSON_BASE64" in installer
+    plan_loader = read("assets/live/libertix-installation-plan.sh")
+    target = read("assets/live/libertix-target-common.sh")
+    for variable in (
+        "SHARE_WINDOWS_FILES_IN_LINUX",
+        "SHARE_LINUX_FILES_IN_WINDOWS",
+        "WINDOWS_PROFILES_JSON_BASE64",
+    ):
+        assert variable in plan_loader
+        assert variable in target
 
     assert "ShareWindowsFilesInLinux" in apply_changes
     assert "ShareLinuxFilesInWindows" in apply_changes
@@ -261,12 +533,9 @@ def test_sharing_options_reach_both_live_installers() -> None:
 
 
 def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
-    for target in (
-        read("iso/target/configure-target.sh"),
-        read("iso-uefi/target/configure-target.sh"),
-    ):
-        assert 'shortcut="User_$profile"' in target
-        assert ".config/gtk-3.0/bookmarks" in target
+    target = read("assets/live/configure-target-main.sh")
+    assert 'shortcut="User_$profile"' in target
+    assert ".config/gtk-3.0/bookmarks" in target
 
     windows_share = read("Scripts/libertix-configure-windows-share.ps1")
     assert "--ro" in windows_share
@@ -297,6 +566,23 @@ def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
     assert "Set-Service -Name ExtFsWatcher -StartupType Disabled" in windows_share
 
 
+def test_installed_keyboard_layout_is_applied_once_after_cinnamon_starts() -> None:
+    target = read("assets/live/configure-target-main.sh")
+    target_common = read("assets/live/libertix-target-common.sh")
+    first_session = read("assets/live/libertix-apply-keyboard-once.sh")
+
+    assert "/etc/xdg/autostart/libertix-keyboard.desktop" in target
+    assert "Exec=/usr/local/bin/libertix-apply-keyboard-once" in target
+    assert "libertix-apply-keyboard-once.sh" in target_common
+    assert ". /etc/default/keyboard" in first_session
+    assert "setxkbmap \\" in first_session
+    assert '-variant "${XKBVARIANT:-}"' in first_session
+    assert 'KEYBOARD_VARIANT="$KEYBOARD_VARIANT"' in target_common
+    assert 'XKBVARIANT="$KEYBOARD_VARIANT"' in target
+    assert 'keyboard_source="${KEYBOARD_LAYOUT}+${KEYBOARD_VARIANT}"' in target
+    assert 'marker_path="$marker_directory/keyboard-initialized"' in first_session
+
+
 def test_ext4_setup_payload_matches_pinned_release_hash() -> None:
     setup = ROOT / "auto_tests/app/filepool/ext4-win-driver.exe"
     assert setup.is_file()
@@ -307,27 +593,25 @@ def test_ext4_setup_payload_matches_pinned_release_hash() -> None:
 
 def test_live_gui_uses_the_proven_direct_xorg_path() -> None:
     rootfs = read("iso-uefi/live/setup-live-rootfs.sh")
-    for variant in ("iso", "iso-uefi"):
-        runner = read(f"{variant}/live/libertix-runner.sh")
+    runner = read("assets/live/libertix-runner-main.sh")
 
-        assert "xinit" not in runner
-        assert " xinit " not in rootfs
-        assert '"$x_server" "$GUI_DISPLAY" "vt$GUI_VT"' in runner
-        assert "-ac -noreset" in runner
-        assert "XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui" in runner
+    assert "xinit" not in runner
+    assert " xinit " not in rootfs
+    assert '"$x_server" "$GUI_DISPLAY" "vt$GUI_VT"' in runner
+    assert "-ac -noreset" in runner
+    assert "XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui" in runner
 
 
 def test_live_gui_sets_a_visible_pointer_on_both_boot_paths() -> None:
-    gui = read("iso-uefi/live/libertix-gui.py")
+    gui = read("assets/live/libertix-gui.py")
+    runner = read("assets/live/libertix-runner-main.sh")
 
     assert 'cursor="left_ptr"' in gui
-    for variant in ("iso", "iso-uefi"):
-        runner = read(f"{variant}/live/libertix-runner.sh")
-        assert "xsetroot -cursor_name left_ptr" in runner
+    assert "xsetroot -cursor_name left_ptr" in runner
 
 
 def test_live_reboot_is_only_offered_after_verified_rollback() -> None:
-    gui = read("iso-uefi/live/libertix-gui.py")
+    gui = read("assets/live/libertix-gui.py")
     failure_branch = gui.split('elif success == "false" and rc is not None:', 1)[1]
 
     verified, unverified = failure_branch.split("else:", 1)
@@ -388,7 +672,7 @@ def test_windows_close_behavior_uses_tray_while_installation_runs() -> None:
     assert "InstallationRunningChanged" in main
     assert "RestoreFromTray();" in main
     assert "ShowBalloonTip" in tray
-    assert "Resources/Images/Icon.ico" in tray
+    assert "Resources/Images/icon.ico" in tray
     assert "SystemIcons.Application.Clone()" in tray
     assert "SetInstallationRunning" in state
 
@@ -429,7 +713,7 @@ def test_windows_preparation_log_is_persisted_for_every_gui_line() -> None:
     cancellation = read("Pages/ApplyChanges.Cancellation.cs")
     apply_changes = read("Pages/ApplyChanges.xaml.cs")
 
-    assert 'string logRoot = @"C:\\LibertixInstallLogs"' in cancellation
+    assert 'Path.Combine(WindowsSystemDrive, "LibertixInstallLogs")' in cancellation
     assert "AppendPersistentLog(line);" in apply_changes
 
 
@@ -441,8 +725,40 @@ def test_filepool_defaults_to_production_and_supports_an_explicit_override() -> 
 
     assert 'ProductionBaseUrl = "https://ekimia.fr/libertix"' in filepool
     assert 'FilepoolOption = "--filepool-base-url"' in startup
+    assert 'DevelopmentSshStaticIpOption = "--dev-ssh-static-ip"' in startup
     assert "FilepoolConfig.TryUseOverride(options.FilepoolBaseUrlOverride" in app
     assert '--filepool-base-url "{1}"' in launch
+    assert '--dev-ssh-static-ip "{0}"' in launch
+
+
+def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None:
+    target = read("assets/live/configure-development-access.sh")
+    first_boot = read("assets/live/libertix-development-ssh-first-boot.sh")
+    unit = read("assets/live/libertix-development-ssh.service")
+    automation = read("auto_tests/app/services/automation.py")
+    validation = read("auto_tests/app/services/validation.py")
+
+    assert '[ "${DEVELOPMENT_SSH_ENABLED:-false}" = "true" ] || exit 0' in target
+    assert "autoconnect-priority=1000" in target
+    assert "address1=$DEVELOPMENT_STATIC_IPV4_ADDRESS/" in target
+    assert "apt-get -o Acquire::Retries=3 install" in first_boot
+    assert "openssh-server" in first_boot
+    assert "PasswordAuthentication yes" in first_boot
+    assert "PermitRootLogin no" in first_boot
+    assert "AllowUsers $username" in first_boot
+    assert first_boot.index("install -d -m 0755 /run/sshd") < first_boot.index("/usr/sbin/sshd -t")
+    assert "After=network-online.target" in unit
+    assert '"development_static_ipv4": vm.host' in automation
+    assert '"development_static_ipv4": vm.host' in validation
+
+
+def test_windows_integrity_check_preserves_preexisting_boot_drive_letter() -> None:
+    script = read("auto_tests/app/scripts/check_windows_integrity.ps1")
+
+    assert "$bootLetter = [string]$mountedBootPartition.DriveLetter" in script
+    assert "if ([string]::IsNullOrWhiteSpace($bootLetter))" in script
+    assert "$bootLetterWasAssigned = $true" in script
+    assert "$mountedBootPartition -and $bootLetterWasAssigned -and $bootLetter" in script
 
 
 def test_uefi_early_revert_does_not_require_absent_transaction_state() -> None:
@@ -451,8 +767,8 @@ def test_uefi_early_revert_does_not_require_absent_transaction_state() -> None:
     ]
 
     assert "Remove-LibertixInstallerPartitionIfPresent" in revert
-    assert "No transaction state found; C: was not resized by this run." in revert
-    assert "Cannot restore C: without the saved transaction state." not in revert
+    assert "No transaction state found; $SystemDrive was not resized by this run." in revert
+    assert "Cannot restore $SystemDrive without the saved transaction state." not in revert
 
 
 def test_uefi_revert_does_not_require_download_configuration() -> None:
@@ -460,7 +776,7 @@ def test_uefi_revert_does_not_require_download_configuration() -> None:
     validation = script.split("# Networking defaults", 1)[0].rsplit(
         "# A rollback only consumes", 1
     )[1]
-    downloads = script.split("# Downloads", 1)[1].split("# Defaults", 1)[0]
+    downloads = script.split("# Download hashes and names", 1)[1].split("# Defaults", 1)[0]
 
     assert "if (-not $Revert)" in validation
     assert "FilepoolBaseUrl is required" in validation
@@ -468,24 +784,16 @@ def test_uefi_revert_does_not_require_download_configuration() -> None:
     assert "New-LibertixDownloadUrls" in downloads
 
 
-def test_uefi_plan_config_does_not_require_legacy_account_or_locale_fields() -> None:
+def test_uefi_configuration_requires_the_versioned_installation_plan() -> None:
     script = read("Scripts/libertix-uefi-install.ps1")
     config_block = script.split("if (-not [string]::IsNullOrWhiteSpace($ConfigPath))", 1)[1].split(
-        "# New callers pass a validated plan", 1
+        "$installationPlan = $null", 1
     )[0]
 
-    legacy_fields = (
-        "LinuxUsername",
-        "LinuxPasswordHash",
-        "LinuxComputerName",
-        "SystemLang",
-        "KeyboardLayout",
-        "KeyboardModel",
-        "Timezone",
-    )
-    for field in legacy_fields:
-        assert f'Properties.Name -contains "{field}"' in config_block
-        assert f"$config.{field}" in config_block
+    assert 'Properties.Name -contains "InstallationPlanPath"' in config_block
+    assert 'Properties.Name -contains "ExecutionStatePath"' in config_block
+    assert "LinuxUsername" not in config_block
+    assert "LinuxPasswordHash" not in config_block
 
 
 def test_powershell_atomic_writers_use_real_same_directory_backups() -> None:
@@ -522,7 +830,6 @@ def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
     assert "-DriveLetter $createdDriveLetter" in create_or_reuse
     assert 'Test-Path "${createdDriveLetter}:\\"' in create_or_reuse
     assert "Get-LibertixInstallerPartition -DriveLetter $createdDriveLetter" in create_or_reuse
-    assert "Ensure-VolumeNotEncrypted -DriveLetter $createdDriveLetter" in create_or_reuse
     assert 'Drive = "${createdDriveLetter}:"' in create_or_reuse
     assert "-DriveLetter $InstallerLetter" not in create_or_reuse
 
@@ -572,7 +879,7 @@ def test_uefi_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
         "$stagingBytes = [int64]$installationPlan.disk.installer.stagingSizeBytes"
         in create_or_reuse
     )
-    assert "$legacyStagingSizeGB = if ($SizeGB -gt 31) { 8 } else { $SizeGB }" in create_or_reuse
+    assert "$stagingSizeGB = [int]($stagingBytes / 1GB)" in create_or_reuse
     assert "$need = $requestedBytes + $minFree" in create_or_reuse
     assert "$shrinkBytes = $requestedBytes" in create_or_reuse
     assert "-Size $stagingBytes" in create_or_reuse
@@ -602,6 +909,38 @@ def test_bios_recovery_guard_accepts_staging_or_final_partition_size() -> None:
     assert "$isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize" in recovery
 
 
+def test_bios_recovery_guard_removes_only_the_empty_transaction_extended_container() -> None:
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+    helper = recovery.split("function Remove-EmptyTransactionExtendedContainer", 1)[1].split(
+        "\ntry {", 1
+    )[0]
+    rollback = recovery.split("if (@($candidates).Count -eq 1)", 1)[1].split("Restore-BcdState", 1)[
+        0
+    ]
+
+    assert '[string]$disk.PartitionStyle -ne "MBR"' in helper
+    assert "$mbrType -in @(5, 15, 133)" in helper
+    assert "$partitionStart -ge $SystemPartitionEnd" in helper
+    assert "$partitionStart -le $TransactionOffset" in helper
+    assert "$partitionEnd -ge $transactionEnd" in helper
+    assert "$partitionEnd -le $RecoveryPartitionOffset" in helper
+    assert "$containedPartitions.Count -ne 0" in helper
+    assert "Remove-Partition -InputObject $container" in helper
+    assert "The empty transaction MBR extended container still exists after removal" in helper
+    recovery_offset_read = (
+        'Read-EnvValue `\n        -Path $Pending `\n        -Name "RECOVERY_PARTITION_OFFSET_BYTES"'
+    )
+    assert recovery_offset_read in recovery
+
+    remove_transaction = rollback.index(
+        "Remove-Partition -DiskNumber $diskNumber -PartitionNumber $number"
+    )
+    remove_container = rollback.index("Remove-EmptyTransactionExtendedContainer")
+    wait_for_capacity = rollback.index("Wait-SystemDriveResizeCapacity")
+    resize_windows = rollback.index("Resize-Partition -DriveLetter $SystemDriveLetter")
+    assert remove_transaction < remove_container < wait_for_capacity < resize_windows
+
+
 def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
     script = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     create_or_reuse = script.split("function New-OrReuseInstallerPartition", 1)[1].split(
@@ -617,7 +956,7 @@ def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
     assert create_position < save_position < format_position
 
 
-def test_uefi_low_memory_boot_files_are_writable_and_revert_removes_iso() -> None:
+def test_uefi_low_memory_boot_files_are_writable_and_revert_uses_transaction_state() -> None:
     staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
     install = staging.split("function Install-LibertixIsoToPartition", 1)[1].split(
@@ -631,17 +970,20 @@ def test_uefi_low_memory_boot_files_are_writable_and_revert_removes_iso() -> Non
     )
 
     assert attributes_position < write_position
-    assert "$LowMemoryMode -and (Test-Path -LiteralPath $LowMemoryIsoPath" in revert
+    assert "LowMemoryMode = [bool]$LowMemoryMode" in transaction
+    assert "$transactionUsedLowMemory" in revert
+    assert "$LowMemoryMode -and (Test-Path -LiteralPath $LowMemoryIsoPath" not in revert
     assert "Remove-Item -LiteralPath $LowMemoryIsoPath -Force" in revert
 
 
 def test_uefi_live_expands_fat32_staging_before_ext4_format() -> None:
-    installer = read("iso-uefi/live/install-mint.sh")
+    installer = read("assets/live/libertix-install-main.sh")
     reuse = installer.split('if [ -n "$LIVE_PART" ]', 1)[1].split(
         'elif [ "$PART_TABLE" = "msdos" ]', 1
     )[0]
 
-    assert "desired_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
+    assert "requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
+    assert 'desired_partition_bytes="$requested_partition_bytes"' in reuse
     assert (
         "recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))" in reuse
     )
@@ -652,12 +994,13 @@ def test_uefi_live_expands_fat32_staging_before_ext4_format() -> None:
 
 
 def test_bios_live_expands_fat32_staging_before_ext4_format() -> None:
-    installer = read("iso/live/install-mint.sh")
+    installer = read("assets/live/libertix-install-main.sh")
     reuse = installer.split('if [ -n "$LIVE_PART" ]', 1)[1].split(
         'elif [ "$PART_TABLE" = "msdos" ]', 1
     )[0]
 
-    assert "desired_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
+    assert "requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))" in reuse
+    assert 'desired_partition_bytes="$requested_partition_bytes"' in reuse
     assert (
         "recovery_start_sector=$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector_bytes))" in reuse
     )
@@ -693,6 +1036,23 @@ def test_bios_iso_output_name_matches_the_filepool_contract() -> None:
     assert "/workspace/libertix-installer.iso" not in docker_builder
 
 
+def test_iso_build_defaults_do_not_embed_account_or_locale_fallbacks() -> None:
+    for relative_path in ("iso/config/defaults.env", "iso-uefi/config/defaults.env"):
+        defaults = read(relative_path)
+        assert "USERNAME=" not in defaults
+        assert "PASSWORD_HASH=" not in defaults
+        assert "LANGUAGE_CODE=" not in defaults
+        assert "KEYBOARD_LAYOUT=" not in defaults
+
+
+def test_wpf_and_automation_require_the_same_minimum_password_length() -> None:
+    account_page = (ROOT / "Pages" / "AccountCreation.xaml.cs").read_text(encoding="utf-8-sig")
+    api_models = (ROOT / "auto_tests" / "app" / "models.py").read_text(encoding="utf-8")
+
+    assert "PasswordBox.Password.Length < 8" in account_page
+    assert "linux_password: str = Field(min_length=8" in api_models
+
+
 def test_legacy_ci_entry_point_reuses_the_single_ci_policy() -> None:
     workflow = read(".github/workflows/ci.yml")
     compatibility_entry = read(".github/workflows/dotnet-desktop.yml")
@@ -708,7 +1068,7 @@ def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     script = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
     bits = script.split("function Start-BitsDownload", 1)[1].split("function Get-Aria2Exe", 1)[0]
     robust = script.split("function Start-RobustDownload", 1)[1].split(
-        "function Ensure-MintIsoOnWindows", 1
+        "function Set-MintIsoOnWindows", 1
     )[0]
 
     assert "NoProgressTimeoutSeconds = 120" in bits
@@ -724,17 +1084,16 @@ def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
 
 def test_terminal_fallback_does_not_reset_video_mode_on_redraw() -> None:
     rootfs = read("iso-uefi/live/setup-live-rootfs.sh")
-    for variant in ("iso", "iso-uefi"):
-        runner = read(f"{variant}/live/libertix-runner.sh")
+    runner = read("assets/live/libertix-runner-main.sh")
 
-        assert "write_tty1_screen" in runner
-        assert "cmp -s" in runner
-        assert "perl -pe 's/\\n/\\033[K\\r\\n/g'" in runner
-        assert "printf '\\033c'" not in runner
-        assert "dmesg -n 1" in runner
-        assert "prepare_terminal_ui" in runner
-        assert "getty@tty1.service" in rootfs
-        assert "ln -sf /dev/null" in rootfs
+    assert "write_tty1_screen" in runner
+    assert "cmp -s" in runner
+    assert "perl -pe 's/\\n/\\033[K\\r\\n/g'" in runner
+    assert "printf '\\033c'" not in runner
+    assert "dmesg -n 1" in runner
+    assert "prepare_terminal_ui" in runner
+    assert "getty@tty1.service" in rootfs
+    assert "ln -sf /dev/null" in rootfs
 
 
 def test_live_rootfs_masks_unused_serial_login_prompt() -> None:
@@ -744,16 +1103,15 @@ def test_live_rootfs_masks_unused_serial_login_prompt() -> None:
 
 
 def test_developer_terminal_is_verbose_and_initialized_only_once() -> None:
-    for variant in ("iso", "iso-uefi"):
-        runner = read(f"{variant}/live/libertix-runner.sh")
+    runner = read("assets/live/libertix-runner-main.sh")
 
-        assert "DEV_TERMINAL_ACTIVE=false" in runner
-        assert '[ "$DEV_TERMINAL_ACTIVE" = false ] || return 1' in runner
-        assert "DEV_TERMINAL_ACTIVE=true" in runner
-        assert 'UI_MODE="details"' in runner
-        assert "log_lines=$((rows - 10))" in runner
-        assert 'tail -n "$log_lines" "$LOG"' in runner
-        assert 'render_key="$(current_stage):$UI_MODE:$log_size"' in runner
+    assert "DEV_TERMINAL_ACTIVE=false" in runner
+    assert '[ "$DEV_TERMINAL_ACTIVE" = false ] || return 1' in runner
+    assert "DEV_TERMINAL_ACTIVE=true" in runner
+    assert 'UI_MODE="details"' in runner
+    assert "log_lines=$((rows - 10))" in runner
+    assert 'tail -n "$log_lines" "$LOG"' in runner
+    assert 'render_key="$(current_stage):$UI_MODE:$log_size"' in runner
 
 
 def test_live_logs_are_copied_completely_and_verified() -> None:
@@ -763,17 +1121,17 @@ def test_live_logs_are_copied_completely_and_verified() -> None:
     assert "journalctl -b --no-pager" in helper
     assert 'dmesg > "$LOG_DIR/dmesg.log"' in helper
     assert "cp -f /var/log/Xorg.*.log" in helper
-    assert 'mount -o remount,rw "$target"' in helper
+    assert 'umount "$target"' in helper
+    assert 'mount -t ntfs-3g -o rw "$win" "$target"' in helper
     assert 'cp -a "$LOG_DIR/." "$log_dir/"' in helper
     assert "sha256sum > SHA256SUMS" in helper
     assert "trap cleanup_mount EXIT" in helper
-    assert 'mount -o remount,ro "$target"' in helper
+    assert 'mount -t ntfs-3g -o ro "$win" "$target"' in helper
 
-    for variant in ("iso", "iso-uefi"):
-        runner = read(f"{variant}/live/libertix-runner.sh")
-        assert "/usr/local/sbin/libertix-copy-logs" in runner
-        assert "libertix-copy-logs.sh" in build
-        assert 'LOG_COPY_STATUS="success"' in runner
+    runner = read("assets/live/libertix-runner-main.sh")
+    assert "/usr/local/sbin/libertix-copy-logs" in runner
+    assert "libertix-copy-logs.sh" in build
+    assert 'LOG_COPY_STATUS="success"' in runner
 
 
 def test_grub_submenu_entries_always_have_a_transparent_icon_class() -> None:

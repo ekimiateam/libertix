@@ -134,6 +134,19 @@ function Assert-LibertixInstallationPlan {
             throw "Installation plan field locale.$name cannot be empty."
         }
     }
+    foreach ($name in @("keyboardLayout", "keyboardModel")) {
+        if ([string]$locale.$name -notmatch '^[a-z0-9_-]+$') {
+            throw "Installation plan field locale.$name is not a valid XKB name."
+        }
+    }
+    $keyboardVariant = if (Test-LibertixPlanProperty -Object $locale -Name "keyboardVariant") {
+        [string]$locale.keyboardVariant
+    } else {
+        ""
+    }
+    if ($keyboardVariant -notmatch '^[a-z0-9_-]*$') {
+        throw "Installation plan field locale.keyboardVariant is not a valid XKB variant name."
+    }
 
     $account = Assert-LibertixPlanProperty -Object $Plan -Name "account" -Path "account"
     $username = [string](Assert-LibertixPlanProperty -Object $account -Name "username" -Path "account.username")
@@ -262,6 +275,61 @@ function Assert-LibertixInstallationPlan {
     }
     if ($hasRecoveryRunId -and [string]$recoveryRunId -notmatch '^[0-9a-f]{32}$') {
         throw "Installation plan recoveryRunId must contain 32 lowercase hexadecimal characters."
+    }
+
+    if (Test-LibertixPlanProperty -Object $Plan -Name "development") {
+        $development = $Plan.development
+        $enableSsh = Assert-LibertixPlanProperty `
+            -Object $development `
+            -Name "enableSsh" `
+            -Path "development.enableSsh"
+        if ($enableSsh -isnot [bool] -or -not $enableSsh) {
+            throw "Installation plan development.enableSsh must be true."
+        }
+        $staticAddress = [string](Assert-LibertixPlanProperty `
+            -Object $development `
+            -Name "staticIpv4Address" `
+            -Path "development.staticIpv4Address")
+        [System.Net.IPAddress]$parsedAddress = $null
+        if (
+            -not [System.Net.IPAddress]::TryParse($staticAddress, [ref]$parsedAddress) -or
+            $parsedAddress.AddressFamily -ne
+                [System.Net.Sockets.AddressFamily]::InterNetwork
+        ) {
+            throw "Installation plan development.staticIpv4Address must be IPv4."
+        }
+        $octets = $parsedAddress.GetAddressBytes()
+        if (
+            $octets[0] -ne 192 -or $octets[1] -ne 168 -or $octets[2] -ne 1 -or
+            $octets[3] -le 1 -or $octets[3] -ge 255
+        ) {
+            throw "Installation plan development.staticIpv4Address must be usable in 192.168.1.0/24."
+        }
+        $prefixLength = Assert-LibertixPlanProperty `
+            -Object $development `
+            -Name "staticIpv4PrefixLength" `
+            -Path "development.staticIpv4PrefixLength"
+        if ([int]$prefixLength -ne 24) {
+            throw "Installation plan development.staticIpv4PrefixLength must be 24."
+        }
+        $gateway = [string](Assert-LibertixPlanProperty `
+            -Object $development `
+            -Name "staticIpv4Gateway" `
+            -Path "development.staticIpv4Gateway")
+        if ($gateway -ne "192.168.1.1") {
+            throw "Installation plan development.staticIpv4Gateway must be 192.168.1.1."
+        }
+        $dnsServers = @(Assert-LibertixPlanProperty `
+            -Object $development `
+            -Name "dnsServers" `
+            -Path "development.dnsServers")
+        if (
+            $dnsServers.Count -ne 2 -or
+            [string]$dnsServers[0] -ne "8.8.8.8" -or
+            [string]$dnsServers[1] -ne "1.1.1.1"
+        ) {
+            throw "Installation plan development.dnsServers must contain 8.8.8.8 then 1.1.1.1."
+        }
     }
 
     return $Plan

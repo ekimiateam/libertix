@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using Libertix.Helpers;
+using Libertix.Installation;
 using Libertix.Models;
 
 namespace Libertix.Pages
@@ -191,7 +192,10 @@ namespace Libertix.Pages
         private void SaveState()
         {
             _state.LastCheckedUtc = DateTime.UtcNow.ToString("o");
-            File.WriteAllText(_statePath, JsonSerializer.Serialize(_state), new UTF8Encoding(false));
+            // The startup recovery agent derives its next action from this
+            // document alone. Publish each phase transition atomically so an
+            // interrupted fallback cannot leave recovery without a valid state.
+            AtomicJsonFile.Write(_statePath, JsonSerializer.Serialize(_state));
         }
 
         private static string QuoteArgument(string value)

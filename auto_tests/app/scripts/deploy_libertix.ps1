@@ -35,8 +35,9 @@ function Get-FreeDriveLetter {
     $used = @{}
     Get-PSDrive -PSProvider FileSystem | ForEach-Object { $used[$_.Name.ToUpperInvariant()] = $true }
     Get-SmbMapping -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.LocalPath -match "^([A-Z]):$") {
-            $used[$Matches[1].ToUpperInvariant()] = $true
+        $driveMatch = [regex]::Match([string]$_.LocalPath, "^([A-Z]):$")
+        if ($driveMatch.Success) {
+            $used[$driveMatch.Groups[1].Value.ToUpperInvariant()] = $true
         }
     }
 
@@ -78,8 +79,8 @@ $mappedDrive = $null
 try {
     $sourcePath = $config.source
 
-    # On utilise l'UNC directement quand il est disponible. Sinon on monte un
-    # lecteur temporaire non persistant, sans dépendre d'un ancien Z: utilisateur.
+    # Prefer the UNC path when available. A temporary non-persistent mapping
+    # avoids depending on a stale drive letter in the interactive profile.
     if (-not (Test-Path -LiteralPath $config.source -PathType Container)) {
         $mappedDrive = Get-FreeDriveLetter
         New-SmbMapping `
@@ -104,7 +105,8 @@ try {
     $documents = [Environment]::GetFolderPath("MyDocuments")
     $target = Join-Path $documents $config.release_dir_name
 
-    # Relance propre : pas d'ancien processus, pas d'ancienne copie locale.
+    # A previous executable can lock the release copy or report state from an
+    # earlier run, so stop it before replacing the local deployment.
     Get-ScheduledTask -TaskName "LibertixAutoInstall_*" -ErrorAction SilentlyContinue |
         Unregister-ScheduledTask -Confirm:$false -ErrorAction Stop
     Get-Process -Name "Libertix" -ErrorAction SilentlyContinue |

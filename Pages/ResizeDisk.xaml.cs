@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,9 +18,9 @@ namespace Libertix.Pages
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {
         private readonly InstallationState _installationState;
-        private const string STATE_KEY = "ResizeDisk";
         private readonly double _totalSpace;
         private readonly double _initialFreeSpace;
+        private readonly double _shrinkAvailableSpace;
         private double _selectedSize;
         private double _windowsUsedSpace;
         private double _windowsFreeSpace;
@@ -36,20 +35,21 @@ namespace Libertix.Pages
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        public double MinimumSize => 20; // Linux Mint requires 20GB minimum; 100GB is recommended.
-        public double MinimumWindowsFree => 15; // Minimum 15GB free for Windows
-        private double AvailableLinuxSize => _initialFreeSpace - MinimumWindowsFree;
-        public double MaximumSize => Math.Max(MinimumSize, AvailableLinuxSize); // Keep slider range valid.
+        // These reserves prevent the wizard from offering allocations that
+        // leave either operating system below its documented minimum.
+        public double MinimumSize => 20;
+        public double MinimumWindowsFree => 15;
+        private double AvailableLinuxSize => Math.Min(
+            _initialFreeSpace - MinimumWindowsFree,
+            _shrinkAvailableSpace);
+        // WPF rejects a slider whose maximum is lower than its minimum. The
+        // separate CanAllocateLinux flag still prevents an invalid install.
+        public double MaximumSize => Math.Max(MinimumSize, AvailableLinuxSize);
         public bool CanAllocateLinux => AvailableLinuxSize >= MinimumSize;
 
-        // Windows total = Used + remaining free after Linux allocation
         public double WindowsTotalSpace => _windowsUsedSpace + _windowsFreeSpace;
-
-        // Percentage calculations for the two-partition view (Windows vs Linux)
         public GridLength WindowsPartitionPercentage => new GridLength(WindowsTotalSpace * 100 / _totalSpace, GridUnitType.Star);
         public GridLength LinuxPartitionPercentage => new GridLength(_linuxSize * 100 / _totalSpace, GridUnitType.Star);
-
-        // Used/Free ratio inside the Windows partition (for the usage indicator)
         public GridLength WindowsUsedPercentage => new GridLength(_windowsUsedSpace, GridUnitType.Star);
         public GridLength WindowsFreeInPartitionPercentage => new GridLength(_windowsFreeSpace > 0 ? _windowsFreeSpace : 0.001, GridUnitType.Star);
 
@@ -61,6 +61,7 @@ namespace Libertix.Pages
                 _windowsUsedSpace = value;
                 NotifyPropertyChanged(nameof(WindowsUsedSpace));
                 NotifyPropertyChanged(nameof(WindowsUsedPercentage));
+                NotifyPropertyChanged(nameof(SystemRequirements));
             }
         }
 
@@ -74,6 +75,8 @@ namespace Libertix.Pages
                 NotifyPropertyChanged(nameof(WindowsTotalSpace));
                 NotifyPropertyChanged(nameof(WindowsPartitionPercentage));
                 NotifyPropertyChanged(nameof(WindowsFreeInPartitionPercentage));
+                NotifyPropertyChanged(nameof(SystemRequirements));
+                NotifyPropertyChanged(nameof(AdditionalSpaceNeeded));
             }
         }
 
@@ -84,6 +87,7 @@ namespace Libertix.Pages
             {
                 _isoSize = value;
                 NotifyPropertyChanged(nameof(IsoSize));
+                NotifyPropertyChanged(nameof(SystemRequirements));
             }
         }
 
@@ -158,7 +162,8 @@ namespace Libertix.Pages
             LinuxSize = linuxSize;
             WindowsFreeSpace = _initialFreeSpace - linuxSize;
 
-            // Force update of all percentage bindings for proper visual refresh
+            // These bindings depend on calculated properties rather than stored
+            // fields, so changing LinuxSize does not notify them automatically.
             NotifyPropertyChanged(nameof(WindowsTotalSpace));
             NotifyPropertyChanged(nameof(WindowsPartitionPercentage));
             NotifyPropertyChanged(nameof(LinuxPartitionPercentage));
@@ -175,17 +180,27 @@ namespace Libertix.Pages
             {
                 _hasError = value;
                 NotifyPropertyChanged(nameof(HasError));
+                NotifyPropertyChanged(nameof(AdditionalSpaceNeeded));
             }
         }
 
-        public string SystemRequirements => 
-            $"Windows Used Space: {WindowsUsedSpace:N1} GB\n" +
-            $"Windows Free Space: {WindowsFreeSpace:N1} GB\n" +
-            $"ISO Partition: {IsoSize:N1} GB\n" +
-            $"Required Linux Space: {MinimumSize:N1} GB";
+        public string SystemRequirements => string.Join(
+            Environment.NewLine,
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskWindowsUsedSpace"), WindowsUsedSpace),
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskWindowsFreeSpace"), WindowsFreeSpace),
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskIsoSize"), IsoSize),
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskLinuxMinimum"), MinimumSize));
 
-        public string AdditionalSpaceNeeded => HasError ? 
-            $"Additional space needed: {(MinimumSize - WindowsFreeSpace):N1} GB" : null;
+        public string AdditionalSpaceNeeded => HasError
+            ? string.Format(
+                CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskAdditionalSpace"),
+                Math.Max(0, MinimumSize - AvailableLinuxSize))
+            : null;
 
         public ICommand OpenDiskCleanupCommand => _openDiskCleanupCommand;
 
@@ -209,6 +224,10 @@ namespace Libertix.Pages
             _totalSpace = Math.Round(systemDrive.TotalSize / 1024.0 / 1024.0 / 1024.0);
             WindowsUsedSpace = Math.Round((systemDrive.TotalSize - systemDrive.AvailableFreeSpace) / 1024.0 / 1024.0 / 1024.0);
             _initialFreeSpace = Math.Round(systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0);
+            _shrinkAvailableSpace = Math.Max(
+                0,
+                (_installationState.Compatibility?.ShrinkAvailableBytes ?? 0) /
+                    1024d / 1024d / 1024d);
             WindowsFreeSpace = _initialFreeSpace;
 
             if (_installationState.SelectedDistro is Models.DistroInfo distro)
@@ -219,45 +238,27 @@ namespace Libertix.Pages
             ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
         }
 
-        private void SaveState(DistroInfo distro)
+        private void SaveState()
         {
-            var stateKey = $"{STATE_KEY}_{distro.Name}";
-            var state = new PageState
-            {
-                PageType = typeof(ResizeDisk),
-                StateKey = stateKey,
-                State = new Dictionary<string, double>
-                {
-                    { "SelectedSize", SelectedSize },
-                    { "WindowsFreeSpace", WindowsFreeSpace },
-                    { "LinuxSize", LinuxSize }
-                }
-            };
-            StateManager.SaveState(stateKey, state);
+            _installationState.SelectedLinuxSizeGiB = SelectedSize;
         }
 
         private void LoadState(DistroInfo distro)
         {
-            var stateKey = $"{STATE_KEY}_{distro.Name}";
-            var state = StateManager.GetState(stateKey);
-            
-            // Initialize ISO size
             IsoSize = distro.SizeInGB;
-            
-            // Calculate recommended size
             RecommendedSize = CalculateRecommendedSize();
-            
-            if (state?.State is Dictionary<string, double> savedState)
+
+            if (_installationState.SelectedLinuxSizeGiB is double savedSize)
             {
-                // Restore saved values
-                SelectedSize = savedState["SelectedSize"];
-                WindowsFreeSpace = savedState["WindowsFreeSpace"];
-                LinuxSize = savedState["LinuxSize"];
+                // A previously saved choice can become invalid after Windows
+                // moves unmovable files or consumes disk space. Clamp it to the
+                // current typed preflight result instead of displaying an
+                // allocation that the storage layer will later reject.
+                SelectedSize = Math.Min(savedSize, MaximumSize);
                 ManualSize = SelectedSize.ToString("F0", CultureInfo.InvariantCulture);
             }
             else
             {
-                // Initialize with recommended size
                 SelectedSize = RecommendedSize;
                 ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
             }
@@ -265,7 +266,6 @@ namespace Libertix.Pages
 
         private double CalculateRecommendedSize()
         {
-            // Use 40% of available space or minimum 30GB, maximum 100GB
             if (!CanAllocateLinux)
                 return MinimumSize;
             double recommendedSize = Math.Max(MinimumSize, _initialFreeSpace * 0.4);
@@ -274,7 +274,6 @@ namespace Libertix.Pages
 
         private void CheckSpaceRequirements()
         {
-            // Check if Windows has enough free space (minimum 15GB)
             HasError = WindowsFreeSpace < MinimumWindowsFree || AvailableLinuxSize < MinimumSize;
         }
 
@@ -283,7 +282,7 @@ namespace Libertix.Pages
             if (string.IsNullOrWhiteSpace(value))
             {
                 HasSizeError = true;
-                SizeErrorMessage = "Size cannot be empty";
+                SizeErrorMessage = Localization.GetString("ResizeDiskSizeEmpty");
                 return;
             }
 
@@ -293,21 +292,21 @@ namespace Libertix.Pages
                 if (size < MinimumSize)
                 {
                     HasSizeError = true;
-                    SizeErrorMessage = $"Size must be at least {MinimumSize}GB";
+                    SizeErrorMessage = string.Format(CultureInfo.CurrentCulture, Localization.GetString("ResizeDiskSizeTooSmall"), MinimumSize);
                     return;
                 }
 
                 if (AvailableLinuxSize < MinimumSize)
                 {
                     HasSizeError = true;
-                    SizeErrorMessage = $"Not enough free space. Windows needs {MinimumWindowsFree}GB free and Linux needs at least {MinimumSize}GB";
+                    SizeErrorMessage = string.Format(CultureInfo.CurrentCulture, Localization.GetString("ResizeDiskNotEnoughSpace"), MinimumWindowsFree, MinimumSize);
                     return;
                 }
 
                 if (size > AvailableLinuxSize)
                 {
                     HasSizeError = true;
-                    SizeErrorMessage = $"Size cannot exceed {AvailableLinuxSize:N0}GB (Windows needs {MinimumWindowsFree}GB free)";
+                    SizeErrorMessage = string.Format(CultureInfo.CurrentCulture, Localization.GetString("ResizeDiskSizeTooLarge"), AvailableLinuxSize, MinimumWindowsFree);
                     return;
                 }
 
@@ -318,7 +317,7 @@ namespace Libertix.Pages
             else
             {
                 HasSizeError = true;
-                SizeErrorMessage = "Please enter a valid number";
+                SizeErrorMessage = Localization.GetString("ResizeDiskInvalidNumber");
             }
         }
 
@@ -352,9 +351,9 @@ namespace Libertix.Pages
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_installationState.SelectedDistro is DistroInfo distro)
+            if (_installationState.SelectedDistro != null)
             {
-                SaveState(distro);
+                SaveState();
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
@@ -369,16 +368,16 @@ namespace Libertix.Pages
             if (HasError || HasSizeError)
             {
                 MessageBox.Show(
-                    SizeErrorMessage ?? "Not enough disk space for installation.",
-                    "Disk size error",
+                    SizeErrorMessage ?? Localization.GetString("ResizeDiskNoSpace"),
+                    Localization.GetString("ResizeDiskErrorTitle"),
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);
                 return;
             }
 
-            if (_installationState.SelectedDistro is DistroInfo distro)
+            if (_installationState.SelectedDistro != null)
             {
-                SaveState(distro);
+                SaveState();
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
@@ -386,9 +385,5 @@ namespace Libertix.Pages
                 TimeSpan.FromSeconds(0.3));
         }
 
-        private void FallbackPanel_Loaded(object sender, RoutedEventArgs e)
-        {
-
-        }
     }
 }

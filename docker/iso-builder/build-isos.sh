@@ -16,11 +16,15 @@ case "$mode" in
     bios)
         /workspace/iso/build.sh
         verify-libertix-iso bios /workspace/libertix-installer-bios.iso
+        python3 /workspace/iso-tools/sync_filepool_checksums.py \
+            --bios /workspace/libertix-installer-bios.iso
         outputs=(/workspace/libertix-installer-bios.iso)
         ;;
     uefi)
         /workspace/iso-uefi/build.sh
         verify-libertix-iso uefi /workspace/libertix-installer-uefi.iso
+        python3 /workspace/iso-tools/sync_filepool_checksums.py \
+            --uefi /workspace/libertix-installer-uefi.iso
         outputs=(/workspace/libertix-installer-uefi.iso)
         ;;
     all)
@@ -28,6 +32,9 @@ case "$mode" in
         /workspace/iso-uefi/build.sh
         verify-libertix-iso bios /workspace/libertix-installer-bios.iso
         verify-libertix-iso uefi /workspace/libertix-installer-uefi.iso
+        python3 /workspace/iso-tools/sync_filepool_checksums.py \
+            --bios /workspace/libertix-installer-bios.iso \
+            --uefi /workspace/libertix-installer-uefi.iso
         outputs=(
             /workspace/libertix-installer-bios.iso
             /workspace/libertix-installer-uefi.iso
@@ -39,5 +46,7 @@ case "$mode" in
         ;;
 esac
 
-chown "$host_uid:$host_gid" "${outputs[@]}"
+chown "$host_uid:$host_gid" \
+    "${outputs[@]}" \
+    /workspace/auto_tests/app/filepool/distros.json
 sha256sum "${outputs[@]}"

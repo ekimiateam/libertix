@@ -1,6 +1,32 @@
 import httpx
+import pytest
 
+import app.clients.proxmox as proxmox_module
 from app.clients.proxmox import ProxmoxClient
+
+
+@pytest.mark.parametrize(("verify_tls", "expected"), ((True, True), (False, False)))
+def test_tls_verification_is_explicit(
+    monkeypatch: pytest.MonkeyPatch, verify_tls: bool, expected: bool
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(proxmox_module.httpx, "Client", FakeHttpClient)
+
+    ProxmoxClient(
+        "https://proxmox.test:8006",
+        "token",
+        "secret",
+        timeout=1,
+        task_timeout=1,
+        verify_tls=verify_tls,
+    )
+
+    assert captured["verify"] is expected
 
 
 def test_vm_lookup_only_queries_nodes_and_target_vmid() -> None:

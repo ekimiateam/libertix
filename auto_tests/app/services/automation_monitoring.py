@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+from typing import Literal
 
 from vncdotool import api
 
@@ -17,76 +19,16 @@ logger = logging.getLogger(__name__)
 
 
 class InstallationMonitoringMixin:
-    """Observe preparation, confirm reboot, and stop at the validated live stage."""
+    """Observe preparation, reboot, live installation, and the installed system."""
 
-    def _monitor_install_progress(self, vm: VMConfig, result: ResultBuilder) -> None:
-        deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
-        attempt = 0
-        last_context: dict[str, object] | None = None
-        while time.monotonic() < deadline:
-            attempt += 1
-            time.sleep(self.settings.automation_monitor_interval_seconds)
-            capture = self._capture_with_name(vm, f"monitor-{attempt:03d}")
-            try:
-                verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
-            except WorkflowError as exc:
-                exc.details.update({"vm": vm.name, "target": vm.vnc, "capture": str(capture)})
-                raise
-            context = {
-                "target": vm.vnc,
-                "vm": vm.name,
-                "capture": str(capture),
-                **verdict.model_dump(),
-            }
-            last_context = context
-            result.ok(
-                "automation.monitor_iso",
-                "Capture de progression analysée par le LLM",
-                **context,
-            )
-            if verdict.error_visible:
-                raise WorkflowError(
-                    "automation.monitor_iso",
-                    "Erreur visible pendant le téléchargement ou l'installation",
-                    details=context,
-                )
-            if verdict.blocking_problem_visible:
-                raise WorkflowError(
-                    "automation.monitor_iso",
-                    "Erreur bloquante détectée sur l'écran Libertix",
-                    details=context,
-                )
-            if verdict.iso_download_finished:
-                result.ok(
-                    "automation.iso_download_seen",
-                    "Téléchargement ISO terminé, attente de la fin de préparation",
-                    **context,
-                )
-            # The LLM can see "finished" text while a progress bar is still
-            # active. Only click Reboot after there is no active progress left.
-            if (
-                verdict.installation_finished or verdict.reboot_prompt_visible
-            ) and not verdict.active_install_progress_visible:
-                result.ok(
-                    "automation.preparation_finished",
-                    "Préparation Windows terminée",
-                    **context,
-                )
-                self._click_reboot_after_preparation(vm, result)
-                return
-            if verdict.installation_finished or verdict.reboot_prompt_visible:
-                result.ok(
-                    "automation.finish_ignored",
-                    "Verdict de fin ignoré car une progression active reste visible",
-                    **context,
-                )
-        raise WorkflowError(
-            "automation.monitor_iso",
-            "Timeout en attendant la fin du téléchargement ISO",
-            details=last_context or {"vm": vm.name, "target": vm.vnc},
-        )
+    def _monitor_until_live_boot(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+        firmware: Literal["bios", "uefi"],
+    ) -> Literal["boot-menu", "linux-desktop"]:
+        """Monitor Windows preparation and the following live boot as one transaction."""
 
-    def _monitor_uefi_until_reboot(self, vm: VMConfig, result: ResultBuilder) -> None:
         deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
         attempt = 0
         last_context: dict[str, object] | None = None
@@ -94,7 +36,7 @@ class InstallationMonitoringMixin:
         while time.monotonic() < deadline:
             attempt += 1
             time.sleep(self.settings.automation_monitor_interval_seconds)
-            capture = self._capture_with_name(vm, f"uefi-monitor-{attempt:03d}")
+            capture = self._capture_with_name(vm, f"{firmware}-monitor-{attempt:03d}")
             try:
                 verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
             except WorkflowError as exc:
@@ -108,14 +50,45 @@ class InstallationMonitoringMixin:
             }
             last_context = context
             result.ok(
-                "automation.monitor_uefi",
-                "Capture de progression UEFI analysée par le LLM",
+                "automation.monitor_installation",
+                f"Capture de progression {firmware.upper()} analysée par le LLM",
                 **context,
             )
+            rollback_text = f"{verdict.visible_text}\n{verdict.summary}"
+            if self._rollback_in_progress(rollback_text):
+                result.ok(
+                    "automation.rollback_in_progress",
+                    f"Rollback {firmware.upper()} détecté; suivi maintenu jusqu'au verdict",
+                    **context,
+                )
+                continue
+            rollback_outcome = self._rollback_terminal_outcome(rollback_text)
+            if rollback_outcome is not None:
+                context["rollback_outcome"] = rollback_outcome
+                message = (
+                    f"Installation {firmware.upper()} échouée après rollback vérifié"
+                    if rollback_outcome == "verified"
+                    else f"Installation {firmware.upper()} échouée avec rollback incomplet"
+                )
+                raise WorkflowError(
+                    "automation.monitor_installation",
+                    message,
+                    details=context,
+                )
+            if (
+                self._display_transition_without_error(rollback_text)
+                and not verdict.blocking_problem_visible
+            ):
+                result.ok(
+                    "automation.display_transition",
+                    f"Transition d'affichage {firmware.upper()} détectée; suivi maintenu",
+                    **context,
+                )
+                continue
             if verdict.error_visible or verdict.blocking_problem_visible:
                 raise WorkflowError(
-                    "automation.monitor_uefi",
-                    "Erreur visible pendant la préparation UEFI",
+                    "automation.monitor_installation",
+                    f"Erreur visible pendant l'installation {firmware.upper()}",
                     details=context,
                 )
             if (
@@ -124,49 +97,112 @@ class InstallationMonitoringMixin:
                 and not verdict.active_install_progress_visible
             ):
                 result.ok(
-                    "automation.uefi_preparation_finished",
-                    "Préparation UEFI terminée; validation du redémarrage",
+                    "automation.preparation_finished",
+                    f"Préparation {firmware.upper()} terminée; validation du redémarrage",
                     **context,
                 )
                 self._click_reboot_after_preparation(vm, result)
                 reboot_clicked = True
                 continue
+            # Some vision models put GRUB OCR in the summary instead of
+            # visible_text. Inspect both, but accept only the complete final
+            # menu. This check precedes the model's generic finished flag so a
+            # boot menu can never be mislabeled as a running Linux desktop.
+            final_boot_evidence = f"{verdict.visible_text}\n{verdict.summary}"
+            if self._reboot_or_live_started(final_boot_evidence):
+                result.ok(
+                    "automation.installed_boot_menu_seen",
+                    f"Menu de démarrage installé {firmware.upper()} confirmé visuellement",
+                    **context,
+                )
+                return "boot-menu"
             if (
                 reboot_clicked
                 and verdict.installation_finished
                 and not verdict.active_install_progress_visible
             ):
                 result.ok(
-                    "automation.uefi_installation_finished",
-                    "Installation UEFI terminée et bureau Linux démarré",
+                    "automation.installation_finished",
+                    f"Installation {firmware.upper()} terminée et bureau Linux démarré",
                     **context,
                 )
-                return
-            # Depending on the local vision model, the stable live-stage text
-            # can be returned in either visible_text or the concise summary.
-            # Inspect both fields so a real live boot is not missed merely
-            # because the model placed its OCR evidence in the summary.
-            live_evidence = f"{verdict.visible_text}\n{verdict.summary}"
-            if self._uefi_reboot_or_live_started(live_evidence):
-                result.ok(
-                    "automation.uefi_reboot_seen",
-                    "Reboot Windows vers le live UEFI confirmé visuellement",
-                    **context,
-                )
-                return
+                return "linux-desktop"
         raise WorkflowError(
-            "automation.monitor_uefi",
-            "Timeout en attendant le reboot Windows vers le live UEFI",
+            "automation.monitor_installation",
+            f"Timeout en attendant le reboot Windows vers le live {firmware.upper()}",
             details=last_context or {"vm": vm.name, "target": vm.vnc},
         )
 
     @staticmethod
-    def _uefi_reboot_or_live_started(visible_text: str) -> bool:
+    def _rollback_in_progress(content: str) -> bool:
+        """Keep monitoring while the installer is still restoring Windows."""
+
+        text = content.casefold()
+        return any(
+            marker in text
+            for marker in (
+                "restoring windows",
+                "restauration de windows",
+                "restaurando windows",
+                "windows を復元しています",
+            )
+        )
+
+    @staticmethod
+    def _rollback_terminal_outcome(content: str) -> Literal["verified", "incomplete"] | None:
+        """Classify only explicit final rollback messages rendered by Libertix."""
+
+        text = content.casefold()
+        incomplete_markers = (
+            "rollback incomplete",
+            "rollback incomplet",
+            "restauración incompleta",
+            "ロールバックが完了していません",
+        )
+        if any(marker in text for marker in incomplete_markers):
+            return "incomplete"
+
+        verified_markers = (
+            "windows has been restored",
+            "windows a été restauré",
+            "windows a ete restaure",
+            "windows ha sido restaurado",
+            "windows を復元しました",
+            "windows rollback completed and verified",
+            "rollback windows terminé et vérifié",
+            "rollback windows termine et verifie",
+            "la restauración de windows terminó y fue verificada",
+            "windows のロールバックと検証が完了しました",
+        )
+        if any(marker in text for marker in verified_markers):
+            return "verified"
+        return None
+
+    @staticmethod
+    def _display_transition_without_error(content: str) -> bool:
+        """Treat missing video during reboot as uncertainty, never as visible failure."""
+
+        text = content.casefold()
+        return any(
+            marker in text
+            for marker in (
+                "display output is not active",
+                "display is inactive",
+                "screen is blank",
+                "blank screen",
+                "black screen",
+                "no video output",
+                "video output is not active",
+            )
+        )
+
+    @staticmethod
+    def _reboot_or_live_started(visible_text: str) -> bool:
         """Detect that Windows has left the wizard and the live boot path started.
 
-        The UEFI automation must match the BIOS contract: it confirms the app
-        path up to the reboot into the installer, then stops. It must not wait
-        for Mint installation success.
+        Both firmware paths must remain under observation after the reboot.
+        Otherwise a bootloader failure can be mistaken for a successful run
+        merely because the Windows preparation reached its restart prompt.
         """
 
         text = visible_text.lower()
@@ -174,14 +210,15 @@ class InstallationMonitoringMixin:
         # installer completed and handed control to the installed system.  It
         # contains both operating systems plus the Libertix advanced submenu;
         # a standalone Windows Boot Manager screen must remain a blocker.
-        if all(
-            marker in text
-            for marker in (
-                "linux mint gnu/linux",
-                "windows boot manager",
-                "advanced options",
-            )
-        ):
+        final_menu_markers = (
+            "linux mint gnu/linux",
+            "shutdown",
+            "advanced options",
+        )
+        windows_entry_visible = "windows boot manager" in text or bool(
+            re.search(r"(?:^|\n)\s*windows\s*(?:\n|$)", text)
+        )
+        if all(marker in text for marker in final_menu_markers) and windows_entry_visible:
             return True
 
         if any(
@@ -215,26 +252,7 @@ class InstallationMonitoringMixin:
         ):
             return False
 
-        return any(
-            marker in text
-            for marker in (
-                "libertix stage:",
-                "code: 120-unsquashfs",
-                "code: 130-target-system-config",
-                "f12: mode terminal",
-                "libertix_install_success=",
-            )
-        ) and any(
-            marker in text
-            for marker in (
-                "installation automatique",
-                "extraction de mint",
-                "configuration du système installé",
-                "configuration du systeme installe",
-                "libertix stage:",
-                "installer-success",
-            )
-        )
+        return False
 
     def _click_reboot_after_preparation(self, vm: VMConfig, result: ResultBuilder) -> None:
         client = None

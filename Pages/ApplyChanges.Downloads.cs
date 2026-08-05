@@ -237,13 +237,14 @@ namespace Libertix.Pages
             int attempt,
             int attempts)
         {
-            using (var client = new HttpClient())
+            using (var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                _installationCancellation.Token))
             {
-                client.Timeout = timeout;
-                using (var response = await client.GetAsync(
+                timeoutCancellation.CancelAfter(timeout);
+                using (var response = await SharedHttpClient.GetAsync(
                     url,
                     HttpCompletionOption.ResponseHeadersRead,
-                    _installationCancellation.Token))
+                    timeoutCancellation.Token))
                 {
                     response.EnsureSuccessStatusCode();
 
@@ -269,13 +270,13 @@ namespace Libertix.Pages
                             buffer,
                             0,
                             buffer.Length,
-                            _installationCancellation.Token)) > 0)
+                            timeoutCancellation.Token)) > 0)
                         {
                             await fileStream.WriteAsync(
                                 buffer,
                                 0,
                                 bytesRead,
-                                _installationCancellation.Token);
+                                timeoutCancellation.Token);
                             totalRead += bytesRead;
 
                             if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)

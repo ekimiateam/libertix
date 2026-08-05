@@ -67,12 +67,46 @@ function Invoke-DiskpartScript {
             -Arguments ('/s "{0}"' -f $tmp) `
             -TimeoutSeconds 120
         $text = ($result.StandardOutput + [Environment]::NewLine + $result.StandardError).Trim()
-        if ($result.ExitCode -ne 0 -or $text -match "(?i)(error|erreur|failed|échec)") {
+        # diskpart output is localized. Callers verify the resulting partition,
+        # access path, or absence directly, so only the process contract belongs
+        # here.
+        if ($result.ExitCode -ne 0) {
             throw "diskpart failed: $text"
         }
     } finally {
         Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Get-HibernateEnabled {
+    # Read the state from the registry rather than parsing `powercfg /a`, whose
+    # output is localized. Returns $true, $false, or $null when unknown.
+    try {
+        $value = Get-ItemProperty `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
+            -Name "HibernateEnabled" `
+            -ErrorAction Stop
+        return ([int]$value.HibernateEnabled -ne 0)
+    } catch {
+        return $null
+    }
+}
+
+function Set-HibernateEnabled {
+    param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+    $argument = if ($Enabled) { "on" } else { "off" }
+    $powercfg = Get-NativeSystemExecutable -FileName "powercfg.exe"
+    $output = & $powercfg /hibernate $argument 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "powercfg failed to turn hibernation $argument (rc=$LASTEXITCODE): $($output -join ' ')"
+    }
+
+    $observed = Get-HibernateEnabled
+    if ($null -eq $observed -or $observed -ne $Enabled) {
+        throw "Windows did not apply the requested hibernation state: $argument"
+    }
+    Write-Log "Windows hibernation and Fast Startup set to: $argument" "Cyan"
 }
 
 function Get-GuidDLower {
@@ -92,7 +126,7 @@ exit
         Start-Sleep -Seconds 1
     }
 
-    $winPart = Get-Partition -DriveLetter C
+    $winPart = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     $espPart =
         Get-Partition -DiskNumber $winPart.DiskNumber |
         Where-Object {
@@ -125,7 +159,7 @@ exit
 }
 
 function Get-WindowsEspPartition {
-    $winPart = Get-Partition -DriveLetter C -ErrorAction Stop
+    $winPart = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     $espPart =
         Get-Partition -DiskNumber $winPart.DiskNumber -ErrorAction Stop |
         Where-Object {
@@ -181,20 +215,7 @@ function Install-LibertixTemporaryBootloaderOnEsp {
     Copy-Item -LiteralPath $grubx64 -Destination (Join-Path $destination "grubx64.efi") -Force
     Copy-Item -LiteralPath $mmx64 -Destination (Join-Path $destination "mmx64.efi") -Force
 
-    $grubConfig = @"
-set default=0
-set timeout=0
-set timeout_style=hidden
-set hidden_timeout=0
-set hidden_timeout_quiet=true
-
-search --no-floppy --label $InstallerLabel --set=root
-
-menuentry "Install Linux Mint (Automatic)" {
-    linux /live/vmlinuz boot=live toram components quiet splash silent plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
-    initrd /live/initrd.img
-}
-"@
+    $grubConfig = Get-LibertixStagingGrubConfig
     Set-Content -Path (Join-Path $destination "grub.cfg") -Value $grubConfig -Encoding ASCII
 
     $hashes = @{}
@@ -432,36 +453,15 @@ function Get-FreeDriveLetter {
 }
 
 function Get-LibertixInstallerPartition {
-    param([string]$DriveLetter = "")
+    param([Parameter(Mandatory = $true)][string]$DriveLetter)
 
-    if ($DriveLetter) {
-        $partition = Get-Partition -DriveLetter $DriveLetter -ErrorAction SilentlyContinue
-        if ($partition) {
-            return $partition
-        }
-    }
-
-    $volume = Get-Volume -ErrorAction SilentlyContinue |
-        Where-Object { $_.FileSystemLabel -eq $InstallerLabel -and $_.DriveLetter } |
-        Select-Object -First 1
-
-    if ($volume) {
-        $partition = Get-Partition -DriveLetter $volume.DriveLetter -ErrorAction SilentlyContinue
-        if ($partition) {
-            return $partition
-        }
-    }
-
-    return Get-Partition |
-        Where-Object {
-            $_.GptType -eq "{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}" -and
-            $_.Size -gt 1GB
-        } |
-        Sort-Object DiskNumber,PartitionNumber -Descending |
-        Select-Object -First 1
+    # Only the access path returned by New-Partition identifies the new RAW
+    # slot before its transaction geometry has been persisted. Falling back to
+    # a label or a generic large ESP could select an unrelated user partition.
+    return Get-Partition -DriveLetter $DriveLetter -ErrorAction Stop
 }
 
-function Ensure-VolumeLetterByLabel {
+function Set-VolumeLetterByLabel {
     param(
         [Parameter(Mandatory = $true)][string]$Label,
         [Parameter(Mandatory = $true)][string]$Letter
@@ -507,76 +507,28 @@ function Ensure-VolumeLetterByLabel {
     return "${letterToUse}:"
 }
 
-function Ensure-VolumeNotEncrypted {
-    param([Parameter(Mandatory = $true)][string]$DriveLetter)
-
-    $manageBde = Get-NativeSystemExecutable -FileName "manage-bde.exe"
-    $out = & $manageBde -status "${DriveLetter}:" 2>&1 | Out-String
-
-    $needsDecryption = $false
-    if ($out -match "Percentage Encrypted:\s*(\d+\.?\d*)%?") {
-        if ([double]$matches[1] -gt 0) { $needsDecryption = $true }
-    }
-
-    if (
-        $out -match "Conversion Status:\s*(Encryption in Progress|Used Space Only Encrypted|Fully Encrypted)" -or
-        $out -match "Protection Status:\s*(Protection On)"
-    ) {
-        $needsDecryption = $true
-    }
-
-    if (-not $needsDecryption) {
-        return
-    }
-
-    Write-Log "BitLocker detected on ${DriveLetter}:, disabling..." "Yellow"
-    & $manageBde -off "${DriveLetter}:" 2>&1 | Out-Null
-
-    $timeoutSec = 600
-    $elapsed = 0
-    $interval = 3
-
-    while ($elapsed -lt $timeoutSec) {
-        Start-Sleep -Seconds $interval
-        $elapsed += $interval
-
-        $out = & $manageBde -status "${DriveLetter}:" 2>&1 | Out-String
-        if ($out -match "Percentage Encrypted:\s*(\d+\.?\d*)%?") {
-            $enc = [double]$matches[1]
-            $pct = [math]::Round(100 - $enc, 1)
-            Write-Progress -Activity "Decrypting ${DriveLetter}:" `
-                -PercentComplete $pct -Status "$pct% ($elapsed sec)"
-            if ($enc -eq 0) { break }
-        }
-
-        if ($out -match "Conversion Status:\s*Fully Decrypted") { break }
-        if ($out -match "État de la conversion:\s*Intégralement déchiffré") { break }
-    }
-
-    Write-Progress -Activity "Decrypting ${DriveLetter}:" -Completed
-}
-
-function Ensure-WindowsVolumeReadableFromLinux {
+function Set-WindowsVolumeReadableFromLinux {
     $manageBde = Get-NativeSystemExecutable -FileName "manage-bde.exe"
 
     try {
-        $bitlockerVolume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
+        $bitlockerVolume = Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop
     } catch {
-        throw "Cannot establish the BitLocker state of C:. Refusing disk changes: $($_.Exception.Message)"
+        throw "Cannot establish the BitLocker state of $SystemDrive. Refusing disk changes: $($_.Exception.Message)"
     }
 
     if (-not $bitlockerVolume) {
-        throw "Get-BitLockerVolume returned no C: volume. Refusing disk changes."
+        throw "Get-BitLockerVolume returned no $SystemDrive volume. Refusing disk changes."
     }
 
     if (Test-BitLockerVolumeReadable -Volume $bitlockerVolume) {
-        Write-Log "Windows C: is already readable from Linux." "Green"
+        Write-Log "Windows $SystemDrive is already readable from Linux." "Green"
         return
     }
 
-    Write-Log "Disabling BitLocker/device encryption on C: before Linux live boot..." "Cyan"
-    Disable-BitLocker -MountPoint "C:" -ErrorAction Continue
-    & $manageBde -off C: 2>&1 | Out-Null
+    Write-LibertixProgress -Stage "windows-decryption-start" -Percent 18
+    Write-Log "Disabling BitLocker/device encryption on $SystemDrive before Linux live boot..." "Cyan"
+    Disable-BitLocker -MountPoint $SystemDrive -ErrorAction Continue
+    & $manageBde -off $SystemDrive 2>&1 | Out-Null
 
     $maxDecryptionWait = [TimeSpan]::FromHours(6)
     $decryptionTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -586,9 +538,10 @@ function Ensure-WindowsVolumeReadableFromLinux {
     while ($decryptionTimer.Elapsed -lt $maxDecryptionWait) {
         Start-Sleep -Seconds 10
         $attempt++
-        $bitlockerVolume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
+        $bitlockerVolume = Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop
         if (Test-BitLockerVolumeReadable -Volume $bitlockerVolume) {
-            Write-Log "Windows C: decrypted." "Green"
+            Write-LibertixProgress -Stage "windows-decryption-complete" -Percent 28
+            Write-Log "Windows $SystemDrive decrypted." "Green"
             return
         }
 
@@ -600,20 +553,21 @@ function Ensure-WindowsVolumeReadableFromLinux {
                 $samePercentCount = 0
                 $lastEncryptedPercent = $encryptedPercent
             }
-            Write-Log "Waiting for C: decryption... $encryptedPercent% encrypted, protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
+            Write-LibertixProgress -Stage "windows-decryption" -Percent ([int][math]::Round($encryptedPercent))
+            Write-Log "Waiting for $SystemDrive decryption... $encryptedPercent% encrypted, protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
         } else {
-            Write-Log "Waiting for C: decryption... status=$($bitlockerVolume.VolumeStatus), protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
+            Write-Log "Waiting for $SystemDrive decryption... status=$($bitlockerVolume.VolumeStatus), protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
         }
 
         if (($attempt % 12) -eq 0 -or $samePercentCount -ge 12) {
-            Write-Log "Reasserting BitLocker decryption request for C:..." "Yellow"
-            Disable-BitLocker -MountPoint "C:" -ErrorAction Continue
-            & $manageBde -off C: 2>&1 | Out-Null
+            Write-Log "Reasserting BitLocker decryption request for $SystemDrive..." "Yellow"
+            Disable-BitLocker -MountPoint $SystemDrive -ErrorAction Continue
+            & $manageBde -off $SystemDrive 2>&1 | Out-Null
             $samePercentCount = 0
         }
 
     }
     $decryptionTimer.Stop()
-    $finalStatus = & $manageBde -status C: 2>&1 | Out-String
-    throw "Timed out waiting for C: BitLocker decryption. Final status: $finalStatus"
+    $finalStatus = & $manageBde -status $SystemDrive 2>&1 | Out-String
+    throw "Timed out waiting for $SystemDrive BitLocker decryption. Final status: $finalStatus"
 }

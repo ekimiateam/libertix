@@ -222,8 +222,10 @@ namespace Libertix.Pages
 
         private static void WriteUefiRecoveryState(UefiRecoveryState state)
         {
+            // The startup recovery agent decides which phase applies from this
+            // document alone; a torn write would leave it undecidable.
             string statePath = Path.Combine(state.RecoveryRoot, "state.json");
-            File.WriteAllText(statePath, JsonSerializer.Serialize(state), new UTF8Encoding(false));
+            AtomicJsonFile.Write(statePath, JsonSerializer.Serialize(state));
         }
 
         private void InstallUefiRecoveryAgent(UefiRecoveryState recovery, string powershell)
@@ -300,42 +302,17 @@ namespace Libertix.Pages
 
             Log(line);
 
-            string normalized = line.ToLowerInvariant();
-            if (normalized.Contains("checking secure boot"))
-                UpdateProgress(8, Localized("ApplyChangesCheckingSecureBoot", "Checking Secure Boot..."));
-            else if (normalized.Contains("disabling bitlocker"))
-                UpdateProgress(18, Localized("ApplyChangesDecryptingWindowsInit", "Initializing Windows C: decryption..."));
-            else if (normalized.Contains("windows c: decrypted"))
-                UpdateProgress(28, Localized("ApplyChangesWindowsDecrypted", "Windows C: decrypted"));
-            else if (normalized.Contains("waiting for c: decryption") || normalized.Contains("decryptioninprogress"))
-                UpdateDecryptionProgress(line);
-            else if (normalized.Contains("downloading mint iso"))
+            var progressEvent = Regex.Match(
+                line,
+                @"^LIBERTIX_PROGRESS (?<stage>[a-z0-9-]+) (?<percent>\d{1,3})$");
+            if (progressEvent.Success &&
+                int.TryParse(progressEvent.Groups["percent"].Value, out int eventPercent))
             {
-                _uefiDownloadingInstallerIso = false;
-                UpdateProgress(30, Localized("ApplyChangesDownloadingMint", "Downloading Mint ISO..."));
+                HandleUefiProgressEvent(
+                    progressEvent.Groups["stage"].Value,
+                    Math.Max(0, Math.Min(100, eventPercent)));
+                return;
             }
-            else if (normalized.Contains("mint iso ready"))
-            {
-                _uefiDownloadingInstallerIso = false;
-                UpdateProgress(45, Localized("ApplyChangesMintReady", "Mint ISO ready"));
-            }
-            else if (normalized.Contains("creating") && normalized.Contains("libertixefi"))
-                UpdateProgress(52, Localized("ApplyChangesCreatingUefiPartition", "Creating UEFI installer partition..."));
-            else if (normalized.Contains("downloading libertix uefi iso"))
-            {
-                _uefiDownloadingInstallerIso = true;
-                UpdateProgress(62, Localized("ApplyChangesDownloadingUefiIso", "Downloading Libertix UEFI ISO..."));
-            }
-            else if (normalized.Contains("libertix-installer-uefi.iso"))
-            {
-                _uefiDownloadingInstallerIso = true;
-            }
-            else if (normalized.Contains("copying iso contents"))
-                UpdateProgress(78, Localized("ApplyChangesCopyingUefiInstaller", "Copying UEFI installer..."));
-            else if (normalized.Contains("configuring one-time uefi boot entry"))
-                UpdateProgress(90, Localized("ApplyChangesConfiguringUefiBoot", "Configuring UEFI boot..."));
-            else if (normalized.Contains("complete. next boot"))
-                UpdateProgress(100, Localized("ApplyChangesUefiComplete", "UEFI preparation complete"));
 
             var ariaProgress = Regex.Match(line, @"\((\d{1,3})%\)");
             if (ariaProgress.Success && int.TryParse(ariaProgress.Groups[1].Value, out int percent))
@@ -362,37 +339,71 @@ namespace Libertix.Pages
             }
         }
 
-        private void UpdateDecryptionProgress(string line)
+        private void HandleUefiProgressEvent(string stage, int percent)
         {
-            var encryptedMatch = Regex.Match(line, @"(\d+(?:[.,]\d+)?)%\s+encrypted", RegexOptions.IgnoreCase);
-            if (!encryptedMatch.Success)
+            switch (stage)
             {
-                encryptedMatch = Regex.Match(line, @"DecryptionInProgress\s+(\d+(?:[.,]\d+)?)", RegexOptions.IgnoreCase);
+                case "secure-boot":
+                    UpdateProgress(percent, Localized("ApplyChangesCheckingSecureBoot", "Checking Secure Boot..."));
+                    break;
+                case "windows-decryption-start":
+                    UpdateProgress(
+                        percent,
+                        LocalizedFormat(
+                            "ApplyChangesDecryptingWindowsInit",
+                            "Initializing Windows {0} decryption...",
+                            _storagePreflight.SystemDrive));
+                    break;
+                case "windows-decryption":
+                    UpdateDecryptionProgressFromEncryptedPercent(percent);
+                    break;
+                case "windows-decryption-complete":
+                    UpdateProgress(
+                        percent,
+                        LocalizedFormat(
+                            "ApplyChangesWindowsDecrypted",
+                            "Windows {0} decrypted",
+                            _storagePreflight.SystemDrive));
+                    break;
+                case "installer-iso-download":
+                    _uefiDownloadingInstallerIso = false;
+                    UpdateProgress(percent, Localized("ApplyChangesDownloadingMint", "Downloading Mint ISO..."));
+                    break;
+                case "installer-iso-ready":
+                    _uefiDownloadingInstallerIso = false;
+                    UpdateProgress(percent, Localized("ApplyChangesMintReady", "Mint ISO ready"));
+                    break;
+                case "staging-partition":
+                    UpdateProgress(percent, Localized("ApplyChangesCreatingUefiPartition", "Creating UEFI installer partition..."));
+                    break;
+                case "live-iso-download":
+                    _uefiDownloadingInstallerIso = true;
+                    UpdateProgress(percent, Localized("ApplyChangesDownloadingUefiIso", "Downloading Libertix UEFI ISO..."));
+                    break;
+                case "live-iso-copy":
+                    UpdateProgress(percent, Localized("ApplyChangesCopyingUefiInstaller", "Copying UEFI installer..."));
+                    break;
+                case "temporary-boot":
+                    UpdateProgress(percent, Localized("ApplyChangesConfiguringUefiBoot", "Configuring UEFI boot..."));
+                    break;
+                case "complete":
+                    UpdateProgress(percent, Localized("ApplyChangesUefiComplete", "UEFI preparation complete"));
+                    break;
             }
-            if (!encryptedMatch.Success)
-            {
-                UpdateProgress(18, Localized("ApplyChangesDecryptingWindows", "Decrypting Windows C:..."));
-                return;
-            }
+        }
 
-            if (!double.TryParse(
-                encryptedMatch.Groups[1].Value.Replace(',', '.'),
-                NumberStyles.Float,
-                CultureInfo.InvariantCulture,
-                out double encryptedPercent))
-            {
-                UpdateProgress(18, Localized("ApplyChangesDecryptingWindows", "Decrypting Windows C:..."));
-                return;
-            }
-
+        private void UpdateDecryptionProgressFromEncryptedPercent(double encryptedPercent)
+        {
             int decryptedPercent = Math.Max(0, Math.Min(100, (int)Math.Round(100 - encryptedPercent)));
             int overallProgress = 18 + (decryptedPercent * 10 / 100);
             UpdateProgress(
                 overallProgress,
                 LocalizedFormat(
                     "ApplyChangesDecryptingWindowsPercent",
-                    "Decrypting Windows C: {0}%",
+                    "Decrypting Windows {0}: {1}%",
+                    _storagePreflight.SystemDrive,
                     decryptedPercent));
         }
+
     }
 }

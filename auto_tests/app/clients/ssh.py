@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -26,21 +27,36 @@ class SSHClient:
         username: str,
         password: str,
         *,
+        known_hosts_path: str | Path,
         port: int = 22,
         connect_timeout: float = 15,
+        strict_host_key: bool = True,
     ) -> None:
         self.host = host
         self.username = username
         self.password = password
+        self.known_hosts_path = Path(known_hosts_path)
         self.port = port
         self.connect_timeout = connect_timeout
+        self.strict_host_key = strict_host_key
         self._client: paramiko.SSHClient | None = None
+        self.server_key_sha256: str | None = None
 
     def __enter__(self) -> SSHClient:
         logger.info("Connexion SSH", extra={"step": "ssh.connect", "target": self.host})
         client = paramiko.SSHClient()
         try:
-            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            # Automation controls disks and boot state, so a first-seen host key
+            # must never be trusted implicitly. The operator owns this file and
+            # must update it deliberately when a VM or server key changes.
+            if self.strict_host_key:
+                client.load_host_keys(str(self.known_hosts_path))
+                client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            else:
+                # Reinstalling a test VM creates a new SSH host key. The
+                # post-install suite records that ephemeral key but must not
+                # pollute the trusted Windows/server known-hosts inventory.
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(
                 self.host,
                 port=self.port,
@@ -52,6 +68,11 @@ class SSHClient:
                 look_for_keys=False,
                 allow_agent=False,
             )
+            transport = client.get_transport()
+            if transport is not None:
+                self.server_key_sha256 = hashlib.sha256(
+                    transport.get_remote_server_key().asbytes()
+                ).hexdigest()
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             client.close()
             raise WorkflowError(
@@ -80,12 +101,17 @@ class SSHClient:
         timeout: float,
         check: bool = True,
         sensitive: bool = False,
+        stdin_data: str | None = None,
     ) -> CommandResult:
         if not self._client:
             raise WorkflowError(step, "Client SSH non connecté", details={"host": self.host})
         logger.info("Commande distante démarrée", extra={"step": step, "target": self.host})
         try:
-            _stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
+            stdin, stdout, stderr = self._client.exec_command(command, timeout=timeout)
+            if stdin_data is not None:
+                stdin.write(stdin_data)
+                stdin.flush()
+                stdin.channel.shutdown_write()
             channel = stdout.channel
             deadline = time.monotonic() + timeout
             out_chunks: list[bytes] = []

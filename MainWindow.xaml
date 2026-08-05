@@ -11,23 +11,23 @@
         ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen">
 
-    <Frame x:Name="MainFrame" NavigationUIVisibility="Hidden" Background="#232136">
+    <Frame x:Name="MainFrame" NavigationUIVisibility="Hidden" Background="{DynamicResource PrimaryBackground}">
         <Frame.Content>
-            <Grid Background="#232136">
+            <Grid Background="{DynamicResource PrimaryBackground}">
                 <StackPanel VerticalAlignment="Center">
                     <Label Content="{DynamicResource Welcome}"
                            HorizontalAlignment="Center"
                            Margin="0,0,0,40"
                            FontSize="72"
                            FontWeight="Light"
-                           Foreground="#E0DEF4"/>
+                           Foreground="{DynamicResource TextPrimary}"/>
 
                     <Label Content="{DynamicResource Subtitle}"
                            HorizontalAlignment="Center"
                            Margin="0,0,0,20"
                            FontSize="16"
                            FontWeight="Light"
-                           Foreground="#908CAA"/>
+                           Foreground="{DynamicResource TextSecondary}"/>
 
                     <Button Content="{DynamicResource GetStarted}"
                             Style="{StaticResource ModernButton}"
@@ -40,7 +40,7 @@
                     <StackPanel Orientation="Horizontal"
                               HorizontalAlignment="Center">
                         <TextBlock Text="{DynamicResource Language}"
-                                 Foreground="#E0DEF4"
+                                 Foreground="{DynamicResource TextPrimary}"
                                  FontSize="16"
                                  VerticalAlignment="Center"
                                  Margin="0,0,10,0"/>
@@ -63,28 +63,6 @@
                             Margin="0,24,0,0"
                             Click="AboutButton_Click"/>
 
-                    <!-- Debug Navigation -->
-                    <StackPanel x:Name="DebugPanel"
-                                Orientation="Horizontal"
-                                HorizontalAlignment="Center"
-                                Margin="0,30,0,0"
-                                Visibility="Collapsed">
-                        <TextBlock Text="DEBUG: Go to page"
-                                 Foreground="#eb6f92"
-                                 FontSize="14"
-                                 VerticalAlignment="Center"
-                                 Margin="0,0,10,0"/>
-                        <ComboBox x:Name="DebugPageComboBox"
-                                 Width="180"
-                                 Style="{StaticResource ModernComboBox}"
-                                 SelectionChanged="DebugPageComboBox_SelectionChanged">
-                            <ComboBoxItem Content="ChooseDistro" Tag="ChooseDistro" Style="{StaticResource ModernComboBoxItem}"/>
-                            <ComboBoxItem Content="ResizeDisk" Tag="ResizeDisk" Style="{StaticResource ModernComboBoxItem}"/>
-                            <ComboBoxItem Content="AccountCreation" Tag="AccountCreation" Style="{StaticResource ModernComboBoxItem}"/>
-                            <ComboBoxItem Content="WarningConfirmation" Tag="WarningConfirmation" Style="{StaticResource ModernComboBoxItem}"/>
-                            <ComboBoxItem Content="ApplyChanges" Tag="ApplyChanges" Style="{StaticResource ModernComboBoxItem}"/>
-                        </ComboBox>
-                    </StackPanel>
                 </StackPanel>
             </Grid>
         </Frame.Content>

@@ -61,6 +61,19 @@ def contains_wizard_blocker(content: str) -> bool:
     )
 
 
+def contains_warning_screen(content: str) -> bool:
+    """Require both a localized title and confirmation control."""
+
+    text = content.casefold()
+    title_visible = any(
+        marker in text for marker in ("avertissement", "warning", "advertencia", "警告")
+    )
+    confirmation_visible = any(
+        marker in text for marker in ("je comprends", "i understand", "entiendo", "理解しました")
+    )
+    return title_visible and confirmation_visible
+
+
 def contains_active_install_progress(content: str) -> bool:
     if contains_final_reboot_prompt(content):
         return False

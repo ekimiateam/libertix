@@ -20,7 +20,7 @@ require_container_root() {
 
 require_build_dependencies() {
     local command missing=()
-    local commands=(debootstrap mksquashfs xorriso mmd mcopy mkfs.vfat)
+    local commands=(debootstrap mksquashfs xorriso mmd mcopy mkfs.vfat python3)
     if [ "$FIRMWARE_MODE" = "bios" ]; then
         commands+=(grub-mkstandalone)
     else
@@ -35,6 +35,14 @@ require_build_dependencies() {
         printf 'Missing ISO build prerequisites: %s\n' "${missing[*]}" >&2
         exit 1
     }
+}
+
+render_boot_config() {
+    local template="$1" output="$2"
+    python3 "$ROOT_DIR/iso-tools/render-boot-config.py" \
+        --arguments "$ROOT_DIR/Scripts/config/Libertix.BootArguments.json" \
+        --template "$template" \
+        --output "$output"
 }
 
 prepare_workdir() {
@@ -92,7 +100,9 @@ install_live_installer_assets() {
     install -m 0755 "$ISO_DIR/live/install-mint.sh" "$WORKDIR/chroot/install-mint.sh"
     install -m 0755 -D "$ISO_DIR/live/libertix-runner.sh" \
         "$WORKDIR/chroot/usr/local/sbin/libertix-runner"
-    install -m 0755 -D "$ROOT_DIR/iso-uefi/live/libertix-gui.py" \
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-runner-main.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-runner-main.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-gui.py" \
         "$WORKDIR/chroot/usr/local/sbin/libertix-gui"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-copy-logs.sh" \
         "$WORKDIR/chroot/usr/local/sbin/libertix-copy-logs"
@@ -102,6 +112,20 @@ install_live_installer_assets() {
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-storage-common.sh"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-install-runtime-common.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-install-runtime-common.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-installation-plan.py" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-installation-plan.py"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-installation-plan.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-installation-plan.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/configure-development-access.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/configure-development-access.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-development-ssh-first-boot.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-development-ssh-first-boot.sh"
+    install -m 0644 -D "$ROOT_DIR/assets/live/libertix-development-ssh.service" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-development-ssh.service"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-live-context.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-live-context.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-install-main.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-install-main.sh"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-i18n.py" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-i18n.py"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-i18n.sh" \
@@ -110,6 +134,8 @@ install_live_installer_assets() {
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-translations.json"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-target-common.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-target-common.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/libertix-apply-keyboard-once.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-apply-keyboard-once.sh"
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-rollback-common.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-rollback-common.sh"
     if [ "$FIRMWARE_MODE" = "bios" ]; then
@@ -121,10 +147,16 @@ install_live_installer_assets() {
     fi
     install -m 0755 -D "$ROOT_DIR/assets/live/libertix-runner-stage-common.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/libertix-runner-stage-common.sh"
+    install -m 0644 -D "$ROOT_DIR/assets/live/libertix-stages.tsv" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/libertix-stages.tsv"
     install -m 0755 -D "$ISO_DIR/live/cleanup-bcd.py" \
         "$WORKDIR/chroot/usr/local/lib/libertix/cleanup-bcd.py"
+    install -m 0755 -D "$ROOT_DIR/assets/live/cleanup-bcd-main.py" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/cleanup-bcd-main.py"
     install -m 0755 -D "$ISO_DIR/target/configure-target.sh" \
         "$WORKDIR/chroot/usr/local/lib/libertix/configure-target.sh"
+    install -m 0755 -D "$ROOT_DIR/assets/live/configure-target-main.sh" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/configure-target-main.sh"
     install -m 0755 -D "$ROOT_DIR/grub/10_libertix" \
         "$WORKDIR/chroot/usr/local/lib/libertix/10_libertix"
     install -m 0755 -D "$ROOT_DIR/grub/render-libertix-menu.py" \
@@ -165,24 +197,6 @@ EOF
         | LC_ALL=C sort > "$WORKDIR/iso_build/libertix-packages.txt"
 }
 
-write_live_config() {
-    shell_quote() {
-        printf '%q' "$1"
-    }
-    cat > "$WORKDIR/iso_build/config.txt" <<CONFIGFILE
-LANGUAGE_CODE=$(shell_quote "$LANGUAGE_CODE")
-SYSTEM_LANG=$(shell_quote "$SYSTEM_LANG")
-KEYBOARD_LAYOUT=$(shell_quote "$KEYBOARD_LAYOUT")
-KEYBOARD_MODEL=$(shell_quote "$KEYBOARD_MODEL")
-TIMEZONE=$(shell_quote "$TIMEZONE")
-USERNAME=$(shell_quote "$USERNAME")
-PASSWORD_HASH=$(shell_quote "$PASSWORD_HASH")
-COMPUTER_NAME=$(shell_quote "$COMPUTER_NAME")
-ISO_FILENAME=$(shell_quote "$ISO_FILENAME")
-LINUX_SIZE_GB=$(shell_quote "$LINUX_SIZE_GB")
-CONFIGFILE
-}
-
 build_squashfs() {
     echo "=== Creating squashfs ==="
     mkdir -p "$WORKDIR/iso_build/live"
@@ -202,7 +216,9 @@ configure_isolinux() {
     mkdir -p "$WORKDIR/iso_build/isolinux"
     cp /usr/lib/ISOLINUX/isolinux.bin "$WORKDIR/iso_build/isolinux/"
     cp /usr/lib/syslinux/modules/bios/*.c32 "$WORKDIR/iso_build/isolinux/"
-    install -m 0644 "$ISO_DIR/boot/isolinux.cfg" "$WORKDIR/iso_build/isolinux/isolinux.cfg"
+    render_boot_config \
+        "$ISO_DIR/boot/isolinux.cfg" \
+        "$WORKDIR/iso_build/isolinux/isolinux.cfg"
 }
 
 configure_grub_efi() {
@@ -212,7 +228,9 @@ configure_grub_efi() {
     fi
     echo "=== Configuring GRUB EFI ==="
     mkdir -p "$WORKDIR/iso_build/boot/grub" "$WORKDIR/iso_build/EFI/BOOT"
-    install -m 0644 "$ISO_DIR/boot/grub.cfg" "$WORKDIR/iso_build/boot/grub/grub.cfg"
+    render_boot_config \
+        "$ISO_DIR/boot/grub.cfg" \
+        "$WORKDIR/iso_build/boot/grub/grub.cfg"
     mkdir -p "$WORKDIR/iso_build/boot/grub/themes"
     cp -a "$ROOT_DIR/assets/grub-theme" \
         "$WORKDIR/iso_build/boot/grub/themes/Libertix"
@@ -249,12 +267,16 @@ configure_signed_grub_efi() {
         "$WORKDIR/iso_build/EFI/BOOT" \
         "$WORKDIR/iso_build/EFI/debian" \
         "$WORKDIR/iso_build/EFI/LibertixInstaller"
-    install -m 0644 "$ISO_DIR/boot/grub.cfg" "$WORKDIR/iso_build/boot/grub/grub.cfg"
+    render_boot_config \
+        "$ISO_DIR/boot/grub.cfg" \
+        "$WORKDIR/iso_build/boot/grub/grub.cfg"
     mkdir -p "$WORKDIR/iso_build/boot/grub/themes"
     cp -a "$ROOT_DIR/assets/grub-theme" \
         "$WORKDIR/iso_build/boot/grub/themes/Libertix"
-    install -m 0644 "$ISO_DIR/boot/grub.cfg" "$WORKDIR/iso_build/EFI/debian/grub.cfg"
-    install -m 0644 "$ISO_DIR/boot/grub.cfg" "$WORKDIR/iso_build/EFI/LibertixInstaller/grub.cfg"
+    install -m 0644 "$WORKDIR/iso_build/boot/grub/grub.cfg" \
+        "$WORKDIR/iso_build/EFI/debian/grub.cfg"
+    install -m 0644 "$WORKDIR/iso_build/boot/grub/grub.cfg" \
+        "$WORKDIR/iso_build/EFI/LibertixInstaller/grub.cfg"
     install -m 0644 "$shim_efi" "$WORKDIR/iso_build/EFI/BOOT/BOOTX64.EFI"
     install -m 0644 "$grub_efi" "$WORKDIR/iso_build/EFI/BOOT/grubx64.efi"
     install -m 0644 "$mok_efi" "$WORKDIR/iso_build/EFI/BOOT/mmx64.efi"
@@ -323,7 +345,6 @@ main() {
     install_live_installer_assets
     write_build_id
     unmount_chroot_filesystems
-    write_live_config
     build_squashfs
     configure_isolinux
     configure_grub_efi

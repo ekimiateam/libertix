@@ -11,7 +11,6 @@ namespace Libertix.Pages
     public partial class AccountCreation : Page
     {
         private readonly InstallationState _installationState;
-        private const string STATE_KEY = "AccountCreation";
         private readonly Regex usernameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$");
         private readonly Regex hostnameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$");
 
@@ -29,23 +28,15 @@ namespace Libertix.Pages
 
         private void UpdateDefaultValues()
         {
-            // Get current Windows username and convert to lowercase
             string windowsUsername = Environment.UserName.ToLower();
-
-            // Remove any characters that don't match our regex
             string sanitizedUsername = Regex.Replace(windowsUsername, "[^a-z0-9-]", "");
-
-            // Ensure it starts with a letter
             if (!string.IsNullOrEmpty(sanitizedUsername) && char.IsLetter(sanitizedUsername[0]))
             {
                 UsernameBox.Text = sanitizedUsername;
             }
 
-            // Get Windows computer name and create Linux hostname
             string windowsHostname = Environment.MachineName.ToLower();
             string sanitizedHostname = Regex.Replace(windowsHostname, "[^a-z0-9-]", "");
-
-            // Ensure it starts with a letter
             if (!string.IsNullOrEmpty(sanitizedHostname) && char.IsLetter(sanitizedHostname[0]))
             {
                 HostnameBox.Text = sanitizedHostname + "-linux";
@@ -54,31 +45,22 @@ namespace Libertix.Pages
             {
                 HostnameBox.Text = "linux-pc";
             }
-
-            // Validate the default values
             ValidateInput(null, null);
         }
 
         private void SaveState()
         {
-            var state = new PageState
+            _installationState.Account = new AccountInfo
             {
-                PageType = typeof(AccountCreation),
-                StateKey = STATE_KEY,
-                State = new AccountInfo
-                {
-                    Username = UsernameBox.Text,
-                    ComputerName = HostnameBox.Text
-                    // Don't save password for security
-                }
+                Username = UsernameBox.Text,
+                ComputerName = HostnameBox.Text
+                // Passwords never survive backward navigation.
             };
-            StateManager.SaveState(STATE_KEY, state);
         }
 
         private void LoadState()
         {
-            var state = StateManager.GetState(STATE_KEY);
-            if (state?.State is AccountInfo info)
+            if (_installationState.Account is AccountInfo info)
             {
                 UsernameBox.Text = info.Username;
                 HostnameBox.Text = info.ComputerName;
@@ -90,15 +72,14 @@ namespace Libertix.Pages
         {
             bool isValid = true;
             
-            // Validate username
             if (string.IsNullOrEmpty(UsernameBox.Text))
             {
-                UsernameError.Text = "Username is required";
+                UsernameError.Text = Localization.GetString("UsernameRequired");
                 isValid = false;
             }
             else if (!usernameRegex.IsMatch(UsernameBox.Text) || UsernameBox.Text == "root")
             {
-                UsernameError.Text = "Username must start with a letter and contain only lowercase letters, numbers, or hyphens";
+                UsernameError.Text = Localization.GetString("UsernameInvalid");
                 isValid = false;
             }
             else
@@ -106,20 +87,19 @@ namespace Libertix.Pages
                 UsernameError.Text = "";
             }
 
-            // Validate password (min 4 characters)
             if (string.IsNullOrEmpty(PasswordBox.Password))
             {
                 PasswordError.Text = Application.Current.Resources["PasswordRequired"] as string ?? "Password is required";
                 isValid = false;
             }
-            else if (PasswordBox.Password.Length < 4)
+            else if (PasswordBox.Password.Length < 8)
             {
-                PasswordError.Text = Application.Current.Resources["PasswordTooShort"] as string ?? "Password must be at least 4 characters";
+                PasswordError.Text = Application.Current.Resources["PasswordTooShort"] as string ?? "Password must be at least 8 characters";
                 isValid = false;
             }
             else if (PasswordBox.Password.Length > 128)
             {
-                PasswordError.Text = "Password must not exceed 128 characters";
+                PasswordError.Text = Localization.GetString("PasswordTooLong");
                 isValid = false;
             }
             else
@@ -127,15 +107,14 @@ namespace Libertix.Pages
                 PasswordError.Text = "";
             }
 
-            // Validate confirm password
             if (string.IsNullOrEmpty(ConfirmPasswordBox.Password))
             {
-                ConfirmPasswordError.Text = "Please confirm your password";
+                ConfirmPasswordError.Text = Localization.GetString("ConfirmPasswordRequired");
                 isValid = false;
             }
             else if (PasswordBox.Password != ConfirmPasswordBox.Password)
             {
-                ConfirmPasswordError.Text = "Passwords do not match";
+                ConfirmPasswordError.Text = Localization.GetString("PasswordsDoNotMatch");
                 isValid = false;
             }
             else
@@ -143,15 +122,14 @@ namespace Libertix.Pages
                 ConfirmPasswordError.Text = "";
             }
 
-            // Validate hostname
             if (string.IsNullOrEmpty(HostnameBox.Text))
             {
-                HostnameError.Text = "Computer name is required";
+                HostnameError.Text = Localization.GetString("ComputerNameRequired");
                 isValid = false;
             }
             else if (!hostnameRegex.IsMatch(HostnameBox.Text))
             {
-                HostnameError.Text = "Computer name must start with a letter and contain only lowercase letters, numbers, or hyphens";
+                HostnameError.Text = Localization.GetString("ComputerNameInvalid");
                 isValid = false;
             }
             else
@@ -182,7 +160,6 @@ namespace Libertix.Pages
             };
 
             _installationState.Account = accountInfo;
-            SaveState();
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
                 new WarningConfirmation(_installationState),
@@ -191,7 +168,6 @@ namespace Libertix.Pages
 
         private void PasswordBox_PreviewExecuted(object sender, ExecutedRoutedEventArgs e)
         {
-            // Block paste and copy commands on password boxes
             if (e.Command == ApplicationCommands.Paste ||
                 e.Command == ApplicationCommands.Copy ||
                 e.Command == ApplicationCommands.Cut)

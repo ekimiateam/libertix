@@ -70,11 +70,11 @@ class ValidationService:
                 for future in as_completed(futures):
                     vm_result = future.result()
                     result.steps.extend(vm_result.steps)
-                    if vm_result.status == "problème":
+                    if vm_result.status == "error":
                         failures.append(vm_result)
                 if failures:
                     return OperationResult(
-                        status="problème",
+                        status="error",
                         operation="validation",
                         message="; ".join(item.message for item in failures),
                         steps=result.steps,
@@ -140,7 +140,6 @@ class ValidationService:
                         "win10-bios",
                         "win10-uefi",
                         "win11-uefi",
-                        "192.168.1.241",
                     ],
                 },
             )
@@ -155,6 +154,7 @@ class ValidationService:
             host,
             username,
             password,
+            known_hosts_path=self.settings.ssh_known_hosts,
             port=self.settings.ssh_port,
             connect_timeout=self.settings.ssh_timeout_seconds,
         )
@@ -405,7 +405,13 @@ class ValidationService:
 
         values = self.parse_powershell_results(
             response.stdout,
-            prefixes=("MSBUILD", "TEMP_BUILD_DIR", "FINAL_EXE", "FINAL_EXE_SHA256"),
+            prefixes=(
+                "MSBUILD",
+                "VSTEST",
+                "TEMP_BUILD_DIR",
+                "FINAL_EXE",
+                "FINAL_EXE_SHA256",
+            ),
         )
         final_exe = values.get("FINAL_EXE")
         if not final_exe:
@@ -419,6 +425,7 @@ class ValidationService:
             "Libertix compilé sur la VM Windows et copié vers Samba",
             target=s.build_vm_host,
             msbuild=values.get("MSBUILD"),
+            vstest=values.get("VSTEST"),
             executable_sha256=values.get("FINAL_EXE_SHA256"),
             temp_build_dir=values.get("TEMP_BUILD_DIR"),
             cleanup="dossier temporaire, script et config supprimés en fin de commande",
@@ -561,6 +568,7 @@ class ValidationService:
                     "executable": str(executable),
                     "task_name": task_name,
                     "filepool_base_url": self.settings.filepool_base_url,
+                    "development_static_ipv4": vm.host,
                 },
                 step="vm.launch_elevated",
                 timeout=90,

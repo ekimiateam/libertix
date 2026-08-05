@@ -110,12 +110,14 @@ def test_live_translation_helper_loads_every_supported_language(language: str) -
 
 
 def test_bios_and_uefi_project_the_language_code_to_the_live() -> None:
-    bios = (ROOT / "Pages/ApplyChanges.Bios.cs").read_text(encoding="utf-8-sig")
-    uefi = (ROOT / "Scripts/uefi/Libertix.Uefi.Execution.ps1").read_text(encoding="utf-8-sig")
+    bios = (ROOT / "Pages/ApplyChanges.Plan.cs").read_text(encoding="utf-8-sig")
+    plan_exporter = (ROOT / "assets/live/libertix-installation-plan.py").read_text(
+        encoding="utf-8-sig"
+    )
     target = (ROOT / "assets/live/libertix-target-common.sh").read_text(encoding="utf-8-sig")
 
-    assert "LANGUAGE_CODE={ShellQuoteValue(locale.LanguageCode)}" in bios
-    assert "LANGUAGE_CODE=$(ConvertTo-ShellQuotedValue $LanguageCode)" in uefi
+    assert "LanguageCode = Localization.CurrentLanguage" in bios
+    assert '"LANGUAGE_CODE": locale["languageCode"]' in plan_exporter
     assert 'LANGUAGE_CODE="$LANGUAGE_CODE"' in target
 
 
@@ -123,7 +125,7 @@ def test_english_live_ui_contains_no_french_fallback_text() -> None:
     ui_sources = "\n".join(
         (ROOT / relative).read_text(encoding="utf-8-sig")
         for relative in (
-            "iso-uefi/live/libertix-gui.py",
+            "assets/live/libertix-gui.py",
             "iso/live/libertix-runner.sh",
             "iso-uefi/live/libertix-runner.sh",
             "assets/live/libertix-runner-stage-common.sh",

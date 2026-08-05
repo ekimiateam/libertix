@@ -16,6 +16,13 @@ $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $exe = [string]$config.executable
 $taskName = [string]$config.task_name
 $filepoolBaseUrl = [string]$config.filepool_base_url
+$developmentStaticIpv4 = if (
+    $config.PSObject.Properties.Name -contains "development_static_ipv4"
+) {
+    [string]$config.development_static_ipv4
+} else {
+    ""
+}
 
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
     throw ("Libertix.exe local est introuvable: " + $exe)
@@ -34,13 +41,34 @@ if (
 }
 $filepoolBaseUrl = $parsedFilepoolUri.AbsoluteUri.TrimEnd("/")
 
-# Le lancement administrateur interactif est nécessaire pour le parcours
-# d'installation. sshd seul démarre trop souvent le processus dans une session
-# invisible ; /IT force l'attachement à la session utilisateur active.
+if (-not [string]::IsNullOrWhiteSpace($developmentStaticIpv4)) {
+    [System.Net.IPAddress]$parsedDevelopmentAddress = $null
+    if (
+        -not [System.Net.IPAddress]::TryParse(
+            $developmentStaticIpv4,
+            [ref]$parsedDevelopmentAddress
+        ) -or
+        $parsedDevelopmentAddress.AddressFamily -ne
+            [System.Net.Sockets.AddressFamily]::InterNetwork
+    ) {
+        throw "development_static_ipv4 must be an IPv4 address"
+    }
+    $octets = $parsedDevelopmentAddress.GetAddressBytes()
+    if (
+        $octets[0] -ne 192 -or $octets[1] -ne 168 -or $octets[2] -ne 1 -or
+        $octets[3] -le 1 -or $octets[3] -ge 255
+    ) {
+        throw "development_static_ipv4 must be usable in 192.168.1.0/24"
+    }
+    $developmentStaticIpv4 = $parsedDevelopmentAddress.ToString()
+}
+
+# SSH starts elevated processes in a non-interactive session. A scheduled task
+# with /IT attaches the installer to the active desktop where VNC can drive it.
 Stop-Process -Name "Libertix" -Force -ErrorAction SilentlyContinue
 
-# Supprimer l'ancienne tâche si elle existe. schtasks retourne une erreur native
-# quand la tâche n'existe pas ; ce cas est normal et ne doit pas interrompre le run.
+# schtasks reports a native error when the old task is absent. That expected
+# condition must not abort creation of the new interactive task.
 $oldPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
@@ -52,6 +80,9 @@ finally {
 
 $time = (Get-Date).AddMinutes(1).ToString("HH:mm")
 $taskCommand = '"{0}" --filepool-base-url "{1}"' -f $exe, $filepoolBaseUrl
+if (-not [string]::IsNullOrEmpty($developmentStaticIpv4)) {
+    $taskCommand += ' --dev-ssh-static-ip "{0}"' -f $developmentStaticIpv4
+}
 $interactiveSession = Get-Process -Name explorer -ErrorAction Stop |
     Sort-Object StartTime -Descending |
     Select-Object -First 1 -ExpandProperty SessionId

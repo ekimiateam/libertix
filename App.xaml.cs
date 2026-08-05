@@ -12,12 +12,10 @@ using Libertix.Models;
 
 namespace Libertix
 {
-    /// <summary>
-    /// Logique d'interaction pour App.xaml
-    /// </summary>
     public partial class App : Application
     {
         public InstallationState InstallationState { get; } = new InstallationState();
+        public StartupOptions RuntimeOptions { get; private set; } = new StartupOptions();
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -25,15 +23,17 @@ namespace Libertix
             ApplicationLogger.Write("Libertix.exe startup.");
             RegisterApplicationErrorLogging();
 
-            if (!TryConfigureFilepool(e.Args))
+            if (!TryConfigureStartupOptions(e.Args))
                 return;
 
             if (!IsRunningAsAdministrator())
             {
                 ApplicationLogger.Write("Startup refused: administrator privileges are missing.");
+                // This runs before the language dictionary is merged, so the
+                // message is resolved from the Windows UI language directly.
                 MessageBox.Show(
-                    "Libertix doit être lancé en administrateur pour modifier les partitions et le démarrage Windows.",
-                    "Libertix - droits administrateur requis",
+                    AdministratorRequiredMessage(),
+                    "Libertix",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
 
@@ -48,7 +48,7 @@ namespace Libertix
             base.OnStartup(e);
         }
 
-        private static bool TryConfigureFilepool(string[] args)
+        private bool TryConfigureStartupOptions(string[] args)
         {
             if (!StartupOptions.TryParse(args, out StartupOptions options, out string error))
             {
@@ -63,7 +63,14 @@ namespace Libertix
                 return false;
             }
 
+            RuntimeOptions = options;
             ApplicationLogger.Write($"Filepool base URL: {FilepoolConfig.BaseUrl}");
+            if (!string.IsNullOrEmpty(options.DevelopmentSshStaticIpv4Address))
+            {
+                ApplicationLogger.Write(
+                    "Development SSH/static network enabled for " +
+                    options.DevelopmentSshStaticIpv4Address + ".");
+            }
             return true;
         }
 
@@ -117,6 +124,25 @@ namespace Libertix
             }
             catch { }
             return null;
+        }
+
+        private static string AdministratorRequiredMessage()
+        {
+            switch (Localization.GetWindowsLanguageCode())
+            {
+                case "fr":
+                    return "Libertix doit être lancé en administrateur pour modifier les partitions "
+                        + "et le démarrage Windows.";
+                case "es":
+                    return "Libertix debe ejecutarse como administrador para modificar las particiones "
+                        + "y el arranque de Windows.";
+                case "ja":
+                    return "パーティションと Windows の起動設定を変更するため、Libertix は管理者として "
+                        + "実行する必要があります。";
+                default:
+                    return "Libertix must be run as administrator to modify partitions and the "
+                        + "Windows boot configuration.";
+            }
         }
 
         private static bool IsRunningAsAdministrator()

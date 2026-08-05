@@ -48,6 +48,17 @@ def test_automation_endpoint_requires_auth() -> None:
     assert response.status_code == 401
 
 
+def test_automation_endpoint_requires_an_explicit_linux_password() -> None:
+    with TestClient(create_app(settings())) as client:
+        response = client.post(
+            "/api/v1/automation",
+            headers={"X-API-Key": "secret"},
+            json={"vms": ["vm1"], "source": "local"},
+        )
+
+    assert response.status_code == 422
+
+
 def test_configured_vms_endpoint_requires_auth_and_returns_safe_vm_metadata() -> None:
     with TestClient(create_app(settings())) as client:
         rejected = client.get("/api/v1/vms", headers={"X-API-Key": "wrong"})

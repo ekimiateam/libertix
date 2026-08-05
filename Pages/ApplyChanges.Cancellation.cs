@@ -27,7 +27,7 @@ namespace Libertix.Pages
         {
             try
             {
-                string logRoot = @"C:\LibertixInstallLogs";
+                string logRoot = Path.Combine(WindowsSystemDrive, "LibertixInstallLogs");
                 Directory.CreateDirectory(logRoot);
                 _persistentLogPath = Path.Combine(
                     logRoot,
@@ -208,10 +208,11 @@ namespace Libertix.Pages
                     "Rollback incomplete. Manual intervention is required."));
             FinishInstallation(enableBackButton: false);
             MessageBox.Show(
-                Localized(
+                LocalizedFormat(
                     "ApplyChangesUefiRollbackIncompleteDetails",
                     "The installation was cancelled, but the UEFI rollback could not be verified. " +
-                    "Do not restart; review C:\\LibertixInstallLogs."),
+                    "Do not restart; review {0}.",
+                    Path.Combine(WindowsSystemDrive, "LibertixInstallLogs")),
                 Localized("ApplyChangesRollbackIncompleteTitle", "Libertix - Incomplete rollback"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);

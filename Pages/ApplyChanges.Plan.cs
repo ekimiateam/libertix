@@ -41,7 +41,7 @@ namespace Libertix.Pages
             InstallationSizes sizes = InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB);
             bool isUefi = firmware == FirmwareType.Uefi;
             string systemDriveRoot =
-                (Environment.GetEnvironmentVariable("SystemDrive") ?? "C:")
+                (Environment.GetEnvironmentVariable("SystemDrive") ?? WindowsSystemDrive)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
                 Path.DirectorySeparatorChar;
             string installerIsoPath = isUefi
@@ -56,6 +56,11 @@ namespace Libertix.Pages
             string planId = !string.IsNullOrWhiteSpace(recoveryRunId)
                 ? recoveryRunId
                 : Guid.NewGuid().ToString("N");
+            LinuxKeyboardConfiguration keyboard = WindowsKeyboardLayout.ResolveActive(
+                Localization.GetKeyboardLayout());
+            string developmentIpv4 = ((App)Application.Current)
+                .RuntimeOptions
+                .DevelopmentSshStaticIpv4Address;
             _installationPlan = new InstallationPlan
             {
                 PlanId = planId,
@@ -76,7 +81,8 @@ namespace Libertix.Pages
                 {
                     LanguageCode = Localization.CurrentLanguage,
                     SystemLanguage = Localization.GetLinuxLocale(),
-                    KeyboardLayout = Localization.GetKeyboardLayout(),
+                    KeyboardLayout = keyboard.Layout,
+                    KeyboardVariant = keyboard.Variant,
                     KeyboardModel = "pc105",
                     Timezone = Localization.GetWindowsTimezoneAsLinux()
                 },
@@ -119,7 +125,17 @@ namespace Libertix.Pages
                         : InstallationBootStrategy.BiosGrub4Dos,
                     RecoveryRootWindows = recoveryRoot,
                     RecoveryRunId = recoveryRunId
-                }
+                },
+                Development = string.IsNullOrEmpty(developmentIpv4)
+                    ? null
+                    : new InstallationDevelopmentOptions
+                    {
+                        EnableSsh = true,
+                        StaticIpv4Address = developmentIpv4,
+                        StaticIpv4PrefixLength = 24,
+                        StaticIpv4Gateway = "192.168.1.1",
+                        DnsServers = new[] { "8.8.8.8", "1.1.1.1" }
+                    }
             };
 
             Directory.CreateDirectory(persistenceRoot);
@@ -132,7 +148,14 @@ namespace Libertix.Pages
             StartExecutionStep(InstallationStep.WindowsPreflightVerified);
             CompleteExecutionStep(InstallationStep.WindowsPreflightVerified);
             Log($"Installation plan created: {planId}, firmware={_installationPlan.Firmware}, " +
-                $"final={sizes.FinalSizeGiB}GiB, staging={sizes.StagingSizeGiB}GiB.");
+                $"final={sizes.FinalSizeGiB}GiB, staging={sizes.StagingSizeGiB}GiB, " +
+                $"keyboard={keyboard.Layout}{FormatKeyboardVariant(keyboard.Variant)}, " +
+                $"windowsKlid={keyboard.WindowsKeyboardIdentifier}, fallback={keyboard.UsedFallback}.");
+        }
+
+        private static string FormatKeyboardVariant(string variant)
+        {
+            return string.IsNullOrEmpty(variant) ? string.Empty : $"({variant})";
         }
 
         private async Task UpdateInstallerPartitionIdentityAsync(char driveLetter)
@@ -170,7 +193,9 @@ namespace Libertix.Pages
             InstallerPartitionPlan installer = _installationPlan.Disk.Installer;
             installer.Number = number;
             installer.OffsetBytes = offset;
-            if (size != installer.StagingSizeBytes)
+            if (!InstallationSizePolicy.IsObservedStagingSizeAcceptable(
+                installer.StagingSizeBytes,
+                size))
             {
                 throw new InvalidOperationException(
                     $"Installer staging size mismatch: expected {installer.StagingSizeBytes}, got {size}.");
@@ -263,10 +288,11 @@ namespace Libertix.Pages
         private void PersistExecutionState()
         {
             InstallationStateStore.WriteAtomic(_executionStatePath, _executionStateMachine.State);
-            if (Directory.Exists(@"Z:\"))
+            if (!string.IsNullOrWhiteSpace(_biosInstallerDriveLetter) &&
+                Directory.Exists(BiosInstallerRoot))
             {
                 InstallationStateStore.WriteAtomic(
-                    Path.Combine(@"Z:\", InstallationStateFileName),
+                    Path.Combine(BiosInstallerRoot, InstallationStateFileName),
                     _executionStateMachine.State);
             }
         }

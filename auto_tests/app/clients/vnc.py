@@ -19,7 +19,8 @@ class VNCClient:
         host, separator, display = address.rpartition(":")
         if not separator or not host or not display.isdigit():
             raise WorkflowError("vnc.address", "Adresse VNC invalide", details={"address": address})
-        # vncdotool utilise host::port ; la notation Proxmox host:display N vaut 5900 + N.
+        # vncdotool expects host::port, while Proxmox exposes host:display and
+        # maps display N to TCP port 5900 + N.
         return f"{host}::{5900 + int(display)}"
 
     def capture(self, address: str, destination: Path) -> Path:
@@ -61,7 +62,8 @@ class VNCClient:
         try:
             client = api.connect(self._vncdotool_address(address))
             time.sleep(1)
-            # Quatrième emplacement de la colonne d'icônes des snapshots clean2.
+            # The clean2 snapshots place the Libertix shortcut in the fourth
+            # desktop-icon slot; the following capture synchronizes the click.
             client.mouseMove(48, 330)
             client.mousePress(1)
             sync_path = Path(tempfile.gettempdir()) / f"vnc-sync-{uuid4().hex}.png"

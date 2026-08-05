@@ -40,36 +40,23 @@ function New-OrReuseInstallerPartition {
         throw "$InstallerLabel exists without an owned transaction state; refusing reuse."
     }
 
-    if ($installationPlan) {
-        $requestedBytes = [int64]$installationPlan.disk.installer.finalSizeBytes
-        $stagingBytes = [int64]$installationPlan.disk.installer.stagingSizeBytes
-        if ($requestedBytes -ne ([int64]$SizeGB * 1GB)) {
-            throw "InstallerPartitionSizeGB does not match the installation plan."
-        }
-    } else {
-        $requestedBytes = [int64]$SizeGB * 1GB
-        # Compatibility path for direct script callers that do not yet supply
-        # an installation plan.
-        $legacyStagingSizeGB = if ($SizeGB -gt 31) { 8 } else { $SizeGB }
-        $stagingBytes = [int64]$legacyStagingSizeGB * 1GB
+    if (-not $installationPlan) {
+        throw "An installation plan is required before partition preparation."
+    }
+    $requestedBytes = [int64]$installationPlan.disk.installer.finalSizeBytes
+    $stagingBytes = [int64]$installationPlan.disk.installer.stagingSizeBytes
+    if ($requestedBytes -ne ([int64]$SizeGB * 1GB)) {
+        throw "InstallerPartitionSizeGB does not match the installation plan."
     }
     $stagingSizeGB = [int]($stagingBytes / 1GB)
-    $cPart = Get-Partition -DriveLetter C
-    $cVol = Get-Volume -DriveLetter C
+    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
+    $systemVolume = Get-Volume -DriveLetter $SystemDriveLetter -ErrorAction Stop
 
     $minFree = 10GB
     $need = $requestedBytes + $minFree
 
-    if ($cVol.SizeRemaining -lt $need) {
-        throw "Not enough free space on C: (need ~$( [math]::Round($need / 1GB, 1) ) GB)."
-    }
-
-    $supported = $cPart | Get-PartitionSupportedSize
-    $shrinkBytes = $requestedBytes
-    $maxShrink = $supported.SizeMax - $supported.SizeMin
-
-    if ($shrinkBytes -gt $maxShrink) {
-        throw "Cannot shrink C: by ${SizeGB}GB (max ~$( [math]::Round($maxShrink / 1GB, 1) ) GB)."
+    if ($systemVolume.SizeRemaining -lt $need) {
+        throw "Not enough free space on $SystemDrive (need ~$( [math]::Round($need / 1GB, 1) ) GB)."
     }
 
     if ($stagingSizeGB -lt $SizeGB) {
@@ -79,11 +66,29 @@ function New-OrReuseInstallerPartition {
     }
 
     Start-LibertixTrackedStep -Step "windows.recovery-armed"
-    Save-TransactionPreparationState -SystemPartition $cPart
+    Save-TransactionPreparationState -SystemPartition $systemPartition
     Complete-LibertixTrackedStep -Step "windows.recovery-armed"
 
+    if ($ShareWindowsFilesInLinux -and (Get-HibernateEnabled) -ne $false) {
+        # Fast Startup leaves NTFS metadata cached by Windows. Linux mounts the
+        # shared volume read-write, so hibernation must remain disabled for the
+        # installed system. Removing hiberfil.sys before querying SizeMin also
+        # prevents that unmovable file from artificially limiting the shrink.
+        Set-HibernateEnabled -Enabled $false
+    }
+
+    $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
+    $shrinkBytes = $requestedBytes
+    $maxShrink = $supported.SizeMax - $supported.SizeMin
+    if ($shrinkBytes -gt $maxShrink) {
+        throw "Cannot shrink $SystemDrive by ${SizeGB}GB (max ~$( [math]::Round($maxShrink / 1GB, 1) ) GB)."
+    }
+
     Start-LibertixTrackedStep -Step "windows.system-volume-shrunk"
-    Resize-Partition -DriveLetter C -Size ($cPart.Size - $shrinkBytes)
+    Resize-Partition `
+        -DriveLetter $SystemDriveLetter `
+        -Size ($systemPartition.Size - $shrinkBytes) `
+        -ErrorAction Stop
     Start-Sleep -Seconds 2
     Complete-LibertixTrackedStep -Step "windows.system-volume-shrunk"
 
@@ -92,7 +97,7 @@ function New-OrReuseInstallerPartition {
     # that is not represented as a local volume by Get-Volume.
     Start-LibertixTrackedStep -Step "windows.installer-partition-created"
     $newPartition = New-Partition `
-        -DiskNumber $cPart.DiskNumber `
+        -DiskNumber $systemPartition.DiskNumber `
         -Size $stagingBytes `
         -AssignDriveLetter
 
@@ -135,8 +140,6 @@ function New-OrReuseInstallerPartition {
     if ($verifiedPartition.Guid) {
         $guid = Get-GuidDLower -Guid $verifiedPartition.Guid
     }
-
-    Ensure-VolumeNotEncrypted -DriveLetter $createdDriveLetter
 
     return @{
         Drive = "${createdDriveLetter}:"
@@ -195,6 +198,7 @@ function Install-LibertixIsoToPartition {
     $isoPath = Join-Path $tmpDir $InstallerIsoName
 
     try {
+        Write-LibertixProgress -Stage "live-iso-download" -Percent 62
         Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
         # Keep the configured canonical URL unchanged. Some filepool frontends
         # redirect only that exact resource and return 404 for arbitrary query
@@ -229,6 +233,7 @@ function Install-LibertixIsoToPartition {
         $src = "$isoDrive\*"
         $dst = "$PartitionDrive\"
 
+        Write-LibertixProgress -Stage "live-iso-copy" -Percent 78
         Write-Log "Copying ISO contents to $PartitionDrive..." "Cyan"
         Copy-Item -Path $src -Destination $dst -Recurse -Force
 
@@ -348,7 +353,7 @@ function Set-LibertixUefiBootEntry {
     Write-Log "Configuring one-time UEFI boot entry..." "Cyan"
 
     if (-not (Test-Path "$InstallerDrive\")) {
-        $InstallerDrive = Ensure-VolumeLetterByLabel -Label $InstallerLabel -Letter $InstallerLetter
+        $InstallerDrive = Set-VolumeLetterByLabel -Label $InstallerLabel -Letter $InstallerLetter
         if (-not $InstallerDrive -or -not (Test-Path "$InstallerDrive\")) {
             throw "Cannot assign a drive letter to the Libertix installer partition before UEFI boot setup."
         }
@@ -395,24 +400,9 @@ function Set-LibertixUefiBootEntry {
         throw "Windows ESP partition could not be resolved for UEFI boot setup."
     }
 
-    powercfg /h off 2>&1 | Out-Null
-
     if (-not $ReusePreparedInstaller) {
         $driveRoot = "$InstallerDrive\"
-        $grubConfig = @"
-set default=0
-set timeout=0
-set timeout_style=hidden
-set hidden_timeout=0
-set hidden_timeout_quiet=true
-
-search --no-floppy --label $InstallerLabel --set=root
-
-menuentry "Install Linux Mint (Automatic)" {
-    linux /live/vmlinuz boot=live toram components quiet splash silent plymouth.ignore-serial-consoles loglevel=3 systemd.show_status=0 console=ttyS0,115200n8 console=tty1
-    initrd /live/initrd.img
-}
-"@
+        $grubConfig = Get-LibertixStagingGrubConfig
         foreach ($grubConfigDir in @(
             (Join-Path $driveRoot "EFI\debian"),
             (Join-Path $driveRoot "EFI\LibertixInstaller"),
@@ -456,11 +446,12 @@ menuentry "Install Linux Mint (Automatic)" {
             -InstallerDiskNumber $espPartition.DiskNumber `
             -InstallerPartitionNumber $espPartition.PartitionNumber `
             -LoaderPath $loaderPath
-        if ($bootVariable -notmatch "^Boot([0-9A-Fa-f]{4})$") {
+        $bootVariableMatch = [regex]::Match($bootVariable, "^Boot([0-9A-Fa-f]{4})$")
+        if (-not $bootVariableMatch.Success) {
             throw "Unexpected native UEFI boot variable name: $bootVariable"
         }
 
-        $bootNumber = [Convert]::ToUInt16($Matches[1], 16)
+        $bootNumber = [Convert]::ToUInt16($bootVariableMatch.Groups[1].Value, 16)
         Assert-LibertixFirmwareEntry -BootNumber $bootNumber -LoaderPath $loaderPath
         Set-FirmwareVariable -Name "BootNext" -Value (ConvertTo-BootOrderBytes -Order @($bootNumber))
         $bootNext = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext"))

@@ -10,33 +10,26 @@ using Libertix.Pages;
 using System.ComponentModel;
 using System.Net.Http;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
-using System.Runtime.InteropServices;
+using Libertix.Installation;
 
-namespace Libertix
+namespace Libertix.Pages
 {
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
         private readonly InstallationState _installationState;
-        private const string STATE_KEY = "ChooseDistro";
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
         private bool _partitionConfigValid = false;
-
-        private enum FirmwareType
+        private static readonly HttpClient SharedHttpClient = new HttpClient
         {
-            Unknown = 0,
-            Bios = 1,
-            Uefi = 2,
-            Max = 3
-        }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool GetFirmwareType(out FirmwareType firmwareType);
+            Timeout = Timeout.InfiniteTimeSpan
+        };
 
         public bool IsDistroSelected
         {
@@ -76,10 +69,13 @@ namespace Libertix
         {
             try
             {
-                using (var client = new HttpClient())
+                using (var timeoutCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                using (var response = await SharedHttpClient.GetAsync(
+                    FilepoolConfig.DistrosUrl,
+                    timeoutCancellation.Token))
                 {
-                    client.Timeout = TimeSpan.FromSeconds(30);
-                    var json = await client.GetStringAsync(FilepoolConfig.DistrosUrl);
+                    response.EnsureSuccessStatusCode();
+                    var json = await response.Content.ReadAsStringAsync();
                     var options = new JsonSerializerOptions
                     {
                         PropertyNameCaseInsensitive = true
@@ -128,32 +124,17 @@ namespace Libertix
                 MessageBox.Show(
                     (Application.Current.Resources["DistroLoadError"] as string ?? "Failed to load distributions") +
                     Environment.NewLine + ex.Message,
-                    "Error",
+                    Localization.GetString("ErrorTitle"),
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }
         }
 
-        private void SaveState()
-        {
-            if (_selectedDistro != null)
-            {
-                var state = new PageState
-                {
-                    PageType = typeof(ChooseDistro),
-                    StateKey = STATE_KEY,
-                    State = _selectedDistro.Name // Save just the name of the selected distro
-                };
-                StateManager.SaveState(STATE_KEY, state);
-            }
-        }
-
         private void LoadState()
         {
-            var state = StateManager.GetState(STATE_KEY);
-            if (state?.State is string selectedDistroName)
+            string selectedDistroName = _installationState.SelectedDistro?.Name;
+            if (!string.IsNullOrWhiteSpace(selectedDistroName))
             {
-                // Find and select the previously selected distro
                 foreach (var distro in _distros)
                 {
                     if (distro.Name == selectedDistroName)
@@ -167,17 +148,13 @@ namespace Libertix
 
         private void SelectDistro(DistroInfo distro)
         {
-            // Deselect previous selection
             if (_selectedDistro != null)
             {
                 _selectedDistro.IsSelected = false;
             }
 
-            // Select new distro
             _selectedDistro = distro;
             _selectedDistro.IsSelected = true;
-
-            // Update next button state (considers partition validation)
             UpdateNextButtonState();
         }
 
@@ -187,7 +164,7 @@ namespace Libertix
             {
                 if (_selectedDistro != distro)
                 {
-                    StateManager.ClearDependentStates("ResizeDisk");
+                    _installationState.SelectedLinuxSizeGiB = null;
                 }
                 SelectDistro(distro);
             }
@@ -197,7 +174,6 @@ namespace Libertix
         {
             if (_selectedDistro != null)
             {
-                SaveState();
                 _installationState.SelectedDistro = _selectedDistro;
                 NavigationHelper.NavigateWithAnimation(
                     NavigationService,
@@ -237,7 +213,7 @@ namespace Libertix
             var warnings = new List<string>();
             try
             {
-                if (!GetFirmwareType(out var firmwareType) ||
+                if (!FirmwareInterop.TryGetFirmwareType(out var firmwareType) ||
                     (firmwareType != FirmwareType.Bios && firmwareType != FirmwareType.Uefi))
                     throw new InvalidOperationException("Windows could not determine the firmware type.");
 
@@ -249,10 +225,12 @@ namespace Libertix
                     throw new FileNotFoundException("Storage preflight script is missing.", scriptPath);
 
                 string expected = firmwareType == FirmwareType.Uefi ? "UEFI" : "BIOS";
+                // Same resolution and timeout policy as the ApplyChanges preflight:
+                // "powershell.exe" alone is subject to WOW64 redirection.
                 var result = await Task.Run(() => RunProcessWithTimeout(
-                    "powershell.exe",
+                    ResolveSystemPowerShell(),
                     $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -ExpectedFirmware {expected}",
-                    120000));
+                    (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds));
                 if (result.exitCode != 0 || !result.output.Contains("PREFLIGHT_OK=true"))
                     throw new InvalidOperationException(
                         $"Storage preflight failed: {result.error} {result.output}");
@@ -264,6 +242,20 @@ namespace Libertix
                 warnings.Add($"Error checking partitions: {ex.Message}");
                 return (false, warnings);
             }
+        }
+
+        private static string ResolveSystemPowerShell()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            foreach (string candidate in new[]
+            {
+                Path.Combine(windows, "Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                Path.Combine(windows, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+            })
+            {
+                if (File.Exists(candidate)) return candidate;
+            }
+            return "powershell.exe";
         }
 
         private static (int exitCode, string output, string error) RunProcessWithTimeout(

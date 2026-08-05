@@ -12,7 +12,9 @@ namespace Libertix.Helpers
     /// </summary>
     internal static class ApplicationLogger
     {
-        private const string LogRoot = @"C:\LibertixInstallLogs";
+        private static readonly string LogRoot = Path.Combine(
+            Path.GetPathRoot(Environment.SystemDirectory),
+            "LibertixInstallLogs");
         private static readonly object SyncRoot = new object();
         private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
         private static string _logPath;

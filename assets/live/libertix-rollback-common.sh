@@ -2,10 +2,11 @@
 
 # Shared rollback engine for BIOS and UEFI live installations.
 #
-# Firmware adapters supply five small hooks: preparing firmware rollback,
-# resolving and validating the transaction partition, restoring boot state,
-# and publishing an optional failure marker. The destructive geometry changes
-# remain centralized here so both firmware paths follow the same safeguards.
+# Firmware adapters supply six small hooks: preparing firmware rollback,
+# resolving and validating the transaction partition, cleaning a firmware-
+# specific partition container, restoring boot state, and publishing an
+# optional failure marker. The destructive geometry changes remain centralized
+# here so both firmware paths follow the same safeguards.
 
 cleanup_live_mounts_best_effort() {
     local mount_directory
@@ -58,16 +59,31 @@ restore_pre_grub_mbr_best_effort() {
 }
 
 delete_transaction_partition_best_effort() {
-    local deleted=false
+    local deleted=false idle_attempt holders
 
     firmware_resolve_rollback_partition
     if [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ]; then
         NEW_PART_NUM="${NEW_PART_NUM:-$(partition_number "$NEW_PART")}"
         if firmware_rollback_partition_is_owned "$NEW_PART"; then
+            for idle_attempt in $(seq 1 10); do
+                holders="$(find "/sys/class/block/$(basename "$NEW_PART")/holders" \
+                    -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || true)"
+                if ! findmnt -rn -S "$NEW_PART" | grep -q . \
+                    && [ -z "$holders" ] \
+                    && ! fuser "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
+                    break
+                fi
+                sleep 1
+            done
+
+            holders="$(find "/sys/class/block/$(basename "$NEW_PART")/holders" \
+                -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || true)"
             if findmnt -rn -S "$NEW_PART" | grep -q .; then
                 echo "ROLLBACK: cannot delete $NEW_PART because it is still mounted"
-            elif fuser -m "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
-                echo "ROLLBACK: cannot delete $NEW_PART because it still has users"
+            elif [ -n "$holders" ]; then
+                echo "ROLLBACK: cannot delete $NEW_PART because kernel holders remain: $holders"
+            elif fuser "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
+                echo "ROLLBACK: cannot delete $NEW_PART because direct device users remain"
                 cat /tmp/libertix-rollback-fuser.txt || true
             else
                 echo "ROLLBACK: deleting temporary Linux partition $NEW_PART"
@@ -153,6 +169,7 @@ rollback_windows_layout_best_effort() {
     restore_pre_grub_mbr_best_effort || boot_restore_ok=false
     firmware_prepare_rollback_best_effort || boot_restore_ok=false
     delete_transaction_partition_best_effort || return 1
+    firmware_cleanup_partition_container_best_effort || return 1
     if restore_windows_partition_best_effort; then
         [ "$boot_restore_ok" = true ] && rollback_ok=true
     fi

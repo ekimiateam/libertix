@@ -7,6 +7,11 @@
 # partition-layout rules that must not leak into the common orchestrator.
 
 
+firmware_finalize_success_best_effort() {
+    return 0
+}
+
+
 candidate_disks() {
     lsblk -dnpo NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}' | while read -r disk; do
         case "$(basename "$disk")" in
@@ -31,29 +36,12 @@ disk_matches_manifest() {
     [ -n "$boot_candidate" ] || return 1
 }
 
-find_biggest_windows_partition() {
-    local disk="$1"
-    local best=""
-    local best_size=0
-    local pn pdev pfs psize
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
-        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-        [ "$pfs" = "ntfs" ] || continue
-        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -gt 1000 ] && [ "$psize" -gt "$best_size" ]; then
-            best="$pdev"
-            best_size="$psize"
-        fi
-    done
-    echo "$best"
-}
 
 find_live_partition_on_disk() {
     local disk="$1"
     local pn pdev label pfs psize legacy_label
-    legacy_label="$(printf '%s%s' 'LINUX' 'GATE')"
+    # Partitions created before the project was renamed still carry this label.
+    legacy_label="LINUXGATE"
     for pn in 1 2 3 4 5; do
         pdev=$(partition_path "$disk" "$pn")
         [ -b "$pdev" ] || continue
@@ -140,7 +128,7 @@ partition_has_boot_flag() {
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
     local windows_verify="/mnt/libertix-windows-final-verify"
-    local fs uuid count windows_boot_part_num
+    local fs uuid primary_slot_count windows_boot_part_num
 
     mark "150-final-verify"
     echo "FINAL VERIFY: checking installed system before success"
@@ -153,8 +141,9 @@ final_verify_or_die() {
 
     assert_recovery_unchanged_or_die
 
-    count="$(partition_count "$DISK")"
-    [ "$count" -le 4 ] || die "final verify: MBR partition count is $count"
+    primary_slot_count="$(mbr_primary_slot_count "$DISK")"
+    [ "$primary_slot_count" -le 4 ] || \
+        die "final verify: MBR primary slot count is $primary_slot_count"
 
     windows_boot_part_num="$(partition_number "$WINDOWS_BOOT_PART")"
     partition_has_boot_flag "$DISK" "$windows_boot_part_num" || \
@@ -223,6 +212,73 @@ firmware_rollback_partition_is_owned() {
         && [ "$(partition_start_bytes "$DISK" "$partition" || true)" = "$INSTALLER_PARTITION_OFFSET_BYTES" ]
 }
 
+firmware_cleanup_partition_container_best_effort() {
+    local layout current_table logical_sector installer_sector recovery_sector
+    local windows_number windows_end extended_row extended_rc extended_type
+    local extended_number extended_start extended_end
+
+    layout="$(parted -sm "$DISK" unit s print 2>/dev/null)" || return 1
+    current_table="$(printf '%s\n' "$layout" | awk -F: 'NR==2{print $6; exit}')"
+    [ "$current_table" = "msdos" ] || return 0
+
+    logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || true)"
+    [ "${logical_sector:-0}" -gt 0 ] 2>/dev/null || return 1
+    installer_sector="$((INSTALLER_PARTITION_OFFSET_BYTES / logical_sector))"
+    recovery_sector="$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector))"
+
+    if extended_row="$(
+        printf '%s\n' "$layout" |
+            mbr_empty_container_from_machine_output "$installer_sector" "$recovery_sector"
+    )"; then
+        extended_rc=0
+    else
+        extended_rc=$?
+    fi
+    if [ "$extended_rc" -eq 2 ]; then
+        echo "ROLLBACK: refusing to remove the extended container because a logical partition remains"
+        return 1
+    fi
+    if [ "$extended_rc" -ne 0 ]; then
+        echo "ROLLBACK: refusing ambiguous extended-container cleanup"
+        return 1
+    fi
+    if [ -z "$extended_row" ]; then
+        # Some partitioning tools remove an empty container automatically.
+        return 0
+    fi
+
+    IFS=: read -r extended_number extended_start extended_end <<< "$extended_row"
+    extended_type="$(sfdisk --part-type "$DISK" "$extended_number" 2>/dev/null \
+        | normalize_mbr_partition_type)"
+    case "$extended_type" in
+        5|f|85) ;;
+        *)
+            echo "ROLLBACK: refusing to remove partition $extended_number because type $extended_type is not extended"
+            return 1
+            ;;
+    esac
+
+    windows_number="$(partition_number "$WINDOWS_PART")"
+    windows_end="$(
+        printf '%s\n' "$layout" | awk -F: -v number="$windows_number" '
+            $1 == number { end=$3; sub(/s$/, "", end); print end; exit }
+        '
+    )"
+    [ -n "$windows_end" ] && [ "$windows_end" -lt "$extended_start" ] || {
+        echo "ROLLBACK: extended container does not follow the Windows partition"
+        return 1
+    }
+
+    # Windows creates an extended container when the temporary FAT32 volume
+    # becomes logical partition 5. Once that owned logical partition is gone,
+    # the empty container must also go or C: cannot grow back to Recovery.
+    echo "ROLLBACK: deleting empty transaction-owned extended partition $extended_number"
+    parted -s "$DISK" rm "$extended_number" || return 1
+    sync || true
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+}
+
 firmware_restore_boot_state_best_effort() {
     local windows_boot_partition windows_boot_number
 
@@ -238,6 +294,96 @@ firmware_restore_boot_state_best_effort() {
 
 firmware_write_failure_marker_best_effort() {
     return 0
+}
+
+prepare_installer_partition_for_target_format_or_die() {
+    local layout logical_sector installer_sector recovery_sector owned_layout
+    local logical_number logical_start logical_end
+    local extended_number extended_start extended_end extended_type
+    local original_size new_end new_size
+
+    [ "$PART_TABLE" = "msdos" ] || return 0
+    [ "$SHARE_LINUX_FILES_IN_WINDOWS" = "true" ] || return 0
+    [ "${NEW_PART_NUM:-0}" -ge 5 ] 2>/dev/null || return 0
+
+    mark "055-normalize-mbr-linux-slot"
+    layout="$(parted -sm "$DISK" unit s print 2>/dev/null)" || \
+        die "cannot read MBR layout before Linux partition normalization"
+    logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || true)"
+    [ "${logical_sector:-0}" -gt 0 ] 2>/dev/null || \
+        die "cannot determine the MBR logical sector size"
+    installer_sector="$((INSTALLER_PARTITION_OFFSET_BYTES / logical_sector))"
+    recovery_sector="$((RECOVERY_PARTITION_OFFSET_BYTES / logical_sector))"
+
+    owned_layout="$(
+        printf '%s\n' "$layout" |
+            mbr_owned_logical_layout_from_machine_output "$installer_sector" "$recovery_sector"
+    )" || die "the MBR logical staging layout is not uniquely owned by this transaction"
+    IFS=: read -r \
+        logical_number logical_start logical_end \
+        extended_number extended_start extended_end <<< "$owned_layout"
+
+    [ "$logical_number" = "$NEW_PART_NUM" ] || \
+        die "the MBR logical staging number changed before normalization"
+    [ "$(partition_start_bytes "$DISK" "$NEW_PART" || true)" = "$INSTALLER_PARTITION_OFFSET_BYTES" ] || \
+        die "the MBR logical staging offset changed before normalization"
+    extended_type="$(
+        sfdisk --part-type "$DISK" "$extended_number" 2>/dev/null |
+            normalize_mbr_partition_type
+    )"
+    case "$extended_type" in
+        5|f|85) ;;
+        *) die "the container around the MBR staging partition is not extended" ;;
+    esac
+
+    assert_not_mounted_or_open "$NEW_PART"
+    assert_recovery_unchanged_or_die
+    original_size="$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)"
+    [ "$original_size" -gt 0 ] || die "cannot read the MBR logical staging size"
+
+    # ext4-win-driver 0.2.2 reads only the four primary MBR entries and does
+    # not traverse EBRs. When Windows created the owned staging volume as the
+    # only logical partition, replace that logical/container pair with one
+    # primary partition at the identical payload geometry. Recovery remains
+    # untouched, and rollback can still resolve the partition by plan offset.
+    echo "Converting transaction-owned MBR logical partition $logical_number to a primary Linux slot"
+    NEW_PART=""
+    NEW_PART_NUM=""
+    run_logged parted -s "$DISK" rm "$logical_number"
+    sync
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    run_logged parted -s "$DISK" rm "$extended_number"
+    sync
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    run_logged parted -s "$DISK" unit s mkpart primary ext4 \
+        "${logical_start}s" "${logical_end}s"
+    sync
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    NEW_PART="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+    [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] || \
+        die "the primary Linux partition could not be resolved after MBR normalization"
+    NEW_PART_NUM="$(partition_number "$NEW_PART")"
+    [ "$NEW_PART_NUM" -ge 1 ] && [ "$NEW_PART_NUM" -le 4 ] || \
+        die "MBR normalization did not create a primary Linux partition"
+    new_end="$(
+        parted -sm "$DISK" unit s print 2>/dev/null |
+            awk -F: -v number="$NEW_PART_NUM" '
+                $1 == number { end=$3; sub(/s$/, "", end); print end; exit }
+            '
+    )"
+    [ "$new_end" = "$logical_end" ] || \
+        die "the primary Linux partition end changed during MBR normalization"
+    new_size="$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)"
+    [ "$new_size" = "$original_size" ] || \
+        die "the primary Linux partition size changed during MBR normalization"
+    assert_recovery_unchanged_or_die
+    echo "Primary MBR Linux partition verified at $NEW_PART"
 }
 
 
@@ -256,15 +402,14 @@ wait_for_prereqs() {
         done
 
         for candidate in \
-            /run/live/medium/config.txt \
-            /lib/live/mount/medium/config.txt \
-            /lib/live/mount/rootfs/filesystem.squashfs/config.txt \
-            /cdrom/config.txt; do
+            /run/live/medium/installation-plan.json \
+            /lib/live/mount/medium/installation-plan.json \
+            /cdrom/installation-plan.json; do
             [ -f "$candidate" ] && { config_ready=1; break; }
         done
 
         if [ "$config_ready" -eq 0 ]; then
-            found_config=$(find /run/live /lib/live /cdrom -maxdepth 6 -iname config.txt -print -quit 2>/dev/null || true)
+            found_config=$(find /run/live /lib/live /cdrom -maxdepth 6 -name installation-plan.json -print -quit 2>/dev/null || true)
             [ -n "$found_config" ] && config_ready=1
         fi
 
@@ -343,6 +488,19 @@ find_windows_os_partition_any() {
     done
 
     echo "$best"
+}
+
+set_linux_partition_type_or_die() {
+    [ -n "$NEW_PART_NUM" ] || die "Linux partition number missing"
+
+    mark "060-set-linux-partition-type"
+    [ "$PART_TABLE" = "msdos" ] || \
+        die "BIOS adapter expected an MBR partition table, got $PART_TABLE"
+    echo "Setting MBR partition $NEW_PART_NUM type to Linux (0x83)"
+    run_logged sfdisk --part-type "$DISK" "$NEW_PART_NUM" 83 || \
+        die "failed to set Linux MBR type on $NEW_PART"
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
 }
 
 cleanup_windows_live_boot_artifacts() {

@@ -112,5 +112,84 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "activeStep": {
+            "type": "null"
+          },
+          "failure": {
+            "$ref": "#/$defs/failure"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["pending", "running", "succeeded"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "failure": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "rollback-running"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "phase": {
+            "const": "rollback"
+          },
+          "activeStep": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["rolled-back", "succeeded"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "phase": {
+            "const": "complete"
+          },
+          "activeStep": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
 }

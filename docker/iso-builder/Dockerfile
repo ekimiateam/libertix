@@ -23,6 +23,7 @@ RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.
         initramfs-tools-core \
         isolinux \
         mtools \
+        python3 \
         shim-signed \
         squashfs-tools \
         syslinux-common \

@@ -5,6 +5,11 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$SystemDrive = [string]$env:SystemDrive
+if ($SystemDrive -notmatch "^[A-Za-z]:$") {
+    throw "SystemDrive must be a valid Windows drive designator."
+}
+$WindowsShareRoot = Join-Path $SystemDrive "ProgramData\Libertix\WindowsShare"
 
 function Write-AgentLog {
     param([Parameter(Mandatory = $true)][string]$Message)
@@ -35,10 +40,51 @@ function Read-EnvValue {
 }
 
 function Save-State {
+    # This agent runs at startup and decides, from this document alone, which
+    # recovery phase applies. A torn write would leave it unable to determine
+    # that phase, so publish it with a same-directory atomic rename.
     param([Parameter(Mandatory = $true)]$State)
 
     $State.LastCheckedUtc = [DateTime]::UtcNow.ToString("o")
-    $State | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StatePath -Encoding UTF8
+    $fullPath = [IO.Path]::GetFullPath($StatePath)
+    $directory = [IO.Path]::GetDirectoryName($fullPath)
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    $temporaryPath = Join-Path $directory ".$(Split-Path -Leaf $fullPath).$([Guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = Join-Path $directory ".$(Split-Path -Leaf $fullPath).$([Guid]::NewGuid().ToString('N')).bak"
+    try {
+        $json = $State | ConvertTo-Json -Depth 8
+        $encoding = New-Object Text.UTF8Encoding($false)
+        $stream = New-Object IO.FileStream(
+            $temporaryPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None,
+            4096,
+            [IO.FileOptions]::WriteThrough
+        )
+        try {
+            $writer = New-Object IO.StreamWriter($stream, $encoding)
+            try {
+                $writer.Write($json)
+                $writer.Write("`n")
+                $writer.Flush()
+                $stream.Flush($true)
+            } finally {
+                $writer.Dispose()
+            }
+        } finally {
+            $stream.Dispose()
+        }
+
+        if ([IO.File]::Exists($fullPath)) {
+            [IO.File]::Replace($temporaryPath, $fullPath, $backupPath)
+        } else {
+            [IO.File]::Move($temporaryPath, $fullPath)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
+        if ([IO.File]::Exists($backupPath)) { [IO.File]::Delete($backupPath) }
+    }
 }
 
 function Assert-RecoveryState {
@@ -92,14 +138,14 @@ function Test-LinuxPartitionPresent {
     $expectedSize = [int64]$State.ExpectedLinuxPartitionSize
     $tolerance = 256MB
     $linuxGptType = "{0fc63daf-8483-4772-8e79-3d69d8477de4}"
-    $matches = @(
+    $installerPartitions = @(
         Get-Partition -DiskNumber ([int]$State.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
                 [math]::Abs([int64]$_.Size - $expectedSize) -le $tolerance -and
                 ($_.GptType -eq $linuxGptType -or $_.Type -match "Linux")
             }
     )
-    return $matches.Count -eq 1
+    return $installerPartitions.Count -eq 1
 }
 
 function Remove-RecoveryArtifacts {
@@ -109,15 +155,18 @@ function Remove-RecoveryArtifacts {
     if (-not [string]::IsNullOrWhiteSpace([string]$State.PromptTaskName)) {
         schtasks.exe /Delete /TN $State.PromptTaskName /F 2>$null | Out-Null
     }
-    Remove-Item -LiteralPath "C:\libertix-live.iso" -Force -ErrorAction SilentlyContinue
+    Remove-Item `
+        -LiteralPath (Join-Path $SystemDrive "libertix-live.iso") `
+        -Force `
+        -ErrorAction SilentlyContinue
     $root = [IO.Path]::GetFullPath([string]$State.RecoveryRoot)
     $quotedRoot = '"' + $root.Replace('"', '""') + '"'
     Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c ping 127.0.0.1 -n 3 > nul & rmdir /s /q $quotedRoot" -WindowStyle Hidden
 }
 
 function Invoke-WindowsShareFinalize {
-    $config = "C:\ProgramData\Libertix\WindowsShare\config.json"
-    $script = "C:\ProgramData\Libertix\WindowsShare\mount-linux-readonly.ps1"
+    $config = Join-Path $WindowsShareRoot "config.json"
+    $script = Join-Path $WindowsShareRoot "mount-linux-readonly.ps1"
     if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return }
     if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
         throw "Windows share configuration exists but its script is missing."
@@ -130,9 +179,8 @@ function Invoke-WindowsShareFinalize {
 }
 
 function Remove-PendingWindowsSharePayload {
-    $root = "C:\ProgramData\Libertix\WindowsShare"
-    if (Test-Path -LiteralPath (Join-Path $root "pending.marker") -PathType Leaf) {
-        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath (Join-Path $WindowsShareRoot "pending.marker") -PathType Leaf) {
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction SilentlyContinue
         Write-AgentLog "Removed pending Windows sharing payload."
     }
 }

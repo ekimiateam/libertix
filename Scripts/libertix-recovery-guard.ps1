@@ -2,14 +2,27 @@ param()
 
 $ErrorActionPreference = "Stop"
 
-$Root = "C:\LibertixInstallRecovery"
+$SystemDrive = [string]$env:SystemDrive
+if ($SystemDrive -notmatch "^[A-Za-z]:$") {
+    throw "SystemDrive must be a valid Windows drive designator."
+}
+$SystemDriveLetter = $SystemDrive.Substring(0, 1)
+$ProgramDataRoot = Join-Path $SystemDrive "ProgramData"
+$Root = Join-Path $SystemDrive "LibertixInstallRecovery"
 $TaskName = "LibertixInstallRecovery"
 $Log = Join-Path $Root "recovery.log"
 $Pending = Join-Path $Root "pending.env"
-$Result = "C:\LibertixInstallLogs\latest\result.env"
-$ArchiveRoot = "C:\LibertixInstallLogs"
+$ArchiveRoot = Join-Path $SystemDrive "LibertixInstallLogs"
+$Result = Join-Path $ArchiveRoot "latest\result.env"
 $ArchiveLog = Join-Path $ArchiveRoot "windows-recovery.log"
 $BcdBackup = Join-Path $Root "bcd-backup"
+$TemporaryBootFiles = @(
+    (Join-Path $SystemDrive "grldr"),
+    (Join-Path $SystemDrive "grldr.mbr"),
+    (Join-Path $SystemDrive "menu.lst"),
+    (Join-Path $SystemDrive "libertix-live.iso")
+)
+$WindowsShareRoot = Join-Path $ProgramDataRoot "Libertix\WindowsShare"
 
 function Write-RecoveryLog {
     param([string]$Message)
@@ -65,12 +78,7 @@ function Restore-BcdState {
 }
 
 function Remove-TemporaryBootPayload {
-    foreach ($temporaryBootFile in @(
-        "C:\grldr",
-        "C:\grldr.mbr",
-        "C:\menu.lst",
-        "C:\libertix-live.iso"
-    )) {
+    foreach ($temporaryBootFile in $TemporaryBootFiles) {
         if (Test-Path -LiteralPath $temporaryBootFile -PathType Leaf) {
             Remove-Item -LiteralPath $temporaryBootFile -Force -ErrorAction Stop
             Write-RecoveryLog "Removed temporary boot file: $temporaryBootFile"
@@ -79,8 +87,8 @@ function Remove-TemporaryBootPayload {
 }
 
 function Invoke-WindowsShareFinalize {
-    $config = "C:\ProgramData\Libertix\WindowsShare\config.json"
-    $script = "C:\ProgramData\Libertix\WindowsShare\mount-linux-readonly.ps1"
+    $config = Join-Path $WindowsShareRoot "config.json"
+    $script = Join-Path $WindowsShareRoot "mount-linux-readonly.ps1"
     if (-not (Test-Path -LiteralPath $config -PathType Leaf)) { return }
     if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
         throw "Windows share configuration exists but its script is missing."
@@ -93,15 +101,134 @@ function Invoke-WindowsShareFinalize {
 }
 
 function Remove-PendingWindowsSharePayload {
-    $root = "C:\ProgramData\Libertix\WindowsShare"
-    if (Test-Path -LiteralPath (Join-Path $root "pending.marker") -PathType Leaf) {
-        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath (Join-Path $WindowsShareRoot "pending.marker") -PathType Leaf) {
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction SilentlyContinue
         Write-RecoveryLog "Removed pending Windows sharing payload."
+    }
+}
+
+function Wait-SystemDriveResizeCapacity {
+    param(
+        [Parameter(Mandatory = $true)][int]$DiskNumber,
+        [Parameter(Mandatory = $true)][int64]$RequiredSize,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        # Removing a partition updates the disk before every Storage CIM object
+        # sees the new free extent. Refresh both caches before trusting SizeMax.
+        Update-HostStorageCache -ErrorAction SilentlyContinue
+        Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
+
+        $partition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
+        $supported = Get-PartitionSupportedSize -DriveLetter $SystemDriveLetter -ErrorAction Stop
+        if ($partition.Size -ge $RequiredSize -or $supported.SizeMax -ge $RequiredSize) {
+            return $supported
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            return $supported
+        }
+        Start-Sleep -Seconds 2
+    } while ($true)
+}
+
+function Remove-EmptyTransactionExtendedContainer {
+    param(
+        [Parameter(Mandatory = $true)][int]$DiskNumber,
+        [Parameter(Mandatory = $true)][int64]$TransactionOffset,
+        [Parameter(Mandatory = $true)][int64]$TransactionSize,
+        [Parameter(Mandatory = $true)][int64]$SystemPartitionEnd,
+        [int64]$RecoveryPartitionOffset = 0
+    )
+
+    $disk = Get-Disk -Number $DiskNumber -ErrorAction Stop
+    if ([string]$disk.PartitionStyle -ne "MBR") {
+        return
+    }
+
+    Update-HostStorageCache -ErrorAction SilentlyContinue
+    Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
+
+    $transactionEnd = $TransactionOffset + $TransactionSize
+    $partitions = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
+    $containers = @(
+        $partitions | Where-Object {
+            $partitionStart = [int64]$_.Offset
+            $partitionEnd = $partitionStart + [int64]$_.Size
+            $mbrType = [int]$_.MbrType
+            $isExtendedType = $mbrType -in @(5, 15, 133)
+            $precedesRecovery = (
+                $RecoveryPartitionOffset -le 0 -or
+                $partitionEnd -le $RecoveryPartitionOffset
+            )
+            $isExtendedType -and
+                $partitionStart -ge $SystemPartitionEnd -and
+                $partitionStart -le $TransactionOffset -and
+                $partitionEnd -ge $transactionEnd -and
+                $precedesRecovery
+        }
+    )
+
+    if ($containers.Count -gt 1) {
+        throw "Multiple MBR extended containers match the removed transaction partition; refusing ambiguous rollback."
+    }
+    if ($containers.Count -eq 0) {
+        return
+    }
+
+    $container = $containers[0]
+    $containerStart = [int64]$container.Offset
+    $containerEnd = $containerStart + [int64]$container.Size
+    $containedPartitions = @(
+        $partitions | Where-Object {
+            $_.ObjectId -ne $container.ObjectId -and
+            [int64]$_.Offset -ge $containerStart -and
+            ([int64]$_.Offset + [int64]$_.Size) -le $containerEnd
+        }
+    )
+    if ($containedPartitions.Count -ne 0) {
+        throw "The matching MBR extended container is not empty; refusing rollback."
+    }
+
+    # Windows can place a FAT32 staging volume in a logical partition and keep
+    # its automatically-created extended container after the volume is removed.
+    # The container still occupies the free extent, so C: cannot grow until the
+    # exact empty container proven to have enclosed the transaction is removed.
+    Write-RecoveryLog (
+        "Removing empty transaction MBR extended container " +
+        "offset=$containerStart size=$([int64]$container.Size)."
+    )
+    Remove-Partition -InputObject $container -Confirm:$false -ErrorAction Stop
+    Start-Sleep -Seconds 2
+    Update-HostStorageCache -ErrorAction SilentlyContinue
+    Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
+
+    $containerStillExists = @(
+        Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop | Where-Object {
+            [int64]$_.Offset -eq $containerStart -and
+            [int64]$_.Size -eq [int64]$container.Size -and
+            [int]$_.MbrType -in @(5, 15, 133)
+        }
+    ).Count -ne 0
+    if ($containerStillExists) {
+        throw "The empty transaction MBR extended container still exists after removal."
     }
 }
 
 try {
     Write-RecoveryLog "Recovery guard started."
+
+    $pendingSystemDrive = Read-EnvValue -Path $Pending -Name "SYSTEM_DRIVE"
+    if (
+        $null -ne $pendingSystemDrive -and
+        (
+            $pendingSystemDrive -notmatch "^[A-Za-z]:$" -or
+            $pendingSystemDrive.ToUpperInvariant() -ne $SystemDrive.ToUpperInvariant()
+        )
+    ) {
+        throw "Pending metadata system drive does not match the current Windows system drive; refusing recovery."
+    }
 
     # A successful live install writes this marker before rebooting. In that case
     # the Windows guard only cleans up its scheduled task and leaves disks alone.
@@ -127,6 +254,9 @@ try {
     $systemPartitionNumberText = Read-EnvValue -Path $Pending -Name "SYSTEM_PARTITION_NUMBER"
     $initialSystemSizeText = Read-EnvValue -Path $Pending -Name "SYSTEM_PARTITION_SIZE_BYTES"
     $expectedDiskId = Read-EnvValue -Path $Pending -Name "SYSTEM_DISK_UNIQUE_ID"
+    $recoveryPartitionOffsetText = Read-EnvValue `
+        -Path $Pending `
+        -Name "RECOVERY_PARTITION_OFFSET_BYTES"
     if (-not $expectedMbText -or -not $diskNumberText -or -not $systemPartitionNumberText -or -not $initialSystemSizeText) {
         throw "Pending metadata is incomplete; refusing heuristic rollback."
     }
@@ -140,12 +270,17 @@ try {
     $diskNumber = [int]$diskNumberText
     $systemPartitionNumber = [int]$systemPartitionNumberText
     $initialSystemSize = [int64]$initialSystemSizeText
+    $recoveryPartitionOffset = if ($recoveryPartitionOffsetText) {
+        [int64]$recoveryPartitionOffsetText
+    } else {
+        0
+    }
     $minBytes = [int64]([Math]::Max(1024, $expectedMb - 1024)) * 1MB
     $maxBytes = [int64]($expectedMb + 1024) * 1MB
     $stagingMinBytes = [int64]([Math]::Max(1024, $stagingMb - 1024)) * 1MB
     $stagingMaxBytes = [int64]($stagingMb + 1024) * 1MB
 
-    $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     if ($systemPartition.DiskNumber -ne $diskNumber -or $systemPartition.PartitionNumber -ne $systemPartitionNumber) {
         throw "Windows system partition identity changed; refusing rollback."
     }
@@ -154,7 +289,7 @@ try {
         throw "Windows system disk identity changed; refusing rollback."
     }
 
-    # A candidate must be unique, on the exact Windows disk, after C:, and
+    # A candidate must be unique, on the exact Windows disk, after the system partition, and
     # either be the known FAT32 staging/final size or the final ext4 size.
     $partitions = Get-Partition -DiskNumber $diskNumber | Sort-Object Offset
     $candidates = @()
@@ -178,7 +313,7 @@ try {
         $fs = if ($volume) { [string]$volume.FileSystem } else { "" }
         $letter = if ($volume) { [string]$volume.DriveLetter } else { "" }
 
-        $isTemporaryFat = ($label -eq "LIBERTIX" -or $letter -eq "Z")
+        $isTemporaryFat = ($label -eq "LIBERTIX")
         $isLinux = ($fs -match "^(ext2|ext3|ext4)$")
         if (-not $isTemporaryFat -and -not $isLinux) {
             continue
@@ -209,34 +344,65 @@ try {
     if (@($candidates).Count -eq 1) {
         $candidate = $candidates[0]
         $number = $candidate.Partition.PartitionNumber
+        $candidateOffset = [int64]$candidate.Partition.Offset
+        $candidateSize = [int64]$candidate.Partition.Size
+        $systemPartitionEnd = [int64]$systemPartition.Offset + [int64]$systemPartition.Size
         $sizeMb = [Math]::Round($candidate.Partition.Size / 1MB, 0)
         Write-RecoveryLog "Removing transaction partition number=$number sizeMB=$sizeMb label=$($candidate.Label) fs=$($candidate.FileSystem)."
         Remove-Partition -DiskNumber $diskNumber -PartitionNumber $number -Confirm:$false -ErrorAction Stop
         Start-Sleep -Seconds 2
+        Remove-EmptyTransactionExtendedContainer `
+            -DiskNumber $diskNumber `
+            -TransactionOffset $candidateOffset `
+            -TransactionSize $candidateSize `
+            -SystemPartitionEnd $systemPartitionEnd `
+            -RecoveryPartitionOffset $recoveryPartitionOffset
     } else {
-        Write-RecoveryLog "No transaction partition exists; checking whether only C: needs extension."
+        Write-RecoveryLog "No transaction partition exists; checking whether only the system partition needs extension."
     }
 
-    $supported = Get-PartitionSupportedSize -DriveLetter C -ErrorAction Stop
-    $currentSystemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+    $currentSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     if ($currentSystemPartition.Size -lt $initialSystemSize) {
+        $supported = Wait-SystemDriveResizeCapacity `
+            -DiskNumber $diskNumber `
+            -RequiredSize $initialSystemSize
         if ($supported.SizeMax -lt $initialSystemSize) {
-            throw "C: cannot be restored to its initial size ($initialSystemSize); SizeMax=$($supported.SizeMax)."
+            throw "$SystemDrive cannot be restored to its initial size ($initialSystemSize); SizeMax=$($supported.SizeMax)."
         }
-        Write-RecoveryLog "Restoring C: to its exact initial size: $initialSystemSize bytes."
-        Resize-Partition -DriveLetter C -Size $initialSystemSize -ErrorAction Stop
+        Write-RecoveryLog "Restoring $SystemDrive to its exact initial size: $initialSystemSize bytes."
+        Resize-Partition -DriveLetter $SystemDriveLetter -Size $initialSystemSize -ErrorAction Stop
     } else {
-        Write-RecoveryLog "C: is already at or above its initial size; resize skipped."
+        Write-RecoveryLog "$SystemDrive is already at or above its initial size; resize skipped."
     }
 
     Restore-BcdState
     Remove-PendingWindowsSharePayload
 
+    # Hibernation is switched off during preparation so the installed Linux can
+    # safely mount Windows read-write. A rollback removes that installation, so
+    # the user's original setting must come back with it.
+    $originalHibernate = Read-EnvValue -Path $Pending -Name "ORIGINAL_HIBERNATE_ENABLED"
+    if ($originalHibernate -eq "true") {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
+        $hibernateOutput = & "$env:SystemRoot\System32\powercfg.exe" /hibernate on 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Hibernation restore failed with rc=$LASTEXITCODE output=$($hibernateOutput -join ' ')"
+        }
+        $hibernateEnabled = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction Stop).HibernateEnabled
+        if ($hibernateEnabled -ne 1) {
+            throw "Hibernation restore did not enable HibernateEnabled."
+        }
+    } elseif ($originalHibernate -eq "false") {
+        Write-RecoveryLog "Hibernation was already disabled before installation; left off."
+    } else {
+        Write-RecoveryLog "Original hibernation state unknown; left unchanged."
+    }
+
     Remove-TemporaryBootPayload
 
-    $finalSystemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+    $finalSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     if ($finalSystemPartition.Size -lt $initialSystemSize) {
-        throw "C: rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
+        throw "$SystemDrive rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
     }
 
     Write-RecoveryLog "Recovery completed and verified."

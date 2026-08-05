@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import json
 import logging
 import queue
 import threading
@@ -28,6 +27,7 @@ from app.models import (
 from app.services.automation import AutomationService
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
+from app.stream_events import StreamEventProjector
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        configure_logging(configured.log_level)
+        configure_logging(configured.log_level, configured.operation_log_dir)
         configured.capture_dir.mkdir(parents=True, exist_ok=True)
         cleanup_capture_workspaces(configured)
         yield
@@ -45,7 +45,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api = FastAPI(
         title="Libertix Automated Validation",
         version="0.1.0",
-        description="Validation SSH/VNC/LLM vision et reset contrôlé Proxmox.",
+        description=(
+            "Controlled SSH, VNC, vision-model, and Proxmox validation for Libertix test VMs."
+        ),
         lifespan=lifespan,
     )
     api.state.settings = configured
@@ -65,9 +67,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> OperationResult:
         if not operation_lock.acquire(blocking=False):
             return OperationResult(
-                status="problème",
+                status="error",
                 operation=operation,  # type: ignore[arg-type]
-                message="problème: une autre opération est déjà en cours",
+                message="error: another operation is already running",
                 steps=[],
             )
         try:
@@ -97,21 +99,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         operation: Literal["validation", "reset", "automation"],
         selectors: list[str] | None = None,
         automation: AutomationRequest | None = None,
+        stream_format: Literal["compact", "ndjson"] = "compact",
     ):
         events: queue.Queue[dict | None] = queue.Queue()
+        projector = StreamEventProjector(operation, configured.operation_log_dir)
         if not operation_lock.acquire(blocking=False):
             result = OperationResult(
-                status="problème",
+                status="error",
                 operation=operation,
-                message="problème: une autre opération est déjà en cours",
+                message="error: another operation is already running",
                 steps=[],
             )
-            events.put({"event": "result", "data": result.model_dump(mode="json")})
+            events.put(projector.project_result(result))
             events.put(None)
         else:
 
             def on_step(step: StepResult) -> None:
-                events.put({"event": "step", "data": step.model_dump(mode="json")})
+                event = projector.project_step(step)
+                if event is not None:
+                    events.put(event)
 
             def worker() -> None:
                 try:
@@ -133,17 +139,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         )
                     else:
                         result = ResetService(configured).run(selectors, on_step=on_step)
-                    events.put({"event": "result", "data": result.model_dump(mode="json")})
+                    events.put(projector.project_result(result))
                 except Exception as exc:
                     logger.exception("Erreur interne inattendue dans le flux %s", operation)
                     result = OperationResult(
-                        status="problème",
+                        status="error",
                         operation=operation,
-                        message="problème: erreur interne inattendue",
+                        message="error: unexpected internal failure",
                         steps=[
                             StepResult(
                                 step=f"{operation}.internal_error",
-                                status="problème",
+                                status="error",
                                 message="Erreur interne inattendue; consulter les logs serveur",
                                 context={
                                     "exception_type": type(exc).__name__,
@@ -151,7 +157,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             )
                         ],
                     )
-                    events.put({"event": "result", "data": result.model_dump(mode="json")})
+                    events.put(projector.project_result(result))
                 finally:
                     operation_lock.release()
                     events.put(None)
@@ -163,7 +169,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 event = await asyncio.to_thread(events.get)
                 if event is None:
                     break
-                yield json.dumps(event, ensure_ascii=False) + "\n"
+                yield projector.render(event, stream_format=stream_format)
 
         return generator()
 
@@ -219,11 +225,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         body: Annotated[ValidationRequest | None, Body()] = None,
         vm: Annotated[list[str] | None, Query()] = None,
         source: Annotated[SourceMode | None, Query()] = None,
+        format: Annotated[Literal["compact", "ndjson"], Query()] = "compact",
     ) -> StreamingResponse:
         selectors, request = validation_request(body, vm, source)
         return StreamingResponse(
-            stream_operation("validation", selectors, request),
-            media_type="application/x-ndjson",
+            stream_operation("validation", selectors, request, format),
+            media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
         )
 
     @api.post("/api/v1/automation/stream", dependencies=[Depends(authorize)])
@@ -232,11 +239,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         vm: Annotated[list[str] | None, Query()] = None,
         apply: Annotated[bool | None, Query()] = None,
         source: Annotated[SourceMode | None, Query()] = None,
+        format: Annotated[Literal["compact", "ndjson"], Query()] = "compact",
     ) -> StreamingResponse:
         selectors, request = automation_request(body, vm, apply, source)
         return StreamingResponse(
-            stream_operation("automation", selectors, request),
-            media_type="application/x-ndjson",
+            stream_operation("automation", selectors, request, format),
+            media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
         )
 
     @api.post("/api/v1/reset", response_model=OperationResult, dependencies=[Depends(authorize)])
@@ -244,8 +252,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await execute("reset", vm)
 
     @api.post("/api/v1/reset/stream", dependencies=[Depends(authorize)])
-    async def reset_stream(vm: Annotated[list[str] | None, Query()] = None) -> StreamingResponse:
-        return StreamingResponse(stream_operation("reset", vm), media_type="application/x-ndjson")
+    async def reset_stream(
+        vm: Annotated[list[str] | None, Query()] = None,
+        format: Annotated[Literal["compact", "ndjson"], Query()] = "compact",
+    ) -> StreamingResponse:
+        return StreamingResponse(
+            stream_operation("reset", vm, stream_format=format),
+            media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
+        )
 
     return api
 

@@ -136,6 +136,14 @@ jobs:
           '/p:Platform=Any CPU'
           /verbosity:minimal
 
+      - name: Run C# contract tests
+        shell: pwsh
+        run: >-
+          dotnet test Libertix.Tests\Libertix.Tests.csproj
+          --configuration Release
+          --no-restore
+          --verbosity minimal
+
       - name: Verify WPF output
         shell: pwsh
         run: |

@@ -16,6 +16,7 @@ from app.config import VMConfig
 from app.errors import WorkflowError
 from app.services.automation_types import AutomationOptions, Point, WizardProfile
 from app.services.common import ResultBuilder
+from tools.azerty_qwerty import azerty_to_qwerty
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +24,16 @@ logger = logging.getLogger(__name__)
 class WizardAutomationMixin:
     """Drive and validate wizard pages through the configured VNC desktop."""
 
+    BIOS_WARNING_ACKNOWLEDGEMENT = Point(430, 575)
+    UEFI_WARNING_ACKNOWLEDGEMENT = Point(430, 566)
+
     def _click_wizard(
         self,
         vm: VMConfig,
         options: AutomationOptions,
         profile: WizardProfile,
         result: ResultBuilder,
-    ) -> None:
+    ) -> Literal["boot-menu", "linux-desktop"] | None:
         client = None
         try:
             client = api.connect(VNCClient._vncdotool_address(vm.vnc))
@@ -44,7 +48,7 @@ class WizardAutomationMixin:
                     target=vm.vnc,
                     vm=vm.name,
                 )
-                return
+                return None
 
             if profile.name == "uefi":
                 self._click_wizard_uefi(client, vm, options, result)
@@ -68,10 +72,9 @@ class WizardAutomationMixin:
                         extra={"step": "automation.vnc_close", "target": vm.vnc},
                     )
 
-        if options.monitor_iso and profile.name == "bios":
-            self._monitor_install_progress(vm, result)
-        elif options.monitor_iso and profile.name == "uefi":
-            self._monitor_uefi_until_reboot(vm, result)
+        if options.monitor_iso:
+            return self._monitor_until_live_boot(vm, result, profile.name)
+        return None
 
     def _click_wizard_bios(
         self, client: object, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
@@ -126,7 +129,7 @@ class WizardAutomationMixin:
             result=result,
         )
 
-        self._click(client, vm, Point(221, 541), 0.5)
+        self._click(client, vm, self.BIOS_WARNING_ACKNOWLEDGEMENT, 0.5)
         self._click(client, vm, Point(919, 628), 10.0)
         self._capture_from_client(client, vm, "06-apply-started", result)
 
@@ -183,7 +186,7 @@ class WizardAutomationMixin:
             result=result,
         )
 
-        self._click(client, vm, Point(278, 530), 0.5)
+        self._click(client, vm, self.UEFI_WARNING_ACKNOWLEDGEMENT, 0.5)
         self._click(client, vm, Point(838, 614), 10.0)
         self._capture_from_client(client, vm, "06-apply-started", result)
 
@@ -479,7 +482,7 @@ class WizardAutomationMixin:
         self._click(client, vm, point, 0.35)
         self._select_all(client)
         time.sleep(0.15)
-        self._type_text(client, text)
+        self._type_text(client, text, vm.vnc_keyboard_layout)
         time.sleep(0.35)
 
     def _fill_account_fields(
@@ -503,20 +506,31 @@ class WizardAutomationMixin:
         self._fill_field(client, vm, confirmation_point, password)
 
     @staticmethod
-    def _type_text(client: object, text: str) -> None:
+    def _type_text(client: object, text: str, keyboard_layout: str = "us") -> None:
         # Send keys one by one. Clipboard paste is not reliable across the VNC
         # stack and can silently fail on login/password fields.
-        for char in text:
-            client.keyPress(char)
+        # Proxmox VNC sends US physical key positions. Pre-translating text for
+        # a French Windows session makes the characters produced by AZERTY
+        # match the caller's logical value, including masked password fields.
+        wire_text = azerty_to_qwerty(text) if keyboard_layout == "fr" else text
+        for char in wire_text:
+            # vncdotool treats a literal hyphen as a chord separator. Its
+            # documented "minus" key name emits the actual punctuation key.
+            client.keyPress("minus" if char == "-" else char)
             time.sleep(0.12)
 
     @staticmethod
     def _select_all(client: object) -> None:
         # The Windows VNC keyboard layout used in this lab maps Ctrl+A through
         # the physical Q key. Keeping it here avoids paste/clipboard paths.
-        client.keyDown("ctrl")
-        time.sleep(0.05)
-        client.keyPress("q")
-        time.sleep(0.05)
-        client.keyUp("ctrl")
-        time.sleep(0.05)
+        control_is_down = False
+        try:
+            client.keyDown("ctrl")
+            control_is_down = True
+            time.sleep(0.05)
+            client.keyPress("q")
+            time.sleep(0.05)
+        finally:
+            if control_is_down:
+                client.keyUp("ctrl")
+                time.sleep(0.05)

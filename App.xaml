@@ -7,9 +7,7 @@
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <!-- Styles dictionary -->
                 <ResourceDictionary>
-                    <!-- Effects -->
                     <DropShadowEffect x:Key="DropShadowEffect"
                                     ShadowDepth="1"
                                     Direction="270"
@@ -46,22 +44,27 @@
                         </Setter>
                     </Style>
                     
-                    <!-- Color Resources -->
                     <SolidColorBrush x:Key="PrimaryBackground" Color="#232136"/>
                     <SolidColorBrush x:Key="SecondaryBackground" Color="#2a273f"/>
                     <SolidColorBrush x:Key="AccentColor" Color="#3e8fb0"/>
                     <SolidColorBrush x:Key="TextPrimary" Color="#e0def4"/>
                     <SolidColorBrush x:Key="TextSecondary" Color="#908caa"/>
                     <SolidColorBrush x:Key="ErrorColor" Color="#eb6f92"/>
+                    <SolidColorBrush x:Key="WarningColor" Color="#f6c177"/>
+                    <SolidColorBrush x:Key="PanelBorder" Color="#363252"/>
+                    <SolidColorBrush x:Key="HighlightColor" Color="#c4a7e7"/>
+                    <SolidColorBrush x:Key="DeepBackground" Color="#1e1c31"/>
+                    <SolidColorBrush x:Key="OverlayBackground" Color="#ee1e1c31"/>
+                    <SolidColorBrush x:Key="CompatibilityBorder" Color="#44415a"/>
+                    <SolidColorBrush x:Key="WindowsPartitionColor" Color="#1e5570"/>
+                    <SolidColorBrush x:Key="WindowsPartitionDetailColor" Color="#2d7090"/>
 
-                    <!-- Converters -->
                     <converters:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
                     <converters:ScaleConverter x:Key="ScaleConverter"/>
                     <converters:StringToVisibilityConverter x:Key="StringToVisibilityConverter"/>
                     <converters:InverseBoolConverter x:Key="InverseBoolConverter"/>
                     <converters:VisibilityToBoolConverter x:Key="VisibilityToBoolConverter"/>
 
-                    <!-- ComboBox Style -->
                     <Style x:Key="ModernComboBox" TargetType="ComboBox">
                         <Setter Property="Background" Value="#2a273f"/>
                         <Setter Property="Foreground" Value="#E0DEF4"/>
@@ -176,7 +179,6 @@
                     </Style>
                 </ResourceDictionary>
                 
-                <!-- Default language (English) -->
                 <ResourceDictionary Source="pack://application:,,,/Resources/Lang/Strings.en.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>

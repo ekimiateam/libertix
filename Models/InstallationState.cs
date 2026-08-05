@@ -11,6 +11,7 @@ namespace Libertix.Models
         private bool _isInstallationRunning;
 
         public DistroInfo SelectedDistro { get; set; }
+        public double? SelectedLinuxSizeGiB { get; set; }
         public CompatibilityInfo Compatibility { get; set; }
         public SharingOptions Sharing { get; set; } = new SharingOptions();
         public AccountInfo Account { get; set; }
