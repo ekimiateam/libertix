@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILDER_DIR="$ROOT_DIR/docker/iso-builder"
 IMAGE_NAME="libertix-iso-builder:trixie"
+APT_CACHE_VOLUME="libertix-iso-apt-cache"
 MODE="${1:-all}"
 LOG_DIR="${LIBERTIX_ISO_BUILD_LOG_DIR:-$ROOT_DIR/build-logs}"
 LOG_FILE="$LOG_DIR/iso-build-$(date -u +%Y%m%dT%H%M%SZ)-$MODE.log"
@@ -26,6 +27,59 @@ command -v docker >/dev/null 2>&1 || {
 
 mkdir -p "$LOG_DIR"
 : > "$LOG_FILE"
+
+# A builder left behind by an interrupted run still holds the shared apt cache
+# lock, which makes every later build fail before it downloads anything.
+stale_builders="$(docker ps -q --filter "ancestor=$IMAGE_NAME")"
+if [ -n "$stale_builders" ]; then
+    echo "Removing leftover ISO builder containers"
+    # shellcheck disable=SC2086
+    docker kill $stale_builders >/dev/null
+fi
+
+# The chroots are thousands of small files written once and thrown away. Keeping
+# them in RAM avoids the container overlay filesystem, which dominates the
+# rootfs stages. Sized from what the host can spare, never from total memory.
+tmpfs_size() {
+    local requested="${LIBERTIX_ISO_TMPFS:-auto}" available_gb needed_gb size_gb
+    case "$requested" in
+        0|off|no) return 0 ;;
+        auto) ;;
+        *) printf '%s' "$requested"; return 0 ;;
+    esac
+
+    available_gb=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo)
+    [ "$MODE" = "all" ] && needed_gb=10 || needed_gb=6
+    [ "$available_gb" -ge "$((needed_gb + 4))" ] || return 0
+
+    size_gb=$((available_gb * 6 / 10))
+    [ "$size_gb" -le 24 ] || size_gb=24
+    printf '%sg' "$size_gb"
+}
+
+docker_run_options=(
+    --rm --privileged
+    --env "HOST_UID=$(id -u)"
+    --env "HOST_GID=$(id -g)"
+    --env "LIBERTIX_DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT"
+    --env "LIBERTIX_DEBIAN_SUITE=$DEBIAN_SUITE"
+    --env "LIBERTIX_ISO_PARALLEL=${LIBERTIX_ISO_PARALLEL:-1}"
+    --env "LIBERTIX_APT_CACHE_ROOT=/var/cache/libertix-apt"
+    --env "LIBERTIX_SQUASHFS_COMPRESSOR=${LIBERTIX_SQUASHFS_COMPRESSOR:-zstd}"
+    --env "LIBERTIX_SQUASHFS_LEVEL=${LIBERTIX_SQUASHFS_LEVEL:-19}"
+    --volume "$ROOT_DIR:/workspace"
+    --volume "$APT_CACHE_VOLUME:/var/cache/libertix-apt"
+)
+
+TMPFS_SIZE="$(tmpfs_size)"
+if [ -n "$TMPFS_SIZE" ]; then
+    # exec and dev are required: the chroot lives here and dpkg maintainer
+    # scripts run from it against the device nodes debootstrap creates.
+    docker_run_options+=(--tmpfs "/tmp:rw,exec,dev,suid,size=$TMPFS_SIZE")
+    echo "TMPFS /tmp size=$TMPFS_SIZE"
+else
+    echo "TMPFS disabled"
+fi
 
 report_stage_warnings() {
     local stage="$1"
@@ -74,21 +128,17 @@ run_stage() {
     return "$rc"
 }
 
+# The base image is pinned by digest, so --pull would only add a registry
+# round trip to every build without changing what is built.
 run_stage "builder-image" \
-    docker build --pull \
+    docker build \
         --build-arg "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" \
         --build-arg "DEBIAN_SUITE=$DEBIAN_SUITE" \
         --tag "$IMAGE_NAME" \
         "$BUILDER_DIR"
 
 run_stage "iso-$MODE" \
-    docker run --rm --privileged \
-        --env "HOST_UID=$(id -u)" \
-        --env "HOST_GID=$(id -g)" \
-        --env "LIBERTIX_DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" \
-        --env "LIBERTIX_DEBIAN_SUITE=$DEBIAN_SUITE" \
-        --volume "$ROOT_DIR:/workspace" \
-        "$IMAGE_NAME" "$MODE"
+    docker run "${docker_run_options[@]}" "$IMAGE_NAME" "$MODE"
 
 case "$MODE" in
     bios) outputs=("$ROOT_DIR/libertix-installer-bios.iso") ;;

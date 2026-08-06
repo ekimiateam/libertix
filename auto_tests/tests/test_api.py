@@ -28,7 +28,7 @@ def test_web_ui_is_served() -> None:
     assert "/filepool/distros.json" in response.text
     assert "/filepool/libertix-installer-bios.iso" in response.text
     assert "/filepool/libertix-installer-uefi.iso" in response.text
-    assert "/filepool/mint.iso" in response.text
+    assert "/filepool/mint.iso" not in response.text
     assert "/filepool/aria2-64.zip" in response.text
     assert "monitor_iso" in response.text
     assert "linux_password" in response.text

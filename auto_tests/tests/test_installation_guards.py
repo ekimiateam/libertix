@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import runpy
 import subprocess
 import xml.etree.ElementTree as ET
@@ -336,6 +337,142 @@ def test_mbr_owned_logical_layout_rejects_an_unowned_second_logical_partition() 
     assert result.stdout == ""
 
 
+def test_bios_mbr_normalization_writes_exact_sectors_under_a_disk_lock() -> None:
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    normalization = bios.split("prepare_installer_partition_for_target_format_or_die()", 1)[
+        1
+    ].split("wait_for_prereqs()", 1)[0]
+
+    assert "partition_size=$((logical_end - logical_start + 1))" in normalization
+    assert 'sfdisk --lock --append --no-reread -N "$extended_number" "$DISK"' in normalization
+    assert "mkpart primary ext4" not in normalization
+    assert 'partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES"' in normalization
+    assert '"$new_end" = "$logical_end"' in normalization
+    assert '"$new_size" = "$original_size"' in normalization
+    assert normalization.count("assert_recovery_unchanged_or_die") >= 2
+
+
+def test_bios_mbr_removal_verifies_the_table_instead_of_trusting_parted_rc() -> None:
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    removal = bios.split("remove_mbr_partition_entry_verified()", 1)[1].split(
+        "firmware_rollback_partition_is_owned()", 1
+    )[0]
+    normalization = bios.split("prepare_installer_partition_for_target_format_or_die()", 1)[
+        1
+    ].split("wait_for_prereqs()", 1)[0]
+    rollback_cleanup = bios.split("firmware_cleanup_partition_container_best_effort()", 1)[1].split(
+        "firmware_restore_boot_state_best_effort()", 1
+    )[0]
+
+    assert 'if parted -s "$DISK" rm "$number"; then' in removal
+    assert 'layout="$(parted -sm "$DISK" unit s print' in removal
+    assert 'echo "WARNING: parted returned rc=$rc' in removal
+    assert 'remove_mbr_partition_entry_verified \\\n        "$logical_number"' in normalization
+    assert 'remove_mbr_partition_entry_verified \\\n        "$extended_number"' in normalization
+    assert "run_logged parted" not in normalization
+    assert "remove_mbr_partition_entry_verified" in rollback_cleanup
+
+
+@pytest.mark.parametrize(
+    ("layout", "expected_returncode"),
+    [
+        ("BYT;\n/dev/mock:4096s:file:512:512:msdos:;\n", 0),
+        ("BYT;\n/dev/mock:4096s:file:512:512:msdos:;\n3:1s:2047s:2047s:::;\n", 1),
+    ],
+)
+def test_bios_mbr_removal_uses_the_observed_postcondition(
+    tmp_path: Path, layout: str, expected_returncode: int
+) -> None:
+    parted = tmp_path / "parted"
+    parted.write_text(
+        '#!/bin/sh\nif [ "$1" = "-s" ]; then exit 1; fi\nprintf \'%s\\n\' "$MOCK_LAYOUT"\n',
+        encoding="utf-8",
+    )
+    parted.chmod(0o755)
+    command = (
+        'PATH="$1:$PATH"; MOCK_LAYOUT="$2"; export PATH MOCK_LAYOUT; '
+        'source "$3"; DISK=/dev/mock; '
+        'remove_mbr_partition_entry_verified 3 "test removal"'
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command,
+            "mbr-removal-test",
+            str(tmp_path),
+            layout,
+            str(ROOT / "assets/live/libertix-bios-adapter.sh"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode
+    if expected_returncode == 0:
+        assert "parted returned rc=1, but removal" in result.stdout
+    else:
+        assert "partition 3 remains after parted returned rc=1" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("layout", "expected_returncode"),
+    [
+        ("BYT;\n/dev/mock:4096s:file:512:512:msdos:;\n1:1s:2047s:2047s:::boot;\n", 0),
+        ("BYT;\n/dev/mock:4096s:file:512:512:msdos:;\n2:1s:2047s:2047s:::boot;\n", 1),
+    ],
+)
+def test_bios_boot_flag_update_uses_the_observed_postcondition(
+    tmp_path: Path, layout: str, expected_returncode: int
+) -> None:
+    sfdisk = tmp_path / "sfdisk"
+    parted = tmp_path / "parted"
+    sfdisk.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    parted.write_text("#!/bin/sh\nprintf '%s\\n' \"$MOCK_LAYOUT\"\n", encoding="utf-8")
+    sfdisk.chmod(0o755)
+    parted.chmod(0o755)
+    command = (
+        'PATH="$1:$PATH"; MOCK_LAYOUT="$2"; export PATH MOCK_LAYOUT; '
+        'source "$3"; DISK=/dev/mock; '
+        'set_mbr_active_partition_verified 1 "test boot flags"'
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command,
+            "mbr-boot-flag-test",
+            str(tmp_path),
+            layout,
+            str(ROOT / "assets/live/libertix-bios-adapter.sh"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode
+    if expected_returncode == 0:
+        assert (
+            "sfdisk returned rc=1, but the requested MBR boot flags were verified" in result.stdout
+        )
+    else:
+        assert "MBR boot flags do not match the requested state after rc=1" in result.stdout
+
+
+def test_run_logged_failure_reports_the_wrapped_command() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+    runtime = read("assets/live/libertix-install-runtime-common.sh")
+
+    assert 'RUN_LOGGED_COMMAND="$*"' in runtime
+    assert 'RUN_LOGGED_RC="$rc"' in runtime
+    assert 'cmd="$RUN_LOGGED_COMMAND"' in installer
+    assert '[[ "$shell_command" == return* ]]' in installer
+
+
 def test_detached_partition_check_does_not_query_the_dev_mount() -> None:
     runtime = (ROOT / "assets/live/libertix-install-runtime-common.sh").read_text(encoding="utf-8")
     detached_check = runtime.split("assert_not_mounted_or_open() {", 1)[1].split(
@@ -344,6 +481,55 @@ def test_detached_partition_check_does_not_query_the_dev_mount() -> None:
 
     assert 'fuser "$partition"' in detached_check
     assert 'fuser -m "$partition"' not in detached_check
+    assert "consecutive_idle_samples" in detached_check
+    assert "udevadm settle --timeout=10" in detached_check
+
+
+@pytest.mark.parametrize(("mode", "expected_returncode"), [("transient", 0), ("persistent", 1)])
+def test_detached_partition_check_tolerates_only_transient_direct_users(
+    tmp_path: Path, mode: str, expected_returncode: int
+) -> None:
+    for name, body in {
+        "findmnt": "exit 1\n",
+        "udevadm": "exit 0\n",
+        "sleep": "exit 0\n",
+        "fuser": (
+            'if [ "$MODE" = persistent ]; then echo 1408; exit 0; fi\n'
+            'count=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)\n'
+            'count=$((count + 1)); printf "%s\\n" "$count" > "$COUNT_FILE"\n'
+            '[ "$count" -gt 1 ] && exit 1\n'
+            "echo 1408\nexit 0\n"
+        ),
+    }.items():
+        executable = tmp_path / name
+        executable.write_text(f"#!/bin/sh\n{body}", encoding="utf-8")
+        executable.chmod(0o755)
+
+    command = (
+        'PATH="$1:$PATH"; MODE="$2"; COUNT_FILE="$1/count"; '
+        'export PATH MODE COUNT_FILE; source "$3"; '
+        'die() { echo "DIE:$*"; return 1; }; '
+        'assert_not_mounted_or_open "$4"'
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command,
+            "partition-user-test",
+            str(tmp_path),
+            mode,
+            str(ROOT / "assets/live/libertix-install-runtime-common.sh"),
+            "/dev/null",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == expected_returncode
+    if mode == "persistent":
+        assert "DIE:partition remains in use" in result.stdout
 
 
 @pytest.mark.parametrize(("raw_type", "normalized"), [(" f \n", "f"), ("0x0F\n", "f")])
@@ -379,7 +565,7 @@ def test_bios_rollback_removes_only_a_proven_empty_extended_container() -> None:
     bios_cleanup = bios_cleanup.split("firmware_restore_boot_state_best_effort()", 1)[0]
     assert "mbr_empty_container_from_machine_output" in bios_cleanup
     assert 'sfdisk --part-type "$DISK" "$extended_number"' in bios_cleanup
-    assert 'parted -s "$DISK" rm "$extended_number"' in bios_cleanup
+    assert "remove_mbr_partition_entry_verified" in bios_cleanup
     assert "firmware_cleanup_partition_container_best_effort()" in uefi
 
     # -m is only defined for mounted filesystems and can report unrelated
@@ -755,20 +941,29 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     assert "catch (OperationCanceledException)" in apply_changes
 
 
-def test_uefi_cancellation_does_not_claim_bitlocker_was_restored_when_it_changed() -> None:
+def test_all_rollbacks_verify_bitlocker_against_the_pre_decryption_state() -> None:
     cancellation = read("Pages/ApplyChanges.Cancellation.cs")
     system = read("Pages/ApplyChanges.System.cs")
     storage = read("Installation/StoragePreflightInfo.cs")
+    preflight = read("Scripts/libertix-storage-preflight.ps1")
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    uefi = read("Pages/ApplyChanges.Uefi.cs")
 
     for field in (
-        "BitLockerConversionStatus",
-        "BitLockerEncryptionPercentage",
-        "BitLockerProtectionStatus",
+        "InitialBitLockerConversionStatus",
+        "InitialBitLockerEncryptionPercentage",
+        "InitialBitLockerProtectionStatus",
     ):
         assert field in storage
         assert field in system
         assert field in cancellation
-    assert "BitLockerMatchesPreflightStateAfterCancellationAsync" in cancellation
+    assert "$initialBitLocker = $bitLocker" in preflight
+    assert 'Write-Result "BITLOCKER_INITIAL_CONVERSION_STATUS"' in preflight
+    assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in cancellation
+    assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in bios
+    assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in uefi
+    assert "decryptBitLocker: false" in cancellation
+    assert "firmware == FirmwareType.Bios && decryptBitLocker && !info.BitLockerSafe" in system
     assert "BitLocker did not " in cancellation
     assert "return to its initial state." in cancellation
     assert '"ApplyChangesBitLockerReenable"' in cancellation
@@ -910,15 +1105,19 @@ def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None
     assert first_boot.index("update \\") < first_boot.index("install -y --no-install-recommends")
     assert "retry_delay_seconds=$((attempt * 10))" in first_boot
     assert "openssh-server" in first_boot
-    assert "PasswordAuthentication yes" in first_boot
-    assert "PermitRootLogin no" in first_boot
-    assert "AllowUsers $username" in first_boot
+    assert "PasswordAuthentication yes" in target
+    assert "PermitRootLogin no" in target
+    assert "AllowUsers $USERNAME" in target
+    assert "sshd_policy=/etc/ssh/sshd_config.d/90-libertix-development.conf" in first_boot
+    assert 'grep -Fx "AllowUsers $username" "$sshd_policy"' in first_boot
     assert first_boot.index("install -d -m 0755 /run/sshd") < first_boot.index("/usr/sbin/sshd -t")
     assert "After=network-online.target" in unit
     assert '"development_static_ipv4": vm.host' in automation
     assert '"development_static_ipv4": vm.host' in validation
     assert '"development_dns_servers": list(self.settings.development_dns_servers)' in automation
     assert '"development_dns_servers": list(self.settings.development_dns_servers)' in validation
+    postinstall = read("auto_tests/app/services/automation_postinstall.py")
+    assert "test -e /var/lib/libertix/development-ssh-ready" in postinstall
 
 
 def test_windows_integrity_check_preserves_preexisting_boot_drive_letter() -> None:
@@ -1049,8 +1248,8 @@ def test_uefi_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
         in create_or_reuse
     )
     assert "$stagingSizeGB = [int]($stagingBytes / 1GB)" in create_or_reuse
-    assert "$requiredFreeBytes = $shrinkBytes + $minimumFreeBytes" in create_or_reuse
-    assert "$freeSpaceAccountingToleranceBytes = 16MB" in create_or_reuse
+    assert "Get-LibertixWindowsFreeSpaceBudget" in create_or_reuse
+    assert "-AllocationBytes $shrinkBytes" in create_or_reuse
     assert "Get-Volume -DriveLetter $SystemDriveLetter" in create_or_reuse
     assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
     assert "$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes" in create_or_reuse
@@ -1068,6 +1267,9 @@ def test_bios_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
     assert "ShrinkWindowsPartitionAsync(requestedLinuxMB)" in partitioning
     assert "CreateFat32PartitionSimpleAsync(biosStagingMB)" in partitioning
     assert "the live will expand it" in partitioning
+    assert partitioning.index("PrepareBiosDistributionIsoAsync(distribution)") < (
+        partitioning.index("ShrinkWindowsPartitionAsync(requestedLinuxMB)")
+    )
 
 
 def test_bios_recovery_guard_accepts_staging_or_final_partition_size() -> None:
@@ -1187,8 +1389,119 @@ def test_bios_storage_uses_the_same_alignment_geometry_as_uefi() -> None:
     assert "[Math]::Max" not in script
     assert "$allocationWithMbrMetadata = $SizeBytes + $partitionAlignmentBytes" in script
     assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in script
+    assert "Get-LibertixWindowsFreeSpaceBudget" in script
+    assert "-AllocationBytes ([int64]$shrinkGeometry.ShrinkBytes)" in script
     assert "-Offset $containerOffsetBytes" in script
     assert "-Alignment $partitionAlignmentBytes" in script
+
+
+def test_uefi_preparation_failure_distinguishes_verified_and_incomplete_rollback() -> None:
+    source = read("Pages/ApplyChanges.Uefi.cs")
+    exit_failure = source.split("if (exitCode != 0)", 1)[1].split(
+        "try\n            {\n                InstallUefiRecoveryAgent", 1
+    )[0]
+    agent_failure = source.split(
+        'Log($"ERROR: UEFI recovery agent setup failed: {ex.Message}");', 1
+    )[1].split('UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"]', 1)[0]
+    failure_handler = source.split("private async Task HandleUefiPreparationFailureAsync", 1)[
+        1
+    ].split("private UefiRecoveryState CreateUefiRecoverySession", 1)[0]
+
+    assert "HandleUefiPreparationFailureAsync" in exit_failure
+    assert "HandleUefiPreparationFailureAsync" in agent_failure
+    assert '"UEFI_RECOVERY_AGENT_FAILED"' in agent_failure
+    assert "InstallationStatus.RolledBack" in failure_handler
+    assert "-Revert" in failure_handler
+    assert "observeCancellation: false" in failure_handler
+    assert '"ApplyChangesPreparationErrorRestored"' in failure_handler
+    assert '"ApplyChangesRollbackIncomplete"' in failure_handler
+    assert '"ApplyChangesPreparationRollbackIncompleteDetails"' in failure_handler
+    assert "FinishInstallation(enableBackButton: false)" in failure_handler
+
+
+def test_live_bitlocker_diagnostic_is_shared_by_bios_and_uefi() -> None:
+    common = read("assets/live/libertix-storage-common.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+    installer = read("assets/live/libertix-install-main.sh")
+
+    assert "find_biggest_bitlocker_partition()" in common
+    assert "find_biggest_bitlocker_partition()" not in bios
+    assert "find_biggest_bitlocker_partition()" not in uefi
+    assert 'find_biggest_bitlocker_partition "$DISK"' in installer
+
+
+def test_live_boot_partition_identity_never_scans_other_disks() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+    target = read("assets/live/configure-target-main.sh")
+    target_runtime = read("assets/live/libertix-target-common.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    assert 'WINDOWS_BOOT_PART=$(partition_at_offset "$DISK"' in installer
+    assert 'WINDOWS_BOOT_PART="$WINDOWS_BOOT_PART"' in target_runtime
+    assert 'blkid -s UUID -o value "$WINDOWS_BOOT_PART"' in target
+    assert 'bcd_part="$WINDOWS_BOOT_PART"' in bios
+    assert 'windows_part="$WINDOWS_PART"' in bios
+    esp = uefi.split("find_esp_partition()", 1)[1].split(
+        "cleanup_final_uefi_bootloader_best_effort()", 1
+    )[0]
+    assert 'partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES"' in esp
+    assert "candidate_disks" not in esp
+    uefi_cleanup = uefi.split("cleanup_windows_live_boot_artifacts()", 1)[1]
+    assert "bcd_part=$(find_esp_partition || true)" in uefi_cleanup
+
+
+def test_live_disk_discovery_has_the_same_fallback_for_both_firmwares() -> None:
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    for adapter in (bios, uefi):
+        discovery = adapter.split("candidate_disks()", 1)[1].split("disk_matches_manifest()", 1)[0]
+        wait = adapter.split("wait_for_prereqs()", 1)[1].split(
+            "set_linux_partition_type_or_die()", 1
+        )[0]
+        assert "lsblk -dnpo NAME,TYPE" in discovery
+        assert "for disk in /sys/block/*" in discovery
+        assert "done < <(candidate_disks)" in wait
+
+
+def test_live_rollback_ownership_uses_manifest_offset_for_both_firmwares() -> None:
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    for adapter in (bios, uefi):
+        ownership = adapter.split("firmware_rollback_partition_is_owned()", 1)[1]
+        ownership = ownership.split("firmware_cleanup_partition_container_best_effort()", 1)[0]
+        assert 'parent_disk_from_part "$partition"' in ownership
+        assert 'partition_start_bytes "$DISK" "$partition"' in ownership
+        assert '"$INSTALLER_PARTITION_OFFSET_BYTES"' in ownership
+
+
+def test_temporary_windows_boot_cleanup_fails_closed_for_both_firmwares() -> None:
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    bios_cleanup = bios.split("cleanup_windows_live_boot_artifacts()", 1)[1]
+    uefi_cleanup = uefi.split("cleanup_windows_live_boot_artifacts()", 1)[1]
+    assert 'die "Windows BCD store disappeared after mount"' in bios_cleanup
+    assert 'die "Windows UEFI BCD store disappeared after mount"' in uefi_cleanup
+    assert "delete_live_bcd_entry_or_die" in bios_cleanup
+    assert "delete_live_bcd_entry_or_die" in uefi_cleanup
+    assert "UEFI BCD cleanup failed; continuing" not in uefi_cleanup
+    assert "temporary UEFI installer entry remains after cleanup" in uefi
+
+
+def test_recovery_geometry_uses_manifest_offset_for_both_firmwares() -> None:
+    common = read("assets/live/libertix-storage-common.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    assert "manifest_partition_geometry()" in common
+    assert 'manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"' in bios
+    assert 'manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"' in uefi
+    assert "'$1==\"4\"'" not in bios
+    assert "'$1==\"4\"'" not in uefi
 
 
 def test_uefi_low_memory_boot_files_are_writable_and_revert_uses_transaction_state() -> None:
@@ -1252,6 +1565,19 @@ def test_uefi_iso_download_uses_the_canonical_url_without_cache_busting() -> Non
     assert "$downloadUrl = $InstallerIsoUrl" in download
     assert "cacheBust" not in download
     assert "Start-RobustDownload -Url $downloadUrl" in download
+
+
+def test_mint_installer_uses_the_official_mirror_in_every_download_contract() -> None:
+    official_url = "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso"
+    distributions = json.loads(read("auto_tests/app/filepool/distros.json"))
+    download_module = read("Scripts/modules/Libertix.Download.psm1")
+
+    assert distributions[0]["isoInstaller"] == official_url
+    assert distributions[0]["isoInstallerSha256"] == (
+        "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4"
+    )
+    assert f'MintIso = "{official_url}"' in download_module
+    assert "$baseUrl/mint.iso" not in download_module
 
 
 def test_bios_iso_output_name_matches_the_filepool_contract() -> None:

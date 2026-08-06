@@ -169,11 +169,11 @@
     <system:String x:Key="ApplyChangesPreparationErrorRestored">La préparation a échoué. Windows a été restauré.</system:String>
     <system:String x:Key="ApplyChangesRollbackIncomplete">Rollback incomplet. Une intervention manuelle est requise.</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenable">Le disque et le démarrage ont été restaurés, mais BitLocker doit être réactivé dans Windows.</system:String>
-    <system:String x:Key="ApplyChangesBitLockerReenableDetails">L'installation a été annulée et les modifications du disque et du démarrage ont été restaurées. BitLocker a poursuivi ou terminé son déchiffrement et ne peut pas être réactivé automatiquement sur cette édition de Windows. Réactivez le chiffrement dans les paramètres Windows avant de considérer la restauration comme terminée.</system:String>
+    <system:String x:Key="ApplyChangesBitLockerReenableDetails">Les modifications du disque et du démarrage ont été restaurées, mais BitLocker a poursuivi ou terminé son déchiffrement et ne peut pas être réactivé automatiquement sur cette édition de Windows. Réactivez le chiffrement dans les paramètres Windows avant de considérer la restauration comme terminée.</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenableTitle">Libertix - Réactiver BitLocker</system:String>
     <system:String x:Key="ApplyChangesRollbackIncompleteTitle">Libertix - Rollback incomplet</system:String>
     <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">L'installation a été annulée, mais le rollback UEFI n'a pas pu être vérifié. Ne redémarrez pas et consultez {0}.</system:String>
-    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">La préparation a échoué et le rollback automatique n'a pas pu être vérifié. Ne relancez pas l'installation et consultez {0}.</system:String>
+    <system:String x:Key="ApplyChangesPreparationRollbackIncompleteDetails">La préparation a échoué et le rollback automatique n'a pas pu être vérifié. Ne relancez pas l'installation et consultez {0}.</system:String>
     <system:String x:Key="CloseConfirmationTitle">Fermer Libertix</system:String>
     <system:String x:Key="CloseConfirmationMessage">Voulez-vous vraiment fermer Libertix ?</system:String>
     <system:String x:Key="TrayInstallTitle">Installation Libertix en cours</system:String>

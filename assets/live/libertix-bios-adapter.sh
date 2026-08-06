@@ -13,12 +13,30 @@ firmware_finalize_success_best_effort() {
 
 
 candidate_disks() {
-    lsblk -dnpo NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}' | while read -r disk; do
-        case "$(basename "$disk")" in
-            loop*|ram*|sr*) continue ;;
-        esac
-        echo "$disk"
-    done
+    local disk
+
+    {
+        lsblk -dnpo NAME,TYPE 2>/dev/null \
+            | awk '$2=="disk"{print $1}' \
+            | while read -r disk; do
+                case "$(basename "$disk")" in
+                    loop*|ram*|sr*) continue ;;
+                esac
+                echo "$disk"
+            done
+
+        # Some early live environments expose block devices in sysfs before
+        # lsblk reports them. Both firmware paths need the same fallback.
+        for disk in /sys/block/*; do
+            [ -e "$disk" ] || continue
+            disk="/dev/$(basename "$disk")"
+            case "$(basename "$disk")" in
+                loop*|ram*|sr*) continue ;;
+            esac
+            [ -b "$disk" ] || continue
+            echo "$disk"
+        done
+    } | awk '!seen[$0]++' || true
 }
 
 disk_matches_manifest() {
@@ -37,37 +55,9 @@ disk_matches_manifest() {
 }
 
 
-find_live_partition_on_disk() {
-    local disk="$1"
-    local pn pdev label pfs psize legacy_label
-    # Partitions created before the project was renamed still carry this label.
-    legacy_label="LINUXGATE"
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
-        label=$(blkid -s LABEL -o value "$pdev" 2>/dev/null || echo "")
-        if [ "$label" = "LIBERTIX" ] || [ "$label" = "LIBERTIX_INSTALLER" ] || [ "$label" = "$legacy_label" ]; then
-            echo "$pdev"
-            return 0
-        fi
-    done
-    for pn in 1 2 3 4 5; do
-        pdev=$(partition_path "$disk" "$pn")
-        [ -b "$pdev" ] || continue
-        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-        [ "$pfs" = "vfat" ] || [ "$pfs" = "fat32" ] || continue
-        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -ge 1500 ] && [ "$psize" -le 3072 ]; then
-            echo "$pdev"
-            return 0
-        fi
-    done
-    return 1
-}
-
 recovery_geometry() {
     local disk="$1"
-    parted -sm "$disk" unit s print 2>/dev/null | awk -F: '$1=="4"{print $1":"$2":"$3":"$5":"$6; exit}'
+    manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"
 }
 
 write_target_fstab_or_die() {
@@ -123,6 +113,61 @@ partition_has_boot_flag() {
             }
             END { exit !(matched && has_boot) }
         '
+}
+
+only_mbr_partition_has_boot_flag() {
+    local disk="$1"
+    local expected_number="$2"
+
+    parted -sm "$disk" print 2>/dev/null |
+        awk -F: -v expected="$expected_number" '
+            $1 ~ /^[0-9]+$/ {
+                number = $1
+                count = split($7, flags, ",")
+                for (i = 1; i <= count; i++) {
+                    sub(/;$/, "", flags[i])
+                    if (flags[i] == "boot") {
+                        if (number == expected) expected_is_active = 1
+                        else unexpected_is_active = 1
+                    }
+                }
+            }
+            END { exit !(expected_is_active && !unexpected_is_active) }
+        '
+}
+
+set_mbr_active_partition_verified() {
+    local partition_number="$1"
+    local purpose="$2"
+    local rc
+
+    echo "+ sfdisk --lock --activate $DISK $partition_number"
+    if sfdisk --lock --activate "$DISK" "$partition_number"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    sync || true
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+
+    if ! only_mbr_partition_has_boot_flag "$DISK" "$partition_number"; then
+        echo "$purpose: MBR boot flags do not match the requested state after rc=$rc"
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "WARNING: sfdisk returned rc=$rc, but the requested MBR boot flags were verified"
+    fi
+    return 0
+}
+
+set_bios_boot_flags_or_die() {
+    local windows_boot_partition_number
+
+    windows_boot_partition_number="$(partition_number "$WINDOWS_BOOT_PART")"
+    set_mbr_active_partition_verified \
+        "$windows_boot_partition_number" "BIOS boot-flag update" || \
+        die "the Windows boot partition could not be made the only active MBR partition"
 }
 
 final_verify_or_die() {
@@ -205,6 +250,38 @@ firmware_resolve_rollback_partition() {
     fi
 }
 
+remove_mbr_partition_entry_verified() {
+    local number="$1"
+    local purpose="$2"
+    local rc layout
+
+    echo "+ parted -s $DISK rm $number"
+    if parted -s "$DISK" rm "$number"; then
+        rc=0
+    else
+        rc=$?
+    fi
+    sync || true
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+
+    layout="$(parted -sm "$DISK" unit s print 2>/dev/null)" || {
+        echo "$purpose: cannot verify the MBR table after parted returned rc=$rc"
+        return 1
+    }
+    if printf '%s\n' "$layout" | awk -F: -v number="$number" '
+        $1 == number { found=1 }
+        END { exit(found ? 0 : 1) }
+    '; then
+        echo "$purpose: partition $number remains after parted returned rc=$rc"
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "WARNING: parted returned rc=$rc, but removal of MBR partition $number was verified"
+    fi
+    return 0
+}
+
 firmware_rollback_partition_is_owned() {
     local partition="$1"
 
@@ -275,10 +352,8 @@ firmware_cleanup_partition_container_best_effort() {
     # becomes logical partition 5. Once that owned logical partition is gone,
     # the empty container must also go or C: cannot grow back to Recovery.
     echo "ROLLBACK: deleting empty transaction-owned extended partition $extended_number"
-    parted -s "$DISK" rm "$extended_number" || return 1
-    sync || true
-    partprobe "$DISK" 2>/dev/null || true
-    udevadm settle 2>/dev/null || true
+    remove_mbr_partition_entry_verified \
+        "$extended_number" "ROLLBACK: extended-container cleanup" || return 1
 }
 
 firmware_restore_boot_state_best_effort() {
@@ -291,7 +366,8 @@ firmware_restore_boot_state_best_effort() {
     fi
 
     windows_boot_number=$(partition_number "$windows_boot_partition")
-    parted -s "$DISK" set "$windows_boot_number" boot on 2>/dev/null || true
+    set_mbr_active_partition_verified \
+        "$windows_boot_number" "ROLLBACK: Windows boot-flag restore"
 }
 
 firmware_write_failure_marker_best_effort() {
@@ -314,7 +390,7 @@ prepare_installer_partition_for_target_format_or_die() {
     local layout logical_sector installer_sector recovery_sector owned_layout
     local logical_number logical_start logical_end
     local extended_number extended_start extended_end extended_type
-    local original_size new_end new_size
+    local original_size partition_size new_end new_size attempt
 
     bios_partition_table_or_die >/dev/null
     [ "$SHARE_LINUX_FILES_IN_WINDOWS" = "true" ] || return 0
@@ -367,23 +443,34 @@ prepare_installer_partition_for_target_format_or_die() {
     echo "Converting transaction-owned MBR logical partition $logical_number to a primary Linux slot"
     NEW_PART=""
     NEW_PART_NUM=""
-    run_logged parted -s "$DISK" rm "$logical_number"
+    remove_mbr_partition_entry_verified \
+        "$logical_number" "MBR logical staging cleanup" || \
+        die "the MBR logical staging partition could not be removed"
+    remove_mbr_partition_entry_verified \
+        "$extended_number" "MBR extended-container cleanup" || \
+        die "the MBR extended staging container could not be removed"
+
+    partition_size=$((logical_end - logical_start + 1))
+    [ "$partition_size" -gt 0 ] || die "the primary Linux partition size is invalid"
+
+    # Exact sector values avoid any geometry reinterpretation. The disk lock
+    # also prevents udev from racing the short interval between removal of the
+    # extended container and creation of the replacement primary entry.
+    echo "+ sfdisk: create primary slot $extended_number at sector $logical_start size $partition_size"
+    printf 'start=%s, size=%s, type=83\n' "$logical_start" "$partition_size" |
+        sfdisk --lock --append --no-reread -N "$extended_number" "$DISK" ||
+        die "sfdisk could not create the primary Linux partition"
     sync
     partprobe "$DISK" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
 
-    run_logged parted -s "$DISK" rm "$extended_number"
-    sync
-    partprobe "$DISK" 2>/dev/null || true
-    udevadm settle 2>/dev/null || true
-
-    run_logged parted -s "$DISK" unit s mkpart primary ext4 \
-        "${logical_start}s" "${logical_end}s"
-    sync
-    partprobe "$DISK" 2>/dev/null || true
-    udevadm settle 2>/dev/null || true
-
-    NEW_PART="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+    # BLKRRPART and udev updates are asynchronous on some virtual controllers.
+    # Resolve the exact manifest offset rather than assuming a device number.
+    for attempt in $(seq 1 20); do
+        NEW_PART="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+        [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] && break
+        sleep 0.25
+    done
     [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] || \
         die "the primary Linux partition could not be resolved after MBR normalization"
     NEW_PART_NUM="$(partition_number "$NEW_PART")"
@@ -415,9 +502,10 @@ wait_for_prereqs() {
         local config_ready=0
         local candidate found_config
 
-        for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
+        while read -r candidate; do
+            [ -n "$candidate" ] || continue
             [ -b "$candidate" ] && { disk_ready=1; break; }
-        done
+        done < <(candidate_disks)
 
         for candidate in \
             /run/live/medium/installation-plan.json \
@@ -450,64 +538,6 @@ wait_for_prereqs() {
     die "live prerequisites not ready after 60s"
 }
 
-find_ntfs_partition_with_file() {
-    local relative_path="$1"
-    local candidate pn pdev pfs tmp
-
-    for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
-        [ -b "$candidate" ] || continue
-        for pn in 1 2 3 4 5; do
-            pdev=$(partition_path "$candidate" "$pn")
-            [ -b "$pdev" ] || continue
-            pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-            [ "$pfs" = "ntfs" ] || continue
-
-            tmp=$(mktemp -d)
-            if mount -t ntfs-3g -o ro "$pdev" "$tmp" 2>/dev/null; then
-                if [ -f "$tmp/$relative_path" ]; then
-                    umount "$tmp"
-                    rmdir "$tmp"
-                    echo "$pdev"
-                    return 0
-                fi
-                umount "$tmp" 2>/dev/null || true
-            fi
-            rmdir "$tmp" 2>/dev/null || true
-        done
-    done
-    return 1
-}
-
-find_windows_os_partition_any() {
-    local best=""
-    local best_size=0
-    local candidate pn pdev pfs psize tmp
-
-    for candidate in /dev/sd? /dev/nvme?n? /dev/mmcblk?; do
-        [ -b "$candidate" ] || continue
-        for pn in 1 2 3 4 5; do
-            pdev=$(partition_path "$candidate" "$pn")
-            [ -b "$pdev" ] || continue
-            pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-            [ "$pfs" = "ntfs" ] || continue
-            psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-            [ "$psize" -gt 1000 ] || continue
-
-            tmp=$(mktemp -d)
-            if mount -t ntfs-3g -o ro "$pdev" "$tmp" 2>/dev/null; then
-                if [ -d "$tmp/Windows" ] && [ "$psize" -gt "$best_size" ]; then
-                    best="$pdev"
-                    best_size="$psize"
-                fi
-                umount "$tmp" 2>/dev/null || true
-            fi
-            rmdir "$tmp" 2>/dev/null || true
-        done
-    done
-
-    echo "$best"
-}
-
 set_linux_partition_type_or_die() {
     [ -n "$NEW_PART_NUM" ] || die "Linux partition number missing"
 
@@ -527,8 +557,9 @@ cleanup_windows_live_boot_artifacts() {
 
     # First remove the one-shot Windows Boot Manager entry. If the installer
     # fails later, the next reboot must fall back to Windows instead of looping.
-    bcd_part=$(find_ntfs_partition_with_file "Boot/BCD" || true)
-    [ -n "$bcd_part" ] || die "Windows BCD store not found"
+    bcd_part="$WINDOWS_BOOT_PART"
+    [ -n "$bcd_part" ] && [ -b "$bcd_part" ] || \
+        die "Windows boot partition is unavailable during BCD cleanup"
 
     bcd_mnt="/mnt/libertix-bcd"
     echo "Cleaning temporary BCD live boot entry from $bcd_part"
@@ -544,8 +575,9 @@ cleanup_windows_live_boot_artifacts() {
         echo "Low-memory mode: deferring GRUB4DOS file cleanup until Windows starts."
         return 0
     fi
-    windows_part=$(find_windows_os_partition_any || true)
-    [ -n "$windows_part" ] || die "Windows OS partition not found"
+    windows_part="$WINDOWS_PART"
+    [ -n "$windows_part" ] && [ -b "$windows_part" ] || \
+        die "Windows OS partition is unavailable during GRUB4DOS cleanup"
 
     windows_mnt="/mnt/libertix-windows-cleanup"
     echo "Removing temporary GRUB4DOS files from $windows_part"

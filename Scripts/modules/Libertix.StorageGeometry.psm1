@@ -1,9 +1,46 @@
 Set-StrictMode -Version Latest
 
 $script:WindowsPartitionAlignmentBytes = 1MB
+$script:MinimumWindowsFreeSpaceBytes = 10GB
+$script:WindowsFreeSpaceToleranceBytes = 512MB
 
 function Get-LibertixPartitionAlignmentBytes {
     return [int64]$script:WindowsPartitionAlignmentBytes
+}
+
+function Get-LibertixWindowsFreeSpaceBudget {
+    param(
+        [Parameter(Mandatory = $true)][int64]$AvailableBytes,
+        [Parameter(Mandatory = $true)][int64]$AllocationBytes
+    )
+
+    if ($AvailableBytes -lt 0 -or $AllocationBytes -le 0) {
+        throw "Windows free-space budget values are outside the supported range."
+    }
+    if ($AllocationBytes -gt [int64]::MaxValue - $script:MinimumWindowsFreeSpaceBytes) {
+        throw "Windows free-space budget exceeds the supported integer range."
+    }
+
+    [int64]$requiredBytes = $AllocationBytes + $script:MinimumWindowsFreeSpaceBytes
+    [int64]$acceptedFloorBytes = $requiredBytes - $script:WindowsFreeSpaceToleranceBytes
+
+    # Windows can grow its page file and other managed files after the wizard
+    # measures free space. The tolerance keeps that bounded drift from making
+    # a valid minimum-size installation fail, while the 10 GiB reserve remains
+    # the nominal policy and deficits beyond 512 MiB still fail closed.
+    return [pscustomobject]@{
+        Accepted = [bool]($AvailableBytes -ge $acceptedFloorBytes)
+        WithinTolerance = [bool](
+            $AvailableBytes -lt $requiredBytes -and
+            $AvailableBytes -ge $acceptedFloorBytes
+        )
+        AvailableBytes = $AvailableBytes
+        AllocationBytes = $AllocationBytes
+        RequiredBytes = $requiredBytes
+        AcceptedFloorBytes = $acceptedFloorBytes
+        ReserveBytes = [int64]$script:MinimumWindowsFreeSpaceBytes
+        ToleranceBytes = [int64]$script:WindowsFreeSpaceToleranceBytes
+    }
 }
 
 function Get-LibertixPartitionEndAlignmentPadding {
@@ -75,6 +112,7 @@ function Get-LibertixAlignedShrinkGeometry {
 
 Export-ModuleMember -Function @(
     "Get-LibertixPartitionAlignmentBytes",
+    "Get-LibertixWindowsFreeSpaceBudget",
     "Get-LibertixPartitionEndAlignmentPadding",
     "Get-LibertixAlignedShrinkGeometry"
 )

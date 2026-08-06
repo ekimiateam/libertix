@@ -169,11 +169,11 @@
     <system:String x:Key="ApplyChangesPreparationErrorRestored">Preparation failed. Windows has been restored.</system:String>
     <system:String x:Key="ApplyChangesRollbackIncomplete">Rollback incomplete. Manual intervention is required.</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenable">Disk and boot restored, but BitLocker must be re-enabled in Windows.</system:String>
-    <system:String x:Key="ApplyChangesBitLockerReenableDetails">The installation was cancelled and disk/boot changes were restored. BitLocker continued or completed decryption and cannot be re-enabled automatically on this Windows edition. Re-enable encryption in Windows settings before considering recovery complete.</system:String>
+    <system:String x:Key="ApplyChangesBitLockerReenableDetails">Disk and boot changes were restored, but BitLocker continued or completed decryption and cannot be re-enabled automatically on this Windows edition. Re-enable encryption in Windows settings before considering recovery complete.</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenableTitle">Libertix - Re-enable BitLocker</system:String>
     <system:String x:Key="ApplyChangesRollbackIncompleteTitle">Libertix - Incomplete rollback</system:String>
     <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">The installation was cancelled, but the UEFI rollback could not be verified. Do not restart; review {0}.</system:String>
-    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">Preparation failed and automatic rollback could not be verified. Do not restart the installation; review {0}.</system:String>
+    <system:String x:Key="ApplyChangesPreparationRollbackIncompleteDetails">Preparation failed and automatic rollback could not be verified. Do not restart the installation; review {0}.</system:String>
     <system:String x:Key="CloseConfirmationTitle">Close Libertix</system:String>
     <system:String x:Key="CloseConfirmationMessage">Do you really want to close Libertix?</system:String>
     <system:String x:Key="TrayInstallTitle">Libertix installation in progress</system:String>

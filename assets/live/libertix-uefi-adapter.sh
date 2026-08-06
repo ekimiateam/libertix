@@ -101,7 +101,7 @@ write_windows_recovery_marker_best_effort() {
 }
 
 disk_matches_manifest() {
-    local disk="$1" actual_size actual_style expected_style windows_candidate
+    local disk="$1" actual_size actual_style expected_style windows_candidate boot_candidate
     actual_size=$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)
     [ "$actual_size" = "$TARGET_DISK_SIZE_BYTES" ] || return 1
     actual_style=$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}')
@@ -111,102 +111,14 @@ disk_matches_manifest() {
     windows_candidate=$(partition_at_offset "$disk" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
     [ -n "$windows_candidate" ] || return 1
     [ "$(blkid -s TYPE -o value "$windows_candidate" 2>/dev/null || true)" = "ntfs" ] || return 1
+    boot_candidate=$(partition_at_offset "$disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
+    [ -n "$boot_candidate" ] || return 1
 }
 
-
-find_biggest_bitlocker_partition() {
-    local disk="$1"
-    local best=""
-    local best_size=0
-    local pdev pfs psize
-
-    while read -r pdev; do
-        [ -n "$pdev" ] || continue
-        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-        echo "$pfs" | grep -qi "bitlocker" || continue
-        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -gt 1000 ] && [ "$psize" -gt "$best_size" ]; then
-            best="$pdev"
-            best_size="$psize"
-        fi
-    done < <(partitions_of_disk "$disk")
-
-    echo "$best"
-}
-
-find_live_partition_on_disk() {
-    local disk="$1"
-    local pdev label pfs psize legacy_label
-    # Partitions created before the project was renamed still carry this label.
-    legacy_label="LINUXGATE"
-
-    while read -r pdev; do
-        [ -n "$pdev" ] || continue
-        label=$(blkid -s LABEL -o value "$pdev" 2>/dev/null || echo "")
-        if [ "$label" = "LIBERTIX" ] \
-            || [ "$label" = "LIBERTIX_INSTALLER" ] \
-            || [ "$label" = "LIBERTIXEFI" ] \
-            || [ "$label" = "$legacy_label" ]; then
-            echo "$pdev"
-            return 0
-        fi
-    done < <(partitions_of_disk "$disk")
-
-    while read -r pdev; do
-        [ -n "$pdev" ] || continue
-        pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-        [ "$pfs" = "vfat" ] || [ "$pfs" = "fat32" ] || continue
-        psize=$(($(blockdev --getsize64 "$pdev" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$psize" -ge 1500 ] && [ "$psize" -le 32768 ]; then
-            echo "$pdev"
-            return 0
-        fi
-    done < <(partitions_of_disk "$disk")
-
-    return 1
-}
 
 recovery_geometry() {
     local disk="$1"
-    local part_table line dev num start size end type part ptype plabel layout
-
-    part_table="$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print $6}')"
-    if [ "$part_table" = "msdos" ]; then
-        parted -sm "$disk" unit s print 2>/dev/null | awk -F: '$1=="4"{print $1":"$2":"$3":"$5":"$6; exit}'
-        return 0
-    fi
-
-    if command -v sfdisk >/dev/null 2>&1; then
-        while IFS= read -r line; do
-            case "$line" in
-                "$disk"*":"*"type="*)
-                    type="$(printf '%s\n' "$line" | sed -n 's/.*type=\([^, ]*\).*/\1/p' | tr '[:upper:]' '[:lower:]')"
-                    [ "$type" = "de94bba4-06d1-4d40-a16a-bfd50179d6ac" ] || continue
-                    dev="${line%% :*}"
-                    num="$(partition_number "$dev")"
-                    start="$(printf '%s\n' "$line" | sed -n 's/.*start=[[:space:]]*\([0-9]*\).*/\1/p')"
-                    size="$(printf '%s\n' "$line" | sed -n 's/.*size=[[:space:]]*\([0-9]*\).*/\1/p')"
-                    if [ -n "$num" ] && [ -n "$start" ] && [ -n "$size" ]; then
-                        end="$((start + size - 1))"
-                        echo "$num:${start}s:${end}s:${size}s:$type"
-                        return 0
-                    fi
-                    ;;
-            esac
-        done < <(sfdisk -d "$disk" 2>/dev/null || true)
-    fi
-
-    while read -r part; do
-        [ -n "$part" ] || continue
-        ptype="$(lsblk -dnro PARTTYPE "$part" 2>/dev/null | tr '[:upper:]' '[:lower:]' || true)"
-        plabel="$(lsblk -dnro PARTLABEL "$part" 2>/dev/null || true)"
-        if [ "$ptype" = "de94bba4-06d1-4d40-a16a-bfd50179d6ac" ] || echo "$plabel" | grep -qi "recovery"; then
-            num="$(partition_number "$part")"
-            layout="$(parted -sm "$disk" unit s print 2>/dev/null | awk -F: -v n="$num" '$1==n{print $1":"$2":"$3":"$4; exit}')"
-            [ -n "$layout" ] && echo "$layout:$ptype"
-            return 0
-        fi
-    done < <(partitions_of_disk "$disk")
+    manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"
 }
 
 
@@ -361,7 +273,9 @@ firmware_rollback_partition_is_owned() {
     local partition="$1"
 
     [ "$partition" != "$WINDOWS_PART" ] \
-        && [ "$(parent_disk_from_part "$partition")" = "$DISK" ]
+        && [ "$(parent_disk_from_part "$partition")" = "$DISK" ] \
+        && [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
+            "$INSTALLER_PARTITION_OFFSET_BYTES" ]
 }
 
 firmware_cleanup_partition_container_best_effort() {
@@ -433,67 +347,31 @@ wait_for_prereqs() {
     die "live prerequisites not ready after 60s"
 }
 
-find_ntfs_partition_with_file() {
-    local relative_path="$1"
-    local candidate pdev pfs tmp
-
-    while read -r candidate; do
-        [ -n "$candidate" ] || continue
-        [ -b "$candidate" ] || continue
-        while read -r pdev; do
-            [ -n "$pdev" ] || continue
-            pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-            [ "$pfs" = "ntfs" ] || continue
-
-            tmp=$(mktemp -d)
-            if mount -t ntfs-3g -o ro "$pdev" "$tmp" 2>/dev/null; then
-                if [ -f "$tmp/$relative_path" ]; then
-                    umount "$tmp"
-                    rmdir "$tmp"
-                    echo "$pdev"
-                    return 0
-                fi
-                umount "$tmp" 2>/dev/null || true
-            fi
-            rmdir "$tmp" 2>/dev/null || true
-        done < <(partitions_of_disk "$candidate")
-    done < <(candidate_disks)
-    return 1
-}
-
-find_fat_partition_with_file() {
-    local relative_path="$1"
-    local candidate pdev pfs tmp
-
-    while read -r candidate; do
-        [ -n "$candidate" ] || continue
-        [ -b "$candidate" ] || continue
-        while read -r pdev; do
-            [ -n "$pdev" ] || continue
-            pfs=$(blkid -s TYPE -o value "$pdev" 2>/dev/null || echo "")
-            case "$pfs" in
-                vfat|fat|msdos) ;;
-                *) continue ;;
-            esac
-
-            tmp=$(mktemp -d)
-            if mount -t vfat -o ro "$pdev" "$tmp" 2>/dev/null; then
-                if [ -f "$tmp/$relative_path" ]; then
-                    umount "$tmp"
-                    rmdir "$tmp"
-                    echo "$pdev"
-                    return 0
-                fi
-                umount "$tmp" 2>/dev/null || true
-            fi
-            rmdir "$tmp" 2>/dev/null || true
-        done < <(partitions_of_disk "$candidate")
-    done < <(candidate_disks)
-    return 1
-}
-
 find_esp_partition() {
-    find_fat_partition_with_file "EFI/Microsoft/Boot/bootmgfw.efi"
+    local esp filesystem mountpoint
+
+    esp="$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)"
+    [ -n "$esp" ] && [ -b "$esp" ] || return 1
+    [ "$(parent_disk_from_part "$esp")" = "$DISK" ] || return 1
+    filesystem="$(blkid -s TYPE -o value "$esp" 2>/dev/null || echo "")"
+    case "$filesystem" in
+        vfat|fat|msdos) ;;
+        *) return 1 ;;
+    esac
+
+    mountpoint="$(mktemp -d)"
+    if ! mount -t vfat -o ro "$esp" "$mountpoint" 2>/dev/null; then
+        rmdir "$mountpoint"
+        return 1
+    fi
+    if [ ! -f "$mountpoint/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
+        umount "$mountpoint" 2>/dev/null || true
+        rmdir "$mountpoint" 2>/dev/null || true
+        return 1
+    fi
+    umount "$mountpoint" 2>/dev/null || return 1
+    rmdir "$mountpoint" 2>/dev/null || return 1
+    echo "$esp"
 }
 
 cleanup_final_uefi_bootloader_best_effort() {
@@ -714,22 +592,27 @@ EOF
 
 
 cleanup_temporary_uefi_bootentries() {
-    local bootnum
+    local bootnum temporary_entries
 
-    command -v efibootmgr >/dev/null 2>&1 || return 0
+    command -v efibootmgr >/dev/null 2>&1 || \
+        die "efibootmgr is required to remove the temporary UEFI entry"
 
-    efibootmgr 2>/dev/null \
+    temporary_entries="$(efibootmgr 2>/dev/null \
         | awk '/^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][* ] Libertix UEFI Installer/ {
             n=substr($1,5,4)
             gsub(/\*/, "", n)
             print n
-        }' \
-        | while read -r bootnum; do
-            [ -n "$bootnum" ] || continue
-            echo "Deleting temporary UEFI installer entry Boot$bootnum"
-            efibootmgr -b "$bootnum" -B || \
-                echo "WARNING: cannot delete temporary UEFI installer entry Boot$bootnum"
-        done
+        }')" || die "cannot enumerate temporary UEFI boot entries"
+    while read -r bootnum; do
+        [ -n "$bootnum" ] || continue
+        echo "Deleting temporary UEFI installer entry Boot$bootnum"
+        efibootmgr -b "$bootnum" -B || \
+            die "cannot delete temporary UEFI installer entry Boot$bootnum"
+    done <<< "$temporary_entries"
+    if efibootmgr 2>/dev/null | grep -Eq \
+        '^Boot[0-9A-Fa-f]{4}[* ] Libertix UEFI Installer'; then
+        die "temporary UEFI installer entry remains after cleanup"
+    fi
 
     # BootNext is one-shot and should already be consumed, but clearing it here
     # keeps a failed live boot from looping if the firmware preserved it.
@@ -745,24 +628,17 @@ cleanup_windows_live_boot_artifacts() {
     # fails later, the next reboot must fall back to Windows instead of looping.
     cleanup_temporary_uefi_bootentries
 
-    bcd_part=$(find_fat_partition_with_file "EFI/Microsoft/Boot/BCD" || true)
-    if [ -n "$bcd_part" ]; then
-        bcd_mnt="/mnt/libertix-bcd"
-        echo "Cleaning temporary UEFI BCD live boot entry from $bcd_part"
-        mkdir -p "$bcd_mnt"
-        if mount -t vfat -o rw,flush "$bcd_part" "$bcd_mnt"; then
-            if [ -f "$bcd_mnt/EFI/Microsoft/Boot/BCD" ]; then
-                delete_live_bcd_entry_or_die "$bcd_mnt/EFI/Microsoft/Boot/BCD" || \
-                    echo "WARNING: UEFI BCD cleanup failed; continuing because bootsequence is one-shot"
-                sync
-            else
-                echo "WARNING: Windows UEFI BCD store disappeared after mount; continuing"
-            fi
-            umount "$bcd_mnt" 2>/dev/null || true
-        else
-            echo "WARNING: cannot mount Windows ESP for BCD cleanup; continuing"
-        fi
-    else
-        echo "WARNING: Windows UEFI BCD store not found; continuing"
-    fi
+    bcd_part=$(find_esp_partition || true)
+    [ -n "$bcd_part" ] && [ -b "$bcd_part" ] || \
+        die "Windows UEFI boot partition is unavailable during BCD cleanup"
+    bcd_mnt="/mnt/libertix-bcd"
+    echo "Cleaning temporary UEFI BCD live boot entry from $bcd_part"
+    mkdir -p "$bcd_mnt"
+    mount -t vfat -o rw,flush "$bcd_part" "$bcd_mnt" || \
+        die "cannot mount Windows ESP for BCD cleanup"
+    [ -f "$bcd_mnt/EFI/Microsoft/Boot/BCD" ] || \
+        die "Windows UEFI BCD store disappeared after mount"
+    delete_live_bcd_entry_or_die "$bcd_mnt/EFI/Microsoft/Boot/BCD"
+    sync
+    umount "$bcd_mnt" || die "cannot unmount Windows ESP after BCD cleanup"
 }

@@ -42,7 +42,9 @@ namespace Libertix.Pages
                 "Installation was stopped before any disk change.");
         }
 
-        private async Task<StoragePreflightInfo> RunStoragePreflightAsync(FirmwareType firmware)
+        private async Task<StoragePreflightInfo> RunStoragePreflightAsync(
+            FirmwareType firmware,
+            bool decryptBitLocker = true)
         {
             string scriptPath = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
@@ -59,8 +61,8 @@ namespace Libertix.Pages
                 powershell,
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
                 $"-ExpectedFirmware {expected} " +
-                (firmware == FirmwareType.Bios ? "-DecryptBitLocker" : ""),
-                firmware == FirmwareType.Bios
+                (firmware == FirmwareType.Bios && decryptBitLocker ? "-DecryptBitLocker" : ""),
+                firmware == FirmwareType.Bios && decryptBitLocker
                     ? (int)WindowsProcessTimeouts.InstallerOperation.TotalMilliseconds
                     : (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds));
 
@@ -91,7 +93,10 @@ namespace Libertix.Pages
                 "SYSTEM_DISK_UNIQUE_ID", "SYSTEM_DISK_SIZE", "LOGICAL_SECTOR_SIZE", "PARTITION_STYLE",
                 "RECOVERY_PARTITION_NUMBER", "RECOVERY_PARTITION_OFFSET", "RECOVERY_PARTITION_SIZE",
                 "BITLOCKER_SAFE", "BITLOCKER_STATE", "BITLOCKER_CONVERSION_STATUS",
-                "BITLOCKER_ENCRYPTION_PERCENTAGE", "BITLOCKER_PROTECTION_STATUS"
+                "BITLOCKER_ENCRYPTION_PERCENTAGE", "BITLOCKER_PROTECTION_STATUS",
+                "BITLOCKER_INITIAL_CONVERSION_STATUS",
+                "BITLOCKER_INITIAL_ENCRYPTION_PERCENTAGE",
+                "BITLOCKER_INITIAL_PROTECTION_STATUS"
             };
             foreach (string key in required)
             {
@@ -129,10 +134,19 @@ namespace Libertix.Pages
                     CultureInfo.InvariantCulture),
                 BitLockerProtectionStatus = int.Parse(
                     values["BITLOCKER_PROTECTION_STATUS"],
+                    CultureInfo.InvariantCulture),
+                InitialBitLockerConversionStatus = int.Parse(
+                    values["BITLOCKER_INITIAL_CONVERSION_STATUS"],
+                    CultureInfo.InvariantCulture),
+                InitialBitLockerEncryptionPercentage = int.Parse(
+                    values["BITLOCKER_INITIAL_ENCRYPTION_PERCENTAGE"],
+                    CultureInfo.InvariantCulture),
+                InitialBitLockerProtectionStatus = int.Parse(
+                    values["BITLOCKER_INITIAL_PROTECTION_STATUS"],
                     CultureInfo.InvariantCulture)
             };
 
-            if (firmware == FirmwareType.Bios && !info.BitLockerSafe)
+            if (firmware == FirmwareType.Bios && decryptBitLocker && !info.BitLockerSafe)
                 throw new InvalidOperationException("BitLocker is not fully decrypted on the Windows volume.");
 
             Log($"Storage preflight OK: firmware={expected}, disk={info.SystemDiskNumber}, " +

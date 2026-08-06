@@ -34,6 +34,9 @@ namespace Libertix.Installation
         public int BitLockerConversionStatus { get; set; }
         public int BitLockerEncryptionPercentage { get; set; }
         public int BitLockerProtectionStatus { get; set; }
+        public int InitialBitLockerConversionStatus { get; set; }
+        public int InitialBitLockerEncryptionPercentage { get; set; }
+        public int InitialBitLockerProtectionStatus { get; set; }
 
         public PartitionIdentity WindowsPartition => new PartitionIdentity
         {

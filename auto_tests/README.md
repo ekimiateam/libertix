@@ -66,13 +66,13 @@ Files served by the current workflows:
 
 ```text
 /filepool/distros.json
-/filepool/mint.iso
 /filepool/libertix-installer-bios.iso
 /filepool/libertix-installer-uefi.iso
 /filepool/aria2-64.zip
 ```
 
-Bind the API to an address reachable by the test VMs when they need the filepool.
+The distribution catalogue points directly to the official Linux Mint mirror for the installer
+ISO. Bind the API to an address reachable by the test VMs for the remaining filepool artifacts.
 
 ## Reset behavior
 

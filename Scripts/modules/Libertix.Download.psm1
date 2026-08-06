@@ -8,7 +8,7 @@ function New-LibertixDownloadUrls {
     $baseUrl = $FilepoolBaseUrl.TrimEnd("/")
     return [pscustomobject]@{
         InstallerIso = "$baseUrl/libertix-installer-uefi.iso"
-        MintIso = "$baseUrl/mint.iso"
+        MintIso = "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso"
         Aria2Zip = "$baseUrl/$Aria2ZipName"
     }
 }

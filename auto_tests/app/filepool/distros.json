@@ -4,11 +4,11 @@
     "description": "Linux Mint is an operating system for desktop and laptop computers. It is designed to work out of the box and comes fully equipped with the apps most people need.",
     "imageUrl": "https://www.linuxmint.com/web/img/screenshots/c1.jpg",
     "isoUrl": "libertix-installer-bios.iso",
-    "isoInstaller": "mint.iso",
+    "isoInstaller": "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso",
     "isoInstallerFileName": "mint.iso",
-    "isoSha256": "69f47c6765a727498119b7a54868b33a6c3cf5941cd7c5f18b9d0edc5a695a9e",
+    "isoSha256": "2b95e18d6833059de468600247adb4e8c6e99ece9d200e0c0417bdf4666c389f",
     "uefiIsoUrl": "libertix-installer-uefi.iso",
-    "uefiIsoSha256": "4037b3907809128839c8d43929eb58fbddfc686c8371ad2614a108fb6ae5c7ab",
+    "uefiIsoSha256": "71c9632d008f2ac1cf107e9c2d2ace920740544897faab5b327ca3cc95d03062",
     "isoInstallerSha256": "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4",
     "sizeInGB": 20
   }

@@ -61,7 +61,9 @@ class PostInstallValidationMixin:
             username=options.linux_username,
             password=options.linux_password,
             trust_on_first_use=True,
-            probe="printf LIBERTIX_LINUX_READY",
+            probe=(
+                "test -e /var/lib/libertix/development-ssh-ready && printf LIBERTIX_LINUX_READY"
+            ),
             expected="LIBERTIX_LINUX_READY",
             phase="linux",
             grub_entry=None if monitor_outcome == "boot-menu" else "linux",
@@ -417,9 +419,11 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck(
                 "linux.time_sync",
-                'i=0; while [ "$i" -lt 24 ]; do '
-                "timedatectl show -p NTPSynchronized --value | grep -Fxq yes && exit 0; "
-                "i=$((i + 1)); sleep 5; done; timedatectl status; exit 1",
+                'i=0; while [ "$i" -lt 18 ]; do '
+                "timeout 5s timedatectl show -p NTPSynchronized --value | "
+                "grep -Fxq yes && exit 0; "
+                "i=$((i + 1)); sleep 2; done; "
+                "timeout 5s timedatectl status; exit 1",
                 timeout=150,
             ),
             RemoteCheck(
@@ -499,13 +503,15 @@ class PostInstallValidationMixin:
         check: RemoteCheck,
         sudo_password: str | None = None,
     ) -> CommandResult | None:
-        command = check.command
+        # Every semicolon-separated assertion is part of the contract. Without
+        # errexit, a later successful diagnostic could hide an earlier failure.
+        command = f"sh -eu -c {shlex.quote(check.command)}"
         stdin_data = None
         sensitive = check.sensitive
         if check.requires_sudo:
             if sudo_password is None:
                 raise ValueError(f"{check.name} requires a sudo password")
-            command = f"sudo -S -p '' sh -c {shlex.quote(check.command)}"
+            command = f"sudo -S -p '' sh -eu -c {shlex.quote(check.command)}"
             stdin_data = sudo_password + "\n"
             sensitive = True
         try:

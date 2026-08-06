@@ -6,10 +6,6 @@
 # those policies intentionally differ between the BIOS and UEFI adapters. This
 # module owns only stable Linux device naming and manifest-based resolution.
 
-safe_run() {
-    "$@" || echo "WARNING: $* failed"
-}
-
 partition_path() {
     local disk="$1"
     local number="$2"
@@ -65,10 +61,6 @@ installer_partition_target_bytes() {
     shortfall_bytes=$((requested_bytes - maximum_bytes))
     [ "$shortfall_bytes" -le "$alignment_tolerance_bytes" ] || return 1
     echo "$maximum_bytes"
-}
-
-partition_count() {
-    lsblk -nr -o NAME,TYPE "$1" | awk '$2=="part"{count++}END{print count+0}'
 }
 
 mbr_primary_slot_count_from_machine_output() {
@@ -178,6 +170,26 @@ partitions_of_disk() {
     lsblk -lnpo NAME,TYPE "$disk" 2>/dev/null | awk '$2=="part"{print $1}'
 }
 
+find_biggest_bitlocker_partition() {
+    local disk="$1"
+    local best=""
+    local best_size=0
+    local partition filesystem size_mib
+
+    while read -r partition; do
+        [ -n "$partition" ] || continue
+        filesystem=$(blkid -s TYPE -o value "$partition" 2>/dev/null || echo "")
+        echo "$filesystem" | grep -qi "bitlocker" || continue
+        size_mib=$(($(blockdev --getsize64 "$partition" 2>/dev/null || echo 0) / 1024 / 1024))
+        if [ "$size_mib" -gt 1000 ] && [ "$size_mib" -gt "$best_size" ]; then
+            best="$partition"
+            best_size="$size_mib"
+        fi
+    done < <(partitions_of_disk "$disk")
+
+    echo "$best"
+}
+
 partition_start_bytes() {
     local disk="$1"
     local partition="$2"
@@ -222,6 +234,22 @@ partition_at_offset() {
         fi
     done < <(partitions_of_disk "$disk")
     return 1
+}
+
+manifest_partition_geometry() {
+    local disk="$1"
+    local expected_offset="$2"
+    local partition number actual_offset size type
+
+    partition="$(partition_at_offset "$disk" "$expected_offset" || true)"
+    [ -n "$partition" ] && [ -b "$partition" ] || return 1
+    number="$(partition_number "$partition")"
+    actual_offset="$(partition_start_bytes "$disk" "$partition" || true)"
+    size="$(blockdev --getsize64 "$partition" 2>/dev/null || echo 0)"
+    type="$(lsblk -dnro PARTTYPE "$partition" 2>/dev/null || true)"
+    [ "$actual_offset" = "$expected_offset" ] || return 1
+    [ "$size" -gt 0 ] 2>/dev/null || return 1
+    printf '%s:%s:%s:%s\n' "$number" "$actual_offset" "$size" "$type"
 }
 
 resolve_target_disk_from_manifest() {

@@ -125,11 +125,10 @@ namespace Libertix.Pages
 
             if (exitCode != 0)
             {
-                ReloadExecutionState();
-                CleanupPendingWindowsSharePayload();
-                Log($"ERROR: UEFI installer preparation failed with rc={exitCode}");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                FinishInstallation(enableBackButton: true);
+                await HandleUefiPreparationFailureAsync(
+                    scriptPath,
+                    powershell,
+                    $"UEFI installer preparation failed with rc={exitCode}.");
                 return;
             }
 
@@ -140,27 +139,84 @@ namespace Libertix.Pages
             catch (Exception ex)
             {
                 Log($"ERROR: UEFI recovery agent setup failed: {ex.Message}");
-                ReloadExecutionState();
-                RecordExecutionFailure(
-                    "UEFI_RECOVERY_AGENT_FAILED",
-                    ex.Message,
-                    InstallationPhase.Windows);
-                BeginExecutionRollback();
-                var revert = await Task.Run(() => RunProcess(
+                await HandleUefiPreparationFailureAsync(
+                    scriptPath,
                     powershell,
-                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert",
-                    (int)WindowsProcessTimeouts.DiskImageOperation.TotalMilliseconds));
-                Log($"UEFI revert after recovery-agent failure: rc={revert.exitCode}");
-                if (revert.exitCode == 0)
-                    CompleteExecutionRollback();
-                CleanupPendingWindowsSharePayload();
-                throw;
+                    $"UEFI recovery agent setup failed: {ex.Message}",
+                    "UEFI_RECOVERY_AGENT_FAILED");
+                return;
             }
 
             UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
             Log("UEFI installation preparation completed successfully.");
             RebootButton.Visibility = Visibility.Visible;
             FinishInstallation(enableBackButton: false);
+        }
+
+        private async Task HandleUefiPreparationFailureAsync(
+            string scriptPath,
+            string powershell,
+            string reason,
+            string failureCode = "UEFI_PREPARATION_FAILED")
+        {
+            ReloadExecutionState();
+            bool rollbackVerified = _executionStateMachine != null &&
+                _executionStateMachine.State.Status == InstallationStatus.RolledBack;
+
+            if (!rollbackVerified)
+            {
+                RecordExecutionFailure(failureCode, reason, InstallationPhase.Windows);
+                BeginExecutionRollback();
+                int revertExitCode = await RunStreamingProcessAsync(
+                    powershell,
+                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert",
+                    WindowsProcessTimeouts.DiskImageOperation,
+                    line => Log($"ROLLBACK: {line}"),
+                    observeCancellation: false);
+                Log($"UEFI automatic revert finished with rc={revertExitCode}.");
+                if (revertExitCode == 0)
+                    CompleteExecutionRollback();
+                ReloadExecutionState();
+                rollbackVerified = _executionStateMachine != null &&
+                    _executionStateMachine.State.Status == InstallationStatus.RolledBack;
+            }
+
+            CleanupPendingWindowsSharePayload();
+            if (rollbackVerified)
+            {
+                if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
+                {
+                    ShowBitLockerRollbackIncomplete();
+                    return;
+                }
+                Log($"{reason} Automatic rollback was verified.");
+                UpdateProgress(
+                    0,
+                    Localized(
+                        "ApplyChangesPreparationErrorRestored",
+                        "Preparation failed. Windows has been restored."));
+                FinishInstallation(enableBackButton: true);
+                return;
+            }
+
+            Log($"CRITICAL: {reason} Rollback was not verified. Do not restart the machine.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesRollbackIncomplete",
+                    "Rollback incomplete. Manual intervention is required."));
+            FinishInstallation(enableBackButton: false);
+            MessageBox.Show(
+                LocalizedFormat(
+                    "ApplyChangesPreparationRollbackIncompleteDetails",
+                    "Preparation failed and automatic rollback could not be verified. " +
+                    "Do not restart; review {0}.",
+                    Path.Combine(WindowsSystemDrive, "LibertixInstallLogs")),
+                Localized(
+                    "ApplyChangesRollbackIncompleteTitle",
+                    "Libertix - Incomplete rollback"),
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
         }
 
         private UefiRecoveryState CreateUefiRecoverySession()

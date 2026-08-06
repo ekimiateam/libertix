@@ -169,11 +169,11 @@
     <system:String x:Key="ApplyChangesPreparationErrorRestored">準備に失敗しました。Windows を復元しました。</system:String>
     <system:String x:Key="ApplyChangesRollbackIncomplete">ロールバックが完了していません。手動での対応が必要です。</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenable">ディスクとブートは復元されましたが、Windows で BitLocker を再度有効にする必要があります。</system:String>
-    <system:String x:Key="ApplyChangesBitLockerReenableDetails">インストールはキャンセルされ、ディスクとブートの変更は復元されました。BitLocker の暗号化解除が継続または完了したため、この Windows エディションでは自動的に再有効化できません。復旧完了と判断する前に、Windows の設定で暗号化を再度有効にしてください。</system:String>
+    <system:String x:Key="ApplyChangesBitLockerReenableDetails">ディスクとブートの変更は復元されましたが、BitLocker の暗号化解除が継続または完了したため、この Windows エディションでは自動的に再有効化できません。復旧完了と判断する前に、Windows の設定で暗号化を再度有効にしてください。</system:String>
     <system:String x:Key="ApplyChangesBitLockerReenableTitle">Libertix - BitLocker を再度有効化</system:String>
     <system:String x:Key="ApplyChangesRollbackIncompleteTitle">Libertix - ロールバック未完了</system:String>
     <system:String x:Key="ApplyChangesUefiRollbackIncompleteDetails">インストールはキャンセルされましたが、UEFI ロールバックを確認できませんでした。再起動せず、{0} を確認してください。</system:String>
-    <system:String x:Key="ApplyChangesBiosRollbackIncompleteDetails">準備に失敗し、自動ロールバックを確認できませんでした。インストールを再開せず、{0} を確認してください。</system:String>
+    <system:String x:Key="ApplyChangesPreparationRollbackIncompleteDetails">準備に失敗し、自動ロールバックを確認できませんでした。インストールを再開せず、{0} を確認してください。</system:String>
     <system:String x:Key="CloseConfirmationTitle">Libertix を閉じる</system:String>
     <system:String x:Key="CloseConfirmationMessage">Libertix を閉じてもよろしいですか？</system:String>
     <system:String x:Key="TrayInstallTitle">Libertix のインストール中</system:String>

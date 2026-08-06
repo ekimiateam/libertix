@@ -91,6 +91,18 @@ switch ($Action) {
             -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
         $targetSize = [int64]$shrinkGeometry.TargetSizeBytes
         $installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
+        $systemVolume = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
+        $freeSpaceBudget = Get-LibertixWindowsFreeSpaceBudget `
+            -AvailableBytes ([int64]$systemVolume.SizeRemaining) `
+            -AllocationBytes ([int64]$shrinkGeometry.ShrinkBytes)
+        if (-not $freeSpaceBudget.Accepted) {
+            throw (
+                "Not enough free space on $SystemDrive " +
+                "(available=$($freeSpaceBudget.AvailableBytes) bytes, " +
+                "required=$($freeSpaceBudget.RequiredBytes) bytes, " +
+                "acceptedFloor=$($freeSpaceBudget.AcceptedFloorBytes) bytes)."
+            )
+        }
         if (
             $SizeBytes -gt $RecoveryPartitionOffsetBytes -or
             $installerOffsetBytes -gt `
@@ -111,6 +123,7 @@ switch ($Action) {
             SizeBytes = [int64]$verified.Size
             AlignmentPaddingBytes = [int64]$shrinkGeometry.PaddingBytes
             ActualShrinkBytes = [int64]$shrinkGeometry.ShrinkBytes
+            FreeSpaceWithinTolerance = [bool]$freeSpaceBudget.WithinTolerance
         }
     }
     "CreateStaging" {

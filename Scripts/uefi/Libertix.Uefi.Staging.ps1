@@ -86,24 +86,25 @@ function New-OrReuseInstallerPartition {
 
     # Read free space after hibernation has been disabled. hiberfil.sys can be
     # several GiB, so checking the earlier volume snapshot rejects layouts that
-    # become safely shrinkable as part of this transaction. A bounded tolerance
-    # absorbs only the small transaction/log writes made between the wizard and
-    # this check; SizeMin remains the authoritative fail-closed resize guard.
-    [int64]$minimumFreeBytes = 10GB
-    [int64]$freeSpaceAccountingToleranceBytes = 16MB
-    [int64]$requiredFreeBytes = $shrinkBytes + $minimumFreeBytes
+    # become safely shrinkable as part of this transaction. The shared budget
+    # applies the same bounded Windows free-space policy to BIOS and UEFI.
     $systemVolume = Get-Volume -DriveLetter $SystemDriveLetter -ErrorAction Stop
     [int64]$remainingBytes = [int64]$systemVolume.SizeRemaining
-    if ($remainingBytes + $freeSpaceAccountingToleranceBytes -lt $requiredFreeBytes) {
+    $freeSpaceBudget = Get-LibertixWindowsFreeSpaceBudget `
+        -AvailableBytes $remainingBytes `
+        -AllocationBytes $shrinkBytes
+    if (-not $freeSpaceBudget.Accepted) {
         throw (
             "Not enough free space on $SystemDrive " +
-            "(available=$remainingBytes bytes, required=$requiredFreeBytes bytes)."
+            "(available=$remainingBytes bytes, " +
+            "required=$($freeSpaceBudget.RequiredBytes) bytes, " +
+            "acceptedFloor=$($freeSpaceBudget.AcceptedFloorBytes) bytes)."
         )
     }
-    if ($remainingBytes -lt $requiredFreeBytes) {
+    if ($freeSpaceBudget.WithinTolerance) {
         Write-Log (
-            "Free-space accounting is within the bounded 16 MiB tolerance: " +
-            "available=$remainingBytes required=$requiredFreeBytes."
+            "Windows free space is within the bounded tolerance: " +
+            "available=$remainingBytes required=$($freeSpaceBudget.RequiredBytes)."
         ) "Yellow"
     }
 

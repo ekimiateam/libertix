@@ -176,49 +176,39 @@ cleanup_live_boot_artifacts() {
 }
 
 find_windows_boot_uuid() {
-    local partition filesystem mount_directory
+    local filesystem mount_directory expected_file mount_type uuid
 
-    while read -r partition; do
-        [ -n "$partition" ] || continue
-        filesystem="$(blkid -s TYPE -o value "$partition" 2>/dev/null || echo "")"
+    [ -n "${WINDOWS_BOOT_PART:-}" ] && [ -b "$WINDOWS_BOOT_PART" ] || return 1
+    filesystem="$(blkid -s TYPE -o value "$WINDOWS_BOOT_PART" 2>/dev/null || echo "")"
+    if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
+        [ "$filesystem" = "ntfs" ] || return 1
+        mount_type="ntfs-3g"
+        expected_file="bootmgr"
+    else
+        case "$filesystem" in
+            vfat|fat|msdos) ;;
+            *) return 1 ;;
+        esac
+        mount_type="vfat"
+        expected_file="EFI/Microsoft/Boot/bootmgfw.efi"
+    fi
 
-        if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
-            [ "$filesystem" = "ntfs" ] || continue
-        else
-            case "$filesystem" in
-                vfat|fat|msdos) ;;
-                *) continue ;;
-            esac
-        fi
-
-        mount_directory="$(mktemp -d)"
-        if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
-            mount -t ntfs-3g -o ro "$partition" "$mount_directory" 2>/dev/null || {
-                rmdir "$mount_directory"
-                continue
-            }
-            [ -f "$mount_directory/bootmgr" ] || {
-                umount "$mount_directory"
-                rmdir "$mount_directory"
-                continue
-            }
-        else
-            mount -t vfat -o ro "$partition" "$mount_directory" 2>/dev/null || {
-                rmdir "$mount_directory"
-                continue
-            }
-            [ -f "$mount_directory/EFI/Microsoft/Boot/bootmgfw.efi" ] || {
-                umount "$mount_directory"
-                rmdir "$mount_directory"
-                continue
-            }
-        fi
-
-        blkid -s UUID -o value "$partition"
-        umount "$mount_directory"
+    mount_directory="$(mktemp -d)"
+    if ! mount -t "$mount_type" -o ro "$WINDOWS_BOOT_PART" "$mount_directory" 2>/dev/null; then
         rmdir "$mount_directory"
-        return 0
-    done < <(partitions_of_disk "$DISK")
+        return 1
+    fi
+    if [ ! -f "$mount_directory/$expected_file" ]; then
+        umount "$mount_directory" 2>/dev/null || true
+        rmdir "$mount_directory" 2>/dev/null || true
+        return 1
+    fi
+
+    uuid="$(blkid -s UUID -o value "$WINDOWS_BOOT_PART" 2>/dev/null || true)"
+    umount "$mount_directory" || return 1
+    rmdir "$mount_directory" || return 1
+    [ -n "$uuid" ] || return 1
+    printf '%s\n' "$uuid"
 }
 
 write_windows_grub_entry() {

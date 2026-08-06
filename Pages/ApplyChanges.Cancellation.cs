@@ -161,29 +161,9 @@ namespace Libertix.Pages
 
             if (exitCode == 0)
             {
-                if (!await BitLockerMatchesPreflightStateAfterCancellationAsync())
+                if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
                 {
-                    Log(
-                        "CRITICAL: Disk and UEFI rollback completed, but BitLocker did not " +
-                        "return to its initial state.");
-                    UpdateProgress(
-                        0,
-                        Localized(
-                            "ApplyChangesBitLockerReenable",
-                            "Disk and boot restored, but BitLocker must be re-enabled in Windows."));
-                    FinishInstallation(enableBackButton: false);
-                    MessageBox.Show(
-                        Localized(
-                            "ApplyChangesBitLockerReenableDetails",
-                            "The installation was cancelled and disk/boot changes were restored. " +
-                            "BitLocker continued or completed decryption and cannot be re-enabled " +
-                            "automatically on this Windows edition. Re-enable encryption in Windows " +
-                            "settings before considering recovery complete."),
-                        Localized(
-                            "ApplyChangesBitLockerReenableTitle",
-                            "Libertix - Re-enable BitLocker"),
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
+                    ShowBitLockerRollbackIncomplete();
                     return;
                 }
 
@@ -218,7 +198,7 @@ namespace Libertix.Pages
                 MessageBoxImage.Error);
         }
 
-        private async Task<bool> BitLockerMatchesPreflightStateAfterCancellationAsync()
+        private async Task<bool> BitLockerMatchesInitialPreflightStateAfterRollbackAsync()
         {
             StoragePreflightInfo initial = _storagePreflight;
             if (initial == null)
@@ -227,7 +207,9 @@ namespace Libertix.Pages
             StoragePreflightInfo current;
             try
             {
-                current = await RunStoragePreflightAsync(FirmwareType.Uefi);
+                current = await RunStoragePreflightAsync(
+                    initial.Firmware,
+                    decryptBitLocker: false);
             }
             catch (Exception ex)
             {
@@ -236,21 +218,45 @@ namespace Libertix.Pages
             }
 
             bool matches =
-                current.BitLockerConversionStatus == initial.BitLockerConversionStatus &&
-                current.BitLockerEncryptionPercentage == initial.BitLockerEncryptionPercentage &&
-                current.BitLockerProtectionStatus == initial.BitLockerProtectionStatus;
+                current.BitLockerConversionStatus == initial.InitialBitLockerConversionStatus &&
+                current.BitLockerEncryptionPercentage == initial.InitialBitLockerEncryptionPercentage &&
+                current.BitLockerProtectionStatus == initial.InitialBitLockerProtectionStatus;
             if (!matches)
             {
                 Log(
                     "BitLocker state mismatch after rollback: " +
-                    $"initial conversion={initial.BitLockerConversionStatus}, " +
-                    $"encrypted={initial.BitLockerEncryptionPercentage}%, " +
-                    $"protection={initial.BitLockerProtectionStatus}; " +
+                    $"initial conversion={initial.InitialBitLockerConversionStatus}, " +
+                    $"encrypted={initial.InitialBitLockerEncryptionPercentage}%, " +
+                    $"protection={initial.InitialBitLockerProtectionStatus}; " +
                     $"current conversion={current.BitLockerConversionStatus}, " +
                     $"encrypted={current.BitLockerEncryptionPercentage}%, " +
                     $"protection={current.BitLockerProtectionStatus}.");
             }
             return matches;
+        }
+
+        private void ShowBitLockerRollbackIncomplete()
+        {
+            Log(
+                "CRITICAL: Disk and boot rollback completed, but BitLocker did not " +
+                "return to its initial state.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesBitLockerReenable",
+                    "Disk and boot restored, but BitLocker must be re-enabled in Windows."));
+            FinishInstallation(enableBackButton: false);
+            MessageBox.Show(
+                Localized(
+                    "ApplyChangesBitLockerReenableDetails",
+                    "Disk and boot changes were restored, but BitLocker continued or completed " +
+                    "decryption and cannot be re-enabled automatically on this Windows edition. " +
+                    "Re-enable encryption in Windows settings before considering recovery complete."),
+                Localized(
+                    "ApplyChangesBitLockerReenableTitle",
+                    "Libertix - Re-enable BitLocker"),
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
         }
 
         private void SetActiveStreamingProcess(Process process)

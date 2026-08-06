@@ -124,6 +124,7 @@ try {
     }
 
     $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
+    $initialBitLocker = $bitLocker
     if (-not $bitLocker.Safe -and $DecryptBitLocker) {
         Write-Output "BITLOCKER_ACTION=decrypting"
         $disableOutput = & manage-bde.exe -off $systemDrive 2>&1
@@ -209,6 +210,9 @@ try {
     Write-Result "BITLOCKER_CONVERSION_STATUS" $bitLocker.ConversionStatus
     Write-Result "BITLOCKER_ENCRYPTION_PERCENTAGE" $bitLocker.EncryptionPercentage
     Write-Result "BITLOCKER_PROTECTION_STATUS" $bitLocker.ProtectionStatus
+    Write-Result "BITLOCKER_INITIAL_CONVERSION_STATUS" $initialBitLocker.ConversionStatus
+    Write-Result "BITLOCKER_INITIAL_ENCRYPTION_PERCENTAGE" $initialBitLocker.EncryptionPercentage
+    Write-Result "BITLOCKER_INITIAL_PROTECTION_STATUS" $initialBitLocker.ProtectionStatus
 
     exit 0
 } catch {

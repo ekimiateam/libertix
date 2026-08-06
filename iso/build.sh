@@ -11,6 +11,20 @@ esac
 
 source "$ISO_DIR/config/defaults.env"
 
+# Downloaded .deb files survive between builds when the caller mounts a cache
+# directory. snapshot.debian.org is the slowest stage of the build by far.
+APT_CACHE_DIR="${LIBERTIX_APT_CACHE_DIR:-}"
+SQUASHFS_PROCESSORS="${LIBERTIX_SQUASHFS_PROCESSORS:-$(nproc)}"
+SQUASHFS_COMPRESSOR="${LIBERTIX_SQUASHFS_COMPRESSOR:-zstd}"
+SQUASHFS_LEVEL="${LIBERTIX_SQUASHFS_LEVEL:-19}"
+# mksquashfs defaults to a quarter of physical memory, which two concurrent
+# builds plus a tmpfs workdir cannot afford.
+SQUASHFS_MEM="${LIBERTIX_SQUASHFS_MEM:-2G}"
+
+# dpkg fsyncs every unpacked file by default. The chroot is a disposable
+# artifact rebuilt from scratch, so durability buys nothing here.
+export DPKG_FORCE=unsafe-io
+
 require_container_root() {
     [ "$EUID" -eq 0 ] && [ -f /.dockerenv ] || {
         echo "Build this ISO with iso-tools/build-isos-docker.sh $FIRMWARE_MODE" >&2
@@ -20,7 +34,7 @@ require_container_root() {
 
 require_build_dependencies() {
     local command missing=()
-    local commands=(debootstrap mksquashfs xorriso mmd mcopy mkfs.vfat python3)
+    local commands=(debootstrap mksquashfs xorriso mmd mcopy mkfs.vfat python3 findmnt nproc)
     if [ "$FIRMWARE_MODE" = "bios" ]; then
         commands+=(grub-mkstandalone)
     else
@@ -55,9 +69,14 @@ bootstrap_live_system() {
     local snapshot="${LIBERTIX_DEBIAN_SNAPSHOT:?LIBERTIX_DEBIAN_SNAPSHOT is required}"
     local suite="${LIBERTIX_DEBIAN_SUITE:?LIBERTIX_DEBIAN_SUITE is required}"
     local mirror="http://snapshot.debian.org/archive/debian/${snapshot}/"
+    local -a options=(--variant=minbase)
+    if [ -n "$APT_CACHE_DIR" ]; then
+        mkdir -p "$APT_CACHE_DIR"
+        options+=("--cache-dir=$APT_CACHE_DIR")
+    fi
 
     echo "=== Creating minimal Debian system ==="
-    debootstrap --variant=minbase "$suite" "$WORKDIR/chroot" "$mirror"
+    debootstrap "${options[@]}" "$suite" "$WORKDIR/chroot" "$mirror"
     cat > "$WORKDIR/chroot/etc/apt/sources.list" <<EOF
 deb [check-valid-until=no] $mirror $suite main
 EOF
@@ -69,14 +88,41 @@ mount_chroot_filesystems() {
     mount -t sysfs none "$WORKDIR/chroot/sys"
     mount --bind /dev "$WORKDIR/chroot/dev"
     mount --bind /dev/pts "$WORKDIR/chroot/dev/pts"
+    [ -z "$APT_CACHE_DIR" ] || mount_shared_apt_cache
+}
+
+# apt refuses to start without the partial subdirectory and downloads unsandboxed
+# unless it belongs to _apt, so both are set up on the shared cache once mounted.
+mount_shared_apt_cache() {
+    mkdir -p "$APT_CACHE_DIR/partial" "$WORKDIR/chroot/var/cache/apt/archives"
+    # An interrupted build leaves its lock file behind. apt then reports it as
+    # held by process 0, because the previous owner lived in another container
+    # PID namespace, and refuses to run. Only cached .deb files must survive.
+    rm -f "$APT_CACHE_DIR/lock" "$APT_CACHE_DIR/partial/"*
+    mount --bind "$APT_CACHE_DIR" "$WORKDIR/chroot/var/cache/apt/archives"
+    chroot "$WORKDIR/chroot" chown _apt:root /var/cache/apt/archives/partial
 }
 
 unmount_chroot_filesystems() {
     echo "=== Unmounting chroot ==="
+    umount "$WORKDIR/chroot/var/cache/apt/archives" 2>/dev/null || true
     umount "$WORKDIR/chroot/dev/pts" 2>/dev/null || true
     umount "$WORKDIR/chroot/dev" 2>/dev/null || true
     umount "$WORKDIR/chroot/proc" 2>/dev/null || true
     umount "$WORKDIR/chroot/sys" 2>/dev/null || true
+}
+
+# The chroot keeps its packages only while the shared cache is bind mounted.
+# Emptying it must happen after the unmount so the host cache stays intact.
+purge_chroot_apt_cache() {
+    rm -rf "$WORKDIR/chroot/var/cache/apt/archives" "$WORKDIR/chroot/var/lib/apt/lists"
+    mkdir -p "$WORKDIR/chroot/var/cache/apt/archives/partial" \
+        "$WORKDIR/chroot/var/lib/apt/lists/partial"
+}
+
+workdir_has_mounts() {
+    findmnt -rn -o TARGET \
+        | awk -v prefix="$WORKDIR/" 'index($0, prefix) == 1 { found = 1 } END { exit !found }'
 }
 
 configure_live_system() {
@@ -90,7 +136,13 @@ configure_live_system() {
     install -m 0644 -D "$ROOT_DIR/assets/grub-theme/right_down_border.png" \
         "$WORKDIR/chroot/usr/share/plymouth/themes/libertix/logo.png"
     install -m 0755 "$ROOT_DIR/assets/live/setup-live-rootfs.sh" "$WORKDIR/chroot/setup.sh"
-    chroot "$WORKDIR/chroot" /usr/bin/env LIBERTIX_FIRMWARE_MODE="$FIRMWARE_MODE" /setup.sh
+    local keep_apt_cache=0
+    [ -z "$APT_CACHE_DIR" ] || keep_apt_cache=1
+    chroot "$WORKDIR/chroot" /usr/bin/env \
+        LIBERTIX_FIRMWARE_MODE="$FIRMWARE_MODE" \
+        LIBERTIX_KEEP_APT_CACHE="$keep_apt_cache" \
+        DPKG_FORCE=unsafe-io \
+        /setup.sh
     rm -f "$WORKDIR/chroot/setup.sh"
 
     mkdir -p "$WORKDIR/chroot/etc/live"
@@ -207,8 +259,16 @@ EOF
 build_squashfs() {
     echo "=== Creating squashfs ==="
     mkdir -p "$WORKDIR/iso_build/live"
+    # zstd compresses several times faster than xz for a comparable image size
+    # and decompresses far faster, which also shortens the live boot.
+    local -a compression=(-comp "$SQUASHFS_COMPRESSOR")
+    case "$SQUASHFS_COMPRESSOR" in
+        zstd|gzip|lz4) compression+=(-Xcompression-level "$SQUASHFS_LEVEL") ;;
+    esac
     mksquashfs "$WORKDIR/chroot" "$WORKDIR/iso_build/live/filesystem.squashfs" \
-        -comp xz -b 1M -e boot
+        "${compression[@]}" \
+        -b 1M -processors "$SQUASHFS_PROCESSORS" -mem "$SQUASHFS_MEM" \
+        -no-progress -e boot
 
     mapfile -t kernels < <(find "$WORKDIR/chroot/boot" -maxdepth 1 -type f -name 'vmlinuz-*' | sort)
     [ "${#kernels[@]}" -eq 1 ] || { echo "Expected exactly one kernel, found ${#kernels[@]}"; exit 1; }
@@ -337,6 +397,11 @@ create_iso() {
 
 cleanup() {
     unmount_chroot_filesystems
+    # A leftover bind mount would make this delete the shared host apt cache.
+    if workdir_has_mounts; then
+        echo "Refusing to remove $WORKDIR while mounts remain under it" >&2
+        return
+    fi
     rm -rf "$WORKDIR"
 }
 
@@ -352,6 +417,7 @@ main() {
     install_live_installer_assets
     write_build_id
     unmount_chroot_filesystems
+    purge_chroot_apt_cache
     build_squashfs
     configure_isolinux
     configure_grub_efi

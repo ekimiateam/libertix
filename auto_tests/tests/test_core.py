@@ -1471,9 +1471,9 @@ def test_bios_installer_keeps_windows_boot_partition_active() -> None:
     preflight = read_repo("Scripts/libertix-storage-preflight.ps1")
 
     assert "WINDOWS_BOOT_PARTITION_OFFSET_BYTES" in installer
-    assert 'set "$NEW_PART_NUM" boot off' in installer
-    assert 'set "$WINDOWS_BOOT_PART_NUM" boot on' in installer
-    assert 'set "$NEW_PART_NUM" boot on' not in installer
+    assert "set_bios_boot_flags_or_die" in installer
+    assert 'sfdisk --lock --activate "$DISK" "$partition_number"' in bios_adapter
+    assert "only_mbr_partition_has_boot_flag" in bios_adapter
     assert "final verify: Windows boot partition is not active" in bios_adapter
     assert 'Write-Result "BOOT_PARTITION_OFFSET"' in preflight
 
@@ -1622,9 +1622,19 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     assert len(ssh.calls) == len(tests)
     sudo_calls = [(command, kwargs) for command, kwargs in ssh.calls if command.startswith("sudo ")]
     assert len(sudo_calls) == 6
+    assert all(
+        command.startswith("sh -eu -c ") or command.startswith("sudo -S -p '' sh -eu -c ")
+        for command, _kwargs in ssh.calls
+    )
     assert all("test-passphrase" not in command for command, _kwargs in sudo_calls)
     assert all(kwargs["stdin_data"] == "test-passphrase\n" for _command, kwargs in sudo_calls)
     commands = "\n".join(command for command, _kwargs in ssh.calls)
+    time_sync_call = next(
+        (command, kwargs) for command, kwargs in ssh.calls if "NTPSynchronized" in command
+    )
+    assert "timeout 5s timedatectl show" in time_sync_call[0]
+    assert "timeout 5s timedatectl status" in time_sync_call[0]
+    assert time_sync_call[1]["timeout"] == 150
     assert "address1=192.168.1.240/24,192.168.1.1" in commands
     assert "default via 192.168.1.1" in commands
     assert "8.8.8.8" in commands

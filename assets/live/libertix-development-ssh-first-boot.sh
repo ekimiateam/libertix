@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 marker=/var/lib/libertix/development-ssh-ready
 username_file=/etc/libertix/development-ssh-user
+sshd_policy=/etc/ssh/sshd_config.d/90-libertix-development.conf
 
 [ ! -e "$marker" ] || exit 0
 [ -s "$username_file" ]
@@ -47,15 +48,8 @@ install_openssh_server() {
 
 install_openssh_server
 
-install -d -m 0755 /etc/ssh/sshd_config.d
-cat > /etc/ssh/sshd_config.d/90-libertix-development.conf <<EOF
-# This password-enabled endpoint exists only when Libertix is launched with
-# --dev-ssh-static-ip. Production installations never create this file.
-PasswordAuthentication yes
-KbdInteractiveAuthentication no
-PermitRootLogin no
-AllowUsers $username
-EOF
+[ -s "$sshd_policy" ]
+grep -Fx "AllowUsers $username" "$sshd_policy" >/dev/null
 
 # The package can finish before systemd starts ssh.service and creates its
 # RuntimeDirectory. sshd refuses even a configuration check without this path.

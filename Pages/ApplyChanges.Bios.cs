@@ -29,7 +29,7 @@ namespace Libertix.Pages
             InstallationSizes installationSizes =
                 InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB);
 
-            if (!await PrepareBiosPartitionAsync(installationSizes) ||
+            if (!await PrepareBiosPartitionAsync(installationSizes, distribution) ||
                 !await PrepareBiosLiveMediaAsync(distribution) ||
                 !await PrepareBiosTemporaryBootAsync())
             {
@@ -50,7 +50,9 @@ namespace Libertix.Pages
             FinishInstallation(enableBackButton: false);
         }
 
-        private async Task<bool> PrepareBiosPartitionAsync(InstallationSizes installationSizes)
+        private async Task<bool> PrepareBiosPartitionAsync(
+            InstallationSizes installationSizes,
+            InstallationDistribution distribution)
         {
             double requestedLinuxMB = installationSizes.FinalSizeMiB;
 
@@ -73,6 +75,12 @@ namespace Libertix.Pages
                 return false;
             }
             CompleteExecutionStep(InstallationStep.WindowsRecoveryArmed);
+
+            // Keep the large distribution ISO on NTFS, but acquire it before
+            // shrinking C:. Both firmware paths must validate their free-space
+            // budget against the disk usage that will exist during the live run.
+            if (!await PrepareBiosDistributionIsoAsync(distribution))
+                return false;
 
             if (_installationState.Sharing.ShareWindowsFilesInLinux &&
                 !SetHibernateEnabled(false))
@@ -231,9 +239,6 @@ namespace Libertix.Pages
                 // Cleanup failure does not invalidate media already copied to
                 // the staging volume, and rollback can remove it later.
             }
-
-            if (!await PrepareBiosDistributionIsoAsync(distribution))
-                return false;
 
             // The live must consume the same validated plan that authorized the
             // Windows-side disk changes; no second shell contract is generated.
@@ -421,6 +426,12 @@ namespace Libertix.Pages
             _biosRecoveryGuardInstalled = !rollbackSucceeded;
             if (rollbackSucceeded)
             {
+                if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
+                {
+                    CleanupPendingWindowsSharePayload();
+                    ShowBitLockerRollbackIncomplete();
+                    return;
+                }
                 CompleteExecutionRollback();
                 CleanupPendingWindowsSharePayload();
                 Log("Automatic rollback completed and verified.");
@@ -443,7 +454,7 @@ namespace Libertix.Pages
                 FinishInstallation(enableBackButton: false);
                 MessageBox.Show(
                     LocalizedFormat(
-                        "ApplyChangesBiosRollbackIncompleteDetails",
+                        "ApplyChangesPreparationRollbackIncompleteDetails",
                         "Preparation failed and automatic rollback could not be verified. Do not " +
                         "restart the installation; review {0}.",
                         Path.Combine(RecoveryRoot, "recovery.log")),

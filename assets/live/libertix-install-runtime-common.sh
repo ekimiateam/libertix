@@ -112,12 +112,19 @@ append_install_result() {
 }
 
 run_logged() {
+    RUN_LOGGED_COMMAND="$*"
+    RUN_LOGGED_RC=""
     echo "+ $*"
     set +e
     "$@"
     local rc=$?
     set -e
+    RUN_LOGGED_RC="$rc"
     echo "rc=$rc: $*"
+    if [ "$rc" -eq 0 ]; then
+        RUN_LOGGED_COMMAND=""
+        RUN_LOGGED_RC=""
+    fi
     return "$rc"
 }
 
@@ -242,24 +249,35 @@ assert_no_target_disk_mounts() {
 
 assert_not_mounted_or_open() {
     local partition="$1"
+    local attempt consecutive_idle_samples=0
 
     [ -b "$partition" ] || die "partition not found: $partition"
-    if findmnt -rn -S "$partition" | grep -q .; then
-        echo "ERROR: $partition is still mounted"
-        debug_partition_users "$partition"
-        return 1
-    fi
     # `fuser -m` treats the argument as a file on its containing filesystem.
     # For a node under /dev that can report unrelated processes using /dev and
     # falsely claim the detached partition is busy. Query the block device
-    # itself after findmnt has already ruled out an active mount.
-    if fuser "$partition" >/tmp/libertix-fuser.txt 2>&1; then
-        echo "ERROR: $partition still has users"
-        cat /tmp/libertix-fuser.txt
-        debug_partition_users "$partition"
-        return 1
-    fi
-    return 0
+    # itself after findmnt has already ruled out an active mount. Partition
+    # discovery can briefly leave a udev/blkid probe on the node, so require two
+    # consecutive idle samples instead of treating one transient PID as fatal.
+    udevadm settle --timeout=10 2>/dev/null || true
+    for attempt in $(seq 1 20); do
+        if findmnt -rn -S "$partition" | grep -q .; then
+            echo "ERROR: $partition is still mounted"
+            debug_partition_users "$partition"
+            die "partition remains mounted before a partition-table update: $partition"
+        fi
+        if fuser "$partition" >/tmp/libertix-fuser.txt 2>&1; then
+            consecutive_idle_samples=0
+        else
+            consecutive_idle_samples=$((consecutive_idle_samples + 1))
+            [ "$consecutive_idle_samples" -lt 2 ] || return 0
+        fi
+        sleep 0.25
+    done
+
+    echo "ERROR: $partition still has users after bounded retries"
+    cat /tmp/libertix-fuser.txt 2>/dev/null || true
+    debug_partition_users "$partition"
+    die "partition remains in use before a partition-table update: $partition"
 }
 
 mount_ntfs_rw_or_die() {

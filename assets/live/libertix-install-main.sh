@@ -24,6 +24,8 @@ NEW_PART_NUM=""
 INSTALL_SUCCESS=false
 ROLLBACK_ATTEMPTED=false
 BOOTLOADER_WRITE_STARTED=false
+RUN_LOGGED_COMMAND=""
+RUN_LOGGED_RC=""
 MBR_BACKUP="$LOG_DIR/mbr-before-grub.bin"
 RECOVERY_GEOMETRY_BEFORE=""
 # Keep rollback-safe defaults available before the configuration file is parsed.
@@ -62,7 +64,17 @@ die() {
 on_err() {
     local rc="$?"
     local line="${BASH_LINENO[0]:-unknown}"
-    local cmd="${BASH_COMMAND:-unknown}"
+    local shell_command="${BASH_COMMAND:-unknown}"
+    local cmd="$shell_command"
+
+    # ERR fires on run_logged's final return rather than on the wrapped
+    # command. Preserve the real command so failure reports identify the
+    # operation that failed instead of the implementation detail `return 1`.
+    if [ -n "${RUN_LOGGED_COMMAND:-}" ] \
+        && [ "${RUN_LOGGED_RC:-}" = "$rc" ] \
+        && [[ "$shell_command" == return* ]]; then
+        cmd="$RUN_LOGGED_COMMAND"
+    fi
     local msg="stage=$CURRENT_STAGE rc=$rc line=$line cmd=$cmd"
     echo "ERROR: $msg"
     {
@@ -165,14 +177,12 @@ fi
 echo "Windows: $WINDOWS_PART (${WINDOWS_SIZE}MB)"
 echo "$WINDOWS_PART" > "$LOG_DIR/windows-partition"
 
-if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
-    WINDOWS_BOOT_PART=$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
-    [ -n "$WINDOWS_BOOT_PART" ] && [ -b "$WINDOWS_BOOT_PART" ] || \
-        die "Windows boot partition does not match the Windows manifest"
-    [ "$(parent_disk_from_part "$WINDOWS_BOOT_PART")" = "$DISK" ] || \
-        die "Windows boot partition is not on the target disk"
-    echo "Windows boot partition: $WINDOWS_BOOT_PART"
-fi
+WINDOWS_BOOT_PART=$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
+[ -n "$WINDOWS_BOOT_PART" ] && [ -b "$WINDOWS_BOOT_PART" ] || \
+    die "Windows boot partition does not match the Windows manifest"
+[ "$(parent_disk_from_part "$WINDOWS_BOOT_PART")" = "$DISK" ] || \
+    die "Windows boot partition is not on the target disk"
+echo "Windows boot partition: $WINDOWS_BOOT_PART"
 
 run_live_preflight
 cleanup_windows_live_boot_artifacts
@@ -294,11 +304,7 @@ unmount_target_system
 if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
     # GRUB lives in the MBR and does not need the Linux partition marked active.
     # Keeping the Windows boot partition active preserves BCD and WinRE lookup.
-    WINDOWS_BOOT_PART_NUM="$(partition_number "$WINDOWS_BOOT_PART")"
-    run_logged parted -s "$DISK" set "$NEW_PART_NUM" boot off
-    run_logged parted -s "$DISK" set "$WINDOWS_BOOT_PART_NUM" boot on
-    partprobe "$DISK" 2>/dev/null || true
-    udevadm settle 2>/dev/null || true
+    set_bios_boot_flags_or_die
 fi
 assert_recovery_unchanged_or_die
 final_verify_or_die

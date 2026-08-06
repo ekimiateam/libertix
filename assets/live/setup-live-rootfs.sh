@@ -4,7 +4,13 @@ set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# The rootfs is a throwaway build artifact, so dpkg does not need to fsync.
+export DPKG_FORCE="${DPKG_FORCE:-unsafe-io}"
+
 firmware_mode="${LIBERTIX_FIRMWARE_MODE:?LIBERTIX_FIRMWARE_MODE is required}"
+# When the builder bind mounts a shared .deb cache over the apt archives, this
+# script must leave it alone; the caller empties the chroot copy after unmount.
+keep_apt_cache="${LIBERTIX_KEEP_APT_CACHE:-0}"
 packages=(
     linux-image-amd64 live-boot live-boot-initramfs-tools live-config
     live-config-systemd systemd-sysv initramfs-tools parted fdisk e2fsprogs
@@ -20,8 +26,17 @@ elif [ "$firmware_mode" != "bios" ]; then
     exit 2
 fi
 
-apt -o Acquire::Check-Valid-Until=false update
-apt -o Acquire::Check-Valid-Until=false install -y "${packages[@]}"
+apt_options=(
+    -o Acquire::Check-Valid-Until=false
+    -o Acquire::Languages=none
+    -o Dpkg::Use-Pty=0
+    # The apt CLI defaults to discarding downloaded .deb files, unlike apt-get.
+    # The shared build cache only fills up when they are kept.
+    -o APT::Keep-Downloaded-Packages=true
+)
+
+apt "${apt_options[@]}" update
+apt "${apt_options[@]}" install -y "${packages[@]}"
 
 # xterm is not needed and can appear as a confusing default X client.
 apt purge -y xterm 2>/dev/null || true
@@ -45,5 +60,7 @@ useradd -m -s /bin/bash -G sudo user 2>/dev/null || true
 echo "user:live" | chpasswd
 echo "user ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-apt clean
-rm -rf /var/lib/apt/lists/*
+if [ "$keep_apt_cache" != "1" ]; then
+    apt clean
+    rm -rf /var/lib/apt/lists/*
+fi
