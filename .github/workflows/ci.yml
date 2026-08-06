@@ -141,6 +141,7 @@ jobs:
         run: >-
           dotnet test Libertix.Tests\Libertix.Tests.csproj
           --configuration Release
+          --no-build
           --no-restore
           --verbosity minimal
 
