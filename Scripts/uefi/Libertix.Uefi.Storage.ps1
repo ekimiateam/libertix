@@ -293,7 +293,7 @@ public static class LibertixExplorerWindowApi {
                     }
                 }
             } catch {
-                # A shell window can disappear while ShellWindows is enumerated.
+                Write-Verbose "Explorer window disappeared during COM enumeration: $($_.Exception.Message)"
             }
         }
     } catch {
@@ -303,8 +303,7 @@ public static class LibertixExplorerWindowApi {
             try {
                 [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
             } catch {
-                # COM cleanup is best-effort after Explorer inspection; the
-                # process teardown releases any remaining proxy reference.
+                Write-Verbose "Explorer COM proxy cleanup was deferred to process teardown: $($_.Exception.Message)"
             }
         }
     }
@@ -379,7 +378,7 @@ public static class LibertixExplorerWindowApi {
                         }
                     }
                 } catch {
-                    # An Explorer window can disappear while its UI tree is read.
+                    Write-Verbose "Explorer window disappeared during UI Automation inspection: $($_.Exception.Message)"
                 }
             }
 

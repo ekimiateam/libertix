@@ -543,8 +543,7 @@ function New-LibertixBcdFirmwareEntry {
         try {
             Invoke-BcdeditCommand -Arguments @("/deletevalue", $entryId, $value) | Out-Null
         } catch {
-            # These values are inherited from the copied boot manager and are
-            # optional for a firmware application entry.
+            Write-Verbose "Optional BCD value '$value' could not be removed: $($_.Exception.Message)"
         }
     }
     Invoke-BcdeditCommand -Arguments @("/set", "{fwbootmgr}", "displayorder", $entryId, "/addfirst") | Out-Null

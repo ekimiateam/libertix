@@ -116,7 +116,7 @@ function Copy-WithRobocopy {
         [string[]]$ExtraArgs = @()
     )
 
-    $args = @(
+    $robocopyArguments = @(
         $Source,
         $Destination,
         "/E",
@@ -131,7 +131,7 @@ function Copy-WithRobocopy {
         "/NP"
     ) + $ExtraArgs
 
-    $output = & robocopy.exe @args
+    $output = & robocopy.exe @robocopyArguments
     $code = $LASTEXITCODE
     if ($code -gt 7) {
         throw ("Robocopy failed, code={0}; output={1}" -f $code, ($output -join " | "))

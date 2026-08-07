@@ -26,8 +26,7 @@ function Get-MountedIsoDrive {
                         Select-Object -ExpandProperty DriveLetter
                 )
             } catch {
-                # A mounted image can transiently omit its volume association;
-                # the partition query below provides the independent fallback.
+                Write-Verbose "Mounted image volume discovery is not ready: $($_.Exception.Message)"
             }
             try {
                 $letters += @(
@@ -37,8 +36,7 @@ function Get-MountedIsoDrive {
                         Select-Object -ExpandProperty DriveLetter
                 )
             } catch {
-                # Storage WMI can lag behind Mount-DiskImage. The bounded retry
-                # loop repeats both discovery paths until the drive appears.
+                Write-Verbose "Mounted image partition discovery is not ready: $($_.Exception.Message)"
             }
         }
         $letter = $letters |

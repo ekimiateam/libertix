@@ -272,7 +272,7 @@ try {
     try {
         Write-AgentLog "ERROR: $($_.Exception.Message)"
     } catch {
-        # Logging must never replace the original recovery error.
+        Write-Verbose "Unable to persist the recovery failure: $($_.Exception.Message)"
     }
     Write-Error $_.Exception.Message
     exit 1

@@ -387,8 +387,7 @@ function Install-LibertixIsoToPartition {
             Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue |
                 Out-Null
         } catch {
-            # Dismount is best-effort because the primary copy failure must be
-            # preserved and Windows releases the read-only image at process exit.
+            Write-Verbose "Best-effort installer image dismount failed: $($_.Exception.Message)"
         }
 
         Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -478,7 +477,7 @@ function Set-LibertixUefiBootEntry {
         try {
             Invoke-BcdeditCommand -Arguments @("/deletevalue", $identifier, "bootsequence") | Out-Null
         } catch {
-            # Missing one-shot sequences are the expected clean state.
+            Write-Verbose "One-shot BCD sequence was already absent for ${identifier}: $($_.Exception.Message)"
         }
     }
 
@@ -541,8 +540,7 @@ function Set-LibertixUefiBootEntry {
     try {
         Remove-FirmwareVariable -Name "BootNext"
     } catch {
-        # Some firmware refuses deletion when BootNext is already absent. The
-        # verified BootOrder entry still provides the required fallback boot.
+        Write-Verbose "BootNext removal was not required by this firmware: $($_.Exception.Message)"
     }
     Update-TransactionFirmwareState `
         -BootNumber $firmwareEntry.BootNumber `

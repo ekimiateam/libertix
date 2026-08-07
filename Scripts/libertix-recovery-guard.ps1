@@ -447,9 +447,9 @@ try {
         $letter = if ($volume) { [string]$volume.DriveLetter } else { "" }
 
         $isTemporaryFat = ($label -eq "LIBERTIX")
-        $isLinux = ($fs -match "^(ext2|ext3|ext4)$")
+        $isLinuxFileSystem = ($fs -match "^(ext2|ext3|ext4)$")
         $isRawTransaction = [string]::IsNullOrWhiteSpace($fs)
-        if (-not $isTemporaryFat -and -not $isLinux -and -not $isRawTransaction) {
+        if (-not $isTemporaryFat -and -not $isLinuxFileSystem -and -not $isRawTransaction) {
             continue
         }
 
@@ -460,7 +460,7 @@ try {
         )
         if (
             ($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
-            ($isLinux -and -not $matchesFinalSize) -or
+            ($isLinuxFileSystem -and -not $matchesFinalSize) -or
             ($isRawTransaction -and -not $matchesStagingSize)
         ) {
             continue

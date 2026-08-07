@@ -169,10 +169,10 @@ function Install-ExplorerPinTasks {
         throw "No real Windows profile is available for Explorer pin task registration."
     }
 
-    foreach ($profile in $profiles) {
-        $sid = [Security.Principal.SecurityIdentifier]::new([string]$profile.SID)
+    foreach ($userProfile in $profiles) {
+        $sid = [Security.Principal.SecurityIdentifier]::new([string]$userProfile.SID)
         $userId = $sid.Translate([Security.Principal.NTAccount]).Value
-        $taskName = "$($script:LinuxReadOnlyPinTaskPrefix)$(([string]$profile.SID).Replace('-', '_'))"
+        $taskName = "$($script:LinuxReadOnlyPinTaskPrefix)$(([string]$userProfile.SID).Replace('-', '_'))"
         $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
         $principal = New-ScheduledTaskPrincipal `
@@ -190,7 +190,7 @@ function Install-ExplorerPinTasks {
             -Settings $settings `
             -Force | Out-Null
 
-        if ($profile.Loaded) {
+        if ($userProfile.Loaded) {
             Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
         }
         Write-ShareLog "Explorer pin task registered for $userId`: $taskName"
@@ -402,7 +402,7 @@ try {
     try {
         Write-ShareLog "ERROR: $($_.Exception.Message)"
     } catch {
-        # Logging must never replace the original sharing error.
+        Write-Verbose "Unable to persist the sharing failure: $($_.Exception.Message)"
     }
     Write-Error $_.Exception.Message
     exit 1

@@ -134,14 +134,17 @@ jobs:
             Invoke-ScriptAnalyzer `
               -Path Scripts `
               -Recurse `
+              -Settings PSScriptAnalyzerSettings.psd1 `
               -Severity Error, Warning
             Invoke-ScriptAnalyzer `
               -Path auto_tests/app/scripts `
               -Recurse `
+              -Settings PSScriptAnalyzerSettings.psd1 `
               -Severity Error, Warning
             Invoke-ScriptAnalyzer `
               -Path PowerShell.Tests `
               -Recurse `
+              -Settings PSScriptAnalyzerSettings.psd1 `
               -Severity Error, Warning
           )
           $findings | Format-Table -AutoSize

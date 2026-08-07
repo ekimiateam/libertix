@@ -188,7 +188,7 @@ function Start-Aria2Download {
     }
 
     Write-Log "Downloading with aria2: $destinationName" "Cyan"
-    $args = @(
+    $aria2Arguments = @(
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
         "--continue=true",
@@ -203,7 +203,7 @@ function Start-Aria2Download {
 
     Push-Location -LiteralPath $downloadDir
     try {
-        & $aria2 @args
+        & $aria2 @aria2Arguments
         if ($LASTEXITCODE -ne 0) {
             throw "aria2 failed with exit code $LASTEXITCODE."
         }
