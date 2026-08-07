@@ -22,8 +22,20 @@ usage() {
     printf 'Without an argument, an interactive catalog menu is displayed.\n'
 }
 
+print_configured_paths() {
+    printf 'Configured files:\n'
+    printf '  Catalog served by auto-tests: %s\n' "$served_manifest"
+    printf '  Catalog test fixture:         %s\n' "$fixture_manifest"
+    printf '  Served detached signature:    %s\n' "$served_signature"
+    printf '  Fixture detached signature:   %s\n' "$fixture_signature"
+    printf '  Private signing key:          %s\n' "$private_key"
+    printf '  Public application key:       %s\n' "$public_key_xml"
+}
+
 choose_manifest() {
     printf 'Libertix signed catalog tool\n'
+    print_configured_paths
+    printf '\n'
     printf '  1) Sign and synchronize distros.json\n'
     printf '  q) Quit\n'
     printf '> '
