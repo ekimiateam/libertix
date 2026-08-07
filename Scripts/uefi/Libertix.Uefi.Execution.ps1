@@ -3,6 +3,8 @@
 # Shared execution-state, diagnostics, and installation-context publication.
 
 function Get-LibertixStagingGrubConfig {
+    param([Parameter(Mandatory = $true)][bool]$UseLowMemoryMode)
+
     # Both the ESP fallback and the staging partition must start the same
     # one-shot live environment. Keeping the configuration here prevents a
     # boot-parameter fix from reaching only one of those two paths.
@@ -14,6 +16,20 @@ function Get-LibertixStagingGrubConfig {
         ConvertFrom-Json -ErrorAction Stop
     $normalArguments = [string]$bootArguments.normal
     $verboseArguments = [string]$bootArguments.verbose
+    if ($UseLowMemoryMode) {
+        $normalArguments = $normalArguments -replace `
+            '(?i)(^|\s)toram(?=\s|$)',
+            '$1toram=filesystem.squashfs'
+        $verboseArguments = $verboseArguments -replace `
+            '(?i)(^|\s)toram(?=\s|$)',
+            '$1toram=filesystem.squashfs'
+        if (
+            $normalArguments -notmatch '(^|\s)toram=filesystem\.squashfs(?=\s|$)' -or
+            $verboseArguments -notmatch '(^|\s)toram=filesystem\.squashfs(?=\s|$)'
+        ) {
+            throw "Shared live boot arguments cannot be converted to low-memory module mode."
+        }
+    }
     foreach ($entry in @(
         @{ Name = "normal"; Value = $normalArguments },
         @{ Name = "verbose"; Value = $verboseArguments }
@@ -155,28 +171,24 @@ function Start-LibertixTrackedRollback {
     }
 }
 
-function Complete-LibertixTrackedRollback {
+function Complete-LibertixTrackedCompensation {
+    param([Parameter(Mandatory = $true)][string]$Step)
+
     if (-not (Test-LibertixTrackedExecution)) {
         return
     }
     $state = Read-LibertixExecutionState -Path $ExecutionStatePath
     if ([string]$state.status -ne "rollback-running") {
-        return
+        throw "Compensation proof requires a running rollback."
     }
-    # Compensations are recorded in reverse dependency order. This mirrors the
-    # rollback: remove temporary boot state and live files before growing the
-    # Windows system volume.
-    foreach ($step in @(
-        "windows.temporary-boot-prepared",
-        "windows.live-media-prepared",
-        "windows.installer-partition-created",
-        "windows.system-volume-shrunk",
-        "windows.recovery-armed"
-    )) {
-        if ($step -in @($state.completedSteps) -and $step -notin @($state.compensatedSteps)) {
-            $null = Complete-LibertixCompensation -Path $ExecutionStatePath -Step $step
-            $state = Read-LibertixExecutionState -Path $ExecutionStatePath
-        }
+    if ($Step -in @($state.completedSteps) -and $Step -notin @($state.compensatedSteps)) {
+        $null = Complete-LibertixCompensation -Path $ExecutionStatePath -Step $Step
+    }
+}
+
+function Complete-LibertixTrackedRollback {
+    if (-not (Test-LibertixTrackedExecution)) {
+        return
     }
     $null = Complete-LibertixRollback -Path $ExecutionStatePath
 }

@@ -32,6 +32,8 @@ cleanup_live_mounts_best_effort() {
 resolve_rollback_storage_best_effort() {
     if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
         DISK=$(resolve_target_disk_from_manifest || true)
+        # The target setup module consumes DISKNAME after rollback refreshes it.
+        # shellcheck disable=SC2034
         [ -n "$DISK" ] && DISKNAME="$(basename "$DISK")"
     fi
     if [ -z "$WINDOWS_PART" ] && [ -n "$DISK" ] && [ -b "$DISK" ]; then
@@ -59,18 +61,18 @@ restore_pre_grub_mbr_best_effort() {
 }
 
 delete_transaction_partition_best_effort() {
-    local deleted=false idle_attempt holders
+    local deleted=false holders fuser_output=""
 
     firmware_resolve_rollback_partition
     if [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ]; then
         NEW_PART_NUM="${NEW_PART_NUM:-$(partition_number "$NEW_PART")}"
         if firmware_rollback_partition_is_owned "$NEW_PART"; then
-            for idle_attempt in $(seq 1 10); do
+            for _ in $(seq 1 10); do
                 holders="$(find "/sys/class/block/$(basename "$NEW_PART")/holders" \
                     -mindepth 1 -maxdepth 1 -printf '%f ' 2>/dev/null || true)"
                 if ! findmnt -rn -S "$NEW_PART" | grep -q . \
                     && [ -z "$holders" ] \
-                    && ! fuser "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
+                    && ! fuser_output=$(fuser "$NEW_PART" 2>&1); then
                     break
                 fi
                 sleep 1
@@ -82,9 +84,9 @@ delete_transaction_partition_best_effort() {
                 echo "ROLLBACK: cannot delete $NEW_PART because it is still mounted"
             elif [ -n "$holders" ]; then
                 echo "ROLLBACK: cannot delete $NEW_PART because kernel holders remain: $holders"
-            elif fuser "$NEW_PART" >/tmp/libertix-rollback-fuser.txt 2>&1; then
+            elif fuser_output=$(fuser "$NEW_PART" 2>&1); then
                 echo "ROLLBACK: cannot delete $NEW_PART because direct device users remain"
-                cat /tmp/libertix-rollback-fuser.txt || true
+                [ -z "$fuser_output" ] || printf '%s\n' "$fuser_output"
             else
                 echo "ROLLBACK: deleting temporary Linux partition $NEW_PART"
                 if parted -s "$DISK" rm "$NEW_PART_NUM"; then
@@ -176,6 +178,7 @@ rollback_windows_layout_best_effort() {
     [ "$INSTALL_SUCCESS" = false ] || return 0
     [ "$ROLLBACK_ATTEMPTED" = false ] || return 0
     ROLLBACK_ATTEMPTED=true
+    begin_installation_state_rollback_best_effort
 
     echo "=== ROLLBACK: best-effort Windows layout restore ==="
     resolve_rollback_storage_best_effort || return 1
@@ -198,6 +201,20 @@ rollback_windows_layout_best_effort() {
     debug_disk_state || true
 
     if [ "$rollback_ok" = true ]; then
+        for rollback_step in \
+            "target.bootloader-installed" \
+            "target.system-configured" \
+            "live.distribution-extracted" \
+            "live.target-filesystem-created" \
+            "live.installer-partition-expanded" \
+            "windows.temporary-boot-prepared" \
+            "windows.live-media-prepared" \
+            "windows.installer-partition-created" \
+            "windows.system-volume-shrunk" \
+            "windows.recovery-armed"; do
+            compensate_installation_state_step_best_effort "$rollback_step"
+        done
+        complete_installation_state_rollback_best_effort
         echo "ROLLBACK: completed best-effort Windows layout restore"
         return 0
     fi
@@ -211,6 +228,7 @@ fail_and_exit() {
     trap - ERR
     set +e
     echo "ERROR: $message"
+    fail_installation_state_best_effort "$rc" "$message"
     debug_disk_state || true
     if rollback_windows_layout_best_effort; then
         append_install_result false "$rc" "completed"

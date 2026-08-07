@@ -13,7 +13,7 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges
     {
-        private static string GetWindowsProfilesJsonBase64()
+        private string GetWindowsProfilesJsonBase64()
         {
             var profiles = new List<string>();
             var excludedProfiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -30,7 +30,20 @@ namespace Libertix.Pages
                 "Users");
             if (Directory.Exists(usersRoot))
             {
-                foreach (string profilePath in Directory.GetDirectories(usersRoot))
+                string[] profilePaths;
+                try
+                {
+                    profilePaths = Directory.GetDirectories(usersRoot);
+                }
+                catch (Exception error) when (
+                    error is UnauthorizedAccessException ||
+                    error is IOException)
+                {
+                    Log($"WARNING: Windows profiles could not be enumerated: {error.Message}");
+                    profilePaths = Array.Empty<string>();
+                }
+
+                foreach (string profilePath in profilePaths)
                 {
                     try
                     {
@@ -39,15 +52,15 @@ namespace Libertix.Pages
                         if (excludedProfiles.Contains(profileName)) continue;
                         profiles.Add(profileName);
                     }
-                    catch (UnauthorizedAccessException)
+                    catch (UnauthorizedAccessException error)
                     {
-                        // Service and protected profiles are intentionally
-                        // excluded when Windows denies enumeration.
+                        Log($"WARNING: Windows profile was skipped because access was denied: " +
+                            $"{profilePath}: {error.Message}");
                     }
-                    catch (IOException)
+                    catch (IOException error)
                     {
-                        // Profiles can disappear while the user directory is
-                        // enumerated; only stable profiles are published.
+                        Log($"WARNING: Windows profile changed during enumeration and was skipped: " +
+                            $"{profilePath}: {error.Message}");
                     }
                 }
             }
@@ -88,7 +101,7 @@ namespace Libertix.Pages
                     if (!setupReady)
                     {
                         string setupUrl =
-                            $"{FilepoolConfig.BaseUrl}/{Artifacts.Ext4Driver.FileName}";
+                            $"{Filepool.BaseUrl}/{Artifacts.Ext4Driver.FileName}";
                         if (!await DownloadFileWithRetriesAsync(
                             setupUrl,
                             setupPath,
@@ -230,6 +243,21 @@ namespace Libertix.Pages
                     }
 
                     File.Copy(sourceScript, targetScript, true);
+                    string stateModuleSource = Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        "Scripts",
+                        "modules",
+                        "Libertix.InstallationState.psm1");
+                    string stateModuleTarget = Path.Combine(
+                        RecoveryRoot,
+                        "Libertix.InstallationState.psm1");
+                    if (!File.Exists(stateModuleSource))
+                    {
+                        Dispatcher.Invoke(() => Log(
+                            $"ERROR: Recovery state module missing: {stateModuleSource}"));
+                        return false;
+                    }
+                    File.Copy(stateModuleSource, stateModuleTarget, true);
 
                     if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
                     {
@@ -272,6 +300,7 @@ namespace Libertix.Pages
                         $"RECOVERY_PARTITION_NUMBER={_storagePreflight.RecoveryPartitionNumber}",
                         $"RECOVERY_PARTITION_OFFSET_BYTES={_storagePreflight.RecoveryPartitionOffset}",
                         $"RECOVERY_PARTITION_SIZE_BYTES={_storagePreflight.RecoveryPartitionSize}",
+                        $"RECOVERY_RUN_ID={_installationPlan.Runtime.RecoveryRunId}",
                         // Captured before Fast Startup is disabled so a rollback
                         // can put the user's original setting back.
                         $"ORIGINAL_HIBERNATE_ENABLED={FormatOptionalBool(GetHibernateEnabled())}",
@@ -279,15 +308,37 @@ namespace Libertix.Pages
                     });
                     File.WriteAllText(metadataPath, metadata + Environment.NewLine);
 
-                    string taskCommand = $"powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File '{targetScript}'";
-                    string args = $"/Create /TN \"{RecoveryTaskName}\" /SC ONSTART /RU SYSTEM /RL HIGHEST /TR \"{taskCommand}\" /F";
+                    string registrationScript = Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        "Scripts",
+                        "libertix-register-bios-recovery-task.ps1");
+                    if (!File.Exists(registrationScript))
+                    {
+                        Dispatcher.Invoke(() => Log(
+                            $"ERROR: BIOS recovery task registration script missing: " +
+                            registrationScript));
+                        return false;
+                    }
+
+                    // schtasks stamps ONSTART triggers with the current local time. A
+                    // dual-boot clock correction can move the next Windows boot before
+                    // that boundary and silently suppress recovery. The ScheduledTasks
+                    // API creates a boot trigger without a wall-clock dependency.
+                    string powershell = ResolveSystemExecutable(
+                        "WindowsPowerShell\\v1.0\\powershell.exe",
+                        "powershell.exe");
+                    string args = $"-NoProfile -ExecutionPolicy Bypass -File " +
+                        $"{QuoteArgument(registrationScript)} " +
+                        $"-TaskName {QuoteArgument(RuntimeNames.BiosRecoveryTask)} " +
+                        $"-RecoveryScriptPath {QuoteArgument(targetScript)}";
                     var result = RunProcess(
-                        "schtasks.exe",
+                        powershell,
                         args,
                         waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds);
                     Dispatcher.Invoke(() =>
                     {
-                        Log($"schtasks create {RecoveryTaskName}: {(result.exitCode == 0 ? "OK" : "Failed")}");
+                        Log($"BIOS recovery task registration: " +
+                            $"{(result.exitCode == 0 ? "OK" : "Failed")}");
                         if (!string.IsNullOrWhiteSpace(result.output))
                             Log(result.output.Trim());
                         if (!string.IsNullOrWhiteSpace(result.error))

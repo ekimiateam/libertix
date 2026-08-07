@@ -29,6 +29,9 @@ namespace Libertix.Installation
         private static readonly Regex XkbNamePattern = new Regex(
             "^[a-z0-9_-]+$",
             RegexOptions.CultureInvariant);
+        private static readonly Regex TimezonePattern = new Regex(
+            "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+$",
+            RegexOptions.CultureInvariant);
 
         public static void Validate(InstallationPlan plan)
         {
@@ -123,6 +126,8 @@ namespace Libertix.Installation
                 errors,
                 "locale.keyboardVariant is not a valid XKB variant name.");
             RequireNotBlank(locale.Timezone, "locale.timezone", errors);
+            Require(TimezonePattern.IsMatch(locale.Timezone ?? string.Empty), errors,
+                "locale.timezone is not a safe IANA timezone name.");
         }
 
         private static void ValidateAccount(
@@ -138,11 +143,13 @@ namespace Libertix.Installation
             Require(UsernamePattern.IsMatch(account.Username ?? string.Empty), errors,
                 "account.username is not a valid Linux username.");
             Require(
-                !string.IsNullOrEmpty(account.PasswordHash) &&
-                account.PasswordHash.StartsWith("$6$", StringComparison.Ordinal) &&
-                account.PasswordHash.IndexOfAny(new[] { '\r', '\n', '\t' }) < 0,
+                !string.IsNullOrWhiteSpace(account.PasswordHashWindowsPath) &&
+                Regex.IsMatch(
+                    account.PasswordHashWindowsPath,
+                    @"^[A-Za-z]:\\(?!.*(?:^|\\)\.\.(?:\\|$)).+$",
+                    RegexOptions.CultureInvariant),
                 errors,
-                "account.passwordHash must use SHA-512 crypt.");
+                "account.passwordHashWindowsPath must be an absolute safe Windows path.");
             Require(
                 !string.IsNullOrWhiteSpace(account.ComputerName) && account.ComputerName.Length <= 63,
                 errors,
@@ -252,6 +259,9 @@ namespace Libertix.Installation
             }
 
             const long partitionAlignmentBytes = 1024L * 1024L;
+            // Windows preserves the partition end modulo 1 MiB when it shrinks C:.
+            // Reconstructing the expected start from the original extent rejects a
+            // staging partition silently created in another free extent of the disk.
             long alignmentPadding = windowsEnd % partitionAlignmentBytes;
             if (disk.Installer.FinalSizeBytes > windowsEnd - alignmentPadding)
             {
@@ -259,9 +269,14 @@ namespace Libertix.Installation
                 return;
             }
             long expectedOffset = windowsEnd - alignmentPadding - disk.Installer.FinalSizeBytes;
+            // Converting an MBR logical partition into a primary partition may consume
+            // the adjacent alignment unit that previously held the extended container.
             long primaryMbrOffset = expectedOffset - partitionAlignmentBytes;
             bool offsetMatches = disk.Installer.OffsetBytes.Value == expectedOffset ||
-                (string.Equals(disk.PartitionStyle, "MBR", StringComparison.Ordinal) &&
+                (string.Equals(
+                    disk.PartitionStyle,
+                    InstallationPartitionStyle.Mbr,
+                    StringComparison.Ordinal) &&
                  disk.Installer.OffsetBytes.Value == primaryMbrOffset);
             Require(offsetMatches, errors,
                 "disk.installer.offsetBytes does not match the aligned Windows shrink geometry.");
@@ -328,6 +343,9 @@ namespace Libertix.Installation
                 installer.FinalSizeBytes % InstallationSizePolicy.BytesPerGiB == 0;
             bool stagingSizeIsWholeGiB = installer.StagingSizeBytes > 0 &&
                 installer.StagingSizeBytes % InstallationSizePolicy.BytesPerGiB == 0;
+            // The UI records GiB policy choices, while observed partition geometry is
+            // tracked separately. Accepting rounded policy values here would make the
+            // plan describe a different allocation from the one the user approved.
             Require(finalSizeIsWholeGiB && stagingSizeIsWholeGiB, errors,
                 "disk.installer sizes must be whole numbers of GiB.");
 

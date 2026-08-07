@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -70,80 +69,38 @@ namespace Libertix.Pages
                 Log(result.output.Trim());
             if (!string.IsNullOrWhiteSpace(result.error))
                 Log($"ERROR: {result.error.Trim()}");
-            if (result.exitCode != 0)
-            {
+            PowerShellJsonResult values = PowerShellJsonResult.ParseFinalObject(result.output);
+            if (result.exitCode != 0 || !values.GetBoolean("preflightOk"))
                 throw new InvalidOperationException(
-                    $"Storage preflight failed with rc={result.exitCode}: {result.error}");
-            }
-
-            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (string rawLine in result.output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                int separator = rawLine.IndexOf('=');
-                if (separator <= 0)
-                    continue;
-                values[rawLine.Substring(0, separator).Trim()] = rawLine.Substring(separator + 1).Trim();
-            }
-
-            string[] required =
-            {
-                "PREFLIGHT_OK", "FIRMWARE", "SYSTEM_DRIVE", "SYSTEM_DISK_NUMBER",
-                "SYSTEM_PARTITION_NUMBER", "SYSTEM_PARTITION_OFFSET", "SYSTEM_PARTITION_SIZE",
-                "BOOT_PARTITION_NUMBER", "BOOT_PARTITION_OFFSET", "BOOT_PARTITION_SIZE",
-                "SYSTEM_DISK_UNIQUE_ID", "SYSTEM_DISK_SIZE", "LOGICAL_SECTOR_SIZE", "PARTITION_STYLE",
-                "RECOVERY_PARTITION_NUMBER", "RECOVERY_PARTITION_OFFSET", "RECOVERY_PARTITION_SIZE",
-                "BITLOCKER_SAFE", "BITLOCKER_STATE", "BITLOCKER_CONVERSION_STATUS",
-                "BITLOCKER_ENCRYPTION_PERCENTAGE", "BITLOCKER_PROTECTION_STATUS",
-                "BITLOCKER_INITIAL_CONVERSION_STATUS",
-                "BITLOCKER_INITIAL_ENCRYPTION_PERCENTAGE",
-                "BITLOCKER_INITIAL_PROTECTION_STATUS"
-            };
-            foreach (string key in required)
-            {
-                if (!values.ContainsKey(key))
-                    throw new InvalidOperationException($"Storage preflight did not return {key}.");
-            }
-            if (!string.Equals(values["PREFLIGHT_OK"], "true", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Storage preflight did not confirm a safe state.");
+                    $"Storage preflight failed with rc={result.exitCode}: " +
+                    values.GetOptionalString("errorMessage", result.error));
 
             var info = new StoragePreflightInfo
             {
                 Firmware = firmware,
-                SystemDrive = values["SYSTEM_DRIVE"],
-                SystemDiskNumber = int.Parse(values["SYSTEM_DISK_NUMBER"], CultureInfo.InvariantCulture),
-                SystemPartitionNumber = int.Parse(values["SYSTEM_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
-                SystemPartitionOffset = long.Parse(values["SYSTEM_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
-                SystemPartitionSize = long.Parse(values["SYSTEM_PARTITION_SIZE"], CultureInfo.InvariantCulture),
-                BootPartitionNumber = int.Parse(values["BOOT_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
-                BootPartitionOffset = long.Parse(values["BOOT_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
-                BootPartitionSize = long.Parse(values["BOOT_PARTITION_SIZE"], CultureInfo.InvariantCulture),
-                SystemDiskUniqueId = values["SYSTEM_DISK_UNIQUE_ID"],
-                SystemDiskSize = long.Parse(values["SYSTEM_DISK_SIZE"], CultureInfo.InvariantCulture),
-                LogicalSectorSize = int.Parse(values["LOGICAL_SECTOR_SIZE"], CultureInfo.InvariantCulture),
-                PartitionStyle = values["PARTITION_STYLE"],
-                RecoveryPartitionNumber = int.Parse(values["RECOVERY_PARTITION_NUMBER"], CultureInfo.InvariantCulture),
-                RecoveryPartitionOffset = long.Parse(values["RECOVERY_PARTITION_OFFSET"], CultureInfo.InvariantCulture),
-                RecoveryPartitionSize = long.Parse(values["RECOVERY_PARTITION_SIZE"], CultureInfo.InvariantCulture),
-                BitLockerSafe = bool.Parse(values["BITLOCKER_SAFE"]),
-                BitLockerState = values["BITLOCKER_STATE"],
-                BitLockerConversionStatus = int.Parse(
-                    values["BITLOCKER_CONVERSION_STATUS"],
-                    CultureInfo.InvariantCulture),
-                BitLockerEncryptionPercentage = int.Parse(
-                    values["BITLOCKER_ENCRYPTION_PERCENTAGE"],
-                    CultureInfo.InvariantCulture),
-                BitLockerProtectionStatus = int.Parse(
-                    values["BITLOCKER_PROTECTION_STATUS"],
-                    CultureInfo.InvariantCulture),
-                InitialBitLockerConversionStatus = int.Parse(
-                    values["BITLOCKER_INITIAL_CONVERSION_STATUS"],
-                    CultureInfo.InvariantCulture),
-                InitialBitLockerEncryptionPercentage = int.Parse(
-                    values["BITLOCKER_INITIAL_ENCRYPTION_PERCENTAGE"],
-                    CultureInfo.InvariantCulture),
-                InitialBitLockerProtectionStatus = int.Parse(
-                    values["BITLOCKER_INITIAL_PROTECTION_STATUS"],
-                    CultureInfo.InvariantCulture)
+                SystemDrive = values.GetString("systemDrive"),
+                SystemDiskNumber = values.GetInt32("systemDiskNumber"),
+                SystemPartitionNumber = values.GetInt32("systemPartitionNumber"),
+                SystemPartitionOffset = values.GetInt64("systemPartitionOffset"),
+                SystemPartitionSize = values.GetInt64("systemPartitionSize"),
+                BootPartitionNumber = values.GetInt32("bootPartitionNumber"),
+                BootPartitionOffset = values.GetInt64("bootPartitionOffset"),
+                BootPartitionSize = values.GetInt64("bootPartitionSize"),
+                SystemDiskUniqueId = values.GetString("systemDiskUniqueId"),
+                SystemDiskSize = values.GetInt64("systemDiskSize"),
+                LogicalSectorSize = values.GetInt32("logicalSectorSize"),
+                PartitionStyle = values.GetString("partitionStyle"),
+                RecoveryPartitionNumber = values.GetInt32("recoveryPartitionNumber"),
+                RecoveryPartitionOffset = values.GetInt64("recoveryPartitionOffset"),
+                RecoveryPartitionSize = values.GetInt64("recoveryPartitionSize"),
+                BitLockerSafe = values.GetBoolean("bitLockerSafe"),
+                BitLockerState = values.GetString("bitLockerState"),
+                BitLockerConversionStatus = values.GetInt32("bitLockerConversionStatus"),
+                BitLockerEncryptionPercentage = values.GetInt32("bitLockerEncryptionPercentage"),
+                BitLockerProtectionStatus = values.GetInt32("bitLockerProtectionStatus"),
+                InitialBitLockerConversionStatus = values.GetInt32("initialBitLockerConversionStatus"),
+                InitialBitLockerEncryptionPercentage = values.GetInt32("initialBitLockerEncryptionPercentage"),
+                InitialBitLockerProtectionStatus = values.GetInt32("initialBitLockerProtectionStatus")
             };
 
             if (firmware == FirmwareType.Bios && decryptBitLocker && !info.BitLockerSafe)
@@ -172,34 +129,7 @@ namespace Libertix.Pages
 
         private static string QuoteArgument(string value)
         {
-            if (value == null)
-                return "\"\"";
-
-            var quoted = new StringBuilder("\"");
-            int backslashes = 0;
-            foreach (char character in value)
-            {
-                if (character == '\\')
-                {
-                    backslashes++;
-                    continue;
-                }
-
-                if (character == '"')
-                {
-                    quoted.Append('\\', backslashes * 2 + 1);
-                    quoted.Append('"');
-                    backslashes = 0;
-                    continue;
-                }
-
-                quoted.Append('\\', backslashes);
-                quoted.Append(character);
-                backslashes = 0;
-            }
-            quoted.Append('\\', backslashes * 2);
-            quoted.Append('"');
-            return quoted.ToString();
+            return WindowsProcessRunner.QuoteArgument(value);
         }
 
         private static Encoding GetWindowsConsoleEncoding()

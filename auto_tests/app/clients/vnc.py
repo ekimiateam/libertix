@@ -14,8 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class VNCClient:
+    def connect(self, address: str):
+        return api.connect(self.vncdotool_address(address))
+
     @staticmethod
-    def _vncdotool_address(address: str) -> str:
+    def vncdotool_address(address: str) -> str:
         host, separator, display = address.rpartition(":")
         if not separator or not host or not display.isdigit():
             raise WorkflowError("vnc.address", "Invalid VNC address", details={"address": address})
@@ -28,7 +31,7 @@ class VNCClient:
         logger.info("VNC capture started", extra={"step": "vnc.capture", "target": address})
         client = None
         try:
-            client = api.connect(self._vncdotool_address(address))
+            client = self.connect(address)
             # Long downloads can let Windows blank the virtual display. A pointer move wakes
             # it without changing focus, clicking a control, or sending keyboard input.
             client.mouseMove(1, 1)
@@ -60,7 +63,7 @@ class VNCClient:
         logger.info("Lancement interactif VNC", extra={"step": "vnc.launch", "target": address})
         client = None
         try:
-            client = api.connect(self._vncdotool_address(address))
+            client = self.connect(address)
             time.sleep(1)
             # The clean2 snapshots place the Libertix shortcut in the fourth
             # desktop-icon slot; the following capture synchronizes the click.

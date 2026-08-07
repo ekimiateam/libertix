@@ -7,7 +7,7 @@ host_gid="${HOST_GID:?HOST_GID is required}"
 parallel="${LIBERTIX_ISO_PARALLEL:-1}"
 apt_cache_root="${LIBERTIX_APT_CACHE_ROOT:-}"
 
-[ -f /workspace/iso/build.sh ] || {
+[ -f /workspace/iso-tools/build-iso.sh ] || {
     echo "Libertix source tree is not mounted at /workspace" >&2
     exit 1
 }
@@ -35,9 +35,12 @@ build_one() {
 # read-only source tree, so running them together overlaps the network bound
 # debootstrap of one with the CPU bound squashfs of the other.
 build_both_in_parallel() {
-    local bios_log=/tmp/libertix-build-bios.log
-    local uefi_log=/tmp/libertix-build-uefi.log
+    local container_log_dir=/workspace/build-logs
+    local bios_log="$container_log_dir/libertix-build-bios.log"
+    local uefi_log="$container_log_dir/libertix-build-uefi.log"
     local bios_pid uefi_pid bios_rc=0 uefi_rc=0
+
+    mkdir -p "$container_log_dir"
 
     # Each build writes to its own file rather than through a tagging pipe.
     # Maintainer scripts run inside the chroot inherit the build stdout, and a
@@ -94,5 +97,5 @@ esac
 
 chown "$host_uid:$host_gid" \
     "${outputs[@]}" \
-    /workspace/auto_tests/app/filepool/distros.json
+    /workspace/auto_tests/runtime/filepool/distros.json
 sha256sum "${outputs[@]}"

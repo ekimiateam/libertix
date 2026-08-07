@@ -107,6 +107,8 @@ class ValidationService:
                 vm.os,
                 vm.os.replace("Windows ", "win"),
                 vm.os.replace("Windows ", ""),
+                str(vm.vmid),
+                f"vm{vm.vmid}",
             }
             if "Windows 10 BIOS" in vm.os:
                 aliases.update({"bios", "win10-bios", "10-bios", "windows10-bios"})
@@ -133,16 +135,10 @@ class ValidationService:
                 "Unknown VM selector",
                 details={
                     "unknown": unknown,
-                    "accepted_examples": [
-                        "vm1",
-                        "vm2",
-                        "vm3",
-                        "win10-bios",
-                        "win10-uefi",
-                        "win11-uefi",
-                    ],
+                    "accepted_examples": [vm.name for vm in self.settings.vms],
                 },
             )
+
         return tuple(selected)
 
     @staticmethod
@@ -214,13 +210,23 @@ class ValidationService:
         try:
             return ssh.run(command, step=step, timeout=timeout, sensitive=True)
         finally:
-            ssh.run(
-                cleanup_command,
-                step=f"{step}.cleanup_script",
-                timeout=30,
-                check=False,
-                sensitive=True,
-            )
+            try:
+                ssh.run(
+                    cleanup_command,
+                    step=f"{step}.cleanup_script",
+                    timeout=30,
+                    check=False,
+                    sensitive=True,
+                )
+            except WorkflowError as exc:
+                # A timed-out remote check can close its SSH transport. Cleanup
+                # is best-effort and must not replace the diagnostic from the
+                # check that actually failed.
+                logger.warning(
+                    "Temporary Windows test files could not be removed",
+                    extra={"step": f"{step}.cleanup_script", "target": ssh.host},
+                    exc_info=exc,
+                )
 
     @staticmethod
     def parse_powershell_results(stdout: str, *, prefixes: Sequence[str]) -> dict[str, str]:
@@ -248,7 +254,7 @@ class ValidationService:
             )
             result.ok(
                 "server.check_smb",
-                "The /root/smb directory exists and is accessible",
+                f"The {s.smb_root} directory exists and is accessible",
                 target=s.main_ssh_host,
             )
 
@@ -327,8 +333,13 @@ class ValidationService:
                 details={"path": str(root)},
             )
 
+        archive_directory = s.runtime_dir / "source-archives"
+        archive_directory.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            prefix="libertix-source-", suffix=".tar.gz", delete=False
+            prefix="libertix-source-",
+            suffix=".tar.gz",
+            dir=archive_directory,
+            delete=False,
         ) as tmp:
             archive = Path(tmp.name)
         try:
@@ -340,7 +351,7 @@ class ValidationService:
 
             archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
 
-            remote_archive = f"/tmp/{archive.name}"
+            remote_archive = str(PurePosixPath(s.smb_root) / f".{archive.name}")
             ssh.upload_file(archive, remote_archive, step="server.copy_local_source.upload")
             # The destination is removed only inside the configured Samba root.
             # This avoids accidentally deleting an arbitrary server path.
@@ -437,7 +448,10 @@ class ValidationService:
         try:
             relative = path.relative_to(root)
         except ValueError as exc:
-            raise WorkflowError("release.path", "Executable is outside /root/smb") from exc
+            raise WorkflowError(
+                "release.path",
+                f"Executable is outside {self.settings.smb_root}",
+            ) from exc
         return PureWindowsPath("Z:/") / PureWindowsPath(*relative.parts)
 
     def _validate_vm(
@@ -558,6 +572,29 @@ class ValidationService:
     ) -> dict[str, object]:
         del result
         task_name = f"LibertixValidation_{vm.name}"
+        values = self.launch_elevated_process(
+            vm,
+            executable,
+            task_name=task_name,
+            step="vm.launch_elevated",
+        )
+        return {
+            "pid": int(values["PID"]),
+            "session_id": int(values["SESSION_ID"]),
+            "window_handle": 0,
+            "task_name": values.get("TASK_NAME", task_name),
+            "launch_method": "scheduled_task_elevated",
+            "visual_confirmation": "capture_vnc_et_llm",
+        }
+
+    def launch_elevated_process(
+        self,
+        vm: VMConfig,
+        executable: PureWindowsPath,
+        *,
+        task_name: str,
+        step: str,
+    ) -> dict[str, str]:
         with self.ssh(
             vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
         ) as ssh:
@@ -577,29 +614,45 @@ class ValidationService:
                     ),
                     "development_dns_servers": list(self.settings.development_dns_servers),
                 },
-                step="vm.launch_elevated",
+                step=step,
                 timeout=90,
             )
-        values = self.parse_powershell_results(
-            response.stdout, prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE")
-        )
-        if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
-            raise WorkflowError(
-                "vm.launch_elevated",
-                "Elevated Libertix process was not confirmed",
-                details={"vm": vm.name, "host": vm.host, "stdout": response.stdout[-4000:]},
+            values = self.parse_powershell_results(
+                response.stdout,
+                prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE"),
             )
+            if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
+                confirmation = self.run_windows_script(
+                    ssh,
+                    script_name="confirm_libertix_process.ps1",
+                    config={"executable": str(executable), "task_name": task_name},
+                    step=f"{step}.confirm_process",
+                    timeout=60,
+                )
+                values = self.parse_powershell_results(
+                    confirmation.stdout,
+                    prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE"),
+                )
+                if (
+                    not values.get("PID", "").isdigit()
+                    or not values.get("SESSION_ID", "").isdigit()
+                ):
+                    raise WorkflowError(
+                        step,
+                        "Elevated Libertix process was not confirmed",
+                        details={
+                            "vm": vm.name,
+                            "host": vm.host,
+                            "launch_stdout": response.stdout[-4000:],
+                            "launch_stderr": response.stderr[-4000:],
+                            "confirmation_stdout": confirmation.stdout[-4000:],
+                            "confirmation_stderr": confirmation.stderr[-4000:],
+                        },
+                    )
         if PureWindowsPath(values.get("EXECUTABLE", "")) != executable:
             raise WorkflowError(
-                "vm.launch_elevated",
+                step,
                 "The launched process does not match the deployed executable",
                 details={"vm": vm.name, "expected": str(executable)},
             )
-        return {
-            "pid": int(values["PID"]),
-            "session_id": int(values["SESSION_ID"]),
-            "window_handle": 0,
-            "task_name": values.get("TASK_NAME", task_name),
-            "launch_method": "scheduled_task_elevated",
-            "visual_confirmation": "capture_vnc_et_llm",
-        }
+        return values

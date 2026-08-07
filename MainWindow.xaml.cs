@@ -3,8 +3,6 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Navigation;
 using Libertix.Helpers;
 using Libertix.Dialogs;
@@ -17,7 +15,7 @@ namespace Libertix
     {
         private readonly InstallationState _installationState;
         private readonly TrayIconController _trayIcon;
-        private readonly object _welcomeContent;
+        private string _selectedLanguageCode;
         private bool _hiddenInTray;
         private bool _allowClose;
 
@@ -25,22 +23,15 @@ namespace Libertix
         {
             _installationState = ((App)Application.Current).InstallationState;
             InitializeComponent();
-            _welcomeContent = MainFrame.Content;
             _installationState.InstallationRunningChanged += InstallationState_InstallationRunningChanged;
 
             string windowsLang = Localization.GetWindowsLanguageCode();
-            foreach (ComboBoxItem languageItem in LanguageComboBox.Items)
-            {
-                if (string.Equals(languageItem.Tag as string, windowsLang, StringComparison.OrdinalIgnoreCase))
-                {
-                    LanguageComboBox.SelectedItem = languageItem;
-                    break;
-                }
-            }
             Localization.SetLanguage(windowsLang);
+            _selectedLanguageCode = windowsLang;
             _trayIcon = new TrayIconController(
                 RestoreFromTray,
                 ResourceText("TrayOpenLibertix", "Open Libertix"));
+            MainFrame.Content = CreateWelcomePage();
 
             if (_installationState.UefiRecoveryStatePath is string recoveryStatePath &&
                 !string.IsNullOrWhiteSpace(recoveryStatePath))
@@ -132,10 +123,10 @@ namespace Libertix
 
         private static string ResourceText(string key, string fallback)
         {
-            return Application.Current.Resources[key] as string ?? fallback;
+            return Localization.GetString(key, fallback);
         }
 
-        private void Button_Click(object sender, RoutedEventArgs e)
+        private void StartInstallation()
         {
             _installationState.SelectedDistro = null;
             _installationState.SelectedLinuxSizeGiB = null;
@@ -146,7 +137,7 @@ namespace Libertix
                 TimeSpan.FromSeconds(0.3));
         }
 
-        private void AboutButton_Click(object sender, RoutedEventArgs e)
+        private void OpenAbout()
         {
             NavigationHelper.NavigateWithAnimationInFrame(
                 MainFrame,
@@ -154,45 +145,44 @@ namespace Libertix
                 TimeSpan.FromSeconds(0.3));
         }
 
-        /// <summary>
-        /// Restores the original welcome content after leaving an auxiliary page.
-        /// The installation navigation stack is intentionally not involved.
-        /// </summary>
+        /// <summary>Restores a fresh welcome page outside the installation journal.</summary>
         public void ReturnToWelcome()
         {
-            // The welcome view is a XAML element rather than a Page. NavigationHelper
-            // animates that element directly when About is opened, so its animation
-            // clocks must be removed before the same instance is reused. Otherwise a
-            // second navigation can leave the frame transparent after Get Started.
-            if (_welcomeContent is UIElement welcomeElement)
+            NavigationService navigation = MainFrame.NavigationService;
+            NavigatedEventHandler navigated = null;
+            navigated = (sender, args) =>
             {
-                welcomeElement.BeginAnimation(UIElement.OpacityProperty, null);
-                welcomeElement.Opacity = 1.0;
-            }
+                navigation.Navigated -= navigated;
 
-            if (_welcomeContent is FrameworkElement welcomeFrameworkElement)
-            {
-                welcomeFrameworkElement.BeginAnimation(FrameworkElement.MarginProperty, null);
-                welcomeFrameworkElement.Margin = new Thickness(0);
-            }
+                // Auxiliary pages must not become part of the installation journal.
+                // Clear About only after the fresh welcome page has become current.
+                while (navigation.RemoveBackEntry() != null)
+                {
+                }
+            };
 
-            // Return through the Frame journal when About was reached by navigation.
-            // Assigning Frame.Content directly leaves NavigationService on the About
-            // entry and the following animated navigation can render an empty frame.
-            if (MainFrame.CanGoBack)
-                MainFrame.GoBack();
-            else
-                MainFrame.Content = _welcomeContent;
+            navigation.Navigated += navigated;
+            NavigationHelper.NavigateWithAnimationInFrame(
+                MainFrame,
+                CreateWelcomePage(),
+                TimeSpan.FromSeconds(0.3),
+                slideLeft: false);
         }
 
-        private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private Welcome CreateWelcomePage()
         {
-            if (LanguageComboBox.SelectedItem is ComboBoxItem item)
-            {
-                string cultureName = item.Tag.ToString();
-                Localization.SetLanguage(cultureName);
-                _trayIcon?.SetOpenLabel(ResourceText("TrayOpenLibertix", "Open Libertix"));
-            }
+            return new Welcome(
+                _selectedLanguageCode,
+                StartInstallation,
+                OpenAbout,
+                ChangeLanguage);
+        }
+
+        private void ChangeLanguage(string cultureName)
+        {
+            _selectedLanguageCode = cultureName;
+            Localization.SetLanguage(cultureName);
+            _trayIcon?.SetOpenLabel(ResourceText("TrayOpenLibertix", "Open Libertix"));
         }
     }
 }

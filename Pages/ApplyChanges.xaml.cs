@@ -27,12 +27,12 @@ namespace Libertix.Pages
     public partial class ApplyChanges : Page
     {
         private readonly InstallationState _installationState;
+        private FilepoolConfig Filepool => ((App)Application.Current).Filepool;
         private double _linuxSizeGB;
-        private const string RecoveryTaskName = "LibertixInstallRecovery";
         private static readonly string WindowsSystemDrive =
             Path.GetPathRoot(Environment.SystemDirectory);
         private static readonly string RecoveryRoot =
-            Path.Combine(WindowsSystemDrive, "LibertixInstallRecovery");
+            Path.Combine(WindowsSystemDrive, RuntimeNames.BiosRecoveryDirectory);
         private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
         private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
         private const int Aria2MaxConnections = 5;
@@ -105,7 +105,7 @@ namespace Libertix.Pages
                 if (_linuxSizeGB < 20 || double.IsNaN(_linuxSizeGB) || double.IsInfinity(_linuxSizeGB))
                 {
                     Log($"ERROR: Invalid Linux partition size: {_linuxSizeGB:N1}GB");
-                    UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                    UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                     FinishInstallation(enableBackButton: true);
                     return;
                 }
@@ -113,6 +113,9 @@ namespace Libertix.Pages
                 FirmwareType firmware = DetectFirmwareTypeOrThrow();
                 _activeFirmware = firmware;
                 ThrowIfCancellationRequested();
+                // The wizard preflight prevents an invalid topology from being selected.
+                // Re-run it immediately before mutation because disk layout and BitLocker
+                // state may have changed while the user completed the remaining pages.
                 _storagePreflight = await RunStoragePreflightAsync(firmware);
                 ThrowIfCancellationRequested();
                 if (!await PrepareWindowsSharePayloadAsync())
@@ -127,11 +130,12 @@ namespace Libertix.Pages
                 else if (firmware == FirmwareType.Bios)
                 {
                     Log("BIOS firmware detected. Using existing BIOS workflow.");
+                    string biosRecoveryRunId = Guid.NewGuid().ToString("N");
                     InitializeInstallationContext(
                         firmware,
                         RecoveryRoot,
-                        recoveryRoot: null,
-                        recoveryRunId: null);
+                        RecoveryRoot,
+                        biosRecoveryRunId);
                     await ExecutePartitioningAsync();
                 }
                 else
@@ -156,7 +160,7 @@ namespace Libertix.Pages
                     InstallationPhase.Windows);
                 Log($"ERROR: {ex.Message}");
                 CleanupPendingWindowsSharePayload();
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
             }
         }
@@ -196,7 +200,7 @@ namespace Libertix.Pages
         /// </summary>
         private static string Localized(string key, string englishFallback)
         {
-            return Application.Current.Resources[key] as string ?? englishFallback;
+            return Localization.GetString(key, englishFallback);
         }
 
         private static string LocalizedFormat(string key, string englishFallback, params object[] args)

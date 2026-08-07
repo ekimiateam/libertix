@@ -26,9 +26,15 @@ function Invoke-LibertixNativeProcess {
         $errorTask = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try {
-                $process.Kill()
+                $taskKill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+                & $taskKill /PID $process.Id /T /F 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0 -and -not $process.HasExited) {
+                    $process.Kill()
+                }
             } catch {
-                # The process can exit between the timeout and termination.
+                if (-not $process.HasExited) {
+                    $process.Kill()
+                }
             }
             throw "$FilePath timed out after $TimeoutSeconds seconds."
         }

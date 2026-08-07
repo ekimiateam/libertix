@@ -76,4 +76,15 @@ cp -f "$LOG_DIR/install.log" "$log_dir/install.log"
 cp -f "$LOG_DIR/install.log" "$log_root/latest/install.log"
 (cd "$log_dir" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 cp -f "$log_dir/SHA256SUMS" "$log_root/latest/SHA256SUMS"
+
+# Keep the newest twenty boot diagnostics. The stable latest directory and the
+# Windows-side preparation logs are outside this timestamped-directory set.
+find "$log_root" -mindepth 1 -maxdepth 1 -type d -name '????????T??????Z' \
+    -printf '%T@ %p\n' 2>/dev/null |
+    sort -nr |
+    tail -n +21 |
+    cut -d' ' -f2- |
+    while IFS= read -r expired_log_dir; do
+        [ -n "$expired_log_dir" ] && rm -rf -- "$expired_log_dir"
+    done
 sync

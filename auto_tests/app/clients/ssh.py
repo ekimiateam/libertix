@@ -21,11 +21,12 @@ SUPPORTED_HOST_KEY_TYPES = {
 }
 
 
-class PersistFirstHostKeyPolicy(paramiko.MissingHostKeyPolicy):
-    """Persist one explicitly authorized first-seen key for this test run."""
+class PersistAuthenticatedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Persist a first-seen key only after authentication succeeds."""
 
     def __init__(self, known_hosts_path: Path) -> None:
         self.known_hosts_path = known_hosts_path
+        self._candidate: tuple[str, paramiko.PKey] | None = None
 
     def missing_host_key(
         self,
@@ -37,8 +38,14 @@ class PersistFirstHostKeyPolicy(paramiko.MissingHostKeyPolicy):
         if key_type not in SUPPORTED_HOST_KEY_TYPES:
             raise paramiko.SSHException(f"Unsupported SSH host key type: {key_type}")
 
+        self._candidate = (hostname, key)
+
+    def persist_authenticated_key(self, client: paramiko.SSHClient) -> None:
+        if self._candidate is None:
+            return
+        hostname, key = self._candidate
         self.known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
-        client.get_host_keys().add(hostname, key_type, key)
+        client.get_host_keys().add(hostname, key.get_name(), key)
         client.save_host_keys(str(self.known_hosts_path))
         self.known_hosts_path.chmod(0o600)
 
@@ -75,6 +82,7 @@ class SSHClient:
     def __enter__(self) -> SSHClient:
         logger.info("SSH connection attempt", extra={"step": "ssh.connect", "target": self.host})
         client = paramiko.SSHClient()
+        authenticated_key_policy: PersistAuthenticatedHostKeyPolicy | None = None
         try:
             # Automation controls disks and boot state, so a first-seen host key
             # must never be trusted implicitly. The operator owns this file and
@@ -84,11 +92,13 @@ class SSHClient:
                 client.set_missing_host_key_policy(paramiko.RejectPolicy())
             else:
                 # A reinstall creates a new Linux host key. Record the first
-                # key in this run's isolated workspace; Paramiko then rejects
-                # any key change on later connection attempts.
+                # authenticated key in this run's isolated workspace. The
+                # other OS can answer briefly on the same IP during a reboot,
+                # so persisting before authentication would pin the wrong OS.
                 if self.known_hosts_path.is_file():
                     client.load_host_keys(str(self.known_hosts_path))
-                client.set_missing_host_key_policy(PersistFirstHostKeyPolicy(self.known_hosts_path))
+                authenticated_key_policy = PersistAuthenticatedHostKeyPolicy(self.known_hosts_path)
+                client.set_missing_host_key_policy(authenticated_key_policy)
             client.connect(
                 self.host,
                 port=self.port,
@@ -100,12 +110,14 @@ class SSHClient:
                 look_for_keys=False,
                 allow_agent=False,
             )
+            if authenticated_key_policy is not None:
+                authenticated_key_policy.persist_authenticated_key(client)
             transport = client.get_transport()
             if transport is not None:
                 self.server_key_sha256 = hashlib.sha256(
                     transport.get_remote_server_key().asbytes()
                 ).hexdigest()
-        except (TimeoutError, paramiko.SSHException, OSError) as exc:
+        except (EOFError, TimeoutError, paramiko.SSHException, OSError) as exc:
             client.close()
             raise WorkflowError(
                 "ssh.connect",
@@ -168,7 +180,7 @@ class SSHClient:
             exit_code = channel.recv_exit_status()
             out = b"".join(out_chunks).decode("utf-8", errors="replace").strip()
             err = b"".join(err_chunks).decode("utf-8", errors="replace").strip()
-        except (TimeoutError, paramiko.SSHException, OSError) as exc:
+        except (EOFError, TimeoutError, paramiko.SSHException, OSError) as exc:
             raise WorkflowError(
                 step,
                 "Remote command execution failed",

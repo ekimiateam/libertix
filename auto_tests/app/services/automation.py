@@ -4,6 +4,7 @@ import logging
 import tempfile
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
 from app.clients.proxmox import ProxmoxClient
@@ -30,10 +31,9 @@ class AutomationService(
 ):
     """Automate the Libertix wizard through the real VNC desktop.
 
-    The old standalone VM500 script was useful for proving the path. This
-    service is the API version: it works from configured VM metadata, reuses the
-    existing build/deploy code, streams steps, and keeps destructive Apply behind
-    an explicit option.
+    Profiles come exclusively from configured VM metadata. The service reuses
+    the build and deployment workflow, streams compact progress, and keeps disk
+    changes behind the explicit apply option.
     """
 
     REFERENCE_WIDTH = 1024
@@ -63,6 +63,8 @@ class AutomationService(
         linux_username: str,
         linux_password: str,
         monitor_iso: bool,
+        share_windows_files_in_linux: bool = True,
+        share_linux_files_in_windows: bool = True,
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
@@ -81,9 +83,8 @@ class AutomationService(
                 )
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
-            # Preflight every VM before starting any rollback, then restore all
-            # selected snapshots concurrently. A triple run therefore starts
-            # from one coherent clean baseline instead of resetting one VM at a time.
+            # Restore every selected VM after one all-VM preflight barrier so
+            # parallel nominal runs start from one coherent clean baseline.
             self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
             executable = self.validation.prepare_server(result, source=source)
             windows_path = self.validation.to_windows_share_path(executable)
@@ -97,6 +98,8 @@ class AutomationService(
                 linux_username=linux_username,
                 linux_password=linux_password,
                 monitor_iso=monitor_iso,
+                share_windows_files_in_linux=share_windows_files_in_linux,
+                share_linux_files_in_windows=share_linux_files_in_windows,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
                 futures = {
@@ -183,9 +186,8 @@ class AutomationService(
 
         raise WorkflowError(
             "automation.scope",
-            "Libertix auto-click refused: this option is validated only on "
-            "VM500/vm1 BIOS, VM501/vm2 UEFI, and VM502/vm3 UEFI. Use ?vm=vm1, "
-            "?vm=vm2, ?vm=vm3, or an explicit vms request body.",
+            "Libertix auto-click refused for one or more selected VMs. Select only "
+            "configured VMs whose automation_enabled flag is true.",
             details={
                 "requested_selectors": list(selectors or []),
                 "selected_vms": [vm.name for vm in selected_vms],
@@ -230,6 +232,7 @@ class AutomationService(
     ) -> OperationResult:
         result = ResultBuilder("automation", on_step=on_step)
         try:
+            self._prepare_windows_test_vm(vm, result)
             local_executable = self.validation.deploy_to_documents(vm, executable)
             result.ok(
                 "automation.deploy",
@@ -259,47 +262,46 @@ class AutomationService(
         except WorkflowError as exc:
             return result.failure(exc)
 
-    def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:
-        task_name = f"LibertixAutoInstall_{vm.name}"
-        # The scheduled task launches into the interactive desktop session while
-        # keeping the process elevated. SSH alone would start a non-visible UI.
+    def _prepare_windows_test_vm(self, vm: VMConfig, result: ResultBuilder) -> None:
         with self.validation.ssh(
-            vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
         ) as ssh:
             response = self.validation.run_windows_script(
                 ssh,
-                script_name="launch_libertix_elevated.ps1",
-                config={
-                    "executable": str(executable),
-                    "task_name": task_name,
-                    "filepool_base_url": self.settings.filepool_base_url,
-                    "development_static_ipv4": vm.host,
-                    "development_static_ipv4_prefix_length": (
-                        self.settings.development_static_ipv4_prefix_length
-                    ),
-                    "development_static_ipv4_gateway": (
-                        self.settings.development_static_ipv4_gateway
-                    ),
-                    "development_dns_servers": list(self.settings.development_dns_servers),
-                },
-                step="automation.launch_elevated",
-                timeout=90,
+                script_name="prepare_windows_test_vm.ps1",
+                config={"utc_now": datetime.now(UTC).isoformat()},
+                step="automation.prepare_vm",
+                timeout=60,
             )
         values = self.validation.parse_powershell_results(
-            response.stdout, prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE")
+            response.stdout,
+            prefixes=("UTC_NOW", "CLOCK_SKEW_SECONDS"),
         )
-        if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
+        if not values.get("UTC_NOW") or not values.get("CLOCK_SKEW_SECONDS"):
             raise WorkflowError(
-                "automation.launch_elevated",
-                "Elevated Libertix process was not confirmed",
-                details={"vm": vm.name, "host": vm.host, "stdout": response.stdout[-4000:]},
+                "automation.prepare_vm",
+                "Windows test VM did not confirm its synchronized clock",
+                details={"vm": vm.name, "host": vm.host},
             )
-        if PureWindowsPath(values.get("EXECUTABLE", "")) != executable:
-            raise WorkflowError(
-                "automation.launch_elevated",
-                "The launched process does not match the deployed executable",
-                details={"vm": vm.name, "expected": str(executable)},
-            )
+        result.ok(
+            "automation.prepare_vm",
+            "Windows test VM clock synchronized after snapshot restore",
+            vm=vm.name,
+            target=vm.host,
+            utc_now=values["UTC_NOW"],
+            clock_skew_seconds=int(values["CLOCK_SKEW_SECONDS"]),
+        )
+
+    def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:
+        task_name = f"LibertixAutoInstall_{vm.name}"
+        values = self.validation.launch_elevated_process(
+            vm,
+            executable,
+            task_name=task_name,
+            step="automation.launch_elevated",
+        )
         return {
             "pid": int(values["PID"]),
             "session_id": int(values["SESSION_ID"]),

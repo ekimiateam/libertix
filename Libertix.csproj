@@ -79,9 +79,8 @@
       <Generator>MSBuild:Compile</Generator>
       <SubType>Designer</SubType>
     </ApplicationDefinition>
-    <Compile Include="Converters\InverseBoolConverter.cs" />
-    <Compile Include="Converters\VisibilityToBoolConverter.cs" />
     <Compile Include="Helpers\FilepoolConfig.cs" />
+    <Compile Include="Helpers\PowerShellJsonResult.cs" />
     <Compile Include="Helpers\StartupOptions.cs" />
     <Compile Include="Helpers\CompatibilityPreflightRunner.cs" />
     <Compile Include="Helpers\ApplicationLogger.cs" />
@@ -94,8 +93,11 @@
     </Compile>
     <Compile Include="Installation\AtomicJsonFile.cs" />
     <Compile Include="Installation\ArtifactCatalog.cs" />
+    <Compile Include="Installation\DistributionCatalogTrust.cs" />
     <Compile Include="Installation\InstallationExecutionState.cs" />
+    <Compile Include="Installation\InstallationExecutionLedger.cs" />
     <Compile Include="Installation\InstallationPlan.cs" />
+    <Compile Include="Installation\InstallationPlanFactory.cs" />
     <Compile Include="Installation\InstallationPlanSerializer.cs" />
     <Compile Include="Installation\InstallationPlanValidator.cs" />
     <Compile Include="Installation\Ipv4NetworkPolicy.cs" />
@@ -103,6 +105,7 @@
     <Compile Include="Installation\InstallationStateMachine.cs" />
     <Compile Include="Installation\InstallationStateStore.cs" />
     <Compile Include="Installation\LiveBootArguments.cs" />
+    <Compile Include="Installation\RuntimeNames.cs" />
     <Compile Include="Installation\WindowsKeyboardLayout.cs" />
     <Compile Include="Installation\StoragePreflightInfo.cs" />
     <Compile Include="Installation\FirmwareInterop.cs" />
@@ -117,6 +120,9 @@
     </Compile>
     <Compile Include="Pages\About.xaml.cs">
       <DependentUpon>About.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="Pages\Welcome.xaml.cs">
+      <DependentUpon>Welcome.xaml</DependentUpon>
     </Compile>
     <Compile Include="Pages\ApplyChanges.xaml.cs">
       <DependentUpon>ApplyChanges.xaml</DependentUpon>
@@ -177,6 +183,7 @@
     </Compile>
     <Page Include="Pages\AccountCreation.xaml" />
     <Page Include="Pages\About.xaml" />
+    <Page Include="Pages\Welcome.xaml" />
     <Page Include="Pages\ApplyChanges.xaml" />
     <Page Include="Pages\UefiBootFallback.xaml" />
     <Page Include="Pages\WarningConfirmation.xaml" />
@@ -199,7 +206,6 @@
     <Compile Include="Converters\StringToVisibilityConverter.cs" />
     <Compile Include="Commands\RelayCommand.cs" />
     <Compile Include="Converters\BoolToVisibilityConverter.cs" />
-    <Compile Include="Converters\ScaleConverter.cs" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Pages\ResizeDisk.xaml.cs">
@@ -240,6 +246,12 @@
     <Content Include="Scripts\config\Libertix.Artifacts.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\config\Libertix.CatalogPublicKey.xml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\config\Libertix.CompatibilityMessages.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\uefi\Libertix.Uefi.Execution.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -259,6 +271,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\libertix-recovery-guard.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\libertix-register-bios-recovery-task.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\libertix-uefi-recovery-agent.ps1">

@@ -116,55 +116,28 @@ stage_percent() {
     libertix_stage_percent "$1"
 }
 
-unsquashfs_subpercent() {
-    awk '
-        /STAGE: 120-unsquashfs/ { found=1; next }
-        /STAGE: 130-target-system-config/ { found=0 }
-        found {
-            line=$0
-            while (match(line, /[0-9]+\/[0-9]+/)) {
-                split(substr(line, RSTART, RLENGTH), parts, "/")
-                if (parts[2] > 0) {
-                    value=int(parts[1] * 100 / parts[2])
-                    if (value > best && value <= 100) best=value
-                }
-                line=substr(line, RSTART + RLENGTH)
-            }
-            line=$0
-            while (match(line, /[0-9]{1,3}%/)) {
-                value=substr(line, RSTART, RLENGTH - 1) + 0
-                if (value > best && value <= 100) best=value
-                line=substr(line, RSTART + RLENGTH)
-            }
-        }
-        END { if (best != "") print best }
-    ' "$LOG" 2>/dev/null || true
+dynamic_progress_record() {
+    local stage="$1"
+    python3 /usr/local/lib/libertix/libertix_progress.py \
+        --catalogue "$LIBERTIX_STAGE_CATALOG" \
+        --log "$LOG" \
+        --stage "$stage" 2>/dev/null \
+        || printf '%s\t\n' "$(stage_percent "$stage")"
 }
 
 stage_percent_dynamic() {
-    local stage="$1"
-    local sub
-    if [ "$stage" = "120-unsquashfs" ]; then
-        sub="$(unsquashfs_subpercent)"
-        if [ -n "$sub" ]; then
-            echo $((54 + sub * 22 / 100))
-            return 0
-        fi
-        echo 54
-        return 0
-    fi
-    stage_percent "$stage"
+    local record
+    record="$(dynamic_progress_record "$1")"
+    printf '%s\n' "${record%%$'\t'*}"
 }
 
 stage_label_dynamic() {
-    local stage="$1"
-    local sub
-    if [ "$stage" = "120-unsquashfs" ]; then
-        sub="$(unsquashfs_subpercent)"
-        if [ -n "$sub" ]; then
-            printf '%s (%s%%)\n' "$LIBERTIX_I18N_STAGE_120_UNSQUASHFS" "$sub"
-            return 0
-        fi
+    local stage="$1" record sub
+    record="$(dynamic_progress_record "$stage")"
+    sub="${record#*$'\t'}"
+    if [ "$record" != "$sub" ] && [ -n "$sub" ]; then
+        printf '%s (%s%%)\n' "$(stage_label "$stage")" "$sub"
+        return 0
     fi
     stage_label "$stage"
 }
@@ -363,7 +336,7 @@ switch_to_terminal_ui_if_requested() {
 }
 
 start_gui() {
-    local attempt wait_count x_server
+    local attempt x_server
     x_server="$(find_x_server)" || return 1
     [ -x /usr/local/sbin/libertix-gui ] || return 1
 
@@ -375,7 +348,7 @@ start_gui() {
     "$x_server" "$GUI_DISPLAY" "vt$GUI_VT" -nolisten tcp -ac -noreset -s 0 -dpms -br >> "$GUI_LOG" 2>&1 &
     XORG_PID="$!"
 
-    for wait_count in $(seq 1 "$XORG_START_TIMEOUT"); do
+    for _ in $(seq 1 "$XORG_START_TIMEOUT"); do
         [ -S "$GUI_SOCKET" ] && break
         if ! kill -0 "$XORG_PID" 2>/dev/null; then
             echo "Xorg exited before display socket was ready" >> "$LOG"
@@ -394,7 +367,7 @@ start_gui() {
             rm -f "$GUI_READY_FILE" "$GUI_HEARTBEAT_FILE"
             DISPLAY="$GUI_DISPLAY" XAUTHORITY=/dev/null /usr/local/sbin/libertix-gui >> "$GUI_LOG" 2>&1 &
             GUI_PID="$!"
-            for wait_count in $(seq 1 "$GUI_READY_TIMEOUT"); do
+            for _ in $(seq 1 "$GUI_READY_TIMEOUT"); do
                 if gui_running; then
                     chvt "$GUI_VT" 2>/dev/null || true
                     echo "Graphical installer UI ready" >> "$LOG"

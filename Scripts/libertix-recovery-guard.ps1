@@ -14,8 +14,13 @@ $Log = Join-Path $Root "recovery.log"
 $Pending = Join-Path $Root "pending.env"
 $ArchiveRoot = Join-Path $SystemDrive "LibertixInstallLogs"
 $Result = Join-Path $ArchiveRoot "latest\result.env"
+$LiveStartedMarker = Join-Path $Root "live-started.env"
+$LiveFailedMarker = Join-Path $Root "live-failed.env"
+$InstallSuccessMarker = Join-Path $Root "install-success.env"
 $ArchiveLog = Join-Path $ArchiveRoot "windows-recovery.log"
 $BcdBackup = Join-Path $Root "bcd-backup"
+$ExecutionStatePath = Join-Path $Root "installation-state.json"
+$ExecutionStateModulePath = Join-Path $Root "Libertix.InstallationState.psm1"
 $TemporaryBootFiles = @(
     (Join-Path $SystemDrive "grldr"),
     (Join-Path $SystemDrive "grldr.mbr"),
@@ -49,10 +54,54 @@ function Read-EnvValue {
 }
 
 function Remove-RecoveryTask {
-    try {
-        schtasks.exe /Delete /TN $TaskName /F | Out-Null
-    } catch {
-        Write-RecoveryLog "Task cleanup failed: $($_.Exception.Message)"
+    param([switch]$Required)
+
+    $deleteOutput = & schtasks.exe /Delete /TN $TaskName /F 2>&1
+    $deleteExitCode = $LASTEXITCODE
+    if ($deleteExitCode -ne 0) {
+        $message = "Recovery task cleanup failed with rc=$deleteExitCode output=$($deleteOutput -join ' ')"
+        if ($Required) {
+            throw $message
+        }
+        Write-RecoveryLog $message
+        return
+    }
+
+    if ($Required) {
+        $null = & schtasks.exe /Query /TN $TaskName 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            throw "Recovery task still exists after deletion."
+        }
+    }
+}
+
+function Initialize-RecoveryExecutionState {
+    if (-not (Test-Path -LiteralPath $ExecutionStatePath -PathType Leaf)) {
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $ExecutionStateModulePath -PathType Leaf)) {
+        throw "Recovery execution state exists but its transition module is missing."
+    }
+
+    Import-Module -Name $ExecutionStateModulePath -Force -ErrorAction Stop
+    $state = Read-LibertixExecutionState -Path $ExecutionStatePath
+    if ([string]$state.status -in @("running", "failed")) {
+        $null = Start-LibertixRollback -Path $ExecutionStatePath
+    } elseif ([string]$state.status -ne "rollback-running") {
+        throw "Recovery execution state cannot begin rollback from status '$($state.status)'."
+    }
+    return $true
+}
+
+function Complete-RecoveryCompensation {
+    param([Parameter(Mandatory = $true)][string]$Step)
+
+    if (-not $script:TrackRecoveryExecutionState) {
+        return
+    }
+    $state = Read-LibertixExecutionState -Path $ExecutionStatePath
+    if ($Step -in @($state.completedSteps) -and $Step -notin @($state.compensatedSteps)) {
+        $null = Complete-LibertixCompensation -Path $ExecutionStatePath -Step $Step
     }
 }
 
@@ -218,6 +267,28 @@ function Remove-EmptyTransactionExtendedContainer {
 
 try {
     Write-RecoveryLog "Recovery guard started."
+    $script:TrackRecoveryExecutionState = $false
+
+    $expectedRecoveryRunId = Read-EnvValue -Path $Pending -Name "RECOVERY_RUN_ID"
+    $successRecoveryRunId = Read-EnvValue `
+        -Path $InstallSuccessMarker `
+        -Name "LIBERTIX_BIOS_RECOVERY_RUN_ID"
+    $successRecoveryState = Read-EnvValue `
+        -Path $InstallSuccessMarker `
+        -Name "LIBERTIX_BIOS_RECOVERY_STATE"
+    if (
+        -not [string]::IsNullOrWhiteSpace($expectedRecoveryRunId) -and
+        $successRecoveryRunId -eq $expectedRecoveryRunId -and
+        $successRecoveryState -eq "install-success"
+    ) {
+        Write-RecoveryLog "Dedicated successful install marker found; no disk rollback needed."
+        Remove-TemporaryBootPayload
+        Invoke-WindowsShareFinalize
+        Remove-RecoveryTask
+        Save-RecoveryLog
+        Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
+        exit 0
+    }
 
     $pendingSystemDrive = Read-EnvValue -Path $Pending -Name "SYSTEM_DRIVE"
     if (
@@ -247,6 +318,38 @@ try {
         Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
         exit 0
     }
+
+    $liveStartedRunId = Read-EnvValue `
+        -Path $LiveStartedMarker `
+        -Name "LIBERTIX_BIOS_RECOVERY_RUN_ID"
+    $liveStartedState = Read-EnvValue `
+        -Path $LiveStartedMarker `
+        -Name "LIBERTIX_BIOS_RECOVERY_STATE"
+    $liveFailedRunId = Read-EnvValue `
+        -Path $LiveFailedMarker `
+        -Name "LIBERTIX_BIOS_RECOVERY_RUN_ID"
+    $liveFailedState = Read-EnvValue `
+        -Path $LiveFailedMarker `
+        -Name "LIBERTIX_BIOS_RECOVERY_STATE"
+    $liveStartedWithoutFailure = (
+        -not [string]::IsNullOrWhiteSpace($expectedRecoveryRunId) -and
+        $liveStartedRunId -eq $expectedRecoveryRunId -and
+        $liveStartedState -eq "live-started" -and
+        -not (
+            $liveFailedRunId -eq $expectedRecoveryRunId -and
+            $liveFailedState -eq "live-failed"
+        )
+    )
+    if ($liveStartedWithoutFailure) {
+        Write-RecoveryLog (
+            "The live installer started but produced neither a success nor a failure marker. " +
+            "Refusing automatic disk rollback without positive failure evidence."
+        )
+        Save-RecoveryLog
+        exit 2
+    }
+
+    $script:TrackRecoveryExecutionState = Initialize-RecoveryExecutionState
 
     $expectedMbText = Read-EnvValue -Path $Pending -Name "LINUX_SIZE_MB"
     $stagingMbText = Read-EnvValue -Path $Pending -Name "STAGING_SIZE_MB"
@@ -448,10 +551,18 @@ try {
         throw "$SystemDrive rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
     }
 
+    Complete-RecoveryCompensation -Step "windows.temporary-boot-prepared"
+    Complete-RecoveryCompensation -Step "windows.live-media-prepared"
+    Complete-RecoveryCompensation -Step "windows.installer-partition-created"
+    Complete-RecoveryCompensation -Step "windows.system-volume-shrunk"
+
     Write-RecoveryLog "Recovery completed and verified."
-    Remove-RecoveryTask
+    Remove-RecoveryTask -Required
+    Complete-RecoveryCompensation -Step "windows.recovery-armed"
+    if ($script:TrackRecoveryExecutionState) {
+        $null = Complete-LibertixRollback -Path $ExecutionStatePath
+    }
     Save-RecoveryLog
-    Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
     exit 0
 } catch {
     Write-RecoveryLog "Recovery failed: $($_.Exception.Message)"

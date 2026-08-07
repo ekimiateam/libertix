@@ -330,19 +330,10 @@ function Get-BcdFirmwareEntryIdsByDescription {
 function Remove-BcdFirmwareEntriesByDescription {
     param([Parameter(Mandatory = $true)][string[]]$Descriptions)
 
-    try {
-        $identifiers = @(Get-BcdFirmwareEntryIdsByDescription -Descriptions $Descriptions)
-    } catch {
-        Write-Log "BCD firmware enumeration failed during stale-entry cleanup; native Boot#### cleanup will continue: $($_.Exception.Message)" "Yellow"
-        return
-    }
+    $identifiers = @(Get-BcdFirmwareEntryIdsByDescription -Descriptions $Descriptions)
 
     foreach ($identifier in $identifiers) {
-        try {
-            Invoke-BcdeditCommand -Arguments @("/delete", $identifier, "/f") | Out-Null
-        } catch {
-            Write-Log "BCD could not delete temporary firmware entry $identifier; native Boot#### cleanup will continue: $($_.Exception.Message)" "Yellow"
-        }
+        Invoke-BcdeditCommand -Arguments @("/delete", $identifier, "/f") | Out-Null
     }
 }
 
@@ -379,6 +370,19 @@ function Remove-LibertixTemporaryFirmwareEntries {
         if ($bytes -and (Get-EfiLoadOptionDescription -Bytes $bytes) -eq $InstallerBootDescription) {
             Remove-FirmwareVariable -Name "BootNext"
         }
+    }
+
+    $remainingBcdEntries = @(
+        Get-BcdFirmwareEntryIdsByDescription -Descriptions @($InstallerBootDescription)
+    )
+    if ($remainingBcdEntries.Count -ne 0) {
+        throw "Temporary Libertix BCD firmware entries remain after cleanup."
+    }
+    $remainingNativeEntry = Get-FirmwareBootNumberByDescription `
+        -Description $InstallerBootDescription
+    if ($null -ne $remainingNativeEntry) {
+        throw ("Temporary Libertix firmware entry Boot{0:X4} remains after cleanup." -f `
+            [uint16]$remainingNativeEntry)
     }
 }
 

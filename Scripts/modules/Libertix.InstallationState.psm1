@@ -5,6 +5,79 @@ $script:ValidStatuses = @(
 )
 $script:ValidPhases = @("windows", "live", "target", "rollback", "complete")
 $script:TerminalStatuses = @("rolled-back", "succeeded")
+$script:OrderedSteps = @(
+    "windows.preflight-verified",
+    "windows.artifacts-verified",
+    "windows.recovery-armed",
+    "windows.system-volume-shrunk",
+    "windows.installer-partition-created",
+    "windows.live-media-prepared",
+    "windows.temporary-boot-prepared",
+    "live.preflight-verified",
+    "live.installer-partition-expanded",
+    "live.target-filesystem-created",
+    "live.distribution-extracted",
+    "target.system-configured",
+    "target.bootloader-installed",
+    "target.installation-verified"
+)
+$script:CompensatableSteps = @(
+    "windows.recovery-armed",
+    "windows.system-volume-shrunk",
+    "windows.installer-partition-created",
+    "windows.live-media-prepared",
+    "windows.temporary-boot-prepared",
+    "live.installer-partition-expanded",
+    "live.target-filesystem-created",
+    "live.distribution-extracted",
+    "target.system-configured",
+    "target.bootloader-installed"
+)
+$script:InstallationStatePropertySets = [ordered]@{
+    root = @(
+        "schemaVersion", "planId", "revision", "status", "phase", "activeStep",
+        "completedSteps", "compensatedSteps", "failure", "progress", "updatedAtUtc"
+    )
+    progress = @("stage", "overallPercent", "detailPercent")
+    failure = @("code", "message", "component")
+}
+
+function Assert-LibertixExactStateProperties {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$PropertySet
+    )
+
+    $allowed = @($script:InstallationStatePropertySets[$PropertySet])
+    if ($allowed.Count -eq 0) {
+        throw "Unknown installation state property set: $PropertySet."
+    }
+    $propertyNames = if ($Object -is [Collections.IDictionary]) {
+        @($Object.Keys)
+    } else {
+        @($Object.PSObject.Properties.Name)
+    }
+    $unexpected = @($propertyNames | Where-Object { $_ -notin $allowed })
+    if ($unexpected.Count -gt 0) {
+        throw "Installation state $Path contains unsupported field '$($unexpected[0])'."
+    }
+}
+
+function Test-LibertixStateProperty {
+    param(
+        [AllowNull()][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    if ($null -eq $Object) {
+        return $false
+    }
+    if ($Object -is [Collections.IDictionary]) {
+        return $Object.Contains($Name)
+    }
+    return $Object.PSObject.Properties.Name -contains $Name
+}
 
 function Assert-LibertixExecutionStep {
     param([Parameter(Mandatory = $true)][string]$Step)
@@ -19,6 +92,8 @@ function Assert-LibertixExecutionState {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object]$State)
 
+    Assert-LibertixExactStateProperties -Object $State -Path "root" -PropertySet "root"
+
     if ([int]$State.schemaVersion -ne 1) {
         throw "Unsupported Libertix execution state schemaVersion."
     }
@@ -28,8 +103,12 @@ function Assert-LibertixExecutionState {
     if ([int]$State.revision -lt 0) {
         throw "Libertix execution state revision cannot be negative."
     }
-    if ($State.PSObject.Properties.Name -contains "progress" -and $null -ne $State.progress) {
+    if ((Test-LibertixStateProperty -Object $State -Name "progress") -and $null -ne $State.progress) {
         $progress = $State.progress
+        Assert-LibertixExactStateProperties `
+            -Object $progress `
+            -Path "progress" `
+            -PropertySet "progress"
         if ([string]$progress.stage -notmatch '^[a-z0-9]+(?:-[a-z0-9]+)*$') {
             throw "Libertix execution state progress stage is invalid."
         }
@@ -37,7 +116,10 @@ function Assert-LibertixExecutionState {
         if ($overallPercent -lt 0 -or $overallPercent -gt 100) {
             throw "Libertix execution state overall progress is invalid."
         }
-        if ($progress.PSObject.Properties.Name -contains "detailPercent" -and $null -ne $progress.detailPercent) {
+        if (
+            (Test-LibertixStateProperty -Object $progress -Name "detailPercent") -and
+            $null -ne $progress.detailPercent
+        ) {
             $detailPercent = [int]$progress.detailPercent
             if ($detailPercent -lt 0 -or $detailPercent -gt 100) {
                 throw "Libertix execution state detailed progress is invalid."
@@ -74,10 +156,18 @@ function Assert-LibertixExecutionState {
             throw "Libertix execution state compensates an incomplete step: $step"
         }
     }
+    for ($index = 0; $index -lt $completed.Count; $index++) {
+        if ($index -ge $script:OrderedSteps.Count -or [string]$completed[$index] -ne $script:OrderedSteps[$index]) {
+            throw "Libertix execution state completedSteps is not an ordered workflow prefix."
+        }
+    }
 
     $activeStep = [string]$State.activeStep
     if (-not [string]::IsNullOrWhiteSpace($activeStep)) {
         $null = Assert-LibertixExecutionStep -Step $activeStep
+        if ($completed.Count -ge $script:OrderedSteps.Count -or $activeStep -ne $script:OrderedSteps[$completed.Count]) {
+            throw "Libertix execution state activeStep is not the next workflow step."
+        }
     }
     if (
         [string]$State.status -in @("failed", "rollback-running", "rolled-back", "succeeded") -and
@@ -95,6 +185,10 @@ function Assert-LibertixExecutionState {
         throw "A failed execution state requires failure details."
     }
     if ($null -ne $State.failure) {
+        Assert-LibertixExactStateProperties `
+            -Object $State.failure `
+            -Path "failure" `
+            -PropertySet "failure"
         if (
             [string]::IsNullOrWhiteSpace([string]$State.failure.code) -or
             [string]::IsNullOrWhiteSpace([string]$State.failure.message) -or
@@ -247,6 +341,15 @@ function Start-LibertixExecutionStep {
         if ($transitionStep -in @($state.completedSteps)) {
             throw "Step '$transitionStep' is already complete."
         }
+        $expectedIndex = @($state.completedSteps).Count
+        $expectedStep = if ($expectedIndex -lt $script:OrderedSteps.Count) {
+            $script:OrderedSteps[$expectedIndex]
+        } else {
+            "no further step"
+        }
+        if ($transitionStep -ne $expectedStep) {
+            throw "Step '$transitionStep' is out of order; expected '$expectedStep'."
+        }
         # A recovery retry may legitimately resume after a recorded failure.
         # Drop that failure here: without this, the ledger can reach 'succeeded'
         # while still carrying the diagnostics of a run that did not succeed.
@@ -282,7 +385,7 @@ function Set-LibertixExecutionProgress {
             if ($null -ne $progressDetail) {
                 $progress.detailPercent = [int]$progressDetail
             }
-            if ($state.PSObject.Properties.Name -contains "progress") {
+            if (Test-LibertixStateProperty -Object $state -Name "progress") {
                 $state.progress = $progress
             } else {
                 $state | Add-Member -NotePropertyName progress -NotePropertyValue $progress
@@ -381,6 +484,11 @@ function Complete-LibertixRollback {
         if ([string]$state.status -ne "rollback-running") {
             throw "No rollback is running."
         }
+        foreach ($step in @($state.completedSteps)) {
+            if ($step -in $script:CompensatableSteps -and $step -notin @($state.compensatedSteps)) {
+                throw "Rollback cannot complete before compensating '$step'."
+            }
+        }
         $state.status = "rolled-back"
         $state.phase = "complete"
         $state.activeStep = $null
@@ -395,6 +503,12 @@ function Complete-LibertixInstallation {
         param($state)
         if ([string]$state.status -ne "running" -or -not [string]::IsNullOrWhiteSpace([string]$state.activeStep)) {
             throw "Installation can complete only between successful steps."
+        }
+        if (
+            @($state.completedSteps).Count -ne $script:OrderedSteps.Count -or
+            [string]$state.completedSteps[-1] -ne "target.installation-verified"
+        ) {
+            throw "Installation cannot complete before final target verification."
         }
         $state.status = "succeeded"
         $state.phase = "complete"

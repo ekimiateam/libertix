@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 
 $script:WindowsPartitionAlignmentBytes = 1MB
 $script:MinimumWindowsFreeSpaceBytes = 10GB
-$script:WindowsFreeSpaceToleranceBytes = 512MB
+$script:WindowsFreeSpaceToleranceBytes = 1GB
 
 function Get-LibertixPartitionAlignmentBytes {
     return [int64]$script:WindowsPartitionAlignmentBytes
@@ -27,7 +27,7 @@ function Get-LibertixWindowsFreeSpaceBudget {
     # Windows can grow its page file and other managed files after the wizard
     # measures free space. The tolerance keeps that bounded drift from making
     # a valid minimum-size installation fail, while the 10 GiB reserve remains
-    # the nominal policy and deficits beyond 512 MiB still fail closed.
+    # the nominal policy and deficits beyond one GiB still fail closed.
     return [pscustomobject]@{
         Accepted = [bool]($AvailableBytes -ge $acceptedFloorBytes)
         WithinTolerance = [bool](

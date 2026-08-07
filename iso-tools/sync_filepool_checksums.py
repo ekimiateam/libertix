@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Synchronize mini-ISO hashes in the filepool distribution metadata."""
+"""Generate runtime filepool metadata with hashes from built mini-ISO images."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ import tempfile
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_METADATA = REPOSITORY_ROOT / "auto_tests" / "app" / "filepool" / "distros.json"
+DEFAULT_TEMPLATE = REPOSITORY_ROOT / "auto_tests" / "app" / "filepool" / "distros.json"
+DEFAULT_METADATA = REPOSITORY_ROOT / "auto_tests" / "runtime" / "filepool" / "distros.json"
 
 
 def sha256(path: Path) -> str:
@@ -26,8 +27,11 @@ def update_metadata(
     metadata_path: Path,
     bios_iso: Path | None,
     uefi_iso: Path | None,
+    *,
+    template_path: Path | None = None,
 ) -> None:
-    distributions = json.loads(metadata_path.read_text(encoding="utf-8"))
+    source_path = template_path or metadata_path
+    distributions = json.loads(source_path.read_text(encoding="utf-8"))
     if not isinstance(distributions, list) or not distributions:
         raise ValueError("Distribution metadata must contain at least one entry.")
 
@@ -46,6 +50,7 @@ def update_metadata(
             )
         matches[0][hash_key] = sha256(artifact)
 
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
     # Readers must see either the previous complete catalogue or the new one.
     with tempfile.NamedTemporaryFile(
         mode="w",
@@ -66,6 +71,7 @@ def update_metadata(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--metadata", type=Path, default=DEFAULT_METADATA)
+    parser.add_argument("--template", type=Path, default=DEFAULT_TEMPLATE)
     parser.add_argument("--bios", type=Path)
     parser.add_argument("--uefi", type=Path)
     args = parser.parse_args()
@@ -76,7 +82,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    update_metadata(args.metadata, args.bios, args.uefi)
+    update_metadata(
+        args.metadata,
+        args.bios,
+        args.uefi,
+        template_path=args.template,
+    )
 
 
 if __name__ == "__main__":

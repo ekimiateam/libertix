@@ -49,13 +49,13 @@ def test_live_boot_mode_function_is_fail_closed(
         library,
         "validate_live_boot_mode",
         "true",
-        "boot=live findiso=/libertix-live.iso quiet",
+        "boot=live toram=filesystem.squashfs quiet",
     )
     rejected_low_memory = run_shell_function(
         library,
         "validate_live_boot_mode",
         "true",
-        "boot=live toram quiet",
+        "boot=live findiso=/libertix-live.iso quiet",
     )
     accepted_normal = run_shell_function(
         library,
@@ -637,17 +637,42 @@ def test_success_retires_stale_uefi_transaction_state_after_final_verification()
 
 def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
     apply_changes = read_apply_changes()
+    plan_factory = read("Installation/InstallationPlanFactory.cs")
     uefi = read("Scripts/libertix-uefi-install.ps1")
     installer = read("assets/live/libertix-install-main.sh")
     assert ". /usr/local/lib/libertix/libertix-install-platform-common.sh" in installer
     assert "libertix-install-main.sh" in read("iso/live/install-mint.sh")
     assert "libertix-install-main.sh" in read("iso-uefi/live/install-mint.sh")
 
-    assert "ConfigureBiosLowMemoryBootAsync" in apply_changes
-    assert "LowMemoryMode =" in apply_changes
+    assert "ConfigureBiosLowMemoryBoot" in apply_changes
+    assert "LowMemoryMode =" in plan_factory
     assert "compatibility.LowMemoryMode" in apply_changes
     assert "$LowMemoryMode" in uefi
-    assert "findiso=/libertix-live.iso" in read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    assert "toram=filesystem.squashfs" in read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    assert "libertix-live.iso" not in apply_changes
+
+
+def test_uefi_generated_grub_configs_preserve_low_memory_findiso_mode() -> None:
+    execution = read("Scripts/uefi/Libertix.Uefi.Execution.ps1")
+    storage = read("Scripts/uefi/Libertix.Uefi.Storage.ps1")
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    grub_config = execution.split("function Get-LibertixStagingGrubConfig", 1)[1].split(
+        "function Write-Log", 1
+    )[0]
+
+    assert "[bool]$UseLowMemoryMode" in grub_config
+    assert "$normalArguments = $normalArguments -replace" in grub_config
+    assert "$verboseArguments = $verboseArguments -replace" in grub_config
+    assert grub_config.count("toram=filesystem.squashfs") == 2
+    assert grub_config.count("toram=filesystem\\.squashfs") == 2
+    assert (
+        "Get-LibertixStagingGrubConfig `\n        -UseLowMemoryMode ([bool]$LowMemoryMode)"
+        in storage
+    )
+    assert (
+        "Get-LibertixStagingGrubConfig `\n            -UseLowMemoryMode ([bool]$LowMemoryMode)"
+        in staging
+    )
 
 
 def run_localized_stage_function(function: str, argument: str) -> subprocess.CompletedProcess[str]:
@@ -686,8 +711,34 @@ def test_runner_stage_functions_return_stable_labels_and_percentages() -> None:
     assert label.returncode == 0
     assert label.stdout.strip() == "Extracting Mint"
     assert percent.returncode == 0
-    assert percent.stdout.strip() == "64"
+    assert percent.stdout.strip() == "54"
     assert unknown_label.stdout.strip() == "custom-stage"
+
+
+def test_shared_progress_helper_maps_unsquashfs_output(tmp_path: Path) -> None:
+    log = tmp_path / "install.log"
+    log.write_text(
+        "STAGE: 120-unsquashfs\n123/246\nSTAGE: 130-target-system-config\n99%\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "python3",
+            str(ROOT / "assets/live/libertix_progress.py"),
+            "--catalogue",
+            str(ROOT / "assets/live/libertix-stages.tsv"),
+            "--log",
+            str(log),
+            "--stage",
+            "120-unsquashfs",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "65\t50"
 
 
 def test_uefi_copy_preserves_live_boot_case_sensitive_names() -> None:
@@ -932,7 +983,8 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     assert 'x:Name="CancelInstallationButton"' in xaml
     assert 'Click="CancelInstallationButton_Click"' in xaml
     assert "_installationCancellation.Cancel()" in cancellation
-    assert 'Arguments = $"/PID {processId} /T /F"' in cancellation
+    assert "WindowsProcessRunner.TerminateProcessTree(process)" in cancellation
+    assert 'Arguments = $"/PID {processId} /T /F"' in read("Helpers/WindowsProcessRunner.cs")
     assert "FailBiosPreparationAndRollbackAsync" in cancellation
     assert '"ApplyChangesCancelledRestored"' in cancellation
     assert '"Installation cancelled. Windows has been restored."' in cancellation
@@ -958,7 +1010,7 @@ def test_all_rollbacks_verify_bitlocker_against_the_pre_decryption_state() -> No
         assert field in system
         assert field in cancellation
     assert "$initialBitLocker = $bitLocker" in preflight
-    assert 'Write-Result "BITLOCKER_INITIAL_CONVERSION_STATUS"' in preflight
+    assert "initialBitLockerConversionStatus = [int]$initialBitLocker.ConversionStatus" in preflight
     assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in cancellation
     assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in bios
     assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in uefi
@@ -1064,7 +1116,7 @@ def test_windows_preparation_log_is_persisted_for_every_gui_line() -> None:
     cancellation = read("Pages/ApplyChanges.Cancellation.cs")
     apply_changes = read("Pages/ApplyChanges.xaml.cs")
 
-    assert 'Path.Combine(WindowsSystemDrive, "LibertixInstallLogs")' in cancellation
+    assert "RuntimeNames.InstallationLogDirectory" in cancellation
     assert "AppendPersistentLog(line);" in apply_changes
 
 
@@ -1080,7 +1132,10 @@ def test_filepool_defaults_to_production_and_supports_an_explicit_override() -> 
     assert 'DevelopmentSshPrefixLengthOption = "--dev-ssh-prefix-length"' in startup
     assert 'DevelopmentSshGatewayOption = "--dev-ssh-gateway"' in startup
     assert 'DevelopmentSshDnsOption = "--dev-ssh-dns"' in startup
-    assert "FilepoolConfig.TryUseOverride(options.FilepoolBaseUrlOverride" in app
+    assert "FilepoolConfig.TryCreate(" in app
+    assert "public sealed class FilepoolConfig" in filepool
+    assert "public string BaseUrl { get; }" in filepool
+    assert "public static string BaseUrl" not in filepool
     assert '--filepool-base-url "{1}"' in launch
     assert '--dev-ssh-static-ip "{0}"' in launch
     assert '--dev-ssh-prefix-length "{0}"' in launch
@@ -1112,9 +1167,8 @@ def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None
     assert 'grep -Fx "AllowUsers $username" "$sshd_policy"' in first_boot
     assert first_boot.index("install -d -m 0755 /run/sshd") < first_boot.index("/usr/sbin/sshd -t")
     assert "After=network-online.target" in unit
-    assert '"development_static_ipv4": vm.host' in automation
+    assert "launch_elevated_process(" in automation
     assert '"development_static_ipv4": vm.host' in validation
-    assert '"development_dns_servers": list(self.settings.development_dns_servers)' in automation
     assert '"development_dns_servers": list(self.settings.development_dns_servers)' in validation
     postinstall = read("auto_tests/app/services/automation_postinstall.py")
     assert "test -e /var/lib/libertix/development-ssh-ready" in postinstall
@@ -1193,11 +1247,14 @@ def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
 
     assert "$existingDriveLetter = Get-FreeDriveLetter" in create_or_reuse
     assert "-NewDriveLetter $existingDriveLetter" in create_or_reuse
-    assert "-AssignDriveLetter" in create_or_reuse
-    assert "$createdDriveLetter = [string]$newPartition.DriveLetter" in create_or_reuse
-    assert "-DriveLetter $createdDriveLetter" in create_or_reuse
+    create_position = create_or_reuse.index("$newPartition = New-Partition")
+    format_position = create_or_reuse.index("Format-Volume", create_position)
+    assign_position = create_or_reuse.index("Add-PartitionAccessPath", format_position)
+    assert "-AssignDriveLetter" not in create_or_reuse[create_position:format_position]
+    assert "-Partition $newPartition" in create_or_reuse[format_position:assign_position]
+    assert "-AssignDriveLetter" in create_or_reuse[assign_position:]
+    assert "$createdDriveLetter = [string]$verifiedPartition.DriveLetter" in create_or_reuse
     assert 'Test-Path "${createdDriveLetter}:\\"' in create_or_reuse
-    assert "Get-LibertixInstallerPartition -DriveLetter $createdDriveLetter" in create_or_reuse
     assert 'Drive = "${createdDriveLetter}:"' in create_or_reuse
     assert "-DriveLetter $InstallerLetter" not in create_or_reuse
 
@@ -1268,6 +1325,9 @@ def test_bios_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
     assert "CreateFat32PartitionSimpleAsync(biosStagingMB)" in partitioning
     assert "the live will expand it" in partitioning
     assert partitioning.index("PrepareBiosDistributionIsoAsync(distribution)") < (
+        partitioning.index("InstallWindowsRecoveryGuardAsync(requestedLinuxMB)")
+    )
+    assert partitioning.index("PrepareBiosDistributionIsoAsync(distribution)") < (
         partitioning.index("ShrinkWindowsPartitionAsync(requestedLinuxMB)")
     )
 
@@ -1333,6 +1393,18 @@ def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
     assert create_position < save_position < geometry_position < format_position
 
 
+def test_bios_staging_is_formatted_before_mount_manager_exposes_it() -> None:
+    script = read("Scripts/libertix-bios-storage.ps1")
+    create_staging = script.split('"CreateStaging" {', 1)[1]
+    create_position = create_staging.index("$partition = New-Partition")
+    format_position = create_staging.index("Format-Volume", create_position)
+    assign_position = create_staging.index("Add-PartitionAccessPath", format_position)
+
+    assert "-AssignDriveLetter" not in create_staging[create_position:format_position]
+    assert "-Partition $partition" in create_staging[format_position:assign_position]
+    assert "-AssignDriveLetter" in create_staging[assign_position:]
+
+
 def test_windows_staging_size_is_exact_across_bios_and_uefi() -> None:
     bios_plan = read("Pages/ApplyChanges.Plan.cs")
     bios_storage = read("Scripts/libertix-bios-storage.ps1")
@@ -1377,6 +1449,23 @@ def test_uefi_shrink_uses_shared_geometry_for_partition_creation() -> None:
     assert "-Size $stagingBytes" in create_or_reuse
     assert "-Offset $installerOffsetBytes" in create_or_reuse
     assert "-Alignment ([int64]$shrinkGeometry.AlignmentBytes)" in create_or_reuse
+
+
+def test_windows_hibernation_validation_distinguishes_preference_from_capability() -> None:
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    assert "if ($ShareWindowsFilesInLinux)" in staging
+    assert "Set-HibernateEnabled -Enabled $false" in staging
+    assert '"HIBERNATION_ENABLED={0}"' in checks
+    assert '"FAST_STARTUP_CONFIGURED={0}"' in checks
+    assert '"FAST_STARTUP_CAPABLE={0}"' in checks
+    assert "$fastStartupConfigured -and" in checks
+    assert "$hibernateEnabled -and" in checks
+    assert "$hiberfilePresent" in checks
+    assert "Assert-Condition (-not $hibernateEnabled)" in checks
+    assert "Assert-Condition (-not $fastStartupCapable)" in checks
+    assert "Assert-Condition (-not $hiberfilePresent)" not in checks
 
 
 def test_bios_storage_uses_the_same_alignment_geometry_as_uefi() -> None:
@@ -1494,12 +1583,14 @@ def test_temporary_windows_boot_cleanup_fails_closed_for_both_firmwares() -> Non
 
 def test_recovery_geometry_uses_manifest_offset_for_both_firmwares() -> None:
     common = read("assets/live/libertix-storage-common.sh")
+    runtime = read("assets/live/libertix-install-runtime-common.sh")
     bios = read("assets/live/libertix-bios-adapter.sh")
     uefi = read("assets/live/libertix-uefi-adapter.sh")
 
     assert "manifest_partition_geometry()" in common
-    assert 'manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"' in bios
-    assert 'manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"' in uefi
+    assert 'manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"' in runtime
+    assert "recovery_geometry()" not in bios
+    assert "recovery_geometry()" not in uefi
     assert "'$1==\"4\"'" not in bios
     assert "'$1==\"4\"'" not in uefi
 
@@ -1576,7 +1667,7 @@ def test_mint_installer_uses_the_official_mirror_in_every_download_contract() ->
     assert distributions[0]["isoInstallerSha256"] == (
         "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4"
     )
-    assert f'MintIso = "{official_url}"' in download_module
+    assert "MintIso =" not in download_module
     assert "$baseUrl/mint.iso" not in download_module
 
 
@@ -1664,7 +1755,7 @@ def test_developer_terminal_is_verbose_and_initialized_only_once() -> None:
 
 def test_live_logs_are_copied_completely_and_verified() -> None:
     helper = read("assets/live/libertix-copy-logs.sh")
-    build = read("iso/build.sh")
+    build = read("iso-tools/build-iso.sh")
 
     assert "journalctl -b --no-pager" in helper
     assert 'dmesg > "$LOG_DIR/dmesg.log"' in helper
@@ -1717,8 +1808,9 @@ def test_compatibility_preflight_forces_utf8_console_codepage() -> None:
     assert "[Console]::OutputEncoding" in script
     assert "[Console]::InputEncoding" in script
     assert "StandardOutputEncoding = Encoding.UTF8" in runner
-    assert "NormalizeUtf8Line" in runner
-    assert "Encoding.GetEncoding(1252).GetBytes(line)" in runner
+    assert "PowerShellJsonResult.ParseFinalObject" in runner
+    assert "NormalizeUtf8Line" not in runner
+    assert "Encoding.GetEncoding(1252).GetBytes(line)" not in runner
 
 
 def test_compatibility_runner_drains_async_output_before_parsing_final_fields() -> None:
@@ -1760,6 +1852,8 @@ def test_compatibility_shrink_capacity_reserves_cloned_layout_alignment() -> Non
 
 def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
     page = read("Pages/ResizeDisk.xaml.cs")
+    size_policy = read("Installation/InstallationSizePolicy.cs")
+    storage_policy = read("Scripts/modules/Libertix.StorageGeometry.psm1")
 
     assert "_initialFreeSpace =" in page
     assert "systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0" in page
@@ -1771,6 +1865,26 @@ def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
         "            _shrinkAvailableSpace)"
     )
     assert available_linux_size in page
+    assert "MinimumWindowsFreeSpaceGiB = 10" in size_policy
+    assert "$script:MinimumWindowsFreeSpaceBytes = 10GB" in storage_policy
+    assert "$script:WindowsFreeSpaceToleranceBytes = 1GB" in storage_policy
+    assert "InstallationSizePolicy.MinimumWindowsFreeSpaceGiB" in page
+
+
+def test_protected_account_hash_uses_a_posix_line_ending() -> None:
+    plan = read("Pages/ApplyChanges.Plan.cs")
+
+    assert 'WriteProtectedInstallerFile(passwordHashWindowsPath, passwordHash + "\\n")' in plan
+    assert "passwordHash + Environment.NewLine" not in plan
+
+
+def test_live_context_exports_the_validated_plan_for_target_configuration() -> None:
+    context = read("assets/live/libertix-live-context.sh")
+    target = read("assets/live/libertix-target-common.sh")
+
+    assert 'INSTALLATION_PLAN_PATH="$plan_path"' in context
+    assert "export INSTALLATION_PLAN_PATH INSTALLATION_STATE_PATH" in context
+    assert 'install -m 0644 "$INSTALLATION_PLAN_PATH"' in target
 
 
 def test_nvram_write_probe_opt_out_is_explicit_and_never_reported_as_passed() -> None:
@@ -1786,7 +1900,7 @@ def test_nvram_write_probe_opt_out_is_explicit_and_never_reported_as_passed() ->
     skipped_branch = script.split("if ($SkipNvramWriteProbe) {", 1)[1].split("} else {", 1)[0]
     assert "$nvramSkipped = $true" in skipped_branch
     assert "$nvramPassed = $true" not in skipped_branch
-    assert 'Write-Result "NVRAM_PROBE_SKIPPED"' in script
+    assert "nvramProbeSkipped = [bool]$nvramSkipped" in script
 
 
 def test_windows_manifest_declares_supported_platform_dpi_and_long_paths() -> None:
@@ -1813,3 +1927,50 @@ def test_grub_decorations_use_guarded_desktop_bitmap_path() -> None:
     assert 'desktop-image: "background.png"' in theme
     assert "+ image {" not in theme
     assert "background.png" in generator
+
+
+def test_large_local_artifacts_do_not_use_tmpfs_paths() -> None:
+    settings = read("auto_tests/app/config.py")
+    validation = read("auto_tests/app/services/validation.py")
+    builder = read("iso-tools/build-isos-docker.sh")
+    verifier = read("docker/iso-builder/verify-built-iso.sh")
+    bios_defaults = read("iso/config/defaults.env")
+    uefi_defaults = read("iso-uefi/config/defaults.env")
+
+    assert 'runtime_dir: Path = Path(__file__).resolve().parents[1] / "runtime"' in settings
+    assert 'capture_dir: Path = Path(__file__).resolve().parents[1] / "runtime"' in settings
+    assert 'archive_directory = s.runtime_dir / "source-archives"' in validation
+    assert 'PurePosixPath(s.smb_root) / f".{archive.name}"' in validation
+    assert "--tmpfs" not in builder
+    assert '--volume "$WORK_VOLUME:/var/lib/libertix-work"' in builder
+    assert 'verification_root="/var/lib/libertix-work/$mode/verification"' in verifier
+    assert 'mktemp -d "$verification_root/run.XXXXXX"' in verifier
+    assert "/var/lib/libertix-work/bios" in bios_defaults
+    assert "/var/lib/libertix-work/uefi" in uefi_defaults
+
+
+def test_uefi_rollback_proves_firmware_and_esp_cleanup() -> None:
+    live = read("assets/live/libertix-uefi-adapter.sh")
+    firmware = read("Scripts/uefi/Libertix.Uefi.Firmware.ps1")
+    prepare = live.split("firmware_prepare_rollback_best_effort()", 1)[1].split(
+        "uefi_partition_table_or_die()", 1
+    )[0]
+    cleanup = live.split("cleanup_final_uefi_bootloader_best_effort()", 1)[1].split(
+        "set_linux_partition_type_or_die()", 1
+    )[0]
+    restore = live.split("firmware_restore_boot_state_best_effort()", 1)[1].split(
+        "firmware_write_failure_marker_best_effort()", 1
+    )[0]
+    powershell_cleanup = firmware.split("function Remove-LibertixTemporaryFirmwareEntries", 1)[
+        1
+    ].split("function Set-NativeUefiBootOrderOnce", 1)[0]
+
+    assert "cleanup_final_uefi_bootloader_best_effort || true" not in prepare
+    assert 'efibootmgr -b "$bootnum" -B || return 1' in cleanup
+    assert '[ ! -e "$esp_mount/EFI/Libertix" ] || return 1' in cleanup
+    assert 'umount "$esp_mount" || return 1' in cleanup
+    assert 'parted -s "$DISK" set "$esp_num" esp on 2>/dev/null || return 1' in restore
+    assert "Temporary Libertix BCD firmware entries remain after cleanup" in powershell_cleanup
+    assert (
+        "Temporary Libertix firmware entry Boot{0:X4} remains after cleanup" in powershell_cleanup
+    )

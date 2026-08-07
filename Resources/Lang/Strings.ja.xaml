@@ -9,7 +9,6 @@
 
     <system:String x:Key="ChooseDistroTitle">お好みのLinuxディストリビューションを選ぶ</system:String>
     
-    <system:String x:Key="UbuntuDescription">高速、無料、新機能が充実。世界で最も人気のあるLinuxオペレーティングシステム。</system:String>
 
     <system:String x:Key="ResizeDiskTitle">ディスクのサイズを変更</system:String>
     <system:String x:Key="Windows">Windows</system:String>
@@ -53,8 +52,6 @@
     <system:String x:Key="ComputerNameInvalid">コンピューター名は英字で始まり、小文字、数字、ハイフンのみを使用してください</system:String>
 
     <system:String x:Key="PartitionWarningTitle">警告：非標準のパーティション構成</system:String>
-    <system:String x:Key="PartitionWarningMessage">このインストーラーはこのパーティション構成でテストされていません。正確に何をしているか理解していない限り、続行は強くお勧めしません。</system:String>
-    <system:String x:Key="PartitionWarningCheckbox">理解しました</system:String>
 
     <system:String x:Key="WarningTitle">警告</system:String>
     <system:String x:Key="WarningMessage">ディスクパーティションに重大な変更を加えようとしています。この操作はハードドライブを変更し、Windowsと共にデュアルブートシステムをインストールします。</system:String>
@@ -116,15 +113,9 @@
 
     <system:String x:Key="ApplyChangesTitle">変更を適用</system:String>
     <system:String x:Key="ApplyChangesWaiting">パーティション作成の準備完了</system:String>
-    <system:String x:Key="ApplyChangesSummary">インストール概要</system:String>
-    <system:String x:Key="ApplyChangesDistro">ディストリビューション:</system:String>
-    <system:String x:Key="ApplyChangesLinuxSize">Linux領域:</system:String>
-    <system:String x:Key="ApplyChangesUsername">ユーザー名:</system:String>
-    <system:String x:Key="ApplyChangesStart">インストール開始</system:String>
     <system:String x:Key="ApplyChangesStep1">Linux用にWindowsパーティションを縮小中...</system:String>
     <system:String x:Key="ApplyChangesStep2">FAT32ブートパーティションを作成中...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">ディスク更新を待機中...</system:String>
-    <system:String x:Key="ApplyChangesStep3">Linux用にWindowsパーティションを縮小中...</system:String>
     <system:String x:Key="ApplyChangesComplete">パーティション作成完了！</system:String>
     <system:String x:Key="ApplyChangesError">エラーが発生しました</system:String>
     <system:String x:Key="ApplyChangesReboot">再起動</system:String>
@@ -142,7 +133,6 @@
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Secure Boot を確認しています...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Windows {0} の暗号化解除を初期化しています...</system:String>
     <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} の暗号化を解除しました</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindows">Windows {0} の暗号化を解除しています...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Windows {0} の暗号化を解除しています... {1}%</system:String>
     <system:String x:Key="ApplyChangesDownloading">ダウンロードしています...</system:String>
     <system:String x:Key="ApplyChangesDownloadingIso">ISO をダウンロードしています...</system:String>
@@ -157,8 +147,6 @@
     <system:String x:Key="ApplyChangesMintReady">Mint ISO の準備ができました</system:String>
     <system:String x:Key="ApplyChangesCreatingUefiPartition">UEFI インストーラーパーティションを作成しています...</system:String>
     <system:String x:Key="ApplyChangesDownloadingUefiIso">Libertix UEFI ISO をダウンロードしています...</system:String>
-    <system:String x:Key="ApplyChangesDownloadingUefiIsoPercent">Libertix UEFI ISO をダウンロードしています... {0}%</system:String>
-    <system:String x:Key="ApplyChangesDownloadingMintPercent">Mint ISO をダウンロードしています... {0}%</system:String>
     <system:String x:Key="ApplyChangesCopyingUefiInstaller">UEFI インストーラーをコピーしています...</system:String>
     <system:String x:Key="ApplyChangesConfiguringUefiBoot">UEFI ブートを設定しています...</system:String>
     <system:String x:Key="ApplyChangesUefiComplete">UEFI の準備が完了しました</system:String>

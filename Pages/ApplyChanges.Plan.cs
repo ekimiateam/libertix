@@ -1,7 +1,6 @@
 using System;
 using System.Globalization;
 using System.IO;
-using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using Libertix.Helpers;
@@ -20,9 +19,8 @@ namespace Libertix.Pages
         private const string InstallationStateFileName = "installation-state.json";
 
         private InstallationPlan _installationPlan;
-        private InstallationStateMachine _executionStateMachine;
+        private InstallationExecutionLedger _executionLedger;
         private string _installationPlanPath;
-        private string _executionStatePath;
 
         private void InitializeInstallationContext(
             FirmwareType firmware,
@@ -40,19 +38,12 @@ namespace Libertix.Pages
             // User input is normalized exactly once. Every later component
             // consumes the resulting byte counts from the persisted plan.
             InstallationSizes sizes = InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB);
-            bool isUefi = firmware == FirmwareType.Uefi;
             string systemDriveRoot =
                 (Environment.GetEnvironmentVariable("SystemDrive") ?? WindowsSystemDrive)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
                 Path.DirectorySeparatorChar;
-            string installerIsoPath = isUefi
-                ? Path.Combine(
-                    systemDriveRoot,
-                    distribution.IsoInstallerFileName)
-                : Path.Combine(
-                    Path.GetTempPath(),
-                    "Libertix",
-                    distribution.IsoInstallerFileName);
+            string passwordHashWindowsPath = Path.Combine(persistenceRoot, "account-secret.env");
+            string passwordHash = LinuxPasswordHasher.Hash(account.Password);
 
             string planId = !string.IsNullOrWhiteSpace(recoveryRunId)
                 ? recoveryRunId
@@ -60,92 +51,38 @@ namespace Libertix.Pages
             LinuxKeyboardConfiguration keyboard = WindowsKeyboardLayout.ResolveActive(
                 Localization.GetKeyboardLayout());
             StartupOptions startupOptions = ((App)Application.Current).RuntimeOptions;
-            string developmentIpv4 = startupOptions.DevelopmentSshStaticIpv4Address;
-            _installationPlan = new InstallationPlan
+            _installationPlan = InstallationPlanFactory.Create(new InstallationPlanCreationOptions
             {
                 PlanId = planId,
-                CreatedAtUtc = DateTimeOffset.UtcNow,
-                Firmware = isUefi ? InstallationFirmware.Uefi : InstallationFirmware.Bios,
-                Distribution = new InstallationDistribution
-                {
-                    Name = distribution.Name,
-                    InstallerIsoFileName = distribution.IsoInstallerFileName,
-                    InstallerIsoUrl = distribution.IsoInstaller,
-                    InstallerIsoWindowsPath = installerIsoPath,
-                    InstallerIsoSha256 = distribution.IsoInstallerSha256.ToLowerInvariant(),
-                    LiveIsoUrl = isUefi ? distribution.UefiIsoUrl : distribution.IsoUrl,
-                    LiveIsoSha256 = (isUefi ? distribution.UefiIsoSha256 : distribution.IsoSha256)
-                        .ToLowerInvariant()
-                },
-                Locale = new InstallationLocale
-                {
-                    LanguageCode = Localization.CurrentLanguage,
-                    SystemLanguage = Localization.GetLinuxLocale(),
-                    KeyboardLayout = keyboard.Layout,
-                    KeyboardVariant = keyboard.Variant,
-                    KeyboardModel = "pc105",
-                    Timezone = Localization.GetWindowsTimezoneAsLinux()
-                },
-                Account = new InstallationAccount
-                {
-                    Username = account.Username,
-                    PasswordHash = LinuxPasswordHasher.Hash(account.Password),
-                    ComputerName = account.ComputerName
-                },
-                Disk = new InstallationDisk
-                {
-                    Number = _storagePreflight.SystemDiskNumber,
-                    UniqueId = _storagePreflight.SystemDiskUniqueId.Trim(),
-                    SizeBytes = _storagePreflight.SystemDiskSize,
-                    LogicalSectorSizeBytes = _storagePreflight.LogicalSectorSize,
-                    PartitionStyle = _storagePreflight.PartitionStyle,
-                    SystemDrive = _storagePreflight.SystemDrive.ToUpperInvariant(),
-                    Windows = _storagePreflight.WindowsPartition,
-                    Boot = _storagePreflight.BootPartition,
-                    Recovery = _storagePreflight.RecoveryPartition,
-                    Installer = new InstallerPartitionPlan
-                    {
-                        FinalSizeBytes = sizes.FinalSizeBytes,
-                        StagingSizeBytes = sizes.StagingSizeBytes
-                    }
-                },
-                Features = new InstallationFeatures
-                {
-                    ShareWindowsFilesInLinux = _installationState.Sharing.ShareWindowsFilesInLinux,
-                    ShareLinuxFilesInWindows = _installationState.Sharing.ShareLinuxFilesInWindows,
-                    WindowsProfilesJsonBase64 = GetWindowsProfilesJsonBase64()
-                },
-                Runtime = new InstallationRuntime
-                {
-                    LowMemoryMode =
-                        _installationState.Compatibility is CompatibilityInfo compatibility &&
-                        compatibility.LowMemoryMode,
-                    BootStrategy = isUefi
-                        ? InstallationBootStrategy.UefiBootNext
-                        : InstallationBootStrategy.BiosGrub4Dos,
-                    RecoveryRootWindows = recoveryRoot,
-                    RecoveryRunId = recoveryRunId
-                },
-                Development = string.IsNullOrEmpty(developmentIpv4)
-                    ? null
-                    : new InstallationDevelopmentOptions
-                    {
-                        EnableSsh = true,
-                        StaticIpv4Address = developmentIpv4,
-                        StaticIpv4PrefixLength =
-                            startupOptions.DevelopmentSshStaticIpv4PrefixLength.Value,
-                        StaticIpv4Gateway = startupOptions.DevelopmentSshStaticIpv4Gateway,
-                        DnsServers = startupOptions.DevelopmentSshDnsServers.ToArray()
-                    }
-            };
+                Firmware = firmware,
+                Distribution = distribution,
+                Account = account,
+                Sharing = _installationState.Sharing,
+                Compatibility = _installationState.Compatibility,
+                Storage = _storagePreflight,
+                Sizes = sizes,
+                Keyboard = keyboard,
+                StartupOptions = startupOptions,
+                LanguageCode = Localization.CurrentLanguage,
+                SystemLanguage = Localization.GetLinuxLocale(),
+                Timezone = Localization.GetWindowsTimezoneAsLinux(),
+                SystemDriveRoot = systemDriveRoot,
+                PasswordHashWindowsPath = passwordHashWindowsPath,
+                WindowsProfilesJsonBase64 = GetWindowsProfilesJsonBase64(),
+                RecoveryRootWindows = recoveryRoot,
+                RecoveryRunId = recoveryRunId
+            });
 
-            Directory.CreateDirectory(persistenceRoot);
+            ProtectDirectoryForInstallerAndSystem(persistenceRoot);
+            // The live reads this file as a POSIX line. A Windows CRLF leaves
+            // a carriage return in the crypt hash after Bash strips only LF.
+            WriteProtectedInstallerFile(passwordHashWindowsPath, passwordHash + "\n");
             _installationPlanPath = Path.Combine(persistenceRoot, InstallationPlanFileName);
-            _executionStatePath = Path.Combine(persistenceRoot, InstallationStateFileName);
             InstallationPlanSerializer.WriteAtomic(_installationPlanPath, _installationPlan);
 
-            _executionStateMachine = InstallationStateMachine.Create(planId);
-            InstallationStateStore.WriteAtomic(_executionStatePath, _executionStateMachine.State);
+            _executionLedger = InstallationExecutionLedger.Create(
+                planId,
+                Path.Combine(persistenceRoot, InstallationStateFileName));
             StartExecutionStep(InstallationStep.WindowsPreflightVerified);
             CompleteExecutionStep(InstallationStep.WindowsPreflightVerified);
             Log($"Installation plan created: {planId}, firmware={_installationPlan.Firmware}, " +
@@ -207,7 +144,7 @@ namespace Libertix.Pages
 
         private void PublishInstallationContextToLive(string liveRoot)
         {
-            if (_installationPlan == null || _executionStateMachine == null)
+            if (_installationPlan == null || _executionLedger == null)
                 throw new InvalidOperationException("Installation context is not initialized.");
 
             // Publishing both documents together lets the live stage verify
@@ -215,99 +152,37 @@ namespace Libertix.Pages
             InstallationPlanSerializer.WriteAtomic(
                 Path.Combine(liveRoot, InstallationPlanFileName),
                 _installationPlan);
-            InstallationStateStore.WriteAtomic(
-                Path.Combine(liveRoot, InstallationStateFileName),
-                _executionStateMachine.State);
+            _executionLedger.Publish(Path.Combine(liveRoot, InstallationStateFileName));
         }
 
         private void StartExecutionStep(string step)
         {
-            if (_executionStateMachine == null)
-                return;
-            _executionStateMachine.StartStep(step);
-            PersistExecutionState();
+            _executionLedger?.StartStep(step);
         }
 
         private void CompleteExecutionStep(string step)
         {
-            if (_executionStateMachine == null)
-                return;
-            _executionStateMachine.CompleteStep(step);
-            PersistExecutionState();
+            _executionLedger?.CompleteStep(step);
         }
 
         private void RecordExecutionFailure(string code, string message, string component)
         {
-            if (_executionStateMachine == null)
-                return;
-            if (_executionStateMachine.State.Status == InstallationStatus.RollbackRunning ||
-                _executionStateMachine.State.Status == InstallationStatus.RolledBack ||
-                _executionStateMachine.State.Status == InstallationStatus.Succeeded)
-            {
-                return;
-            }
-            _executionStateMachine.Fail(code, message, component);
-            PersistExecutionState();
+            _executionLedger?.RecordFailure(code, message, component);
         }
 
         private void BeginExecutionRollback()
         {
-            if (_executionStateMachine == null)
-                return;
-            if (_executionStateMachine.State.Status == InstallationStatus.Running ||
-                _executionStateMachine.State.Status == InstallationStatus.Failed)
-            {
-                _executionStateMachine.BeginRollback();
-                PersistExecutionState();
-            }
+            _executionLedger?.BeginRollback();
         }
 
         private void CompleteExecutionRollback()
         {
-            if (_executionStateMachine == null ||
-                _executionStateMachine.State.Status != InstallationStatus.RollbackRunning)
-            {
-                return;
-            }
-
-            string[] compensatableSteps =
-            {
-                InstallationStep.WindowsTemporaryBootPrepared,
-                InstallationStep.WindowsLiveMediaPrepared,
-                InstallationStep.WindowsInstallerPartitionCreated,
-                InstallationStep.WindowsSystemVolumeShrunk,
-                InstallationStep.WindowsRecoveryArmed
-            };
-            foreach (string step in compensatableSteps)
-            {
-                if (_executionStateMachine.State.CompletedSteps.Contains(step))
-                    _executionStateMachine.CompleteCompensation(step);
-            }
-            _executionStateMachine.CompleteRollback();
-            PersistExecutionState();
-        }
-
-        private void PersistExecutionState()
-        {
-            InstallationStateStore.WriteAtomic(_executionStatePath, _executionStateMachine.State);
-            if (!string.IsNullOrWhiteSpace(_biosInstallerDriveLetter) &&
-                Directory.Exists(BiosInstallerRoot))
-            {
-                InstallationStateStore.WriteAtomic(
-                    Path.Combine(BiosInstallerRoot, InstallationStateFileName),
-                    _executionStateMachine.State);
-            }
+            _executionLedger?.CompleteRollback();
         }
 
         private void ReloadExecutionState()
         {
-            if (string.IsNullOrWhiteSpace(_executionStatePath) || !File.Exists(_executionStatePath))
-                return;
-
-            // PowerShell can advance the same state file while the GUI waits.
-            // Always rehydrate before the GUI performs a later transition.
-            _executionStateMachine = new InstallationStateMachine(
-                InstallationStateStore.Read(_executionStatePath));
+            _executionLedger?.Reload();
         }
     }
 }

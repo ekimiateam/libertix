@@ -10,6 +10,7 @@ using Libertix.Pages;
 using System.ComponentModel;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Diagnostics;
@@ -22,6 +23,7 @@ namespace Libertix.Pages
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
         private readonly InstallationState _installationState;
+        private readonly FilepoolConfig _filepool;
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
@@ -43,13 +45,21 @@ namespace Libertix.Pages
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        public ChooseDistro() : this(((App)Application.Current).InstallationState)
+        public ChooseDistro() : this(
+            ((App)Application.Current).InstallationState,
+            ((App)Application.Current).Filepool)
         {
         }
 
         public ChooseDistro(InstallationState installationState)
+            : this(installationState, ((App)Application.Current).Filepool)
+        {
+        }
+
+        public ChooseDistro(InstallationState installationState, FilepoolConfig filepool)
         {
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
+            _filepool = filepool ?? throw new ArgumentNullException(nameof(filepool));
             InitializeComponent();
             _distros = new ObservableCollection<DistroInfo>();
             DataContext = this;
@@ -71,11 +81,27 @@ namespace Libertix.Pages
             {
                 using (var timeoutCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
                 using (var response = await SharedHttpClient.GetAsync(
-                    FilepoolConfig.DistrosUrl,
+                    _filepool.DistrosUrl,
                     timeoutCancellation.Token))
                 {
                     response.EnsureSuccessStatusCode();
-                    var json = await response.Content.ReadAsStringAsync();
+                    byte[] manifest = await response.Content.ReadAsByteArrayAsync();
+                    if (_filepool.RequiresCatalogSignature)
+                    {
+                        using (var signatureResponse = await SharedHttpClient.GetAsync(
+                            _filepool.DistrosSignatureUrl,
+                            timeoutCancellation.Token))
+                        {
+                            signatureResponse.EnsureSuccessStatusCode();
+                            string signature = await signatureResponse.Content.ReadAsStringAsync();
+                            DistributionCatalogTrust.Verify(
+                                manifest,
+                                signature,
+                                DistributionCatalogTrust.GetApplicationPublicKeyPath());
+                        }
+                    }
+
+                    string json = Encoding.UTF8.GetString(manifest);
                     var options = new JsonSerializerOptions
                     {
                         PropertyNameCaseInsensitive = true
@@ -106,11 +132,11 @@ namespace Libertix.Pages
                             Name = distroJson.Name,
                             Description = distroJson.Description ?? "No description available",
                             ImageUrl = distroJson.ImageUrl,
-                            IsoUrl = FilepoolConfig.ResolveUrl(distroJson.IsoUrl),
-                            IsoInstaller = FilepoolConfig.ResolveUrl(distroJson.IsoInstaller),
+                            IsoUrl = _filepool.ResolveUrl(distroJson.IsoUrl),
+                            IsoInstaller = _filepool.ResolveUrl(distroJson.IsoInstaller),
                             IsoInstallerFileName = distroJson.IsoInstallerFileName,
                             IsoSha256 = distroJson.IsoSha256,
-                            UefiIsoUrl = FilepoolConfig.ResolveUrl(distroJson.UefiIsoUrl),
+                            UefiIsoUrl = _filepool.ResolveUrl(distroJson.UefiIsoUrl),
                             UefiIsoSha256 = distroJson.UefiIsoSha256,
                             IsoInstallerSha256 = distroJson.IsoInstallerSha256,
                             SizeInGB = distroJson.SizeInGB
@@ -122,7 +148,7 @@ namespace Libertix.Pages
             catch (Exception ex)
             {
                 MessageBox.Show(
-                    (Application.Current.Resources["DistroLoadError"] as string ?? "Failed to load distributions") +
+                    Localization.GetString("DistroLoadError", "Failed to load distributions") +
                     Environment.NewLine + ex.Message,
                     Localization.GetString("ErrorTitle"),
                     MessageBoxButton.OK,
@@ -228,12 +254,15 @@ namespace Libertix.Pages
                 // Same resolution and timeout policy as the ApplyChanges preflight:
                 // "powershell.exe" alone is subject to WOW64 redirection.
                 var result = await Task.Run(() => RunProcessWithTimeout(
-                    ResolveSystemPowerShell(),
-                    $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\" -ExpectedFirmware {expected}",
+                    WindowsProcessRunner.ResolvePowerShell(),
+                    $"-NoProfile -ExecutionPolicy Bypass -File {WindowsProcessRunner.QuoteArgument(scriptPath)} " +
+                    $"-ExpectedFirmware {expected}",
                     (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds));
-                if (result.exitCode != 0 || !result.output.Contains("PREFLIGHT_OK=true"))
+                PowerShellJsonResult preflight = PowerShellJsonResult.ParseFinalObject(result.output);
+                if (result.exitCode != 0 || !preflight.GetBoolean("preflightOk"))
                     throw new InvalidOperationException(
-                        $"Storage preflight failed: {result.error} {result.output}");
+                        "Storage preflight failed: " +
+                        preflight.GetOptionalString("errorMessage", result.error));
 
                 return (true, warnings);
             }
@@ -242,20 +271,6 @@ namespace Libertix.Pages
                 warnings.Add($"Error checking partitions: {ex.Message}");
                 return (false, warnings);
             }
-        }
-
-        private static string ResolveSystemPowerShell()
-        {
-            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
-            foreach (string candidate in new[]
-            {
-                Path.Combine(windows, "Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"),
-                Path.Combine(windows, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-            })
-            {
-                if (File.Exists(candidate)) return candidate;
-            }
-            return "powershell.exe";
         }
 
         private static (int exitCode, string output, string error) RunProcessWithTimeout(

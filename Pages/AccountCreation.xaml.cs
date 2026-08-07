@@ -2,7 +2,6 @@ using System;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
 using Libertix.Helpers;
 using Libertix.Models;
 
@@ -89,12 +88,14 @@ namespace Libertix.Pages
 
             if (string.IsNullOrEmpty(PasswordBox.Password))
             {
-                PasswordError.Text = Application.Current.Resources["PasswordRequired"] as string ?? "Password is required";
+                PasswordError.Text = Localization.GetString("PasswordRequired", "Password is required");
                 isValid = false;
             }
             else if (PasswordBox.Password.Length < 8)
             {
-                PasswordError.Text = Application.Current.Resources["PasswordTooShort"] as string ?? "Password must be at least 8 characters";
+                PasswordError.Text = Localization.GetString(
+                    "PasswordTooShort",
+                    "Password must be at least 8 characters");
                 isValid = false;
             }
             else if (PasswordBox.Password.Length > 128)
@@ -166,14 +167,5 @@ namespace Libertix.Pages
                 TimeSpan.FromSeconds(0.3));
         }
 
-        private void PasswordBox_PreviewExecuted(object sender, ExecutedRoutedEventArgs e)
-        {
-            if (e.Command == ApplicationCommands.Paste ||
-                e.Command == ApplicationCommands.Copy ||
-                e.Command == ApplicationCommands.Cut)
-            {
-                e.Handled = true;
-            }
-        }
     }
 }

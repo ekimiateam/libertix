@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.Json;
 using System.Windows;
 using System.Xml.Linq;
 using Libertix.Helpers;
@@ -91,6 +92,44 @@ namespace Libertix
             }
         }
 
+        public static string GetBootstrapString(string key)
+        {
+            string path = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Scripts",
+                "config",
+                "Libertix.CompatibilityMessages.json");
+            try
+            {
+                using (JsonDocument document = JsonDocument.Parse(File.ReadAllText(path)))
+                {
+                    JsonElement section = document.RootElement.GetProperty("bootstrapMessages");
+                    string language = GetWindowsLanguageCode();
+                    if (!section.TryGetProperty(language, out JsonElement messages))
+                        messages = section.GetProperty("en");
+                    if (!messages.TryGetProperty(key, out JsonElement value))
+                    {
+                        if (language == "en" ||
+                            !section.GetProperty("en").TryGetProperty(key, out value))
+                            return "Libertix must be run as administrator.";
+                    }
+                    string message = value.GetString();
+                    if (!string.IsNullOrWhiteSpace(message))
+                        return message;
+                }
+            }
+            catch (IOException)
+            {
+            }
+            catch (JsonException)
+            {
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            return "Libertix must be run as administrator.";
+        }
+
         /// <summary>
         /// Converts the current Windows time-zone identifier to an IANA identifier.
         /// </summary>
@@ -153,6 +192,14 @@ namespace Libertix
         public static string GetString(string key)
         {
             return Application.Current.TryFindResource(key) as string ?? key;
+        }
+
+        /// <summary>
+        /// Resolves a localized string and returns the supplied English text when the key is absent.
+        /// </summary>
+        public static string GetString(string key, string englishFallback)
+        {
+            return Application.Current.TryFindResource(key) as string ?? englishFallback;
         }
     }
 }

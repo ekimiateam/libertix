@@ -44,8 +44,8 @@ magick "$source_dir/right_down_border.png" -resize "x${right_height}" \
 
 left_dimensions=$(magick identify -format '%w %h' "$staging_dir/left_down_border.png")
 right_dimensions=$(magick identify -format '%w %h' "$staging_dir/right_down_border.png")
-read -r left_width left_height <<< "$left_dimensions"
-read -r right_width right_height <<< "$right_dimensions"
+read -r _ left_height <<< "$left_dimensions"
+read -r _ right_height <<< "$right_dimensions"
 
 magick -size "${screen_width}x${screen_height}" 'xc:#222134' \
   "$staging_dir/left_down_border.png" -gravity southwest -composite \
@@ -78,7 +78,6 @@ item_padding=$(scale 12)
 item_spacing=$(scale 16)
 menu_width=$(scale 960)
 menu_height=$(scale 540)
-menu_left_offset=$((menu_width / 2))
 label_width=$(scale 576)
 label_left_offset=$((label_width / 2))
 

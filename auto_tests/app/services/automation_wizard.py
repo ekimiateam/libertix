@@ -9,9 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from vncdotool import api
-
-from app.clients.vnc import VNCClient
+from app.clients.vision_models import contains_install_blocker
 from app.config import VMConfig
 from app.errors import WorkflowError
 from app.services.automation_types import (
@@ -25,6 +23,13 @@ from tools.azerty_qwerty import azerty_to_qwerty
 
 logger = logging.getLogger(__name__)
 
+COMPATIBILITY_SUCCESS_MARKERS = (
+    "machine compatible",
+    "this computer is compatible",
+    "el equipo es compatible",
+    "互換性があります",
+)
+
 
 class WizardAutomationMixin:
     """Drive and validate wizard pages through the configured VNC desktop."""
@@ -37,6 +42,8 @@ class WizardAutomationMixin:
         distribution=Point(145, 395),
         next_button=Point(919, 628),
         sharing_next=Point(899, 588),
+        windows_to_linux_checkbox=Point(125, 310),
+        linux_to_windows_checkbox=Point(125, 415),
         username=Point(512, 220),
         password=Point(512, 333),
         password_confirmation=Point(512, 445),
@@ -47,6 +54,8 @@ class WizardAutomationMixin:
         distribution=Point(220, 389),
         next_button=Point(838, 614),
         sharing_next=Point(822, 579),
+        windows_to_linux_checkbox=Point(125, 310),
+        linux_to_windows_checkbox=Point(125, 415),
         username=Point(508, 223),
         password=Point(508, 330),
         password_confirmation=Point(508, 438),
@@ -62,7 +71,7 @@ class WizardAutomationMixin:
     ) -> Literal["boot-menu", "linux-desktop"] | None:
         client = None
         try:
-            client = api.connect(VNCClient._vncdotool_address(vm.vnc))
+            client = self.vnc.connect(vm.vnc)
             time.sleep(1)
             self._capture_from_client(client, vm, "00-welcome", result)
 
@@ -117,6 +126,10 @@ class WizardAutomationMixin:
             distro_point=layout.distribution,
             next_point=layout.next_button,
             sharing_point=layout.sharing_next,
+            windows_to_linux_checkbox=layout.windows_to_linux_checkbox,
+            linux_to_windows_checkbox=layout.linux_to_windows_checkbox,
+            share_windows_files_in_linux=options.share_windows_files_in_linux,
+            share_linux_files_in_windows=options.share_linux_files_in_windows,
             username=options.linux_username,
             result=result,
         )
@@ -143,7 +156,10 @@ class WizardAutomationMixin:
             result=result,
         )
 
-        self._click(client, vm, layout.next_button, 2.0)
+        # Navigation can complete after the button handler returns while WPF is
+        # busy rendering three concurrent test VMs. Let the animation settle
+        # before asking vision to prove that the warning page replaced account.
+        self._click(client, vm, layout.next_button, 5.0)
         warning_capture, warning_capture_latest = self._capture_wizard_pair(
             client, vm, "05-warning", result
         )
@@ -171,7 +187,13 @@ class WizardAutomationMixin:
         sharing_point: Point,
         username: str,
         result: ResultBuilder,
+        windows_to_linux_checkbox: Point | None = None,
+        linux_to_windows_checkbox: Point | None = None,
+        share_windows_files_in_linux: bool = True,
+        share_linux_files_in_windows: bool = True,
     ) -> None:
+        windows_to_linux_checkbox = windows_to_linux_checkbox or Point(125, 310)
+        linux_to_windows_checkbox = linux_to_windows_checkbox or Point(125, 415)
         deadline = time.monotonic() + 300
         last_screen: str | None = None
         attempt = 0
@@ -214,14 +236,33 @@ class WizardAutomationMixin:
                 "visible_text": verdict.visible_text,
             }
             visible_lower = verdict.visible_text.lower()
+            analysis_lower = f"{verdict.summary}\n{verdict.visible_text}".lower()
             # Empty account fields legitimately show "password required" before
             # automation fills them. Validation becomes strict immediately after fill.
             if verdict.detected_screen == "account":
                 return
-            if (
-                verdict.detected_screen == "compatibility"
-                and "preflight_ok=true" not in verdict.visible_text.lower()
+            compatibility_error_visible = verdict.detected_screen == "compatibility" and (
+                bool(re.search(r"\bCOMPAT_E_[A-Z0-9_]+\b", verdict.visible_text, re.IGNORECASE))
+                or "preflight_ok=false" in visible_lower
+            )
+            if compatibility_error_visible:
+                raise WorkflowError(
+                    "automation.compatibility_preflight",
+                    "Compatibility preflight failed",
+                    details=context,
+                )
+            if verdict.detected_screen == "resize" and contains_install_blocker(
+                verdict.visible_text
             ):
+                raise WorkflowError(
+                    "automation.resize_capacity",
+                    "Libertix reports insufficient disk space",
+                    details=context,
+                )
+            compatibility_complete = verdict.detected_screen == "compatibility" and any(
+                marker in visible_lower for marker in COMPATIBILITY_SUCCESS_MARKERS
+            )
+            if verdict.detected_screen == "compatibility" and not compatibility_complete:
                 result.ok(
                     "automation.compatibility_wait",
                     "Compatibility preflight is still running",
@@ -230,8 +271,7 @@ class WizardAutomationMixin:
                 time.sleep(2)
                 continue
             compatibility_without_error = (
-                verdict.detected_screen == "compatibility"
-                and "compat_e_" not in verdict.visible_text.lower()
+                verdict.detected_screen == "compatibility" and not compatibility_error_visible
             )
             known_wizard_page_without_error = verdict.detected_screen in {
                 "welcome",
@@ -278,6 +318,10 @@ class WizardAutomationMixin:
             elif verdict.detected_screen == "resize":
                 self._click(client, vm, next_point, 1.0)
             elif verdict.detected_screen == "sharing":
+                if not share_windows_files_in_linux:
+                    self._click(client, vm, windows_to_linux_checkbox, 0.3)
+                if not share_linux_files_in_windows:
+                    self._click(client, vm, linux_to_windows_checkbox, 0.3)
                 self._click(client, vm, sharing_point, 1.0)
             elif verdict.detected_screen in {"warning", "apply"}:
                 raise WorkflowError(
@@ -298,9 +342,14 @@ class WizardAutomationMixin:
                     target=vm.vnc,
                     vm=vm.name,
                 )
-            elif (
-                verdict.detected_screen == "other"
-                and "protection contre les virus et menaces" in verdict.visible_text.lower()
+            elif verdict.detected_screen == "other" and any(
+                marker in analysis_lower
+                for marker in (
+                    "windows security",
+                    "securite windows",
+                    "sécurité windows",
+                    "protection contre les virus et menaces",
+                )
             ):
                 client.keyDown("alt")
                 client.keyPress("f4")
@@ -309,6 +358,25 @@ class WizardAutomationMixin:
                 result.ok(
                     "automation.dismiss_windows_security_window",
                     "Windows Security window closed to bring Libertix to the foreground",
+                    target=vm.vnc,
+                    vm=vm.name,
+                )
+            elif verdict.detected_screen == "other" and any(
+                marker in analysis_lower
+                for marker in (
+                    "windows settings",
+                    "paramètres windows",
+                    "parametres windows",
+                    "system settings",
+                )
+            ):
+                client.keyDown("alt")
+                client.keyPress("f4")
+                client.keyUp("alt")
+                time.sleep(3)
+                result.ok(
+                    "automation.dismiss_windows_settings",
+                    "Windows Settings closed to bring Libertix to the foreground",
                     target=vm.vnc,
                     vm=vm.name,
                 )

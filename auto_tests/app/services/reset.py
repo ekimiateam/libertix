@@ -7,10 +7,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.clients.proxmox import ProxmoxClient
 from app.clients.ssh import SSHClient
-from app.config import Settings
+from app.config import Settings, VMConfig
 from app.errors import WorkflowError
 from app.models import OperationResult, StepResult
 from app.services.common import ResultBuilder
+from app.services.validation import ValidationService
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ RESET_SNAPSHOT = "clean2"
 class ResetService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.validation = ValidationService(settings)
 
     def run(
         self,
@@ -28,22 +30,22 @@ class ResetService:
     ) -> OperationResult:
         result = ResultBuilder("reset", on_step=on_step)
         try:
-            reset_vm_ids = tuple(vm.vmid for vm in self.settings.vms)
-            vmids = self._selected_vmids(selectors)
+            selected_vms = self._selected_vms(selectors)
+            vmids = tuple(vm.vmid for vm in selected_vms)
             locations = self._preflight_proxmox(result, vmids)
             if selectors is None:
                 self._empty_smb(result)
             else:
                 result.ok(
                     "reset.scope",
-                    "Selective reset requested: /root/smb is preserved",
+                    f"Selective reset requested: {self.settings.smb_root} is preserved",
                     targets=[str(vmid) for vmid in vmids],
                 )
             self._restore_snapshots(locations, vmids, result)
             if selectors is None:
                 return result.success(
-                    "Reset completed for /root/smb and VMs "
-                    + ", ".join(str(vmid) for vmid in reset_vm_ids)
+                    f"Reset completed for {self.settings.smb_root} and VMs "
+                    + ", ".join(str(vmid) for vmid in vmids)
                 )
             return result.success("Reset completed for " + ", ".join(str(vmid) for vmid in vmids))
         except WorkflowError as exc:
@@ -69,43 +71,18 @@ class ResetService:
         )
 
     def _selected_vmids(self, selectors: Sequence[str] | None) -> tuple[int, ...]:
-        if selectors is None:
-            return tuple(vm.vmid for vm in self.settings.vms)
-        if not selectors:
+        return tuple(vm.vmid for vm in self._selected_vms(selectors))
+
+    def _selected_vms(self, selectors: Sequence[str] | None) -> tuple[VMConfig, ...]:
+        if selectors is not None and not selectors:
             raise WorkflowError("reset.selector", "No VM requested")
+        return self.validation.select_vms(selectors)
 
-        aliases: dict[str, int] = {
-            "500": 500,
-            "vm500": 500,
-            "win10-bios": 500,
-            "windows10-bios": 500,
-            "501": 501,
-            "vm501": 501,
-            "win10-uefi": 501,
-            "windows10-uefi": 501,
-            "502": 502,
-            "vm502": 502,
-            "win11": 502,
-            "win11-uefi": 502,
-            "windows11-uefi": 502,
-        }
-        for vm in self.settings.vms:
-            aliases[vm.name.strip().lower()] = vm.vmid
-        selected: list[int] = []
-        for selector in selectors:
-            key = selector.strip().lower()
-            vmid = aliases.get(key)
-            if vmid is None:
-                raise WorkflowError(
-                    "reset.selector",
-                    "Unknown VM requested for reset",
-                    details={"selector": selector},
-                )
-            if vmid not in selected:
-                selected.append(vmid)
-        return tuple(selected)
-
-    def _preflight_proxmox(self, result: ResultBuilder, vmids: Sequence[int]) -> dict[int, str]:
+    def _preflight_proxmox(
+        self,
+        result: ResultBuilder,
+        vmids: Sequence[int],
+    ) -> dict[int, str]:
         locations: dict[int, str] = {}
         with self._proxmox() as proxmox:
             for vmid in vmids:
@@ -151,16 +128,19 @@ class ResetService:
             if verification.stdout:
                 raise WorkflowError(
                     "reset.verify_smb_empty",
-                    "The /root/smb directory is not empty after deletion",
+                    f"The {s.smb_root} directory is not empty after deletion",
                 )
         result.ok(
             "reset.empty_smb",
-            "/root/smb contents deleted and empty state verified",
+            f"{s.smb_root} contents deleted and empty state verified",
             target=s.main_ssh_host,
         )
 
     def _restore_snapshots(
-        self, locations: dict[int, str], vmids: Sequence[int], result: ResultBuilder
+        self,
+        locations: dict[int, str],
+        vmids: Sequence[int],
+        result: ResultBuilder,
     ) -> None:
         for vmid in vmids:
             if vmid not in locations:

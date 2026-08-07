@@ -65,39 +65,7 @@ candidate_disks() {
 write_windows_recovery_marker_best_effort() {
     local state="$1"
     local rc="${2:-0}"
-    local mountpoint="/mnt/libertix-recovery-state"
-    local relative marker
-
-    [ -n "$RECOVERY_ROOT_WINDOWS" ] || return 0
-    [ -n "$RECOVERY_RUN_ID" ] || return 0
-    [ -n "$WINDOWS_PART" ] && [ -b "$WINDOWS_PART" ] || return 0
-    case "$RECOVERY_ROOT_WINDOWS" in
-        [Cc]:\\*) ;;
-        *)
-            echo "WARNING: refusing unexpected Windows recovery root: $RECOVERY_ROOT_WINDOWS"
-            return 0
-            ;;
-    esac
-
-    relative="$(windows_path_to_relative "$RECOVERY_ROOT_WINDOWS")"
-    marker="$mountpoint/$relative/$state.env"
-    mkdir -p "$mountpoint"
-    mountpoint -q "$mountpoint" && umount "$mountpoint" 2>/dev/null || true
-    if ! mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint" 2>/dev/null; then
-        echo "WARNING: cannot write Windows recovery marker $state"
-        return 0
-    fi
-
-    mkdir -p "$(dirname "$marker")" 2>/dev/null || true
-    {
-        echo "LIBERTIX_UEFI_RECOVERY_RUN_ID=$RECOVERY_RUN_ID"
-        echo "LIBERTIX_UEFI_RECOVERY_STATE=$state"
-        echo "LIBERTIX_UEFI_RECOVERY_STAGE=$CURRENT_STAGE"
-        echo "LIBERTIX_UEFI_RECOVERY_RC=$rc"
-        echo "LIBERTIX_UEFI_RECOVERY_TIME=$(date -Is 2>/dev/null || date)"
-    } > "$marker" 2>/dev/null || true
-    sync || true
-    umount "$mountpoint" 2>/dev/null || true
+    write_windows_recovery_marker_file_best_effort "UEFI" "$state" "$rc"
 }
 
 disk_matches_manifest() {
@@ -115,44 +83,6 @@ disk_matches_manifest() {
     [ -n "$boot_candidate" ] || return 1
 }
 
-
-recovery_geometry() {
-    local disk="$1"
-    manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"
-}
-
-
-
-verify_fstab_or_die() {
-    local target_root="$1" output rc
-    local target_dev="$target_root/dev"
-
-    [ -f "$target_root/etc/fstab" ] || die "final verify: target fstab missing"
-    [ -d "$target_dev" ] || die "final verify: target /dev directory missing"
-
-    # findmnt resolves mount targets from /. Run it in the installed system;
-    # otherwise /boot/efi is incorrectly checked against the live environment.
-    mount --rbind /dev "$target_dev" || die "final verify: unable to bind /dev for fstab validation"
-    mount --make-rslave "$target_dev" || {
-        umount -R "$target_dev" 2>/dev/null || true
-        die "final verify: unable to isolate target /dev bind"
-    }
-
-    if output=$(chroot "$target_root" findmnt --verify --verbose --tab-file /etc/fstab 2>&1); then
-        rc=0
-    else
-        rc=$?
-    fi
-    umount -R "$target_dev" || die "final verify: unable to unmount target /dev bind"
-
-    printf '%s\n' "$output"
-    [ "$rc" -eq 0 ] && return 0
-    if printf '%s\n' "$output" | grep -Eq '(^|[[:space:]])0 parse errors, 0 errors,'; then
-        echo "FINAL VERIFY: fstab has non-fatal compatibility warnings only"
-        return 0
-    fi
-    die "final verify: fstab is invalid"
-}
 
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
@@ -233,7 +163,7 @@ final_verify_or_die() {
 }
 
 firmware_prepare_rollback_best_effort() {
-    cleanup_final_uefi_bootloader_best_effort || true
+    cleanup_final_uefi_bootloader_best_effort
 }
 
 uefi_partition_table_or_die() {
@@ -287,11 +217,18 @@ firmware_restore_boot_state_best_effort() {
     # of assuming partition 1, otherwise a rollback marks the wrong partition.
     local esp_part esp_num
     esp_part="$(find_esp_partition || true)"
-    [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 0
-    [ "$(parent_disk_from_part "$esp_part")" = "$DISK" ] || return 0
+    [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 1
+    [ "$(parent_disk_from_part "$esp_part")" = "$DISK" ] || return 1
     esp_num="$(partition_number "$esp_part")"
-    [ -n "$esp_num" ] || return 0
-    parted -s "$DISK" set "$esp_num" esp on 2>/dev/null || true
+    [ -n "$esp_num" ] || return 1
+    parted -s "$DISK" set "$esp_num" esp on 2>/dev/null || return 1
+    parted -sm "$DISK" print 2>/dev/null | awk -F: -v number="$esp_num" '
+        $1 == number {
+            count++
+            if ($7 ~ /(^|,)(boot|esp)(,|;$)/) found=1
+        }
+        END { exit !(count == 1 && found == 1) }
+    '
 }
 
 firmware_write_failure_marker_best_effort() {
@@ -375,40 +312,42 @@ find_esp_partition() {
 }
 
 cleanup_final_uefi_bootloader_best_effort() {
-    local bootnum esp_part esp_mount
+    local bootnum esp_part esp_mount temporary_entries
 
     [ "$INSTALL_SUCCESS" = false ] || return 0
 
     if command -v efibootmgr >/dev/null 2>&1; then
-        efibootmgr 2>/dev/null \
+        temporary_entries="$(efibootmgr 2>/dev/null \
             | awk '/^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][* ] Libertix[[:space:]]/ {
                 n=substr($1,5,4)
                 gsub(/\*/, "", n)
                 print n
-            }' \
-            | while read -r bootnum; do
-                [ -n "$bootnum" ] || continue
-                echo "ROLLBACK: deleting final UEFI entry Boot$bootnum"
-                efibootmgr -b "$bootnum" -B || \
-                    echo "ROLLBACK: warning: cannot delete final UEFI entry Boot$bootnum"
-            done
+            }')" || return 1
+        while read -r bootnum; do
+            [ -n "$bootnum" ] || continue
+            echo "ROLLBACK: deleting final UEFI entry Boot$bootnum"
+            efibootmgr -b "$bootnum" -B || return 1
+        done <<< "$temporary_entries"
+        if efibootmgr 2>/dev/null | grep -Eq \
+            '^Boot[0-9A-Fa-f]{4}[* ] Libertix([[:space:]]|$)'; then
+            return 1
+        fi
     fi
 
     esp_part="$(find_esp_partition || true)"
-    [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 0
+    [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 1
 
     esp_mount="/mnt/libertix-rollback-esp"
     mkdir -p "$esp_mount"
-    if mount -t vfat -o rw,flush "$esp_part" "$esp_mount"; then
-        if [ -d "$esp_mount/EFI/Libertix" ]; then
-            echo "ROLLBACK: removing EFI/Libertix from ESP"
-            rm -rf "$esp_mount/EFI/Libertix"
-            sync || true
-        fi
-        umount "$esp_mount" 2>/dev/null || true
-    else
-        echo "ROLLBACK: warning: cannot mount ESP to remove EFI/Libertix"
+    mount -t vfat -o rw,flush "$esp_part" "$esp_mount" || return 1
+    if [ -d "$esp_mount/EFI/Libertix" ]; then
+        echo "ROLLBACK: removing EFI/Libertix from ESP"
+        rm -rf "$esp_mount/EFI/Libertix" || return 1
+        sync || return 1
     fi
+    [ ! -e "$esp_mount/EFI/Libertix" ] || return 1
+    umount "$esp_mount" || return 1
+    rmdir "$esp_mount" 2>/dev/null || return 1
 }
 
 set_linux_partition_type_or_die() {

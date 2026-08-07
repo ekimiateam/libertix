@@ -15,6 +15,9 @@ a small live system performs the Linux installation, and the installed system re
 boot and sharing configuration. BIOS and UEFI use separate boot adapters, while the safety rules,
 installation plan, state tracking and most live operations are shared.
 
+The authoritative lifecycle, state, and rollback guarantees are documented in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ```mermaid
 flowchart TB
     subgraph Windows["Windows application"]
@@ -221,15 +224,15 @@ local `.env` file; `auto_tests/.env.example` documents the required fields.
 ```bash
 cd auto_tests
 python -m pip install --requirement requirements-dev.txt
-python -m ruff check app tests
-python -m ruff format --check app tests
-python -m pytest --cov=app --cov-report=term-missing
+python -m ruff check app tests ../assets/live/*.py
+python -m ruff format --check app tests ../assets/live/*.py
+python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 ```
 
-The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, parses the PowerShell
-sources, builds `Libertix.exe` on Windows and builds both ISO images on trusted `dev` branch runs.
-Successful workflow runs publish the WPF build and the verified ISO images as GitHub Actions
-artifacts.
+The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, analyzes PowerShell with
+PSScriptAnalyzer, runs the Pester contract suite, builds `Libertix.exe` on Windows and builds both
+ISO images on trusted `dev` branch runs. Successful workflow runs publish the WPF build and the
+verified ISO images as GitHub Actions artifacts.
 
 ## Source layout
 

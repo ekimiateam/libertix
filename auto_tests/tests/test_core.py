@@ -11,8 +11,8 @@ import app.services.automation as automation_module
 import app.services.automation_monitoring as automation_monitoring_module
 import app.services.automation_wizard as automation_wizard_module
 from app.clients.ssh import CommandResult
-from app.clients.vision_llm import VisionLLMClient
 from app.clients.vision_models import InstallProgressVerdict
+from app.clients.vision_parsing import load_wizard_json
 from app.clients.vnc import VNCClient
 from app.config import Settings
 from app.errors import WorkflowError
@@ -101,38 +101,38 @@ def read_repo(relative_path: str) -> str:
 
 def settings(**overrides: object) -> Settings:
     values = {
-        "main_ssh_host": "192.168.1.208",
+        "main_ssh_host": "192.0.2.208",
         "main_ssh_user": "root",
         "main_ssh_password": "secret",
         "windows_ssh_password": "secret",
-        "samba_unc": r"\\192.168.1.208\smb",
+        "samba_unc": r"\\192.0.2.208\smb",
         "samba_username": "admin",
         "samba_password": "secret",
-        "build_vm_host": "192.168.1.138",
+        "build_vm_host": "192.0.2.138",
         "build_vm_user": "admin",
         "build_vm_password": "secret",
         "ssh_known_hosts": "/tmp/libertix-test-known-hosts",
-        "filepool_base_url": "http://192.168.1.170:8000/filepool",
+        "filepool_base_url": "http://192.0.2.170:8000/filepool",
         "development_static_ipv4_prefix_length": 24,
-        "development_static_ipv4_gateway": "192.168.1.1",
+        "development_static_ipv4_gateway": "192.0.2.1",
         "development_dns_servers": ("8.8.8.8", "1.1.1.1"),
         "repository_url": "https://github.com/ekimiateam/libertix.git",
-        "smb_root": "/root/smb",
-        "allowed_smb_roots": ("/root/smb",),
+        "smb_root": "/srv/libertix-smb",
+        "allowed_smb_roots": ("/srv/libertix-smb",),
         "allowed_proxmox_vmids": (500, 501, 502),
-        "llm_api_url": "http://192.168.1.247:8000/v1",
+        "llm_api_url": "http://192.0.2.247:8000/v1",
         "llm_api_key": "secret",
         "llm_model": "Qwen3.6-35B-A3B-Thinking",
-        "proxmox_url": "https://192.168.1.166:8006",
+        "proxmox_url": "https://192.0.2.166:8006",
         "proxmox_token_id": "root@pam!eki",
         "proxmox_token_secret": "secret",
         "api_access_token": "secret",
         "vms": (
             {
                 "name": "vm1",
-                "host": "192.168.1.240",
+                "host": "192.0.2.240",
                 "os": "Windows 10 BIOS",
-                "vnc": "192.168.1.166:10",
+                "vnc": "192.0.2.166:10",
                 "screen_width": 1024,
                 "screen_height": 768,
                 "vmid": 500,
@@ -141,9 +141,9 @@ def settings(**overrides: object) -> Settings:
             },
             {
                 "name": "vm2",
-                "host": "192.168.1.241",
+                "host": "192.0.2.241",
                 "os": "Windows 10 UEFI",
-                "vnc": "192.168.1.166:11",
+                "vnc": "192.0.2.166:11",
                 "screen_width": 1280,
                 "screen_height": 800,
                 "vmid": 501,
@@ -152,9 +152,9 @@ def settings(**overrides: object) -> Settings:
             },
             {
                 "name": "vm3",
-                "host": "192.168.1.242",
+                "host": "192.0.2.242",
                 "os": "Windows 11 UEFI",
-                "vnc": "192.168.1.166:12",
+                "vnc": "192.0.2.166:12",
                 "screen_width": 1280,
                 "screen_height": 800,
                 "vmid": 502,
@@ -180,7 +180,7 @@ def apply_changes_source() -> str:
 def test_share_path_translation() -> None:
     service = ValidationService(settings())
     actual = service.to_windows_share_path(
-        PurePosixPath("/root/smb/Libertix-release/folder/Libertix.exe")
+        PurePosixPath("/srv/libertix-smb/Libertix-release/folder/Libertix.exe")
     )
     assert actual == PureWindowsPath("Z:/Libertix-release/folder/Libertix.exe")
 
@@ -193,10 +193,10 @@ def test_smb_root_is_strictly_guarded() -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "ftp://192.168.1.170/filepool",
-        "http://user:password@192.168.1.170/filepool",
-        "http://192.168.1.170/filepool?token=secret",
-        "http://192.168.1.170/filepool#fragment",
+        "ftp://192.0.2.170/filepool",
+        "http://user:password@192.0.2.170/filepool",
+        "http://192.0.2.170/filepool?token=secret",
+        "http://192.0.2.170/filepool#fragment",
     ],
 )
 def test_filepool_base_url_rejects_unsafe_values(url: str) -> None:
@@ -300,7 +300,7 @@ def test_local_source_copy_excludes_env_files(tmp_path: Path) -> None:
 
 
 def test_vnc_display_is_converted_to_tcp_port() -> None:
-    assert VNCClient._vncdotool_address("192.168.1.166:10") == "192.168.1.166::5910"
+    assert VNCClient.vncdotool_address("192.0.2.166:10") == "192.0.2.166::5910"
 
 
 def test_absolute_vnc_click_is_not_scaled() -> None:
@@ -404,8 +404,8 @@ def test_navigation_closes_windows_security_after_defender_preparation(
     )
     screens = iter(
         (
-            ("other", "Protection contre les virus et menaces"),
-            ("account", "Créez votre compte Linux"),
+            ("other", "Windows Security is visible", ""),
+            ("account", "test", "Créez votre compte Linux"),
         )
     )
 
@@ -417,12 +417,12 @@ def test_navigation_closes_windows_security_after_defender_preparation(
     )
 
     def analyze(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        screen, visible_text = next(screens)
+        screen, summary, visible_text = next(screens)
         return SimpleNamespace(
             detected_screen=screen,
             expected_screen_visible=False,
             no_blocking_error=True,
-            summary="test",
+            summary=summary,
             visible_text=visible_text,
         )
 
@@ -521,8 +521,8 @@ def test_navigation_accepts_compatibility_progress_without_false_error(
                 detected_screen="compatibility",
                 expected_screen_visible=False,
                 no_blocking_error=True,
-                summary="Machine compatible",
-                visible_text="PREFLIGHT_OK=true Continuer",
+                summary="The page is compatible and has no COMPAT_E_* error",
+                visible_text="Machine compatible avec Libertix. Continuer",
             ),
             *[
                 SimpleNamespace(
@@ -554,8 +554,94 @@ def test_navigation_accepts_compatibility_progress_without_false_error(
     assert any(step.step == "automation.compatibility_wait" for step in result.steps)
 
 
+def test_navigation_reports_blocking_compatibility_error_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    events: list[tuple[str, int, int] | tuple[str, int]] = []
+    client = SimpleNamespace(
+        mouseMove=lambda x, y: events.append(("move", x, y)),
+        mousePress=lambda button: events.append(("press", button)),
+    )
+
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_from_client",
+        lambda *_args, **_kwargs: Path("compatibility-error.png"),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        detected_screen="compatibility",
+        expected_screen_visible=False,
+        no_blocking_error=False,
+        summary="Compatibility failed with COMPAT_E_RAM_TOO_LOW",
+        visible_text="COMPAT_E_RAM_TOO_LOW: 2048 MiB required",
+    )
+
+    result = ResultBuilder("automation")
+    with pytest.raises(WorkflowError) as raised:
+        service._navigate_to_account(  # noqa: SLF001
+            client,
+            vm,
+            welcome_point=Point(512, 432),
+            distro_point=Point(220, 389),
+            next_point=Point(838, 614),
+            sharing_point=Point(822, 579),
+            username="test",
+            result=result,
+        )
+
+    assert raised.value.step == "automation.compatibility_preflight"
+    assert "COMPAT_E_RAM_TOO_LOW" in raised.value.details["summary"]
+    assert events == []
+
+
+def test_navigation_reports_insufficient_resize_capacity_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    events: list[tuple[str, int, int] | tuple[str, int]] = []
+    client = SimpleNamespace(
+        mouseMove=lambda x, y: events.append(("move", x, y)),
+        mousePress=lambda button: events.append(("press", button)),
+    )
+
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_from_client",
+        lambda *_args, **_kwargs: Path("resize-capacity-error.png"),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        detected_screen="resize",
+        expected_screen_visible=False,
+        no_blocking_error=False,
+        summary="The resize page is blocked",
+        visible_text="Espace insuffisant. 2,5 Gio supplémentaires sont nécessaires.",
+    )
+
+    result = ResultBuilder("automation")
+    with pytest.raises(WorkflowError) as raised:
+        service._navigate_to_account(  # noqa: SLF001
+            client,
+            vm,
+            welcome_point=Point(512, 432),
+            distro_point=Point(220, 389),
+            next_point=Point(838, 614),
+            sharing_point=Point(822, 579),
+            username="test",
+            result=result,
+        )
+
+    assert raised.value.step == "automation.resize_capacity"
+    assert "Espace insuffisant" in raised.value.details["visible_text"]
+    assert events == []
+
+
 def test_wizard_screen_uses_visible_title_when_model_returns_other() -> None:
-    verdict = VisionLLMClient._load_wizard_json(  # noqa: SLF001
+    verdict = load_wizard_json(
         '{"detected_screen":"other","visible_text":"Choisissez votre version de Linux !",'
         '"expected_screen_visible":false,"no_blocking_error":true,'
         '"username_visible":false,"password_fields_filled":false,"summary":"selection"}'
@@ -610,6 +696,72 @@ def test_navigation_ignores_desktop_weather_warning_on_distro(
     )
 
     assert len([event for event in events if event[0] == "press"]) == 2
+
+
+def test_navigation_closes_windows_settings_covering_libertix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    keys: list[tuple[str, str]] = []
+    client = SimpleNamespace(
+        keyDown=lambda key: keys.append(("down", key)),
+        keyPress=lambda key: keys.append(("press", key)),
+        keyUp=lambda key: keys.append(("up", key)),
+        mouseMove=lambda _x, _y: None,
+        mousePress=lambda _button: None,
+    )
+    verdicts = iter(
+        (
+            SimpleNamespace(
+                detected_screen="other",
+                expected_screen_visible=False,
+                no_blocking_error=True,
+                summary="Windows Settings is covering the Libertix wizard",
+                visible_text="",
+            ),
+            SimpleNamespace(
+                detected_screen="account",
+                expected_screen_visible=True,
+                no_blocking_error=True,
+                summary="Account page",
+                visible_text="Créez votre compte Linux",
+            ),
+        )
+    )
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_from_client",
+        lambda *_args, **_kwargs: Path("windows-settings.png"),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: next(verdicts)  # type: ignore[method-assign]
+    result = ResultBuilder("automation")
+
+    service._navigate_to_account(  # noqa: SLF001
+        client,
+        vm,
+        welcome_point=Point(512, 432),
+        distro_point=Point(220, 389),
+        next_point=Point(838, 614),
+        sharing_point=Point(822, 579),
+        username="test",
+        result=result,
+    )
+
+    assert keys == [("down", "alt"), ("press", "f4"), ("up", "alt")]
+    assert any(step.step == "automation.dismiss_windows_settings" for step in result.steps)
+
+
+def test_account_navigation_waits_for_the_warning_transition() -> None:
+    source = (REPO_ROOT / "auto_tests/app/services/automation_wizard.py").read_text(
+        encoding="utf-8"
+    )
+    account_transition = source.split("account_capture_latest", 1)[1].split(
+        "warning_capture_latest", 1
+    )[0]
+
+    assert "layout.next_button, 5.0" in account_transition
 
 
 def test_validation_source_defaults_to_local() -> None:
@@ -673,6 +825,65 @@ def test_launch_interactive_uses_elevated_scheduled_task(monkeypatch: pytest.Mon
     assert launch["launch_method"] == "scheduled_task_elevated"
 
 
+def test_launch_interactive_confirms_process_when_launcher_output_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSshContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    service = ValidationService(settings())
+    scripts: list[str] = []
+
+    def fake_run_windows_script(
+        *_args: object, script_name: str, step: str, **_kwargs: object
+    ) -> object:
+        scripts.append(script_name)
+        if script_name == "launch_libertix_elevated.ps1":
+            assert step == "vm.launch_elevated"
+            return SimpleNamespace(stdout="", stderr="")
+
+        assert script_name == "confirm_libertix_process.ps1"
+        assert step == "vm.launch_elevated.confirm_process"
+        return SimpleNamespace(
+            stdout=(
+                "PID=1234\nSESSION_ID=2\nTASK_NAME=LibertixValidation_vm1\n"
+                "EXECUTABLE=Z:\\Libertix-release\\Libertix.exe\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(service, "ssh", lambda *_args, **_kwargs: FakeSshContext())
+    monkeypatch.setattr(service, "run_windows_script", fake_run_windows_script)
+    vm = service.select_vms(["vm1"])[0]
+
+    launch = service._launch_interactive(  # noqa: SLF001
+        vm,
+        PureWindowsPath("Z:/Libertix-release/Libertix.exe"),
+        ResultBuilder("validation"),
+    )
+
+    assert scripts == ["launch_libertix_elevated.ps1", "confirm_libertix_process.ps1"]
+    assert launch["pid"] == 1234
+    assert launch["session_id"] == 2
+
+
+def test_about_back_navigation_uses_a_fresh_welcome_page() -> None:
+    source = read_repo("MainWindow.xaml.cs")
+    project = read_repo("Libertix.csproj")
+    return_to_welcome = source.split("public void ReturnToWelcome()", 1)[1].split(
+        "private Welcome CreateWelcomePage", 1
+    )[0]
+
+    assert '<Page Include="Pages\\Welcome.xaml" />' in project
+    assert "CreateWelcomePage()" in return_to_welcome
+    assert "navigation.RemoveBackEntry()" in return_to_welcome
+    assert "GoBack()" not in return_to_welcome
+
+
 def test_automation_launch_passes_the_windows_address_to_the_dev_ssh_option(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -697,7 +908,7 @@ def test_automation_launch_passes_the_windows_address_to_the_dev_ssh_option(
         assert step == "automation.launch_elevated"
         assert config["development_static_ipv4"] == vm.host
         assert config["development_static_ipv4_prefix_length"] == 24
-        assert config["development_static_ipv4_gateway"] == "192.168.1.1"
+        assert config["development_static_ipv4_gateway"] == "192.0.2.1"
         assert config["development_dns_servers"] == ["8.8.8.8", "1.1.1.1"]
         return SimpleNamespace(
             stdout=(
@@ -716,6 +927,46 @@ def test_automation_launch_passes_the_windows_address_to_the_dev_ssh_option(
 
     assert launch["pid"] == 1234
     assert launch["session_id"] == 2
+
+
+def test_automation_prepares_snapshot_clock_before_deployment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSshContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    observed: dict[str, object] = {}
+
+    def fake_run_windows_script(
+        *_args: object,
+        script_name: str,
+        config: dict[str, object],
+        step: str,
+        **_kwargs: object,
+    ) -> CommandResult:
+        observed.update(script_name=script_name, config=config, step=step)
+        return CommandResult(
+            stdout="UTC_NOW=2026-08-07T00:00:00.0000000Z\nCLOCK_SKEW_SECONDS=1\n",
+            stderr="",
+            exit_code=0,
+        )
+
+    monkeypatch.setattr(service.validation, "ssh", lambda *_args, **_kwargs: FakeSshContext())
+    monkeypatch.setattr(service.validation, "run_windows_script", fake_run_windows_script)
+    result = ResultBuilder("automation")
+
+    service._prepare_windows_test_vm(vm, result)  # noqa: SLF001
+
+    assert observed["script_name"] == "prepare_windows_test_vm.ps1"
+    assert observed["step"] == "automation.prepare_vm"
+    assert "utc_now" in observed["config"]
+    assert result.steps[-1].context["clock_skew_seconds"] == 1
 
 
 def test_automation_scope_accepts_vm500() -> None:
@@ -868,9 +1119,9 @@ def test_automation_scope_rejects_unvalidated_vm() -> None:
             vms=(
                 {
                     "name": "vm1",
-                    "host": "192.168.1.240",
+                    "host": "192.0.2.240",
                     "os": "Windows 10 BIOS",
-                    "vnc": "192.168.1.166:10",
+                    "vnc": "192.0.2.166:10",
                     "screen_width": 1024,
                     "screen_height": 768,
                     "vmid": 500,
@@ -879,9 +1130,9 @@ def test_automation_scope_rejects_unvalidated_vm() -> None:
                 },
                 {
                     "name": "vm4",
-                    "host": "192.168.1.244",
+                    "host": "192.0.2.244",
                     "os": "Windows experimental",
-                    "vnc": "192.168.1.166:14",
+                    "vnc": "192.0.2.166:14",
                     "screen_width": 1024,
                     "screen_height": 768,
                     "vmid": 501,
@@ -1043,9 +1294,9 @@ def test_automation_apply_false_only_launches_ui(monkeypatch: pytest.MonkeyPatch
             self.disconnected = True
 
     fake_client = FakeClient()
-    monkeypatch.setattr(automation_wizard_module.api, "connect", lambda _address: fake_client)
     monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     service = AutomationService(settings(capture_dir=tmp_path))
+    monkeypatch.setattr(service.vnc, "connect", lambda _address: fake_client)
     vm = service.validation.select_vms(["vm1"])[0]
     profile = service._automation_profile_for_vm(vm)  # noqa: SLF001
     assert profile is not None
@@ -1081,7 +1332,7 @@ def test_automation_run_removes_temporary_capture_workspace(
     monkeypatch.setattr(
         service.validation,
         "prepare_server",
-        lambda _result, source: PurePosixPath("/root/smb/Libertix-release/Libertix.exe"),
+        lambda _result, source: PurePosixPath("/srv/libertix-smb/Libertix-release/Libertix.exe"),
     )
 
     def fake_run_vm(*_args, **_kwargs):
@@ -1113,7 +1364,7 @@ def test_validation_run_removes_temporary_capture_workspace(
     monkeypatch.setattr(
         service,
         "prepare_server",
-        lambda _result, source: PurePosixPath("/root/smb/Libertix-release/Libertix.exe"),
+        lambda _result, source: PurePosixPath("/srv/libertix-smb/Libertix-release/Libertix.exe"),
     )
 
     def fake_validate_vm(*_args, **_kwargs):
@@ -1259,6 +1510,80 @@ def test_automation_monitor_stops_when_mint_desktop_is_seen_after_reboot(
         len([step for step in result.steps if step.step == "automation.monitor_installation"]) == 3
     )
     assert result.steps[-1].step == "automation.installation_finished"
+
+
+def test_automation_monitor_retries_a_restart_prompt_instead_of_calling_it_linux(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    verdicts = iter(
+        (
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=True,
+                reboot_prompt_visible=True,
+                still_in_progress=False,
+                error_visible=False,
+                summary="Preparation complete; restart control visible.",
+                visible_text="Libertix 100% Redémarrer",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=True,
+                reboot_prompt_visible=True,
+                still_in_progress=False,
+                error_visible=False,
+                summary="The Libertix installer still shows its restart control.",
+                visible_text="Redémarrer",
+            ),
+            InstallProgressVerdict(
+                iso_download_finished=True,
+                installation_finished=False,
+                reboot_prompt_visible=False,
+                still_in_progress=False,
+                error_visible=False,
+                summary="The installed boot menu is visible.",
+                visible_text="Linux Mint GNU/Linux\nWindows\nShutdown\nAdvanced options",
+            ),
+        )
+    )
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"/tmp/{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda _capture, _name, _os: next(verdicts),
+    )
+    reboot_clicks: list[str] = []
+    monkeypatch.setattr(
+        service,
+        "_click_reboot_after_preparation",
+        lambda selected_vm, _result: reboot_clicks.append(selected_vm.name),
+    )
+    result = ResultBuilder("automation")
+
+    outcome = service._monitor_until_live_boot(vm, result, "bios")  # noqa: SLF001
+
+    assert outcome == "boot-menu"
+    assert reboot_clicks == ["vm1", "vm1"]
+    assert any(step.step == "automation.reboot_retry" for step in result.steps)
+    assert not any(step.step == "automation.installation_finished" for step in result.steps)
+
+
+def test_linux_desktop_evidence_rejects_the_windows_restart_prompt() -> None:
+    service = AutomationService(settings())
+
+    assert service._installed_linux_desktop_seen(  # noqa: SLF001
+        "Bienvenue à Linux Mint 22.3 Cinnamon desktop"
+    )
+    assert not service._installed_linux_desktop_seen(  # noqa: SLF001
+        "Libertix 100% Redémarrer"
+    )
 
 
 def test_automation_monitor_labels_final_grub_menu_before_generic_finished_flag(
@@ -1475,7 +1800,7 @@ def test_bios_installer_keeps_windows_boot_partition_active() -> None:
     assert 'sfdisk --lock --activate "$DISK" "$partition_number"' in bios_adapter
     assert "only_mbr_partition_has_boot_flag" in bios_adapter
     assert "final verify: Windows boot partition is not active" in bios_adapter
-    assert 'Write-Result "BOOT_PARTITION_OFFSET"' in preflight
+    assert "bootPartitionOffset = [long]$boot.Offset" in preflight
 
     awk_program = """
         $1 == number {
@@ -1565,14 +1890,30 @@ def test_uefi_recovery_tasks_are_not_clock_boundary_dependent() -> None:
     assert '"/SC ONSTART /RU SYSTEM' not in source[method_start:method_end]
 
 
+def test_bios_recovery_task_is_not_clock_boundary_dependent() -> None:
+    script = read_repo("Scripts/libertix-register-bios-recovery-task.ps1")
+    source = apply_changes_source()
+
+    assert "New-ScheduledTaskTrigger -AtStartup" in script
+    assert "-StartWhenAvailable" in script
+    assert "StartBoundary" in script
+    assert "IsNullOrWhiteSpace" in script
+    assert "libertix-register-bios-recovery-task.ps1" in source
+    method_start = source.index("private async Task<bool> InstallWindowsRecoveryGuardAsync")
+    method_end = source.index("private async Task<double> QueryShrinkSpaceAsync", method_start)
+    method = source[method_start:method_end]
+    assert '"schtasks.exe"' not in method
+    assert '"/SC ONSTART' not in method
+
+
 def test_wpf_storage_preflight_fails_closed() -> None:
     source = apply_changes_source()
     preflight = read_repo("Scripts/libertix-storage-preflight.ps1")
 
     assert "DetectFirmwareTypeOrThrow" in source
     assert "Installation was stopped before any disk change" in source
-    assert "SYSTEM_DISK_NUMBER" in preflight
-    assert "BITLOCKER_SAFE" in preflight
+    assert "systemDiskNumber = [int]$partition.DiskNumber" in preflight
+    assert "bitLockerSafe = [bool]$bitLocker.Safe" in preflight
     assert "Exactly one Windows recovery partition is required" in preflight
 
 
@@ -1635,8 +1976,8 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     assert "timeout 5s timedatectl show" in time_sync_call[0]
     assert "timeout 5s timedatectl status" in time_sync_call[0]
     assert time_sync_call[1]["timeout"] == 150
-    assert "address1=192.168.1.240/24,192.168.1.1" in commands
-    assert "default via 192.168.1.1" in commands
+    assert "address1=192.0.2.240/24,192.0.2.1" in commands
+    assert "default via 192.0.2.1" in commands
     assert "8.8.8.8" in commands
     assert "1.1.1.1" in commands
 
@@ -1680,7 +2021,7 @@ def test_post_install_grub_selection_uses_vision_before_typing(
             visible_text=("Linux Mint GNU/Linux\nWindows Boot Manager\nShutdown\nAdvanced options"),
         ),
     )
-    monkeypatch.setattr("app.services.automation_postinstall.api.connect", lambda _address: vnc)
+    monkeypatch.setattr(service.vnc, "connect", lambda _address: vnc)
 
     selected = service._select_grub_entry_if_visible(  # noqa: SLF001
         vm, result, "windows", 3
@@ -1724,6 +2065,27 @@ def test_linux_windows_reboot_password_is_sent_only_on_stdin() -> None:
     assert result.steps[-1].status == "ok"
 
 
+def test_final_windows_reboot_uses_a_distinct_result_name() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    result = ResultBuilder("automation")
+
+    class FakeSSH:
+        def run(self, _command: str, **_kwargs) -> CommandResult:
+            return CommandResult(stdout="", stderr="", exit_code=0)
+
+    service._request_windows_boot(  # type: ignore[arg-type]  # noqa: SLF001
+        FakeSSH(),
+        vm,
+        AutomationOptions(True, "test", "test-passphrase", True),
+        result,
+        test_name="linux.final_windows_reboot",
+    )
+
+    assert result.steps[-1].context["test"] == "linux.final_windows_reboot"
+    assert result.steps[-1].message == "linux.final_windows_reboot: OK"
+
+
 def test_windows_post_install_checks_continue_after_one_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1731,9 +2093,11 @@ def test_windows_post_install_checks_continue_after_one_failure(
     vm = service.validation.select_vms(["vm3"])[0]
     result = ResultBuilder("automation")
     called: list[str] = []
+    timeouts: dict[str, float] = {}
 
-    def fake_run_windows_script(_ssh, *, config, **_kwargs) -> CommandResult:
+    def fake_run_windows_script(_ssh, *, config, timeout, **_kwargs) -> CommandResult:
         called.append(config["check"])
+        timeouts[config["check"]] = timeout
         if config["check"] == "bitlocker":
             raise WorkflowError(
                 "automation.test.windows",
@@ -1768,6 +2132,50 @@ def test_windows_post_install_checks_continue_after_one_failure(
         next(step for step in result.steps if step.context["test"] == "windows.chkdsk_scan").status
         == "ok"
     )
+    assert timeouts["identity"] == 300
+    assert timeouts["sfc_verify_only"] == 1800
+    assert timeouts["chkdsk_scan"] == 1800
+
+
+def test_windows_script_cleanup_does_not_mask_the_primary_failure() -> None:
+    service = AutomationService(settings())
+
+    class FailingSSH:
+        host = "example.test"
+
+        def __init__(self) -> None:
+            self.run_count = 0
+
+        def upload_text(self, *_args, **_kwargs) -> None:
+            pass
+
+        def run(self, *_args, **_kwargs) -> CommandResult:
+            self.run_count += 1
+            if self.run_count == 1:
+                raise WorkflowError(
+                    "automation.test.windows",
+                    "Primary Windows check timeout",
+                    details={"exception_type": "TimeoutError"},
+                )
+            raise WorkflowError(
+                "automation.test.windows.cleanup_script",
+                "Cleanup transport is closed",
+                details={"exception_type": "EOFError"},
+            )
+
+    ssh = FailingSSH()
+    with pytest.raises(WorkflowError) as caught:
+        service.validation.run_windows_script(  # type: ignore[arg-type]
+            ssh,
+            script_name="post_install_windows_check.ps1",
+            config={"check": "sfc_verify_only"},
+            step="automation.test.windows",
+            timeout=1800,
+        )
+
+    assert caught.value.message == "Primary Windows check timeout"
+    assert caught.value.details["exception_type"] == "TimeoutError"
+    assert ssh.run_count == 2
 
 
 def test_windows_post_install_script_exposes_every_requested_check() -> None:
@@ -1782,8 +2190,10 @@ def test_windows_post_install_script_exposes_every_requested_check() -> None:
     assert "$home =" not in script.casefold()
     assert "Get-NetRoute `" in script
     assert "$defaultRoutes.Count -ge 1" in script
-    assert 'NextHop -contains "192.168.1.1"' not in script
+    assert 'NextHop -contains "192.0.2.1"' not in script
     assert {
+        "final_state",
+        "finalization",
         "identity",
         "firmware",
         "system_volume",
@@ -1811,3 +2221,20 @@ def test_windows_post_install_script_exposes_every_requested_check() -> None:
         "sfc_verify_only",
         "chkdsk_scan",
     } <= implemented
+
+
+def test_final_windows_state_check_excludes_slow_health_scans() -> None:
+    script = read_repo("auto_tests/app/scripts/post_install_windows_check.ps1")
+    start = script.index('        "final_state" {')
+    end = script.index('        "identity" {', start)
+    final_state = script[start:end].casefold()
+
+    assert "get-ciminstance win32_operatingsystem" in final_state
+    assert "get-computerinfo" in final_state
+    assert "get-volume" in final_state
+    assert "get-netipaddress" in final_state
+    assert "get-service" in final_state
+    assert "bcdedit.exe" in final_state
+    assert "dism.exe" not in final_state
+    assert "sfc.exe" not in final_state
+    assert "chkdsk.exe" not in final_state

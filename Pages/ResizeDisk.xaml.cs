@@ -11,6 +11,7 @@ using System.Globalization;
 using System.Linq;
 using Libertix.Commands;
 using Libertix.Helpers;
+using Libertix.Installation;
 using Libertix.Models;
 
 namespace Libertix.Pages
@@ -35,10 +36,8 @@ namespace Libertix.Pages
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        // These reserves prevent the wizard from offering allocations that
-        // leave either operating system below its documented minimum.
-        public double MinimumSize => 20;
-        public double MinimumWindowsFree => 15;
+        public double MinimumSize => InstallationSizePolicy.MinimumFinalSizeGiB;
+        public double MinimumWindowsFree => InstallationSizePolicy.MinimumWindowsFreeSpaceGiB;
         private double AvailableLinuxSize => Math.Min(
             _initialFreeSpace - MinimumWindowsFree,
             _shrinkAvailableSpace);

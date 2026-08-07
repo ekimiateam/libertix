@@ -9,7 +9,6 @@
 
     <system:String x:Key="ChooseDistroTitle">Elija su versión de Linux</system:String>
     
-    <system:String x:Key="UbuntuDescription">Rápido, gratuito y lleno de nuevas características. Ubuntu es el sistema Linux preferido en el mundo.</system:String>
 
     <system:String x:Key="ResizeDiskTitle">Redimensiona tu disco</system:String>
     <system:String x:Key="Windows">Windows</system:String>
@@ -53,8 +52,6 @@
     <system:String x:Key="ComputerNameInvalid">El nombre del equipo debe comenzar por una letra y contener solo letras minúsculas, números o guiones</system:String>
 
     <system:String x:Key="PartitionWarningTitle">ADVERTENCIA: Configuración de partición no estándar</system:String>
-    <system:String x:Key="PartitionWarningMessage">Este instalador NO ha sido probado en esta configuración de particiones. Continuar NO SE RECOMIENDA a menos que sepa EXACTAMENTE lo que está haciendo.</system:String>
-    <system:String x:Key="PartitionWarningCheckbox">Entiendo</system:String>
 
     <system:String x:Key="WarningTitle">Advertencia</system:String>
     <system:String x:Key="WarningMessage">Está a punto de realizar cambios significativos en las particiones de su disco. Esta operación modificará su disco duro e instalará un sistema de arranque dual junto con Windows.</system:String>
@@ -116,15 +113,9 @@
 
     <system:String x:Key="ApplyChangesTitle">Aplicar cambios</system:String>
     <system:String x:Key="ApplyChangesWaiting">Listo para iniciar el particionamiento</system:String>
-    <system:String x:Key="ApplyChangesSummary">Resumen de la instalacion</system:String>
-    <system:String x:Key="ApplyChangesDistro">Distribucion:</system:String>
-    <system:String x:Key="ApplyChangesLinuxSize">Espacio Linux:</system:String>
-    <system:String x:Key="ApplyChangesUsername">Nombre de usuario:</system:String>
-    <system:String x:Key="ApplyChangesStart">Iniciar instalacion</system:String>
     <system:String x:Key="ApplyChangesStep1">Reduciendo particion de Windows para Linux...</system:String>
     <system:String x:Key="ApplyChangesStep2">Creando particion FAT32 de arranque...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">Esperando actualizacion del disco...</system:String>
-    <system:String x:Key="ApplyChangesStep3">Reduciendo particion de Windows para Linux...</system:String>
     <system:String x:Key="ApplyChangesComplete">Particionamiento completado!</system:String>
     <system:String x:Key="ApplyChangesError">Ocurrio un error</system:String>
     <system:String x:Key="ApplyChangesReboot">Reiniciar</system:String>
@@ -142,7 +133,6 @@
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Comprobando Secure Boot...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Inicializando el descifrado de Windows {0}...</system:String>
     <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} descifrado</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindows">Descifrando Windows {0}...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Descifrando Windows {0}: {1}%</system:String>
     <system:String x:Key="ApplyChangesDownloading">Descargando...</system:String>
     <system:String x:Key="ApplyChangesDownloadingIso">Descargando ISO...</system:String>
@@ -157,8 +147,6 @@
     <system:String x:Key="ApplyChangesMintReady">ISO de Mint lista</system:String>
     <system:String x:Key="ApplyChangesCreatingUefiPartition">Creando la partición de instalación UEFI...</system:String>
     <system:String x:Key="ApplyChangesDownloadingUefiIso">Descargando la ISO UEFI de Libertix...</system:String>
-    <system:String x:Key="ApplyChangesDownloadingUefiIsoPercent">Descargando la ISO UEFI de Libertix... {0}%</system:String>
-    <system:String x:Key="ApplyChangesDownloadingMintPercent">Descargando la ISO de Mint... {0}%</system:String>
     <system:String x:Key="ApplyChangesCopyingUefiInstaller">Copiando el instalador UEFI...</system:String>
     <system:String x:Key="ApplyChangesConfiguringUefiBoot">Configurando el arranque UEFI...</system:String>
     <system:String x:Key="ApplyChangesUefiComplete">Preparación UEFI completada</system:String>

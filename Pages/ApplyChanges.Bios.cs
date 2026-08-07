@@ -1,9 +1,10 @@
 // Windows-side BIOS installation workflow.
 //
-// This partial class arms recovery before disk changes, creates the reusable
-// FAT32 staging slot, publishes the validated installation plan, and installs
-// the one-shot GRUB4DOS bridge. The live environment owns conversion to ext4,
-// target extraction, final GRUB installation, verification, and live rollback.
+// This partial class verifies external artifacts before arming recovery, then
+// creates the reusable FAT32 staging slot, publishes the validated installation
+// plan, and installs the one-shot GRUB4DOS bridge. The live environment owns
+// conversion to ext4, target extraction, final GRUB installation, verification,
+// and live rollback.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -29,14 +30,15 @@ namespace Libertix.Pages
             InstallationSizes installationSizes =
                 InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB);
 
-            if (!await PrepareBiosPartitionAsync(installationSizes, distribution) ||
+            if (!await PrepareBiosDistributionIsoAsync(distribution) ||
+                !await PrepareBiosPartitionAsync(installationSizes) ||
                 !await PrepareBiosLiveMediaAsync(distribution) ||
                 !await PrepareBiosTemporaryBootAsync())
             {
                 return;
             }
 
-            UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
+            UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
             Log("Installation preparation completed successfully!");
             Log($"- FAT32 live partition: {_biosInstallerDriveLetter}: ({installationSizes.StagingSizeMiB / 1024:N0}GB staging, {_linuxSizeGB:N0}GB reserved for Linux)");
             Log("- The live installer will expand it if needed, then reformat it as ext4 without deleting/recreating the MBR entry");
@@ -51,8 +53,7 @@ namespace Libertix.Pages
         }
 
         private async Task<bool> PrepareBiosPartitionAsync(
-            InstallationSizes installationSizes,
-            InstallationDistribution distribution)
+            InstallationSizes installationSizes)
         {
             double requestedLinuxMB = installationSizes.FinalSizeMiB;
 
@@ -70,17 +71,11 @@ namespace Libertix.Pages
                     "Windows recovery guard installation failed before any disk modification.",
                     InstallationPhase.Windows);
                 Log("ERROR: Failed to install Windows recovery guard");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
                 return false;
             }
             CompleteExecutionStep(InstallationStep.WindowsRecoveryArmed);
-
-            // Keep the large distribution ISO on NTFS, but acquire it before
-            // shrinking C:. Both firmware paths must validate their free-space
-            // budget against the disk usage that will exist during the live run.
-            if (!await PrepareBiosDistributionIsoAsync(distribution))
-                return false;
 
             if (_installationState.Sharing.ShareWindowsFilesInLinux &&
                 !SetHibernateEnabled(false))
@@ -104,7 +99,7 @@ namespace Libertix.Pages
                 return false;
             }
 
-            UpdateProgress(10, Application.Current.Resources["ApplyChangesStep1"] as string ?? "Shrinking Windows partition...");
+            UpdateProgress(10, Localized("ApplyChangesStep1", "Shrinking Windows partition..."));
             Log($"Step 1: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
             StartExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
             bool shrinkSucceeded = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
@@ -121,8 +116,7 @@ namespace Libertix.Pages
             double biosStagingMB = installationSizes.StagingSizeMiB;
             UpdateProgress(
                 30,
-                Application.Current.Resources["ApplyChangesStep2"] as string
-                    ?? "Creating FAT32 boot partition...");
+                Localized("ApplyChangesStep2", "Creating FAT32 boot partition..."));
             Log(
                 biosStagingMB < requestedLinuxMB
                     ? $"Step 2: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; the live will expand it to {_linuxSizeGB:N0}GB..."
@@ -136,6 +130,8 @@ namespace Libertix.Pages
                 await FailBiosPreparationAndRollbackAsync("Failed to create FAT32 partition");
                 return false;
             }
+            _executionLedger.SetMirrorPath(
+                Path.Combine(BiosInstallerRoot, InstallationStateFileName));
             await UpdateInstallerPartitionIdentityAsync(_biosInstallerDriveLetter[0]);
             CompleteExecutionStep(InstallationStep.WindowsInstallerPartitionCreated);
 
@@ -154,7 +150,7 @@ namespace Libertix.Pages
             }
 
             Log("Step 3: No second shrink needed; live partition will become the Linux partition.");
-            UpdateProgress(50, Application.Current.Resources["ApplyChangesWaitDisk"] as string ?? "Waiting for disk update...");
+            UpdateProgress(50, Localized("ApplyChangesWaitDisk", "Waiting for disk update..."));
             return true;
         }
 
@@ -171,7 +167,7 @@ namespace Libertix.Pages
 
             UpdateProgress(55, Localized("ApplyChangesDownloadingIso", "Downloading ISO..."));
             Log($"Step 4: Downloading ISO from {isoUrl}...");
-            StartExecutionStep(InstallationStep.WindowsArtifactsVerified);
+            StartExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
 
             string tempIsoPath = Path.Combine(Path.GetTempPath(), "libertix_installer.iso");
             string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
@@ -206,11 +202,8 @@ namespace Libertix.Pages
                 return false;
             }
             ThrowIfCancellationRequested();
-            CompleteExecutionStep(InstallationStep.WindowsArtifactsVerified);
-
             UpdateProgress(80, Localized("ApplyChangesCopyingIsoContents", "Copying ISO contents..."));
             Log($"Step 5: Mounting ISO and copying contents to {BiosInstallerRoot}...");
-            StartExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
             bool copySucceeded = await MountAndCopyIsoAsync(tempIsoPath);
             ThrowIfCancellationRequested();
             if (!copySucceeded)
@@ -222,7 +215,7 @@ namespace Libertix.Pages
             bool lowMemoryMode =
                 _installationState.Compatibility is CompatibilityInfo compatibility &&
                 compatibility.LowMemoryMode;
-            if (lowMemoryMode && !await ConfigureBiosLowMemoryBootAsync(tempIsoPath))
+            if (lowMemoryMode && !ConfigureBiosLowMemoryBoot())
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Failed to configure low-memory live boot");
@@ -254,10 +247,13 @@ namespace Libertix.Pages
         {
             // The large distribution ISO stays on NTFS because the FAT32
             // staging volume must remain small enough for Windows to format.
+            // Acquire and verify it before arming recovery so a network or TLS
+            // failure cannot require disk rollback.
+            StartExecutionStep(InstallationStep.WindowsArtifactsVerified);
             if (string.IsNullOrEmpty(distribution.InstallerIsoUrl) ||
                 string.IsNullOrEmpty(distribution.InstallerIsoFileName))
             {
-                return true;
+                return FailBiosBeforeMutation("Linux installer ISO metadata is missing");
             }
 
             UpdateProgress(85, Localized("ApplyChangesDownloadingLinuxIso", "Downloading Linux installer ISO..."));
@@ -287,22 +283,28 @@ namespace Libertix.Pages
 
             if (!downloadSuccess)
             {
-                await FailBiosPreparationAndRollbackAsync(
-                    "Failed to download Linux installer ISO");
-                return false;
+                return FailBiosBeforeMutation("Failed to download Linux installer ISO");
             }
             if (!await VerifySha256Async(
                 installerPath,
                 distribution.InstallerIsoSha256,
                 "Mint ISO"))
             {
-                await FailBiosPreparationAndRollbackAsync(
-                    "Mint ISO integrity verification failed");
-                return false;
+                return FailBiosBeforeMutation("Mint ISO integrity verification failed");
             }
             ThrowIfCancellationRequested();
             Log($"Linux installer saved to {installerPath}");
+            CompleteExecutionStep(InstallationStep.WindowsArtifactsVerified);
             return true;
+        }
+
+        private bool FailBiosBeforeMutation(string reason)
+        {
+            RecordExecutionFailure("BIOS_ARTIFACT_PREPARATION_FAILED", reason, InstallationPhase.Windows);
+            Log($"ERROR: {reason}");
+            UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+            FinishInstallation(enableBackButton: true);
+            return false;
         }
 
         private async Task<bool> PrepareBiosTemporaryBootAsync()
@@ -342,7 +344,7 @@ namespace Libertix.Pages
                 if (!ready)
                 {
                     ready = await DownloadFileAsync(
-                        $"{FilepoolConfig.BaseUrl}/{file}",
+                        $"{Filepool.BaseUrl}/{file}",
                         destinationPath);
                 }
                 ThrowIfCancellationRequested();
@@ -727,18 +729,10 @@ namespace Libertix.Pages
             });
         }
 
-        private async Task<bool> ConfigureBiosLowMemoryBootAsync(string verifiedIsoPath)
+        private bool ConfigureBiosLowMemoryBoot()
         {
-            string retainedIsoPath = Path.Combine(
-                _storagePreflight.SystemDrive + @"\",
-                "libertix-live.iso");
             try
             {
-                await Task.Run(() => File.Copy(verifiedIsoPath, retainedIsoPath, true));
-                string expectedHash = _installationPlan?.Distribution?.LiveIsoSha256;
-                if (!await VerifySha256Async(retainedIsoPath, expectedHash, "Libertix low-memory ISO"))
-                    return false;
-
                 string[] bootConfigs = Directory.GetFiles(BiosInstallerRoot, "*.cfg", SearchOption.AllDirectories);
                 int updatedCount = 0;
                 foreach (string bootConfig in bootConfigs)
@@ -747,7 +741,7 @@ namespace Libertix.Pages
                     string updated = Regex.Replace(
                         content,
                         @"(?i)(^|\s)toram(?=\s|$)",
-                        "$1findiso=/libertix-live.iso");
+                        "$1toram=filesystem.squashfs");
                     if (updated == content) continue;
                     File.SetAttributes(bootConfig, FileAttributes.Normal);
                     File.WriteAllText(bootConfig, updated, new UTF8Encoding(false));
@@ -756,10 +750,10 @@ namespace Libertix.Pages
 
                 if (updatedCount == 0)
                 {
-                    Log("ERROR: No BIOS boot configuration accepted low-memory findiso mode.");
+                    Log("ERROR: No BIOS boot configuration accepted low-memory module mode.");
                     return false;
                 }
-                Log($"Low-memory findiso mode configured in {updatedCount} BIOS boot files.");
+                Log($"Low-memory SquashFS module boot configured in {updatedCount} BIOS boot files.");
                 return true;
             }
             catch (Exception ex)

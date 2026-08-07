@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api_requests import automation_request, validation_request
@@ -53,6 +53,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     api.state.settings = configured
 
     filepool_dir = Path(__file__).resolve().parent / "filepool"
+
+    @api.get("/filepool/distros.json", include_in_schema=False)
+    async def filepool_distribution_metadata() -> FileResponse:
+        generated = configured.runtime_dir / "filepool" / "distros.json"
+        metadata = generated if generated.is_file() else filepool_dir / "distros.json"
+        return FileResponse(metadata, media_type="application/json")
+
     api.mount("/filepool", StaticFiles(directory=filepool_dir), name="filepool")
 
     def authorize(x_api_key: str = Header(..., alias="X-API-Key")) -> None:
@@ -89,6 +96,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     linux_username=request.linux_username,
                     linux_password=request.linux_password,
                     monitor_iso=request.monitor_iso,
+                    share_windows_files_in_linux=request.share_windows_files_in_linux,
+                    share_linux_files_in_windows=request.share_linux_files_in_windows,
                     source=request.source,
                 )
             return await asyncio.to_thread(ResetService(configured).run, selectors)
@@ -134,6 +143,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             linux_username=request.linux_username,
                             linux_password=request.linux_password,
                             monitor_iso=request.monitor_iso,
+                            share_windows_files_in_linux=request.share_windows_files_in_linux,
+                            share_linux_files_in_windows=request.share_linux_files_in_windows,
                             source=request.source,
                             on_step=on_step,
                         )

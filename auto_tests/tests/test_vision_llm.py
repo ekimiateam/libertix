@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 
 from app.clients.vision_llm import INSTALL_PROGRESS_SYSTEM_PROMPT, SYSTEM_PROMPT, VisionLLMClient
+from app.clients.vision_parsing import load_wizard_json
 from app.errors import WorkflowError
 
 
@@ -407,7 +408,7 @@ def test_wizard_reasoning_uses_only_complete_verdict_json() -> None:
      "no_blocking_error":true,"visible_text":["Linux Mint 22.3", "Suivant"]}
     """
 
-    verdict = VisionLLMClient._load_wizard_json(reasoning)  # noqa: SLF001
+    verdict = load_wizard_json(reasoning)
 
     assert verdict["detected_screen"] == "distro"
     assert verdict["expected_screen_visible"] is False

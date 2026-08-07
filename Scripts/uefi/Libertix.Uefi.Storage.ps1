@@ -118,12 +118,7 @@ function Mount-Esp {
     param([Parameter(Mandatory = $true)][string]$Letter)
 
     if (Test-Path "${Letter}:\") {
-        Invoke-DiskpartScript -ScriptText @"
-select volume $Letter
-remove letter=$Letter
-exit
-"@
-        Start-Sleep -Seconds 1
+        throw "Drive letter $Letter became occupied before the ESP could be mounted."
     }
 
     $winPart = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
@@ -215,7 +210,8 @@ function Install-LibertixTemporaryBootloaderOnEsp {
     Copy-Item -LiteralPath $grubx64 -Destination (Join-Path $destination "grubx64.efi") -Force
     Copy-Item -LiteralPath $mmx64 -Destination (Join-Path $destination "mmx64.efi") -Force
 
-    $grubConfig = Get-LibertixStagingGrubConfig
+    $grubConfig = Get-LibertixStagingGrubConfig `
+        -UseLowMemoryMode ([bool]$LowMemoryMode)
     Set-Content -Path (Join-Path $destination "grub.cfg") -Value $grubConfig -Encoding ASCII
 
     $hashes = @{}
@@ -443,27 +439,24 @@ exit
 }
 
 function Get-FreeDriveLetter {
+    param([string[]]$ExcludedLetters = @())
+
     $used = @{}
     Get-Volume -ErrorAction SilentlyContinue |
         Where-Object { $_.DriveLetter } |
         ForEach-Object { $used[[string]$_.DriveLetter] = $true }
 
     foreach ($candidate in "X", "W", "V", "U", "T", "S", "R", "Q", "P", "O", "N", "M", "L", "K", "J", "I", "H", "G", "F", "E", "D") {
-        if (-not $used.ContainsKey($candidate) -and -not (Test-Path "${candidate}:\")) {
+        if (
+            $candidate -notin $ExcludedLetters -and
+            -not $used.ContainsKey($candidate) -and
+            -not (Test-Path "${candidate}:\")
+        ) {
             return $candidate
         }
     }
 
     throw "No free drive letter available for Libertix installer partition."
-}
-
-function Get-LibertixInstallerPartition {
-    param([Parameter(Mandatory = $true)][string]$DriveLetter)
-
-    # Only the access path returned by New-Partition identifies the new RAW
-    # slot before its transaction geometry has been persisted. Falling back to
-    # a label or a generic large ESP could select an unrelated user partition.
-    return Get-Partition -DriveLetter $DriveLetter -ErrorAction Stop
 }
 
 function Set-VolumeLetterByLabel {

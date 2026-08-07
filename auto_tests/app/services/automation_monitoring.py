@@ -7,9 +7,6 @@ import re
 import time
 from typing import Literal
 
-from vncdotool import api
-
-from app.clients.vnc import VNCClient
 from app.config import VMConfig
 from app.errors import WorkflowError
 from app.services.automation_types import Point
@@ -32,7 +29,7 @@ class InstallationMonitoringMixin:
         deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
         attempt = 0
         last_context: dict[str, object] | None = None
-        reboot_clicked = False
+        reboot_attempts = 0
         while time.monotonic() < deadline:
             attempt += 1
             time.sleep(self.settings.automation_monitor_interval_seconds)
@@ -92,17 +89,31 @@ class InstallationMonitoringMixin:
                     details=context,
                 )
             if (
-                not reboot_clicked
-                and (verdict.installation_finished or verdict.reboot_prompt_visible)
+                (verdict.installation_finished or verdict.reboot_prompt_visible)
+                and verdict.reboot_prompt_visible
                 and not verdict.active_install_progress_visible
             ):
+                if reboot_attempts >= 3:
+                    raise WorkflowError(
+                        "automation.reboot_click",
+                        "The Windows restart prompt remained visible after three attempts",
+                        details=context,
+                    )
                 result.ok(
-                    "automation.preparation_finished",
-                    f"{firmware.upper()} preparation completed; validating reboot",
+                    (
+                        "automation.preparation_finished"
+                        if reboot_attempts == 0
+                        else "automation.reboot_retry"
+                    ),
+                    (
+                        f"{firmware.upper()} preparation completed; validating reboot"
+                        if reboot_attempts == 0
+                        else f"{firmware.upper()} restart prompt remained visible; retrying"
+                    ),
                     **context,
                 )
                 self._click_reboot_after_preparation(vm, result)
-                reboot_clicked = True
+                reboot_attempts += 1
                 continue
             # Some vision models put GRUB OCR in the summary instead of
             # visible_text. Inspect both, but accept only the complete final
@@ -117,9 +128,10 @@ class InstallationMonitoringMixin:
                 )
                 return "boot-menu"
             if (
-                reboot_clicked
+                reboot_attempts > 0
                 and verdict.installation_finished
                 and not verdict.active_install_progress_visible
+                and self._installed_linux_desktop_seen(final_boot_evidence)
             ):
                 result.ok(
                     "automation.installation_finished",
@@ -254,10 +266,32 @@ class InstallationMonitoringMixin:
 
         return False
 
+    @staticmethod
+    def _installed_linux_desktop_seen(content: str) -> bool:
+        """Require Linux-specific evidence before accepting a generic final verdict."""
+
+        text = content.casefold()
+        if any(
+            marker in text
+            for marker in (
+                "redémarrer",
+                "restart",
+                "libertix 100%",
+                "installation preparation completed",
+                "préparation terminée",
+            )
+        ):
+            return False
+        linux_markers = ("linux mint", "cinnamon")
+        desktop_markers = ("desktop", "bureau", "welcome", "bienvenue", "panel", "panneau")
+        return any(marker in text for marker in linux_markers) and any(
+            marker in text for marker in desktop_markers
+        )
+
     def _click_reboot_after_preparation(self, vm: VMConfig, result: ResultBuilder) -> None:
         client = None
         try:
-            client = api.connect(VNCClient._vncdotool_address(vm.vnc))
+            client = self.vnc.connect(vm.vnc)
             self._capture_from_client(client, vm, "reboot-ready", result)
             # Small delays keep the click sequence visible and avoid racing the
             # confirmation dialog after the LLM declares the wizard complete.

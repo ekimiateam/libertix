@@ -8,10 +8,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Literal
 
-from vncdotool import api
-
 from app.clients.ssh import CommandResult, SSHClient
-from app.clients.vnc import VNCClient
 from app.config import VMConfig
 from app.errors import WorkflowError
 from app.services.automation_types import AutomationOptions
@@ -111,13 +108,116 @@ class PostInstallValidationMixin:
                 server_key_sha256=windows_ssh.server_key_sha256,
             )
             self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
+            self._request_linux_boot_from_windows(windows_ssh, vm, result)
         finally:
             windows_ssh.__exit__(None, None, None)
+
+        result.ok(
+            "automation.post_install_phase",
+            "Waiting for Linux SSH after the Windows boot cycle",
+            vm=vm.name,
+            target=vm.host,
+            phase="linux-return-ssh",
+        )
+        returned_linux_ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=options.linux_username,
+            password=options.linux_password,
+            trust_on_first_use=True,
+            probe="test -e /var/lib/libertix/development-ssh-ready && printf LIBERTIX_LINUX_READY",
+            expected="LIBERTIX_LINUX_READY",
+            phase="linux_return",
+            grub_entry="linux",
+        )
+        try:
+            firmware_test = (
+                "test -d /sys/firmware/efi"
+                if vm.firmware == "uefi"
+                else "test ! -d /sys/firmware/efi"
+            )
+            self._run_remote_check(
+                returned_linux_ssh,
+                vm,
+                result,
+                "linux",
+                RemoteCheck(
+                    "linux.return_after_windows",
+                    f"{firmware_test}; test -s /boot/grub/grub.cfg; "
+                    "grub-script-check /boot/grub/grub.cfg; "
+                    'test "$(findmnt -n -o FSTYPE /)" = ext4',
+                    requires_sudo=True,
+                ),
+                sudo_password=options.linux_password,
+            )
+            self._request_windows_boot(
+                returned_linux_ssh,
+                vm,
+                options,
+                result,
+                test_name="linux.final_windows_reboot",
+            )
+        finally:
+            returned_linux_ssh.__exit__(None, None, None)
+
+        result.ok(
+            "automation.post_install_phase",
+            "Waiting for the final Windows SSH state",
+            vm=vm.name,
+            target=vm.host,
+            phase="windows-final-ssh",
+        )
+        final_windows_ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="windows_final",
+            grub_entry="windows",
+        )
+        try:
+            try:
+                response = self.validation.run_windows_script(
+                    final_windows_ssh,
+                    script_name="post_install_windows_check.ps1",
+                    config={
+                        "check": "final_state",
+                        "expected_firmware": vm.firmware,
+                        "expected_ipv4": vm.host,
+                    },
+                    step="automation.test.windows",
+                    timeout=300,
+                )
+                result.ok(
+                    "automation.test.windows",
+                    "windows.final_state: OK",
+                    vm=vm.name,
+                    target=vm.host,
+                    test="windows.final_state",
+                    server_key_sha256=final_windows_ssh.server_key_sha256,
+                    exit_code=response.exit_code,
+                    stdout=response.stdout,
+                    stderr=response.stderr,
+                )
+            except WorkflowError as exc:
+                result.error(
+                    "automation.test.windows",
+                    "windows.final_state: FAILED",
+                    vm=vm.name,
+                    target=vm.host,
+                    test="windows.final_state",
+                    **exc.details,
+                )
+        finally:
+            final_windows_ssh.__exit__(None, None, None)
 
     def _select_linux_from_grub(self, vm: VMConfig, result: ResultBuilder) -> None:
         client = None
         try:
-            client = api.connect(VNCClient._vncdotool_address(vm.vnc))
+            client = self.vnc.connect(vm.vnc)
             client.mouseMove(5, 5)
             client.keyPress("home")
             client.keyPress("enter")
@@ -221,7 +321,7 @@ class PostInstallValidationMixin:
 
         client = None
         try:
-            client = api.connect(VNCClient._vncdotool_address(vm.vnc))
+            client = self.vnc.connect(vm.vnc)
             client.mouseMove(5, 5)
             client.keyPress("home")
             if entry == "windows":
@@ -272,6 +372,41 @@ class PostInstallValidationMixin:
             "find /boot/efi/EFI -type f -iname '*.efi' -print -quit | grep -q ."
             if vm.firmware == "uefi"
             else "test -s /boot/grub/i386-pc/core.img"
+        )
+        windows_mount_test = (
+            "findmnt /mnt/windows; findmnt -n -o FSTYPE /mnt/windows | "
+            "grep -Eq '^(fuseblk|ntfs3)$'; "
+            "findmnt -n -o OPTIONS /mnt/windows | grep -qw rw"
+            if options.share_windows_files_in_linux
+            else "! findmnt /mnt/windows; "
+            "! grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
+        )
+        sharing_policy_test = (
+            ("grep -Fx true" if options.share_linux_files_in_windows else "grep -Fx false")
+            + " /etc/libertix/share-linux-in-windows; "
+            + (
+                "grep -Eq '^UUID=.*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
+                if options.share_windows_files_in_linux
+                else "! grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
+            )
+        )
+        profile_shortcut_test = (
+            "profiles=$(python3 -c 'import base64,json,sys; "
+            'p=json.load(open(sys.argv[1], encoding="utf-8")); '
+            'print("\\n".join(json.loads(base64.b64decode('
+            'p["features"]["windowsProfilesJsonBase64"], validate=True))))\' '
+            "/etc/libertix/installation-plan.json); "
+            f"home=/home/{username}; bookmarks=$home/.config/gtk-3.0/bookmarks; "
+            "printf '%s\\n' \"$profiles\" | while IFS= read -r profile; do "
+            'test -n "$profile" || continue; shortcut=$home/User_$profile; '
+            'test -L "$shortcut"; '
+            'test "$(readlink "$shortcut")" = "/mnt/windows/Users/$profile"; '
+            'grep -Fqx "file://$shortcut User_$profile" "$bookmarks"; done'
+            if options.share_windows_files_in_linux
+            else (
+                f"! find /home/{username} -maxdepth 1 -type l -name 'User_*' "
+                "-print -quit | grep -q ."
+            )
         )
         checks = (
             RemoteCheck("linux.identity", f'test "$(id -un)" = {username}; id'),
@@ -372,7 +507,9 @@ class PostInstallValidationMixin:
                 "test -s /boot/grub/grub.cfg; "
                 "grub-script-check /boot/grub/grub.cfg; "
                 'grep -Eq "menuentry [\'\\"]Windows( Boot Manager)?[\'\\"]" '
-                "/boot/grub/grub.cfg",
+                "/boot/grub/grub.cfg; "
+                "grep -Fq \"submenu 'Advanced options' --class efi\" /boot/grub/grub.cfg; "
+                "grep -Fq \"menuentry 'Shutdown' --class shutdown\" /boot/grub/grub.cfg",
                 requires_sudo=True,
             ),
             RemoteCheck("linux.boot_mode_files", boot_mode_test, requires_sudo=True),
@@ -385,14 +522,15 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck(
                 "linux.windows_mount",
-                "findmnt /mnt/windows; findmnt -n -o FSTYPE /mnt/windows | "
-                "grep -Eq '^(fuseblk|ntfs3)$'; "
-                "findmnt -n -o OPTIONS /mnt/windows | grep -qw rw",
+                windows_mount_test,
             ),
             RemoteCheck(
                 "linux.sharing_policy",
-                "grep -Fx true /etc/libertix/share-linux-in-windows; "
-                "grep -Eq '^UUID=.*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab",
+                sharing_policy_test,
+            ),
+            RemoteCheck(
+                "linux.windows_profile_shortcuts",
+                profile_shortcut_test,
             ),
             RemoteCheck(
                 "linux.desktop_stack",
@@ -469,11 +607,17 @@ class PostInstallValidationMixin:
             "bs=1M count=1 status=none; sync; "
             f"sha256sum {shlex.quote(linux_path)} | awk '{{print $1}}'"
         )
-        windows_hash = self._run_artifact_check(
-            ssh, vm, result, "sharing.linux_to_windows_100m", windows_command
+        windows_hash = (
+            self._run_artifact_check(
+                ssh, vm, result, "sharing.linux_to_windows_100m", windows_command
+            )
+            if options.share_windows_files_in_linux
+            else ""
         )
-        linux_hash = self._run_artifact_check(
-            ssh, vm, result, "sharing.linux_home_marker", linux_command
+        linux_hash = (
+            self._run_artifact_check(ssh, vm, result, "sharing.linux_home_marker", linux_command)
+            if options.share_linux_files_in_windows
+            else ""
         )
         return CrossOsArtifacts(
             windows_relative_path=windows_relative.replace("/", "\\"),
@@ -555,6 +699,8 @@ class PostInstallValidationMixin:
         vm: VMConfig,
         options: AutomationOptions,
         result: ResultBuilder,
+        *,
+        test_name: str = "linux.windows_reboot",
     ) -> None:
         entry = "Windows" if vm.firmware == "bios" else "Windows Boot Manager"
         reboot_script = f"grub-reboot {shlex.quote(entry)} && systemctl reboot"
@@ -571,20 +717,20 @@ class PostInstallValidationMixin:
         except WorkflowError as exc:
             result.error(
                 "automation.test.linux",
-                "linux.windows_reboot: FAILED",
+                f"{test_name}: FAILED",
                 vm=vm.name,
                 target=vm.host,
-                test="linux.windows_reboot",
+                test=test_name,
                 **exc.details,
             )
             return
         if response.exit_code not in {0, -1}:
             result.error(
                 "automation.test.linux",
-                "linux.windows_reboot: FAILED",
+                f"{test_name}: FAILED",
                 vm=vm.name,
                 target=vm.host,
-                test="linux.windows_reboot",
+                test=test_name,
                 exit_code=response.exit_code,
                 stdout=response.stdout,
                 stderr=response.stderr,
@@ -592,10 +738,53 @@ class PostInstallValidationMixin:
             return
         result.ok(
             "automation.test.linux",
-            "linux.windows_reboot: OK",
+            f"{test_name}: OK",
             vm=vm.name,
             target=vm.host,
-            test="linux.windows_reboot",
+            test=test_name,
+        )
+
+    def _request_linux_boot_from_windows(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> None:
+        try:
+            response = ssh.run(
+                "shutdown.exe /r /t 0 /d p:0:0",
+                step="automation.linux_return_boot",
+                timeout=30,
+                check=False,
+            )
+        except WorkflowError as exc:
+            result.error(
+                "automation.test.windows",
+                "windows.linux_reboot: FAILED",
+                vm=vm.name,
+                target=vm.host,
+                test="windows.linux_reboot",
+                **exc.details,
+            )
+            return
+        if response.exit_code not in {0, -1}:
+            result.error(
+                "automation.test.windows",
+                "windows.linux_reboot: FAILED",
+                vm=vm.name,
+                target=vm.host,
+                test="windows.linux_reboot",
+                exit_code=response.exit_code,
+                stdout=response.stdout,
+                stderr=response.stderr,
+            )
+            return
+        result.ok(
+            "automation.test.windows",
+            "windows.linux_reboot: OK",
+            vm=vm.name,
+            target=vm.host,
+            test="windows.linux_reboot",
         )
 
     def _run_windows_checks(
@@ -606,12 +795,14 @@ class PostInstallValidationMixin:
         artifacts: CrossOsArtifacts,
         result: ResultBuilder,
     ) -> None:
-        check_names = (
+        check_names = [
+            "finalization",
             "identity",
             "firmware",
             "system_volume",
             "system_resources",
             "partition_layout",
+            "partition_geometry",
             "boot_partition",
             "boot_configuration",
             "recovery",
@@ -622,18 +813,25 @@ class PostInstallValidationMixin:
             "ssh_service",
             "core_services",
             "hibernation",
-            "ext4_driver",
-            "ext4_readonly_mount",
-            "linux_home",
-            "linux_home_hash",
-            "ext4_write_denied",
-            "explorer_shortcut",
-            "sharing_tasks",
-            "cross_os_hash",
             "dism_check_health",
             "sfc_verify_only",
             "chkdsk_scan",
-        )
+        ]
+        if options.share_linux_files_in_windows:
+            insert_at = check_names.index("dism_check_health")
+            check_names[insert_at:insert_at] = [
+                "ext4_driver",
+                "ext4_readonly_mount",
+                "linux_home",
+                "linux_home_hash",
+                "ext4_write_denied",
+                "explorer_shortcut",
+                "sharing_tasks",
+            ]
+        if options.share_windows_files_in_linux:
+            check_names.insert(check_names.index("dism_check_health"), "cross_os_hash")
+        if not (options.share_windows_files_in_linux and options.share_linux_files_in_windows):
+            check_names.insert(check_names.index("dism_check_health"), "sharing_disabled")
         base_config = {
             "expected_firmware": vm.firmware,
             "expected_ipv4": vm.host,
@@ -642,6 +840,8 @@ class PostInstallValidationMixin:
             "windows_sha256": artifacts.windows_sha256,
             "linux_relative_path": artifacts.linux_relative_path,
             "linux_sha256": artifacts.linux_sha256,
+            "share_windows_files_in_linux": options.share_windows_files_in_linux,
+            "share_linux_files_in_windows": options.share_linux_files_in_windows,
         }
         for name in check_names:
             try:
@@ -650,7 +850,7 @@ class PostInstallValidationMixin:
                     script_name="post_install_windows_check.ps1",
                     config={**base_config, "check": name},
                     step="automation.test.windows",
-                    timeout=900 if name in {"sfc_verify_only", "chkdsk_scan"} else 300,
+                    timeout=1800 if name in {"sfc_verify_only", "chkdsk_scan"} else 300,
                 )
                 result.ok(
                     "automation.test.windows",

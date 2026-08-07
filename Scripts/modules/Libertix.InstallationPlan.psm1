@@ -4,6 +4,58 @@ $script:MinimumFinalSizeGiB = 20
 $script:MaximumDirectFat32SizeGiB = 31
 $script:LargeInstallationStagingSizeGiB = 8
 $script:BytesPerGiB = 1GB
+$script:InstallationPlanPropertySets = [ordered]@{
+    root = @(
+        "schemaVersion", "planId", "createdAtUtc", "firmware", "distribution",
+        "locale", "account", "disk", "features", "runtime", "development"
+    )
+    distribution = @(
+        "name", "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath",
+        "installerIsoSha256", "liveIsoUrl", "liveIsoSha256"
+    )
+    locale = @(
+        "languageCode", "systemLanguage", "keyboardLayout", "keyboardVariant",
+        "keyboardModel", "timezone"
+    )
+    account = @("username", "passwordHashWindowsPath", "computerName")
+    disk = @(
+        "number", "uniqueId", "sizeBytes", "logicalSectorSizeBytes", "partitionStyle",
+        "systemDrive", "windows", "boot", "recovery", "installer"
+    )
+    partition = @("number", "offsetBytes", "sizeBytes")
+    installer = @("number", "offsetBytes", "finalSizeBytes", "stagingSizeBytes")
+    features = @(
+        "shareWindowsFilesInLinux", "shareLinuxFilesInWindows",
+        "windowsProfilesJsonBase64"
+    )
+    runtime = @("lowMemoryMode", "bootStrategy", "recoveryRootWindows", "recoveryRunId")
+    development = @(
+        "enableSsh", "staticIpv4Address", "staticIpv4PrefixLength",
+        "staticIpv4Gateway", "dnsServers"
+    )
+}
+
+function Assert-LibertixExactPlanProperties {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$PropertySet
+    )
+
+    $allowed = @($script:InstallationPlanPropertySets[$PropertySet])
+    if ($allowed.Count -eq 0) {
+        throw "Unknown installation plan property set: $PropertySet."
+    }
+    $propertyNames = if ($Object -is [Collections.IDictionary]) {
+        @($Object.Keys)
+    } else {
+        @($Object.PSObject.Properties.Name)
+    }
+    $unexpected = @($propertyNames | Where-Object { $_ -notin $allowed })
+    if ($unexpected.Count -gt 0) {
+        throw "Installation plan $Path contains unsupported field '$($unexpected[0])'."
+    }
+}
 
 function Test-LibertixPlanProperty {
     param(
@@ -11,7 +63,13 @@ function Test-LibertixPlanProperty {
         [Parameter(Mandatory = $true)][string]$Name
     )
 
-    return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
+    if ($null -eq $Object) {
+        return $false
+    }
+    if ($Object -is [Collections.IDictionary]) {
+        return $Object.Contains($Name)
+    }
+    return $Object.PSObject.Properties.Name -contains $Name
 }
 
 function Assert-LibertixPlanProperty {
@@ -46,6 +104,11 @@ function Assert-LibertixPartitionIdentity {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][int64]$LogicalSectorSizeBytes
     )
+
+    Assert-LibertixExactPlanProperties `
+        -Object $Partition `
+        -Path $Path `
+        -PropertySet "partition"
 
     $number = Assert-LibertixPlanProperty -Object $Partition -Name "number" -Path "$Path.number"
     $offset = Assert-LibertixPlanProperty -Object $Partition -Name "offsetBytes" -Path "$Path.offsetBytes"
@@ -99,6 +162,11 @@ function Test-LibertixIpv4ConfigurationAddress {
 
 function Assert-LibertixDevelopmentNetwork {
     param([Parameter(Mandatory = $true)][object]$Development)
+
+    Assert-LibertixExactPlanProperties `
+        -Object $Development `
+        -Path "development" `
+        -PropertySet "development"
 
     $staticAddress = [string](Assert-LibertixPlanProperty `
         -Object $Development `
@@ -179,6 +247,8 @@ function Assert-LibertixInstallationPlan {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)][object]$Plan)
 
+    Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
+
     $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
     if ([int]$schemaVersion -ne 1) {
         throw "Unsupported installation plan schemaVersion: $schemaVersion."
@@ -200,6 +270,10 @@ function Assert-LibertixInstallationPlan {
     }
 
     $distribution = Assert-LibertixPlanProperty -Object $Plan -Name "distribution" -Path "distribution"
+    Assert-LibertixExactPlanProperties `
+        -Object $distribution `
+        -Path "distribution" `
+        -PropertySet "distribution"
     foreach ($name in @("name", "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath", "liveIsoUrl")) {
         $value = [string](Assert-LibertixPlanProperty `
             -Object $distribution `
@@ -233,6 +307,7 @@ function Assert-LibertixInstallationPlan {
         -Path "distribution.liveIsoSha256"
 
     $locale = Assert-LibertixPlanProperty -Object $Plan -Name "locale" -Path "locale"
+    Assert-LibertixExactPlanProperties -Object $locale -Path "locale" -PropertySet "locale"
     $languageCode = [string](Assert-LibertixPlanProperty -Object $locale -Name "languageCode" -Path "locale.languageCode")
     if ($languageCode -notin @("en", "fr", "es", "ja")) {
         throw "Installation plan field locale.languageCode must be one of: en, fr, es, ja."
@@ -248,6 +323,9 @@ function Assert-LibertixInstallationPlan {
             throw "Installation plan field locale.$name is not a valid XKB name."
         }
     }
+    if ([string]$locale.timezone -notmatch '^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+$') {
+        throw "Installation plan field locale.timezone is not a safe IANA timezone name."
+    }
     $keyboardVariant = if (Test-LibertixPlanProperty -Object $locale -Name "keyboardVariant") {
         [string]$locale.keyboardVariant
     } else {
@@ -258,20 +336,22 @@ function Assert-LibertixInstallationPlan {
     }
 
     $account = Assert-LibertixPlanProperty -Object $Plan -Name "account" -Path "account"
+    Assert-LibertixExactPlanProperties -Object $account -Path "account" -PropertySet "account"
     $username = [string](Assert-LibertixPlanProperty -Object $account -Name "username" -Path "account.username")
-    $passwordHash = [string](Assert-LibertixPlanProperty -Object $account -Name "passwordHash" -Path "account.passwordHash")
+    $passwordHashWindowsPath = [string](Assert-LibertixPlanProperty -Object $account -Name "passwordHashWindowsPath" -Path "account.passwordHashWindowsPath")
     $computerName = [string](Assert-LibertixPlanProperty -Object $account -Name "computerName" -Path "account.computerName")
     if ($username -notmatch '^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$') {
         throw "Installation plan account.username is invalid."
     }
-    if ($passwordHash -notmatch '^\$6\$[^\r\n\t]+$') {
-        throw "Installation plan account.passwordHash must use SHA-512 crypt."
+    if ($passwordHashWindowsPath -notmatch '^[A-Za-z]:\\' -or $passwordHashWindowsPath -match '(^|\\)\.\.(\\|$)') {
+        throw "Installation plan account.passwordHashWindowsPath must be an absolute safe Windows path."
     }
     if ([string]::IsNullOrWhiteSpace($computerName) -or $computerName.Length -gt 63) {
         throw "Installation plan account.computerName must contain between 1 and 63 characters."
     }
 
     $disk = Assert-LibertixPlanProperty -Object $Plan -Name "disk" -Path "disk"
+    Assert-LibertixExactPlanProperties -Object $disk -Path "disk" -PropertySet "disk"
     $diskNumber = Assert-LibertixPlanProperty -Object $disk -Name "number" -Path "disk.number"
     [int]$parsedDiskNumber = -1
     if (-not [int]::TryParse([string]$diskNumber, [ref]$parsedDiskNumber) -or $parsedDiskNumber -lt 0) {
@@ -349,6 +429,10 @@ function Assert-LibertixInstallationPlan {
     }
 
     $installer = Assert-LibertixPlanProperty -Object $disk -Name "installer" -Path "disk.installer"
+    Assert-LibertixExactPlanProperties `
+        -Object $installer `
+        -Path "disk.installer" `
+        -PropertySet "installer"
     $installerNumber = Assert-LibertixPlanProperty -Object $installer -Name "number" -Path "disk.installer.number"
     $installerOffset = Assert-LibertixPlanProperty -Object $installer -Name "offsetBytes" -Path "disk.installer.offsetBytes"
     if (($null -eq $installerNumber) -ne ($null -eq $installerOffset)) {
@@ -407,6 +491,10 @@ function Assert-LibertixInstallationPlan {
     }
 
     $features = Assert-LibertixPlanProperty -Object $Plan -Name "features" -Path "features"
+    Assert-LibertixExactPlanProperties `
+        -Object $features `
+        -Path "features" `
+        -PropertySet "features"
     foreach ($name in @("shareWindowsFilesInLinux", "shareLinuxFilesInWindows")) {
         $featureValue = Assert-LibertixPlanProperty -Object $features -Name $name -Path "features.$name"
         if ($featureValue -isnot [bool]) {
@@ -427,6 +515,10 @@ function Assert-LibertixInstallationPlan {
     }
 
     $runtime = Assert-LibertixPlanProperty -Object $Plan -Name "runtime" -Path "runtime"
+    Assert-LibertixExactPlanProperties `
+        -Object $runtime `
+        -Path "runtime" `
+        -PropertySet "runtime"
     $lowMemoryMode = Assert-LibertixPlanProperty -Object $runtime -Name "lowMemoryMode" -Path "runtime.lowMemoryMode"
     if ($lowMemoryMode -isnot [bool]) {
         throw "Installation plan field runtime.lowMemoryMode must be a boolean."

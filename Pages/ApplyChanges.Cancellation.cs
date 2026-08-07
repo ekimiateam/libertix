@@ -21,13 +21,16 @@ namespace Libertix.Pages
         private FirmwareType _activeFirmware = FirmwareType.Unknown;
         private UefiRecoveryState _activeUefiRecovery;
         private bool _cancellationHandled;
+        private bool _cancellationDisposed;
         private string _persistentLogPath;
 
         private void InitializeInstallationControls()
         {
             try
             {
-                string logRoot = Path.Combine(WindowsSystemDrive, "LibertixInstallLogs");
+                string logRoot = Path.Combine(
+                    WindowsSystemDrive,
+                    RuntimeNames.InstallationLogDirectory);
                 Directory.CreateDirectory(logRoot);
                 _persistentLogPath = Path.Combine(
                     logRoot,
@@ -56,6 +59,11 @@ namespace Libertix.Pages
         {
             BackButton.IsEnabled = enableBackButton;
             SetInstallationRunning(false);
+            if (!_cancellationDisposed)
+            {
+                _installationCancellation.Dispose();
+                _cancellationDisposed = true;
+            }
         }
 
         private void ThrowIfCancellationRequested()
@@ -192,7 +200,7 @@ namespace Libertix.Pages
                     "ApplyChangesUefiRollbackIncompleteDetails",
                     "The installation was cancelled, but the UEFI rollback could not be verified. " +
                     "Do not restart; review {0}.",
-                    Path.Combine(WindowsSystemDrive, "LibertixInstallLogs")),
+                    Path.Combine(WindowsSystemDrive, RuntimeNames.InstallationLogDirectory)),
                 Localized("ApplyChangesRollbackIncompleteTitle", "Libertix - Incomplete rollback"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
@@ -304,45 +312,7 @@ namespace Libertix.Pages
 
         private static void StopProcessTree(Process process)
         {
-            int processId;
-            try
-            {
-                if (process == null || process.HasExited)
-                    return;
-                processId = process.Id;
-            }
-            catch
-            {
-                return;
-            }
-
-            try
-            {
-                using (var taskKill = Process.Start(new ProcessStartInfo
-                {
-                    FileName = "taskkill.exe",
-                    Arguments = $"/PID {processId} /T /F",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                }))
-                {
-                    taskKill?.WaitForExit(10000);
-                }
-            }
-            catch
-            {
-                try
-                {
-                    process.Kill();
-                }
-                catch
-                {
-                    // The process can exit between taskkill failure and this
-                    // fallback, so there is nothing left to terminate.
-                }
-            }
+            WindowsProcessRunner.TerminateProcessTree(process);
         }
 
         private void AppendPersistentLog(string line)

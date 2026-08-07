@@ -75,7 +75,8 @@ class Settings(BaseSettings):
     proxmox_timeout_seconds: float = 30
     proxmox_task_timeout_seconds: float = 300
 
-    capture_dir: Path = Path("/tmp/libertix-auto-tests-captures")
+    runtime_dir: Path = Path(__file__).resolve().parents[1] / "runtime"
+    capture_dir: Path = Path(__file__).resolve().parents[1] / "runtime" / "captures"
     operation_log_dir: Path = Path(__file__).resolve().parents[1] / "logs"
     launch_wait_seconds: float = 2
     automation_monitor_interval_seconds: float = 30

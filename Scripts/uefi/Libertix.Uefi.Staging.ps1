@@ -76,11 +76,12 @@ function New-OrReuseInstallerPartition {
     Save-TransactionPreparationState -SystemPartition $systemPartition
     Complete-LibertixTrackedStep -Step "windows.recovery-armed"
 
-    if ($ShareWindowsFilesInLinux -and (Get-HibernateEnabled) -ne $false) {
+    if ($ShareWindowsFilesInLinux) {
         # Fast Startup leaves NTFS metadata cached by Windows. Linux mounts the
         # shared volume read-write, so hibernation must remain disabled for the
-        # installed system. Removing hiberfil.sys before querying SizeMin also
-        # prevents that unmovable file from artificially limiting the shrink.
+        # installed system. Run powercfg even when the registry already says
+        # disabled: cloned images can retain a stale hiberfile or inconsistent
+        # power state that only the supported Windows command can normalize.
         Set-HibernateEnabled -Enabled $false
     }
 
@@ -132,16 +133,12 @@ function New-OrReuseInstallerPartition {
     }
     Complete-LibertixTrackedStep -Step "windows.system-volume-shrunk"
 
-    # Let Mount Manager choose the next available access path. A fixed letter
-    # can still be reserved by a disconnected mapping or persistent mount point
-    # that is not represented as a local volume by Get-Volume.
     Start-LibertixTrackedStep -Step "windows.installer-partition-created"
     $newPartition = New-Partition `
         -DiskNumber $systemPartition.DiskNumber `
         -Size $stagingBytes `
         -Offset $installerOffsetBytes `
         -Alignment ([int64]$shrinkGeometry.AlignmentBytes) `
-        -AssignDriveLetter `
         -ErrorAction Stop
 
     # Persist the returned identity before checking any postcondition. A RAW
@@ -156,17 +153,27 @@ function New-OrReuseInstallerPartition {
         throw "Windows created the installer partition with unexpected geometry."
     }
 
-    $createdDriveLetter = [string]$newPartition.DriveLetter
-    if ([string]::IsNullOrWhiteSpace($createdDriveLetter)) {
-        throw "Windows created the installer partition but did not assign a drive letter."
-    }
-
     Format-Volume `
-        -DriveLetter $createdDriveLetter `
+        -Partition $newPartition `
         -FileSystem FAT32 `
         -NewFileSystemLabel $InstallerLabel `
         -Confirm:$false `
-        -Force | Out-Null
+        -Force `
+        -ErrorAction Stop | Out-Null
+
+    # Exposing a RAW partition through a drive letter makes Explorer display a
+    # modal format prompt. Assign the access path only after FAT32 exists, while
+    # still letting Mount Manager avoid persistent or disconnected mappings.
+    $formattedPartition = Get-VerifiedTransactionPartition
+    Add-PartitionAccessPath `
+        -InputObject $formattedPartition `
+        -AssignDriveLetter `
+        -ErrorAction Stop | Out-Null
+    $verifiedPartition = Get-VerifiedTransactionPartition
+    $createdDriveLetter = [string]$verifiedPartition.DriveLetter
+    if ([string]::IsNullOrWhiteSpace($createdDriveLetter)) {
+        throw "Windows formatted the installer partition but did not assign a drive letter."
+    }
 
     $tries = 0
     while (-not (Test-Path "${createdDriveLetter}:\") -and $tries -lt 15) {
@@ -178,10 +185,6 @@ function New-OrReuseInstallerPartition {
         throw "Failed to access ${createdDriveLetter}: after creating the Libertix installer partition."
     }
 
-    $verifiedPartition = Get-LibertixInstallerPartition -DriveLetter $createdDriveLetter
-    if (-not $verifiedPartition) {
-        throw "Libertix installer partition was created, but its partition object could not be resolved."
-    }
     # Formatting can cause Windows to renumber a GPT partition that was inserted
     # before WinRE. Persist the post-format object, not New-Partition's stale one.
     Save-TransactionPartitionState -Partition $verifiedPartition
@@ -268,15 +271,6 @@ function Install-LibertixIsoToPartition {
             throw "Downloaded Libertix UEFI ISO hash mismatch. Expected $InstallerIsoSha256, got $actualIsoHash"
         }
 
-        if ($LowMemoryMode) {
-            Copy-Item -LiteralPath $isoPath -Destination $LowMemoryIsoPath -Force
-            $lowMemoryHash = (Get-FileHash -Algorithm SHA256 -Path $LowMemoryIsoPath).Hash.ToLowerInvariant()
-            if ($lowMemoryHash -ne $InstallerIsoSha256) {
-                throw "Low-memory ISO copy hash mismatch. Expected $InstallerIsoSha256, got $lowMemoryHash"
-            }
-            Write-Log "Low-memory ISO retained at $LowMemoryIsoPath." "Green"
-        }
-
         Write-Log "Mounting ISO..." "Cyan"
         Mount-DiskImage -ImagePath $isoPath -PassThru | Out-Null
         $isoDrive = Get-MountedIsoDrive -ImagePath $isoPath
@@ -342,20 +336,25 @@ function Install-LibertixIsoToPartition {
             }
             foreach ($bootConfig in $bootConfigs) {
                 $content = Get-Content -LiteralPath $bootConfig.FullName -Raw
-                $updated = $content -replace '(?i)(^|\s)toram(?=\s|$)', '$1findiso=/libertix-live.iso'
-                if ($updated -eq $content -and $content -notmatch 'findiso=/libertix-live\.iso') {
+                $updated = $content -replace `
+                    '(?i)(^|\s)toram(?=\s|$)',
+                    '$1toram=filesystem.squashfs'
+                if (
+                    $updated -eq $content -and
+                    $content -notmatch 'toram=filesystem\.squashfs'
+                ) {
                     continue
                 }
                 attrib -R -S -H $bootConfig.FullName 2>$null
                 Set-Content -LiteralPath $bootConfig.FullName -Value $updated -Encoding ASCII -NoNewline
             }
             $configured = @(Get-ChildItem -Path $PartitionDrive -Filter "*.cfg" -Recurse -File | Where-Object {
-                (Get-Content -LiteralPath $_.FullName -Raw) -match 'findiso=/libertix-live\.iso'
+                (Get-Content -LiteralPath $_.FullName -Raw) -match 'toram=filesystem\.squashfs'
             })
             if ($configured.Count -eq 0) {
                 throw "Low-memory boot configuration could not be applied."
             }
-            Write-Log "Low-memory findiso boot configured in $($configured.Count) boot files." "Green"
+            Write-Log "Low-memory SquashFS module boot configured in $($configured.Count) boot files." "Green"
         }
 
         $requiredFiles = @(
@@ -456,7 +455,8 @@ function Set-LibertixUefiBootEntry {
 
     if (-not $ReusePreparedInstaller) {
         $driveRoot = "$InstallerDrive\"
-        $grubConfig = Get-LibertixStagingGrubConfig
+        $grubConfig = Get-LibertixStagingGrubConfig `
+            -UseLowMemoryMode ([bool]$LowMemoryMode)
         foreach ($grubConfigDir in @(
             (Join-Path $driveRoot "EFI\debian"),
             (Join-Path $driveRoot "EFI\LibertixInstaller"),

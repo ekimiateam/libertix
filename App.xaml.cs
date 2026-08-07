@@ -1,7 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Configuration;
-using System.Data;
 using System.IO;
 using System.Linq;
 using System.Security.Principal;
@@ -16,6 +14,7 @@ namespace Libertix
     {
         public InstallationState InstallationState { get; } = new InstallationState();
         public StartupOptions RuntimeOptions { get; private set; } = new StartupOptions();
+        public FilepoolConfig Filepool { get; private set; } = FilepoolConfig.Production;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -56,15 +55,21 @@ namespace Libertix
                 return false;
             }
 
+            FilepoolConfig filepool = FilepoolConfig.Production;
             if (!string.IsNullOrWhiteSpace(options.FilepoolBaseUrlOverride) &&
-                !FilepoolConfig.TryUseOverride(options.FilepoolBaseUrlOverride, out error))
+                !FilepoolConfig.TryCreate(
+                    options.FilepoolBaseUrlOverride,
+                    out filepool,
+                    out error))
             {
                 RejectInvalidStartupOptions(error);
                 return false;
             }
 
+            Filepool = filepool;
+
             RuntimeOptions = options;
-            ApplicationLogger.Write($"Filepool base URL: {FilepoolConfig.BaseUrl}");
+            ApplicationLogger.Write($"Filepool base URL: {Filepool.BaseUrl}");
             if (!string.IsNullOrEmpty(options.DevelopmentSshStaticIpv4Address))
             {
                 ApplicationLogger.Write(
@@ -133,21 +138,7 @@ namespace Libertix
 
         private static string AdministratorRequiredMessage()
         {
-            switch (Localization.GetWindowsLanguageCode())
-            {
-                case "fr":
-                    return "Libertix doit être lancé en administrateur pour modifier les partitions "
-                        + "et le démarrage Windows.";
-                case "es":
-                    return "Libertix debe ejecutarse como administrador para modificar las particiones "
-                        + "y el arranque de Windows.";
-                case "ja":
-                    return "パーティションと Windows の起動設定を変更するため、Libertix は管理者として "
-                        + "実行する必要があります。";
-                default:
-                    return "Libertix must be run as administrator to modify partitions and the "
-                        + "Windows boot configuration.";
-            }
+            return Localization.GetBootstrapString("AdministratorRequired");
         }
 
         private static bool IsRunningAsAdministrator()

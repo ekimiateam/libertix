@@ -133,7 +133,7 @@
         },
         "timezone": {
           "type": "string",
-          "minLength": 1
+          "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+$"
         }
       }
     },
@@ -142,7 +142,7 @@
       "additionalProperties": false,
       "required": [
         "username",
-        "passwordHash",
+        "passwordHashWindowsPath",
         "computerName"
       ],
       "properties": {
@@ -150,9 +150,9 @@
           "type": "string",
           "pattern": "^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$"
         },
-        "passwordHash": {
+        "passwordHashWindowsPath": {
           "type": "string",
-          "pattern": "^\\$6\\$.+"
+          "pattern": "^[A-Za-z]:\\\\"
         },
         "computerName": {
           "type": "string",

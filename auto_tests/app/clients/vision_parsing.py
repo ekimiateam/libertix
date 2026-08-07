@@ -15,7 +15,7 @@ from app.clients.vision_models import InstallProgressVerdict
 from app.errors import WorkflowError
 
 
-def _load_wizard_json(content: str) -> dict[str, object]:
+def load_wizard_json(content: str) -> dict[str, object]:
     """Read only a complete wizard verdict object from model output.
 
     Scanning complete JSON objects tolerates harmless transport noise without
@@ -64,7 +64,7 @@ def _load_wizard_json(content: str) -> dict[str, object]:
     return verdict
 
 
-def _optimized_image(image_path: Path) -> str:
+def optimize_image(image_path: Path) -> str:
     try:
         with Image.open(image_path) as screenshot:
             screenshot = screenshot.convert("RGB")
@@ -80,7 +80,7 @@ def _optimized_image(image_path: Path) -> str:
         ) from exc
 
 
-def _load_progress_message_json(
+def load_progress_message_json(
     message: dict[str, object],
 ) -> tuple[dict[str, object], Literal["strict_json"]]:
     """Read the final JSON answer without exposing private model reasoning."""
@@ -88,10 +88,10 @@ def _load_progress_message_json(
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         raise json.JSONDecodeError("No final install-progress verdict", str(message), 0)
-    return _load_progress_json(content), "strict_json"
+    return load_progress_json(content), "strict_json"
 
 
-def _load_progress_json(content: str) -> dict[str, object]:
+def load_progress_json(content: str) -> dict[str, object]:
     """Return the last complete, valid progress object from noisy output."""
 
     core_keys = {
@@ -127,7 +127,7 @@ def _load_progress_json(content: str) -> dict[str, object]:
     return candidates[-1]
 
 
-def _load_json_object(content: str) -> object:
+def load_json_object(content: str) -> object:
     """Parse a JSON object while tolerating harmless provider output noise."""
 
     try:

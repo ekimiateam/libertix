@@ -47,6 +47,81 @@ $check = [string]$config.check
 
 try {
     switch ($check) {
+        "finalization" {
+            $deadline = [DateTime]::UtcNow.AddMinutes(5)
+            do {
+                $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
+                $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
+                $recoveryTasks = @(
+                    Get-ScheduledTask `
+                        -TaskName "LibertixInstallRecovery" `
+                        -ErrorAction SilentlyContinue
+                )
+                if (-not $biosPending -and -not $uefiTransaction -and $recoveryTasks.Count -eq 0) {
+                    Write-Output "LIBERTIX_FINALIZATION=ready"
+                    break
+                }
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    throw (
+                        "Libertix Windows finalization timed out: " +
+                        "biosPending=$biosPending, uefiTransaction=$uefiTransaction, " +
+                        "recoveryTasks=$($recoveryTasks.Count)."
+                    )
+                }
+                Start-Sleep -Seconds 2
+            } while ($true)
+        }
+        "final_state" {
+            $os = Get-CimInstance Win32_OperatingSystem
+            $firmware = [string](Get-ComputerInfo).BiosFirmwareType
+            $volume = Get-Volume -DriveLetter C -ErrorAction Stop
+            $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                Where-Object { $_.IPAddress -eq [string]$config.expected_ipv4 })
+            $defaultRoutes = @(Get-NetRoute `
+                -AddressFamily IPv4 `
+                -DestinationPrefix "0.0.0.0/0" `
+                -ErrorAction Stop)
+            $sshService = Get-Service -Name "sshd" -ErrorAction Stop
+            $coreServices = @(Get-Service -Name @("EventLog", "RpcSs", "Schedule") -ErrorAction Stop)
+            $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
+            $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
+            $recoveryTasks = @(
+                Get-ScheduledTask `
+                    -TaskName "LibertixInstallRecovery" `
+                    -ErrorAction SilentlyContinue
+            )
+            $bcdEntries = @(& bcdedit.exe /enum all 2>&1)
+            Assert-Condition ($LASTEXITCODE -eq 0) "bcdedit failed during the final Windows check."
+            $bcdText = $bcdEntries -join "`n"
+
+            Write-Output ("WINDOWS={0} BUILD={1}" -f $os.Caption, $os.BuildNumber)
+            Write-Output ("FIRMWARE={0}" -f $firmware)
+            Write-Output ("SYSTEM_VOLUME={0} HEALTH={1}" -f $volume.FileSystem, $volume.HealthStatus)
+            Write-Output ("EXPECTED_IPV4_PRESENT={0}" -f ($addresses.Count -ge 1))
+            Write-Output ("DEFAULT_ROUTES={0}" -f $defaultRoutes.Count)
+            Write-Output ("SSHD={0}" -f $sshService.Status)
+
+            Assert-Condition ($os.ProductType -eq 1) "The final system is not a Windows workstation."
+            if ([string]$config.expected_firmware -eq "uefi") {
+                Assert-Condition ($firmware -match "UEFI") "The final Windows boot is not UEFI."
+            } else {
+                Assert-Condition ($firmware -match "BIOS|Legacy") "The final Windows boot is not BIOS."
+            }
+            Assert-Condition ($volume.FileSystem -eq "NTFS") "The final Windows system volume is not NTFS."
+            Assert-Condition ($volume.HealthStatus -eq "Healthy") "The final Windows system volume is not healthy."
+            Assert-Condition ($addresses.Count -ge 1) "The expected IPv4 address is missing after the final boot."
+            Assert-Condition ($defaultRoutes.Count -ge 1) "Windows has no default route after the final boot."
+            Assert-Condition ($sshService.Status -eq "Running") "The SSH service stopped after the final boot."
+            Assert-Condition (@($coreServices | Where-Object { $_.Status -ne "Running" }).Count -eq 0) `
+                "A core Windows service stopped after the final boot."
+            Assert-Condition (-not $biosPending) "The BIOS transaction is pending after the final boot."
+            Assert-Condition (-not $uefiTransaction) "The UEFI transaction remains after the final boot."
+            Assert-Condition ($recoveryTasks.Count -eq 0) "The recovery task remains after the final boot."
+            Assert-Condition ($bcdText -match "(?i)winload[.]e(?:xe|fi)") `
+                "The Windows loader is absent after the final boot."
+            Assert-Condition ($bcdText -notmatch "(?i)Libertix Installer|mint[.]iso|grldr") `
+                "A temporary Libertix boot entry remains after the final boot."
+        }
         "identity" {
             $os = Get-CimInstance Win32_OperatingSystem
             Write-Output ("COMPUTER={0}" -f $env:COMPUTERNAME)
@@ -97,6 +172,52 @@ try {
             Assert-Condition (-not $systemDisk.IsReadOnly) "The Windows system disk is read-only."
             Assert-Condition ($partitions.Count -ge 3) "The system disk has too few partitions after installation."
         }
+        "partition_geometry" {
+            $planPath = "C:\LibertixInstallLogs\latest\installation-plan.json"
+            Assert-Condition (Test-Path -LiteralPath $planPath -PathType Leaf) `
+                "The archived installation plan is missing."
+            $plan = Get-Content -LiteralPath $planPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
+            $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
+            $partitions = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop)
+            $installerOffset = [int64]$plan.disk.installer.offsetBytes
+            $finalLinuxSize = [int64]$plan.disk.installer.finalSizeBytes
+            $originalWindowsOffset = [int64]$plan.disk.windows.offsetBytes
+            $originalWindowsSize = [int64]$plan.disk.windows.sizeBytes
+            $windowsEnd = [int64]$systemPartition.Offset + [int64]$systemPartition.Size
+            $gapBeforeLinux = $installerOffset - $windowsEnd
+            $actualWindowsShrink = $originalWindowsSize - [int64]$systemPartition.Size
+            $linuxMatches = @($partitions | Where-Object {
+                [int64]$_.Offset -eq $installerOffset -and
+                [int64]$_.Size -eq $finalLinuxSize
+            })
+            $recoveryMatches = @($partitions | Where-Object {
+                [int64]$_.Offset -eq [int64]$plan.disk.recovery.offsetBytes -and
+                [int64]$_.Size -eq [int64]$plan.disk.recovery.sizeBytes
+            })
+            Write-Output ("WINDOWS_OFFSET={0} WINDOWS_SIZE={1}" -f `
+                $systemPartition.Offset, $systemPartition.Size)
+            Write-Output ("LINUX_OFFSET={0} LINUX_SIZE={1}" -f `
+                $installerOffset, $finalLinuxSize)
+            Write-Output ("RECOVERY_OFFSET={0} RECOVERY_SIZE={1}" -f `
+                $plan.disk.recovery.offsetBytes, $plan.disk.recovery.sizeBytes)
+            Assert-Condition ([int]$systemDisk.Number -eq [int]$plan.disk.number) `
+                "The installed system disk number differs from the installation plan."
+            Assert-Condition (([string]$systemDisk.UniqueId).Trim() -eq `
+                ([string]$plan.disk.uniqueId).Trim()) `
+                "The installed system disk identity differs from the installation plan."
+            Assert-Condition ([int64]$systemPartition.Offset -eq $originalWindowsOffset) `
+                "The Windows partition offset changed during installation."
+            Assert-Condition ($gapBeforeLinux -ge 0 -and $gapBeforeLinux -le 1MB) `
+                "The Windows and Linux partitions are separated by an unexpected gap."
+            Assert-Condition ($actualWindowsShrink -ge $finalLinuxSize -and `
+                $actualWindowsShrink -le ($finalLinuxSize + 2MB)) `
+                "The Windows partition shrink differs from the requested Linux allocation."
+            Assert-Condition ($linuxMatches.Count -eq 1) `
+                "The final Linux partition offset or size differs from the installation plan."
+            Assert-Condition ($recoveryMatches.Count -eq 1) `
+                "The Windows Recovery partition geometry changed during installation."
+        }
         "boot_partition" {
             $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
             $partitions = @(Get-Partition -DiskNumber $systemPartition.DiskNumber -ErrorAction Stop)
@@ -128,7 +249,17 @@ try {
             })
             $recoveryPartitions | Format-Table DiskNumber, PartitionNumber, Type, GptType, MbrType, Size -AutoSize
             Assert-Condition ($recoveryPartitions.Count -ge 1) "No Windows recovery partition was found."
-            Invoke-NativeCheck -FilePath "reagentc.exe" -Arguments @("/info")
+            $reagentOutput = @(& reagentc.exe /info 2>&1)
+            $reagentOutput | ForEach-Object { Write-Output $_ }
+            Assert-Condition ($LASTEXITCODE -eq 0) `
+                "reagentc.exe failed to report Windows Recovery Environment status."
+            $reagentText = $reagentOutput -join "`n"
+            Assert-Condition ($reagentText -match `
+                "(?i)(enabled|activ[eé]|habilitado|有効)") `
+                "Windows Recovery Environment is not reported as enabled."
+            Assert-Condition ($reagentText -notmatch `
+                "(?i)(disabled|d[eé]sactiv[eé]|deshabilitado|無効)") `
+                "Windows Recovery Environment is disabled."
         }
         "bitlocker" {
             $volume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
@@ -194,9 +325,57 @@ try {
             Assert-Condition ($stopped.Count -eq 0) "One or more core Windows services are stopped."
         }
         "hibernation" {
-            $hibernateEnabled = (Test-Path -LiteralPath "C:\hiberfil.sys")
-            Write-Output ("HIBERNATION_FILE_PRESENT={0}" -f $hibernateEnabled)
-            Assert-Condition (-not $hibernateEnabled) "Hibernation remains enabled while Windows is mounted read-write from Linux."
+            $power = Get-ItemProperty `
+                -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
+                -ErrorAction Stop
+            $sessionPower = Get-ItemProperty `
+                -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" `
+                -ErrorAction SilentlyContinue
+            $hibernateEnabled = ([int]$power.HibernateEnabled -ne 0)
+            $fastStartupConfigured = (
+                $sessionPower -and
+                $null -ne $sessionPower.HiberbootEnabled -and
+                [int]$sessionPower.HiberbootEnabled -ne 0
+            )
+            $hiberfilePresent = Test-Path -LiteralPath "C:\hiberfil.sys"
+            $fastStartupCapable = (
+                $fastStartupConfigured -and
+                $hibernateEnabled -and
+                $hiberfilePresent
+            )
+            Write-Output ("HIBERNATION_ENABLED={0}" -f $hibernateEnabled)
+            Write-Output ("FAST_STARTUP_CONFIGURED={0}" -f $fastStartupConfigured)
+            Write-Output ("FAST_STARTUP_CAPABLE={0}" -f $fastStartupCapable)
+            Write-Output ("HIBERNATION_FILE_PRESENT={0}" -f $hiberfilePresent)
+            if ([bool]$config.share_windows_files_in_linux) {
+                # HiberbootEnabled is only a saved preference. Fast Startup
+                # cannot run after powercfg disables hibernation, even when a
+                # cloned system retains that preference or a stale hiberfile.
+                Assert-Condition (-not $hibernateEnabled) `
+                    "Windows hibernation remains enabled while Linux mounts Windows read-write."
+                Assert-Condition (-not $fastStartupCapable) `
+                    "Windows Fast Startup remains enabled while Linux mounts Windows read-write."
+            }
+        }
+        "sharing_disabled" {
+            if (-not [bool]$config.share_linux_files_in_windows) {
+                $mountTasks = @(Get-ScheduledTask `
+                    -TaskName "LibertixLinuxReadOnly" `
+                    -ErrorAction SilentlyContinue)
+                $pinTasks = @(Get-ScheduledTask `
+                    -TaskName "LibertixLinuxReadOnlyPin_*" `
+                    -ErrorAction SilentlyContinue)
+                $mountProcesses = @(Get-CimInstance `
+                    Win32_Process `
+                    -Filter "Name='ext4.exe'" `
+                    -ErrorAction SilentlyContinue)
+                Assert-Condition ($mountTasks.Count -eq 0) `
+                    "The disabled Linux-to-Windows share still has a mount task."
+                Assert-Condition ($pinTasks.Count -eq 0) `
+                    "The disabled Linux-to-Windows share still has a shortcut task."
+                Assert-Condition ($mountProcesses.Count -eq 0) `
+                    "The disabled Linux-to-Windows share still has an ext4 mount process."
+            }
         }
         "ext4_driver" {
             $ext4 = "$env:ProgramFiles\ext4-win-driver\ext4.exe"

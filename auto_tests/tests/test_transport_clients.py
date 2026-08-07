@@ -7,9 +7,39 @@ import pytest
 
 import app.clients.ssh as ssh_module
 import app.clients.vnc as vnc_module
+from app.clients.proxmox import ProxmoxClient
 from app.clients.ssh import SSHClient
 from app.clients.vnc import VNCClient
 from app.errors import WorkflowError
+
+
+def test_proxmox_task_warning_is_not_reported_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = object.__new__(ProxmoxClient)
+    client.task_timeout = 5
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: {"status": "stopped", "exitstatus": "WARNINGS: 1"},
+    )
+
+    client._wait_task("node", "UPID:test", 500, action="start")
+
+
+def test_proxmox_failed_task_remains_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = object.__new__(ProxmoxClient)
+    client.task_timeout = 5
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_args, **_kwargs: {"status": "stopped", "exitstatus": "ERROR"},
+    )
+
+    with pytest.raises(WorkflowError) as caught:
+        client._wait_task("node", "UPID:test", 500, action="start")
+
+    assert caught.value.details["exitstatus"] == "ERROR"
 
 
 class FakeChannel:
@@ -159,6 +189,28 @@ def test_ssh_failure_never_exposes_a_sensitive_command(monkeypatch: pytest.Monke
     assert caught.value.details["exit_code"] == 5
 
 
+def test_ssh_transport_eof_becomes_a_workflow_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    transport = FakeParamikoClient()
+
+    def fail_exec(_command: str, *, timeout: float):
+        assert timeout > 0
+        raise EOFError
+
+    transport.exec_command = fail_exec  # type: ignore[method-assign]
+    monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
+
+    with (
+        SSHClient(
+            "example.test", "oem", "secret", known_hosts_path="/tmp/test-known-hosts"
+        ) as client,
+        pytest.raises(WorkflowError) as caught,
+    ):
+        client.run("hostname", step="ssh.eof", timeout=5)
+
+    assert caught.value.step == "ssh.eof"
+    assert caught.value.details["exception_type"] == "EOFError"
+
+
 def test_ssh_client_writes_sensitive_input_to_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = FakeParamikoClient()
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
@@ -186,6 +238,16 @@ def test_ssh_tofu_persists_first_key_in_isolated_inventory(
     transport = FakeParamikoClient()
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
     known_hosts = tmp_path / "run" / "linux-known-hosts"
+    key = ssh_module.paramiko.RSAKey.generate(1024)
+    original_connect = transport.connect
+
+    def connect_and_offer_key(host: str, **kwargs: object) -> None:
+        original_connect(host, **kwargs)
+        policy = transport.missing_host_key_policy
+        assert isinstance(policy, ssh_module.PersistAuthenticatedHostKeyPolicy)
+        policy.missing_host_key(transport, host, key)
+
+    transport.connect = connect_and_offer_key  # type: ignore[method-assign]
 
     with SSHClient(
         "example.test",
@@ -195,17 +257,48 @@ def test_ssh_tofu_persists_first_key_in_isolated_inventory(
         trust_on_first_use=True,
     ):
         policy = transport.missing_host_key_policy
-        assert isinstance(policy, ssh_module.PersistFirstHostKeyPolicy)
-        policy.missing_host_key(
-            transport,
-            "example.test",
-            ssh_module.paramiko.RSAKey.generate(1024),
-        )
+        assert isinstance(policy, ssh_module.PersistAuthenticatedHostKeyPolicy)
 
     assert transport.loaded_host_keys is None
     assert transport.saved_host_keys == str(known_hosts)
     assert known_hosts.is_file()
     assert known_hosts.stat().st_mode & 0o777 == 0o600
+
+
+def test_ssh_tofu_does_not_persist_a_key_before_authentication(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    transport = FakeParamikoClient()
+    known_hosts = tmp_path / "run" / "linux-known-hosts"
+
+    def fail_after_offering_key(host: str, **_kwargs: object) -> None:
+        policy = transport.missing_host_key_policy
+        assert isinstance(policy, ssh_module.PersistAuthenticatedHostKeyPolicy)
+        policy.missing_host_key(
+            transport,
+            host,
+            ssh_module.paramiko.RSAKey.generate(1024),
+        )
+        raise ssh_module.paramiko.AuthenticationException("wrong operating system")
+
+    transport.connect = fail_after_offering_key  # type: ignore[method-assign]
+    monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
+
+    with (
+        pytest.raises(WorkflowError),
+        SSHClient(
+            "example.test",
+            "oem",
+            "secret",
+            known_hosts_path=known_hosts,
+            trust_on_first_use=True,
+        ),
+    ):
+        pass
+
+    assert not known_hosts.exists()
+    assert transport.saved_host_keys is None
 
 
 def test_ssh_connection_failure_closes_the_partial_transport(
@@ -298,6 +391,6 @@ def test_vnc_capture_failure_removes_only_its_incomplete_output(
 @pytest.mark.parametrize("address", ["", "host", ":10", "host:not-a-display"])
 def test_vnc_rejects_invalid_addresses_before_connecting(address: str) -> None:
     with pytest.raises(WorkflowError) as caught:
-        VNCClient._vncdotool_address(address)
+        VNCClient.vncdotool_address(address)
 
     assert caught.value.step == "vnc.address"

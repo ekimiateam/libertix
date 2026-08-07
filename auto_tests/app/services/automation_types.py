@@ -9,6 +9,8 @@ class AutomationOptions:
     linux_username: str
     linux_password: str
     monitor_iso: bool
+    share_windows_files_in_linux: bool = True
+    share_linux_files_in_windows: bool = True
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,8 @@ class WizardLayout:
     distribution: Point
     next_button: Point
     sharing_next: Point
+    windows_to_linux_checkbox: Point
+    linux_to_windows_checkbox: Point
     username: Point
     password: Point
     password_confirmation: Point

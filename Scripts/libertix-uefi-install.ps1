@@ -171,8 +171,8 @@ $Aria2CacheDir = "$SystemDrive\LibertixTools\aria2"
 $Aria2DownloadDir = "$SystemDrive\LibertixTools\downloads"
 $LowMemoryIsoPath = "$SystemDrive\libertix-live.iso"
 
-$EspLetter = "Y"
-$InstallerLetter = "X"
+$InstallerLetter = Get-FreeDriveLetter
+$EspLetter = Get-FreeDriveLetter -ExcludedLetters @($InstallerLetter)
 $InstallerLabel = "LIBERTIXEFI"
 $InstallerBootDescription = "Libertix UEFI Installer"
 $InstallerEspDirectory = "EFI\LibertixInstaller"
@@ -188,7 +188,9 @@ if (-not (Test-Administrator)) {
 }
 
 if ($Revert) {
+    Start-LibertixTrackedRollback
     Invoke-Revert
+    Complete-LibertixTrackedRollback
     exit 0
 }
 

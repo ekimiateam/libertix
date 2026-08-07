@@ -2,21 +2,9 @@ using System.ComponentModel;
 
 namespace Libertix.Models
 {
-    public class DistroInfo : INotifyPropertyChanged
+    public class DistroInfo : DistroInfoJson, INotifyPropertyChanged
     {
         private bool _isSelected;
-
-        public string Name { get; set; }
-        public string Description { get; set; }
-        public string ImageUrl { get; set; }
-        public string IsoUrl { get; set; }
-        public string IsoInstaller { get; set; }
-        public string IsoInstallerFileName { get; set; }
-        public string IsoSha256 { get; set; }
-        public string UefiIsoUrl { get; set; }
-        public string UefiIsoSha256 { get; set; }
-        public string IsoInstallerSha256 { get; set; }
-        public double SizeInGB { get; set; }
 
         public bool IsSelected
         {

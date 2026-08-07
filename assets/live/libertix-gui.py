@@ -4,7 +4,6 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import os
-import re
 import subprocess
 import time
 import tkinter as tk
@@ -20,6 +19,7 @@ READY_FILE = LOG_DIR / "gui-ready"
 HEARTBEAT_FILE = LOG_DIR / "gui-heartbeat"
 BUILD_ID_FILE = Path("/etc/libertix-build-id")
 I18N_MODULE_PATH = Path("/usr/local/lib/libertix/libertix-i18n.py")
+PROGRESS_MODULE_PATH = Path("/usr/local/lib/libertix/libertix_progress.py")
 STAGE_CATALOG_PATH = Path("/usr/local/lib/libertix/libertix-stages.tsv")
 
 
@@ -33,6 +33,13 @@ def load_i18n_module():
 
 
 I18N_MODULE = load_i18n_module()
+PROGRESS_MODULE_SPEC = importlib.util.spec_from_file_location(
+    "libertix_progress", PROGRESS_MODULE_PATH
+)
+if PROGRESS_MODULE_SPEC is None or PROGRESS_MODULE_SPEC.loader is None:
+    raise RuntimeError(f"cannot load progress helper: {PROGRESS_MODULE_PATH}")
+PROGRESS_MODULE = importlib.util.module_from_spec(PROGRESS_MODULE_SPEC)
+PROGRESS_MODULE_SPEC.loader.exec_module(PROGRESS_MODULE)
 TRANSLATIONS = I18N_MODULE.load_catalogue(os.environ.get("LANGUAGE_CODE"))
 
 
@@ -40,26 +47,7 @@ def tr(key: str, **values: object) -> str:
     return I18N_MODULE.translate(TRANSLATIONS, key, **values)
 
 
-def load_stage_catalogue(path: Path = STAGE_CATALOG_PATH) -> dict[str, tuple[str, int]]:
-    stages: dict[str, tuple[str, int]] = {}
-    for line_number, line in enumerate(path.read_text(encoding="ascii").splitlines(), start=1):
-        if not line or line.startswith("#"):
-            continue
-        fields = line.split("\t")
-        if len(fields) != 3:
-            raise RuntimeError(f"invalid stage catalogue line {line_number}")
-        stage, translation_key, raw_percent = fields
-        percent = int(raw_percent)
-        if not stage or not translation_key or not 0 <= percent <= 100:
-            raise RuntimeError(f"invalid stage catalogue line {line_number}")
-        stages[stage] = (translation_key, percent)
-    return stages
-
-
-STAGES = load_stage_catalogue()
-
-UNSQUASHFS_STAGE_START = 54
-UNSQUASHFS_STAGE_END = 76
+STAGES = PROGRESS_MODULE.load_stage_catalogue(STAGE_CATALOG_PATH)
 
 
 def read_text(path: Path, default: str = "") -> str:
@@ -75,37 +63,6 @@ def tail(path: Path, lines: int) -> str:
     except OSError:
         return ""
     return "\n".join(data[-lines:])
-
-
-def log_since_stage(stage: str) -> str:
-    lines = read_text(LOG).replace("\r", "\n").splitlines()
-    start = -1
-    for index, line in enumerate(lines):
-        if line.strip() == f"STAGE: {stage}":
-            start = index
-    if start < 0:
-        return ""
-    return "\n".join(lines[start + 1 :])
-
-
-def parse_unsquashfs_percent() -> int | None:
-    text = log_since_stage("120-unsquashfs")
-    if not text:
-        return None
-
-    values: list[int] = []
-    for match in re.finditer(r"(?<!\d)(\d{1,3})\s*%", text):
-        value = int(match.group(1))
-        if 0 <= value <= 100:
-            values.append(value)
-
-    for match in re.finditer(r"(?<!\d)(\d+)\s*/\s*(\d+)(?!\d)", text):
-        done = int(match.group(1))
-        total = int(match.group(2))
-        if total > 0:
-            values.append(max(0, min(100, int(done * 100 / total))))
-
-    return max(values) if values else None
 
 
 def detailed_logs() -> str:
@@ -137,20 +94,17 @@ def parse_env(path: Path) -> dict[str, str]:
 def stage_info(stage: str) -> tuple[str, int]:
     if stage.startswith("installer-failed-"):
         return tr("stage_installer_failed"), 100
-    key, percent = STAGES.get(stage, ("", 1))
+    key, percent, _end_percent = STAGES.get(stage, ("", 1, 1))
     return (tr(key) if key else stage or tr("unknown_state")), percent
 
 
 def progress_info(stage: str) -> tuple[str, int, str]:
-    label, percent = stage_info(stage)
-    if stage == "120-unsquashfs":
-        sub_percent = parse_unsquashfs_percent()
-        if sub_percent is not None:
-            percent = UNSQUASHFS_STAGE_START + (
-                (UNSQUASHFS_STAGE_END - UNSQUASHFS_STAGE_START) * sub_percent // 100
-            )
-            return label, percent, tr("extraction_progress", percent=sub_percent)
-        return label, UNSQUASHFS_STAGE_START, tr("extraction_initializing")
+    label, _catalogue_percent = stage_info(stage)
+    percent, sub_percent = PROGRESS_MODULE.stage_progress(LOG, stage, STAGES)
+    if sub_percent is not None:
+        return label, percent, tr("extraction_progress", percent=sub_percent)
+    if STAGES.get(stage, ("", percent, percent))[2] != percent:
+        return label, percent, tr("extraction_initializing")
     return label, percent, ""
 
 

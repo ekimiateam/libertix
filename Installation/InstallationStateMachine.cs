@@ -25,6 +25,40 @@ namespace Libertix.Installation
             InstallationPhase.Target
         };
 
+        private static readonly string[] OrderedSteps =
+        {
+            InstallationStep.WindowsPreflightVerified,
+            InstallationStep.WindowsArtifactsVerified,
+            InstallationStep.WindowsRecoveryArmed,
+            InstallationStep.WindowsSystemVolumeShrunk,
+            InstallationStep.WindowsInstallerPartitionCreated,
+            InstallationStep.WindowsLiveMediaPrepared,
+            InstallationStep.WindowsTemporaryBootPrepared,
+            InstallationStep.LivePreflightVerified,
+            InstallationStep.LiveInstallerPartitionExpanded,
+            InstallationStep.LiveTargetFilesystemCreated,
+            InstallationStep.LiveDistributionExtracted,
+            InstallationStep.TargetSystemConfigured,
+            InstallationStep.TargetBootloaderInstalled,
+            InstallationStep.TargetInstallationVerified
+        };
+
+        private static readonly HashSet<string> CompensatableSteps = new HashSet<string>(
+            new[]
+            {
+                InstallationStep.WindowsRecoveryArmed,
+                InstallationStep.WindowsSystemVolumeShrunk,
+                InstallationStep.WindowsInstallerPartitionCreated,
+                InstallationStep.WindowsLiveMediaPrepared,
+                InstallationStep.WindowsTemporaryBootPrepared,
+                InstallationStep.LiveInstallerPartitionExpanded,
+                InstallationStep.LiveTargetFilesystemCreated,
+                InstallationStep.LiveDistributionExtracted,
+                InstallationStep.TargetSystemConfigured,
+                InstallationStep.TargetBootloaderInstalled
+            },
+            StringComparer.Ordinal);
+
         public InstallationStateMachine(InstallationExecutionState state)
         {
             State = state ?? throw new ArgumentNullException(nameof(state));
@@ -83,6 +117,16 @@ namespace Libertix.Installation
                 throw new InvalidOperationException($"Step '{State.ActiveStep}' is already active.");
             if (State.CompletedSteps.Contains(step, StringComparer.Ordinal))
                 throw new InvalidOperationException($"Step '{step}' is already complete.");
+            int expectedIndex = State.CompletedSteps.Count;
+            if (expectedIndex >= OrderedSteps.Length ||
+                !string.Equals(OrderedSteps[expectedIndex], step, StringComparison.Ordinal))
+            {
+                string expected = expectedIndex < OrderedSteps.Length
+                    ? OrderedSteps[expectedIndex]
+                    : "no further step";
+                throw new InvalidOperationException(
+                    $"Step '{step}' is out of order; expected '{expected}'.");
+            }
 
             // A recovery retry may legitimately resume after a recorded failure.
             // Drop that failure here: without this, the ledger can reach
@@ -158,6 +202,14 @@ namespace Libertix.Installation
         {
             if (State.Status != InstallationStatus.RollbackRunning)
                 throw new InvalidOperationException("No rollback is running.");
+            string uncompensatedStep = State.CompletedSteps.FirstOrDefault(step =>
+                CompensatableSteps.Contains(step) &&
+                !State.CompensatedSteps.Contains(step, StringComparer.Ordinal));
+            if (uncompensatedStep != null)
+            {
+                throw new InvalidOperationException(
+                    $"Rollback cannot complete before compensating '{uncompensatedStep}'.");
+            }
 
             State.Status = InstallationStatus.RolledBack;
             State.Phase = InstallationPhase.Complete;
@@ -169,6 +221,15 @@ namespace Libertix.Installation
         {
             if (State.Status != InstallationStatus.Running || !string.IsNullOrEmpty(State.ActiveStep))
                 throw new InvalidOperationException("Installation can complete only between successful steps.");
+            if (State.CompletedSteps.Count != OrderedSteps.Length ||
+                !string.Equals(
+                    State.CompletedSteps[State.CompletedSteps.Count - 1],
+                    InstallationStep.TargetInstallationVerified,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Installation cannot complete before final target verification.");
+            }
 
             State.Status = InstallationStatus.Succeeded;
             State.Phase = InstallationPhase.Complete;
@@ -217,6 +278,25 @@ namespace Libertix.Installation
                 GetStepPhase(step);
             if (!string.IsNullOrEmpty(state.ActiveStep))
                 GetStepPhase(state.ActiveStep);
+            for (int index = 0; index < state.CompletedSteps.Count; index++)
+            {
+                if (index >= OrderedSteps.Length ||
+                    !string.Equals(state.CompletedSteps[index], OrderedSteps[index], StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Execution state completedSteps is not an ordered workflow prefix.");
+                }
+            }
+            if (!string.IsNullOrEmpty(state.ActiveStep) &&
+                (state.CompletedSteps.Count >= OrderedSteps.Length ||
+                 !string.Equals(
+                     state.ActiveStep,
+                     OrderedSteps[state.CompletedSteps.Count],
+                     StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException(
+                    "Execution state activeStep is not the next workflow step.");
+            }
             if (state.Status == InstallationStatus.Failed && state.Failure == null)
                 throw new InvalidOperationException("A failed execution state requires failure details.");
             if (state.Failure != null &&

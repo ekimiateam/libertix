@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import ssl
 import time
 from pathlib import Path
@@ -25,8 +26,11 @@ class ProxmoxClient:
         verify_tls: bool = True,
         ca_bundle: Path | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/") + "/api2/json"
+        self.api_origin = base_url.rstrip("/")
+        self.base_url = self.api_origin + "/api2/json"
         self.task_timeout = task_timeout
+        self.timeout = timeout
+        self.authorization = f"PVEAPIToken={token_id}={token_secret}"
 
         # TLS verification is the safe default. Private Proxmox deployments may
         # opt into their own CA bundle; disabling verification requires an
@@ -35,7 +39,7 @@ class ProxmoxClient:
         if ca_bundle is not None:
             tls_verification = ssl.create_default_context(cafile=str(ca_bundle))
         self.client = httpx.Client(
-            headers={"Authorization": f"PVEAPIToken={token_id}={token_secret}"},
+            headers={"Authorization": self.authorization},
             verify=tls_verification,
             timeout=timeout,
         )
@@ -46,10 +50,17 @@ class ProxmoxClient:
     def __exit__(self, *_args: object) -> None:
         self.client.close()
 
-    def _request(self, method: str, path: str, *, step: str) -> object:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        step: str,
+        data: dict[str, object] | None = None,
+    ) -> object:
         logger.info("Proxmox request", extra={"step": step, "target": path})
         try:
-            response = self.client.request(method, f"{self.base_url}{path}")
+            response = self.client.request(method, f"{self.base_url}{path}", data=data)
             response.raise_for_status()
             return response.json()["data"]
         except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -129,9 +140,9 @@ class ProxmoxClient:
         )
         if not isinstance(data, str) or not data.startswith("UPID:"):
             raise WorkflowError("proxmox.rollback", "Invalid Proxmox UPID", details={"vmid": vmid})
-        self._wait_task(node, data, vmid)
+        self._wait_task(node, data, vmid, action="rollback")
 
-    def _wait_task(self, node: str, upid: str, vmid: int) -> None:
+    def _wait_task(self, node: str, upid: str, vmid: int, *, action: str) -> None:
         deadline = time.monotonic() + self.task_timeout
         encoded = quote(upid, safe="")
         while time.monotonic() < deadline:
@@ -139,14 +150,31 @@ class ProxmoxClient:
                 "GET", f"/nodes/{node}/tasks/{encoded}/status", step="proxmox.wait_task"
             )
             if isinstance(data, dict) and data.get("status") == "stopped":
-                if data.get("exitstatus") != "OK":
+                exit_status = str(data.get("exitstatus") or "")
+                if exit_status == "OK":
+                    return
+                if re.fullmatch(r"WARNINGS: [1-9][0-9]*", exit_status):
+                    # Proxmox reports completed tasks with non-fatal warnings
+                    # separately from failed tasks. The caller validates the
+                    # resulting VM state after the task completes.
+                    logger.warning(
+                        "Proxmox task completed with warnings",
+                        extra={"step": "proxmox.wait_task", "target": str(vmid)},
+                    )
+                    return
+                else:
                     raise WorkflowError(
                         "proxmox.wait_task",
-                        "Proxmox rollback failed",
-                        details={"vmid": vmid, "exitstatus": data.get("exitstatus")},
+                        "Proxmox task failed",
+                        details={
+                            "vmid": vmid,
+                            "action": action,
+                            "exitstatus": exit_status,
+                        },
                     )
-                return
             time.sleep(2)
         raise WorkflowError(
-            "proxmox.wait_task", "Rollback timeout exceeded", details={"vmid": vmid}
+            "proxmox.wait_task",
+            "Proxmox task timeout exceeded",
+            details={"vmid": vmid, "action": action},
         )

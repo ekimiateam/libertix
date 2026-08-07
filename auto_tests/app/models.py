@@ -24,7 +24,7 @@ class OperationResult(BaseModel):
 class ValidationRequest(BaseModel):
     """Optional validation scope.
 
-    Empty body means: validate every configured VM.
+    Empty body means: validate every VM enabled for the default scope.
     Accepted selectors include vm names, IPs, OS labels and common aliases.
     """
 
@@ -60,3 +60,5 @@ class AutomationRequest(ValidationRequest):
     )
     linux_password: str = Field(min_length=8, max_length=128)
     monitor_iso: bool = Field(default=True)
+    share_windows_files_in_linux: bool = Field(default=True)
+    share_linux_files_in_windows: bool = Field(default=True)

@@ -31,10 +31,15 @@ mount_target_windows_partitions_read_only() {
 }
 
 install_target_configuration_payload() {
+    install -d -m 0755 /mnt/target/etc/libertix
+    install -m 0644 "$INSTALLATION_PLAN_PATH" \
+        /mnt/target/etc/libertix/installation-plan.json
     install -m 0755 /usr/local/lib/libertix/configure-target.sh \
         /mnt/target/tmp/libertix-configure-target.sh
     install -m 0755 /usr/local/lib/libertix/configure-target-main.sh \
         /mnt/target/tmp/configure-target-main.sh
+    install -m 0755 /usr/local/lib/libertix/libertix-storage-common.sh \
+        /mnt/target/tmp/libertix-storage-common.sh
     install -m 0755 /usr/local/lib/libertix/10_libertix \
         /mnt/target/tmp/10_libertix
     install -m 0755 /usr/local/lib/libertix/render-libertix-menu.py \
@@ -88,6 +93,7 @@ run_target_configuration() {
 
     rm -f /mnt/target/tmp/libertix-configure-target.sh \
         /mnt/target/tmp/configure-target-main.sh \
+        /mnt/target/tmp/libertix-storage-common.sh \
         /mnt/target/tmp/10_libertix \
         /mnt/target/tmp/render-libertix-menu.py \
         /mnt/target/tmp/libertix-configure-development-access.sh \

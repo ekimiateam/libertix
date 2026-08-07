@@ -15,7 +15,9 @@ esac
 
 [ -s "$image" ] || { echo "Built ISO is missing: $image" >&2; exit 1; }
 
-workdir="$(mktemp -d)"
+verification_root="/var/lib/libertix-work/$mode/verification"
+mkdir -p "$verification_root"
+workdir="$(mktemp -d "$verification_root/run.XXXXXX")"
 trap 'rm -rf "$workdir"' EXIT HUP INT TERM
 squashfs="$workdir/filesystem.squashfs"
 

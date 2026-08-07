@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -22,7 +23,7 @@ namespace Libertix.Pages
             if (!IsRunningAsAdministrator())
             {
                 Log("ERROR: Administrator privileges are required for UEFI installation.");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
                 return;
             }
@@ -40,14 +41,14 @@ namespace Libertix.Pages
             if (!File.Exists(scriptPath))
             {
                 Log($"ERROR: UEFI installer script missing: {scriptPath}");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
                 return;
             }
             if (!File.Exists(aria2Path))
             {
                 Log($"ERROR: bundled aria2 missing: {aria2Path}");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
                 return;
             }
@@ -57,7 +58,7 @@ namespace Libertix.Pages
                 string.IsNullOrWhiteSpace(account.ComputerName))
             {
                 Log("ERROR: Linux account configuration is missing.");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
                 return;
             }
@@ -66,7 +67,7 @@ namespace Libertix.Pages
                 InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB);
             UpdateProgress(5, Localized("ApplyChangesPreparingUefi", "Preparing UEFI installation..."));
             Log($"UEFI installer partition size: {installationSizes.FinalSizeGiB}GB");
-            Log($"Filepool: {FilepoolConfig.BaseUrl}");
+            Log($"Filepool: {Filepool.BaseUrl}");
             Log($"aria2: bundled, max {Aria2MaxConnections} connections");
             Log($"Linux account: {account.Username}");
 
@@ -87,8 +88,8 @@ namespace Libertix.Pages
             string configPath = WriteProtectedUefiConfig(new
             {
                 InstallationPlanPath = _installationPlanPath,
-                ExecutionStatePath = _executionStatePath,
-                FilepoolBaseUrl = FilepoolConfig.BaseUrl,
+                ExecutionStatePath = _executionLedger.StatePath,
+                FilepoolBaseUrl = Filepool.BaseUrl,
                 Aria2ExePath = aria2Path,
                 Aria2Connections = Aria2MaxConnections
             });
@@ -147,7 +148,7 @@ namespace Libertix.Pages
                 return;
             }
 
-            UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
+            UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
             Log("UEFI installation preparation completed successfully.");
             RebootButton.Visibility = Visibility.Visible;
             FinishInstallation(enableBackButton: false);
@@ -160,8 +161,8 @@ namespace Libertix.Pages
             string failureCode = "UEFI_PREPARATION_FAILED")
         {
             ReloadExecutionState();
-            bool rollbackVerified = _executionStateMachine != null &&
-                _executionStateMachine.State.Status == InstallationStatus.RolledBack;
+            bool rollbackVerified = _executionLedger != null &&
+                _executionLedger.State.Status == InstallationStatus.RolledBack;
 
             if (!rollbackVerified)
             {
@@ -177,8 +178,8 @@ namespace Libertix.Pages
                 if (revertExitCode == 0)
                     CompleteExecutionRollback();
                 ReloadExecutionState();
-                rollbackVerified = _executionStateMachine != null &&
-                    _executionStateMachine.State.Status == InstallationStatus.RolledBack;
+                rollbackVerified = _executionLedger != null &&
+                    _executionLedger.State.Status == InstallationStatus.RolledBack;
             }
 
             CleanupPendingWindowsSharePayload();
@@ -211,7 +212,7 @@ namespace Libertix.Pages
                     "ApplyChangesPreparationRollbackIncompleteDetails",
                     "Preparation failed and automatic rollback could not be verified. " +
                     "Do not restart; review {0}.",
-                    Path.Combine(WindowsSystemDrive, "LibertixInstallLogs")),
+                    Path.Combine(WindowsSystemDrive, RuntimeNames.InstallationLogDirectory)),
                 Localized(
                     "ApplyChangesRollbackIncompleteTitle",
                     "Libertix - Incomplete rollback"),
@@ -228,11 +229,12 @@ namespace Libertix.Pages
                 "UefiRecovery",
                 runId);
             string payloadRoot = Path.Combine(root, "payload");
+            ProtectDirectoryForInstallerAndSystem(root);
             Directory.CreateDirectory(payloadRoot);
 
             var manifestFiles = new List<UefiRecoveryManifestFile>();
             string sourceRoot = AppDomain.CurrentDomain.BaseDirectory;
-            foreach (string sourceFile in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+            foreach (string sourceFile in EnumerateUefiRecoveryPayloadFiles(sourceRoot))
             {
                 string relativePath = sourceFile
                     .Substring(sourceRoot.Length)
@@ -275,6 +277,30 @@ namespace Libertix.Pages
                 ExpectedLinuxPartitionSize =
                     InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB).FinalSizeBytes
             };
+        }
+
+        internal static IEnumerable<string> EnumerateUefiRecoveryPayloadFiles(string sourceRoot)
+        {
+            string[] topLevelFiles = Directory.EnumerateFiles(
+                    sourceRoot,
+                    "*",
+                    SearchOption.TopDirectoryOnly)
+                .Where(path =>
+                    Path.GetFileName(path).Equals("Libertix.exe", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetExtension(path).Equals(".dll", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetExtension(path).Equals(".config", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            var payloadFiles = new List<string>(topLevelFiles);
+            foreach (string directoryName in new[] { "Scripts", "Tools" })
+            {
+                string directory = Path.Combine(sourceRoot, directoryName);
+                if (Directory.Exists(directory))
+                    payloadFiles.AddRange(Directory.EnumerateFiles(
+                        directory,
+                        "*",
+                        SearchOption.AllDirectories));
+            }
+            return payloadFiles;
         }
 
         private static void WriteUefiRecoveryState(UefiRecoveryState state)
@@ -336,7 +362,42 @@ namespace Libertix.Pages
             string directory = Path.Combine(Path.GetTempPath(), "Libertix");
             Directory.CreateDirectory(directory);
             string path = Path.Combine(directory, $"uefi-config-{Guid.NewGuid():N}.json");
-            File.WriteAllText(path, JsonSerializer.Serialize(config), new UTF8Encoding(false));
+            WriteProtectedInstallerFile(path, JsonSerializer.Serialize(config));
+            return path;
+        }
+
+        private static void ProtectDirectoryForInstallerAndSystem(string directory)
+        {
+            Directory.CreateDirectory(directory);
+            using (var identity = WindowsIdentity.GetCurrent())
+            {
+                var security = new DirectorySecurity();
+                security.SetAccessRuleProtection(true, false);
+                security.SetOwner(identity.User);
+                var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+                security.AddAccessRule(new FileSystemAccessRule(
+                    identity.User,
+                    FileSystemRights.FullControl,
+                    inheritance,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+                    FileSystemRights.FullControl,
+                    inheritance,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+                Directory.SetAccessControl(directory, security);
+            }
+        }
+
+        private static void WriteProtectedInstallerFile(string path, string content)
+        {
+            string directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(directory))
+                throw new InvalidOperationException("Protected installer file has no parent directory.");
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(path, content, new UTF8Encoding(false));
 
             using (var identity = WindowsIdentity.GetCurrent())
             {
@@ -353,7 +414,6 @@ namespace Libertix.Pages
                     AccessControlType.Allow));
                 File.SetAccessControl(path, security);
             }
-            return path;
         }
 
         private void HandleUefiInstallerOutput(string line)
@@ -369,7 +429,7 @@ namespace Libertix.Pages
         {
             try
             {
-                InstallationExecutionState state = InstallationStateStore.Read(_executionStatePath);
+                InstallationExecutionState state = InstallationStateStore.Read(_executionLedger.StatePath);
                 if (state.Progress == null || state.Revision <= _lastUefiProgressRevision)
                     return;
 

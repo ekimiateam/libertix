@@ -7,19 +7,7 @@ case "$LIBERTIX_FIRMWARE_MODE" in
     *) echo "Unsupported firmware mode: $LIBERTIX_FIRMWARE_MODE" >&2; exit 2 ;;
 esac
 
-partition_path() {
-    local disk="$1"
-    local num="$2"
-    case "$(basename "$disk")" in
-        nvme*|mmcblk*) echo "${disk}p${num}" ;;
-        *) echo "${disk}${num}" ;;
-    esac
-}
-
-partitions_of_disk() {
-    local disk="$1"
-    lsblk -lnpo NAME,TYPE "$disk" 2>/dev/null | awk '$2=="part"{print $1}'
-}
+. /tmp/libertix-storage-common.sh
 
 configure_user() {
     if id "$USERNAME" >/dev/null 2>&1; then
@@ -147,6 +135,10 @@ EOF
 }
 
 configure_timezone() {
+    [ -f "/usr/share/zoneinfo/$TIMEZONE" ] || {
+        echo "Unknown IANA timezone: $TIMEZONE" >&2
+        return 1
+    }
     ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
     echo "$TIMEZONE" > /etc/timezone
 }

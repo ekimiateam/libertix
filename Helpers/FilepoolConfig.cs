@@ -2,16 +2,32 @@ using System;
 
 namespace Libertix.Helpers
 {
-    public static class FilepoolConfig
+    public sealed class FilepoolConfig
     {
         public const string ProductionBaseUrl = "https://ekimia.fr/libertix";
 
-        public static string BaseUrl { get; private set; } = ProductionBaseUrl;
-
-        public static string DistrosUrl => BaseUrl + "/distros.json";
-
-        public static bool TryUseOverride(string value, out string error)
+        private FilepoolConfig(string baseUrl)
         {
+            BaseUrl = baseUrl;
+        }
+
+        public string BaseUrl { get; }
+
+        public string DistrosUrl => BaseUrl + "/distros.json";
+
+        public string DistrosSignatureUrl => DistrosUrl + ".sig";
+
+        public bool RequiresCatalogSignature => string.Equals(
+            BaseUrl,
+            ProductionBaseUrl,
+            StringComparison.OrdinalIgnoreCase);
+
+        public static FilepoolConfig Production { get; } =
+            new FilepoolConfig(ProductionBaseUrl);
+
+        public static bool TryCreate(string value, out FilepoolConfig config, out string error)
+        {
+            config = null;
             error = null;
 
             if (!Uri.TryCreate(value, UriKind.Absolute, out Uri uri) ||
@@ -32,17 +48,30 @@ namespace Libertix.Helpers
                 return false;
             }
 
-            BaseUrl = uri.AbsoluteUri.TrimEnd('/');
+            config = new FilepoolConfig(uri.AbsoluteUri.TrimEnd('/'));
             return true;
         }
 
-        public static string ResolveUrl(string value)
+        public string ResolveUrl(string value)
         {
             if (string.IsNullOrWhiteSpace(value))
                 return value;
 
-            if (System.Uri.TryCreate(value, System.UriKind.Absolute, out _))
-                return value;
+            if (Uri.TryCreate(value, UriKind.Absolute, out Uri absoluteUri))
+            {
+                if ((absoluteUri.Scheme != Uri.UriSchemeHttp &&
+                     absoluteUri.Scheme != Uri.UriSchemeHttps) ||
+                    string.IsNullOrWhiteSpace(absoluteUri.Host) ||
+                    !string.IsNullOrEmpty(absoluteUri.UserInfo) ||
+                    !string.IsNullOrEmpty(absoluteUri.Query) ||
+                    !string.IsNullOrEmpty(absoluteUri.Fragment))
+                {
+                    throw new ArgumentException(
+                        "Artifact URLs must be public absolute HTTP(S) URLs.",
+                        nameof(value));
+                }
+                return absoluteUri.AbsoluteUri;
+            }
 
             return BaseUrl.TrimEnd('/') + "/" + value.TrimStart('/');
         }

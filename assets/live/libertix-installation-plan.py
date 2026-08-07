@@ -126,6 +126,8 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     for name in ("keyboardLayout", "keyboardModel"):
         if not XKB_NAME_PATTERN.fullmatch(locale[name]):
             raise PlanValidationError(f"locale.{name} is not a valid XKB name")
+    if not re.fullmatch(r"[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+", locale["timezone"]):
+        raise PlanValidationError("locale.timezone is not a safe IANA timezone name")
     keyboard_variant = locale.get("keyboardVariant", "")
     if not isinstance(keyboard_variant, str) or (
         keyboard_variant and not XKB_NAME_PATTERN.fullmatch(keyboard_variant)
@@ -135,9 +137,13 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     account = require_mapping(root.get("account"), "account")
     if not USERNAME_PATTERN.fullmatch(str(account.get("username", ""))):
         raise PlanValidationError("account.username is invalid")
-    password_hash = str(account.get("passwordHash", ""))
-    if not re.fullmatch(r"\$6\$[^\r\n\t]+", password_hash):
-        raise PlanValidationError("account.passwordHash must use SHA-512 crypt")
+    password_hash_windows_path = str(account.get("passwordHashWindowsPath", ""))
+    if not re.fullmatch(r"[A-Za-z]:\\.+", password_hash_windows_path) or any(
+        part == ".." for part in password_hash_windows_path[3:].split("\\")
+    ):
+        raise PlanValidationError(
+            "account.passwordHashWindowsPath must be an absolute safe Windows path"
+        )
     computer_name = require_text(account.get("computerName"), "account.computerName")
     if len(computer_name) > 63:
         raise PlanValidationError("account.computerName cannot exceed 63 characters")
@@ -175,7 +181,11 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         if partition_end > disk_size:
             raise PlanValidationError(f"disk.{name} must fit within disk.sizeBytes")
         fixed_extents[name] = (partition_offset, partition_end)
-    for left, right in (("windows", "boot"), ("windows", "recovery"), ("boot", "recovery")):
+    for left, right in (
+        ("windows", "boot"),
+        ("windows", "recovery"),
+        ("boot", "recovery"),
+    ):
         left_start, left_end = fixed_extents[left]
         right_start, right_end = fixed_extents[right]
         if left_start < right_end and right_start < left_end:
@@ -382,7 +392,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "KEYBOARD_MODEL": locale["keyboardModel"],
         "TIMEZONE": locale["timezone"],
         "USERNAME": account["username"],
-        "PASSWORD_HASH": account["passwordHash"],
+        "PASSWORD_HASH_WINDOWS_PATH": account["passwordHashWindowsPath"],
         "COMPUTER_NAME": account["computerName"],
         "ISO_FILENAME": distribution["installerIsoFileName"],
         "ISO_URL": distribution["installerIsoUrl"],
@@ -429,17 +439,19 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("validate", "export-shell"))
+    parser.add_argument("command", choices=("validate", "export-shell", "plan-id"))
     parser.add_argument("path", type=Path)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    plan = load_plan(args.path, require_installer=args.command == "export-shell")
+    plan = load_plan(args.path, require_installer=args.command in {"export-shell", "plan-id"})
     if args.command == "export-shell":
         for name, value in shell_values(plan).items():
             print(f"{name}\t{value}")
+    elif args.command == "plan-id":
+        print(plan["planId"])
     return 0
 
 

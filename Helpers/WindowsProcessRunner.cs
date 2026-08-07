@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -35,6 +36,94 @@ namespace Libertix.Helpers
     /// </summary>
     public static class WindowsProcessRunner
     {
+        public static string ResolvePowerShell()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            foreach (string candidate in new[]
+            {
+                Path.Combine(windows, "Sysnative", "WindowsPowerShell", "v1.0", "powershell.exe"),
+                Path.Combine(windows, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+            })
+            {
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+            return "powershell.exe";
+        }
+
+        public static string QuoteArgument(string value)
+        {
+            if (value == null)
+                return "\"\"";
+
+            var quoted = new StringBuilder("\"");
+            int backslashes = 0;
+            foreach (char character in value)
+            {
+                if (character == '\\')
+                {
+                    backslashes++;
+                    continue;
+                }
+                if (character == '"')
+                {
+                    quoted.Append('\\', backslashes * 2 + 1);
+                    quoted.Append('"');
+                    backslashes = 0;
+                    continue;
+                }
+                quoted.Append('\\', backslashes);
+                quoted.Append(character);
+                backslashes = 0;
+            }
+            quoted.Append('\\', backslashes * 2);
+            quoted.Append('"');
+            return quoted.ToString();
+        }
+
+        public static void TerminateProcessTree(Process process)
+        {
+            int processId;
+            try
+            {
+                if (process == null || process.HasExited)
+                    return;
+                processId = process.Id;
+            }
+            catch
+            {
+                return;
+            }
+
+            try
+            {
+                using (var taskKill = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "taskkill.exe",
+                    Arguments = $"/PID {processId} /T /F",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                }))
+                {
+                    if (taskKill != null)
+                        taskKill.WaitForExit(10000);
+                }
+            }
+            catch
+            {
+                try
+                {
+                    process.Kill();
+                }
+                catch
+                {
+                    // The process may exit between the timeout and fallback.
+                }
+            }
+        }
+
         public static WindowsProcessResult Run(
             string fileName,
             string arguments,
@@ -71,7 +160,7 @@ namespace Libertix.Helpers
                 {
                     try
                     {
-                        process.Kill();
+                        TerminateProcessTree(process);
                     }
                     catch
                     {

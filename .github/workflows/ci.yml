@@ -46,15 +46,15 @@ jobs:
 
       - name: Lint Python
         working-directory: auto_tests
-        run: python -m ruff check app tests
+        run: python -m ruff check app tests ../assets/live/*.py ../iso-tools/*.py
 
       - name: Check Python formatting
         working-directory: auto_tests
-        run: python -m ruff format --check app tests
+        run: python -m ruff format --check app tests ../assets/live/*.py ../iso-tools/*.py
 
       - name: Run Python test suite with coverage
         working-directory: auto_tests
-        run: python -m pytest --cov=app --cov-report=term-missing
+        run: python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 
       - name: Validate shell script syntax
         shell: bash
@@ -68,7 +68,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck -x -S error
+          git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck -x -S warning
 
       - name: Validate versioned JSON contracts
         shell: bash
@@ -107,7 +107,7 @@ jobs:
         shell: pwsh
         run: |
           $failures = [System.Collections.Generic.List[string]]::new()
-          Get-ChildItem -Path Scripts, auto_tests/app/scripts -Recurse -File |
+          Get-ChildItem -Path Scripts, auto_tests/app/scripts, PowerShell.Tests -Recurse -File |
             Where-Object { $_.Extension -in '.ps1', '.psm1' } |
             ForEach-Object {
               $tokens = $null
@@ -124,6 +124,41 @@ jobs:
           if ($failures.Count -gt 0) {
             throw ($failures -join [Environment]::NewLine)
           }
+
+      - name: Analyze PowerShell
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 `
+            -Scope CurrentUser -Force -Repository PSGallery
+          $findings = @(
+            Invoke-ScriptAnalyzer `
+              -Path Scripts `
+              -Recurse `
+              -Severity Error, Warning
+            Invoke-ScriptAnalyzer `
+              -Path auto_tests/app/scripts `
+              -Recurse `
+              -Severity Error, Warning
+            Invoke-ScriptAnalyzer `
+              -Path PowerShell.Tests `
+              -Recurse `
+              -Severity Error, Warning
+          )
+          $findings | Format-Table -AutoSize
+          if ($findings.Count -gt 0) {
+            throw "PSScriptAnalyzer reported $($findings.Count) finding(s)."
+          }
+
+      - name: Run PowerShell contract tests
+        shell: pwsh
+        run: |
+          Install-Module -Name Pester -RequiredVersion 6.0.1 `
+            -Scope CurrentUser -Force -Repository PSGallery
+          $configuration = New-PesterConfiguration
+          $configuration.Run.Path = 'PowerShell.Tests'
+          $configuration.Run.Exit = $true
+          $configuration.Output.Verbosity = 'Normal'
+          Invoke-Pester -Configuration $configuration
 
       - name: Build Libertix.exe
         shell: pwsh

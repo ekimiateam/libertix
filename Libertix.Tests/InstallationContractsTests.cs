@@ -1,7 +1,12 @@
 using System;
 using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Libertix.Helpers;
 using Libertix.Installation;
+using Libertix.Models;
+using Libertix.Pages;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Libertix.Tests
@@ -12,14 +17,94 @@ namespace Libertix.Tests
         private const string PlanId = "0123456789abcdef0123456789abcdef";
 
         [TestMethod]
+        public void UefiRecoveryPayloadIncludesOnlyRequiredRuntimeFiles()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "libertix-recovery-payload-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(root, "Scripts", "modules"));
+                Directory.CreateDirectory(Path.Combine(root, "Tools", "aria2"));
+                Directory.CreateDirectory(Path.Combine(root, "Unrelated"));
+                string[] included =
+                {
+                    "Libertix.exe",
+                    "Libertix.exe.config",
+                    "System.Text.Json.dll",
+                    Path.Combine("Scripts", "libertix-uefi-install.ps1"),
+                    Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
+                    Path.Combine("Tools", "aria2", "aria2c.exe")
+                };
+                foreach (string relativePath in included)
+                {
+                    string path = Path.Combine(root, relativePath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    File.WriteAllText(path, relativePath);
+                }
+                foreach (string relativePath in new[]
+                {
+                    "libertix-installer-uefi.iso",
+                    "Libertix.pdb",
+                    "distros.json",
+                    Path.Combine("Unrelated", "debug.log")
+                })
+                {
+                    string path = Path.Combine(root, relativePath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    File.WriteAllText(path, relativePath);
+                }
+
+                string[] selected = ApplyChanges
+                    .EnumerateUefiRecoveryPayloadFiles(root)
+                    .Select(path => path.Substring(root.Length).TrimStart(
+                        Path.DirectorySeparatorChar,
+                        Path.AltDirectorySeparatorChar))
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+
+                CollectionAssert.AreEqual(
+                    included.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray(),
+                    selected);
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
+        [TestMethod]
+        public void PowerShellJsonResultUsesOnlyTheFinalCompleteObject()
+        {
+            PowerShellJsonResult result = PowerShellJsonResult.ParseFinalObject(
+                "CHECK=storage{diagnostic}\r\n" +
+                "{not-json}\r\n" +
+                "{\"preflightOk\":true,\"size\":42,\"warnings\":[\"one\",\"two\"]}\r\n");
+
+            Assert.IsTrue(result.GetBoolean("preflightOk"));
+            Assert.AreEqual(42, result.GetInt32("size"));
+            CollectionAssert.AreEqual(
+                new[] { "one", "two" },
+                result.GetStringArray("warnings"));
+        }
+
+        [TestMethod]
+        public void PowerShellJsonResultRejectsMissingFinalObject()
+        {
+            Assert.ThrowsException<InvalidOperationException>(
+                () => PowerShellJsonResult.ParseFinalObject("CHECK=storage\r\nnot json\r\n"));
+        }
+
+        [TestMethod]
         public void DevelopmentSshOptionsAcceptACompleteNetworkProfile()
         {
             bool parsed = StartupOptions.TryParse(
                 new[]
                 {
-                    "--dev-ssh-static-ip", "10.42.7.20",
+                    "--dev-ssh-static-ip", "198.51.100.20",
                     "--dev-ssh-prefix-length", "23",
-                    "--dev-ssh-gateway", "10.42.6.1",
+                    "--dev-ssh-gateway", "198.51.100.1",
                     "--dev-ssh-dns", "9.9.9.9",
                     "--dev-ssh-dns", "1.1.1.1"
                 },
@@ -27,9 +112,9 @@ namespace Libertix.Tests
                 out string error);
 
             Assert.IsTrue(parsed, error);
-            Assert.AreEqual("10.42.7.20", options.DevelopmentSshStaticIpv4Address);
+            Assert.AreEqual("198.51.100.20", options.DevelopmentSshStaticIpv4Address);
             Assert.AreEqual(23, options.DevelopmentSshStaticIpv4PrefixLength);
-            Assert.AreEqual("10.42.6.1", options.DevelopmentSshStaticIpv4Gateway);
+            Assert.AreEqual("198.51.100.1", options.DevelopmentSshStaticIpv4Gateway);
             CollectionAssert.AreEqual(
                 new[] { "9.9.9.9", "1.1.1.1" },
                 new System.Collections.Generic.List<string>(
@@ -37,11 +122,11 @@ namespace Libertix.Tests
         }
 
         [DataTestMethod]
-        [DataRow("10.42.6.0", "23", "10.42.6.1", "9.9.9.9")]
-        [DataRow("10.42.7.255", "23", "10.42.6.1", "9.9.9.9")]
-        [DataRow("10.42.7.20", "23", "10.43.0.1", "9.9.9.9")]
-        [DataRow("10.42.7.20", "31", "10.42.7.21", "9.9.9.9")]
-        [DataRow("not-an-address", "24", "10.42.7.1", "9.9.9.9")]
+        [DataRow("198.51.100.0", "23", "198.51.100.1", "9.9.9.9")]
+        [DataRow("198.51.101.255", "23", "198.51.100.1", "9.9.9.9")]
+        [DataRow("198.51.100.20", "23", "203.0.113.1", "9.9.9.9")]
+        [DataRow("198.51.100.20", "31", "198.51.100.21", "9.9.9.9")]
+        [DataRow("not-an-address", "24", "198.51.100.1", "9.9.9.9")]
         [DataRow("127.0.0.2", "24", "127.0.0.1", "9.9.9.9")]
         [DataRow("169.254.10.2", "24", "169.254.10.1", "9.9.9.9")]
         [DataRow("224.0.0.2", "24", "224.0.0.1", "9.9.9.9")]
@@ -69,7 +154,7 @@ namespace Libertix.Tests
         public void DevelopmentSshOptionsRequireTheCompleteProfile()
         {
             bool parsed = StartupOptions.TryParse(
-                new[] { "--dev-ssh-static-ip", "10.42.7.20" },
+                new[] { "--dev-ssh-static-ip", "198.51.100.20" },
                 out _,
                 out string error);
 
@@ -226,6 +311,33 @@ namespace Libertix.Tests
             }
         }
 
+        [TestMethod]
+        public void AtomicJsonFileRetriesATransientWindowsSharingViolation()
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "libertix-tests-" + Guid.NewGuid());
+            string path = Path.Combine(directory, "state.json");
+            try
+            {
+                AtomicJsonFile.Write(path, "{\"revision\":1}");
+                var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                Task release = Task.Run(() =>
+                {
+                    Thread.Sleep(150);
+                    locked.Dispose();
+                });
+
+                AtomicJsonFile.Write(path, "{\"revision\":2}");
+                release.Wait();
+
+                Assert.AreEqual("{\"revision\":2}\n", File.ReadAllText(path));
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, true);
+            }
+        }
+
         [DataTestMethod]
         [DataRow(20.0, 20, 20)]
         [DataRow(31.0, 31, 31)]
@@ -246,8 +358,27 @@ namespace Libertix.Tests
         public void SuccessfulStateCannotRetainFailureDetails()
         {
             InstallationStateMachine machine = InstallationStateMachine.Create(PlanId);
-            machine.StartStep(InstallationStep.WindowsPreflightVerified);
-            machine.CompleteStep(InstallationStep.WindowsPreflightVerified);
+            foreach (string step in new[]
+            {
+                InstallationStep.WindowsPreflightVerified,
+                InstallationStep.WindowsArtifactsVerified,
+                InstallationStep.WindowsRecoveryArmed,
+                InstallationStep.WindowsSystemVolumeShrunk,
+                InstallationStep.WindowsInstallerPartitionCreated,
+                InstallationStep.WindowsLiveMediaPrepared,
+                InstallationStep.WindowsTemporaryBootPrepared,
+                InstallationStep.LivePreflightVerified,
+                InstallationStep.LiveInstallerPartitionExpanded,
+                InstallationStep.LiveTargetFilesystemCreated,
+                InstallationStep.LiveDistributionExtracted,
+                InstallationStep.TargetSystemConfigured,
+                InstallationStep.TargetBootloaderInstalled,
+                InstallationStep.TargetInstallationVerified
+            })
+            {
+                machine.StartStep(step);
+                machine.CompleteStep(step);
+            }
             machine.CompleteInstallation();
             machine.State.Failure = new InstallationFailure
             {
@@ -258,6 +389,21 @@ namespace Libertix.Tests
 
             Assert.ThrowsException<InvalidOperationException>(
                 () => InstallationStateMachine.ValidateState(machine.State));
+        }
+
+        [TestMethod]
+        public void StateMachineRejectsOutOfOrderAndIncompleteSuccess()
+        {
+            InstallationStateMachine machine = InstallationStateMachine.Create(PlanId);
+
+            Assert.ThrowsException<InvalidOperationException>(
+                () => machine.StartStep(InstallationStep.WindowsRecoveryArmed));
+
+            machine.StartStep(InstallationStep.WindowsPreflightVerified);
+            machine.CompleteStep(InstallationStep.WindowsPreflightVerified);
+
+            Assert.ThrowsException<InvalidOperationException>(
+                () => machine.CompleteInstallation());
         }
 
         [TestMethod]
@@ -283,6 +429,106 @@ namespace Libertix.Tests
 
             Assert.ThrowsException<InvalidOperationException>(
                 () => machine.CompleteCompensation(InstallationStep.WindowsPreflightVerified));
+        }
+
+        [TestMethod]
+        public void ExecutionLedgerPersistsPrimaryAndMirroredTransitions()
+        {
+            string directory = Path.Combine(
+                Path.GetTempPath(),
+                "libertix-ledger-" + Guid.NewGuid().ToString("N"));
+            string statePath = Path.Combine(directory, "installation-state.json");
+            string mirrorPath = Path.Combine(directory, "live", "installation-state.json");
+            try
+            {
+                InstallationExecutionLedger ledger =
+                    InstallationExecutionLedger.Create(PlanId, statePath);
+                ledger.SetMirrorPath(mirrorPath);
+                ledger.StartStep(InstallationStep.WindowsPreflightVerified);
+                ledger.CompleteStep(InstallationStep.WindowsPreflightVerified);
+
+                InstallationExecutionState primary = InstallationStateStore.Read(statePath);
+                InstallationExecutionState mirror = InstallationStateStore.Read(mirrorPath);
+
+                Assert.AreEqual(primary.Revision, mirror.Revision);
+                CollectionAssert.AreEqual(
+                    primary.CompletedSteps.ToArray(),
+                    mirror.CompletedSteps.ToArray());
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, true);
+            }
+        }
+
+        [TestMethod]
+        public void PlanFactoryBuildsValidatedUefiIntentFromWindowsInputs()
+        {
+            const long GiB = InstallationSizePolicy.BytesPerGiB;
+            Assert.IsTrue(StartupOptions.TryParse(
+                Array.Empty<string>(),
+                out StartupOptions startupOptions,
+                out string startupError), startupError);
+
+            InstallationPlan plan = InstallationPlanFactory.Create(
+                new InstallationPlanCreationOptions
+                {
+                    PlanId = PlanId,
+                    Firmware = FirmwareType.Uefi,
+                    Distribution = new DistroInfo
+                    {
+                        Name = "Linux Mint",
+                        IsoInstallerFileName = "mint.iso",
+                        IsoInstaller = "https://example.test/mint.iso",
+                        IsoInstallerSha256 = new string('a', 64),
+                        IsoUrl = "https://example.test/bios.iso",
+                        IsoSha256 = new string('b', 64),
+                        UefiIsoUrl = "https://example.test/uefi.iso",
+                        UefiIsoSha256 = new string('c', 64)
+                    },
+                    Account = new AccountInfo
+                    {
+                        Username = "test",
+                        ComputerName = "libertix-test"
+                    },
+                    Sharing = new SharingOptions(),
+                    Compatibility = new CompatibilityInfo(),
+                    Storage = new StoragePreflightInfo
+                    {
+                        SystemDiskNumber = 0,
+                        SystemDiskUniqueId = "test-disk",
+                        SystemDiskSize = 256L * GiB,
+                        LogicalSectorSize = 512,
+                        PartitionStyle = InstallationPartitionStyle.Gpt,
+                        SystemDrive = "C:",
+                        SystemPartitionNumber = 3,
+                        SystemPartitionOffset = 2L * GiB,
+                        SystemPartitionSize = 180L * GiB,
+                        BootPartitionNumber = 1,
+                        BootPartitionOffset = 1024L * 1024L,
+                        BootPartitionSize = 100L * 1024L * 1024L,
+                        RecoveryPartitionNumber = 4,
+                        RecoveryPartitionOffset = 240L * GiB,
+                        RecoveryPartitionSize = 1L * GiB
+                    },
+                    Sizes = InstallationSizePolicy.FromRequestedGigabytes(40),
+                    Keyboard = WindowsKeyboardLayout.ResolveIdentifier("00000409", "us"),
+                    StartupOptions = startupOptions,
+                    LanguageCode = "en",
+                    SystemLanguage = "en_US.UTF-8",
+                    Timezone = "Etc/UTC",
+                    SystemDriveRoot = @"C:\",
+                    PasswordHashWindowsPath = @"C:\ProgramData\Libertix\account-secret.env",
+                    WindowsProfilesJsonBase64 = "W10=",
+                    RecoveryRootWindows = @"C:\ProgramData\Libertix\Recovery",
+                    RecoveryRunId = new string('d', 32)
+                });
+
+            Assert.AreEqual(InstallationFirmware.Uefi, plan.Firmware);
+            Assert.AreEqual(40L * GiB, plan.Disk.Installer.FinalSizeBytes);
+            Assert.AreEqual(8L * GiB, plan.Disk.Installer.StagingSizeBytes);
+            Assert.IsNull(plan.Development);
         }
 
         [TestMethod]
@@ -413,7 +659,7 @@ namespace Libertix.Tests
                 Account = new InstallationAccount
                 {
                     Username = "test",
-                    PasswordHash = "$6$salt$hash",
+                    PasswordHashWindowsPath = @"C:\ProgramData\Libertix\Recovery\account-secret.env",
                     ComputerName = "libertix-test"
                 },
                 Disk = new InstallationDisk

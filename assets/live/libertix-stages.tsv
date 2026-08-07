@@ -9,14 +9,13 @@ runner-start	stage_runner_start	1
 035-umount-windows	stage_035_umount_windows	22
 040-unmount-target-disk	stage_040_unmount_target_disk	26
 050-assert-live-detached	stage_050_assert_live_detached	30
-060-set-mbr-type-83	stage_060_linux_partition	34
 060-set-linux-partition-type	stage_060_linux_partition	34
 070-wipefs-live-part	stage_070_wipefs_live_part	38
 080-mkfs-ext4	stage_080_mkfs_ext4	42
 090-mount-target	stage_090_mount_target	46
 100-remount-windows-ro	stage_100_remount_windows_ro	50
 110-loop-mount-mint-iso	stage_110_loop_mount_mint_iso	54
-120-unsquashfs	stage_120_unsquashfs	64
+120-unsquashfs	stage_120_unsquashfs	54	76
 130-target-system-config	stage_130_target_system_config	76
 140-install-bootloader	stage_140_install_bootloader	90
 150-final-verify	stage_150_final_verify	98

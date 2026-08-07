@@ -117,8 +117,8 @@ namespace Libertix.Installation
         [JsonPropertyName("username")]
         public string Username { get; set; }
 
-        [JsonPropertyName("passwordHash")]
-        public string PasswordHash { get; set; }
+        [JsonPropertyName("passwordHashWindowsPath")]
+        public string PasswordHashWindowsPath { get; set; }
 
         [JsonPropertyName("computerName")]
         public string ComputerName { get; set; }

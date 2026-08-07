@@ -21,8 +21,8 @@ Samba paths, build hosts, VM definitions, snapshots, and credentials are configu
 The service uses two runtime directories under the configured Samba root:
 
 ```text
-/root/smb/Libertix-source
-/root/smb/Libertix-release
+<SMB_ROOT>/Libertix-source
+<SMB_ROOT>/Libertix-release
 ```
 
 The configured build VM requires Visual Studio Build Tools and MSBuild. The expected output is:
@@ -73,10 +73,19 @@ Files served by the current workflows:
 
 The distribution catalogue points directly to the official Linux Mint mirror for the installer
 ISO. Bind the API to an address reachable by the test VMs for the remaining filepool artifacts.
+The `/filepool` routes intentionally do not require the API key because the temporary live system
+must download from them without storing that secret. Run this development service only on an
+isolated laboratory network or behind a firewall that limits access to the test machines. Never
+expose it directly to the public Internet.
 
 ## Reset behavior
 
 The global reset refreshes the configured Samba workspace and restores the authorized VMs.
+
+Refreshing a local-source workspace replaces the bounded remote source directory with a clean copy
+of the selected Git tree. The service validates that directory against `SMB_ROOT` before invoking
+Git cleanup, but any untracked content inside that dedicated remote checkout is intentionally
+removed. Do not point the source path at a shared or manually maintained directory.
 
 A selective reset, for example `?vm=vm3`, restores only that VM and preserves the shared workspace.
 The stream emits `reset.scope` so clients can distinguish both behaviors.

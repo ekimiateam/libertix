@@ -30,8 +30,9 @@ validate_live_boot_mode() {
     local low_memory_mode="$1" kernel_cmdline="$2"
 
     if [ "$low_memory_mode" = "true" ]; then
-        grep -q 'findiso=/libertix-live.iso' <<< "$kernel_cmdline" || {
-            echo "LIVE_E_LOW_MEMORY_BOOT: findiso mode was requested but is absent from the kernel command line"
+        grep -qE '(^|[[:space:]])toram=filesystem\.squashfs([[:space:]]|$)' \
+            <<< "$kernel_cmdline" || {
+            echo "LIVE_E_LOW_MEMORY_BOOT: SquashFS module copy was requested but is absent from the kernel command line"
             return 1
         }
     else

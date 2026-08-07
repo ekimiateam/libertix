@@ -11,60 +11,7 @@
         ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen">
 
-    <Frame x:Name="MainFrame" NavigationUIVisibility="Hidden" Background="{DynamicResource PrimaryBackground}">
-        <Frame.Content>
-            <Grid Background="{DynamicResource PrimaryBackground}">
-                <StackPanel VerticalAlignment="Center">
-                    <Label Content="{DynamicResource Welcome}"
-                           HorizontalAlignment="Center"
-                           Margin="0,0,0,40"
-                           FontSize="72"
-                           FontWeight="Light"
-                           Foreground="{DynamicResource TextPrimary}"/>
-
-                    <Label Content="{DynamicResource Subtitle}"
-                           HorizontalAlignment="Center"
-                           Margin="0,0,0,20"
-                           FontSize="16"
-                           FontWeight="Light"
-                           Foreground="{DynamicResource TextSecondary}"/>
-
-                    <Button Content="{DynamicResource GetStarted}"
-                            Style="{StaticResource ModernButton}"
-                            Width="200"
-                            Height="50"
-                            HorizontalAlignment="Center"
-                            Margin="0,0,0,40"
-                            Click="Button_Click"/>
-
-                    <StackPanel Orientation="Horizontal"
-                              HorizontalAlignment="Center">
-                        <TextBlock Text="{DynamicResource Language}"
-                                 Foreground="{DynamicResource TextPrimary}"
-                                 FontSize="16"
-                                 VerticalAlignment="Center"
-                                 Margin="0,0,10,0"/>
-                        <ComboBox x:Name="LanguageComboBox"
-                                 Width="120"
-                                 Style="{StaticResource ModernComboBox}"
-                                 SelectionChanged="LanguageComboBox_SelectionChanged">
-                            <ComboBoxItem Content="English" Tag="en" IsSelected="True" Style="{StaticResource ModernComboBoxItem}"/>
-                            <ComboBoxItem Content="Français" Tag="fr" Style="{StaticResource ModernComboBoxItem}"/>
-                            <ComboBoxItem Content="Español" Tag="es" Style="{StaticResource ModernComboBoxItem}"/>
-                            <ComboBoxItem Content="日本語" Tag="ja" Style="{StaticResource ModernComboBoxItem}"/>
-                        </ComboBox>
-                    </StackPanel>
-
-                    <Button Content="{DynamicResource AboutButton}"
-                            Style="{StaticResource ModernButton}"
-                            Width="160"
-                            Height="42"
-                            HorizontalAlignment="Center"
-                            Margin="0,24,0,0"
-                            Click="AboutButton_Click"/>
-
-                </StackPanel>
-            </Grid>
-        </Frame.Content>
-    </Frame>
+    <Frame x:Name="MainFrame"
+           NavigationUIVisibility="Hidden"
+           Background="{DynamicResource PrimaryBackground}"/>
 </Window>

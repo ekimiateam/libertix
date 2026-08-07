@@ -1,4 +1,6 @@
 #!/bin/bash
+# Command diagnostics are written here and read by the sourcing orchestrator.
+# shellcheck disable=SC2034
 
 # Shared diagnostics, mount handling, and result reporting for the BIOS and
 # UEFI live installers. The orchestrator must define die(), fail_and_exit(),
@@ -136,6 +138,42 @@ unmount_if_mounted() {
     fi
 }
 
+recovery_geometry() {
+    local disk="$1"
+    manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"
+}
+
+verify_fstab_or_die() {
+    local target_root="$1" output rc
+    local target_dev="$target_root/dev"
+
+    [ -f "$target_root/etc/fstab" ] || die "final verify: target fstab missing"
+    [ -d "$target_dev" ] || die "final verify: target /dev directory missing"
+
+    # findmnt resolves mount targets from /. Run it in the installed system so
+    # target paths are not checked against the live environment.
+    mount --rbind /dev "$target_dev" || die "final verify: unable to bind /dev for fstab validation"
+    mount --make-rslave "$target_dev" || {
+        umount -R "$target_dev" 2>/dev/null || true
+        die "final verify: unable to isolate target /dev bind"
+    }
+
+    if output=$(chroot "$target_root" findmnt --verify --verbose --tab-file /etc/fstab 2>&1); then
+        rc=0
+    else
+        rc=$?
+    fi
+    umount -R "$target_dev" || die "final verify: unable to unmount target /dev bind"
+
+    printf '%s\n' "$output"
+    [ "$rc" -eq 0 ] && return 0
+    if printf '%s\n' "$output" | grep -Eq '(^|[[:space:]])0 parse errors, 0 errors,'; then
+        echo "FINAL VERIFY: fstab has non-fatal compatibility warnings only"
+        return 0
+    fi
+    die "final verify: fstab is invalid"
+}
+
 mount_windows_ro_with_retry() {
     local partition="$1"
     local mountpoint="$2"
@@ -161,13 +199,6 @@ mount_windows_ro_with_retry() {
         echo "WARNING: read-only NTFS mount failed rc=$rc on attempt $attempt"
         [ -n "$output" ] && echo "$output"
 
-        # A dirty NTFS flag after reboot can make early live mounts flaky.
-        # Clear it after a few failures, then retry the read-only mount.
-        if [ "$attempt" -eq 4 ] || [ "$attempt" -eq 8 ]; then
-            echo "Running ntfsfix -d before retrying read-only mount"
-            ntfsfix -d "$partition" || true
-            udevadm settle 2>/dev/null || true
-        fi
         sleep 2
     done
 
@@ -249,7 +280,7 @@ assert_no_target_disk_mounts() {
 
 assert_not_mounted_or_open() {
     local partition="$1"
-    local attempt consecutive_idle_samples=0
+    local attempt consecutive_idle_samples=0 fuser_output=""
 
     [ -b "$partition" ] || die "partition not found: $partition"
     # `fuser -m` treats the argument as a file on its containing filesystem.
@@ -265,7 +296,7 @@ assert_not_mounted_or_open() {
             debug_partition_users "$partition"
             die "partition remains mounted before a partition-table update: $partition"
         fi
-        if fuser "$partition" >/tmp/libertix-fuser.txt 2>&1; then
+        if fuser_output=$(fuser "$partition" 2>&1); then
             consecutive_idle_samples=0
         else
             consecutive_idle_samples=$((consecutive_idle_samples + 1))
@@ -275,7 +306,7 @@ assert_not_mounted_or_open() {
     done
 
     echo "ERROR: $partition still has users after bounded retries"
-    cat /tmp/libertix-fuser.txt 2>/dev/null || true
+    [ -z "$fuser_output" ] || printf '%s\n' "$fuser_output"
     debug_partition_users "$partition"
     die "partition remains in use before a partition-table update: $partition"
 }
@@ -308,4 +339,43 @@ delete_live_bcd_entry_or_die() {
     # cleanup-bcd.py edits the offline Windows BCD hive with hivex. Keeping the
     # Python out of this shell module makes the boot cleanup auditable.
     python3 /usr/local/lib/libertix/cleanup-bcd.py "$bcd_file"
+}
+write_windows_recovery_marker_file_best_effort() {
+    local namespace="$1"
+    local state="$2"
+    local rc="${3:-0}"
+    local mountpoint="/mnt/libertix-recovery-state"
+    local relative marker
+
+    [ -n "$RECOVERY_ROOT_WINDOWS" ] || return 0
+    [ -n "$RECOVERY_RUN_ID" ] || return 0
+    [ -n "$WINDOWS_PART" ] && [ -b "$WINDOWS_PART" ] || return 0
+    case "$RECOVERY_ROOT_WINDOWS" in
+        [Cc]:\\*) ;;
+        *)
+            echo "WARNING: refusing unexpected Windows recovery root: $RECOVERY_ROOT_WINDOWS"
+            return 0
+            ;;
+    esac
+
+    relative="$(windows_path_to_relative "$RECOVERY_ROOT_WINDOWS")"
+    marker="$mountpoint/$relative/$state.env"
+    mkdir -p "$mountpoint"
+    mountpoint -q "$mountpoint" && umount "$mountpoint" 2>/dev/null || true
+    if ! mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint" 2>/dev/null; then
+        echo "WARNING: cannot write Windows recovery marker $state"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$marker")" 2>/dev/null || true
+    {
+        echo "LIBERTIX_${namespace}_RECOVERY_RUN_ID=$RECOVERY_RUN_ID"
+        echo "LIBERTIX_${namespace}_RECOVERY_STATE=$state"
+        echo "LIBERTIX_${namespace}_RECOVERY_STAGE=$CURRENT_STAGE"
+        echo "LIBERTIX_${namespace}_RECOVERY_RC=$rc"
+        echo "LIBERTIX_${namespace}_RECOVERY_TIME=$(date -Is 2>/dev/null || date)"
+    } > "$marker" 2>/dev/null || true
+    sync || true
+    umount "$mountpoint" 2>/dev/null || true
+    return 0
 }

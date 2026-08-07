@@ -9,7 +9,6 @@
 
     <system:String x:Key="ChooseDistroTitle">Choose your flavor of Linux!</system:String>
     
-    <system:String x:Key="UbuntuDescription">Fast, free and full of new features. Ubuntu is the world's favourite Linux operating system.</system:String>
 
     <system:String x:Key="ResizeDiskTitle">Resize Your Disk</system:String>
     <system:String x:Key="Windows">Windows</system:String>
@@ -53,8 +52,6 @@
     <system:String x:Key="ComputerNameInvalid">Computer name must start with a letter and contain only lowercase letters, numbers, or hyphens</system:String>
 
     <system:String x:Key="PartitionWarningTitle">WARNING: Non-standard partition configuration</system:String>
-    <system:String x:Key="PartitionWarningMessage">This installer has NOT been tested on this partition layout. Continuing is HIGHLY DISCOURAGED unless you know EXACTLY what you are doing.</system:String>
-    <system:String x:Key="PartitionWarningCheckbox">I understand</system:String>
 
     <system:String x:Key="WarningTitle">Warning</system:String>
     <system:String x:Key="WarningMessage">You are about to make significant changes to your disk partitions. This operation will modify your hard drive and install a dual-boot system alongside Windows.</system:String>
@@ -116,15 +113,9 @@
 
     <system:String x:Key="ApplyChangesTitle">Apply Changes</system:String>
     <system:String x:Key="ApplyChangesWaiting">Ready to start partitioning</system:String>
-    <system:String x:Key="ApplyChangesSummary">Installation Summary</system:String>
-    <system:String x:Key="ApplyChangesDistro">Distribution:</system:String>
-    <system:String x:Key="ApplyChangesLinuxSize">Linux Space:</system:String>
-    <system:String x:Key="ApplyChangesUsername">Username:</system:String>
-    <system:String x:Key="ApplyChangesStart">Start Installation</system:String>
     <system:String x:Key="ApplyChangesStep1">Shrinking Windows partition for Linux...</system:String>
     <system:String x:Key="ApplyChangesStep2">Creating FAT32 live/Linux partition...</system:String>
     <system:String x:Key="ApplyChangesWaitDisk">Waiting for disk update...</system:String>
-    <system:String x:Key="ApplyChangesStep3">Shrinking Windows partition for Linux...</system:String>
     <system:String x:Key="ApplyChangesComplete">Partitioning complete!</system:String>
     <system:String x:Key="ApplyChangesError">An error occurred</system:String>
     <system:String x:Key="ApplyChangesReboot">Reboot</system:String>
@@ -142,7 +133,6 @@
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Checking Secure Boot...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Initializing Windows {0} decryption...</system:String>
     <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} decrypted</system:String>
-    <system:String x:Key="ApplyChangesDecryptingWindows">Decrypting Windows {0}...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Decrypting Windows {0}: {1}%</system:String>
     <system:String x:Key="ApplyChangesDownloading">Downloading...</system:String>
     <system:String x:Key="ApplyChangesDownloadingIso">Downloading ISO...</system:String>
@@ -157,8 +147,6 @@
     <system:String x:Key="ApplyChangesMintReady">Mint ISO ready</system:String>
     <system:String x:Key="ApplyChangesCreatingUefiPartition">Creating UEFI installer partition...</system:String>
     <system:String x:Key="ApplyChangesDownloadingUefiIso">Downloading Libertix UEFI ISO...</system:String>
-    <system:String x:Key="ApplyChangesDownloadingUefiIsoPercent">Downloading Libertix UEFI ISO... {0}%</system:String>
-    <system:String x:Key="ApplyChangesDownloadingMintPercent">Downloading Mint ISO... {0}%</system:String>
     <system:String x:Key="ApplyChangesCopyingUefiInstaller">Copying UEFI installer...</system:String>
     <system:String x:Key="ApplyChangesConfiguringUefiBoot">Configuring UEFI boot...</system:String>
     <system:String x:Key="ApplyChangesUefiComplete">UEFI preparation complete</system:String>

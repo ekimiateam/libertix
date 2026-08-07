@@ -180,7 +180,7 @@ namespace Libertix.Pages
                     {
                         try
                         {
-                            process.Kill();
+                            WindowsProcessRunner.TerminateProcessTree(process);
                         }
                         catch
                         {
@@ -208,32 +208,7 @@ namespace Libertix.Pages
 
         private static string QuoteArgument(string value)
         {
-            if (value == null)
-                return "\"\"";
-
-            var quoted = new StringBuilder("\"");
-            int backslashes = 0;
-            foreach (char character in value)
-            {
-                if (character == '\\')
-                {
-                    backslashes++;
-                    continue;
-                }
-                if (character == '"')
-                {
-                    quoted.Append('\\', backslashes * 2 + 1);
-                    quoted.Append('"');
-                    backslashes = 0;
-                    continue;
-                }
-                quoted.Append('\\', backslashes);
-                quoted.Append(character);
-                backslashes = 0;
-            }
-            quoted.Append('\\', backslashes * 2);
-            quoted.Append('"');
-            return quoted.ToString();
+            return WindowsProcessRunner.QuoteArgument(value);
         }
 
         private void Log(string value)

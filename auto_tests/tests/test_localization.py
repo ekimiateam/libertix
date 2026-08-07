@@ -31,32 +31,32 @@ def resource_keys(language: str) -> set[str]:
 
 def test_about_page_is_built_and_reachable_from_welcome() -> None:
     project = (ROOT / "Libertix.csproj").read_text(encoding="utf-8-sig")
-    welcome = (ROOT / "MainWindow.xaml").read_text(encoding="utf-8-sig")
+    welcome = (ROOT / "Pages/Welcome.xaml").read_text(encoding="utf-8-sig")
     code_behind = (ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8-sig")
     about = (ROOT / "Pages/About.xaml").read_text(encoding="utf-8-sig")
 
     assert '<Page Include="Pages\\About.xaml" />' in project
     assert '<Compile Include="Pages\\About.xaml.cs">' in project
-    assert 'Click="AboutButton_Click"' in welcome
+    assert '<Page Include="Pages\\Welcome.xaml" />' in project
+    assert '<Compile Include="Pages\\Welcome.xaml.cs">' in project
+    assert 'Click="About_Click"' in welcome
     assert "new About()" in code_behind
     assert "https://ekimia.fr/libertix/" in about
     assert "https://ekimia.fr/donations/campagne-libertix/" in about
     assert "https://github.com/ekimiateam/libertix" in about
 
 
-def test_returning_from_about_clears_welcome_animation_clocks() -> None:
+def test_returning_from_about_creates_a_fresh_welcome_navigation_root() -> None:
     code_behind = (ROOT / "MainWindow.xaml.cs").read_text(encoding="utf-8-sig")
     return_to_welcome = code_behind.split("public void ReturnToWelcome()", 1)[1].split(
-        "private void LanguageComboBox_SelectionChanged", 1
+        "private Welcome CreateWelcomePage", 1
     )[0]
 
-    assert "BeginAnimation(UIElement.OpacityProperty, null)" in return_to_welcome
-    assert "BeginAnimation(FrameworkElement.MarginProperty, null)" in return_to_welcome
-    assert "welcomeElement.Opacity = 1.0" in return_to_welcome
-    assert "welcomeFrameworkElement.Margin = new Thickness(0)" in return_to_welcome
-    assert "if (MainFrame.CanGoBack)" in return_to_welcome
-    assert "MainFrame.GoBack()" in return_to_welcome
-    assert "MainFrame.Content = _welcomeContent" in return_to_welcome
+    assert "CreateWelcomePage()" in return_to_welcome
+    assert "navigation.RemoveBackEntry()" in return_to_welcome
+    assert "GoBack()" not in return_to_welcome
+    assert "_welcomeContent" not in code_behind
+    assert "return new Welcome(" in code_behind
 
 
 def test_all_wpf_languages_contain_the_same_about_resources() -> None:
@@ -98,6 +98,29 @@ def test_live_translation_catalogues_have_identical_keys() -> None:
     assert set(catalogue) == set(LANGUAGES)
     assert len({frozenset(entries) for entries in catalogue.values()}) == 1
     assert all(catalogue[language] for language in LANGUAGES)
+
+
+def test_compatibility_message_catalogue_has_language_and_key_parity() -> None:
+    catalogue = json.loads(
+        (ROOT / "Scripts/config/Libertix.CompatibilityMessages.json").read_text(encoding="utf-8")
+    )
+
+    assert set(catalogue) == {
+        "checkMessages",
+        "warningMessages",
+        "errorMessages",
+        "bootstrapMessages",
+    }
+    for section in catalogue.values():
+        assert set(section) == set(LANGUAGES)
+        assert len({frozenset(entries) for entries in section.values()}) == 1
+        assert all(section[language] for language in LANGUAGES)
+
+    script = (ROOT / "Scripts/libertix-compatibility-preflight.ps1").read_text(encoding="utf-8-sig")
+    assert "Libertix.CompatibilityMessages.json" in script
+    assert "$checkMessages = @{" not in script
+    assert "$warningMessages = @{" not in script
+    assert "$errorMessages = @{" not in script
 
 
 @pytest.mark.parametrize("language", LANGUAGES)
@@ -152,13 +175,21 @@ def test_english_live_ui_contains_no_french_fallback_text() -> None:
 def test_compatibility_preflight_uses_the_selected_language() -> None:
     runner = (ROOT / "Helpers/CompatibilityPreflightRunner.cs").read_text(encoding="utf-8-sig")
     script = (ROOT / "Scripts/libertix-compatibility-preflight.ps1").read_text(encoding="utf-8-sig")
+    messages = json.loads(
+        (ROOT / "Scripts/config/Libertix.CompatibilityMessages.json").read_text(encoding="utf-8")
+    )
 
     assert "string languageCode = Localization.CurrentLanguage" in runner
-    assert '" -LanguageCode " + QuoteArgument(languageCode)' in runner
+    assert '" -LanguageCode " +' in runner
+    assert "WindowsProcessRunner.QuoteArgument(languageCode)" in runner
     assert '[ValidateSet("en", "fr", "es", "ja")]' in script
-    assert 'COMPAT_010_PRIVILEGES = "Checking administrator privileges"' in script
-    assert 'COMPAT_050_FILESYSTEM = "Checking NTFS, BitLocker, and shrinkable space"' in script
-    assert 'BITLOCKER = "BitLocker is active;' in script
+    assert messages["checkMessages"]["en"]["COMPAT_010_PRIVILEGES"] == (
+        "Checking administrator privileges"
+    )
+    assert messages["checkMessages"]["en"]["COMPAT_050_FILESYSTEM"] == (
+        "Checking NTFS, BitLocker, and shrinkable space"
+    )
+    assert messages["warningMessages"]["en"]["BITLOCKER"].startswith("BitLocker is active;")
     assert 'Write-Check "COMPAT_010_PRIVILEGES"' in script
     assert 'Write-Check "COMPAT_050_FILESYSTEM"' in script
     assert 'Write-LocalizedWarning "BITLOCKER"' in script
@@ -173,7 +204,6 @@ def test_apply_changes_runtime_messages_are_translated_in_every_language() -> No
         "ApplyChangesCheckingSecureBoot",
         "ApplyChangesDecryptingWindowsInit",
         "ApplyChangesWindowsDecrypted",
-        "ApplyChangesDecryptingWindows",
         "ApplyChangesDecryptingWindowsPercent",
         "ApplyChangesDownloading",
         "ApplyChangesDownloadingIso",

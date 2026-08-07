@@ -1,13 +1,12 @@
-# UEFI BootNext et BootOrder
+# UEFI BootNext and BootOrder
 
-## Résumé
+## Summary
 
-En UEFI, chaque entrée de boot est stockée dans une variable NVRAM `Boot####`.
-`BootOrder` est la liste persistante des entrées que le firmware essaie dans l'ordre.
-`BootNext` est une variable spéciale one-shot : si elle existe, le firmware tente cette entrée au
-prochain démarrage seulement, puis la supprime avant de lancer le chargeur.
+UEFI stores each boot entry in a `Boot####` NVRAM variable. `BootOrder` is the persistent list of
+entries the firmware tries in order. `BootNext` is a one-shot variable: when present, the firmware
+tries that entry on the next boot only and deletes the variable before launching the loader.
 
-Sources principales :
+Primary sources:
 - UEFI Specification 2.10, Boot Manager : https://uefi.org/specs/UEFI/2.10/03_Boot_Manager.html
 - efibootmgr README : https://github.com/dell/efibootmgr/blob/master/README
 - efibootmgr manpage Debian : https://manpages.debian.org/unstable/efibootmgr/efibootmgr.8.en.html
@@ -15,31 +14,31 @@ Sources principales :
 
 ## BootNext
 
-`BootNext` est prévu pour un démarrage temporaire. Sous Linux, `efibootmgr -n XXXX` écrit cette
-variable. Au reboot suivant, le firmware tente `BootXXXX`, puis revient normalement à `BootOrder`.
-L'intérêt est d'éviter de modifier durablement l'ordre de boot.
+`BootNext` provides a temporary boot selection. On Linux, `efibootmgr -n XXXX` writes this variable.
+On the next reboot, the firmware tries `BootXXXX` and then normally returns to `BootOrder`. This
+avoids changing the persistent boot order.
 
-Limites pratiques :
-- certains firmwares gèrent mal les écritures NVRAM ou les effacent;
-- certains chemins EFI valides sur un firmware échouent sur un autre;
-- Windows et certains firmwares peuvent resynchroniser ou nettoyer les entrées firmware;
-- Secure Boot peut refuser le chargeur même si l'entrée UEFI existe.
+Practical limitations:
+
+- Some firmware mishandles or clears NVRAM writes.
+- An EFI path accepted by one firmware can fail on another.
+- Windows and some firmware can resynchronize or remove firmware entries.
+- Secure Boot can reject a loader even when its UEFI entry exists.
 
 ## BootOrder
 
-`BootOrder` est plus persistant : placer une entrée en premier force le firmware à essayer cette
-entrée en priorité à chaque boot tant que l'ordre reste en place. C'est plus robuste pour certains
-firmwares qui ignorent ou perdent `BootNext`, mais c'est aussi plus intrusif, car cela change l'état
-durable de la machine.
+`BootOrder` is persistent: placing an entry first makes the firmware try it first on every boot while
+that order remains in place. This is more reliable on firmware that ignores or loses `BootNext`, but
+it is also more intrusive because it changes durable machine state.
 
-## Choix actuel dans Libertix
+## Libertix behavior
 
-Le premier essai utilise `BootNext` vers une entree firmware native qui cible le loader temporaire
-`EFI\LibertixInstaller\BOOTX64.EFI` sur l'ESP Windows. Avant le redemarrage, Libertix relit
-l'entree `Boot####`, le chemin du loader, les hashes des fichiers EFI et la valeur `BootNext`.
+The first attempt uses `BootNext` with a native firmware entry targeting the temporary
+`EFI\LibertixInstaller\BOOTX64.EFI` loader on the Windows ESP. Before rebooting, Libertix reads back
+the `Boot####` entry, loader path, EFI file hashes, and `BootNext` value.
 
-Si Windows revient sans marqueur du live, le garde de reprise lance une copie locale verifiee de
-Libertix et demande a l'utilisateur s'il veut utiliser le seul fallback valide : une entree firmware
-creee avec BCD et placee temporairement en tete de `BootOrder`. Ce n'est pas un chainload direct par
-Windows Boot Manager. Le live supprime ses artefacts BCD/EFI avant toute modification de disque et le
-mode `-Revert` restaure l'ordre firmware sauvegarde, les fichiers ESP et la partition temporaire.
+If Windows returns without the live marker, the recovery guard launches a verified local Libertix
+copy and asks whether the user wants the validated fallback: a firmware entry created through BCD
+and placed temporarily at the start of `BootOrder`. Windows Boot Manager does not directly
+chainload the live system. The live installer removes its BCD and EFI artifacts before changing the
+disk, and `-Revert` restores the saved firmware order, ESP files, and temporary partition.

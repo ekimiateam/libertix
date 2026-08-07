@@ -11,6 +11,12 @@ firmware_finalize_success_best_effort() {
     return 0
 }
 
+write_windows_recovery_marker_best_effort() {
+    local state="$1"
+    local rc="${2:-0}"
+    write_windows_recovery_marker_file_best_effort "BIOS" "$state" "$rc"
+}
+
 
 candidate_disks() {
     local disk
@@ -55,48 +61,12 @@ disk_matches_manifest() {
 }
 
 
-recovery_geometry() {
-    local disk="$1"
-    manifest_partition_geometry "$disk" "$RECOVERY_PARTITION_OFFSET_BYTES"
-}
-
 write_target_fstab_or_die() {
     local root_uuid
 
     root_uuid=$(blkid -s UUID -o value "$NEW_PART" 2>/dev/null || true)
     [ -n "$root_uuid" ] || die "root UUID missing before fstab write"
     echo "UUID=$root_uuid / ext4 defaults 0 1" > /mnt/target/etc/fstab
-}
-
-verify_fstab_or_die() {
-    local target_root="$1" output rc
-    local target_dev="$target_root/dev"
-
-    [ -f "$target_root/etc/fstab" ] || die "final verify: target fstab missing"
-    [ -d "$target_dev" ] || die "final verify: target /dev directory missing"
-
-    # findmnt resolves mount targets from /. Run it in the installed system;
-    # otherwise target paths are incorrectly checked against the live system.
-    mount --rbind /dev "$target_dev" || die "final verify: unable to bind /dev for fstab validation"
-    mount --make-rslave "$target_dev" || {
-        umount -R "$target_dev" 2>/dev/null || true
-        die "final verify: unable to isolate target /dev bind"
-    }
-
-    if output=$(chroot "$target_root" findmnt --verify --verbose --tab-file /etc/fstab 2>&1); then
-        rc=0
-    else
-        rc=$?
-    fi
-    umount -R "$target_dev" || die "final verify: unable to unmount target /dev bind"
-
-    printf '%s\n' "$output"
-    [ "$rc" -eq 0 ] && return 0
-    if printf '%s\n' "$output" | grep -Eq '(^|[[:space:]])0 parse errors, 0 errors,'; then
-        echo "FINAL VERIFY: fstab has non-fatal compatibility warnings only"
-        return 0
-    fi
-    die "final verify: fstab is invalid"
 }
 
 partition_has_boot_flag() {
@@ -292,7 +262,7 @@ firmware_rollback_partition_is_owned() {
 firmware_cleanup_partition_container_best_effort() {
     local layout current_table logical_sector installer_sector recovery_sector
     local windows_number windows_end extended_row extended_rc extended_type
-    local extended_number extended_start extended_end
+    local extended_number extended_start
 
     layout="$(parted -sm "$DISK" unit s print 2>/dev/null)" || return 1
     current_table="$(printf '%s\n' "$layout" | awk -F: 'NR==2{print $6; exit}')"
@@ -326,7 +296,7 @@ firmware_cleanup_partition_container_best_effort() {
         return 0
     fi
 
-    IFS=: read -r extended_number extended_start extended_end <<< "$extended_row"
+    IFS=: read -r extended_number extended_start _ <<< "$extended_row"
     extended_type="$(sfdisk --part-type "$DISK" "$extended_number" 2>/dev/null \
         | normalize_mbr_partition_type)"
     case "$extended_type" in
@@ -371,7 +341,8 @@ firmware_restore_boot_state_best_effort() {
 }
 
 firmware_write_failure_marker_best_effort() {
-    return 0
+    local rc="$1"
+    write_windows_recovery_marker_best_effort "live-failed" "$rc"
 }
 
 bios_partition_table_or_die() {
@@ -389,8 +360,8 @@ bios_partition_table_or_die() {
 prepare_installer_partition_for_target_format_or_die() {
     local layout logical_sector installer_sector recovery_sector owned_layout
     local logical_number logical_start logical_end
-    local extended_number extended_start extended_end extended_type
-    local original_size partition_size new_end new_size attempt
+    local extended_number extended_start extended_type
+    local original_size partition_size new_end new_size
 
     bios_partition_table_or_die >/dev/null
     [ "$SHARE_LINUX_FILES_IN_WINDOWS" = "true" ] || return 0
@@ -415,7 +386,7 @@ prepare_installer_partition_for_target_format_or_die() {
     )" || die "the MBR logical staging layout is not uniquely owned by this transaction"
     IFS=: read -r \
         logical_number logical_start logical_end \
-        extended_number extended_start extended_end <<< "$owned_layout"
+        extended_number extended_start _ <<< "$owned_layout"
 
     [ "$logical_number" = "$NEW_PART_NUM" ] || \
         die "the MBR logical staging number changed before normalization"
@@ -466,7 +437,7 @@ prepare_installer_partition_for_target_format_or_die() {
 
     # BLKRRPART and udev updates are asynchronous on some virtual controllers.
     # Resolve the exact manifest offset rather than assuming a device number.
-    for attempt in $(seq 1 20); do
+    for _ in $(seq 1 20); do
         NEW_PART="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
         [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] && break
         sleep 0.25
@@ -571,10 +542,6 @@ cleanup_windows_live_boot_artifacts() {
 
     # Then remove the GRUB4DOS files that Windows used only to start this live
     # installer. The final Linux bootloader is installed later by grub-install.
-    if grep -q 'findiso=/libertix-live.iso' /proc/cmdline; then
-        echo "Low-memory mode: deferring GRUB4DOS file cleanup until Windows starts."
-        return 0
-    fi
     windows_part="$WINDOWS_PART"
     [ -n "$windows_part" ] && [ -b "$windows_part" ] || \
         die "Windows OS partition is unavailable during GRUB4DOS cleanup"

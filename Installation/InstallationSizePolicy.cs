@@ -9,6 +9,7 @@ namespace Libertix.Installation
     public static class InstallationSizePolicy
     {
         public const int MinimumFinalSizeGiB = 20;
+        public const int MinimumWindowsFreeSpaceGiB = 10;
         public const int MaximumDirectFat32SizeGiB = 31;
         public const int LargeInstallationStagingSizeGiB = 8;
         public const long BytesPerGiB = 1024L * 1024L * 1024L;

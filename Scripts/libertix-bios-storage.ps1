@@ -141,15 +141,11 @@ switch ($Action) {
             throw "The staging partition would overlap Windows Recovery."
         }
 
-        # Mount Manager selects an actually available access path. Fixed drive
-        # letters can remain reserved by disconnected mappings that Get-Volume
-        # does not report as local volumes.
         $partition = New-Partition `
             -DiskNumber $DiskNumber `
             -Size $SizeBytes `
             -Offset $containerOffsetBytes `
             -Alignment $partitionAlignmentBytes `
-            -AssignDriveLetter `
             -ErrorAction Stop
         if (
             [int64]$partition.Offset -lt $containerOffsetBytes -or
@@ -160,19 +156,41 @@ switch ($Action) {
         ) {
             throw "Windows created the BIOS staging partition with unexpected geometry."
         }
-        if (-not $partition.DriveLetter) {
-            throw "Windows created the staging partition without a drive letter."
-        }
-        $createdDriveLetter = [string]$partition.DriveLetter
         Format-Volume `
-            -DriveLetter $createdDriveLetter `
+            -Partition $partition `
             -FileSystem FAT32 `
             -NewFileSystemLabel "LIBERTIX" `
             -Confirm:$false `
             -Force `
             -ErrorAction Stop | Out-Null
 
-        $verifiedPartition = Get-Partition -DriveLetter $createdDriveLetter -ErrorAction Stop
+        $partitionMatches = @(
+            Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop |
+                Where-Object {
+                    [int64]$_.Offset -eq [int64]$partition.Offset -and
+                    [int64]$_.Size -eq $SizeBytes
+                }
+        )
+        if ($partitionMatches.Count -ne 1) {
+            throw "The formatted BIOS staging geometry does not resolve to exactly one partition."
+        }
+        # Keep the RAW volume inaccessible to Explorer until its FAT32 format
+        # exists, then let Mount Manager select a genuinely available letter.
+        Add-PartitionAccessPath `
+            -InputObject $partitionMatches[0] `
+            -AssignDriveLetter `
+            -ErrorAction Stop | Out-Null
+        $verifiedPartition = @(
+            Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop |
+                Where-Object {
+                    [int64]$_.Offset -eq [int64]$partition.Offset -and
+                    [int64]$_.Size -eq $SizeBytes
+                }
+        )[0]
+        $createdDriveLetter = [string]$verifiedPartition.DriveLetter
+        if ([string]::IsNullOrWhiteSpace($createdDriveLetter)) {
+            throw "Windows formatted the BIOS staging partition without assigning a drive letter."
+        }
         $verifiedVolume = Get-Volume -DriveLetter $createdDriveLetter -ErrorAction Stop
         if (
             [int]$verifiedPartition.DiskNumber -ne $DiskNumber -or

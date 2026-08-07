@@ -6,11 +6,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-
-function Write-Result {
-    param([string]$Name, [object]$Value)
-    Write-Output ("{0}={1}" -f $Name, [string]$Value)
-}
+& "$env:SystemRoot\System32\chcp.com" 65001 > $null
+[Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
 
 function Get-FirmwareMode {
     $signature = @"
@@ -188,34 +186,42 @@ try {
     }
     $boot = $bootPartitions[0]
 
-    Write-Result "PREFLIGHT_OK" "true"
-    Write-Result "FIRMWARE" $firmware
-    Write-Result "SYSTEM_DRIVE" $systemDrive
-    Write-Result "SYSTEM_DISK_NUMBER" $partition.DiskNumber
-    Write-Result "SYSTEM_PARTITION_NUMBER" $partition.PartitionNumber
-    Write-Result "SYSTEM_PARTITION_OFFSET" $partition.Offset
-    Write-Result "SYSTEM_PARTITION_SIZE" $partition.Size
-    Write-Result "BOOT_PARTITION_NUMBER" $boot.PartitionNumber
-    Write-Result "BOOT_PARTITION_OFFSET" $boot.Offset
-    Write-Result "BOOT_PARTITION_SIZE" $boot.Size
-    Write-Result "SYSTEM_DISK_UNIQUE_ID" $disk.UniqueId
-    Write-Result "SYSTEM_DISK_SIZE" $disk.Size
-    Write-Result "LOGICAL_SECTOR_SIZE" $disk.LogicalSectorSize
-    Write-Result "PARTITION_STYLE" $disk.PartitionStyle
-    Write-Result "RECOVERY_PARTITION_NUMBER" $recovery.PartitionNumber
-    Write-Result "RECOVERY_PARTITION_OFFSET" $recovery.Offset
-    Write-Result "RECOVERY_PARTITION_SIZE" $recovery.Size
-    Write-Result "BITLOCKER_SAFE" $bitLocker.Safe.ToString().ToLowerInvariant()
-    Write-Result "BITLOCKER_STATE" $bitLocker.State
-    Write-Result "BITLOCKER_CONVERSION_STATUS" $bitLocker.ConversionStatus
-    Write-Result "BITLOCKER_ENCRYPTION_PERCENTAGE" $bitLocker.EncryptionPercentage
-    Write-Result "BITLOCKER_PROTECTION_STATUS" $bitLocker.ProtectionStatus
-    Write-Result "BITLOCKER_INITIAL_CONVERSION_STATUS" $initialBitLocker.ConversionStatus
-    Write-Result "BITLOCKER_INITIAL_ENCRYPTION_PERCENTAGE" $initialBitLocker.EncryptionPercentage
-    Write-Result "BITLOCKER_INITIAL_PROTECTION_STATUS" $initialBitLocker.ProtectionStatus
+    [ordered]@{
+        preflightOk = $true
+        firmware = $firmware
+        systemDrive = $systemDrive
+        systemDiskNumber = [int]$partition.DiskNumber
+        systemPartitionNumber = [int]$partition.PartitionNumber
+        systemPartitionOffset = [long]$partition.Offset
+        systemPartitionSize = [long]$partition.Size
+        bootPartitionNumber = [int]$boot.PartitionNumber
+        bootPartitionOffset = [long]$boot.Offset
+        bootPartitionSize = [long]$boot.Size
+        systemDiskUniqueId = [string]$disk.UniqueId
+        systemDiskSize = [long]$disk.Size
+        logicalSectorSize = [int]$disk.LogicalSectorSize
+        partitionStyle = [string]$disk.PartitionStyle
+        recoveryPartitionNumber = [int]$recovery.PartitionNumber
+        recoveryPartitionOffset = [long]$recovery.Offset
+        recoveryPartitionSize = [long]$recovery.Size
+        bitLockerSafe = [bool]$bitLocker.Safe
+        bitLockerState = [string]$bitLocker.State
+        bitLockerConversionStatus = [int]$bitLocker.ConversionStatus
+        bitLockerEncryptionPercentage = [int]$bitLocker.EncryptionPercentage
+        bitLockerProtectionStatus = [int]$bitLocker.ProtectionStatus
+        initialBitLockerConversionStatus = [int]$initialBitLocker.ConversionStatus
+        initialBitLockerEncryptionPercentage = [int]$initialBitLocker.EncryptionPercentage
+        initialBitLockerProtectionStatus = [int]$initialBitLocker.ProtectionStatus
+    } | ConvertTo-Json -Compress
 
     exit 0
 } catch {
-    Write-Error $_.Exception.Message
+    [ordered]@{
+        preflightOk = $false
+        errorMessage = $_.Exception.Message
+        errorType = $_.Exception.GetType().FullName
+        errorPosition = $_.InvocationInfo.PositionMessage
+        errorStack = $_.ScriptStackTrace
+    } | ConvertTo-Json -Compress
     exit 1
 }

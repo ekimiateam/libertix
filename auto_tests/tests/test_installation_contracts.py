@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import ModuleType
 
@@ -11,6 +13,24 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[2]
 GIB = 1024**3
+
+
+def test_legacy_project_compiles_every_application_source_file() -> None:
+    project = ET.parse(ROOT / "Libertix.csproj")
+    namespace = {"msbuild": "http://schemas.microsoft.com/developer/msbuild/2003"}
+    included = {
+        element.attrib["Include"].replace("\\", "/")
+        for element in project.findall(".//msbuild:Compile", namespace)
+        if "Include" in element.attrib
+    }
+    ignored_roots = {"auto_tests", "Libertix.Tests", "bin", "obj", ".work"}
+    application_sources = {
+        path.relative_to(ROOT).as_posix()
+        for path in ROOT.rglob("*.cs")
+        if path.relative_to(ROOT).parts[0] not in ignored_roots
+    }
+
+    assert application_sources == included
 
 
 def load_live_module(relative_path: str, module_name: str) -> ModuleType:
@@ -82,7 +102,7 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
         },
         "account": {
             "username": "oem",
-            "passwordHash": "$6$salt$hash",
+            "passwordHashWindowsPath": ("C:\\ProgramData\\Libertix\\Recovery\\account-secret.env"),
             "computerName": "libertix-test",
         },
         "disk": {
@@ -149,7 +169,7 @@ def test_bios_and_uefi_use_the_same_size_policy(
     [
         (("distribution", "installerIsoFileName"), "folder/mint.iso"),
         (("distribution", "installerIsoWindowsPath"), "C:mint.iso"),
-        (("account", "passwordHash"), "$6$salt\nvalue"),
+        (("account", "passwordHashWindowsPath"), "..\\account-secret.env"),
         (("disk", "systemDrive"), "c:"),
         (("features", "windowsProfilesJsonBase64"), ""),
         (("runtime", "recoveryRunId"), ""),
@@ -188,9 +208,9 @@ def test_development_ssh_network_is_validated_and_exported(
     plan = make_plan("uefi", 40)
     plan["development"] = {
         "enableSsh": True,
-        "staticIpv4Address": "10.42.7.20",
+        "staticIpv4Address": "198.51.100.20",
         "staticIpv4PrefixLength": 23,
-        "staticIpv4Gateway": "10.42.6.1",
+        "staticIpv4Gateway": "198.51.100.1",
         "dnsServers": ["9.9.9.9", "1.1.1.1"],
     }
 
@@ -198,9 +218,9 @@ def test_development_ssh_network_is_validated_and_exported(
     exported = plan_module.shell_values(validated)
 
     assert exported["DEVELOPMENT_SSH_ENABLED"] == "true"
-    assert exported["DEVELOPMENT_STATIC_IPV4_ADDRESS"] == "10.42.7.20"
+    assert exported["DEVELOPMENT_STATIC_IPV4_ADDRESS"] == "198.51.100.20"
     assert exported["DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH"] == "23"
-    assert exported["DEVELOPMENT_STATIC_IPV4_GATEWAY"] == "10.42.6.1"
+    assert exported["DEVELOPMENT_STATIC_IPV4_GATEWAY"] == "198.51.100.1"
     assert exported["DEVELOPMENT_DNS_SERVERS"] == "9.9.9.9;1.1.1.1"
     validate_schema_document("installation-plan.schema.json", plan)
 
@@ -228,9 +248,9 @@ def test_live_plan_runtime_rejects_properties_outside_the_shared_schema(
     ("field", "value"),
     [
         ("enableSsh", False),
-        ("staticIpv4Address", "10.42.6.0"),
+        ("staticIpv4Address", "198.51.100.0"),
         ("staticIpv4PrefixLength", 31),
-        ("staticIpv4Gateway", "10.43.0.1"),
+        ("staticIpv4Gateway", "203.0.113.1"),
         ("dnsServers", ["1.1.1.1", "1.1.1.1"]),
         ("staticIpv4Address", "127.0.0.2"),
         ("staticIpv4Address", "169.254.10.2"),
@@ -246,9 +266,9 @@ def test_development_ssh_network_rejects_noncanonical_values(
     plan = make_plan("uefi", 40)
     development = {
         "enableSsh": True,
-        "staticIpv4Address": "10.42.7.20",
+        "staticIpv4Address": "198.51.100.20",
         "staticIpv4PrefixLength": 23,
-        "staticIpv4Gateway": "10.42.6.1",
+        "staticIpv4Gateway": "198.51.100.1",
         "dnsServers": ["9.9.9.9", "1.1.1.1"],
     }
     development[field] = value
@@ -385,8 +405,14 @@ def test_failure_and_rollback_preserve_the_completed_step_ledger(
         "updatedAtUtc": "2026-07-15T12:00:00Z",
     }
 
-    state_module.start_step(state, "windows.system-volume-shrunk")
-    state_module.complete_step(state, "windows.system-volume-shrunk")
+    for step in (
+        "windows.preflight-verified",
+        "windows.artifacts-verified",
+        "windows.recovery-armed",
+        "windows.system-volume-shrunk",
+    ):
+        state_module.start_step(state, step)
+        state_module.complete_step(state, step)
     state_module.start_step(state, "windows.installer-partition-created")
     state_module.fail(state, "TEST_FAILURE", "windows", "Injected failure")
     state_module.begin_rollback(state)
@@ -395,12 +421,46 @@ def test_failure_and_rollback_preserve_the_completed_step_ledger(
         state_module.compensate(state, "windows.installer-partition-created")
 
     state_module.compensate(state, "windows.system-volume-shrunk")
+    state_module.compensate(state, "windows.recovery-armed")
     state_module.complete_rollback(state)
 
     assert state["status"] == "rolled-back"
     assert state["phase"] == "complete"
-    assert state["completedSteps"] == ["windows.system-volume-shrunk"]
-    assert state["compensatedSteps"] == ["windows.system-volume-shrunk"]
+    assert state["completedSteps"] == [
+        "windows.preflight-verified",
+        "windows.artifacts-verified",
+        "windows.recovery-armed",
+        "windows.system-volume-shrunk",
+    ]
+    assert state["compensatedSteps"] == [
+        "windows.system-volume-shrunk",
+        "windows.recovery-armed",
+    ]
+
+
+def test_live_state_rejects_out_of_order_and_incomplete_success(
+    state_module: ModuleType,
+) -> None:
+    state = {
+        "schemaVersion": 1,
+        "planId": "a" * 32,
+        "revision": 0,
+        "status": "pending",
+        "phase": "windows",
+        "activeStep": None,
+        "completedSteps": [],
+        "compensatedSteps": [],
+        "failure": None,
+        "updatedAtUtc": "2026-07-15T12:00:00Z",
+    }
+
+    with pytest.raises(state_module.StateTransitionError, match="out of order"):
+        state_module.start_step(state, "windows.recovery-armed")
+
+    state_module.start_step(state, "windows.preflight-verified")
+    state_module.complete_step(state, "windows.preflight-verified")
+    with pytest.raises(state_module.StateTransitionError, match="final target verification"):
+        state_module.complete_installation(state)
 
 
 def test_live_state_runtime_rejects_properties_outside_the_shared_schema(
@@ -519,6 +579,124 @@ def test_versioned_schemas_accept_documents_used_by_runtime_validators() -> None
 
     validate_schema_document("installation-plan.schema.json", plan)
     validate_schema_document("installation-state.schema.json", state)
+
+
+def test_windows_plan_models_and_powershell_property_sets_match_schema() -> None:
+    schema = json.loads(
+        (ROOT / "schemas/installation-plan.schema.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "root": set(schema["properties"]),
+        "distribution": set(schema["$defs"]["distribution"]["properties"]),
+        "locale": set(schema["$defs"]["locale"]["properties"]),
+        "account": set(schema["$defs"]["account"]["properties"]),
+        "disk": set(schema["$defs"]["disk"]["properties"]),
+        "partition": set(schema["$defs"]["partitionIdentity"]["properties"]),
+        "installer": set(schema["$defs"]["installerPartition"]["properties"]),
+        "features": set(schema["$defs"]["features"]["properties"]),
+        "runtime": set(schema["$defs"]["runtime"]["properties"]),
+        "development": set(schema["$defs"]["development"]["properties"]),
+    }
+
+    powershell = (ROOT / "Scripts/modules/Libertix.InstallationPlan.psm1").read_text(
+        encoding="utf-8-sig"
+    )
+    property_table = powershell.split("$script:InstallationPlanPropertySets = [ordered]@{", 1)[
+        1
+    ].split("\n}", 1)[0]
+    powershell_sets = {
+        name: set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', values))
+        for name, values in re.findall(r"(?ms)^\s+(\w+)\s*=\s*@\((.*?)\)(?=\s*$)", property_table)
+    }
+    assert powershell_sets == expected
+
+    csharp = (ROOT / "Installation/InstallationPlan.cs").read_text(encoding="utf-8")
+    class_to_schema = {
+        "InstallationPlan": "root",
+        "InstallationDistribution": "distribution",
+        "InstallationLocale": "locale",
+        "InstallationAccount": "account",
+        "InstallationDisk": "disk",
+        "PartitionIdentity": "partition",
+        "InstallerPartitionPlan": "installer",
+        "InstallationFeatures": "features",
+        "InstallationRuntime": "runtime",
+        "InstallationDevelopmentOptions": "development",
+    }
+    for class_name, schema_name in class_to_schema.items():
+        body = re.search(
+            rf"(?ms)^\s*public sealed class {class_name}\s*\{{(.*?)^\s*\}}",
+            csharp,
+        )
+        assert body is not None, class_name
+        properties = set(re.findall(r'JsonPropertyName\("([^"]+)"\)', body.group(1)))
+        assert properties == expected[schema_name], class_name
+
+
+def test_persisted_runtime_names_match_across_language_boundaries() -> None:
+    csharp = (ROOT / "Installation/RuntimeNames.cs").read_text(encoding="utf-8")
+    names = dict(re.findall(r'public const string (\w+) = "([A-Za-z0-9_]+)";', csharp))
+    assert names == {
+        "InstallerVolumeLabel": "LIBERTIXEFI",
+        "InstallationLogDirectory": "LibertixInstallLogs",
+        "BiosRecoveryDirectory": "LibertixInstallRecovery",
+        "BiosRecoveryTask": "LibertixInstallRecovery",
+        "LinuxReadOnlyTask": "LibertixLinuxReadOnly",
+    }
+
+    recovery = (ROOT / "Scripts/libertix-recovery-guard.ps1").read_text(encoding="utf-8-sig")
+    windows_share = (ROOT / "Scripts/libertix-configure-windows-share.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    uefi = (ROOT / "Scripts/libertix-uefi-install.ps1").read_text(encoding="utf-8-sig")
+    live_context = (ROOT / "assets/live/libertix-live-context.sh").read_text(encoding="utf-8-sig")
+    live_logs = (ROOT / "assets/live/libertix-copy-logs.sh").read_text(encoding="utf-8-sig")
+
+    assert f'$TaskName = "{names["BiosRecoveryTask"]}"' in recovery
+    assert f'Join-Path $SystemDrive "{names["BiosRecoveryDirectory"]}"' in recovery
+    assert f'Join-Path $SystemDrive "{names["InstallationLogDirectory"]}"' in recovery
+    assert f'$script:LinuxReadOnlyTaskName = "{names["LinuxReadOnlyTask"]}"' in windows_share
+    assert f'$InstallerLabel = "{names["InstallerVolumeLabel"]}"' in uefi
+    assert names["InstallerVolumeLabel"] in live_context
+    assert names["InstallationLogDirectory"] in live_logs
+
+
+def test_windows_state_models_and_powershell_property_sets_match_schema() -> None:
+    schema = json.loads(
+        (ROOT / "schemas/installation-state.schema.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "root": set(schema["properties"]),
+        "progress": set(schema["$defs"]["progress"]["properties"]),
+        "failure": set(schema["$defs"]["failure"]["properties"]),
+    }
+
+    powershell = (ROOT / "Scripts/modules/Libertix.InstallationState.psm1").read_text(
+        encoding="utf-8-sig"
+    )
+    property_table = powershell.split("$script:InstallationStatePropertySets = [ordered]@{", 1)[
+        1
+    ].split("\n}", 1)[0]
+    powershell_sets = {
+        name: set(re.findall(r'"([A-Za-z][A-Za-z0-9]*)"', values))
+        for name, values in re.findall(r"(?ms)^\s+(\w+)\s*=\s*@\((.*?)\)(?=\s*$)", property_table)
+    }
+    assert powershell_sets == expected
+
+    csharp = (ROOT / "Installation/InstallationExecutionState.cs").read_text(encoding="utf-8")
+    class_to_schema = {
+        "InstallationExecutionState": "root",
+        "InstallationProgress": "progress",
+        "InstallationFailure": "failure",
+    }
+    for class_name, schema_name in class_to_schema.items():
+        body = re.search(
+            rf"(?ms)^\s*public sealed class {class_name}\s*\{{(.*?)^\s*\}}",
+            csharp,
+        )
+        assert body is not None, class_name
+        properties = set(re.findall(r'JsonPropertyName\("([^"]+)"\)', body.group(1)))
+        assert properties == expected[schema_name], class_name
 
 
 @pytest.mark.parametrize(

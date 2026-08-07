@@ -10,6 +10,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$script:LinuxReadOnlyTaskName = "LibertixLinuxReadOnly"
+$script:LinuxReadOnlyPinTaskPrefix = "LibertixLinuxReadOnlyPin_"
 
 function Write-ShareLog {
     param([string]$Message)
@@ -114,7 +116,7 @@ function Install-MountTask {
         throw "Read-only mount launcher is missing."
     }
 
-    $taskName = "LibertixLinuxReadOnly"
+    $taskName = $script:LinuxReadOnlyTaskName
     $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Mount' -f `
         $mountScript, $ConfigPath
@@ -170,7 +172,7 @@ function Install-ExplorerPinTasks {
     foreach ($profile in $profiles) {
         $sid = [Security.Principal.SecurityIdentifier]::new([string]$profile.SID)
         $userId = $sid.Translate([Security.Principal.NTAccount]).Value
-        $taskName = "LibertixLinuxReadOnlyPin_$(([string]$profile.SID).Replace('-', '_'))"
+        $taskName = "$($script:LinuxReadOnlyPinTaskPrefix)$(([string]$profile.SID).Replace('-', '_'))"
         $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
         $principal = New-ScheduledTaskPrincipal `
@@ -285,7 +287,7 @@ function Start-ReadOnlyMount {
 
     $drive = "${driveLetter}:"
     $device = "\\.\PhysicalDrive$($Config.SystemDiskNumber)"
-    $instance = "LibertixLinuxReadOnly"
+    $instance = $script:LinuxReadOnlyTaskName
     $launched = $false
     try {
         if (-not $existingDrive) {
@@ -339,13 +341,15 @@ try {
     $config = Get-Config
     if (-not $config.Enabled) {
         if ($Finalize) {
-            Unregister-ScheduledTask -TaskName "LibertixLinuxReadOnly" -Confirm:$false `
+            Unregister-ScheduledTask -TaskName $script:LinuxReadOnlyTaskName -Confirm:$false `
                 -ErrorAction SilentlyContinue
-            Get-ScheduledTask -TaskName "LibertixLinuxReadOnlyPin_*" -ErrorAction SilentlyContinue |
+            Get-ScheduledTask `
+                -TaskName "$($script:LinuxReadOnlyPinTaskPrefix)*" `
+                -ErrorAction SilentlyContinue |
                 Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue
             Remove-ItemProperty `
                 -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" `
-                -Name "LibertixLinuxReadOnly" `
+                -Name $script:LinuxReadOnlyTaskName `
                 -ErrorAction SilentlyContinue
         }
         Write-ShareLog "Linux-to-Windows sharing is disabled; the Libertix launcher was removed."

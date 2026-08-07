@@ -1,4 +1,6 @@
 #!/bin/bash
+# The orchestrator owns globals that sourced firmware and rollback modules read.
+# shellcheck disable=SC2034
 set -Eeuo pipefail
 
 [ "$EUID" -ne 0 ] && { echo "Run as root"; exit 1; }
@@ -40,6 +42,7 @@ RECOVERY_PARTITION_OFFSET_BYTES=""
 RECOVERY_PARTITION_SIZE_BYTES=""
 RECOVERY_ROOT_WINDOWS=""
 RECOVERY_RUN_ID=""
+PASSWORD_HASH=""
 echo "$CURRENT_STAGE" > "$STAGE_FILE"
 
 mark() {
@@ -184,12 +187,12 @@ WINDOWS_BOOT_PART=$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_
     die "Windows boot partition is not on the target disk"
 echo "Windows boot partition: $WINDOWS_BOOT_PART"
 
+start_installation_state_step "live.preflight-verified"
 run_live_preflight
+complete_installation_state_step "live.preflight-verified"
 cleanup_windows_live_boot_artifacts
 mark "027-windows-live-boot-cleaned"
-if [ "$LIBERTIX_FIRMWARE_MODE" = "uefi" ]; then
-    write_windows_recovery_marker_best_effort "live-started" 0
-fi
+write_windows_recovery_marker_best_effort "live-started" 0
 
 mark "030-check-mint-iso"
 ISO_WINDOWS_REL=$(windows_path_to_relative "$ISO_WINDOWS_PATH")
@@ -197,6 +200,17 @@ ISO_SOURCE="/mnt/windows/$ISO_WINDOWS_REL"
 
 mount_windows_ro_with_retry "$WINDOWS_PART" /mnt/windows
 wait_for_iso_source_or_die "$ISO_SOURCE" "$ISO_WINDOWS_REL"
+PASSWORD_HASH_WINDOWS_REL=$(windows_path_to_relative "$PASSWORD_HASH_WINDOWS_PATH")
+PASSWORD_HASH_SOURCE="/mnt/windows/$PASSWORD_HASH_WINDOWS_REL"
+[ -f "$PASSWORD_HASH_SOURCE" ] || die "protected account secret is missing from Windows"
+IFS= read -r PASSWORD_HASH < "$PASSWORD_HASH_SOURCE" || true
+case "$PASSWORD_HASH" in
+    \$6\$*) ;;
+    *) die "protected account secret does not contain a valid SHA-512 crypt hash" ;;
+esac
+[[ "$PASSWORD_HASH" != *$'\r'* && "$PASSWORD_HASH" != *$'\n'* && "$PASSWORD_HASH" != *$'\t'* ]] || \
+    die "protected account secret contains an invalid control character"
+export PASSWORD_HASH
 
 # Keep Windows NTFS unmounted while changing the MBR table. Any mounted
 # partition on the target disk can make BLKRRPART/partprobe keep the old view.
@@ -225,6 +239,7 @@ assert_not_mounted_or_open "$NEW_PART"
 current_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
 requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))
 desired_partition_bytes="$requested_partition_bytes"
+start_installation_state_step "live.installer-partition-expanded"
 if [ "$current_partition_bytes" -lt "$requested_partition_bytes" ]; then
     logical_sector_bytes=$(blockdev --getss "$DISK" 2>/dev/null || echo 0)
     [ "$logical_sector_bytes" -gt 0 ] || die "cannot determine target disk logical sector size"
@@ -257,7 +272,9 @@ fi
 
 prepare_installer_partition_for_target_format_or_die
 set_linux_partition_type_or_die
+complete_installation_state_step "live.installer-partition-expanded"
 
+start_installation_state_step "live.target-filesystem-created"
 mark "070-wipefs-live-part"
 run_logged wipefs -a "$NEW_PART" || die "Failed to clear old signatures on $NEW_PART"
 mark "080-mkfs-ext4"
@@ -265,6 +282,7 @@ run_logged mkfs.ext4 -F "$NEW_PART"
 mkdir -p /mnt/target /mnt/iso
 mark "090-mount-target"
 run_logged mount "$NEW_PART" /mnt/target
+complete_installation_state_step "live.target-filesystem-created"
 
 mark "100-remount-windows-ro"
 mount_windows_ro_with_retry "$WINDOWS_PART" /mnt/windows
@@ -274,6 +292,7 @@ echo "Mounting installer ISO from Windows workspace..."
 mark "110-loop-mount-mint-iso"
 run_logged mount -o loop,ro "$ISO_SOURCE" /mnt/iso
 echo "Extracting system..."
+start_installation_state_step "live.distribution-extracted"
 mark "120-unsquashfs"
 if command -v stdbuf >/dev/null 2>&1; then
     run_logged stdbuf -oL -eL unsquashfs -f -d /mnt/target /mnt/iso/casper/filesystem.squashfs
@@ -281,9 +300,13 @@ else
     run_logged unsquashfs -f -d /mnt/target /mnt/iso/casper/filesystem.squashfs
 fi
 umount /mnt/iso
+complete_installation_state_step "live.distribution-extracted"
 
+start_installation_state_step "target.system-configured"
 configure_target_system
+complete_installation_state_step "target.system-configured"
 
+start_installation_state_step "target.bootloader-installed"
 mark "140-install-bootloader"
 BOOTLOADER_WRITE_STARTED=true
 if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
@@ -298,6 +321,7 @@ else
     # Linux root partition; the real ESP is mounted at /boot/efi above.
     verify_linux_partition_type_or_die
 fi
+complete_installation_state_step "target.bootloader-installed"
 
 unmount_target_system
 
@@ -307,14 +331,15 @@ if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
     set_bios_boot_flags_or_die
 fi
 assert_recovery_unchanged_or_die
+start_installation_state_step "target.installation-verified"
 final_verify_or_die
 firmware_finalize_success_best_effort
+complete_installation_state_step "target.installation-verified"
+complete_installation_state
 
 echo ""
 echo "=== INSTALLATION COMPLETED ==="
 INSTALL_SUCCESS=true
 append_install_result true 0 "not-needed"
-if [ "$LIBERTIX_FIRMWARE_MODE" = "uefi" ]; then
-    write_windows_recovery_marker_best_effort "install-success" 0
-fi
+write_windows_recovery_marker_best_effort "install-success" 0
 exit 0

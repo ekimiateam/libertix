@@ -30,6 +30,34 @@ ALL_STATUSES = {
 }
 ALL_PHASES = INSTALLATION_PHASES | {"rollback", "complete"}
 FAILURE_COMPONENTS = {"windows", "live", "target", "rollback"}
+ORDERED_STEPS = (
+    "windows.preflight-verified",
+    "windows.artifacts-verified",
+    "windows.recovery-armed",
+    "windows.system-volume-shrunk",
+    "windows.installer-partition-created",
+    "windows.live-media-prepared",
+    "windows.temporary-boot-prepared",
+    "live.preflight-verified",
+    "live.installer-partition-expanded",
+    "live.target-filesystem-created",
+    "live.distribution-extracted",
+    "target.system-configured",
+    "target.bootloader-installed",
+    "target.installation-verified",
+)
+COMPENSATABLE_STEPS = {
+    "windows.recovery-armed",
+    "windows.system-volume-shrunk",
+    "windows.installer-partition-created",
+    "windows.live-media-prepared",
+    "windows.temporary-boot-prepared",
+    "live.installer-partition-expanded",
+    "live.target-filesystem-created",
+    "live.distribution-extracted",
+    "target.system-configured",
+    "target.bootloader-installed",
+}
 
 
 class StateTransitionError(ValueError):
@@ -90,6 +118,12 @@ def validate_state(value: Any) -> dict[str, Any]:
         raise StateTransitionError("compensatedSteps contains duplicates")
     if not set(compensated).issubset(completed):
         raise StateTransitionError("a compensated step did not complete")
+    if completed != list(ORDERED_STEPS[: len(completed)]):
+        raise StateTransitionError("completedSteps is not an ordered workflow prefix")
+    if active_step is not None and (
+        len(completed) >= len(ORDERED_STEPS) or active_step != ORDERED_STEPS[len(completed)]
+    ):
+        raise StateTransitionError("activeStep is not the next workflow step")
 
     status = value["status"]
     failure = value.get("failure")
@@ -161,6 +195,12 @@ def start_step(state: dict[str, Any], step: str) -> None:
         raise StateTransitionError(f"step {state['activeStep']!r} is already active")
     if step in state["completedSteps"]:
         raise StateTransitionError(f"step {step!r} is already complete")
+    expected_index = len(state["completedSteps"])
+    expected = (
+        ORDERED_STEPS[expected_index] if expected_index < len(ORDERED_STEPS) else "no further step"
+    )
+    if step != expected:
+        raise StateTransitionError(f"step {step!r} is out of order; expected {expected!r}")
     # A recovery retry may legitimately resume after a recorded failure. Drop
     # that failure here: without this, the ledger can reach "succeeded" while
     # still carrying the diagnostics of a run that did not succeed.
@@ -215,6 +255,18 @@ def compensate(state: dict[str, Any], step: str) -> None:
 def complete_rollback(state: dict[str, Any]) -> None:
     if state["status"] != "rollback-running":
         raise StateTransitionError("no rollback is running")
+    uncompensated = next(
+        (
+            step
+            for step in state["completedSteps"]
+            if step in COMPENSATABLE_STEPS and step not in state["compensatedSteps"]
+        ),
+        None,
+    )
+    if uncompensated is not None:
+        raise StateTransitionError(
+            f"rollback cannot complete before compensating {uncompensated!r}"
+        )
     state.update(status="rolled-back", phase="complete", activeStep=None)
     touch(state)
 
@@ -222,6 +274,8 @@ def complete_rollback(state: dict[str, Any]) -> None:
 def complete_installation(state: dict[str, Any]) -> None:
     if state["status"] != "running" or state["activeStep"] is not None:
         raise StateTransitionError("installation can complete only between successful steps")
+    if state["completedSteps"] != list(ORDERED_STEPS):
+        raise StateTransitionError("installation cannot complete before final target verification")
     state.update(status="succeeded", phase="complete")
     touch(state)
 
@@ -239,6 +293,10 @@ def parse_args() -> argparse.Namespace:
         transition.add_argument("path", type=Path)
         transition.add_argument("step")
 
+    step_status = subparsers.add_parser("step-status")
+    step_status.add_argument("path", type=Path)
+    step_status.add_argument("step")
+
     failure = subparsers.add_parser("fail")
     failure.add_argument("path", type=Path)
     failure.add_argument("code")
@@ -250,6 +308,8 @@ def parse_args() -> argparse.Namespace:
         "complete-rollback",
         "complete-installation",
         "validate",
+        "plan-id",
+        "status",
     ):
         transition = subparsers.add_parser(command)
         transition.add_argument("path", type=Path)
@@ -276,6 +336,22 @@ def main() -> int:
         }
     else:
         state = read_state(args.path)
+
+    if args.command == "plan-id":
+        print(state["planId"])
+        return 0
+    if args.command == "status":
+        print(state["status"])
+        return 0
+    if args.command == "step-status":
+        require_step(args.step)
+        if args.step in state["completedSteps"]:
+            print("completed")
+        elif state["activeStep"] == args.step:
+            print("active")
+        else:
+            print("pending")
+        return 0
 
     transitions = {
         "start": lambda: start_step(state, args.step),

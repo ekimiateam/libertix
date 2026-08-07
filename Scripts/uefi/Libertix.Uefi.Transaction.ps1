@@ -271,6 +271,7 @@ function Invoke-Revert {
 
         Remove-LibertixTemporaryFirmwareEntries
         Restore-OriginalFirmwareBootOrder
+        Complete-LibertixTrackedCompensation -Step "windows.temporary-boot-prepared"
 
     } finally {
         if ($esp) { Dismount-Letter -Letter $EspLetter }
@@ -287,6 +288,8 @@ function Invoke-Revert {
         Write-Log "Removing low-memory live ISO: $LowMemoryIsoPath" "Cyan"
         Remove-Item -LiteralPath $LowMemoryIsoPath -Force -ErrorAction Stop
     }
+    Complete-LibertixTrackedCompensation -Step "windows.live-media-prepared"
+    Complete-LibertixTrackedCompensation -Step "windows.installer-partition-created"
     if (-not $rollbackState) {
         # No transaction state means the workflow failed before Windows was resized.
         # Remove-LibertixInstallerPartitionIfPresent already refuses to continue
@@ -297,6 +300,7 @@ function Invoke-Revert {
         return
     }
     Restore-LibertixSystemDriveInitialSize -State $rollbackState
+    Complete-LibertixTrackedCompensation -Step "windows.system-volume-shrunk"
 
     # Hibernation is switched off so that the installed Linux can safely mount
     # Windows read-write. A rollback removes that Linux installation, so the
@@ -312,6 +316,7 @@ function Invoke-Revert {
     }
 
     Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction SilentlyContinue
+    Complete-LibertixTrackedCompensation -Step "windows.recovery-armed"
 
     Write-Log "Revert complete." "Green"
 }

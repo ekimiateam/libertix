@@ -1,6 +1,6 @@
 namespace Libertix.Installation
 {
-    internal enum FirmwareType
+    public enum FirmwareType
     {
         Unknown = 0,
         Bios = 1,
@@ -11,7 +11,7 @@ namespace Libertix.Installation
     /// <summary>
     /// Stable identity and geometry captured before any storage modification.
     /// </summary>
-    internal sealed class StoragePreflightInfo
+    public sealed class StoragePreflightInfo
     {
         public FirmwareType Firmware { get; set; }
         public string SystemDrive { get; set; }

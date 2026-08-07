@@ -75,8 +75,7 @@
                          BorderThickness="1"
                          HorizontalContentAlignment="Left"
                          VerticalContentAlignment="Center"
-                         PasswordChanged="ValidateInput"
-                         CommandManager.PreviewExecuted="PasswordBox_PreviewExecuted">
+                         PasswordChanged="ValidateInput">
                 <PasswordBox.Style>
                     <Style TargetType="PasswordBox">
                         <Style.Triggers>
@@ -110,8 +109,7 @@
                          BorderThickness="1"
                          HorizontalContentAlignment="Left"
                          VerticalContentAlignment="Center"
-                         PasswordChanged="ValidateInput"
-                         CommandManager.PreviewExecuted="PasswordBox_PreviewExecuted">
+                         PasswordChanged="ValidateInput">
                 <PasswordBox.Style>
                     <Style TargetType="PasswordBox">
                         <Style.Triggers>
