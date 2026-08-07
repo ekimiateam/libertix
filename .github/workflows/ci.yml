@@ -10,8 +10,7 @@ on:
       - dev
   workflow_dispatch:
 
-# Every job only needs to read the checked-out repository. Keeping this explicit
-# prevents future repository defaults from granting a broader GITHUB_TOKEN.
+# Read access is the workflow default. Only the release job receives write access.
 permissions:
   contents: read
 
@@ -261,3 +260,96 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+
+  release:
+    name: Publish dev alpha prerelease
+    needs:
+      - quality
+      - wpf
+      - iso
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download WPF build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Libertix-wpf-${{ github.sha }}
+          path: release-input/wpf
+
+      - name: Download verified mini-ISO images
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Libertix-mini-isos-${{ github.sha }}
+          path: release-input/iso
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -d release-input/wpf
+          test -s release-input/iso/libertix-installer-bios.iso
+          test -s release-input/iso/libertix-installer-uefi.iso
+          mkdir -p release-assets
+          (
+            cd release-input/wpf
+            zip -9 -q -r "$GITHUB_WORKSPACE/release-assets/Libertix-wpf.zip" .
+          )
+          cp -- \
+            release-input/iso/libertix-installer-bios.iso \
+            release-input/iso/libertix-installer-uefi.iso \
+            release-assets/
+          test -s release-assets/Libertix-wpf.zip
+
+      - name: Publish alpha prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          tag="${GITHUB_SHA:0:7}"
+          title="Alpha $tag"
+          commit_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA"
+          notes="Automated Libertix alpha build for commit [$tag]($commit_url)."
+          assets=(
+            release-assets/Libertix-wpf.zip
+            release-assets/libertix-installer-bios.iso
+            release-assets/libertix-installer-uefi.iso
+          )
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes" \
+              --prerelease
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes" \
+              --prerelease
+          fi
+
+      - name: Keep the three newest dev alpha prereleases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          mapfile -t stale_tags < <(
+            gh release list \
+              --limit 100 \
+              --json tagName,isPrerelease,createdAt \
+              --jq '[.[] | select(.isPrerelease == true and (.tagName | test("^[0-9a-f]{7}$")))] | sort_by(.createdAt) | reverse | .[3:][] | .tagName'
+          )
+          for stale_tag in "${stale_tags[@]}"; do
+            gh release delete "$stale_tag" --cleanup-tag --yes
+          done
