@@ -10,6 +10,7 @@ private_key="$repo_root/local-markdown/catalog-signing-private.pem"
 public_key_xml="$repo_root/Scripts/config/Libertix.CatalogPublicKey.xml"
 work_dir="$repo_root/.work/catalog-signing"
 selected_manifest=""
+signature_tmp=""
 
 die() {
     printf 'ERROR: %s\n' "$*" >&2
@@ -101,7 +102,7 @@ sign_and_synchronize_catalog() {
 
     mkdir -p "$work_dir"
     signature_tmp="$(mktemp "$work_dir/distros.json.sig.XXXXXX")"
-    trap "rm -f -- '$signature_tmp'" EXIT
+    trap 'rm -f -- "$signature_tmp"' EXIT
 
     openssl dgst -sha256 -sign "$private_key" "$source_manifest" |
         base64 -w0 > "$signature_tmp"
