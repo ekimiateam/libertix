@@ -101,8 +101,14 @@ Describe "Installation state ordering" {
     }
 
     It "rejects successful completion before every required step" {
+        $null = Start-LibertixExecutionStep `
+            -Path $script:StatePath `
+            -Step "windows.preflight-verified"
+        $null = Complete-LibertixExecutionStep `
+            -Path $script:StatePath `
+            -Step "windows.preflight-verified"
         { Complete-LibertixInstallation -Path $script:StatePath } |
-            Should -Throw "*all required steps*"
+            Should -Throw "*final target verification*"
     }
 
     It "rejects an unknown persisted state property" {
