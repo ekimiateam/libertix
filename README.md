@@ -176,12 +176,11 @@ mandatory profile; providing only part of it is rejected. Repeat `--dev-ssh-dns`
 than one resolver. Libertix rejects network, broadcast, loopback, multicast and link-local addresses,
 prefixes outside `/1` through `/30`, and gateways outside the selected subnet.
 
-On UEFI systems the compatibility preflight normally verifies firmware support by writing,
-reading and restoring a temporary NVRAM variable and `BootNext`. Diagnostic environments that
-cannot permit this write can explicitly use `--skip-nvram-write-probe`. The preflight records the
-probe as skipped and warns that `BootNext` support is unproven; it never reports the skipped probe
-as successful. This option reduces compatibility assurance and is not intended for normal
-installations.
+On UEFI systems the compatibility preflight normally verifies firmware support by writing, reading
+and restoring `BootNext` itself. Diagnostic environments that cannot permit this write can
+explicitly use `--skip-nvram-write-probe`. The preflight records the probe as skipped and warns that
+`BootNext` support is unproven; it never reports the skipped probe as successful. This option
+reduces compatibility assurance and is not intended for normal installations.
 
 ## Build the Windows application
 

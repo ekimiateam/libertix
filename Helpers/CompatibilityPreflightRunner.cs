@@ -37,11 +37,23 @@ namespace Libertix.Helpers
                     scriptPath);
 
             string languageCode = Localization.CurrentLanguage;
-            return await Task.Run(() => RunProcess(
-                scriptPath,
-                languageCode,
-                skipNvramWriteProbe,
-                onOutput));
+            ApplicationLogger.Write(
+                $"COMPATIBILITY: preflight started; skipNvramWriteProbe={skipNvramWriteProbe}.");
+            try
+            {
+                CompatibilityInfo result = await Task.Run(() => RunProcess(
+                    scriptPath,
+                    languageCode,
+                    skipNvramWriteProbe,
+                    onOutput));
+                ApplicationLogger.Write("COMPATIBILITY: preflight completed successfully.");
+                return result;
+            }
+            catch (Exception ex)
+            {
+                ApplicationLogger.WriteException("COMPATIBILITY: preflight failed.", ex);
+                throw;
+            }
         }
 
         private static CompatibilityInfo RunProcess(
@@ -78,12 +90,14 @@ namespace Libertix.Helpers
                 {
                     if (args.Data == null) return;
                     output.AppendLine(args.Data);
+                    ApplicationLogger.Write("COMPATIBILITY STDOUT: " + args.Data);
                     onOutput?.Invoke(args.Data);
                 };
                 process.ErrorDataReceived += (_, args) =>
                 {
                     if (args.Data == null) return;
                     error.AppendLine(args.Data);
+                    ApplicationLogger.Write("COMPATIBILITY STDERR: " + args.Data);
                     onOutput?.Invoke(args.Data);
                 };
 

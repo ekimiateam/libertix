@@ -1903,6 +1903,24 @@ def test_nvram_write_probe_opt_out_is_explicit_and_never_reported_as_passed() ->
     assert "nvramProbeSkipped = [bool]$nvramSkipped" in script
 
 
+def test_nvram_probe_tests_bootnext_without_a_vendor_variable() -> None:
+    script = read("Scripts/libertix-compatibility-preflight.ps1")
+
+    assert "LibertixCompatibilityProbe" not in script
+    assert '$bootCurrent = Get-NvramVariable -Name "BootCurrent"' in script
+    assert 'Set-NvramVariable -Name "BootNext" -Guid $global -Bytes $bootCurrent.Bytes' in script
+    assert '$bootNext = Get-NvramVariable -Name "BootNext"' in script
+    assert 'Set-NvramVariable -Name "BootNext" -Guid $global -Bytes $null' in script
+
+
+def test_compatibility_output_is_persisted_in_the_application_log() -> None:
+    runner = read("Helpers/CompatibilityPreflightRunner.cs")
+
+    assert 'ApplicationLogger.Write("COMPATIBILITY STDOUT: " + args.Data)' in runner
+    assert 'ApplicationLogger.Write("COMPATIBILITY STDERR: " + args.Data)' in runner
+    assert 'ApplicationLogger.WriteException("COMPATIBILITY: preflight failed.", ex)' in runner
+
+
 def test_windows_manifest_declares_supported_platform_dpi_and_long_paths() -> None:
     root = ET.parse(ROOT / "app1.manifest").getroot()
     supported = root.find(".//{urn:schemas-microsoft-com:compatibility.v1}supportedOS")

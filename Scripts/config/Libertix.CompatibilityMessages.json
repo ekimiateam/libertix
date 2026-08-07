@@ -34,25 +34,25 @@
       "LOW_MEMORY": "Limited memory ({0} MB): Libertix will use low-memory mode without copying the entire live system to RAM.",
       "BITLOCKER": "BitLocker is active; Libertix will decrypt it only after your final confirmation.",
       "MULTIPLE_DISKS": "{0} internal disks are visible; the live system will require an exact match with the Windows disk.",
-      "NVRAM_PROBE_SKIPPED": "The firmware NVRAM write test was explicitly skipped; UEFI BootNext support has not been proven."
+      "NVRAM_PROBE_SKIPPED": "The firmware BootNext write test was explicitly skipped; UEFI BootNext support has not been proven."
     },
     "fr": {
       "LOW_MEMORY": "Mémoire limitée ({0} Mio): Libertix utilisera le mode faible mémoire sans copie intégrale du live en RAM.",
       "BITLOCKER": "BitLocker est actif; Libertix le déchiffrera uniquement après votre confirmation finale.",
       "MULTIPLE_DISKS": "{0} disques internes sont visibles; le live exigera une correspondance exacte avec le disque Windows.",
-      "NVRAM_PROBE_SKIPPED": "Le test d'écriture NVRAM du firmware a été explicitement ignoré; la prise en charge UEFI BootNext n'est pas prouvée."
+      "NVRAM_PROBE_SKIPPED": "Le test d'écriture BootNext du firmware a été explicitement ignoré; la prise en charge UEFI BootNext n'est pas prouvée."
     },
     "es": {
       "LOW_MEMORY": "Memoria limitada ({0} MB): Libertix usará el modo de poca memoria sin copiar todo el sistema live en la RAM.",
       "BITLOCKER": "BitLocker está activo; Libertix solo lo descifrará después de su confirmación final.",
       "MULTIPLE_DISKS": "Hay {0} discos internos visibles; el sistema live exigirá una coincidencia exacta con el disco de Windows.",
-      "NVRAM_PROBE_SKIPPED": "La prueba de escritura NVRAM del firmware se omitió explícitamente; la compatibilidad con UEFI BootNext no está demostrada."
+      "NVRAM_PROBE_SKIPPED": "La prueba de escritura BootNext del firmware se omitió explícitamente; la compatibilidad con UEFI BootNext no está demostrada."
     },
     "ja": {
       "LOW_MEMORY": "メモリが限られています ({0} MB)。Libertix はライブ システム全体を RAM にコピーせず、低メモリ モードを使用します。",
       "BITLOCKER": "BitLocker が有効です。Libertix は最終確認後にのみ暗号化を解除します。",
       "MULTIPLE_DISKS": "{0} 台の内蔵ディスクが検出されました。ライブ システムでは Windows ディスクとの完全一致が必要です。",
-      "NVRAM_PROBE_SKIPPED": "ファームウェア NVRAM 書き込みテストは明示的に省略されました。UEFI BootNext 対応は確認されていません。"
+      "NVRAM_PROBE_SKIPPED": "ファームウェア BootNext 書き込みテストは明示的に省略されました。UEFI BootNext 対応は確認されていません。"
     }
   },
   "errorMessages": {
@@ -67,8 +67,7 @@
       "COMPAT_E_SECURE_BOOT_DB_INVALID": "The Secure Boot certificate database is invalid.",
       "COMPAT_E_SECURE_BOOT_CERT_INVALID": "A Secure Boot certificate cannot be decoded.",
       "COMPAT_E_SECURE_BOOT_THIRD_PARTY_CA": "Secure Boot is enabled but no compatible Microsoft third-party UEFI authority is enrolled.",
-      "COMPAT_E_NVRAM_WRITE": "The firmware did not read back a temporary NVRAM variable correctly.",
-      "COMPAT_E_NVRAM_TEST_FAILED": "The NVRAM/BootNext test failed and was rolled back: {0}",
+      "COMPAT_E_NVRAM_TEST_FAILED": "The BootNext test failed and was rolled back: {0}",
       "COMPAT_E_BOOTCURRENT_READ": "The firmware does not expose a valid BootCurrent value.",
       "COMPAT_E_BOOTNEXT_WRITE": "The firmware refuses or alters BootNext.",
       "COMPAT_E_SYSTEM_DRIVE": "The Windows system volume is invalid.",
@@ -105,8 +104,7 @@
       "COMPAT_E_SECURE_BOOT_DB_INVALID": "La base de certificats Secure Boot est invalide.",
       "COMPAT_E_SECURE_BOOT_CERT_INVALID": "Un certificat Secure Boot ne peut pas être décodé.",
       "COMPAT_E_SECURE_BOOT_THIRD_PARTY_CA": "Secure Boot est actif mais aucune autorité Microsoft UEFI tierce compatible n'est inscrite.",
-      "COMPAT_E_NVRAM_WRITE": "Le firmware n'a pas relu correctement une variable NVRAM temporaire.",
-      "COMPAT_E_NVRAM_TEST_FAILED": "Le test NVRAM/BootNext a échoué et a été restauré : {0}",
+      "COMPAT_E_NVRAM_TEST_FAILED": "Le test BootNext a échoué et a été restauré : {0}",
       "COMPAT_E_BOOTCURRENT_READ": "Le firmware n'expose pas une valeur BootCurrent valide.",
       "COMPAT_E_BOOTNEXT_WRITE": "Le firmware refuse ou altère BootNext.",
       "COMPAT_E_SYSTEM_DRIVE": "Le volume système Windows est invalide.",
@@ -143,8 +141,7 @@
       "COMPAT_E_SECURE_BOOT_DB_INVALID": "La base de datos de certificados de Arranque seguro no es válida.",
       "COMPAT_E_SECURE_BOOT_CERT_INVALID": "No se puede descodificar un certificado de Arranque seguro.",
       "COMPAT_E_SECURE_BOOT_THIRD_PARTY_CA": "El Arranque seguro está activo pero no hay ninguna autoridad UEFI de terceros de Microsoft compatible inscrita.",
-      "COMPAT_E_NVRAM_WRITE": "El firmware no releyó correctamente una variable NVRAM temporal.",
-      "COMPAT_E_NVRAM_TEST_FAILED": "La prueba NVRAM/BootNext falló y se restauró: {0}",
+      "COMPAT_E_NVRAM_TEST_FAILED": "La prueba BootNext falló y se restauró: {0}",
       "COMPAT_E_BOOTCURRENT_READ": "El firmware no expone un valor BootCurrent válido.",
       "COMPAT_E_BOOTNEXT_WRITE": "El firmware rechaza o altera BootNext.",
       "COMPAT_E_SYSTEM_DRIVE": "El volumen del sistema de Windows no es válido.",
@@ -181,8 +178,7 @@
       "COMPAT_E_SECURE_BOOT_DB_INVALID": "セキュア ブートの証明書データベースが無効です。",
       "COMPAT_E_SECURE_BOOT_CERT_INVALID": "セキュア ブート証明書をデコードできません。",
       "COMPAT_E_SECURE_BOOT_THIRD_PARTY_CA": "セキュア ブートは有効ですが、互換性のある Microsoft サードパーティ UEFI 証明機関が登録されていません。",
-      "COMPAT_E_NVRAM_WRITE": "ファームウェアが一時的な NVRAM 変数を正しく読み戻しませんでした。",
-      "COMPAT_E_NVRAM_TEST_FAILED": "NVRAM/BootNext テストが失敗し、元に戻されました: {0}",
+      "COMPAT_E_NVRAM_TEST_FAILED": "BootNext テストが失敗し、元に戻されました: {0}",
       "COMPAT_E_BOOTCURRENT_READ": "ファームウェアが有効な BootCurrent 値を公開していません。",
       "COMPAT_E_BOOTNEXT_WRITE": "ファームウェアが BootNext を拒否または変更します。",
       "COMPAT_E_SYSTEM_DRIVE": "Windows のシステム ボリュームが無効です。",

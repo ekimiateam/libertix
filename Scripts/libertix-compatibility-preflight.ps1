@@ -240,18 +240,8 @@ function Test-NvramAndBootNext {
     Initialize-NvramApi
     [LibertixCompatibilityNvram]::EnablePrivilege()
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
-    $probeGuid = "{E68B6B91-06D7-47A1-AE68-550B498FEE24}"
-    $probeName = "LibertixCompatibilityProbe"
-    $originalProbe = Get-NvramVariable -Name $probeName -Guid $probeGuid
     $originalBootNext = Get-NvramVariable -Name "BootNext" -Guid $global
     try {
-        [byte[]]$probeBytes = [Text.Encoding]::ASCII.GetBytes("libertix-nvram-probe")
-        Set-NvramVariable -Name $probeName -Guid $probeGuid -Bytes $probeBytes
-        $readBack = Get-NvramVariable -Name $probeName -Guid $probeGuid
-        if (-not $readBack.Exists -or [Convert]::ToBase64String($readBack.Bytes) -ne [Convert]::ToBase64String($probeBytes)) {
-            Stop-Compatibility "COMPAT_E_NVRAM_WRITE"
-        }
-
         $bootCurrent = Get-NvramVariable -Name "BootCurrent" -Guid $global
         if (-not $bootCurrent.Exists -or $bootCurrent.Bytes.Length -ne 2) {
             Stop-Compatibility "COMPAT_E_BOOTCURRENT_READ"
@@ -262,8 +252,6 @@ function Test-NvramAndBootNext {
             Stop-Compatibility "COMPAT_E_BOOTNEXT_WRITE"
         }
     } finally {
-        if ($originalProbe.Exists) { Set-NvramVariable -Name $probeName -Guid $probeGuid -Bytes $originalProbe.Bytes }
-        else { Set-NvramVariable -Name $probeName -Guid $probeGuid -Bytes $null }
         if ($originalBootNext.Exists) { Set-NvramVariable -Name "BootNext" -Guid $global -Bytes $originalBootNext.Bytes }
         else { Set-NvramVariable -Name "BootNext" -Guid $global -Bytes $null }
     }
