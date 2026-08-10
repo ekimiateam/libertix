@@ -42,14 +42,28 @@ LIBERTIX_FIRMWARE_MODE="${LIBERTIX_FIRMWARE_MODE:?LIBERTIX_FIRMWARE_MODE is requ
 . /usr/local/lib/libertix/libertix-live-context.sh
 . /usr/local/lib/libertix/libertix-i18n.sh
 mkdir -p "$LOG_DIR"
+touch "$DEBUG_LOG" "$FAIL_FILE"
+_context_loaded=false
+_context_error=""
 for _plan_attempt in $(seq 1 30); do
-    load_libertix_live_context "$LIBERTIX_FIRMWARE_MODE" >/dev/null 2>&1 && break
+    if _context_error="$(
+        load_libertix_live_context "$LIBERTIX_FIRMWARE_MODE" 2>&1
+    )"; then
+        _context_loaded=true
+        break
+    fi
     sleep 1
 done
+if [ "$_context_loaded" != true ]; then
+    printf 'Live installation context was not available after 30 attempts: %s\n' \
+        "${_context_error:-no diagnostic was returned}" |
+        tee -a "$DEBUG_LOG" "$FAIL_FILE" >&2
+    exit 1
+fi
 load_libertix_translations
 . /usr/local/lib/libertix/libertix-runner-stage-common.sh
 
-touch "$LOG" "$DEBUG_LOG" "$FAIL_FILE"
+touch "$LOG"
 # Keep every kernel message available through dmesg/journal without allowing
 # console printk to overwrite the dedicated tty1 UI.
 dmesg -n 1 2>/dev/null || true
@@ -87,7 +101,7 @@ write_tty1_screen() {
     rm -f "$TTY_SCREEN_FILE.$$"
 }
 
-terminal_clear() {
+terminal_hide_cursor() {
     # Keep redraws stable: moving home and clearing after the new content avoids
     # the black frame caused by a full-screen clear before every refresh.
     printf '\033[?25l'
@@ -199,7 +213,7 @@ screen_header() {
     stage="$(current_stage)"
     percent="$(stage_percent_dynamic "$stage")"
 
-    terminal_clear
+    terminal_hide_cursor
     cat <<'LOGO'
  ============================================================
  Libertix Installer
@@ -609,7 +623,7 @@ fi
 (
     echo "===== libertix installer started $(date -Is 2>/dev/null || date) ====="
     echo "build=$(build_id)"
-    /install-mint.sh
+    /libertix-install.sh
 ) >> "$LOG" 2>&1 &
 pid="$!"
 

@@ -2,9 +2,6 @@
 
 [CmdletBinding()]
 param(
-    [int]$MinimumLinuxSizeGB = 20,
-    [int]$MinimumMemoryMB = 2048,
-    [int]$LowMemoryThresholdMB = 4096,
     [ValidateSet("en", "fr", "es", "ja")]
     [string]$LanguageCode = "en",
     [switch]$SkipNvramWriteProbe
@@ -15,6 +12,10 @@ Set-StrictMode -Version Latest
 & "$env:SystemRoot\System32\chcp.com" 65001 > $null
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
+
+$policyModulePath = Join-Path `
+    $PSScriptRoot `
+    "modules\Libertix.InstallationPolicy.psm1"
 
 function Stop-Compatibility {
     param([string]$Code, [object[]]$FormatArguments = @())
@@ -270,6 +271,12 @@ try {
         throw "Libertix storage geometry module is missing: $geometryModule"
     }
     Import-Module -Name $geometryModule -Force -ErrorAction Stop
+    Import-Module -Name $policyModulePath -Force -ErrorAction Stop
+    $installationPolicy = Get-LibertixInstallationPolicy
+    [int]$minimumLinuxSizeGB = [int]$installationPolicy.storage.minimumFinalSizeGiB
+    [int]$minimumMemoryMB = [int]$installationPolicy.memory.windowsMinimumMiB
+    [int]$lowMemoryThresholdMB = [int]$installationPolicy.memory.lowMemoryThresholdMiB
+    [int]$preflightShrinkSafetyGB = [int]$installationPolicy.storage.preflightShrinkSafetyGiB
 
     Write-Check "COMPAT_010_PRIVILEGES"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -430,7 +437,8 @@ try {
         # for its EBR metadata so the wizard never offers an uncreatable size.
         $shrinkAvailable -= Get-LibertixPartitionAlignmentBytes
     }
-    [long]$requiredShrink = ([long]$MinimumLinuxSizeGB + 2L) * 1GB
+    [long]$requiredShrink =
+        ([long]$MinimumLinuxSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
     if ($shrinkAvailable -lt $requiredShrink) {
         Stop-Compatibility "COMPAT_E_SHRINK_SPACE" @([math]::Round($shrinkAvailable / 1GB, 1), [math]::Round($requiredShrink / 1GB, 1))
     }

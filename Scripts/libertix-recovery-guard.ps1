@@ -21,6 +21,8 @@ $ArchiveLog = Join-Path $ArchiveRoot "windows-recovery.log"
 $BcdBackup = Join-Path $Root "bcd-backup"
 $ExecutionStatePath = Join-Path $Root "installation-state.json"
 $ExecutionStateModulePath = Join-Path $Root "Libertix.InstallationState.psm1"
+$InstallationPolicyPath = Join-Path $Root "Libertix.InstallationPolicy.json"
+$TemporaryArtifactsModulePath = Join-Path $Root "Libertix.TemporaryArtifacts.psm1"
 $TemporaryBootFiles = @(
     (Join-Path $SystemDrive "grldr"),
     (Join-Path $SystemDrive "grldr.mbr"),
@@ -28,6 +30,27 @@ $TemporaryBootFiles = @(
     (Join-Path $SystemDrive "libertix-live.iso")
 )
 $WindowsShareRoot = Join-Path $ProgramDataRoot "Libertix\WindowsShare"
+
+if (-not (Test-Path -LiteralPath $InstallationPolicyPath -PathType Leaf)) {
+    throw "Installation policy is missing from the recovery payload."
+}
+$InstallationPolicy = Get-Content `
+    -LiteralPath $InstallationPolicyPath `
+    -Raw `
+    -Encoding UTF8 |
+    ConvertFrom-Json -ErrorAction Stop
+if ([int]$InstallationPolicy.schemaVersion -ne 1 -or $null -eq $InstallationPolicy.storage) {
+    throw "Installation policy is incomplete or unsupported."
+}
+[int64]$PartitionAlignmentBytes =
+    [int64]$InstallationPolicy.storage.partitionAlignmentBytes
+if ($PartitionAlignmentBytes -le 0) {
+    throw "Installation policy partition alignment is invalid."
+}
+if (-not (Test-Path -LiteralPath $TemporaryArtifactsModulePath -PathType Leaf)) {
+    throw "Temporary-artifact cleanup module is missing from the recovery payload."
+}
+Import-Module -Name $TemporaryArtifactsModulePath -Force -ErrorAction Stop
 
 function Write-RecoveryLog {
     param([string]$Message)
@@ -125,6 +148,12 @@ function Save-RecoveryLog {
         Add-Content -Path $ArchiveLog -Value ("===== Libertix recovery guard {0} =====" -f (Get-Date -Format o))
         Get-Content $Log | Add-Content -Path $ArchiveLog
     }
+}
+
+function Remove-TransactionArtifacts {
+    $planId = Read-EnvValue -Path $Pending -Name "PLAN_ID"
+    Remove-LibertixTransactionDownloads -SystemDrive $SystemDrive -PlanId $planId
+    Write-RecoveryLog "Removed transaction download artifacts."
 }
 
 function Restore-OriginalHibernationSetting {
@@ -329,6 +358,7 @@ try {
         Write-RecoveryLog "Dedicated successful install marker found; no disk rollback needed."
         Restore-BcdState -Required
         Remove-TemporaryBootPayload
+        Remove-TransactionArtifacts
         Invoke-WindowsShareFinalize
         Remove-RecoveryTask
         Save-RecoveryLog
@@ -363,6 +393,7 @@ try {
         Write-RecoveryLog "Successful install marker found; no disk rollback needed."
         Restore-BcdState -Required
         Remove-TemporaryBootPayload
+        Remove-TransactionArtifacts
         Invoke-WindowsShareFinalize
         Remove-RecoveryTask
         Save-RecoveryLog
@@ -406,6 +437,7 @@ try {
         Remove-PendingWindowsSharePayload
         Restore-OriginalHibernationSetting
         Remove-TemporaryBootPayload
+        Remove-TransactionArtifacts
         Remove-RecoveryTask -Required
         Save-RecoveryLog
         Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
@@ -458,7 +490,7 @@ try {
     } else {
         0
     }
-    [int64]$partitionSizeTolerance = 1MB
+    [int64]$partitionSizeTolerance = $PartitionAlignmentBytes
     [int64]$expectedBytes = [int64]$expectedMb * 1MB
     [int64]$stagingBytes = [int64]$stagingMb * 1MB
     [int64]$minBytes = $expectedBytes - $partitionSizeTolerance
@@ -471,13 +503,14 @@ try {
         $stagingMinBytes = 1
     }
     $stagingMaxBytes = $stagingBytes + $partitionSizeTolerance
-    $alignmentPadding = ($initialSystemOffset + $initialSystemSize) % 1MB
+    $alignmentPadding =
+        ($initialSystemOffset + $initialSystemSize) % $PartitionAlignmentBytes
     $expectedTransactionOffset = `
         $initialSystemOffset + $initialSystemSize - $alignmentPadding - $expectedBytes
     $candidateOffsets = @(
-        [int64]($expectedTransactionOffset - 1MB),
+        [int64]($expectedTransactionOffset - $PartitionAlignmentBytes),
         [int64]$expectedTransactionOffset,
-        [int64]($expectedTransactionOffset + 1MB)
+        [int64]($expectedTransactionOffset + $PartitionAlignmentBytes)
     )
 
     $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
@@ -601,6 +634,7 @@ try {
     Restore-OriginalHibernationSetting
 
     Remove-TemporaryBootPayload
+    Remove-TransactionArtifacts
 
     $finalSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     if ($finalSystemPartition.Size -ne $initialSystemSize) {
@@ -619,6 +653,7 @@ try {
         $null = Complete-LibertixRollback -Path $ExecutionStatePath
     }
     Save-RecoveryLog
+    Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
     exit 0
 } catch {
     Write-RecoveryLog "Recovery failed: $($_.Exception.Message)"

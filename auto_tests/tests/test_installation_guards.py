@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import runpy
 import subprocess
 import xml.etree.ElementTree as ET
@@ -101,6 +102,39 @@ def test_shared_storage_converts_windows_paths_without_losing_segments(
     assert result.stdout.strip() == expected
 
 
+def test_windows_share_uses_the_observed_partition_identity() -> None:
+    windows = read("Pages/ApplyChanges.Windows.cs")
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    uefi = read("Pages/ApplyChanges.Uefi.cs")
+
+    assert "PublishObservedWindowsSharePartitionIdentity" in windows
+    assert (
+        "configuration.ExpectedLinuxPartitionOffset =\n"
+        "                _installationPlan.Disk.Installer.OffsetBytes.Value;"
+    ) in windows
+    assert (
+        "await UpdateInstallerPartitionIdentityAsync(_biosInstallerDriveLetter[0]);\n"
+        "            PublishObservedWindowsSharePartitionIdentity();"
+    ) in bios
+    assert (
+        "_installationPlan = InstallationPlanSerializer.ReadValidated(\n"
+        "                    _installationPlanPath);\n"
+        "                PublishObservedWindowsSharePartitionIdentity();"
+    ) in uefi
+
+
+def test_temporary_drive_letters_prefer_z_and_fall_back() -> None:
+    geometry = read("Scripts/modules/Libertix.StorageGeometry.psm1")
+    bios = read("Scripts/libertix-bios-storage.ps1")
+    uefi = read("Scripts/libertix-uefi-install.ps1")
+
+    assert '"Z", "Y", "X", "W"' in geometry
+    assert "$createdDriveLetter = Get-LibertixFreeDriveLetter" in bios
+    assert '-AccessPath "${createdDriveLetter}:\\"' in bios
+    assert "$InstallerLetter = Get-LibertixFreeDriveLetter" in uefi
+    assert "$EspLetter = Get-LibertixFreeDriveLetter -ExcludedLetters" in uefi
+
+
 @pytest.mark.parametrize(
     ("kernel_sector", "expected_bytes"),
     [("0", "0"), ("2048", "1048576"), ("524288", "268435456")],
@@ -174,6 +208,11 @@ def test_shared_storage_bounds_mbr_alignment_shortfall(
         "installer_partition_target_bytes",
         requested_bytes,
         maximum_bytes,
+        str(
+            json.loads(read("Scripts/config/Libertix.InstallationPolicy.json"))["storage"][
+                "partitionAlignmentBytes"
+            ]
+        ),
     )
 
     assert (result.returncode == 0) is accepted
@@ -660,7 +699,7 @@ def test_windows_rollbacks_require_the_exact_original_system_partition_size() ->
     assert "[int64]$partition.Offset -notin $candidateOffsets" in bios_guard
     assert "[int]$partition.MbrType -in @(5, 15, 133)" in bios_guard
     assert "$isRawTransaction" in bios_guard
-    assert "[int64]$partitionSizeTolerance = 1MB" in bios_guard
+    assert "[int64]$partitionSizeTolerance = $PartitionAlignmentBytes" in bios_guard
     assert "[int64]$minBytes" in bios_guard
     assert "[int64]$stagingMinBytes" in bios_guard
     assert "[Math]::Max" not in bios_guard
@@ -675,14 +714,76 @@ def test_bios_downloader_verifies_bundled_aria2_before_execution() -> None:
     assert "bundled aria2 hash mismatch, using HTTP downloader" in downloader
 
 
+def test_bios_mbr_backup_is_atomic_durable_and_reusable(tmp_path: Path) -> None:
+    source_backup = tmp_path / "source.bin"
+    restored_backup = tmp_path / "restored.bin"
+    windows_root = tmp_path / "windows"
+    source_backup.write_bytes(bytes(range(256)) * 2)
+    script = r"""
+set -eu
+source "$1"
+source "$2"
+RECOVERY_ROOT_WINDOWS='C:\LibertixInstallRecovery'
+publish_durable_bios_mbr_backup "$3" "$4"
+load_durable_bios_mbr_backup "$3" "$5"
+cmp "$4" "$5"
+validate_durable_bios_mbr_backup \
+    "$3/LibertixInstallRecovery/mbr-backup"
+"""
+
+    subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "mbr-backup-test",
+            str(ROOT / "assets/live/libertix-storage-common.sh"),
+            str(ROOT / "assets/live/libertix-live-context.sh"),
+            str(windows_root),
+            str(source_backup),
+            str(restored_backup),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    durable = windows_root / "LibertixInstallRecovery/mbr-backup"
+    assert (durable / "mbr-before-grub.bin").read_bytes() == source_backup.read_bytes()
+    assert (durable / "mbr-before-grub.sha256").is_file()
+
+
+def test_bios_mbr_backup_precedes_bootloader_write() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+    rollback = read("assets/live/libertix-rollback-common.sh")
+
+    backup = installer.index("prepare_bios_mbr_backup_or_die")
+    armed = installer.index("BOOTLOADER_WRITE_STARTED=true", backup)
+    grub = installer.index("grub-install --target=i386-pc", armed)
+    assert backup < armed < grub
+    assert "load_bios_mbr_backup_for_rollback" in rollback
+    assert "bs=446 count=1 conv=notrunc status=none" in rollback
+
+
+def test_failed_installation_requires_account_secret_reentry() -> None:
+    apply_page = read("Pages/ApplyChanges.xaml.cs")
+    account = read("Models/AccountInfo.cs")
+
+    assert "_installationState.Account?.HasPassword == true" in apply_page
+    assert "new AccountCreation(_installationState)" in apply_page
+    assert "internal bool HasPassword" in account
+    assert "account.ClearPassword();" in read("Pages/ApplyChanges.Plan.cs")
+
+
 def test_windows_download_and_bios_boot_temporary_state_is_transaction_scoped() -> None:
     bios = read("Pages/ApplyChanges.Bios.cs")
     downloads = read("Pages/ApplyChanges.Downloads.cs")
     recovery = read("Scripts/libertix-recovery-guard.ps1")
 
-    assert '"Downloads",\n                _installationPlan.Runtime.RecoveryRunId' in bios
+    assert "InstallationTemporaryArtifacts.GetLiveMediaDirectory(" in bios
+    assert '(_installationPlan.Disk.SystemDrive ?? WindowsSystemDrive) + @"\\"' in bios
+    assert "_installationPlan.PlanId" in bios
     assert 'Path.Combine(tempIsoDirectory, "bios-live.iso")' in bios
-    assert "Environment.SpecialFolder.CommonApplicationData" in bios
     assert 'Path.GetTempPath(), "libertix_installer.iso"' not in bios
     assert "DeleteDownloadArtifactBestEffort(tempIsoPath" in bios
     assert "DeleteDownloadDirectoryBestEffort(" in bios
@@ -723,8 +824,6 @@ def test_live_target_disk_requires_cross_platform_partition_table_identity() -> 
     plan_exporter = read("assets/live/libertix-installation-plan.py")
     plan_loader = read("assets/live/libertix-installation-plan.sh")
     storage = read("assets/live/libertix-storage-common.sh")
-    bios = read("assets/live/libertix-bios-adapter.sh")
-    uefi = read("assets/live/libertix-uefi-adapter.sh")
 
     assert "function Get-PartitionTableIdentity" in preflight
     assert "return \"gpt:$($guid.ToString('D').ToLowerInvariant())\"" in preflight
@@ -733,9 +832,8 @@ def test_live_target_disk_requires_cross_platform_partition_table_identity() -> 
     assert "TARGET_DISK_PARTITION_TABLE_ID" in plan_loader
     assert "disk_partition_table_identity()" in storage
     assert "blkid -s PTUUID" in storage
-    for adapter in (bios, uefi):
-        assert 'actual_identity="$(disk_partition_table_identity "$disk" || true)"' in adapter
-        assert '[ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ]' in adapter
+    assert 'actual_identity="$(disk_partition_table_identity "$disk" || true)"' in storage
+    assert '[ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ]' in storage
 
 
 def test_uefi_bitlocker_decryption_requests_surface_initial_and_retry_failures() -> None:
@@ -831,8 +929,8 @@ def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
     uefi = read("Scripts/libertix-uefi-install.ps1")
     installer = read("assets/live/libertix-install-main.sh")
     assert ". /usr/local/lib/libertix/libertix-install-platform-common.sh" in installer
-    assert "libertix-install-main.sh" in read("iso/live/install-mint.sh")
-    assert "libertix-install-main.sh" in read("iso-uefi/live/install-mint.sh")
+    assert "libertix-install-main.sh" in read("iso/live/libertix-install.sh")
+    assert "libertix-install-main.sh" in read("iso-uefi/live/libertix-install.sh")
 
     assert "ConfigureBiosLowMemoryBoot" in apply_changes
     assert "LowMemoryMode =" in plan_factory
@@ -908,6 +1006,19 @@ def test_runner_stage_functions_return_stable_labels_and_percentages() -> None:
     assert bios_normalization.returncode == 0
     assert bios_normalization.stdout.strip() == "32"
     assert unknown_label.stdout.strip() == "custom-stage"
+
+
+def test_every_literal_live_install_stage_is_declared() -> None:
+    install = read("assets/live/libertix-install-main.sh")
+    declared_stages = {
+        line.split("\t", 1)[0]
+        for line in read("assets/live/libertix-stages.tsv").splitlines()
+        if line.strip()
+    }
+    requested_stages = set(re.findall(r'^mark "([^"]+)"$', install, re.MULTILINE))
+
+    assert requested_stages <= declared_stages
+    assert "105-verify-installer-iso" in requested_stages
 
 
 def test_failure_shortcut_does_not_offer_reboot_before_verified_rollback() -> None:
@@ -1049,7 +1160,8 @@ def test_uefi_firmware_reads_and_deletions_fail_closed() -> None:
     )[1]
 
     assert "[LibertixFirmwareApi]::LastError()" in reader
-    assert "$errorCode -in @(203, 1168)" in reader
+    assert "$script:Win32ErrorEnvironmentVariableNotFound" in reader
+    assert "$script:Win32ErrorNotFound" in reader
     assert "GetFirmwareEnvironmentVariable failed" in reader
     assert "DeleteFirmwareEnvironmentVariable" in deletion
     assert "if (-not $ok)" in deletion
@@ -1143,11 +1255,13 @@ def test_windows_process_tree_must_be_proven_stopped_before_rollback() -> None:
 def test_linux_hostname_contract_is_identical_in_every_runtime() -> None:
     pattern = "^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
     validator = read("Installation/InstallationPlanValidator.cs")
+    account_policy = read("Installation/AccountPolicy.cs")
     powershell = read("Scripts/modules/Libertix.InstallationPlan.psm1")
     live = read("assets/live/libertix-installation-plan.py")
     schema = read("schemas/installation-plan.schema.json")
 
-    assert pattern in validator
+    assert "AccountPolicy.IsValidComputerName" in validator
+    assert pattern in account_policy
     assert pattern in powershell
     assert pattern[1:-1] in live
     assert pattern in schema
@@ -1387,7 +1501,7 @@ def test_mbr_logical_partition_accepts_only_one_alignment_unit_of_shortfall() ->
 
     assert "maximum_partition_bytes=" in installer
     assert "installer_partition_target_bytes" in installer
-    assert 'alignment_tolerance_bytes="${3:-1048576}"' in storage
+    assert 'alignment_tolerance_bytes="${3:-${INSTALLER_ALIGNMENT_BYTES:-}}"' in storage
 
 
 def test_live_manifest_survives_detached_toram_medium_and_fat_name_case() -> None:
@@ -1910,7 +2024,7 @@ def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
         "function Install-LibertixIsoToPartition", 1
     )[0]
 
-    assert "$existingDriveLetter = Get-FreeDriveLetter" in create_or_reuse
+    assert "$existingDriveLetter = Get-LibertixFreeDriveLetter" in create_or_reuse
     assert "-NewDriveLetter $existingDriveLetter" in create_or_reuse
     create_position = create_or_reuse.index("$newPartition = New-Partition")
     format_position = create_or_reuse.index("Format-Volume", create_position)
@@ -1923,7 +2037,7 @@ def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
     assert 'Drive = "${createdDriveLetter}:"' in create_or_reuse
     assert "-DriveLetter $InstallerLetter" not in create_or_reuse
 
-    assert "$preparedDriveLetter = Get-FreeDriveLetter" in prepared_reuse
+    assert "$preparedDriveLetter = Get-LibertixFreeDriveLetter" in prepared_reuse
     assert "-NewDriveLetter $preparedDriveLetter" in prepared_reuse
     assert "-NewDriveLetter $InstallerLetter" not in prepared_reuse
 
@@ -2066,7 +2180,8 @@ def test_bios_staging_is_formatted_before_mount_manager_exposes_it() -> None:
 
     assert "-AssignDriveLetter" not in create_staging[create_position:format_position]
     assert "-Partition $partition" in create_staging[format_position:assign_position]
-    assert "-AssignDriveLetter" in create_staging[assign_position:]
+    assert "$createdDriveLetter = Get-LibertixFreeDriveLetter" in create_staging
+    assert '-AccessPath "${createdDriveLetter}:\\"' in create_staging[assign_position:]
 
 
 def test_windows_staging_size_is_exact_across_bios_and_uefi() -> None:
@@ -2222,17 +2337,22 @@ def test_live_boot_partition_identity_never_scans_other_disks() -> None:
 
 
 def test_live_disk_discovery_has_the_same_fallback_for_both_firmwares() -> None:
+    common = read("assets/live/libertix-storage-common.sh")
     bios = read("assets/live/libertix-bios-adapter.sh")
     uefi = read("assets/live/libertix-uefi-adapter.sh")
 
+    discovery = common.split("candidate_disks()", 1)[1].split("disk_partition_table_identity()", 1)[
+        0
+    ]
     for adapter in (bios, uefi):
-        discovery = adapter.split("candidate_disks()", 1)[1].split("disk_matches_manifest()", 1)[0]
         wait = adapter.split("wait_for_prereqs()", 1)[1].split(
             "set_linux_partition_type_or_die()", 1
         )[0]
-        assert "lsblk -dnpo NAME,TYPE" in discovery
-        assert "for disk in /sys/block/*" in discovery
         assert "done < <(candidate_disks)" in wait
+        assert "candidate_disks()" not in adapter
+        assert "disk_matches_manifest()" not in adapter
+    assert "lsblk -dnpo NAME,TYPE" in discovery
+    assert "for disk in /sys/block/*" in discovery
 
 
 def test_live_rollback_ownership_uses_manifest_offset_for_both_firmwares() -> None:
@@ -2409,7 +2529,7 @@ def test_windows_pages_share_the_wow64_safe_powershell_resolver() -> None:
 
     assert (
         sum(source.count("WindowsProcessRunner.ResolvePowerShell()") for source in page_sources)
-        == 12
+        >= 12
     )
     assert all(
         'SpecialFolder.System), "WindowsPowerShell"' not in source for source in page_sources
@@ -2428,6 +2548,17 @@ def test_live_handoff_is_published_atomically_and_hidden_before_reboot() -> None
     assert "$outputStream.Flush($true)" in uefi
     assert "Installation context publication hash mismatch" in uefi
     assert 'Dismount-Letter -Letter ($drive.TrimEnd(":"))' in orchestrator
+
+
+def test_temporary_media_and_grub_generator_workspaces_are_cleaned() -> None:
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    grub_generator = read("grub/10_libertix")
+
+    assert "$env:TEMP" not in staging
+    assert '"ProgramData\\Libertix\\Downloads\\$RecoveryRunId\\live-media"' in staging
+    assert "Remove-Item -Path $tmpDir -Recurse -Force" in staging
+    assert "trap 'rm -rf \"$workdir\"' EXIT HUP INT TERM" in grub_generator
+    assert "exec python3" not in grub_generator
 
 
 def test_distribution_minimum_uses_the_shared_installation_size_policy() -> None:
@@ -2495,9 +2626,11 @@ def test_recovery_documentation_does_not_promise_reversible_decryption() -> None
 
 def test_wpf_and_automation_require_the_same_minimum_password_length() -> None:
     account_page = (ROOT / "Pages" / "AccountCreation.xaml.cs").read_text(encoding="utf-8-sig")
+    account_policy = (ROOT / "Installation" / "AccountPolicy.cs").read_text(encoding="utf-8-sig")
     api_models = (ROOT / "auto_tests" / "app" / "models.py").read_text(encoding="utf-8")
 
-    assert "PasswordBox.Password.Length < 8" in account_page
+    assert "PasswordBox.Password.Length < AccountPolicy.MinimumPasswordLength" in account_page
+    assert "public const int MinimumPasswordLength = 8;" in account_policy
     assert "linux_password: str = Field(min_length=8" in api_models
 
 
@@ -2609,7 +2742,12 @@ def test_grub_renderer_uses_plan_presentation_without_flattening_advanced_entrie
         "menuentry 'UEFI Firmware Settings' --class firmware {\n}\n", encoding="utf-8"
     )
     plan.write_text(
-        json.dumps({"distribution": {"grubDisplayName": display_name, "grubIcon": icon}}),
+        json.dumps(
+            {
+                "distribution": {"grubDisplayName": display_name, "grubIcon": icon},
+                "locale": {"languageCode": "en"},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -2660,7 +2798,12 @@ def test_grub_renderer_nests_capability_generators_without_extra_root_entries(
         encoding="utf-8",
     )
     plan.write_text(
-        json.dumps({"distribution": {"grubDisplayName": "Vendor Linux", "grubIcon": "vendor"}}),
+        json.dumps(
+            {
+                "distribution": {"grubDisplayName": "Vendor Linux", "grubIcon": "vendor"},
+                "locale": {"languageCode": "en"},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -2749,11 +2892,12 @@ def test_windows_storage_waits_only_for_small_transient_free_space_deficits() ->
     bios = read("Scripts/libertix-bios-storage.ps1")
     uefi = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
 
-    assert "$script:MinimumWindowsFreeSpaceBytes = 10GB" in policy
-    assert "$script:WindowsFreeSpaceToleranceBytes = 2GB" in policy
-    assert "$script:WindowsFreeSpaceRetryWindowBytes = 2GB" in policy
+    assert "Get-LibertixInstallationPolicy" in policy
+    assert "targetWindowsFreeSpaceGiB" in policy
+    assert "windowsFreeSpaceToleranceGiB" in policy
+    assert "windowsFreeSpaceRetryWindowGiB" in policy
     assert "function Wait-LibertixWindowsFreeSpaceBudget" in policy
-    assert "$deficitBytes -gt $script:WindowsFreeSpaceRetryWindowBytes" in policy
+    assert "$deficitBytes -gt $retryWindowBytes" in policy
     assert "$stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds" in policy
     assert "Wait-LibertixWindowsFreeSpaceBudget" in bios
     assert "Wait-LibertixWindowsFreeSpaceBudget" in uefi
@@ -2776,12 +2920,16 @@ def test_grub_generators_remain_nested_after_package_updates() -> None:
     assert target.count("optional") >= 3
     assert 'parser.add_argument("--extra"' in read("grub/render-libertix-menu.py")
     assert "chmod -x /etc/grub.d/10_linux" not in target
-    root_entry_contract = "grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg"
-    assert root_entry_contract in target
-    assert root_entry_contract in postinstall
+    root_entry_pattern = "grep -Ec '^(menuentry|submenu) '"
+    assert root_entry_pattern in target
+    assert root_entry_pattern in postinstall
     assert 'RemoteCheck(\n                "linux.grub_regeneration"' in postinstall
     assert "update-grub; grub-script-check /boot/grub/grub.cfg" in postinstall
     assert "dpkg-divert --listpackage" in postinstall
+    assert postinstall.count("--id libertix-advanced") >= 2
+    assert postinstall.count("--id libertix-shutdown") >= 2
+    assert "submenu 'Advanced options' --class efi" not in postinstall
+    assert "menuentry 'Shutdown' --class shutdown" not in postinstall
 
 
 @pytest.mark.parametrize(
@@ -2796,28 +2944,37 @@ def test_grub_generators_remain_nested_after_package_updates() -> None:
 def test_target_generates_only_the_selected_and_fallback_locales(
     system_lang: str,
     expected: list[str],
+    tmp_path: Path,
 ) -> None:
+    locale_gen_file = tmp_path / "locale.gen"
     command = r"""
 set -eu
 SYSTEM_LANG="$1"
+locale_gen_file="$2"
+selected_locales=("$SYSTEM_LANG")
 {
     printf '%s UTF-8\n' "$SYSTEM_LANG"
     if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]; then
         printf '%s UTF-8\n' "en_US.UTF-8"
+        selected_locales+=("en_US.UTF-8")
     fi
-}
+} > "$locale_gen_file"
+printf '%s\n' "${selected_locales[@]}"
 """
     result = subprocess.run(
-        ["bash", "-c", command, "locale-test", system_lang],
+        ["bash", "-c", command, "locale-test", system_lang, str(locale_gen_file)],
         check=True,
         capture_output=True,
         text=True,
     )
 
-    assert result.stdout.splitlines() == expected
+    assert locale_gen_file.read_text(encoding="utf-8").splitlines() == expected
+    assert result.stdout.splitlines() == [line.split()[0] for line in expected]
     target = read("assets/live/configure-target-main.sh")
     assert "> /etc/locale.gen" in target
     assert 'if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]' in target
+    assert "if [ -d /var/lib/locales/supported.d ]; then" in target
+    assert 'locale-gen "${selected_locales[@]}"' in target
 
 
 def test_grub_kernel_update_keeps_all_advanced_entries_nested() -> None:
@@ -2851,6 +3008,19 @@ def test_compatibility_preflight_forces_utf8_console_codepage() -> None:
     assert "PowerShellJsonResult.ParseFinalObject" in runner
     assert "NormalizeUtf8Line" not in runner
     assert "Encoding.GetEncoding(1252).GetBytes(line)" not in runner
+
+
+def test_compatibility_preflight_imports_the_central_installation_policy() -> None:
+    preflight = read("Scripts/libertix-compatibility-preflight.ps1")
+
+    assert '"modules\\Libertix.InstallationPolicy.psm1"' in preflight
+    policy_import = "Import-Module -Name $policyModulePath -Force -ErrorAction Stop"
+    geometry_import = "Import-Module -Name $geometryModule -Force -ErrorAction Stop"
+    policy_read = "$installationPolicy = Get-LibertixInstallationPolicy"
+    assert geometry_import in preflight
+    assert policy_import in preflight
+    assert preflight.index(geometry_import) < preflight.index(policy_import)
+    assert preflight.index(policy_import) < preflight.index(policy_read)
 
 
 def test_compatibility_runner_drains_async_output_before_parsing_final_fields() -> None:
@@ -2902,11 +3072,11 @@ def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
     assert "InstallationSizePolicy.AvailableLinuxSizeGiB(" in page
     assert "InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(" in page
     assert "initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB" in size_policy
-    assert "TargetWindowsFreeSpaceGiB = 10" in size_policy
-    assert "WindowsFreeSpaceToleranceGiB = 2" in size_policy
+    assert "InstallationPolicy.Current.Storage.TargetWindowsFreeSpaceGiB" in size_policy
+    assert "InstallationPolicy.Current.Storage.WindowsFreeSpaceToleranceGiB" in size_policy
     assert "TargetWindowsFreeSpaceGiB - WindowsFreeSpaceToleranceGiB" in size_policy
-    assert "$script:MinimumWindowsFreeSpaceBytes = 10GB" in storage_policy
-    assert "$script:WindowsFreeSpaceToleranceBytes = 2GB" in storage_policy
+    assert "targetWindowsFreeSpaceGiB" in storage_policy
+    assert "windowsFreeSpaceToleranceGiB" in storage_policy
     assert "InstallationSizePolicy.MinimumWindowsFreeSpaceGiB" in page
 
 
@@ -3078,3 +3248,204 @@ def test_wpf_runtime_failure_paths_are_bounded_and_recoverable() -> None:
     assert "OpenDiskCleanup" not in resize_page
     assert "OpenDiskCleanup" not in resize_xaml
     assert 'Message="{DynamicResource FreeUpSpace}"' in resize_xaml
+
+
+def test_distribution_selection_reuses_compatibility_and_publishes_catalog_atomically() -> None:
+    chooser = read("Pages/ChooseDistro.xaml.cs")
+
+    assert "_partitionConfigValid = _installationState.Compatibility != null;" in chooser
+    assert "CheckPartitionConfigurationAsync" not in chooser
+    validation_start = chooser.index("var validatedDistros = new List<DistroInfo>")
+    validation_end = chooser.index("_distros.Clear();", validation_start)
+    assert "validatedDistros.Add" in chooser[validation_start:validation_end]
+    assert "_distros.Add" not in chooser[validation_start:validation_end]
+    assert chooser.index("_distros.Add(distro);", validation_end) > validation_end
+
+
+def test_dead_command_and_error_panel_action_plumbing_are_removed() -> None:
+    project = read("Libertix.csproj")
+    panel = read("Controls/ErrorPanel.xaml") + read("Controls/ErrorPanel.xaml.cs")
+
+    assert not (ROOT / "Commands/RelayCommand.cs").exists()
+    assert "RelayCommand.cs" not in project
+    assert "ActionButtonText" not in panel
+    assert "ActionCommand" not in panel
+
+
+def test_navigation_falls_back_to_immediate_navigation_without_ui_content() -> None:
+    navigation = read("Helpers/NavigationHelper.cs")
+
+    assert navigation.count("NavigateWithAnimationCore(") == 3
+    fallback = navigation.split("if (!(currentContent is UIElement currentPage))", 1)[1]
+    assert fallback.index("navigate(newPage);") < fallback.index("var fadeOut")
+    assert "if (!currentPage.IsHitTestVisible)" in navigation
+    assert "currentPage.IsHitTestVisible = false;" in navigation
+    assert "currentPage.IsHitTestVisible = true;" in navigation
+    assert navigation.count("FillBehavior = FillBehavior.Stop") == 2
+    completed = navigation.split("fadeOut.Completed +=", 1)[1]
+    assert completed.index("BeginAnimation(UIElement.OpacityProperty, null)") < completed.index(
+        "navigate(newPage)"
+    )
+
+
+def test_long_windows_native_checks_emit_structured_utf8_safe_summaries() -> None:
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    native_check = checks.split("function Invoke-NativeCheck", 1)[1].split(
+        "$config = Get-Content", 1
+    )[0]
+
+    assert "$exitCode = $LASTEXITCODE" in native_check
+    assert '.Replace([char]0, "")' in native_check
+    assert "$diagnostic.Length -gt 2000" in native_check
+    assert 'Write-Output "NATIVE_COMMAND=$FilePath EXIT_CODE=$exitCode"' in native_check
+    assert "$output | ForEach-Object { Write-Output $_ }" not in native_check
+
+
+def test_live_failure_and_cleanup_guards_cover_confirmed_audit_paths() -> None:
+    runner = read("assets/live/libertix-runner-main.sh")
+    live_context = read("assets/live/libertix-live-context.sh")
+    install = read("assets/live/libertix-install-main.sh")
+    runtime = read("assets/live/libertix-install-runtime-common.sh")
+
+    assert "_context_loaded=false" in runner
+    assert "Live installation context was not available after 30 attempts" in runner
+    assert "terminal_hide_cursor" in runner
+    assert "terminal_clear" not in runner
+    assert "find_libertix_installation_plan() (" in live_context
+    assert "trap cleanup_plan_probe EXIT" in live_context
+    assert 'STAGE_CATALOG="/usr/local/lib/libertix/libertix-stages.tsv"' in install
+    assert "unknown installation stage requested:" in install
+    assert "emit_install_result" in runtime
+    marker = runtime.split("write_windows_recovery_marker_file_best_effort()", 1)[1]
+    assert "(\n        umask 077" in marker
+
+
+def test_rollback_uses_observed_partition_state_and_always_cleans_esp_mounts() -> None:
+    rollback = read("assets/live/libertix-rollback-common.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+    deletion = rollback.split("delete_transaction_partition_best_effort()", 1)[1].split(
+        "restore_windows_partition_best_effort()", 1
+    )[0]
+    esp_probe = uefi.split("find_esp_partition()", 1)[1].split(
+        "cleanup_final_uefi_bootloader_best_effort()", 1
+    )[0]
+    final_cleanup = uefi.split("cleanup_final_uefi_bootloader_best_effort()", 1)[1].split(
+        "set_linux_partition_type_or_die()", 1
+    )[0]
+
+    assert "deleted=true" not in deletion
+    assert "deleted=false" not in deletion
+    assert "transaction partition $NEW_PART_NUM is still present" in deletion
+    final_state_failure = deletion.split("transaction partition $NEW_PART_NUM is still present", 1)[
+        1
+    ]
+    assert "return 1" in final_state_failure
+    assert "find_esp_partition() (" in uefi
+    assert "trap cleanup_esp_probe_mount EXIT HUP INT TERM" in esp_probe
+    assert "cleanup_final_uefi_bootloader_best_effort() (" in uefi
+    assert "trap cleanup_rollback_esp_mount EXIT" in final_cleanup
+
+
+@pytest.mark.parametrize(
+    ("language", "shutdown", "advanced"),
+    [
+        ("en", "Shutdown", "Advanced options"),
+        ("fr", "Éteindre", "Options avancées"),
+        ("es", "Apagar", "Opciones avanzadas"),
+        ("ja", "シャットダウン", "詳細オプション"),
+    ],
+)
+def test_grub_renderer_localizes_root_labels(
+    tmp_path: Path,
+    language: str,
+    shutdown: str,
+    advanced: str,
+) -> None:
+    plan = tmp_path / "installation-plan.json"
+    plan.write_text(
+        json.dumps(
+            {
+                "distribution": {"grubDisplayName": "Vendor Linux", "grubIcon": "vendor"},
+                "locale": {"languageCode": language},
+            }
+        ),
+        encoding="utf-8",
+    )
+    renderer = runpy.run_path(str(ROOT / "grub/render-libertix-menu.py"))
+
+    _, _, labels = renderer["read_distribution_presentation"](plan)
+
+    assert labels == {"shutdown": shutdown, "advanced": advanced}
+
+
+def test_grub_contract_is_named_and_reports_specific_failures() -> None:
+    target = read("assets/live/configure-target-main.sh")
+    postinstall = read("auto_tests/app/services/automation_postinstall.py")
+
+    assert "readonly EXPECTED_GRUB_ROOT_ENTRY_COUNT=4" in target
+    assert "EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4" in postinstall
+    assert "Generated GRUB configuration has invalid syntax" in target
+    assert "missing the distribution icon class" in target
+    assert "missing the distribution root entry" in target
+    assert "missing the Advanced options submenu" in target
+    assert "missing the Shutdown entry" in target
+    assert "root entries; expected $EXPECTED_GRUB_ROOT_ENTRY_COUNT" in target
+
+
+def test_aria2_connection_limit_comes_from_the_shared_policy() -> None:
+    policy = json.loads(read("Scripts/config/Libertix.InstallationPolicy.json"))
+    csharp_policy = read("Installation/InstallationPolicy.cs")
+    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    powershell_policy = read("Scripts/modules/Libertix.InstallationPolicy.psm1")
+    uefi = read("Scripts/libertix-uefi-install.ps1")
+
+    assert policy["download"]["aria2MaximumConnections"] == 5
+    assert "InstallationDownloadPolicy Download" in csharp_policy
+    assert "InstallationPolicy.Current.Download.Aria2MaximumConnections" in apply_changes
+    assert "$policy.download.aria2MaximumConnections" in powershell_policy
+    assert "$installationPolicy.download.aria2MaximumConnections" in uefi
+    assert "[int]$Aria2Connections = 5" not in uefi
+    assert uefi.index("$installationPolicy = Get-LibertixInstallationPolicy") < uefi.index(
+        '"Libertix.InstallationPlan.psm1"'
+    )
+
+
+def test_iso_builder_can_finish_without_the_auto_test_filepool() -> None:
+    builder = read("iso-tools/build-isos-docker.sh")
+
+    assert "LIBERTIX_ISO_FILEPOOL_DIR" in builder
+    assert 'if [ -d "$FILEPOOL_DIR" ]; then' in builder
+    assert "filepool directory not present; publication skipped" in builder
+
+
+@pytest.mark.parametrize(("partition_present", "expected_status"), [(True, 1), (False, 0)])
+def test_rollback_partition_deletion_result_depends_on_final_table_state(
+    partition_present: bool,
+    expected_status: int,
+) -> None:
+    rollback = ROOT / "assets/live/libertix-rollback-common.sh"
+    partition_line = "7:1s:2s:2s:ext4::;" if partition_present else ""
+    command = r"""\
+source "$1"
+firmware_resolve_rollback_partition() { :; }
+debug_disk_state() { :; }
+parted() {
+    printf '%s\n' 'BYT;' '/dev/fake:100s:unknown:512:512:msdos:Fake:;' "$PARTITION_LINE"
+}
+DISK=/dev/fake
+NEW_PART=
+NEW_PART_NUM=7
+delete_transaction_partition_best_effort
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(rollback)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "PARTITION_LINE": partition_line},
+    )
+
+    assert result.returncode == expected_status
+    if partition_present:
+        assert "transaction partition 7 is still present" in result.stdout

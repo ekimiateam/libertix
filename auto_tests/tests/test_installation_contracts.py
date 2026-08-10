@@ -217,7 +217,9 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             "grubIcon": "linuxmint",
             "installerIsoFileName": "mint.iso",
             "installerIsoUrl": "https://example.test/mint.iso",
-            "installerIsoWindowsPath": "C:\\mint.iso",
+            "installerIsoWindowsPath": (
+                "C:\\ProgramData\\Libertix\\Downloads\\" + "a" * 32 + "\\mint.iso"
+            ),
             "installerIsoSha256": "b" * 64,
             "liveIsoUrl": "https://example.test/libertix.iso",
             "liveIsoSha256": "c" * 64,
@@ -360,7 +362,9 @@ def test_shared_plan_accepts_all_windows_paths_on_a_non_c_system_drive(
 ) -> None:
     plan = make_plan("uefi", 40)
     plan["disk"]["systemDrive"] = "D:"  # type: ignore[index]
-    plan["distribution"]["installerIsoWindowsPath"] = "D:\\mint.iso"  # type: ignore[index]
+    plan["distribution"]["installerIsoWindowsPath"] = (  # type: ignore[index]
+        "D:\\ProgramData\\Libertix\\Downloads\\" + "a" * 32 + "\\mint.iso"
+    )
     plan["account"]["passwordHashWindowsPath"] = (  # type: ignore[index]
         "D:\\ProgramData\\Libertix\\Recovery\\account-secret.env"
     )
@@ -700,21 +704,38 @@ def test_live_state_runtime_rejects_properties_outside_the_shared_schema(
 
 
 def test_contract_implementations_share_the_same_policy_constants() -> None:
+    policy_path = ROOT / "Scripts/config/Libertix.InstallationPolicy.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
     csharp = (ROOT / "Installation/InstallationSizePolicy.cs").read_text(encoding="utf-8-sig")
     powershell = (ROOT / "Scripts/modules/Libertix.InstallationPlan.psm1").read_text(
         encoding="utf-8-sig"
     )
     python = (ROOT / "assets/live/libertix-installation-plan.py").read_text(encoding="utf-8-sig")
 
-    assert "MinimumFinalSizeGiB = 20" in csharp
-    assert "MaximumDirectFat32SizeGiB = 31" in csharp
-    assert "LargeInstallationStagingSizeGiB = 8" in csharp
-    assert "$script:MinimumFinalSizeGiB = 20" in powershell
-    assert "$script:MaximumDirectFat32SizeGiB = 31" in powershell
-    assert "$script:LargeInstallationStagingSizeGiB = 8" in powershell
-    assert "MINIMUM_FINAL_SIZE_GIB = 20" in python
-    assert "MAXIMUM_DIRECT_FAT32_SIZE_GIB = 31" in python
-    assert "LARGE_INSTALLATION_STAGING_SIZE_GIB = 8" in python
+    assert policy["storage"] == {
+        "minimumFinalSizeGiB": 20,
+        "targetWindowsFreeSpaceGiB": 10,
+        "windowsFreeSpaceToleranceGiB": 2,
+        "windowsFreeSpaceRetryWindowGiB": 2,
+        "preflightShrinkSafetyGiB": 2,
+        "maximumDirectFat32SizeGiB": 31,
+        "largeInstallationStagingSizeGiB": 8,
+        "partitionAlignmentBytes": 1024**2,
+    }
+    assert policy["memory"] == {
+        "windowsMinimumMiB": 2048,
+        "lowMemoryThresholdMiB": 4096,
+        "liveMinimumMiB": 1536,
+    }
+    assert "InstallationPolicy.Current.Storage" in csharp
+    assert "Get-LibertixInstallationPolicy" in powershell
+    assert "INSTALLATION_POLICY.storage" in python
+    for obsolete_literal in (
+        "MinimumFinalSizeGiB = 20",
+        "$script:MinimumFinalSizeGiB = 20",
+        "MINIMUM_FINAL_SIZE_GIB = 20",
+    ):
+        assert obsolete_literal not in csharp + powershell + python
 
 
 @pytest.mark.parametrize(

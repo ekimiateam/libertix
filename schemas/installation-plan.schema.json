@@ -296,12 +296,12 @@
         },
         "finalSizeBytes": {
           "type": "integer",
-          "minimum": 21474836480,
+          "minimum": 1,
           "multipleOf": 1073741824
         },
         "stagingSizeBytes": {
           "type": "integer",
-          "minimum": 8589934592,
+          "minimum": 1,
           "multipleOf": 1073741824
         }
       }

@@ -1,5 +1,5 @@
 [Unit]
-Description=Libertix automatic Mint installer
+Description=Libertix automatic Linux installer
 After=local-fs.target systemd-udev-settle.service
 Wants=local-fs.target systemd-udev-settle.service
 Conflicts=getty@tty1.service

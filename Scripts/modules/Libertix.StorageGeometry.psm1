@@ -1,12 +1,12 @@
 Set-StrictMode -Version Latest
 
-$script:WindowsPartitionAlignmentBytes = 1MB
-$script:MinimumWindowsFreeSpaceBytes = 10GB
-$script:WindowsFreeSpaceToleranceBytes = 2GB
-$script:WindowsFreeSpaceRetryWindowBytes = 2GB
+$policyModulePath = Join-Path $PSScriptRoot "Libertix.InstallationPolicy.psm1"
+Import-Module -Name $policyModulePath -Force -ErrorAction Stop
+$script:InstallationPolicy = Get-LibertixInstallationPolicy
+$script:BytesPerGiB = 1GB
 
 function Get-LibertixPartitionAlignmentBytes {
-    return [int64]$script:WindowsPartitionAlignmentBytes
+    return [int64]$script:InstallationPolicy.storage.partitionAlignmentBytes
 }
 
 function Get-LibertixWindowsFreeSpaceBudget {
@@ -18,18 +18,24 @@ function Get-LibertixWindowsFreeSpaceBudget {
     if ($AvailableBytes -lt 0 -or $AllocationBytes -le 0) {
         throw "Windows free-space budget values are outside the supported range."
     }
-    if ($AllocationBytes -gt [int64]::MaxValue - $script:MinimumWindowsFreeSpaceBytes) {
+    [int64]$reserveBytes =
+        [int]$script:InstallationPolicy.storage.targetWindowsFreeSpaceGiB *
+        $script:BytesPerGiB
+    [int64]$toleranceBytes =
+        [int]$script:InstallationPolicy.storage.windowsFreeSpaceToleranceGiB *
+        $script:BytesPerGiB
+    if ($AllocationBytes -gt [int64]::MaxValue - $reserveBytes) {
         throw "Windows free-space budget exceeds the supported integer range."
     }
 
-    [int64]$requiredBytes = $AllocationBytes + $script:MinimumWindowsFreeSpaceBytes
-    [int64]$acceptedFloorBytes = $requiredBytes - $script:WindowsFreeSpaceToleranceBytes
+    [int64]$requiredBytes = $AllocationBytes + $reserveBytes
+    [int64]$acceptedFloorBytes = $requiredBytes - $toleranceBytes
 
     # Windows can grow its page file and other managed files after the wizard
     # measures free space. The tolerance keeps that bounded drift from making
-    # a valid minimum-size installation fail. The wizard still targets a 10 GiB
-    # reserve, while the execution-time floor stays bounded at 8 GiB and larger
-    # deficits fail closed.
+    # a valid minimum-size installation fail. The wizard still targets the
+    # configured reserve, while the execution-time tolerance stays bounded and
+    # larger deficits fail closed.
     return [pscustomobject]@{
         Accepted = [bool]($AvailableBytes -ge $acceptedFloorBytes)
         WithinTolerance = [bool](
@@ -40,8 +46,8 @@ function Get-LibertixWindowsFreeSpaceBudget {
         AllocationBytes = $AllocationBytes
         RequiredBytes = $requiredBytes
         AcceptedFloorBytes = $acceptedFloorBytes
-        ReserveBytes = [int64]$script:MinimumWindowsFreeSpaceBytes
-        ToleranceBytes = [int64]$script:WindowsFreeSpaceToleranceBytes
+        ReserveBytes = $reserveBytes
+        ToleranceBytes = $toleranceBytes
     }
 }
 
@@ -69,8 +75,11 @@ function Wait-LibertixWindowsFreeSpaceBudget {
         }
 
         [int64]$deficitBytes = $budget.AcceptedFloorBytes - $budget.AvailableBytes
+        [int64]$retryWindowBytes =
+            [int]$script:InstallationPolicy.storage.windowsFreeSpaceRetryWindowGiB *
+            $script:BytesPerGiB
         if (
-            $deficitBytes -gt $script:WindowsFreeSpaceRetryWindowBytes -or
+            $deficitBytes -gt $retryWindowBytes -or
             $stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds
         ) {
             return $budget
@@ -97,7 +106,8 @@ function Get-LibertixPartitionEndAlignmentPadding {
     ) {
         throw "Partition geometry is not aligned to its logical sector size."
     }
-    if ($script:WindowsPartitionAlignmentBytes % $LogicalSectorSizeBytes -ne 0) {
+    [int64]$alignmentBytes = Get-LibertixPartitionAlignmentBytes
+    if ($alignmentBytes % $LogicalSectorSizeBytes -ne 0) {
         throw "Windows partition alignment is incompatible with the logical sector size."
     }
     if ($PartitionOffsetBytes -gt [int64]::MaxValue - $PartitionSizeBytes) {
@@ -105,7 +115,7 @@ function Get-LibertixPartitionEndAlignmentPadding {
     }
 
     $partitionEndBytes = $PartitionOffsetBytes + $PartitionSizeBytes
-    return [int64]($partitionEndBytes % $script:WindowsPartitionAlignmentBytes)
+    return [int64]($partitionEndBytes % $alignmentBytes)
 }
 
 function Get-LibertixAlignedShrinkGeometry {
@@ -136,7 +146,7 @@ function Get-LibertixAlignedShrinkGeometry {
     }
 
     return [pscustomobject]@{
-        AlignmentBytes = [int64]$script:WindowsPartitionAlignmentBytes
+        AlignmentBytes = Get-LibertixPartitionAlignmentBytes
         PaddingBytes = [int64]$paddingBytes
         ShrinkBytes = [int64]$shrinkBytes
         TargetSizeBytes = [int64]($PartitionSizeBytes - $shrinkBytes)
@@ -146,10 +156,38 @@ function Get-LibertixAlignedShrinkGeometry {
     }
 }
 
+function Get-LibertixFreeDriveLetter {
+    param([string[]]$ExcludedLetters = @())
+
+    $used = @{}
+    Get-Volume -ErrorAction SilentlyContinue |
+        Where-Object { $_.DriveLetter } |
+        ForEach-Object { $used[[string]$_.DriveLetter] = $true }
+    Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^[A-Za-z]$' } |
+        ForEach-Object { $used[[string]$_.Name] = $true }
+
+    foreach ($candidate in @(
+        "Z", "Y", "X", "W", "V", "U", "T", "S", "R", "Q", "P", "O",
+        "N", "M", "L", "K", "J", "I", "H", "G", "F", "E", "D"
+    )) {
+        if (
+            $candidate -notin $ExcludedLetters -and
+            -not $used.ContainsKey($candidate) -and
+            -not (Test-Path "${candidate}:\")
+        ) {
+            return $candidate
+        }
+    }
+
+    throw "No free drive letter is available for Libertix."
+}
+
 Export-ModuleMember -Function @(
     "Get-LibertixPartitionAlignmentBytes",
     "Get-LibertixWindowsFreeSpaceBudget",
     "Wait-LibertixWindowsFreeSpaceBudget",
     "Get-LibertixPartitionEndAlignmentPadding",
-    "Get-LibertixAlignedShrinkGeometry"
+    "Get-LibertixAlignedShrinkGeometry",
+    "Get-LibertixFreeDriveLetter"
 )

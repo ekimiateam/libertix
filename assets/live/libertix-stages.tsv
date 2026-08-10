@@ -15,6 +15,7 @@ runner-start	stage_runner_start	1
 080-mkfs-ext4	stage_080_mkfs_ext4	42
 090-mount-target	stage_090_mount_target	46
 100-remount-windows-ro	stage_100_remount_windows_ro	50
+105-verify-installer-iso	stage_030_check_installer_iso	52
 110-loop-mount-installer-iso	stage_110_loop_mount_installer_iso	54
 120-unsquashfs	stage_120_unsquashfs	54	76
 130-target-system-config	stage_130_target_system_config	76

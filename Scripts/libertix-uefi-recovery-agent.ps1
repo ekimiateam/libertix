@@ -210,35 +210,79 @@ function Remove-RecoveryArtifacts {
             throw "Recovery task still exists after removal: $taskName"
         }
     }
-    Remove-Item `
-        -LiteralPath (Join-Path $SystemDrive "libertix-live.iso") `
-        -Force `
-        -ErrorAction SilentlyContinue
+    $temporaryArtifactsModule = Join-Path `
+        $State.PayloadRoot `
+        "Scripts\modules\Libertix.TemporaryArtifacts.psm1"
+    Import-Module -Name $temporaryArtifactsModule -Force -ErrorAction Stop
+    Remove-LibertixTransactionDownloads `
+        -SystemDrive $SystemDrive `
+        -PlanId ([string]$State.PlanId)
+    Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
     $root = [IO.Path]::GetFullPath([string]$State.RecoveryRoot)
+    $sessionsRoot = Split-Path -Parent $root
     if ($DeferRootRemoval) {
-        if ($WaitForProcessId -gt 0) {
-            $escapedRoot = $root.Replace("'", "''")
-            $cleanupCommand = @"
-try { Wait-Process -Id $WaitForProcessId -Timeout 3600 -ErrorAction SilentlyContinue } catch {}
-Remove-Item -LiteralPath '$escapedRoot' -Recurse -Force -ErrorAction SilentlyContinue
-"@
-            $encodedCommand = [Convert]::ToBase64String(
-                [Text.Encoding]::Unicode.GetBytes($cleanupCommand)
-            )
-            Start-Process `
-                -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-                -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $encodedCommand" `
-                -WindowStyle Hidden
+        $escapedRoot = $root.Replace("'", "''")
+        $escapedSessionsRoot = $sessionsRoot.Replace("'", "''")
+        $escapedProductRoot = (Split-Path -Parent $sessionsRoot).Replace("'", "''")
+        $waitCommand = if ($WaitForProcessId -gt 0) {
+            "try { Wait-Process -Id $WaitForProcessId -Timeout 3600 -ErrorAction SilentlyContinue } catch {}"
         } else {
-            $quotedRoot = '"' + $root.Replace('"', '""') + '"'
-            Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c ping 127.0.0.1 -n 3 > nul & rmdir /s /q $quotedRoot" -WindowStyle Hidden
+            "Start-Sleep -Seconds 2"
         }
+        $cleanupCommand = @"
+$waitCommand
+Remove-Item -LiteralPath '$escapedRoot' -Recurse -Force -ErrorAction SilentlyContinue
+if ((Test-Path -LiteralPath '$escapedSessionsRoot' -PathType Container) -and `
+    @((Get-ChildItem -LiteralPath '$escapedSessionsRoot' -Force -ErrorAction SilentlyContinue)).Count -eq 0) {
+    Remove-Item -LiteralPath '$escapedSessionsRoot' -Force -ErrorAction SilentlyContinue
+}
+if ((Test-Path -LiteralPath '$escapedProductRoot' -PathType Container) -and `
+    @((Get-ChildItem -LiteralPath '$escapedProductRoot' -Force -ErrorAction SilentlyContinue)).Count -eq 0) {
+    Remove-Item -LiteralPath '$escapedProductRoot' -Force -ErrorAction SilentlyContinue
+}
+"@
+        $encodedCommand = [Convert]::ToBase64String(
+            [Text.Encoding]::Unicode.GetBytes($cleanupCommand)
+        )
+        Start-Process `
+            -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $encodedCommand" `
+            -WindowStyle Hidden
         return
     }
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
     if (Test-Path -LiteralPath $root) {
         throw "Recovery root still exists after removal: $root"
     }
+    if (
+        (Test-Path -LiteralPath $sessionsRoot -PathType Container) -and
+        @((Get-ChildItem -LiteralPath $sessionsRoot -Force -ErrorAction Stop)).Count -eq 0
+    ) {
+        Remove-Item -LiteralPath $sessionsRoot -Force -ErrorAction Stop
+    }
+    $productRoot = Split-Path -Parent $sessionsRoot
+    if (
+        (Test-Path -LiteralPath $productRoot -PathType Container) -and
+        @((Get-ChildItem -LiteralPath $productRoot -Force -ErrorAction Stop)).Count -eq 0
+    ) {
+        Remove-Item -LiteralPath $productRoot -Force -ErrorAction Stop
+    }
+}
+
+function Save-RecoveryLogs {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $source = Join-Path $State.RecoveryRoot "recovery-agent.log"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        return
+    }
+    $archiveRoot = Join-Path $SystemDrive "LibertixInstallLogs\$($State.RunId)"
+    New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
+    Copy-Item `
+        -LiteralPath $source `
+        -Destination (Join-Path $archiveRoot "uefi-recovery-agent.log") `
+        -Force `
+        -ErrorAction Stop
 }
 
 function Invoke-WindowsShareFinalize {
@@ -287,15 +331,20 @@ try {
     Write-AgentLog "Recovery agent started. action=$Action phase=$($state.Phase)"
 
     if ($Action -eq "Cancel") {
-        $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
-            -Revert `
-            -ExpectedRecoveryRunId ([string]$state.RunId)
-        if ($LASTEXITCODE -ne 0) {
-            throw "UEFI revert failed with rc=$LASTEXITCODE."
+        if ([string]$executionState.status -ne "rolled-back") {
+            $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
+                -Revert `
+                -ExpectedRecoveryRunId ([string]$state.RunId)
+            if ($LASTEXITCODE -ne 0) {
+                throw "UEFI revert failed with rc=$LASTEXITCODE."
+            }
+            Write-AgentLog "Fallback was declined; UEFI transaction reverted."
+        } else {
+            Write-AgentLog "UEFI transaction was already rolled back; cleanup is continuing."
         }
-        Write-AgentLog "Fallback was declined; UEFI transaction reverted."
         Remove-PendingWindowsSharePayload
+        Save-RecoveryLogs -State $state
         Remove-RecoveryArtifacts `
             -State $state `
             -DeferRootRemoval `
@@ -321,6 +370,7 @@ try {
         Save-State -State $state
         Write-AgentLog "Live success and Linux partition verified; removing temporary recovery payload."
         Invoke-WindowsShareFinalize
+        Save-RecoveryLogs -State $state
         Remove-RecoveryArtifacts -State $state
         exit 0
     }
@@ -340,7 +390,9 @@ try {
         Remove-PendingWindowsSharePayload
         $state.Phase = "LiveFailed"
         Save-State -State $state
-        Write-AgentLog "The live installer failed; Windows settings were restored and recovery evidence was retained."
+        Write-AgentLog "The live installer failed; Windows settings were restored and logs were archived."
+        Save-RecoveryLogs -State $state
+        Remove-RecoveryArtifacts -State $state
         exit 2
     }
 

@@ -11,8 +11,8 @@ param(
     [string]$ExpectedRecoveryRunId = "",
     [string]$FilepoolBaseUrl = "",
     [string]$Aria2ExePath = "",
-    [ValidateRange(1, 5)]
-    [int]$Aria2Connections = 5,
+    [ValidateRange(0, 16)]
+    [int]$Aria2Connections = 0,
     [ValidateSet("BootNext", "FirmwareBootOrder")]
     [string]$BootStrategy = "BootNext",
     [switch]$ReusePreparedInstaller = $false,
@@ -23,6 +23,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $bootStrategyWasSpecified = $PSBoundParameters.ContainsKey("BootStrategy")
 
+$policyModulePath = Join-Path $PSScriptRoot "modules\Libertix.InstallationPolicy.psm1"
+if (-not (Test-Path -LiteralPath $policyModulePath -PathType Leaf)) {
+    throw "Libertix PowerShell module is missing: $policyModulePath"
+}
+Import-Module -Name $policyModulePath -Force -ErrorAction Stop
+$installationPolicy = Get-LibertixInstallationPolicy
+
 $requiredModules = @(
     "Libertix.InstallationPlan.psm1",
     "Libertix.InstallationState.psm1",
@@ -30,6 +37,7 @@ $requiredModules = @(
     "Libertix.Process.psm1",
     "Libertix.Firmware.psm1",
     "Libertix.Download.psm1",
+    "Libertix.TemporaryArtifacts.psm1",
     "Libertix.Transaction.psm1",
     "Libertix.Rollback.psm1"
 )
@@ -39,6 +47,10 @@ foreach ($moduleName in $requiredModules) {
         throw "Libertix PowerShell module is missing: $modulePath"
     }
     Import-Module -Name $modulePath -Force -ErrorAction Stop
+}
+
+if ($Aria2Connections -eq 0) {
+    $Aria2Connections = [int]$installationPolicy.download.aria2MaximumConnections
 }
 
 # Dot-sourced components intentionally share this script's transaction scope.
@@ -80,6 +92,10 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
             Remove-Item -LiteralPath $ConfigPath -Force -ErrorAction SilentlyContinue
         }
     }
+}
+
+if ($Aria2Connections -lt 1 -or $Aria2Connections -gt 16) {
+    throw "Aria2Connections must be between 1 and 16."
 }
 
 $installationPlan = $null
@@ -173,8 +189,8 @@ $Aria2CacheDir = "$SystemDrive\LibertixTools\aria2"
 $Aria2DownloadDir = "$SystemDrive\LibertixTools\downloads"
 $LowMemoryIsoPath = "$SystemDrive\libertix-live.iso"
 
-$InstallerLetter = Get-FreeDriveLetter
-$EspLetter = Get-FreeDriveLetter -ExcludedLetters @($InstallerLetter)
+$InstallerLetter = Get-LibertixFreeDriveLetter
+$EspLetter = Get-LibertixFreeDriveLetter -ExcludedLetters @($InstallerLetter)
 $InstallerLabel = "LIBERTIXEFI"
 $firmwareOwnerRunId = if ($RecoveryRunId -match '^[0-9a-f]{32}$') {
     $RecoveryRunId

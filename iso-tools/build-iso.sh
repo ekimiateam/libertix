@@ -160,7 +160,7 @@ install_chroot_asset() {
 
 install_live_installer_assets() {
     local -a assets=(
-        "0755|$ISO_DIR/live/install-mint.sh|/install-mint.sh"
+        "0755|$ISO_DIR/live/libertix-install.sh|/libertix-install.sh"
         "0755|$ISO_DIR/live/libertix-runner.sh|/usr/local/sbin/libertix-runner"
         "0755|$ROOT_DIR/assets/live/libertix-runner-main.sh|/usr/local/lib/libertix/libertix-runner-main.sh"
         "0755|$ROOT_DIR/assets/live/libertix-gui.py|/usr/local/sbin/libertix-gui"
@@ -170,6 +170,8 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-install-runtime-common.sh|/usr/local/lib/libertix/libertix-install-runtime-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-distribution-common.sh|/usr/local/lib/libertix/libertix-distribution-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-installation-plan.py|/usr/local/lib/libertix/libertix-installation-plan.py"
+        "0755|$ROOT_DIR/assets/live/libertix_installation_policy.py|/usr/local/lib/libertix/libertix_installation_policy.py"
+        "0644|$ROOT_DIR/Scripts/config/Libertix.InstallationPolicy.json|/usr/local/lib/libertix/Libertix.InstallationPolicy.json"
         "0755|$ROOT_DIR/assets/live/libertix-installation-state.py|/usr/local/lib/libertix/libertix-installation-state.py"
         "0755|$ROOT_DIR/assets/live/libertix_json_schema.py|/usr/local/lib/libertix/libertix_json_schema.py"
         "0644|$ROOT_DIR/schemas/installation-plan.schema.json|/usr/local/lib/libertix/schemas/installation-plan.schema.json"

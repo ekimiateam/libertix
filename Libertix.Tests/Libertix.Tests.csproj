@@ -66,6 +66,10 @@
       <Link>TestData\Libertix.CatalogPublicKey.xml</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\Scripts\config\Libertix.InstallationPolicy.json">
+      <Link>Scripts\config\Libertix.InstallationPolicy.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="TestData\distros.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

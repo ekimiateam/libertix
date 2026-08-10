@@ -36,6 +36,8 @@ namespace Libertix.Helpers
     /// </summary>
     public static class WindowsProcessRunner
     {
+        private const int ProcessTreeTerminationWaitMilliseconds = 10000;
+
         public static string ResolvePowerShell()
         {
             string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
@@ -110,8 +112,9 @@ namespace Libertix.Helpers
                 {
                     if (taskKill != null)
                     {
-                        bool taskKillCompleted = taskKill.WaitForExit(10000);
-                        process.WaitForExit(10000);
+                        bool taskKillCompleted = taskKill.WaitForExit(
+                            ProcessTreeTerminationWaitMilliseconds);
+                        process.WaitForExit(ProcessTreeTerminationWaitMilliseconds);
                         treeTerminationProven =
                             taskKillCompleted && taskKill.ExitCode == 0 && process.HasExited;
                         if (treeTerminationProven)
@@ -128,24 +131,17 @@ namespace Libertix.Helpers
                 if (!process.HasExited)
                 {
                     process.Kill();
-                    process.WaitForExit(10000);
+                    process.WaitForExit(ProcessTreeTerminationWaitMilliseconds);
                 }
             }
             catch
             {
                 // The process may exit between the taskkill attempt and fallback.
             }
-            try
-            {
-                // Killing only the parent is a useful last resort, but it does
-                // not prove that descendants stopped. Callers must therefore
-                // fail closed instead of beginning rollback over unknown writers.
-                return treeTerminationProven;
-            }
-            catch
-            {
-                return false;
-            }
+            // Killing only the parent is a useful last resort, but it does
+            // not prove that descendants stopped. Callers must therefore
+            // fail closed instead of beginning rollback over unknown writers.
+            return treeTerminationProven;
         }
 
         public static WindowsProcessResult Run(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import gzip
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -286,13 +288,18 @@ def test_ssh_remote_timeouts_are_enforced_on_linux_and_windows() -> None:
     windows = object.__new__(SSHClient)
     windows.remote_os = "windows"
     windows_command = windows._remote_timeout_command("ping -t 127.0.0.1", 10)
-    assert windows_command.startswith("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
-    encoded = windows_command.rsplit(" ", 1)[1]
-    wrapper = base64.b64decode(encoded).decode("utf-16-le")
+    assert windows_command.startswith("powershell.exe -NoProfile -NonInteractive -Command ")
+    compressed_match = re.search(r"FromBase64String\('([^']+)'\)", windows_command)
+    assert compressed_match is not None
+    wrapper = gzip.decompress(base64.b64decode(compressed_match.group(1))).decode("utf-8")
+    assert len(windows_command) < 8191
     assert "chcp 65001 >nul" in wrapper
     assert "[Console]::OutputEncoding = $utf8NoBom" in wrapper
-    assert "ReadAllText($stdoutPath, $utf8NoBom)" in wrapper
-    assert "ReadAllText($stderrPath, $utf8NoBom)" in wrapper
+    assert "function ConvertFrom-NativeOutputBytes" in wrapper
+    assert "[Text.Encoding]::Unicode.GetString" in wrapper
+    assert "CurrentCulture.TextInfo.OEMCodePage" in wrapper
+    assert "Read-NativeOutputText -LiteralPath $stdoutPath" in wrapper
+    assert "Read-NativeOutputText -LiteralPath $stderrPath" in wrapper
     assert '"`r`necho %ERRORLEVEL% > `"$statusPath`"`r`n"' in wrapper
     assert "[int]::TryParse($statusText, [ref]$reportedExitCode)" in wrapper
     assert "$exitCode = 126" in wrapper
@@ -325,7 +332,20 @@ def test_ssh_output_keeps_utf8_diagnostics_and_removes_progress_clixml() -> None
     )
 
 
-def test_ssh_output_preserves_non_progress_clixml() -> None:
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ("Vérification réussie".encode("utf-8-sig"), "Vérification réussie"),
+        ("Vérification réussie".encode("utf-16"), "Vérification réussie"),
+        ("Vérification réussie".encode("utf-16-le"), "Vérification réussie"),
+        ("Vérification réussie".encode("utf-16-be"), "Vérification réussie"),
+    ],
+)
+def test_ssh_output_decodes_unicode_native_windows_streams(payload: bytes, expected: str) -> None:
+    assert SSHClient._decode_bounded(bytearray(payload), False) == expected
+
+
+def test_ssh_output_converts_non_progress_clixml_to_readable_text() -> None:
     output = (
         "#< CLIXML\r\n"
         '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
@@ -333,7 +353,22 @@ def test_ssh_output_preserves_non_progress_clixml() -> None:
         "</Objs>"
     )
 
-    assert SSHClient._decode_bounded(bytearray(output.encode("utf-8")), False) == output
+    assert SSHClient._decode_bounded(bytearray(output.encode("utf-8")), False) == "Failure details"
+
+
+def test_ssh_output_removes_mixed_progress_clixml_and_keeps_readable_error() -> None:
+    output = (
+        "Diagnostic utile\r\n"
+        "#< CLIXML\r\n"
+        '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+        '<Obj S="progress"><MS><PR N="Record"><AV>Commande sensible</AV></PR></MS></Obj>'
+        '<S S="Error">Échec natif_x000D__x000A_Détail</S>'
+        "</Objs>"
+    )
+
+    assert SSHClient._decode_bounded(bytearray(output.encode("utf-8")), False) == (
+        "Diagnostic utile\nÉchec natif\r\nDétail"
+    )
 
 
 def test_ssh_tofu_persists_first_key_in_isolated_inventory(

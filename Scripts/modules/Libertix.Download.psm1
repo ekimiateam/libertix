@@ -1,4 +1,6 @@
 Set-StrictMode -Version Latest
+$script:MountedIsoDriveMaximumAttempts = 30
+$script:MountedIsoDriveRetryDelayMilliseconds = 500
 
 function New-LibertixDownloadUrls {
     param(
@@ -14,7 +16,7 @@ function New-LibertixDownloadUrls {
 function Get-MountedIsoDrive {
     param([Parameter(Mandatory = $true)][string]$ImagePath)
     $resolvedImagePath = [IO.Path]::GetFullPath($ImagePath)
-    for ($attempt = 1; $attempt -le 30; $attempt++) {
+    for ($attempt = 1; $attempt -le $script:MountedIsoDriveMaximumAttempts; $attempt++) {
         $letters = @()
         $image = Get-DiskImage -ImagePath $resolvedImagePath -ErrorAction SilentlyContinue
         if ($image) {
@@ -42,7 +44,7 @@ function Get-MountedIsoDrive {
             Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
             Select-Object -First 1
         if ($letter) { return "$letter`:" }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds $script:MountedIsoDriveRetryDelayMilliseconds
     }
     $diagnostic = Get-DiskImage -ImagePath $resolvedImagePath -ErrorAction SilentlyContinue |
         Format-List * | Out-String

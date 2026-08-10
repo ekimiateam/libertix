@@ -1,5 +1,4 @@
 using System.Windows;
-using System.Windows.Input;
 using System.Windows.Controls;
 
 namespace Libertix.Controls
@@ -17,12 +16,6 @@ namespace Libertix.Controls
 
         public static readonly DependencyProperty AdditionalDetailsProperty =
             DependencyProperty.Register("AdditionalDetails", typeof(string), typeof(ErrorPanel), new PropertyMetadata(string.Empty));
-
-        public static readonly DependencyProperty ActionButtonTextProperty =
-            DependencyProperty.Register("ActionButtonText", typeof(string), typeof(ErrorPanel), new PropertyMetadata(string.Empty));
-
-        public static readonly DependencyProperty ActionCommandProperty =
-            DependencyProperty.Register("ActionCommand", typeof(ICommand), typeof(ErrorPanel), new PropertyMetadata(null));
 
         public string Title
         {
@@ -46,18 +39,6 @@ namespace Libertix.Controls
         {
             get => (string)GetValue(AdditionalDetailsProperty);
             set => SetValue(AdditionalDetailsProperty, value);
-        }
-
-        public string ActionButtonText
-        {
-            get => (string)GetValue(ActionButtonTextProperty);
-            set => SetValue(ActionButtonTextProperty, value);
-        }
-
-        public ICommand ActionCommand
-        {
-            get => (ICommand)GetValue(ActionCommandProperty);
-            set => SetValue(ActionCommandProperty, value);
         }
 
         public ErrorPanel()

@@ -35,7 +35,8 @@ namespace Libertix.Pages
             Path.Combine(WindowsSystemDrive, RuntimeNames.BiosRecoveryDirectory);
         private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
         private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
-        private const int Aria2MaxConnections = 5;
+        private static int Aria2MaxConnections =>
+            InstallationPolicy.Current.Download.Aria2MaximumConnections;
         private static readonly string WindowsShareRoot =
             Path.Combine(WindowsSystemDrive, @"ProgramData\Libertix\WindowsShare");
         private static readonly Lazy<ArtifactCatalog> ArtifactCatalogHolder =
@@ -97,9 +98,12 @@ namespace Libertix.Pages
         {
             if (_isRunning) return;
 
+            Page retryPage = _installationState.Account?.HasPassword == true
+                ? (Page)new WarningConfirmation(_installationState)
+                : new AccountCreation(_installationState);
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new WarningConfirmation(_installationState),
+                retryPage,
                 TimeSpan.FromSeconds(0.3),
                 slideLeft: false);
         }
@@ -113,7 +117,9 @@ namespace Libertix.Pages
 
             try
             {
-                if (_linuxSizeGB < 20 || double.IsNaN(_linuxSizeGB) || double.IsInfinity(_linuxSizeGB))
+                if (_linuxSizeGB < InstallationSizePolicy.MinimumFinalSizeGiB ||
+                    double.IsNaN(_linuxSizeGB) ||
+                    double.IsInfinity(_linuxSizeGB))
                 {
                     Log($"ERROR: Invalid Linux partition size: {_linuxSizeGB:N1}GB");
                     UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));

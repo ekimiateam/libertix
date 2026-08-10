@@ -16,6 +16,8 @@ namespace Libertix.Pages
 {
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {
+        private const double RecommendedLinuxFractionOfFreeSpace = 0.4;
+        private const double MaximumRecommendedLinuxSizeGiB = 100;
         private readonly InstallationState _installationState;
         private readonly double _totalSpace;
         private readonly double _initialFreeSpace;
@@ -258,6 +260,22 @@ namespace Libertix.Pages
                 else
                     NextButton.Focus();
                 e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.End && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                NextButton.Focus();
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Enter &&
+                Keyboard.Modifiers == ModifierKeys.None &&
+                NextButton.IsEnabled)
+            {
+                NavigateToSharingOptions();
+                e.Handled = true;
             }
         }
 
@@ -292,8 +310,12 @@ namespace Libertix.Pages
         {
             if (!CanAllocateLinux)
                 return MinimumSize;
-            double recommendedSize = Math.Max(MinimumSize, _initialFreeSpace * 0.4);
-            return Math.Min(Math.Min(recommendedSize, 100), AvailableLinuxSize);
+            double recommendedSize = Math.Max(
+                MinimumSize,
+                _initialFreeSpace * RecommendedLinuxFractionOfFreeSpace);
+            return Math.Min(
+                Math.Min(recommendedSize, MaximumRecommendedLinuxSizeGiB),
+                AvailableLinuxSize);
         }
 
         private void CheckSpaceRequirements()
@@ -388,6 +410,11 @@ namespace Libertix.Pages
 
         private void NextButton_Click(object sender, RoutedEventArgs e)
         {
+            NavigateToSharingOptions();
+        }
+
+        private void NavigateToSharingOptions()
+        {
             ValidateAndUpdateSize(ManualSize);
             if (HasError || HasSizeError)
             {
@@ -408,6 +435,5 @@ namespace Libertix.Pages
                 new SharingOptionsPage(_installationState),
                 TimeSpan.FromSeconds(0.3));
         }
-
     }
 }

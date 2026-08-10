@@ -48,7 +48,8 @@ run_live_preflight() {
     [ "$(uname -m)" = "x86_64" ] || die "LIVE_E_ARCH_UNSUPPORTED: live architecture is $(uname -m)"
     local memory_kb disk_name disk_type disk_size sector_size holders source
     memory_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
-    [ "${memory_kb:-0}" -ge 1572864 ] || die "LIVE_E_RAM_TOO_LOW: less than 1536 MiB is visible to the live system"
+    local minimum_memory_kb=$((LIVE_MINIMUM_MEMORY_MIB * 1024))
+    [ "${memory_kb:-0}" -ge "$minimum_memory_kb" ] || die "LIVE_E_RAM_TOO_LOW: less than $LIVE_MINIMUM_MEMORY_MIB MiB is visible to the live system"
     disk_name=$(basename "$DISK")
     disk_type=$(lsblk -dnro TYPE "$DISK" 2>/dev/null || true)
     [ "$disk_type" = "disk" ] || die "LIVE_E_TARGET_TYPE: target $DISK is type '$disk_type', not a physical disk"

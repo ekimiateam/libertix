@@ -83,7 +83,7 @@ namespace Libertix.Pages
                 recovery.RecoveryRoot,
                 recovery.RecoveryRoot,
                 recovery.RunId);
-            string configPath = WriteProtectedUefiConfig(new
+            string configPath = WriteProtectedUefiConfig(recovery.ConfigPath, new
             {
                 InstallationPlanPath = _installationPlanPath,
                 ExecutionStatePath = _executionLedger.StatePath,
@@ -91,7 +91,6 @@ namespace Libertix.Pages
                 Aria2ExePath = aria2Path,
                 Aria2Connections = Aria2MaxConnections
             });
-            File.Copy(configPath, recovery.ConfigPath, true);
             WriteUefiRecoveryState(recovery);
 
             try
@@ -106,6 +105,8 @@ namespace Libertix.Pages
                     InstallationPhase.Windows);
                 Log($"ERROR: UEFI recovery agent setup failed before disk mutation: {ex.Message}");
                 CleanupPendingWindowsSharePayload();
+                CleanupTransactionDownloadsBestEffort();
+                CleanupUefiRecoveryBeforeMutationBestEffort(recovery);
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
                 return;
@@ -139,6 +140,13 @@ namespace Libertix.Pages
                     return;
                 }
 
+                _installationPlan = InstallationPlanSerializer.ReadValidated(
+                    _installationPlanPath);
+                PublishObservedWindowsSharePartitionIdentity();
+                recovery.ExpectedLinuxPartitionOffset =
+                    _installationPlan.Disk.Installer.OffsetBytes.Value;
+                recovery.ExpectedLinuxPartitionSize =
+                    _installationPlan.Disk.Installer.FinalSizeBytes;
                 recovery.Phase = "AwaitingReboot";
                 WriteUefiRecoveryState(recovery);
             }
@@ -158,19 +166,6 @@ namespace Libertix.Pages
                     $"Unexpected UEFI preparation failure: {ex.Message}");
                 return;
             }
-            finally
-            {
-                try
-                {
-                    if (File.Exists(configPath))
-                        File.Delete(configPath);
-                }
-                catch (Exception ex)
-                {
-                    Log($"Temporary UEFI configuration cleanup failed: {ex.Message}");
-                }
-            }
-
             UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
             Log("UEFI installation preparation completed successfully.");
             RebootButton.Visibility = Visibility.Visible;
@@ -214,9 +209,12 @@ namespace Libertix.Pages
             {
                 if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
                 {
+                    CleanupTransactionDownloadsBestEffort();
                     ShowBitLockerRollbackIncomplete();
                     return;
                 }
+                CleanupTransactionDownloadsBestEffort();
+                await FinalizeUefiRecoveryAfterVerifiedRollbackAsync();
                 Log($"{reason} Automatic rollback was verified.");
                 UpdateProgress(
                     0,
@@ -294,7 +292,8 @@ namespace Libertix.Pages
                 InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB).FinalSizeBytes;
             long originalWindowsEnd = checked(
                 _storagePreflight.SystemPartitionOffset + _storagePreflight.SystemPartitionSize);
-            long alignmentPadding = originalWindowsEnd % (1024L * 1024L);
+            long alignmentPadding = originalWindowsEnd %
+                InstallationSizePolicy.PartitionAlignmentBytes;
             long expectedLinuxOffset = checked(
                 originalWindowsEnd - expectedLinuxSize - alignmentPadding);
 
@@ -317,6 +316,69 @@ namespace Libertix.Pages
                 ExpectedLinuxPartitionSize = expectedLinuxSize,
                 SecureBootEnabled = _installationState.Compatibility?.SecureBootEnabled == true
             };
+        }
+
+        private async Task<bool> FinalizeUefiRecoveryAfterVerifiedRollbackAsync()
+        {
+            if (_activeUefiRecovery == null)
+                return true;
+
+            string agentPath = Path.Combine(
+                _activeUefiRecovery.PayloadRoot,
+                "Scripts",
+                "libertix-uefi-recovery-agent.ps1");
+            if (!File.Exists(agentPath))
+            {
+                Log("UEFI recovery cleanup agent is missing after rollback.");
+                return false;
+            }
+
+            StreamingProcessResult result = await RunStreamingProcessAsync(
+                WindowsProcessRunner.ResolvePowerShell(),
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agentPath)} " +
+                $"-StatePath {QuoteArgument(Path.Combine(_activeUefiRecovery.RecoveryRoot, "state.json"))} " +
+                "-Action Cancel",
+                WindowsProcessTimeouts.DiskImageOperation,
+                line => Log($"CLEANUP: {line}"),
+                observeCancellation: false);
+            bool succeeded =
+                result.Completion == StreamingProcessCompletion.Exited &&
+                result.ExitCode == 0;
+            Log(
+                succeeded
+                    ? "UEFI recovery payload cleanup was scheduled and verified."
+                    : $"UEFI recovery payload cleanup failed with rc={result.ExitCode} " +
+                      $"({result.Completion}).");
+            return succeeded;
+        }
+
+        private void CleanupUefiRecoveryBeforeMutationBestEffort(UefiRecoveryState recovery)
+        {
+            if (recovery == null)
+                return;
+
+            string schtasks = ResolveSystemExecutable("schtasks.exe", "schtasks.exe");
+            foreach (string taskName in new[] { recovery.TaskName, recovery.PromptTaskName })
+            {
+                if (!string.IsNullOrWhiteSpace(taskName))
+                {
+                    RunProcess(
+                        schtasks,
+                        $"/Delete /TN {QuoteArgument(taskName)} /F",
+                        (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
+                        GetWindowsConsoleEncoding());
+                }
+            }
+
+            try
+            {
+                if (Directory.Exists(recovery.RecoveryRoot))
+                    Directory.Delete(recovery.RecoveryRoot, recursive: true);
+            }
+            catch (Exception ex)
+            {
+                Log($"UEFI pre-mutation recovery cleanup failed: {ex.Message}");
+            }
         }
 
         internal static IEnumerable<string> EnumerateUefiRecoveryPayloadFiles(string sourceRoot)
@@ -381,11 +443,8 @@ namespace Libertix.Pages
             Log($"UEFI recovery guards armed before disk mutation: {recovery.TaskName}, {recovery.PromptTaskName}");
         }
 
-        private static string WriteProtectedUefiConfig(object config)
+        private static string WriteProtectedUefiConfig(string path, object config)
         {
-            string directory = Path.Combine(Path.GetTempPath(), "Libertix");
-            Directory.CreateDirectory(directory);
-            string path = Path.Combine(directory, $"uefi-config-{Guid.NewGuid():N}.json");
             WriteProtectedInstallerFile(path, JsonSerializer.Serialize(config));
             return path;
         }

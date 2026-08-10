@@ -110,11 +110,13 @@ assert_recovery_unchanged_or_die() {
     echo "Windows recovery partition verified from manifest: $recovery_partition ($recovery_size bytes)"
 }
 
-append_install_result() {
+emit_install_result() {
     local success="$1"
     local rc="${2:-0}"
     local rollback="${3:-not-attempted}"
 
+    # The runner redirects the complete installer stdout stream to install.log
+    # and extracts this machine-readable trailer after the child exits.
     {
         echo ""
         echo "LIBERTIX_INSTALL_SUCCESS=$success"
@@ -422,14 +424,16 @@ write_windows_recovery_marker_file_best_effort() {
     mkdir -p "$(dirname "$marker")" 2>/dev/null || true
     local temporary
     temporary="$(dirname "$marker")/.${state}.$$.tmp"
-    umask 077
-    {
-        echo "LIBERTIX_${namespace}_RECOVERY_RUN_ID=$RECOVERY_RUN_ID"
-        echo "LIBERTIX_${namespace}_RECOVERY_STATE=$state"
-        echo "LIBERTIX_${namespace}_RECOVERY_STAGE=$CURRENT_STAGE"
-        echo "LIBERTIX_${namespace}_RECOVERY_RC=$rc"
-        echo "LIBERTIX_${namespace}_RECOVERY_TIME=$(date -Is 2>/dev/null || date)"
-    } > "$temporary" 2>/dev/null || true
+    (
+        umask 077
+        {
+            echo "LIBERTIX_${namespace}_RECOVERY_RUN_ID=$RECOVERY_RUN_ID"
+            echo "LIBERTIX_${namespace}_RECOVERY_STATE=$state"
+            echo "LIBERTIX_${namespace}_RECOVERY_STAGE=$CURRENT_STAGE"
+            echo "LIBERTIX_${namespace}_RECOVERY_RC=$rc"
+            echo "LIBERTIX_${namespace}_RECOVERY_TIME=$(date -Is 2>/dev/null || date)"
+        } > "$temporary"
+    ) 2>/dev/null || true
     if [ -s "$temporary" ]; then
         sync "$temporary" 2>/dev/null || sync || true
         mv -f "$temporary" "$marker" 2>/dev/null || true

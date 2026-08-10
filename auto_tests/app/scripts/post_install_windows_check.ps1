@@ -121,8 +121,16 @@ function Invoke-NativeCheck {
     )
 
     $output = @(& $FilePath @Arguments 2>&1)
-    $output | ForEach-Object { Write-Output $_ }
-    Assert-Condition ($LASTEXITCODE -eq 0) "$FilePath exited with code $LASTEXITCODE."
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $diagnostic = (($output | ForEach-Object { [string]$_ }) -join " | ").Replace([char]0, "").Trim()
+        if ($diagnostic.Length -gt 2000) {
+            $diagnostic = $diagnostic.Substring($diagnostic.Length - 2000)
+        }
+        $suffix = if ([string]::IsNullOrWhiteSpace($diagnostic)) { "" } else { " Output: $diagnostic" }
+        throw "$FilePath exited with code $exitCode.$suffix"
+    }
+    Write-Output "NATIVE_COMMAND=$FilePath EXIT_CODE=$exitCode"
 }
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -165,6 +173,15 @@ try {
             $coreServices = @(Get-Service -Name @("EventLog", "RpcSs", "Schedule") -ErrorAction Stop)
             $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
             $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
+            $uefiToolsRoot = Test-Path -LiteralPath "C:\LibertixTools"
+            $biosRecoveryRoot = Test-Path -LiteralPath "C:\LibertixInstallRecovery"
+            $uefiRecoveryRoot = Test-Path -LiteralPath "C:\ProgramData\Libertix\UefiRecovery"
+            $transactionDownloads = @(
+                Get-ChildItem `
+                    -LiteralPath "C:\ProgramData\Libertix\Downloads" `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            )
             $recoveryTasks = @(Get-LibertixRecoveryTasks)
             $bcdEntries = @(& bcdedit.exe /enum all 2>&1)
             Assert-Condition ($LASTEXITCODE -eq 0) "bcdedit failed during the final Windows check."
@@ -192,6 +209,11 @@ try {
                 "A core Windows service stopped after the final boot."
             Assert-Condition (-not $biosPending) "The BIOS transaction is pending after the final boot."
             Assert-Condition (-not $uefiTransaction) "The UEFI transaction remains after the final boot."
+            Assert-Condition (-not $uefiToolsRoot) "The temporary UEFI tools directory remains after the final boot."
+            Assert-Condition (-not $biosRecoveryRoot) "The BIOS recovery payload remains after the final boot."
+            Assert-Condition (-not $uefiRecoveryRoot) "The UEFI recovery payload remains after the final boot."
+            Assert-Condition ($transactionDownloads.Count -eq 0) `
+                "Transaction downloads remain after the final boot."
             Assert-Condition ($recoveryTasks.Count -eq 0) "The recovery task remains after the final boot."
             Assert-Condition ($bcdText -match "(?i)winload[.]e(?:xe|fi)") `
                 "The Windows loader is absent after the final boot."

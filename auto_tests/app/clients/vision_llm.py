@@ -303,7 +303,9 @@ class VisionLLMClient:
                             "classify the second one. Valid screens: welcome, compatibility, "
                             "distro, resize, sharing, account, warning, apply, other. A visible "
                             "COMPAT_E_* error or disabled Continue button on compatibility is "
-                            "blocking."
+                            "blocking. warning_acknowledged is true only when the warning-page "
+                            "confirmation checkbox visibly contains its selected check mark; it "
+                            "is false on every other page and for an empty checkbox."
                         ),
                     },
                     {
@@ -316,7 +318,9 @@ class VisionLLMClient:
                                     f"{screen_instruction}. The exact expected username is "
                                     f"{expected_username!r}. On the warning page, username_visible "
                                     "and password_fields_filled may be false because those fields "
-                                    "are no longer shown. Copy all decisive Libertix text into "
+                                    "are no longer shown. Inspect the confirmation checkbox itself "
+                                    "to set warning_acknowledged. Copy all decisive Libertix "
+                                    "text into "
                                     "visible_text, especially titles, controls, validation "
                                     "messages, "
                                     "and errors. If no Libertix text is readable, use an empty "

@@ -16,7 +16,13 @@ from app.config import VMConfig
 from app.distributions import DistributionProfile
 from app.errors import WorkflowError
 from app.services.automation_types import AutomationOptions
+from app.services.automation_windows_checks import (
+    CrossOsArtifacts,
+    build_windows_validation_plan,
+)
 from app.services.common import ResultBuilder
+
+EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4
 
 
 @dataclass(frozen=True)
@@ -26,14 +32,6 @@ class RemoteCheck:
     timeout: float = 120
     sensitive: bool = False
     requires_sudo: bool = False
-
-
-@dataclass(frozen=True)
-class CrossOsArtifacts:
-    windows_relative_path: str
-    windows_sha256: str
-    linux_relative_path: str
-    linux_sha256: str
 
 
 class PostInstallValidationMixin:
@@ -518,10 +516,11 @@ class PostInstallValidationMixin:
             'test "$(dpkg-divert --truename "$source")" = "$diverted"; '
             "done; "
             "update-grub; grub-script-check /boot/grub/grub.cfg; "
-            "test \"$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)\" = 4; "
+            f"test \"$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)\" "
+            f"= {EXPECTED_GRUB_ROOT_ENTRY_COUNT}; "
             f"grep -Eq -- {windows_grub_entry_pattern} /boot/grub/grub.cfg; "
-            "grep -Fq \"submenu 'Advanced options' --class efi\" /boot/grub/grub.cfg; "
-            "grep -Fq \"menuentry 'Shutdown' --class shutdown\" /boot/grub/grub.cfg; "
+            "grep -Fq -- '--class efi --id libertix-advanced' /boot/grub/grub.cfg; "
+            "grep -Fq -- '--class shutdown --id libertix-shutdown' /boot/grub/grub.cfg; "
             f"grep -Fq -- {expected_grub_entry} /boot/grub/grub.cfg; "
             'grep -Fq -- "$(uname -r)" /boot/grub/grub.cfg'
             + (
@@ -646,10 +645,11 @@ class PostInstallValidationMixin:
                 "linux.grub",
                 "test -s /boot/grub/grub.cfg; "
                 "grub-script-check /boot/grub/grub.cfg; "
-                "test \"$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)\" = 4; "
+                f"test \"$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)\" "
+                f"= {EXPECTED_GRUB_ROOT_ENTRY_COUNT}; "
                 f"grep -Eq -- {windows_grub_entry_pattern} /boot/grub/grub.cfg; "
-                "grep -Fq \"submenu 'Advanced options' --class efi\" /boot/grub/grub.cfg; "
-                "grep -Fq \"menuentry 'Shutdown' --class shutdown\" /boot/grub/grub.cfg; "
+                "grep -Fq -- '--class efi --id libertix-advanced' /boot/grub/grub.cfg; "
+                "grep -Fq -- '--class shutdown --id libertix-shutdown' /boot/grub/grub.cfg; "
                 f"grep -Fq -- {expected_grub_entry} /boot/grub/grub.cfg",
                 requires_sudo=True,
             ),
@@ -1049,61 +1049,13 @@ class PostInstallValidationMixin:
         artifacts: CrossOsArtifacts,
         result: ResultBuilder,
     ) -> None:
-        check_names = [
-            "finalization",
-            "identity",
-            "firmware",
-            "system_volume",
-            "system_resources",
-            "partition_layout",
-            "partition_geometry",
-            "boot_partition",
-            "boot_configuration",
-            "recovery",
-            "bitlocker",
-            "temporary_artifacts",
-            "network",
-            "locale",
-            "ssh_service",
-            "core_services",
-            "hibernation",
-            "dism_check_health",
-            "sfc_verify_only",
-            "chkdsk_scan",
-        ]
-        if options.share_linux_files_in_windows:
-            insert_at = check_names.index("dism_check_health")
-            check_names[insert_at:insert_at] = [
-                "ext4_driver",
-                "ext4_readonly_mount",
-                "linux_home",
-                "linux_home_hash",
-                "ext4_write_denied",
-                "explorer_shortcut",
-                "sharing_tasks",
-            ]
-        if options.share_windows_files_in_linux:
-            check_names.insert(check_names.index("dism_check_health"), "cross_os_hash")
-        if not (options.share_windows_files_in_linux and options.share_linux_files_in_windows):
-            check_names.insert(check_names.index("dism_check_health"), "sharing_disabled")
-        base_config = {
-            "expected_firmware": vm.firmware,
-            "expected_ipv4": vm.host,
-            "installer_iso_file_name": options.distribution.installer_iso_file_name,
-            "linux_username": options.linux_username,
-            "windows_relative_path": artifacts.windows_relative_path,
-            "windows_sha256": artifacts.windows_sha256,
-            "linux_relative_path": artifacts.linux_relative_path,
-            "linux_sha256": artifacts.linux_sha256,
-            "share_windows_files_in_linux": options.share_windows_files_in_linux,
-            "share_linux_files_in_windows": options.share_linux_files_in_windows,
-        }
-        for name in check_names:
+        plan = build_windows_validation_plan(vm, options, artifacts)
+        for name in plan.check_names:
             try:
                 response = self.validation.run_windows_script(
                     ssh,
                     script_name="post_install_windows_check.ps1",
-                    config={**base_config, "check": name},
+                    config={**plan.base_config, "check": name},
                     step="automation.test.windows",
                     timeout=1800 if name in {"sfc_verify_only", "chkdsk_scan"} else 300,
                 )

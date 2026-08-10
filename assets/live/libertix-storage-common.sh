@@ -2,9 +2,34 @@
 
 # Firmware-neutral block-device helpers shared by both live installers.
 #
-# The caller provides candidate_disks() and disk_matches_manifest() because
-# those policies intentionally differ between the BIOS and UEFI adapters. This
-# module owns only stable Linux device naming and manifest-based resolution.
+# Candidate enumeration and manifest identity are firmware-neutral. Firmware
+# adapters keep only the partitioning and bootloader behavior that truly differs.
+
+candidate_disks() {
+    local disk
+
+    {
+        lsblk -dnpo NAME,TYPE 2>/dev/null \
+            | awk '$2=="disk"{print $1}' \
+            | while read -r disk; do
+                case "$(basename "$disk")" in
+                    loop*|ram*|sr*) continue ;;
+                esac
+                echo "$disk"
+            done
+
+        # Early live boot can expose sysfs devices before lsblk reports them.
+        for disk in /sys/block/*; do
+            [ -e "$disk" ] || continue
+            disk="/dev/$(basename "$disk")"
+            case "$(basename "$disk")" in
+                loop*|ram*|sr*) continue ;;
+            esac
+            [ -b "$disk" ] || continue
+            echo "$disk"
+        done
+    } | awk '!seen[$0]++' || true
+}
 
 partition_number() {
     echo "$1" | grep -oE '[0-9]+$'
@@ -29,6 +54,33 @@ disk_partition_table_identity() {
     esac
 }
 
+disk_matches_manifest() {
+    local disk="$1"
+    local actual_size actual_style actual_identity expected_style
+    local windows_candidate boot_candidate
+
+    actual_size="$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)"
+    [ "$actual_size" = "$TARGET_DISK_SIZE_BYTES" ] || return 1
+    actual_style="$(
+        parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}'
+    )"
+    expected_style="$(echo "$EXPECTED_PARTITION_STYLE" | tr '[:upper:]' '[:lower:]')"
+    [ "$expected_style" != "mbr" ] || expected_style="msdos"
+    [ "$actual_style" = "$expected_style" ] || return 1
+    actual_identity="$(disk_partition_table_identity "$disk" || true)"
+    [ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ] || return 1
+    windows_candidate="$(
+        partition_at_offset "$disk" "$WINDOWS_PARTITION_OFFSET_BYTES" || true
+    )"
+    [ -n "$windows_candidate" ] || return 1
+    [ "$(blkid -s TYPE -o value "$windows_candidate" 2>/dev/null || true)" = "ntfs" ] || \
+        return 1
+    boot_candidate="$(
+        partition_at_offset "$disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true
+    )"
+    [ -n "$boot_candidate" ] || return 1
+}
+
 parent_disk_from_part() {
     local partition="$1"
 
@@ -51,7 +103,7 @@ windows_path_to_relative() {
 installer_partition_target_bytes() {
     local requested_bytes="$1"
     local maximum_bytes="$2"
-    local alignment_tolerance_bytes="${3:-1048576}"
+    local alignment_tolerance_bytes="${3:-${INSTALLER_ALIGNMENT_BYTES:-}}"
     local shortfall_bytes
 
     [ "$requested_bytes" -gt 0 ] 2>/dev/null || return 2

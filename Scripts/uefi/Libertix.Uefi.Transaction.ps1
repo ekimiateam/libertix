@@ -327,6 +327,10 @@ function Invoke-Revert {
         # if an unowned LIBERTIXEFI partition exists, so there is nothing left
         # to restore in this early-failure case.
         Write-Log "No transaction state found; $SystemDrive was not resized by this run." "Gray"
+        Remove-LibertixTransactionDownloads `
+            -SystemDrive $SystemDrive `
+            -PlanId $ExpectedRecoveryRunId
+        Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
         Write-Log "Revert complete." "Green"
         return
     }
@@ -347,6 +351,10 @@ function Invoke-Revert {
     }
 
     Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction SilentlyContinue
+    Remove-LibertixTransactionDownloads `
+        -SystemDrive $SystemDrive `
+        -PlanId $ExpectedRecoveryRunId
+    Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
     Complete-LibertixTrackedCompensation -Step "windows.recovery-armed"
 
     Write-Log "Revert complete." "Green"

@@ -174,10 +174,12 @@ switch ($Action) {
             throw "The formatted BIOS staging geometry does not resolve to exactly one partition."
         }
         # Keep the RAW volume inaccessible to Explorer until its FAT32 format
-        # exists, then let Mount Manager select a genuinely available letter.
+        # exists. Prefer Z: for the short staging phase, then fall back through
+        # the remaining free letters when Z: is already occupied.
+        $createdDriveLetter = Get-LibertixFreeDriveLetter
         Add-PartitionAccessPath `
             -InputObject $partitionMatches[0] `
-            -AssignDriveLetter `
+            -AccessPath "${createdDriveLetter}:\" `
             -ErrorAction Stop | Out-Null
         $verifiedPartition = @(
             Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop |
@@ -186,8 +188,7 @@ switch ($Action) {
                     [int64]$_.Size -eq $SizeBytes
                 }
         )[0]
-        $createdDriveLetter = [string]$verifiedPartition.DriveLetter
-        if ([string]::IsNullOrWhiteSpace($createdDriveLetter)) {
+        if ([string]$verifiedPartition.DriveLetter -ne $createdDriveLetter) {
             throw "Windows formatted the BIOS staging partition without assigning a drive letter."
         }
         $verifiedVolume = Get-Volume -DriveLetter $createdDriveLetter -ErrorAction Stop

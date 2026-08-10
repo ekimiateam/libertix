@@ -127,6 +127,7 @@ namespace Libertix.Pages
             }
 
             CleanupPendingWindowsSharePayload();
+            CleanupTransactionDownloadsBestEffort();
             Log("Installation cancelled before any disk change.");
             UpdateProgress(
                 0,
@@ -171,13 +172,16 @@ namespace Libertix.Pages
             {
                 if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
                 {
+                    CleanupTransactionDownloadsBestEffort();
                     ShowBitLockerRollbackIncomplete();
                     return;
                 }
 
-                // Keep the recovered state on disk for diagnostics. Recovery
-                // cleanup is deliberately separate from proving the rollback.
+                // Preserve diagnostics in the log archive before removing the
+                // temporary recovery payload from the completed transaction.
                 CompleteExecutionRollback();
+                CleanupTransactionDownloadsBestEffort();
+                await FinalizeUefiRecoveryAfterVerifiedRollbackAsync();
                 Log("UEFI cancellation rollback completed and verified.");
                 UpdateProgress(
                     0,

@@ -25,6 +25,7 @@ from app.models import ValidationRequest
 from app.services.automation import AutomationService
 from app.services.automation_postinstall import CrossOsArtifacts
 from app.services.automation_types import AutomationOptions, Point
+from app.services.automation_windows_checks import build_windows_validation_plan
 from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
 from app.services.reset import ResetService
@@ -107,6 +108,26 @@ def test_wizard_pages_expose_deterministic_keyboard_navigation() -> None:
     assert "e.Key == Key.Right" in distro
     assert "DistrosListBox.SelectedIndex = selectedIndex" in distro
     assert "NavigateToSelectedDistro();" in distro
+    resize = (REPO_ROOT / "Pages/ResizeDisk.xaml.cs").read_text(encoding="utf-8-sig")
+    assert "e.Key == Key.End && Keyboard.Modifiers == ModifierKeys.Control" in resize
+    assert "NavigateToSharingOptions();" in resize
+
+
+def test_distribution_cards_have_uniform_rounded_selection_chrome() -> None:
+    source = (REPO_ROOT / "Pages/ChooseDistro.xaml").read_text(encoding="utf-8-sig")
+    card_style = source.split('<Style x:Key="DistroCard"', maxsplit=1)[1].split(
+        "</Style>", maxsplit=1
+    )[0]
+    container_style = source.split('<Style TargetType="ListBoxItem">', maxsplit=1)[1].split(
+        "</Style>", maxsplit=1
+    )[0]
+
+    assert '<Setter Property="Height" Value="285"/>' in card_style
+    assert '<Setter Property="CornerRadius" Value="8"/>' in card_style
+    assert '<DataTrigger Binding="{Binding IsSelected}" Value="True">' in card_style
+    assert '<ControlTemplate TargetType="{x:Type ListBoxItem}">' in container_style
+    assert "<ContentPresenter " in container_style
+    assert "<Border " not in container_style
 
 
 def test_vnc_text_typing_uses_vncdotool_literal_minus(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -603,6 +624,51 @@ def test_sharing_page_uses_keyboard_state_and_default_button(
     ]
 
 
+def test_resize_page_focuses_next_before_keyboard_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    events: list[tuple[str, str]] = []
+    client = SimpleNamespace(
+        keyDown=lambda key: events.append(("down", key)),
+        keyPress=lambda key: events.append(("press", key)),
+        keyUp=lambda key: events.append(("up", key)),
+    )
+    screens = iter(("resize", "account"))
+    monotonic_values = iter((0.0, 0.0, 400.0, 350.0))
+
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_wizard_module.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(
+        service,
+        "_capture_from_client",
+        lambda *_args, **_kwargs: Path("resize-navigation.png"),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        detected_screen=next(screens),
+        expected_screen_visible=False,
+        no_blocking_error=True,
+        summary="test",
+        visible_text="",
+    )
+
+    service._navigate_to_account(  # noqa: SLF001
+        client,
+        vm,
+        distribution_index=1,
+        username="test",
+        result=ResultBuilder("automation"),
+    )
+
+    assert events == [
+        ("down", "ctrl"),
+        ("press", "end"),
+        ("up", "ctrl"),
+        ("press", "enter"),
+    ]
+
+
 def test_account_password_fields_are_rewritten_after_wpf_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -851,7 +917,9 @@ def test_navigation_accepts_compatibility_progress_without_false_error(
         result=result,
     )
 
-    assert len([event for event in events if event[0] == "press"]) == 7
+    pressed_keys = [key for event, key in events if event == "press"]
+    assert len(pressed_keys) == 8
+    assert pressed_keys.count("end") == 1
     assert any(step.step == "automation.compatibility_wait" for step in result.steps)
 
 
@@ -1223,6 +1291,99 @@ def test_warning_confirmation_closes_windows_settings_and_retries(
     assert not any(event[0] in {"move", "mouse"} for event in keys)
     assert any(step.step == "automation.dismiss_windows_settings" for step in result.steps)
     assert result.steps[-1].step == "automation.wizard_state"
+
+
+def test_warning_acknowledgement_uses_deterministic_focus_and_visual_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    keys: list[tuple[str, str]] = []
+    client = SimpleNamespace(
+        keyDown=lambda key: keys.append(("down", key)),
+        keyPress=lambda key: keys.append(("press", key)),
+        keyUp=lambda key: keys.append(("up", key)),
+    )
+
+    def verdict(acknowledged: bool) -> SimpleNamespace:
+        values = {
+            "detected_screen": "warning",
+            "expected_screen_visible": True,
+            "no_blocking_error": True,
+            "username_visible": False,
+            "password_fields_filled": False,
+            "warning_acknowledged": acknowledged,
+            "summary": "Warning page with confirmation checkbox",
+            "visible_text": "Avertissement Je comprends",
+        }
+        return SimpleNamespace(**values, model_dump=lambda: values)
+
+    verdicts = iter((verdict(False), verdict(True)))
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_wizard_pair",
+        lambda *_args, **_kwargs: (Path("warning-1.png"), Path("warning-2.png")),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: next(verdicts)  # type: ignore[method-assign]
+    result = ResultBuilder("automation")
+
+    service._acknowledge_warning_page(  # noqa: SLF001
+        client,
+        vm,
+        "test",
+        result,
+    )
+
+    assert keys == [
+        ("down", "ctrl"),
+        ("press", "home"),
+        ("up", "ctrl"),
+        ("press", "space"),
+    ]
+    assert result.steps[-1].step == "automation.warning_acknowledged"
+
+
+def test_warning_acknowledgement_does_not_toggle_an_already_checked_box(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    keys: list[tuple[str, str]] = []
+    client = SimpleNamespace(
+        keyDown=lambda key: keys.append(("down", key)),
+        keyPress=lambda key: keys.append(("press", key)),
+        keyUp=lambda key: keys.append(("up", key)),
+    )
+    values = {
+        "detected_screen": "warning",
+        "expected_screen_visible": True,
+        "no_blocking_error": True,
+        "username_visible": False,
+        "password_fields_filled": False,
+        "warning_acknowledged": True,
+        "summary": "Warning page with selected confirmation checkbox",
+        "visible_text": "Avertissement Je comprends",
+    }
+    monkeypatch.setattr(
+        service,
+        "_capture_wizard_pair",
+        lambda *_args, **_kwargs: (Path("warning-1.png"), Path("warning-2.png")),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        **values, model_dump=lambda: values
+    )
+    result = ResultBuilder("automation")
+
+    service._acknowledge_warning_page(  # noqa: SLF001
+        client,
+        vm,
+        "test",
+        result,
+    )
+
+    assert keys == []
+    assert result.steps[-1].step == "automation.warning_acknowledged"
 
 
 def test_validation_source_defaults_to_local() -> None:
@@ -1954,7 +2115,19 @@ def test_validation_run_removes_temporary_capture_workspace(
     assert list(tmp_path.iterdir()) == []
 
 
-def test_automation_monitor_stops_only_on_the_installed_boot_menu() -> None:
+@pytest.mark.parametrize(
+    ("shutdown", "advanced"),
+    [
+        ("Shutdown", "Advanced options"),
+        ("Éteindre", "Options avancées"),
+        ("Apagar", "Opciones avanzadas"),
+        ("シャットダウン", "詳細オプション"),
+    ],
+)
+def test_automation_monitor_stops_only_on_the_installed_boot_menu(
+    shutdown: str,
+    advanced: str,
+) -> None:
     service = AutomationService(settings())
 
     assert (
@@ -2003,7 +2176,7 @@ def test_automation_monitor_stops_only_on_the_installed_boot_menu() -> None:
     )
     assert (
         service._reboot_or_live_started(  # noqa: SLF001
-            "Linux Mint 22.3 Cinnamon  Windows Boot Manager  Shutdown  Advanced options",
+            f"Linux Mint 22.3 Cinnamon  Windows Boot Manager  {shutdown}  {advanced}",
         )
         is True
     )
@@ -2424,7 +2597,7 @@ def test_live_installers_require_exact_disk_and_recovery_manifest() -> None:
     assert "resolve_target_disk_from_manifest" in storage
     assert "assert_recovery_unchanged_or_die" in runtime
 
-    for path in ("iso/live/install-mint.sh", "iso-uefi/live/install-mint.sh"):
+    for path in ("iso/live/libertix-install.sh", "iso-uefi/live/libertix-install.sh"):
         wrapper = read_repo(path)
         assert "libertix-install-main.sh" in wrapper
 
@@ -2925,6 +3098,35 @@ def test_windows_post_install_checks_continue_after_one_failure(
     assert timeouts["identity"] == 300
     assert timeouts["sfc_verify_only"] == 1800
     assert timeouts["chkdsk_scan"] == 1800
+
+
+def test_windows_validation_plan_keeps_conditional_sharing_checks_declarative() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    artifacts = CrossOsArtifacts(
+        windows_relative_path=r"Users\Public\Documents\probe.bin",
+        windows_sha256="a" * 64,
+        linux_relative_path="probe.bin",
+        linux_sha256="b" * 64,
+    )
+    options = AutomationOptions(
+        True,
+        "test",
+        "test-passphrase",
+        True,
+        distribution=load_distribution_profile("zorin"),
+        share_windows_files_in_linux=False,
+        share_linux_files_in_windows=False,
+    )
+
+    plan = build_windows_validation_plan(vm, options, artifacts)
+
+    assert "sharing_disabled" in plan.check_names
+    assert "cross_os_hash" not in plan.check_names
+    assert "ext4_driver" not in plan.check_names
+    assert plan.check_names[-3:] == ("dism_check_health", "sfc_verify_only", "chkdsk_scan")
+    assert plan.base_config["installer_iso_file_name"] == "zorin.iso"
+    assert plan.base_config["expected_firmware"] == vm.firmware
 
 
 def test_cross_os_artifacts_are_removed_after_their_checks() -> None:

@@ -141,6 +141,7 @@ namespace Libertix.Pages
             _executionLedger.SetMirrorPath(
                 Path.Combine(BiosInstallerRoot, InstallationStateFileName));
             await UpdateInstallerPartitionIdentityAsync(_biosInstallerDriveLetter[0]);
+            PublishObservedWindowsSharePartitionIdentity();
             CompleteExecutionStep(InstallationStep.WindowsInstallerPartitionCreated);
 
             // On MBR, inserting the Linux slot before the recovery partition
@@ -177,11 +178,9 @@ namespace Libertix.Pages
             Log($"Step 5: Downloading ISO from {isoUrl}...");
             StartExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
 
-            string tempIsoDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "Libertix",
-                "Downloads",
-                _installationPlan.Runtime.RecoveryRunId);
+            string tempIsoDirectory = InstallationTemporaryArtifacts.GetLiveMediaDirectory(
+                (_installationPlan.Disk.SystemDrive ?? WindowsSystemDrive) + @"\",
+                _installationPlan.PlanId);
             Directory.CreateDirectory(tempIsoDirectory);
             string tempIsoPath = Path.Combine(tempIsoDirectory, "bios-live.iso");
             try
@@ -318,6 +317,7 @@ namespace Libertix.Pages
         private bool FailBiosBeforeMutation(string reason)
         {
             RecordExecutionFailure("BIOS_ARTIFACT_PREPARATION_FAILED", reason, InstallationPhase.Windows);
+            CleanupTransactionDownloadsBestEffort();
             Log($"ERROR: {reason}");
             UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
             FinishInstallation(enableBackButton: true);
@@ -489,11 +489,13 @@ namespace Libertix.Pages
                 if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
                 {
                     CleanupPendingWindowsSharePayload();
+                    CleanupTransactionDownloadsBestEffort();
                     ShowBitLockerRollbackIncomplete();
                     return;
                 }
                 CompleteExecutionRollback();
                 CleanupPendingWindowsSharePayload();
+                CleanupTransactionDownloadsBestEffort();
                 Log("Automatic rollback completed and verified.");
                 UpdateProgress(
                     0,

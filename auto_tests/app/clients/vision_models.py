@@ -178,5 +178,6 @@ class WizardStateVerdict(BaseModel):
     no_blocking_error: bool
     username_visible: bool
     password_fields_filled: bool
+    warning_acknowledged: bool = False
     summary: str = Field(min_length=1)
     visible_text: str

@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 function Test-BitLockerVolumeReadable {
     param([Parameter(Mandatory = $true)]$Volume)
     if ($Volume.VolumeStatus -eq "FullyDecrypted") { return $true }
+    # Get-BitLockerVolume can report the previous VolumeStatus briefly after
+    # decryption reaches zero percent. The percentage is the completed state
+    # needed before Linux or rollback accesses the volume contents.
     if ($null -ne $Volume.EncryptionPercentage -and [int]$Volume.EncryptionPercentage -le 0) {
         return $true
     }

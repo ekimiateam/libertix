@@ -12,8 +12,6 @@ using System.Text.Json;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Diagnostics;
-using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows.Input;
 using Libertix.Installation;
@@ -62,6 +60,7 @@ namespace Libertix.Pages
         {
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             _filepool = filepool ?? throw new ArgumentNullException(nameof(filepool));
+            _partitionConfigValid = _installationState.Compatibility != null;
             InitializeComponent();
             _distros = new ObservableCollection<DistroInfo>();
             DataContext = this;
@@ -73,7 +72,6 @@ namespace Libertix.Pages
         {
             Loaded -= ChooseDistro_Loaded;
             await LoadDistrosAsync();
-            await CheckPartitionConfigurationAsync();
             LoadState();
             DistrosListBox.Focus();
         }
@@ -163,7 +161,7 @@ namespace Libertix.Pages
                         throw new InvalidOperationException("Distribution list JSON is empty or invalid.");
                     }
 
-                    _distros.Clear();
+                    var validatedDistros = new List<DistroInfo>(distroList.Count);
                     var seenDistroIds = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var distroJson in distroList)
                     {
@@ -188,7 +186,7 @@ namespace Libertix.Pages
                         {
                             throw new InvalidOperationException("Distribution manifest contains a duplicate id.");
                         }
-                        _distros.Add(new DistroInfo
+                        validatedDistros.Add(new DistroInfo
                         {
                             Id = distroJson.Id,
                             Name = distroJson.Name,
@@ -207,6 +205,12 @@ namespace Libertix.Pages
                             IsoInstallerSizeBytes = distroJson.IsoInstallerSizeBytes,
                             SizeInGB = distroJson.SizeInGB
                         });
+                    }
+
+                    _distros.Clear();
+                    foreach (DistroInfo distro in validatedDistros)
+                    {
+                        _distros.Add(distro);
                     }
                 }
                 DistrosListBox.ItemsSource = _distros;
@@ -283,86 +287,13 @@ namespace Libertix.Pages
             }
         }
 
-        #region Partition Validation
-
-        private async Task CheckPartitionConfigurationAsync()
-        {
-            var (isValid, warnings) = await ValidatePartitionLayoutAsync();
-
-            _partitionConfigValid = isValid;
-
-            if (!isValid)
-            {
-                string warningMessage = string.Join("\n", warnings);
-                PartitionWarningText.Text = warningMessage;
-                PartitionWarningPanel.Visibility = Visibility.Visible;
-            }
-
-            UpdateNextButtonState();
-        }
-
         private void UpdateNextButtonState()
         {
-            // Storage preflight failures are safety blockers, not warnings that
-            // can be bypassed with a checkbox.
+            // Compatibility is completed on the preceding page and the full
+            // storage preflight is repeated immediately before disk mutation.
+            // Re-running PowerShell here made a visible selection appear frozen.
             bool canProceed = _selectedDistro != null && _partitionConfigValid;
             NextButton.IsEnabled = canProceed;
         }
-
-        private async Task<(bool isValid, List<string> warnings)> ValidatePartitionLayoutAsync()
-        {
-            var warnings = new List<string>();
-            try
-            {
-                if (!FirmwareInterop.TryGetFirmwareType(out var firmwareType) ||
-                    (firmwareType != FirmwareType.Bios && firmwareType != FirmwareType.Uefi))
-                    throw new InvalidOperationException("Windows could not determine the firmware type.");
-
-                string scriptPath = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "Scripts",
-                    "libertix-storage-preflight.ps1");
-                if (!File.Exists(scriptPath))
-                    throw new FileNotFoundException("Storage preflight script is missing.", scriptPath);
-
-                string expected = firmwareType == FirmwareType.Uefi ? "UEFI" : "BIOS";
-                // Same resolution and timeout policy as the ApplyChanges preflight:
-                // "powershell.exe" alone is subject to WOW64 redirection.
-                var result = await Task.Run(() => RunProcessWithTimeout(
-                    WindowsProcessRunner.ResolvePowerShell(),
-                    $"-NoProfile -ExecutionPolicy Bypass -File {WindowsProcessRunner.QuoteArgument(scriptPath)} " +
-                    $"-ExpectedFirmware {expected}",
-                    (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds));
-                PowerShellJsonResult preflight = PowerShellJsonResult.ParseFinalObject(result.output);
-                if (result.exitCode != 0 || !preflight.GetBoolean("preflightOk"))
-                    throw new InvalidOperationException(
-                        "Storage preflight failed: " +
-                        preflight.GetOptionalString("errorMessage", result.error));
-
-                return (true, warnings);
-            }
-            catch (Exception ex)
-            {
-                warnings.Add($"Error checking partitions: {ex.Message}");
-                return (false, warnings);
-            }
-        }
-
-        private static (int exitCode, string output, string error) RunProcessWithTimeout(
-            string fileName,
-            string arguments,
-            int timeoutMilliseconds)
-        {
-            WindowsProcessResult result = WindowsProcessRunner.Run(
-                fileName,
-                arguments,
-                TimeSpan.FromMilliseconds(timeoutMilliseconds));
-            return (
-                result.ExitCode,
-                result.StandardOutput,
-                result.TimedOut ? "Storage preflight timed out." : result.StandardError);
-        }
-
-        #endregion
     }
 }

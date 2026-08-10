@@ -53,15 +53,19 @@ resolve_rollback_storage_best_effort() {
 
 restore_pre_grub_mbr_best_effort() {
     [ "$BOOTLOADER_WRITE_STARTED" = true ] || return 0
-    [ -f "$MBR_BACKUP" ] || return 0
+    [ "$LIBERTIX_FIRMWARE_MODE" = bios ] || return 0
+    if ! load_bios_mbr_backup_for_rollback; then
+        echo "ROLLBACK: verified durable pre-GRUB MBR backup is unavailable"
+        return 1
+    fi
 
     echo "ROLLBACK: restoring pre-GRUB MBR boot code from $MBR_BACKUP"
-    dd if="$MBR_BACKUP" of="$DISK" bs=446 count=1 conv=notrunc
+    dd if="$MBR_BACKUP" of="$DISK" bs=446 count=1 conv=notrunc status=none
     sync || true
 }
 
 delete_transaction_partition_best_effort() {
-    local deleted=false holders fuser_output=""
+    local holders fuser_output=""
 
     firmware_resolve_rollback_partition
     if [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ]; then
@@ -90,7 +94,6 @@ delete_transaction_partition_best_effort() {
             else
                 echo "ROLLBACK: deleting temporary Linux partition $NEW_PART"
                 if parted -s "$DISK" rm "$NEW_PART_NUM"; then
-                    deleted=true
                     sync || true
                     partprobe "$DISK" 2>/dev/null || true
                     udevadm settle 2>/dev/null || true
@@ -106,11 +109,9 @@ delete_transaction_partition_best_effort() {
     if [ -n "$NEW_PART_NUM" ] \
         && parted -sm "$DISK" print 2>/dev/null \
             | awk -F: -v n="$NEW_PART_NUM" '$1==n{found=1} END{exit !found}'; then
-        if [ "$deleted" != true ]; then
-            echo "ROLLBACK: skipping Windows resize because transaction partition $NEW_PART_NUM is still present"
-            debug_disk_state || true
-            return 1
-        fi
+        echo "ROLLBACK: skipping Windows resize because transaction partition $NEW_PART_NUM is still present"
+        debug_disk_state || true
+        return 1
     fi
 }
 
@@ -239,9 +240,9 @@ fail_and_exit() {
     fail_installation_state_best_effort "$rc" "$message"
     debug_disk_state || true
     if rollback_windows_layout_best_effort; then
-        append_install_result false "$rc" "completed"
+        emit_install_result false "$rc" "completed"
     else
-        append_install_result false "$rc" "skipped-or-failed"
+        emit_install_result false "$rc" "skipped-or-failed"
     fi
     firmware_write_failure_marker_best_effort "$rc"
     exit "$rc"

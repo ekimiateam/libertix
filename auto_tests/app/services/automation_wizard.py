@@ -117,7 +117,12 @@ class WizardAutomationMixin:
             result,
         )
 
-        self._press_key(client, "space", 0.5)
+        self._acknowledge_warning_page(
+            client,
+            vm,
+            options.linux_username,
+            result,
+        )
         self._press_key(client, "enter", 10.0)
         self._capture_from_client(client, vm, "06-apply-started", result)
 
@@ -261,6 +266,7 @@ class WizardAutomationMixin:
             elif verdict.detected_screen == "distro":
                 self._select_distribution_with_keyboard(client, distribution_index)
             elif verdict.detected_screen == "resize":
+                self._press_chord(client, "ctrl", "end")
                 self._press_key(client, "enter", 1.0)
             elif verdict.detected_screen == "sharing":
                 self._configure_sharing_with_keyboard(
@@ -378,6 +384,80 @@ class WizardAutomationMixin:
                 )
 
         raise AssertionError("Warning-page confirmation loop ended unexpectedly")
+
+    def _acknowledge_warning_page(
+        self,
+        client: object,
+        vm: VMConfig,
+        username: str,
+        result: ResultBuilder,
+    ) -> None:
+        """Select and visually prove the destructive-action acknowledgement."""
+
+        last_context: dict[str, object] = {}
+        for observation in range(1, 5):
+            capture, latest_capture = self._capture_wizard_pair(
+                client, vm, f"05-warning-acknowledgement-{observation:02d}", result
+            )
+            verdict = self.vision_llm.analyze_wizard_state(
+                capture,
+                vm.name,
+                vm.os,
+                expected_screen="warning",
+                expected_username=username,
+                second_image_path=latest_capture,
+            )
+            context = {
+                "target": vm.vnc,
+                "vm": vm.name,
+                "capture": str(capture),
+                "latest_capture": str(latest_capture),
+                **verdict.model_dump(),
+            }
+            last_context = context
+            if (
+                verdict.detected_screen == "warning"
+                and verdict.expected_screen_visible
+                and verdict.no_blocking_error
+                and verdict.warning_acknowledged
+            ):
+                result.ok(
+                    "automation.warning_acknowledged",
+                    "Warning acknowledgement visibly selected before Apply",
+                    **context,
+                )
+                return
+            if (
+                verdict.detected_screen != "warning"
+                or not verdict.expected_screen_visible
+                or not verdict.no_blocking_error
+            ):
+                raise WorkflowError(
+                    "automation.warning_acknowledgement",
+                    "Warning page was lost while selecting its acknowledgement",
+                    details=context,
+                )
+            if observation == 4:
+                break
+
+            # Space toggles a WPF CheckBox. Observe first and press it only
+            # while the checkbox is proven unchecked; otherwise a delayed
+            # vision result could make a retry undo a successful selection.
+            # WarningConfirmation handles Ctrl+Home by focusing its checkbox.
+            self._press_chord(client, "ctrl", "home")
+            self._press_key(client, "space", 0.75)
+            result.ok(
+                "automation.warning_acknowledgement_retry",
+                "Warning checkbox was visibly unchecked; selected it from deterministic focus",
+                attempt=observation,
+                **context,
+            )
+
+        raise WorkflowError(
+            "automation.warning_acknowledgement",
+            "Warning checkbox could not be visibly selected after three attempts",
+            details=last_context or {"vm": vm.name, "target": vm.vnc},
+        )
 
     def _close_windows_interference(
         self,

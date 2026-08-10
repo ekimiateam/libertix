@@ -1,7 +1,5 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
@@ -62,7 +60,7 @@ namespace Libertix
                 return;
             }
 
-            string recoveryStatePath = TryGetUefiRecoveryStatePath(e.Args);
+            string recoveryStatePath = TryGetUefiRecoveryStatePath(RuntimeOptions);
             if (!string.IsNullOrWhiteSpace(recoveryStatePath))
                 InstallationState.UefiRecoveryStatePath = recoveryStatePath;
 
@@ -145,18 +143,18 @@ namespace Libertix
                 ApplicationLogger.WriteException("Unobserved task exception.", args.Exception);
         }
 
-        private static string TryGetUefiRecoveryStatePath(string[] args)
+        private static string TryGetUefiRecoveryStatePath(StartupOptions options)
         {
-            if (args == null || !args.Contains("--uefi-bootnext-failed"))
+            if (options == null ||
+                !options.UefiBootNextFailed ||
+                string.IsNullOrWhiteSpace(options.UefiRecoveryStatePath))
+            {
                 return null;
-
-            int stateIndex = Array.IndexOf(args, "--uefi-recovery-state");
-            if (stateIndex < 0 || stateIndex + 1 >= args.Length)
-                return null;
+            }
 
             try
             {
-                string path = Path.GetFullPath(args[stateIndex + 1]);
+                string path = Path.GetFullPath(options.UefiRecoveryStatePath);
                 string root = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                     "Libertix",

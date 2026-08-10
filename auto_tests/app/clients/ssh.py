@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import hashlib
 import logging
 import math
+import re
 import shlex
 import time
 import xml.etree.ElementTree as ET
@@ -27,6 +29,8 @@ MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
 SSH_CONNECT_ATTEMPTS = 3
 SSH_CONNECT_RETRY_SECONDS = 2
 POWERSHELL_CLIXML_MARKER = "#< CLIXML"
+POWERSHELL_ESCAPE_PATTERN = re.compile(r"_x([0-9A-Fa-f]{4})_")
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class PersistAuthenticatedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
@@ -261,11 +265,31 @@ class SSHClient:
 
     @staticmethod
     def _decode_bounded(buffer: bytearray, truncated: bool) -> str:
-        text = bytes(buffer).decode("utf-8", errors="replace").strip()
+        text = SSHClient._decode_transport_bytes(bytes(buffer)).strip()
         text = SSHClient._strip_progress_clixml(text)
         if truncated:
             return "[earlier remote output truncated]\n" + text
         return text
+
+    @staticmethod
+    def _decode_transport_bytes(payload: bytes) -> str:
+        if payload.startswith(b"\xef\xbb\xbf"):
+            return payload.decode("utf-8-sig", errors="replace")
+        if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+            return payload.decode("utf-16", errors="replace")
+
+        sample = payload[:4096]
+        pair_count = len(sample) // 2
+        if pair_count:
+            even_nuls = sample[0 : pair_count * 2 : 2].count(0)
+            odd_nuls = sample[1 : pair_count * 2 : 2].count(0)
+            threshold = max(2, pair_count // 4)
+            if odd_nuls >= threshold and odd_nuls > even_nuls * 2:
+                return payload.decode("utf-16-le", errors="replace")
+            if even_nuls >= threshold and even_nuls > odd_nuls * 2:
+                return payload.decode("utf-16-be", errors="replace")
+
+        return payload.decode("utf-8", errors="replace")
 
     @staticmethod
     def _strip_progress_clixml(text: str) -> str:
@@ -280,9 +304,38 @@ class SSHClient:
             return text
 
         records = list(root)
-        if not records or any(record.attrib.get("S") != "progress" for record in records):
+        if not records:
             return text
-        return text[:marker_index].rstrip()
+
+        retained: list[str] = []
+        for record in records:
+            if record.attrib.get("S") == "progress":
+                continue
+            values = [
+                node.text
+                for node in record.iter()
+                if node.tag.rsplit("}", 1)[-1] == "S" and node.text
+            ]
+            if not values and record.text:
+                values.append(record.text)
+            retained.extend(values)
+
+        prefix = text[:marker_index].rstrip()
+        if not retained:
+            return prefix
+        decoded = "\n".join(
+            ANSI_ESCAPE_PATTERN.sub(
+                "",
+                POWERSHELL_ESCAPE_PATTERN.sub(
+                    lambda match: chr(int(match.group(1), 16)),
+                    value,
+                ),
+            ).rstrip()
+            for value in retained
+        ).strip()
+        if not decoded:
+            return prefix
+        return "\n".join(part for part in (prefix, decoded) if part)
 
     def _remote_timeout_command(self, command: str, timeout: float) -> str:
         timeout_seconds = max(1, math.ceil(timeout))
@@ -297,9 +350,75 @@ class SSHClient:
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
+$strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
 [Console]::InputEncoding = $utf8NoBom
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
+
+function ConvertFrom-NativeOutputBytes {{
+    param([byte[]]$Bytes)
+
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) {{
+        return ''
+    }}
+
+    if ($Bytes.Length -ge 4 -and
+        $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE -and
+        $Bytes[2] -eq 0x00 -and $Bytes[3] -eq 0x00) {{
+        return [Text.Encoding]::UTF32.GetString($Bytes, 4, $Bytes.Length - 4)
+    }}
+    if ($Bytes.Length -ge 4 -and
+        $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x00 -and
+        $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF) {{
+        $utf32BigEndian = New-Object Text.UTF32Encoding($true, $false, $true)
+        return $utf32BigEndian.GetString($Bytes, 4, $Bytes.Length - 4)
+    }}
+    if ($Bytes.Length -ge 3 -and
+        $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {{
+        return $utf8NoBom.GetString($Bytes, 3, $Bytes.Length - 3)
+    }}
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {{
+        return [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    }}
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {{
+        return [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    }}
+
+    $sampleLength = [Math]::Min($Bytes.Length, 4096)
+    $pairCount = [Math]::Floor($sampleLength / 2)
+    if ($pairCount -gt 0) {{
+        $evenNulls = 0
+        $oddNulls = 0
+        for ($index = 0; $index -lt ($pairCount * 2); $index += 2) {{
+            if ($Bytes[$index] -eq 0) {{ $evenNulls++ }}
+            if ($Bytes[$index + 1] -eq 0) {{ $oddNulls++ }}
+        }}
+        $nullThreshold = [Math]::Max(2, [Math]::Floor($pairCount / 4))
+        if ($oddNulls -ge $nullThreshold -and $oddNulls -gt ($evenNulls * 2)) {{
+            return [Text.Encoding]::Unicode.GetString($Bytes)
+        }}
+        if ($evenNulls -ge $nullThreshold -and $evenNulls -gt ($oddNulls * 2)) {{
+            return [Text.Encoding]::BigEndianUnicode.GetString($Bytes)
+        }}
+    }}
+
+    try {{
+        return $strictUtf8.GetString($Bytes)
+    }} catch [Text.DecoderFallbackException] {{
+        $oemCodePage = [Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
+        return [Text.Encoding]::GetEncoding($oemCodePage).GetString($Bytes)
+    }}
+}}
+
+function Read-NativeOutputText {{
+    param([string]$LiteralPath)
+
+    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {{
+        return ''
+    }}
+    return ConvertFrom-NativeOutputBytes ([IO.File]::ReadAllBytes($LiteralPath))
+}}
+
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))
 $root = Join-Path $env:TEMP ('libertix-ssh-' + [Guid]::NewGuid().ToString('N'))
 $commandPath = $root + '.cmd'
@@ -347,10 +466,10 @@ try {{
         }}
     }}
     if (Test-Path -LiteralPath $stdoutPath) {{
-        [Console]::Out.Write([IO.File]::ReadAllText($stdoutPath, $utf8NoBom))
+        [Console]::Out.Write((Read-NativeOutputText -LiteralPath $stdoutPath))
     }}
     if (Test-Path -LiteralPath $stderrPath) {{
-        [Console]::Error.Write([IO.File]::ReadAllText($stderrPath, $utf8NoBom))
+        [Console]::Error.Write((Read-NativeOutputText -LiteralPath $stderrPath))
     }}
 }} finally {{
     $temporaryPaths = @($commandPath, $stdoutPath, $stderrPath, $statusPath)
@@ -358,8 +477,17 @@ try {{
 }}
 exit $exitCode
 """.strip()
-        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
-        return f"powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded}"
+        compressed = gzip.compress(script.encode("utf-8"), mtime=0)
+        encoded = base64.b64encode(compressed).decode("ascii")
+        bootstrap = (
+            f"$b=[Convert]::FromBase64String('{encoded}');"
+            "$m=[IO.MemoryStream]::new($b);"
+            "$g=[IO.Compression.GzipStream]::new("
+            "$m,[IO.Compression.CompressionMode]::Decompress);"
+            "$r=[IO.StreamReader]::new($g,[Text.Encoding]::UTF8);"
+            "& ([ScriptBlock]::Create($r.ReadToEnd()))"
+        )
+        return f'powershell.exe -NoProfile -NonInteractive -Command "{bootstrap}"'
 
     def upload_text(self, remote_path: str, content: str, *, step: str) -> None:
         if not self._client:

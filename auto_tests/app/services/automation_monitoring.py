@@ -15,6 +15,13 @@ from app.services.common import ResultBuilder
 
 logger = logging.getLogger(__name__)
 
+FINAL_BOOT_MENU_LABELS = (
+    ("shutdown", "advanced options"),
+    ("éteindre", "options avancées"),
+    ("apagar", "opciones avanzadas"),
+    ("シャットダウン", "詳細オプション"),
+)
+
 
 class InstallationMonitoringMixin:
     """Observe preparation, reboot, live installation, and the installed system."""
@@ -228,15 +235,14 @@ class InstallationMonitoringMixin:
         # installer completed and handed control to the installed system.  It
         # contains both operating systems plus the Libertix advanced submenu;
         # a standalone Windows Boot Manager screen must remain a blocker.
-        final_menu_markers = (
-            distribution.grub_display_name.casefold(),
-            "shutdown",
-            "advanced options",
+        distribution_entry_visible = distribution.grub_display_name.casefold() in text
+        localized_menu_labels_visible = any(
+            shutdown in text and advanced in text for shutdown, advanced in FINAL_BOOT_MENU_LABELS
         )
         windows_entry_visible = "windows boot manager" in text or bool(
             re.search(r"(?:^|\n)\s*windows\s*(?:\n|$)", text)
         )
-        if all(marker in text for marker in final_menu_markers) and windows_entry_visible:
+        if distribution_entry_visible and localized_menu_labels_visible and windows_entry_visible:
             return True
 
         if any(

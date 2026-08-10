@@ -8,18 +8,18 @@ import base64
 import datetime as dt
 import ipaddress
 import json
+import ntpath
 import re
 import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from libertix_installation_policy import load_installation_policy
 from libertix_json_schema import validate_json_schema
 
 GIB = 1024**3
-MINIMUM_FINAL_SIZE_GIB = 20
-MAXIMUM_DIRECT_FAT32_SIZE_GIB = 31
-LARGE_INSTALLATION_STAGING_SIZE_GIB = 8
+INSTALLATION_POLICY = load_installation_policy()
 HEX_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 USERNAME_PATTERN = re.compile(r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$")
@@ -246,19 +246,23 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     if final_size % GIB != 0 or staging_size % GIB != 0:
         raise PlanValidationError("installer sizes must be whole numbers of GiB")
     final_size_gib = final_size // GIB
-    if final_size_gib < MINIMUM_FINAL_SIZE_GIB:
-        raise PlanValidationError(f"finalSizeBytes must be at least {MINIMUM_FINAL_SIZE_GIB} GiB")
+    if final_size_gib < INSTALLATION_POLICY.storage.minimum_final_size_gib:
+        raise PlanValidationError(
+            "finalSizeBytes must be at least "
+            f"{INSTALLATION_POLICY.storage.minimum_final_size_gib} GiB"
+        )
     expected_staging_gib = (
-        LARGE_INSTALLATION_STAGING_SIZE_GIB
-        if final_size_gib > MAXIMUM_DIRECT_FAT32_SIZE_GIB
+        INSTALLATION_POLICY.storage.large_installation_staging_size_gib
+        if final_size_gib > INSTALLATION_POLICY.storage.maximum_direct_fat32_size_gib
         else final_size_gib
     )
     if staging_size != expected_staging_gib * GIB:
         raise PlanValidationError("stagingSizeBytes does not match the shared FAT32 staging policy")
     if offset is not None:
-        alignment_padding = windows_end % (1024 * 1024)
+        alignment_bytes = INSTALLATION_POLICY.storage.partition_alignment_bytes
+        alignment_padding = windows_end % alignment_bytes
         expected_installer_offset = windows_end - alignment_padding - final_size
-        primary_mbr_offset = expected_installer_offset - (1024 * 1024)
+        primary_mbr_offset = expected_installer_offset - alignment_bytes
         offset_matches = parsed_offset == expected_installer_offset or (
             firmware == "bios" and parsed_offset == primary_mbr_offset
         )
@@ -319,6 +323,22 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     for path_name, windows_path in windows_paths.items():
         if windows_path[:2].upper() != system_drive:
             raise PlanValidationError(f"{path_name} must be located on disk.systemDrive")
+
+    expected_installer_iso_path = ntpath.join(
+        system_drive + "\\",
+        "ProgramData",
+        "Libertix",
+        "Downloads",
+        str(root["planId"]),
+        distribution["installerIsoFileName"],
+    )
+    if ntpath.normcase(ntpath.normpath(distribution["installerIsoWindowsPath"])) != ntpath.normcase(
+        ntpath.normpath(expected_installer_iso_path)
+    ):
+        raise PlanValidationError(
+            "distribution.installerIsoWindowsPath must use the plan-owned "
+            "ProgramData download directory"
+        )
 
     development = root.get("development")
     if development is not None:
@@ -464,6 +484,8 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "RECOVERY_ROOT_WINDOWS": runtime["recoveryRootWindows"] or "",
         "RECOVERY_RUN_ID": runtime["recoveryRunId"] or "",
         "LOW_MEMORY_MODE": str(runtime["lowMemoryMode"]).lower(),
+        "LIVE_MINIMUM_MEMORY_MIB": str(INSTALLATION_POLICY.memory.live_minimum_mib),
+        "INSTALLER_ALIGNMENT_BYTES": str(INSTALLATION_POLICY.storage.partition_alignment_bytes),
         "SHARE_WINDOWS_FILES_IN_LINUX": str(features["shareWindowsFilesInLinux"]).lower(),
         "SHARE_LINUX_FILES_IN_WINDOWS": str(features["shareLinuxFilesInWindows"]).lower(),
         "WINDOWS_PROFILES_JSON_BASE64": features["windowsProfilesJsonBase64"],

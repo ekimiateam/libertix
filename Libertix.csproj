@@ -98,16 +98,19 @@
     <Compile Include="Installation\InstallationExecutionState.cs" />
     <Compile Include="Installation\InstallationExecutionLedger.cs" />
     <Compile Include="Installation\InstallationPlan.cs" />
+    <Compile Include="Installation\InstallationPolicy.cs" />
     <Compile Include="Installation\InstallationPlanFactory.cs" />
     <Compile Include="Installation\InstallationPlanSerializer.cs" />
     <Compile Include="Installation\InstallationPlanValidator.cs" />
     <Compile Include="Installation\Ipv4NetworkPolicy.cs" />
     <Compile Include="Installation\InstallationSizePolicy.cs" />
+    <Compile Include="Installation\InstallationTemporaryArtifacts.cs" />
     <Compile Include="Installation\InstallationStateMachine.cs" />
     <Compile Include="Installation\InstallationStateStore.cs" />
     <Compile Include="Installation\LiveBootArguments.cs" />
     <Compile Include="Installation\RuntimeNames.cs" />
     <Compile Include="Installation\WindowsKeyboardLayout.cs" />
+    <Compile Include="Installation\WindowsShareConfiguration.cs" />
     <Compile Include="Installation\StoragePreflightInfo.cs" />
     <Compile Include="Installation\FirmwareInterop.cs" />
     <Compile Include="Models\DistroInfo.cs" />
@@ -182,6 +185,7 @@
       <DependentUpon>MainWindow.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Installation\AccountPolicy.cs" />
     <Page Include="Pages\AccountCreation.xaml" />
     <Page Include="Pages\About.xaml" />
     <Page Include="Pages\Welcome.xaml" />
@@ -205,7 +209,6 @@
       <DependentUpon>ErrorPanel.xaml</DependentUpon>
     </Compile>
     <Compile Include="Converters\StringToVisibilityConverter.cs" />
-    <Compile Include="Commands\RelayCommand.cs" />
     <Compile Include="Converters\BoolToVisibilityConverter.cs" />
   </ItemGroup>
   <ItemGroup>
@@ -251,6 +254,9 @@
       <LogicalName>Libertix.Resources.CatalogPublicKey.xml</LogicalName>
     </EmbeddedResource>
     <Content Include="Scripts\config\Libertix.CompatibilityMessages.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\config\Libertix.InstallationPolicy.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\uefi\Libertix.Uefi.Execution.ps1">
@@ -316,10 +322,16 @@
     <Content Include="Scripts\modules\Libertix.InstallationPlan.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\modules\Libertix.InstallationPolicy.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\modules\Libertix.InstallationState.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.StorageGeometry.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.TemporaryArtifacts.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Tools\aria2\aria2c.exe">

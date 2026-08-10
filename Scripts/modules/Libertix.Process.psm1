@@ -3,7 +3,6 @@ Set-StrictMode -Version Latest
 function ConvertTo-LibertixNativeArgument {
     param([AllowEmptyString()][string]$Value)
 
-    if ($null -eq $Value) { return '""' }
     if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') { return $Value }
 
     $builder = New-Object Text.StringBuilder

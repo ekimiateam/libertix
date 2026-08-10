@@ -50,3 +50,21 @@ Describe "Windows free-space stabilization" {
         }
     }
 }
+
+Describe "Temporary drive-letter allocation" {
+    InModuleScope Libertix.StorageGeometry {
+        It "prefers Z and falls back without reusing an occupied letter" {
+            Mock Get-Volume {
+                @(
+                    [pscustomobject]@{ DriveLetter = "Z" },
+                    [pscustomobject]@{ DriveLetter = "C" }
+                )
+            }
+            Mock Get-PSDrive { @() }
+            Mock Test-Path { $false }
+
+            Get-LibertixFreeDriveLetter | Should -Be "Y"
+            Get-LibertixFreeDriveLetter -ExcludedLetters @("Y") | Should -Be "X"
+        }
+    }
+}

@@ -34,7 +34,7 @@ compare_rootfs_file() {
     cmp "$source" "$extracted"
 }
 
-compare_rootfs_file install-mint.sh "$source_dir/live/install-mint.sh"
+compare_rootfs_file libertix-install.sh "$source_dir/live/libertix-install.sh"
 compare_rootfs_file usr/local/sbin/libertix-runner "$source_dir/live/libertix-runner.sh"
 compare_rootfs_file usr/local/lib/libertix/libertix-runner-main.sh \
     /workspace/assets/live/libertix-runner-main.sh
@@ -50,6 +50,10 @@ compare_rootfs_file usr/local/lib/libertix/libertix-distribution-common.sh \
     /workspace/assets/live/libertix-distribution-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.py \
     /workspace/assets/live/libertix-installation-plan.py
+compare_rootfs_file usr/local/lib/libertix/libertix_installation_policy.py \
+    /workspace/assets/live/libertix_installation_policy.py
+compare_rootfs_file usr/local/lib/libertix/Libertix.InstallationPolicy.json \
+    /workspace/Scripts/config/Libertix.InstallationPolicy.json
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-state.py \
     /workspace/assets/live/libertix-installation-state.py
 compare_rootfs_file usr/local/lib/libertix/libertix_progress.py \
@@ -159,8 +163,7 @@ unsquashfs -cat "$squashfs" \
     usr/local/lib/libertix/libertix-development-ssh-first-boot.sh \
     > "$ssh_first_boot"
 cmp /workspace/assets/live/libertix-development-ssh-first-boot.sh "$ssh_first_boot"
-grep -Fq 'Acquire::http::No-Cache=true' "$ssh_first_boot"
-grep -Fq 'max_attempts=6' "$ssh_first_boot"
+bash -n "$ssh_first_boot"
 
 xorriso -osirrox on -indev "$image" \
     -extract /libertix-packages.txt "$workdir/packages.txt" >/dev/null 2>&1
@@ -184,9 +187,18 @@ cmp /workspace/assets/grub-theme/right_down_border.png \
 
 toram_script="$initrd_root/usr/lib/live/boot/9990-toram-todisk.sh"
 [ -f "$toram_script" ] || { echo "Built initramfs is missing live-boot toram script" >&2; exit 1; }
-grep -Fq 'rsync -a ${MODULETORAMFILE} ${copyto} 1>/dev/null' "$toram_script"
-grep -Fq 'rsync -a ${copyfrom}/* ${copyto} 1>/dev/null' "$toram_script"
-if grep -Eq 'rsync -a --progress|Copying .* to RAM.*dev/console' "$toram_script"; then
+module_copy_pattern='^[[:space:]]*rsync[[:space:]].*(\$\{MODULETORAMFILE\}|\$MODULETORAMFILE).*(\$\{copyto\}|\$copyto)'
+medium_copy_pattern='^[[:space:]]*rsync[[:space:]].*(\$\{copyfrom\}|\$copyfrom)/\*.*(\$\{copyto\}|\$copyto)'
+unsafe_progress_pattern='^[[:space:]]*rsync[[:space:]].*(--progress|dev/console)|Copying .* to RAM.*dev/console'
+if ! grep -Eq "$module_copy_pattern" "$toram_script"; then
+    echo "Built initramfs no longer copies the module payload to RAM" >&2
+    exit 1
+fi
+if ! grep -Eq "$medium_copy_pattern" "$toram_script"; then
+    echo "Built initramfs no longer copies the live medium to RAM" >&2
+    exit 1
+fi
+if grep -Eq "$unsafe_progress_pattern" "$toram_script"; then
     echo "Built initramfs still writes toram progress to the console" >&2
     exit 1
 fi

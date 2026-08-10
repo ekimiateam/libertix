@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace Libertix.Installation
@@ -16,14 +17,6 @@ namespace Libertix.Installation
 
         private static readonly Regex Sha256Pattern = new Regex(
             "^[0-9a-f]{64}$",
-            RegexOptions.CultureInvariant);
-
-        private static readonly Regex UsernamePattern = new Regex(
-            "^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$",
-            RegexOptions.CultureInvariant);
-
-        private static readonly Regex ComputerNamePattern = new Regex(
-            "^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$",
             RegexOptions.CultureInvariant);
 
         private static readonly Regex AbsoluteWindowsPathPattern = new Regex(
@@ -70,9 +63,45 @@ namespace Libertix.Installation
             ValidateRuntime(plan.Firmware, plan.Runtime, errors);
             ValidateDevelopment(plan.Development, errors);
             ValidateWindowsPathDrives(plan, errors);
+            ValidateTransactionArtifactPath(plan, errors);
 
             if (errors.Count > 0)
                 throw new InstallationPlanValidationException(errors);
+        }
+
+        private static void ValidateTransactionArtifactPath(
+            InstallationPlan plan,
+            ICollection<string> errors)
+        {
+            if (plan.Disk == null || plan.Distribution == null ||
+                string.IsNullOrWhiteSpace(plan.Disk.SystemDrive) ||
+                string.IsNullOrWhiteSpace(plan.Distribution.InstallerIsoFileName) ||
+                !HexIdPattern.IsMatch(plan.PlanId ?? string.Empty))
+            {
+                return;
+            }
+
+            try
+            {
+                string expected = InstallationTemporaryArtifacts.GetDistributionIsoPath(
+                    plan.Disk.SystemDrive + @"\",
+                    plan.PlanId,
+                    plan.Distribution.InstallerIsoFileName);
+                Require(
+                    string.Equals(
+                        Path.GetFullPath(plan.Distribution.InstallerIsoWindowsPath),
+                        Path.GetFullPath(expected),
+                        StringComparison.OrdinalIgnoreCase),
+                    errors,
+                    "distribution.installerIsoWindowsPath must use the plan-owned " +
+                    "ProgramData download directory.");
+            }
+            catch (Exception)
+            {
+                errors.Add(
+                    "distribution.installerIsoWindowsPath must use the plan-owned " +
+                    "ProgramData download directory.");
+            }
         }
 
         private static void ValidateWindowsPathDrives(
@@ -210,7 +239,7 @@ namespace Libertix.Installation
                 return;
             }
 
-            Require(UsernamePattern.IsMatch(account.Username ?? string.Empty), errors,
+            Require(AccountPolicy.IsValidUsername(account.Username), errors,
                 "account.username is not a valid Linux username.");
             Require(
                 !string.IsNullOrWhiteSpace(account.PasswordHashWindowsPath) &&
@@ -220,7 +249,7 @@ namespace Libertix.Installation
                     RegexOptions.CultureInvariant),
                 errors,
                 "account.passwordHashWindowsPath must be an absolute safe Windows path.");
-            Require(ComputerNamePattern.IsMatch(account.ComputerName ?? string.Empty), errors,
+            Require(AccountPolicy.IsValidComputerName(account.ComputerName), errors,
                 "account.computerName is not a valid Linux hostname.");
         }
 
@@ -340,7 +369,7 @@ namespace Libertix.Installation
                 return;
             }
 
-            const long partitionAlignmentBytes = 1024L * 1024L;
+            long partitionAlignmentBytes = InstallationSizePolicy.PartitionAlignmentBytes;
             // Windows preserves the partition end modulo 1 MiB when it shrinks C:.
             // Reconstructing the expected start from the original extent rejects a
             // staging partition silently created in another free extent of the disk.

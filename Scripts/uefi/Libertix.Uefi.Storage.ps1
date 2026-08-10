@@ -470,27 +470,6 @@ exit
     }
 }
 
-function Get-FreeDriveLetter {
-    param([string[]]$ExcludedLetters = @())
-
-    $used = @{}
-    Get-Volume -ErrorAction SilentlyContinue |
-        Where-Object { $_.DriveLetter } |
-        ForEach-Object { $used[[string]$_.DriveLetter] = $true }
-
-    foreach ($candidate in "X", "W", "V", "U", "T", "S", "R", "Q", "P", "O", "N", "M", "L", "K", "J", "I", "H", "G", "F", "E", "D") {
-        if (
-            $candidate -notin $ExcludedLetters -and
-            -not $used.ContainsKey($candidate) -and
-            -not (Test-Path "${candidate}:\")
-        ) {
-            return $candidate
-        }
-    }
-
-    throw "No free drive letter available for Libertix installer partition."
-}
-
 function Set-VolumeLetterByLabel {
     param(
         [Parameter(Mandatory = $true)][string]$Label,
@@ -525,7 +504,7 @@ function Set-VolumeLetterByLabel {
     # Assign letter using mountvol (works even if previously hidden)
     $letterToUse = $Letter
     if (Test-Path "${letterToUse}:\") {
-        $letterToUse = Get-FreeDriveLetter
+        $letterToUse = Get-LibertixFreeDriveLetter
     }
 
     & mountvol "${letterToUse}:" $deviceId | Out-Null

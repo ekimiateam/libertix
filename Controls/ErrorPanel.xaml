@@ -137,13 +137,6 @@
                 </Border>
             </Expander>
 
-            <Button Content="{Binding ActionButtonText, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                    Style="{StaticResource ModernButton}"
-                    Width="250"
-                    Height="50"
-                    Margin="0,30,0,0"
-                    Command="{Binding ActionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                    Visibility="{Binding ActionButtonText, RelativeSource={RelativeSource AncestorType=UserControl}, Converter={StaticResource StringToVisibilityConverter}}"/>
             </StackPanel>
         </ScrollViewer>
     </Border>

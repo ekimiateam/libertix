@@ -8,7 +8,7 @@ function New-OrReuseInstallerPartition {
     $existingPartition = Get-VerifiedTransactionPartition
     if ($existingPartition) {
         if (-not $existingPartition.DriveLetter) {
-            $existingDriveLetter = Get-FreeDriveLetter
+            $existingDriveLetter = Get-LibertixFreeDriveLetter
             Set-Partition `
                 -DiskNumber $existingPartition.DiskNumber `
                 -PartitionNumber $existingPartition.PartitionNumber `
@@ -208,7 +208,7 @@ function Get-ReusablePreparedInstallerPartition {
         throw "Owned prepared installer partition is missing; refusing firmware fallback."
     }
     if (-not $partition.DriveLetter) {
-        $preparedDriveLetter = Get-FreeDriveLetter
+        $preparedDriveLetter = Get-LibertixFreeDriveLetter
         Set-Partition `
             -DiskNumber $partition.DiskNumber `
             -PartitionNumber $partition.PartitionNumber `
@@ -245,7 +245,12 @@ function Install-LibertixIsoToPartition {
         [Parameter(Mandatory = $true)][string]$PartitionDrive
     )
 
-    $tmpDir = Join-Path $env:TEMP "libertix-uefi-$([Guid]::NewGuid().ToString('N'))"
+    if ($RecoveryRunId -notmatch '^[0-9a-f]{32}$') {
+        throw "A valid recovery run identifier is required for live-media staging."
+    }
+    $tmpDir = Join-Path `
+        $SystemDrive `
+        "ProgramData\Libertix\Downloads\$RecoveryRunId\live-media"
     New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
     $isoPath = Join-Path $tmpDir $InstallerIsoName

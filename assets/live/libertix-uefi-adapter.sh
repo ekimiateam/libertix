@@ -36,54 +36,11 @@ firmware_retire_completed_transaction_best_effort() {
 }
 
 
-candidate_disks() {
-    local disk
-
-    {
-        lsblk -dnpo NAME,TYPE 2>/dev/null \
-            | awk '$2=="disk"{print $1}' \
-            | while read -r disk; do
-                case "$(basename "$disk")" in
-                    loop*|ram*|sr*) continue ;;
-                esac
-                echo "$disk"
-            done
-
-        for disk in /sys/block/*; do
-            [ -e "$disk" ] || continue
-            disk="/dev/$(basename "$disk")"
-            case "$(basename "$disk")" in
-                loop*|ram*|sr*) continue ;;
-            esac
-            [ -b "$disk" ] || continue
-            echo "$disk"
-        done
-    } | awk '!seen[$0]++' || true
-}
-
 write_windows_recovery_marker_best_effort() {
     local state="$1"
     local rc="${2:-0}"
     write_windows_recovery_marker_file_best_effort "UEFI" "$state" "$rc"
 }
-
-disk_matches_manifest() {
-    local disk="$1" actual_size actual_style actual_identity expected_style windows_candidate boot_candidate
-    actual_size=$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)
-    [ "$actual_size" = "$TARGET_DISK_SIZE_BYTES" ] || return 1
-    actual_style=$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}')
-    expected_style=$(echo "$EXPECTED_PARTITION_STYLE" | tr '[:upper:]' '[:lower:]')
-    [ "$expected_style" != "mbr" ] || expected_style="msdos"
-    [ "$actual_style" = "$expected_style" ] || return 1
-    actual_identity="$(disk_partition_table_identity "$disk" || true)"
-    [ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ] || return 1
-    windows_candidate=$(partition_at_offset "$disk" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
-    [ -n "$windows_candidate" ] || return 1
-    [ "$(blkid -s TYPE -o value "$windows_candidate" 2>/dev/null || true)" = "ntfs" ] || return 1
-    boot_candidate=$(partition_at_offset "$disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
-    [ -n "$boot_candidate" ] || return 1
-}
-
 
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
@@ -288,8 +245,16 @@ wait_for_prereqs() {
     die "live prerequisites not ready after 60s"
 }
 
-find_esp_partition() {
-    local esp filesystem mountpoint
+find_esp_partition() (
+    local esp filesystem mountpoint="" mounted=false
+
+    cleanup_esp_probe_mount() {
+        if [ "$mounted" = true ] && mountpoint -q "$mountpoint"; then
+            umount "$mountpoint" 2>/dev/null || true
+        fi
+        [ -z "$mountpoint" ] || rmdir "$mountpoint" 2>/dev/null || true
+    }
+    trap cleanup_esp_probe_mount EXIT HUP INT TERM
 
     esp="$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)"
     [ -n "$esp" ] && [ -b "$esp" ] || return 1
@@ -302,21 +267,30 @@ find_esp_partition() {
 
     mountpoint="$(mktemp -d)"
     if ! mount -t vfat -o ro "$esp" "$mountpoint" 2>/dev/null; then
-        rmdir "$mountpoint"
         return 1
     fi
+    mounted=true
     if [ ! -f "$mountpoint/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
-        umount "$mountpoint" 2>/dev/null || true
-        rmdir "$mountpoint" 2>/dev/null || true
         return 1
     fi
     umount "$mountpoint" 2>/dev/null || return 1
+    mounted=false
     rmdir "$mountpoint" 2>/dev/null || return 1
+    mountpoint=""
+    trap - EXIT HUP INT TERM
     echo "$esp"
-}
+)
 
-cleanup_final_uefi_bootloader_best_effort() {
+cleanup_final_uefi_bootloader_best_effort() (
     local bootnum entry_line esp_part esp_mount owner_file owner_run_id
+
+    cleanup_rollback_esp_mount() {
+        if mountpoint -q "$esp_mount"; then
+            umount "$esp_mount" 2>/dev/null || \
+                echo "WARNING: rollback could not unmount the ESP at $esp_mount" >&2
+        fi
+        rmdir "$esp_mount" 2>/dev/null || true
+    }
 
     [ "$INSTALL_SUCCESS" = false ] || return 0
 
@@ -325,6 +299,7 @@ cleanup_final_uefi_bootloader_best_effort() {
 
     esp_mount="/mnt/libertix-rollback-esp"
     mkdir -p "$esp_mount"
+    trap cleanup_rollback_esp_mount EXIT
     mount -t vfat -o rw,flush "$esp_part" "$esp_mount" || return 1
     if [ -d "$esp_mount/EFI/Libertix" ]; then
         owner_file="$esp_mount/EFI/Libertix/.libertix-owner"
@@ -350,7 +325,8 @@ cleanup_final_uefi_bootloader_best_effort() {
     [ ! -e "$esp_mount/EFI/Libertix" ] || return 1
     umount "$esp_mount" || return 1
     rmdir "$esp_mount" 2>/dev/null || return 1
-}
+    trap - EXIT
+)
 
 set_linux_partition_type_or_die() {
     local linux_gpt_guid="0FC63DAF-8483-4772-8E79-3D69D8477DE4"

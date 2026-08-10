@@ -3,6 +3,8 @@
 # UEFI firmware variables, BCD integration, and Secure Boot checks.
 
 $script:LibertixFirmwarePrivilegeEnabled = $false
+$script:Win32ErrorEnvironmentVariableNotFound = 203
+$script:Win32ErrorNotFound = 1168
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -232,7 +234,10 @@ function Get-FirmwareVariableReadResult {
     $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
     if ($size -eq 0) {
         $errorCode = [LibertixFirmwareApi]::LastError()
-        if ($errorCode -in @(203, 1168)) {
+        if ($errorCode -in @(
+            $script:Win32ErrorEnvironmentVariableNotFound,
+            $script:Win32ErrorNotFound
+        )) {
             return [pscustomobject]@{
                 Exists = $false
                 Bytes = $null

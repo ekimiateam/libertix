@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 
 namespace Libertix.Installation
@@ -18,6 +19,14 @@ namespace Libertix.Installation
         {
             InstallationPlanValidator.Validate(plan);
             AtomicJsonFile.Write(path, JsonSerializer.Serialize(plan, SerializerOptions));
+        }
+
+        public static InstallationPlan ReadValidated(string path)
+        {
+            InstallationPlan plan = JsonSerializer.Deserialize<InstallationPlan>(
+                File.ReadAllText(path));
+            InstallationPlanValidator.Validate(plan);
+            return plan;
         }
     }
 }

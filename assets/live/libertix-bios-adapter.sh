@@ -18,51 +18,6 @@ write_windows_recovery_marker_best_effort() {
 }
 
 
-candidate_disks() {
-    local disk
-
-    {
-        lsblk -dnpo NAME,TYPE 2>/dev/null \
-            | awk '$2=="disk"{print $1}' \
-            | while read -r disk; do
-                case "$(basename "$disk")" in
-                    loop*|ram*|sr*) continue ;;
-                esac
-                echo "$disk"
-            done
-
-        # Some early live environments expose block devices in sysfs before
-        # lsblk reports them. Both firmware paths need the same fallback.
-        for disk in /sys/block/*; do
-            [ -e "$disk" ] || continue
-            disk="/dev/$(basename "$disk")"
-            case "$(basename "$disk")" in
-                loop*|ram*|sr*) continue ;;
-            esac
-            [ -b "$disk" ] || continue
-            echo "$disk"
-        done
-    } | awk '!seen[$0]++' || true
-}
-
-disk_matches_manifest() {
-    local disk="$1" actual_size actual_style actual_identity expected_style windows_candidate boot_candidate
-    actual_size=$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)
-    [ "$actual_size" = "$TARGET_DISK_SIZE_BYTES" ] || return 1
-    actual_style=$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}')
-    expected_style=$(echo "$EXPECTED_PARTITION_STYLE" | tr '[:upper:]' '[:lower:]')
-    [ "$expected_style" != "mbr" ] || expected_style="msdos"
-    [ "$actual_style" = "$expected_style" ] || return 1
-    actual_identity="$(disk_partition_table_identity "$disk" || true)"
-    [ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ] || return 1
-    windows_candidate=$(partition_at_offset "$disk" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
-    [ -n "$windows_candidate" ] || return 1
-    [ "$(blkid -s TYPE -o value "$windows_candidate" 2>/dev/null || true)" = "ntfs" ] || return 1
-    boot_candidate=$(partition_at_offset "$disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
-    [ -n "$boot_candidate" ] || return 1
-}
-
-
 write_target_fstab_or_die() {
     local root_uuid
 

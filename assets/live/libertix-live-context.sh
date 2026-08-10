@@ -15,14 +15,20 @@ copy_libertix_context_candidate() {
     cp -f "$state" "$candidate_dir/$context_id.state.json"
 }
 
-find_libertix_installation_plan() {
+find_libertix_installation_plan() (
     local candidate candidate_dir device label mount_dir plan state context_id plan_id state_plan_id
     local -A unique_contexts=()
+
+    cleanup_plan_probe() {
+        mountpoint -q "$mount_dir" && umount "$mount_dir" 2>/dev/null || true
+        rm -rf "$candidate_dir" 2>/dev/null || true
+    }
 
     # A retry must never inherit candidates from an earlier probe. A fresh
     # directory makes the uniqueness check describe this scan only.
     candidate_dir="$(mktemp -d "$LOG_DIR/plan-candidates.XXXXXX")" || return 2
     mount_dir="$LOG_DIR/plan-medium"
+    trap cleanup_plan_probe EXIT
     mkdir -p "$candidate_dir" "$mount_dir"
 
     for candidate in \
@@ -76,7 +82,7 @@ find_libertix_installation_plan() {
         printf '%s\n' "$LOG_DIR/installation-plan.json"
         return 0
     done
-}
+)
 
 load_libertix_live_context() {
     local plan_path expected_firmware="$1"
@@ -90,6 +96,134 @@ load_libertix_live_context() {
     INSTALLATION_PLAN_PATH="$plan_path"
     INSTALLATION_STATE_PATH="$LOG_DIR/installation-state.json"
     export INSTALLATION_PLAN_PATH INSTALLATION_STATE_PATH
+}
+
+durable_bios_mbr_backup_directory() {
+    local windows_root="$1" relative
+
+    case "${RECOVERY_ROOT_WINDOWS:-}" in
+        [A-Za-z]:\\*) ;;
+        *) return 2 ;;
+    esac
+    relative="$(windows_path_to_relative "$RECOVERY_ROOT_WINDOWS")"
+    [ -n "$relative" ] || return 2
+    printf '%s/%s\n' "$windows_root/$relative" "mbr-backup"
+}
+
+validate_durable_bios_mbr_backup() {
+    local backup_directory="$1"
+
+    [ -d "$backup_directory" ] || return 3
+    [ -f "$backup_directory/mbr-before-grub.bin" ] || return 2
+    [ -f "$backup_directory/mbr-before-grub.sha256" ] || return 2
+    [ "$(stat -c %s "$backup_directory/mbr-before-grub.bin" 2>/dev/null || echo 0)" -eq 512 ] || return 2
+    (
+        cd "$backup_directory" &&
+            sha256sum -c mbr-before-grub.sha256 >/dev/null 2>&1
+    )
+}
+
+publish_durable_bios_mbr_backup() {
+    local windows_root="$1" source_backup="$2" backup_directory parent temporary
+    local source_hash published_hash
+
+    [ -f "$source_backup" ] || return 2
+    [ "$(stat -c %s "$source_backup" 2>/dev/null || echo 0)" -eq 512 ] || return 2
+    backup_directory="$(durable_bios_mbr_backup_directory "$windows_root")" || return $?
+    parent="$(dirname "$backup_directory")"
+    mkdir -p "$parent" || return 1
+
+    if [ -e "$backup_directory" ]; then
+        validate_durable_bios_mbr_backup "$backup_directory" || return 2
+        source_hash="$(sha256sum "$source_backup" | awk '{print $1}')"
+        published_hash="$(awk 'NR == 1 {print $1}' \
+            "$backup_directory/mbr-before-grub.sha256")"
+        [ "$source_hash" = "$published_hash" ] || return 2
+        return 0
+    fi
+
+    temporary="$(mktemp -d "$parent/.mbr-backup.XXXXXX")" || return 1
+    if ! install -m 0600 "$source_backup" "$temporary/mbr-before-grub.bin" ||
+        ! (
+            cd "$temporary" &&
+                sha256sum mbr-before-grub.bin > mbr-before-grub.sha256
+        ) ||
+        ! sync "$temporary/mbr-before-grub.bin" "$temporary/mbr-before-grub.sha256" 2>/dev/null; then
+        rm -f "$temporary/mbr-before-grub.bin" "$temporary/mbr-before-grub.sha256"
+        rmdir "$temporary" 2>/dev/null || true
+        return 1
+    fi
+    chmod 0600 "$temporary/mbr-before-grub.sha256"
+    if ! mv "$temporary" "$backup_directory"; then
+        rm -f "$temporary/mbr-before-grub.bin" "$temporary/mbr-before-grub.sha256"
+        rmdir "$temporary" 2>/dev/null || true
+        return 1
+    fi
+    sync "$backup_directory" 2>/dev/null || sync
+    validate_durable_bios_mbr_backup "$backup_directory"
+}
+
+load_durable_bios_mbr_backup() {
+    local windows_root="$1" destination="$2" backup_directory temporary
+
+    backup_directory="$(durable_bios_mbr_backup_directory "$windows_root")" || return $?
+    validate_durable_bios_mbr_backup "$backup_directory" || return $?
+    mkdir -p "$(dirname "$destination")" || return 1
+    temporary="${destination}.new.$$"
+    if ! install -m 0600 "$backup_directory/mbr-before-grub.bin" "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if [ "$(stat -c %s "$temporary" 2>/dev/null || echo 0)" -ne 512 ] ||
+        [ "$(sha256sum "$temporary" | awk '{print $1}')" != \
+            "$(awk 'NR == 1 {print $1}' "$backup_directory/mbr-before-grub.sha256")" ]; then
+        rm -f "$temporary"
+        return 2
+    fi
+    if ! mv -f "$temporary" "$destination"; then
+        rm -f "$temporary"
+        return 1
+    fi
+}
+
+with_windows_mounted_for_mbr_backup() {
+    local operation="$1" local_backup="$2"
+    local mountpoint="/mnt/libertix-mbr-backup" result=0
+
+    [ -n "${WINDOWS_PART:-}" ] && [ -b "$WINDOWS_PART" ] || return 1
+    if findmnt -rn -S "$WINDOWS_PART" | grep -q .; then
+        return 1
+    fi
+    mkdir -p "$mountpoint"
+    mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint" || return 1
+    case "$operation" in
+        publish) publish_durable_bios_mbr_backup "$mountpoint" "$local_backup" || result=$? ;;
+        load) load_durable_bios_mbr_backup "$mountpoint" "$local_backup" || result=$? ;;
+        *) result=2 ;;
+    esac
+    sync
+    umount "$mountpoint" || result=1
+    return "$result"
+}
+
+prepare_bios_mbr_backup_or_die() {
+    local load_result=0
+
+    if with_windows_mounted_for_mbr_backup load "$MBR_BACKUP"; then
+        echo "Reusing the verified durable pre-GRUB MBR backup."
+        return 0
+    else
+        load_result=$?
+    fi
+    [ "$load_result" -eq 3 ] || return "$load_result"
+
+    run_logged dd if="$DISK" of="$MBR_BACKUP" bs=512 count=1 iflag=fullblock status=none
+    [ "$(stat -c %s "$MBR_BACKUP" 2>/dev/null || echo 0)" -eq 512 ] || return 2
+    with_windows_mounted_for_mbr_backup publish "$MBR_BACKUP"
+}
+
+load_bios_mbr_backup_for_rollback() {
+    with_windows_mounted_for_mbr_backup load "$MBR_BACKUP"
 }
 
 publish_installation_state_mirror() {

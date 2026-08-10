@@ -24,4 +24,4 @@ for generator in \
     set -- "$@" --extra "$output"
 done
 
-exec python3 /usr/local/lib/libertix/render-libertix-menu.py "$@"
+python3 /usr/local/lib/libertix/render-libertix-menu.py "$@"

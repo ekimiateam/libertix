@@ -12,6 +12,12 @@ namespace Libertix.Installation
     internal static class AtomicJsonFile
     {
         private const int MaxPublishAttempts = 8;
+        private const int ErrorAccessDenied = 5;
+        private const int ErrorSharingViolation = 32;
+        private const int ErrorLockViolation = 33;
+        private const int ErrorUnableToRemoveReplaced = 1175;
+        private const int ErrorUnableToMoveReplacement = 1176;
+        private const int ErrorUnableToMoveReplacement2 = 1177;
         private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
 
         public static void Write(string path, string json)
@@ -102,12 +108,12 @@ namespace Libertix.Installation
                 return false;
 
             int win32Code = exception.HResult & 0xFFFF;
-            return win32Code == 5
-                || win32Code == 32
-                || win32Code == 33
-                || win32Code == 1175
-                || win32Code == 1176
-                || win32Code == 1177;
+            return win32Code == ErrorAccessDenied
+                || win32Code == ErrorSharingViolation
+                || win32Code == ErrorLockViolation
+                || win32Code == ErrorUnableToRemoveReplaced
+                || win32Code == ErrorUnableToMoveReplacement
+                || win32Code == ErrorUnableToMoveReplacement2;
         }
     }
 }

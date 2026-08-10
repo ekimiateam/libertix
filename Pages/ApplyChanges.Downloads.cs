@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Libertix.Installation;
 
 namespace Libertix.Pages
 {
@@ -293,6 +294,29 @@ namespace Libertix.Pages
             {
                 Dispatcher.Invoke(() =>
                     Log($"{label}: temporary download directory cleanup failed: {ex.Message}"));
+            }
+        }
+
+        private void CleanupTransactionDownloadsBestEffort()
+        {
+            if (_installationPlan == null ||
+                string.IsNullOrWhiteSpace(_installationPlan.PlanId))
+            {
+                return;
+            }
+
+            try
+            {
+                string systemDriveRoot =
+                    (_installationPlan.Disk.SystemDrive ?? WindowsSystemDrive) + @"\";
+                InstallationTemporaryArtifacts.DeleteDownloadDirectory(
+                    systemDriveRoot,
+                    _installationPlan.PlanId);
+                Log("Transaction download cleanup verified.");
+            }
+            catch (Exception ex)
+            {
+                Log($"Transaction download cleanup failed: {ex.Message}");
             }
         }
 

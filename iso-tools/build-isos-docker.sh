@@ -7,6 +7,7 @@ IMAGE_NAME="libertix-iso-builder:trixie"
 APT_CACHE_VOLUME="libertix-iso-apt-cache"
 WORK_VOLUME="libertix-iso-work"
 MODE="${1:-all}"
+FILEPOOL_DIR="${LIBERTIX_ISO_FILEPOOL_DIR:-$ROOT_DIR/auto_tests/app/filepool}"
 LOG_DIR="${LIBERTIX_ISO_BUILD_LOG_DIR:-$ROOT_DIR/build-logs}"
 LOG_FILE="$LOG_DIR/iso-build-$(date -u +%Y%m%dT%H%M%SZ)-$MODE.log"
 LOCK_DIR="$ROOT_DIR/.work"
@@ -144,7 +145,7 @@ esac
 publish_filepool_artifact() {
     local source="$1" destination temporary
 
-    destination="$ROOT_DIR/auto_tests/app/filepool/$(basename "$source")"
+    destination="$FILEPOOL_DIR/$(basename "$source")"
     temporary="${destination}.tmp.$$"
     cp -- "$source" "$temporary"
     chmod 0644 "$temporary"
@@ -156,7 +157,11 @@ publish_filepool_artifact() {
 }
 
 for output in "${outputs[@]}"; do
-    publish_filepool_artifact "$output"
+    if [ -d "$FILEPOOL_DIR" ]; then
+        publish_filepool_artifact "$output"
+    else
+        echo "WARNING filepool directory not present; publication skipped: $FILEPOOL_DIR" >&2
+    fi
     echo "ARTIFACT $(basename "$output") sha256=$(sha256sum "$output" | awk '{print $1}')"
 done
 echo "RESULT OK log=$LOG_FILE"

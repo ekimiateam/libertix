@@ -130,13 +130,14 @@ namespace Libertix.Pages
                 long originalWindowsEnd = checked(
                     _storagePreflight.SystemPartitionOffset +
                     _storagePreflight.SystemPartitionSize);
-                long alignmentPadding = originalWindowsEnd % (1024L * 1024L);
+                long alignmentPadding = originalWindowsEnd %
+                    InstallationSizePolicy.PartitionAlignmentBytes;
                 long expectedLinuxOffset = checked(
                     originalWindowsEnd - expectedLinuxSize - alignmentPadding);
                 string configPath = Path.Combine(WindowsShareRoot, "config.json");
-                File.WriteAllText(
+                WindowsShareConfigurationStore.WriteAtomic(
                     configPath,
-                    JsonSerializer.Serialize(new
+                    new WindowsShareConfiguration
                     {
                         Enabled = options.ShareLinuxFilesInWindows,
                         SystemDiskNumber = _storagePreflight.SystemDiskNumber,
@@ -149,8 +150,7 @@ namespace Libertix.Pages
                             "Linux files (read-only)"),
                         SetupPath = setupPath,
                         SetupSha256 = Artifacts.Ext4Driver.Sha256
-                    }),
-                    new UTF8Encoding(false));
+                    });
                 File.WriteAllText(
                     Path.Combine(WindowsShareRoot, "pending.marker"),
                     DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
@@ -163,6 +163,28 @@ namespace Libertix.Pages
                 Log($"Windows sharing payload preparation failed: {ex.Message}");
                 return false;
             }
+        }
+
+        private void PublishObservedWindowsSharePartitionIdentity()
+        {
+            if (_installationPlan?.Disk?.Installer?.OffsetBytes == null)
+                throw new InvalidOperationException(
+                    "Observed installer partition identity is unavailable.");
+
+            string configPath = Path.Combine(WindowsShareRoot, "config.json");
+            WindowsShareConfiguration configuration =
+                WindowsShareConfigurationStore.Read(configPath);
+            configuration.SystemDiskNumber = _installationPlan.Disk.Number;
+            configuration.SystemDiskUniqueId = _installationPlan.Disk.UniqueId;
+            configuration.ExpectedLinuxPartitionOffset =
+                _installationPlan.Disk.Installer.OffsetBytes.Value;
+            configuration.ExpectedLinuxPartitionSize =
+                _installationPlan.Disk.Installer.FinalSizeBytes;
+            WindowsShareConfigurationStore.WriteAtomic(configPath, configuration);
+            Log(
+                "Windows sharing partition identity refreshed from the observed " +
+                $"installation plan: offset={configuration.ExpectedLinuxPartitionOffset}, " +
+                $"size={configuration.ExpectedLinuxPartitionSize}.");
         }
 
         private static void CleanupPendingWindowsSharePayload()
@@ -270,6 +292,42 @@ namespace Libertix.Pages
                         return false;
                     }
                     File.Copy(stateModuleSource, stateModuleTarget, true);
+
+                    string policySource = Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        "Scripts",
+                        "config",
+                        "Libertix.InstallationPolicy.json");
+                    string policyTarget = Path.Combine(
+                        RecoveryRoot,
+                        "Libertix.InstallationPolicy.json");
+                    if (!File.Exists(policySource))
+                    {
+                        Dispatcher.Invoke(() => Log(
+                            $"ERROR: Installation policy missing: {policySource}"));
+                        return false;
+                    }
+                    File.Copy(policySource, policyTarget, true);
+
+                    string artifactCleanupModuleSource = Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        "Scripts",
+                        "modules",
+                        "Libertix.TemporaryArtifacts.psm1");
+                    string artifactCleanupModuleTarget = Path.Combine(
+                        RecoveryRoot,
+                        "Libertix.TemporaryArtifacts.psm1");
+                    if (!File.Exists(artifactCleanupModuleSource))
+                    {
+                        Dispatcher.Invoke(() => Log(
+                            $"ERROR: Temporary-artifact module missing: " +
+                            artifactCleanupModuleSource));
+                        return false;
+                    }
+                    File.Copy(
+                        artifactCleanupModuleSource,
+                        artifactCleanupModuleTarget,
+                        true);
 
                     if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
                     {

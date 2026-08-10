@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using Libertix.Helpers;
+using Libertix.Installation;
 using Libertix.Models;
 
 namespace Libertix.Pages
@@ -11,9 +12,6 @@ namespace Libertix.Pages
     public partial class AccountCreation : Page
     {
         private readonly InstallationState _installationState;
-        private readonly Regex usernameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$");
-        private readonly Regex hostnameRegex = new Regex("^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$");
-
         public AccountCreation() : this(((App)Application.Current).InstallationState)
         {
         }
@@ -93,7 +91,7 @@ namespace Libertix.Pages
                 UsernameError.Text = Localization.GetString("UsernameRequired");
                 isValid = false;
             }
-            else if (!usernameRegex.IsMatch(UsernameBox.Text) || UsernameBox.Text == "root")
+            else if (!AccountPolicy.IsValidUsername(UsernameBox.Text) || UsernameBox.Text == "root")
             {
                 UsernameError.Text = Localization.GetString("UsernameInvalid");
                 isValid = false;
@@ -108,14 +106,14 @@ namespace Libertix.Pages
                 PasswordError.Text = Localization.GetString("PasswordRequired", "Password is required");
                 isValid = false;
             }
-            else if (PasswordBox.Password.Length < 8)
+            else if (PasswordBox.Password.Length < AccountPolicy.MinimumPasswordLength)
             {
                 PasswordError.Text = Localization.GetString(
                     "PasswordTooShort",
                     "Password must be at least 8 characters");
                 isValid = false;
             }
-            else if (PasswordBox.Password.Length > 128)
+            else if (PasswordBox.Password.Length > AccountPolicy.MaximumPasswordLength)
             {
                 PasswordError.Text = Localization.GetString("PasswordTooLong");
                 isValid = false;
@@ -145,7 +143,7 @@ namespace Libertix.Pages
                 HostnameError.Text = Localization.GetString("ComputerNameRequired");
                 isValid = false;
             }
-            else if (!hostnameRegex.IsMatch(HostnameBox.Text))
+            else if (!AccountPolicy.IsValidComputerName(HostnameBox.Text))
             {
                 HostnameError.Text = Localization.GetString("ComputerNameInvalid");
                 isValid = false;

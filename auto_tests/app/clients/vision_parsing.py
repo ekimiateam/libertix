@@ -57,6 +57,7 @@ def load_wizard_json(content: str) -> dict[str, object]:
     verdict.setdefault("no_blocking_error", False)
     verdict.setdefault("username_visible", False)
     verdict.setdefault("password_fields_filled", False)
+    verdict.setdefault("warning_acknowledged", False)
     verdict.setdefault(
         "summary",
         f"Wizard screen detected as {verdict.get('detected_screen', 'other')}",

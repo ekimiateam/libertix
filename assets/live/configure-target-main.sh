@@ -9,6 +9,10 @@ esac
 
 . /tmp/libertix-storage-common.sh
 
+# The root menu intentionally contains Linux, Windows, Shutdown, and the
+# Advanced options submenu. Kernel, firmware, and diagnostic entries are nested.
+readonly EXPECTED_GRUB_ROOT_ENTRY_COUNT=4
+
 configure_user() {
     local group available_groups=""
 
@@ -113,13 +117,23 @@ configure_windows_readonly_request() {
 }
 
 configure_locale() {
+    local -a selected_locales=("$SYSTEM_LANG")
+
     {
         printf '%s UTF-8\n' "$SYSTEM_LANG"
         if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]; then
             printf '%s UTF-8\n' "en_US.UTF-8"
+            selected_locales+=("en_US.UTF-8")
         fi
     } > /etc/locale.gen
-    locale-gen
+    # Ubuntu language packs add broad locale lists under supported.d. Passing
+    # explicit locales prevents locale-gen from compiling every regional
+    # variant; Debian relies only on locale.gen and rejects positional locales.
+    if [ -d /var/lib/locales/supported.d ]; then
+        locale-gen "${selected_locales[@]}"
+    else
+        locale-gen
+    fi
     cat > /etc/default/locale <<EOF
 LANG=$SYSTEM_LANG
 LC_ALL=$SYSTEM_LANG
@@ -344,6 +358,37 @@ menuentry "Windows Boot Manager" --class windows --class os {
 EOF
 }
 
+assert_grub_configuration() {
+    local grub_config=/boot/grub/grub.cfg root_entry_count
+
+    grub-script-check "$grub_config" || {
+        echo "Generated GRUB configuration has invalid syntax" >&2
+        return 1
+    }
+    grep -Fq -- "--class $DISTRIBUTION_GRUB_ICON" "$grub_config" || {
+        echo "Generated GRUB configuration is missing the distribution icon class" >&2
+        return 1
+    }
+    grep -Fq "menuentry '$DISTRIBUTION_GRUB_DISPLAY_NAME'" "$grub_config" || {
+        echo "Generated GRUB configuration is missing the distribution root entry" >&2
+        return 1
+    }
+    grep -Fq -- "--class efi --id libertix-advanced" "$grub_config" || {
+        echo "Generated GRUB configuration is missing the Advanced options submenu" >&2
+        return 1
+    }
+    grep -Fq -- "--class shutdown --id libertix-shutdown" "$grub_config" || {
+        echo "Generated GRUB configuration is missing the Shutdown entry" >&2
+        return 1
+    }
+
+    root_entry_count="$(grep -Ec '^(menuentry|submenu) ' "$grub_config" || true)"
+    [ "$root_entry_count" -eq "$EXPECTED_GRUB_ROOT_ENTRY_COUNT" ] || {
+        echo "Generated GRUB configuration has $root_entry_count root entries; expected $EXPECTED_GRUB_ROOT_ENTRY_COUNT" >&2
+        return 1
+    }
+}
+
 configure_grub() {
     local win_boot_uuid
 
@@ -395,12 +440,7 @@ EOF
     chmod -x /etc/grub.d/40_custom 2>/dev/null || true
 
     update-grub
-    grub-script-check /boot/grub/grub.cfg
-    grep -Fq -- "--class $DISTRIBUTION_GRUB_ICON" /boot/grub/grub.cfg
-    grep -Fq "menuentry '$DISTRIBUTION_GRUB_DISPLAY_NAME'" /boot/grub/grub.cfg
-    grep -Fq "submenu 'Advanced options' --class efi" /boot/grub/grub.cfg
-    grep -Fq "menuentry 'Shutdown' --class shutdown" /boot/grub/grub.cfg
-    [ "$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)" -eq 4 ]
+    assert_grub_configuration
 }
 
 enable_first_boot_resize() {

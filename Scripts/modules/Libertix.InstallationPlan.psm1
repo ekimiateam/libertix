@@ -1,8 +1,8 @@
 Set-StrictMode -Version Latest
 
-$script:MinimumFinalSizeGiB = 20
-$script:MaximumDirectFat32SizeGiB = 31
-$script:LargeInstallationStagingSizeGiB = 8
+$policyModulePath = Join-Path $PSScriptRoot "Libertix.InstallationPolicy.psm1"
+Import-Module -Name $policyModulePath -Force -ErrorAction Stop
+$script:InstallationPolicy = Get-LibertixInstallationPolicy
 $script:BytesPerGiB = 1GB
 $script:InstallationPlanPropertySets = [ordered]@{
     root = @(
@@ -476,11 +476,13 @@ function Assert-LibertixInstallationPlan {
         throw "Installation plan installer sizes must be whole numbers of GiB."
     }
     [int64]$finalSizeGiB = [int64]$finalSize / $script:BytesPerGiB
-    if ($finalSizeGiB -lt $script:MinimumFinalSizeGiB) {
-        throw "Installation plan finalSizeBytes must be at least $($script:MinimumFinalSizeGiB) GiB."
+    if ($finalSizeGiB -lt [int]$script:InstallationPolicy.storage.minimumFinalSizeGiB) {
+        throw "Installation plan finalSizeBytes must be at least $($script:InstallationPolicy.storage.minimumFinalSizeGiB) GiB."
     }
-    [int64]$expectedStagingSizeGiB = if ($finalSizeGiB -gt $script:MaximumDirectFat32SizeGiB) {
-        $script:LargeInstallationStagingSizeGiB
+    [int64]$expectedStagingSizeGiB = if (
+        $finalSizeGiB -gt [int]$script:InstallationPolicy.storage.maximumDirectFat32SizeGiB
+    ) {
+        [int]$script:InstallationPolicy.storage.largeInstallationStagingSizeGiB
     } else {
         $finalSizeGiB
     }
@@ -488,13 +490,15 @@ function Assert-LibertixInstallationPlan {
         throw "Installation plan stagingSizeBytes does not match the shared FAT32 staging policy."
     }
     if ($null -ne $installerOffset) {
-        [int64]$alignmentPadding = $windowsEnd % 1MB
+        [int64]$alignmentBytes =
+            [int64]$script:InstallationPolicy.storage.partitionAlignmentBytes
+        [int64]$alignmentPadding = $windowsEnd % $alignmentBytes
         if ([int64]$finalSize -gt $windowsEnd - $alignmentPadding) {
             throw "Installation plan finalSizeBytes exceeds the original Windows extent."
         }
         [int64]$expectedInstallerOffset = `
             $windowsEnd - $alignmentPadding - [int64]$finalSize
-        [int64]$primaryMbrOffset = $expectedInstallerOffset - 1MB
+        [int64]$primaryMbrOffset = $expectedInstallerOffset - $alignmentBytes
         $offsetMatches = (
             [int64]$installerOffset -eq $expectedInstallerOffset -or
             ($partitionStyle -eq "MBR" -and [int64]$installerOffset -eq $primaryMbrOffset)
@@ -587,6 +591,18 @@ function Assert-LibertixInstallationPlan {
         if ($entry.Value.Substring(0, 2).ToUpperInvariant() -ne ([string]$disk.systemDrive)) {
             throw "Installation plan $($entry.Key) must be located on disk.systemDrive."
         }
+    }
+    $expectedInstallerIsoPath = Join-Path `
+        ([string]$disk.systemDrive) `
+        "ProgramData\Libertix\Downloads\$([string]$Plan.planId)\$([string]$distribution.installerIsoFileName)"
+    if (
+        [IO.Path]::GetFullPath([string]$distribution.installerIsoWindowsPath) -ne
+        [IO.Path]::GetFullPath($expectedInstallerIsoPath)
+    ) {
+        throw (
+            "Installation plan distribution.installerIsoWindowsPath must use " +
+            "the plan-owned ProgramData download directory."
+        )
     }
 
     if (Test-LibertixPlanProperty -Object $Plan -Name "development") {

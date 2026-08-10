@@ -47,6 +47,11 @@ namespace Libertix.Installation
 
             bool isUefi = options.Firmware == FirmwareType.Uefi;
             string developmentIpv4 = options.StartupOptions.DevelopmentSshStaticIpv4Address;
+            string installerIsoWindowsPath =
+                InstallationTemporaryArtifacts.GetDistributionIsoPath(
+                    options.SystemDriveRoot,
+                    options.PlanId,
+                    options.Distribution.IsoInstallerFileName);
             var plan = new InstallationPlan
             {
                 PlanId = options.PlanId,
@@ -61,12 +66,7 @@ namespace Libertix.Installation
                     GrubIcon = options.Distribution.GrubIcon,
                     InstallerIsoFileName = options.Distribution.IsoInstallerFileName,
                     InstallerIsoUrl = options.Distribution.IsoInstaller,
-                    InstallerIsoWindowsPath = isUefi
-                        ? Path.Combine(options.SystemDriveRoot, options.Distribution.IsoInstallerFileName)
-                        : Path.Combine(
-                            Path.GetTempPath(),
-                            "Libertix",
-                            options.Distribution.IsoInstallerFileName),
+                    InstallerIsoWindowsPath = installerIsoWindowsPath,
                     InstallerIsoSha256 = options.Distribution.IsoInstallerSha256.ToLowerInvariant(),
                     LiveIsoUrl = isUefi
                         ? options.Distribution.UefiIsoUrl

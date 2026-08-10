@@ -109,7 +109,7 @@ flowchart TB
   preparation. The C# layer starts and observes the operation; the PowerShell modules implement
   staging, EFI media, firmware variables, transaction state and Windows-side rollback.
 - `assets/live/` contains the shared live orchestrator and the small BIOS/UEFI adapters used after
-  reboot. `iso/live/install-mint.sh`, `iso/live/libertix-runner.sh` and their `iso-uefi/live/`
+  reboot. `iso/live/libertix-install.sh`, `iso/live/libertix-runner.sh` and their `iso-uefi/live/`
   counterparts are the actual image entry points; each is a thin wrapper that selects the firmware
   mode and executes the shared implementation.
 - `iso/` and `iso-uefi/` contain the remaining firmware-specific boot inputs used to construct the
@@ -284,6 +284,10 @@ Development takes place on the `dev` branch. Keep firmware-neutral behavior in t
 runtime modules, and limit BIOS/UEFI adapters to operations that genuinely differ. Changes to disk
 or rollback behavior should include parity tests for both firmware paths and a replay of the
 relevant failure scenario where possible.
+
+The separate [development and auto-test guide](auto_tests/README.md) documents the locked `uv`
+environment, Windows and mini-ISO builds, filepool, API, `curl` workflows, VM automation, and local
+verification commands.
 
 ## License
 

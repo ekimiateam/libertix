@@ -8,6 +8,13 @@ import json
 import re
 from pathlib import Path
 
+MENU_LABELS = {
+    "en": {"shutdown": "Shutdown", "advanced": "Advanced options"},
+    "fr": {"shutdown": "Éteindre", "advanced": "Options avancées"},
+    "es": {"shutdown": "Apagar", "advanced": "Opciones avanzadas"},
+    "ja": {"shutdown": "シャットダウン", "advanced": "詳細オプション"},
+}
+
 
 def read_lines(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
@@ -42,7 +49,7 @@ def add_invisible_icon_class(lines: list[str]) -> list[str]:
     return [entry.sub(r"\1 --class find.none\2", line) for line in lines]
 
 
-def read_distribution_presentation(path: Path) -> tuple[str, str]:
+def read_distribution_presentation(path: Path) -> tuple[str, str, dict[str, str]]:
     plan = json.loads(path.read_text(encoding="utf-8"))
     distribution = plan.get("distribution")
     if not isinstance(distribution, dict):
@@ -57,7 +64,13 @@ def read_distribution_presentation(path: Path) -> tuple[str, str]:
         r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?", icon
     ):
         raise ValueError("installation plan has an unsafe GRUB icon")
-    return display_name, icon
+    locale = plan.get("locale")
+    if not isinstance(locale, dict):
+        raise ValueError("installation plan has no locale object")
+    language = locale.get("languageCode")
+    if language not in MENU_LABELS:
+        raise ValueError("installation plan has an unsupported GRUB language")
+    return display_name, icon, MENU_LABELS[language]
 
 
 def main() -> int:
@@ -68,7 +81,7 @@ def main() -> int:
     parser.add_argument("--extra", type=Path, action="append", default=[])
     parser.add_argument("--plan", type=Path, required=True)
     args = parser.parse_args()
-    display_name, icon = read_distribution_presentation(args.plan)
+    display_name, icon, labels = read_distribution_presentation(args.plan)
 
     linux = read_lines(args.linux)
     simple_start, simple_end = extract_top_level_block(linux, "menuentry ")
@@ -109,10 +122,10 @@ def main() -> int:
     output.extend(windows)
     output.extend(
         [
-            "menuentry 'Shutdown' --class shutdown --id libertix-shutdown {",
+            f"menuentry '{labels['shutdown']}' --class shutdown --id libertix-shutdown {{",
             "\thalt",
             "}",
-            "submenu 'Advanced options' --class efi --id libertix-advanced {",
+            f"submenu '{labels['advanced']}' --class efi --id libertix-advanced {{",
         ]
     )
     output.extend(indent(advanced))

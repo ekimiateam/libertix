@@ -92,14 +92,6 @@ if ! mv -- "$latest_staging" "$latest_dir"; then
 fi
 rm -rf -- "$latest_backup" || fail "cannot retire previous latest log directory"
 
-# Keep the newest twenty boot diagnostics. The stable latest directory and the
-# Windows-side preparation logs are outside this timestamped-directory set.
-find "$log_root" -mindepth 1 -maxdepth 1 -type d -name '????????T??????Z' \
-    -printf '%T@ %p\n' 2>/dev/null |
-    sort -nr |
-    tail -n +21 |
-    cut -d' ' -f2- |
-    while IFS= read -r expired_log_dir; do
-        [ -n "$expired_log_dir" ] && rm -rf -- "$expired_log_dir"
-    done
+# Installation logs are durable evidence. Never age them out implicitly;
+# cleanup, retention, or export belongs to an explicit user action.
 sync

@@ -209,14 +209,24 @@ namespace Libertix.Tests
             bool parsed = StartupOptions.TryParse(
                 new[]
                 {
-                    "--uefi-bootnext-failed",
-                    "--uefi-recovery-state",
+                    "--UEFI-BOOTNEXT-FAILED",
+                    "--UEFI-RECOVERY-STATE",
                     @"C:\ProgramData\Libertix\UefiRecovery\state.json"
                 },
-                out _,
+                out StartupOptions options,
                 out string error);
 
             Assert.IsTrue(parsed, error);
+            Assert.IsTrue(options.UefiBootNextFailed);
+            Assert.AreEqual(
+                @"C:\ProgramData\Libertix\UefiRecovery\state.json",
+                options.UefiRecoveryStatePath);
+        }
+
+        [TestMethod]
+        public void SharedInstallationPolicyDefinesTheAria2ConnectionLimit()
+        {
+            Assert.AreEqual(5, InstallationPolicy.Current.Download.Aria2MaximumConnections);
         }
 
         [TestMethod]
@@ -751,7 +761,8 @@ namespace Libertix.Tests
         {
             InstallationPlan plan = CreateValidPlan();
             plan.Disk.SystemDrive = "D:";
-            plan.Distribution.InstallerIsoWindowsPath = @"D:\mint.iso";
+            plan.Distribution.InstallerIsoWindowsPath =
+                @"D:\ProgramData\Libertix\Downloads\" + PlanId + @"\mint.iso";
             plan.Account.PasswordHashWindowsPath = @"D:\ProgramData\Libertix\account-secret.env";
             plan.Runtime.RecoveryRootWindows = @"D:\ProgramData\Libertix\Recovery";
 
@@ -769,6 +780,26 @@ namespace Libertix.Tests
             plan.Disk.Installer.OffsetBytes -= 1024L * 1024L;
 
             InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void TemporaryArtifactsUseThePlanOwnedProgramDataDirectory()
+        {
+            string isoPath = InstallationTemporaryArtifacts.GetDistributionIsoPath(
+                @"C:\",
+                PlanId,
+                "linux.iso");
+            string liveMediaDirectory = InstallationTemporaryArtifacts.GetLiveMediaDirectory(
+                @"C:\",
+                PlanId);
+
+            Assert.AreEqual(
+                @"C:\ProgramData\Libertix\Downloads\" + PlanId + @"\linux.iso",
+                isoPath);
+            Assert.AreEqual(
+                @"C:\ProgramData\Libertix\Downloads\" + PlanId + @"\live-media",
+                liveMediaDirectory);
+            Assert.AreNotEqual(Path.GetDirectoryName(isoPath), liveMediaDirectory);
         }
 
         [TestMethod]
@@ -798,7 +829,8 @@ namespace Libertix.Tests
                     GrubIcon = "linuxmint",
                     InstallerIsoFileName = "mint.iso",
                     InstallerIsoUrl = "https://example.test/mint.iso",
-                    InstallerIsoWindowsPath = @"C:\mint.iso",
+                    InstallerIsoWindowsPath =
+                        @"C:\ProgramData\Libertix\Downloads\" + PlanId + @"\mint.iso",
                     InstallerIsoSha256 = new string('b', 64),
                     LiveIsoUrl = "https://example.test/libertix-installer-uefi.iso",
                     LiveIsoSha256 = new string('c', 64)

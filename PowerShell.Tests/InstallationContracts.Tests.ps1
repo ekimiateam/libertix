@@ -17,7 +17,7 @@ BeforeAll {
     "grubIcon": "linuxmint",
     "installerIsoFileName": "mint.iso",
     "installerIsoUrl": "https://example.test/mint.iso",
-    "installerIsoWindowsPath": "C:\\mint.iso",
+    "installerIsoWindowsPath": "C:\\ProgramData\\Libertix\\Downloads\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\mint.iso",
     "installerIsoSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "liveIsoUrl": "https://example.test/libertix.iso",
     "liveIsoSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
@@ -99,7 +99,8 @@ Describe "Installation plan contract" {
     It "accepts consistent Windows paths on a non-C system drive" {
         $plan = New-ValidInstallationPlan
         $plan.disk.systemDrive = "D:"
-        $plan.distribution.installerIsoWindowsPath = "D:\mint.iso"
+        $plan.distribution.installerIsoWindowsPath = `
+            "D:\ProgramData\Libertix\Downloads\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\mint.iso"
         $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\account-secret.env"
         $plan.runtime.recoveryRootWindows = "D:\ProgramData\Libertix\Recovery"
         { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw

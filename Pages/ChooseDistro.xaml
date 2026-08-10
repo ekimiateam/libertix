@@ -13,6 +13,7 @@
         <Style x:Key="DistroCard" TargetType="Border">
             <Setter Property="Background" Value="{DynamicResource SecondaryBackground}"/>
             <Setter Property="CornerRadius" Value="8"/>
+            <Setter Property="Height" Value="285"/>
             <Setter Property="Margin" Value="10"/>
             <Setter Property="Padding" Value="15"/>
             <Setter Property="BorderThickness" Value="2"/>
@@ -101,6 +102,13 @@
                         <Setter Property="Padding" Value="0"/>
                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                         <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                                    <ContentPresenter SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
                     </Style>
                 </ListBox.ItemContainerStyle>
                 <ListBox.ItemTemplate>

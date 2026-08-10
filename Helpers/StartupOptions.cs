@@ -23,6 +23,8 @@ namespace Libertix.Helpers
         public IReadOnlyList<string> DevelopmentSshDnsServers { get; private set; } =
             Array.Empty<string>();
         public bool SkipNvramWriteProbe { get; private set; }
+        public bool UefiBootNextFailed { get; private set; }
+        public string UefiRecoveryStatePath { get; private set; }
 
         public static bool TryParse(string[] args, out StartupOptions options, out string error)
         {
@@ -163,6 +165,7 @@ namespace Libertix.Helpers
                     UefiBootNextFailedOption,
                     StringComparison.OrdinalIgnoreCase))
                 {
+                    options.UefiBootNextFailed = true;
                     continue;
                 }
 
@@ -177,7 +180,7 @@ namespace Libertix.Helpers
                         return false;
                     }
 
-                    index++;
+                    options.UefiRecoveryStatePath = args[++index];
                     continue;
                 }
 

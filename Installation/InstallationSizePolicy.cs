@@ -8,13 +8,20 @@ namespace Libertix.Installation
     /// </summary>
     public static class InstallationSizePolicy
     {
-        public const int MinimumFinalSizeGiB = 20;
-        public const int TargetWindowsFreeSpaceGiB = 10;
-        public const int WindowsFreeSpaceToleranceGiB = 2;
-        public const int MinimumWindowsFreeSpaceGiB =
+        public static int MinimumFinalSizeGiB =>
+            InstallationPolicy.Current.Storage.MinimumFinalSizeGiB;
+        public static int TargetWindowsFreeSpaceGiB =>
+            InstallationPolicy.Current.Storage.TargetWindowsFreeSpaceGiB;
+        public static int WindowsFreeSpaceToleranceGiB =>
+            InstallationPolicy.Current.Storage.WindowsFreeSpaceToleranceGiB;
+        public static int MinimumWindowsFreeSpaceGiB =>
             TargetWindowsFreeSpaceGiB - WindowsFreeSpaceToleranceGiB;
-        public const int MaximumDirectFat32SizeGiB = 31;
-        public const int LargeInstallationStagingSizeGiB = 8;
+        public static int MaximumDirectFat32SizeGiB =>
+            InstallationPolicy.Current.Storage.MaximumDirectFat32SizeGiB;
+        public static int LargeInstallationStagingSizeGiB =>
+            InstallationPolicy.Current.Storage.LargeInstallationStagingSizeGiB;
+        public static long PartitionAlignmentBytes =>
+            InstallationPolicy.Current.Storage.PartitionAlignmentBytes;
         public const long BytesPerGiB = 1024L * 1024L * 1024L;
         public const long MebibytesPerGiB = 1024L;
 

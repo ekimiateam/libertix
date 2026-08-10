@@ -13,6 +13,7 @@ esac
 LOG_DIR="/run/libertix"
 STAGE_FILE="$LOG_DIR/stage"
 FAIL_FILE="$LOG_DIR/failure"
+STAGE_CATALOG="/usr/local/lib/libertix/libertix-stages.tsv"
 mkdir -p "$LOG_DIR"
 
 CURRENT_STAGE="bootstrap"
@@ -46,7 +47,14 @@ PASSWORD_HASH=""
 echo "$CURRENT_STAGE" > "$STAGE_FILE"
 
 mark() {
-    CURRENT_STAGE="$1"
+    local next_stage="$1"
+
+    if ! awk -F '\t' -v stage="$next_stage" \
+        '$1 == stage { found=1; exit } END { exit !found }' \
+        "$STAGE_CATALOG"; then
+        die "unknown installation stage requested: $next_stage"
+    fi
+    CURRENT_STAGE="$next_stage"
     echo "$CURRENT_STAGE" > "$STAGE_FILE"
     echo "STAGE: $CURRENT_STAGE"
     echo "LIBERTIX STAGE: $CURRENT_STAGE" > /dev/kmsg 2>/dev/null || true
@@ -319,12 +327,13 @@ complete_installation_state_step "target.system-configured"
 
 start_installation_state_step "target.bootloader-installed"
 mark "140-install-bootloader"
-BOOTLOADER_WRITE_STARTED=true
 if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
-    echo "Backing up the current MBR before installing GRUB..."
-    dd if="$DISK" of="$MBR_BACKUP" bs=512 count=1
+    echo "Preparing a durable MBR backup before installing GRUB..."
+    prepare_bios_mbr_backup_or_die || die "pre-GRUB MBR backup could not be persisted and verified"
+    BOOTLOADER_WRITE_STARTED=true
     chroot /mnt/target grub-install --target=i386-pc --recheck "$DISK"
 else
+    BOOTLOADER_WRITE_STARTED=true
     echo "Installing signed UEFI bootloader..."
     install_signed_uefi_bootloader_or_die
 
@@ -350,7 +359,7 @@ complete_installation_state
 echo ""
 echo "=== INSTALLATION COMPLETED ==="
 INSTALL_SUCCESS=true
-append_install_result true 0 "not-needed"
+emit_install_result true 0 "not-needed"
 write_windows_recovery_marker_best_effort "install-success" 0
 firmware_retire_completed_transaction_best_effort
 exit 0

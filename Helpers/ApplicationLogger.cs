@@ -13,6 +13,7 @@ namespace Libertix.Helpers
     /// </summary>
     internal static class ApplicationLogger
     {
+        private const int RetainedApplicationLogsPerPattern = 40;
         private static readonly string LogRoot = Path.Combine(
             Path.GetPathRoot(Environment.SystemDirectory),
             RuntimeNames.InstallationLogDirectory);
@@ -97,7 +98,7 @@ namespace Libertix.Helpers
                         files,
                         (left, right) => File.GetLastWriteTimeUtc(right)
                             .CompareTo(File.GetLastWriteTimeUtc(left)));
-                    for (int index = 40; index < files.Length; index++)
+                    for (int index = RetainedApplicationLogsPerPattern; index < files.Length; index++)
                         File.Delete(files[index]);
                 }
             }
