@@ -130,10 +130,12 @@ configure_target_system() {
 }
 
 unmount_target_system() {
+    local attempt
+
     # Some storage controllers release a recently active filesystem
     # asynchronously. Do not continue to the independent read-only verification
     # while any target mount is still present.
-    for _ in {1..10}; do
+    for ((attempt = 1; attempt <= 10; attempt++)); do
         unmount_target_windows_partitions || true
         umount /mnt/target/dev/pts 2>/dev/null || true
         umount /mnt/target/dev 2>/dev/null || true

@@ -2191,7 +2191,7 @@ def test_final_verification_waits_for_a_clean_target_release_in_both_modes() -> 
     uefi = read("assets/live/libertix-uefi-adapter.sh")
 
     assert 'unmount_target_system || die "target filesystem could not be released' in installer
-    assert "for attempt in $(seq 1 10)" in target
+    assert "for ((attempt = 1; attempt <= 10; attempt++)); do" in target
     assert "findmnt -rn -R /mnt/target" in target
     assert 'findmnt -rn -S "$NEW_PART"' in target
     assert "mount_linux_root_read_only_or_die()" in runtime
