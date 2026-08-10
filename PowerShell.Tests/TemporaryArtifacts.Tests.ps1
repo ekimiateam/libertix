@@ -5,11 +5,14 @@ Import-Module -Name $modulePath -Force
 
 Describe "Libertix temporary artifact ownership" {
     BeforeEach {
-        New-PSDrive -Name T -PSProvider FileSystem -Root $TestDrive -Scope Global | Out-Null
+        & subst.exe T: $TestDrive
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not map the Pester test directory to T:."
+        }
     }
 
     AfterEach {
-        Remove-PSDrive -Name T -Force -Scope Global -ErrorAction SilentlyContinue
+        & subst.exe T: /D
     }
 
     It "resolves transaction downloads under the plan-owned ProgramData directory" {
