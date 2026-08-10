@@ -15,8 +15,6 @@ from app.services.validation import ValidationService
 
 logger = logging.getLogger(__name__)
 
-RESET_SNAPSHOT = "clean2"
-
 
 class ResetService:
     def __init__(self, settings: Settings) -> None:
@@ -87,14 +85,14 @@ class ResetService:
         with self._proxmox() as proxmox:
             for vmid in vmids:
                 node = proxmox.locate_vm(vmid)
-                proxmox.assert_snapshot(node, vmid, RESET_SNAPSHOT)
+                proxmox.assert_snapshot(node, vmid, self.settings.reset_snapshot)
                 locations[vmid] = node
                 result.ok(
                     "proxmox.preflight",
                     "VM and snapshot verified",
                     target=str(vmid),
                     node=node,
-                    snapshot=RESET_SNAPSHOT,
+                    snapshot=self.settings.reset_snapshot,
                 )
         if set(locations) != set(vmids):
             raise WorkflowError("proxmox.guard", "Reset scope guard failed")
@@ -113,6 +111,7 @@ class ResetService:
             known_hosts_path=s.ssh_known_hosts,
             port=s.ssh_port,
             connect_timeout=s.ssh_timeout_seconds,
+            remote_os="linux",
         ) as ssh:
             root = shlex.quote(s.smb_root)
             ssh.run(
@@ -150,20 +149,27 @@ class ResetService:
                     details={"vmid": vmid},
                 )
 
-        def restore_one(vmid: int) -> tuple[int, str]:
+        def restore_one(vmid: int) -> tuple[int, str, dict[str, object]]:
             node = locations[vmid]
             with self._proxmox() as proxmox:
-                proxmox.rollback(node, vmid, RESET_SNAPSHOT)
-            return vmid, node
+                proxmox.rollback(node, vmid, self.settings.reset_snapshot)
+                verified = proxmox.verify_rollback_state(
+                    node,
+                    vmid,
+                    self.settings.reset_snapshot,
+                    require_running=False,
+                )
+            return vmid, node, verified
 
         with ThreadPoolExecutor(max_workers=len(vmids)) as executor:
             futures = {executor.submit(restore_one, vmid): vmid for vmid in vmids}
             for future in as_completed(futures):
-                vmid, node = future.result()
+                vmid, node, verified = future.result()
                 result.ok(
                     "proxmox.rollback",
                     "Snapshot restored successfully",
                     target=str(vmid),
                     node=node,
-                    snapshot=RESET_SNAPSHOT,
+                    snapshot=self.settings.reset_snapshot,
+                    **verified,
                 )

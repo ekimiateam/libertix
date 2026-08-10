@@ -30,30 +30,33 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           python-version: "3.13"
-          cache: pip
-          cache-dependency-path: |
-            auto_tests/requirements.txt
-            auto_tests/requirements-dev.txt
+          version: "0.9.8"
+          enable-cache: true
+          cache-dependency-glob: auto_tests/uv.lock
 
-      - name: Install test dependencies
+      - name: Synchronize locked test environment
         working-directory: auto_tests
-        run: python -m pip install --requirement requirements-dev.txt
+        run: uv sync --frozen --extra dev
 
       - name: Lint Python
         working-directory: auto_tests
-        run: python -m ruff check app tests ../assets/live/*.py ../iso-tools/*.py
+        run: >-
+          uv run --frozen python -m ruff check
+          app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
 
       - name: Check Python formatting
         working-directory: auto_tests
-        run: python -m ruff format --check app tests ../assets/live/*.py ../iso-tools/*.py
+        run: >-
+          uv run --frozen python -m ruff format --check
+          app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
 
       - name: Run Python test suite with coverage
         working-directory: auto_tests
-        run: python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+        run: uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 
       - name: Validate shell script syntax
         shell: bash
@@ -73,8 +76,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          python -m json.tool schemas/installation-plan.schema.json >/dev/null
-          python -m json.tool schemas/installation-state.schema.json >/dev/null
+          uv run --project auto_tests --frozen python -m json.tool schemas/installation-plan.schema.json >/dev/null
+          uv run --project auto_tests --frozen python -m json.tool schemas/installation-state.schema.json >/dev/null
 
   wpf:
     name: Build WPF (.NET Framework 4.8)
@@ -162,6 +165,25 @@ jobs:
           $configuration.Output.Verbosity = 'Normal'
           Invoke-Pester -Configuration $configuration
 
+      - name: Stamp source revision in the executable
+        shell: pwsh
+        run: |
+          $path = 'Properties\AssemblyInfo.cs'
+          $revision = $env:GITHUB_SHA.ToLowerInvariant()
+          $content = [IO.File]::ReadAllText($path)
+          $stamped = $content.Replace(
+            'AssemblyInformationalVersion("1.0.0+local")',
+            "AssemblyInformationalVersion(`"1.0.0+$revision`")"
+          )
+          if ($stamped -eq $content) {
+            throw 'Assembly informational version placeholder was not found.'
+          }
+          [IO.File]::WriteAllText(
+            $path,
+            $stamped,
+            [Text.UTF8Encoding]::new($false)
+          )
+
       - name: Build Libertix.exe
         shell: pwsh
         run: >-
@@ -185,10 +207,18 @@ jobs:
       - name: Verify WPF output
         shell: pwsh
         run: |
-          $executable = 'bin\Release\Libertix.exe'
+          $outputDirectory = 'bin\Release'
+          $executable = Join-Path $outputDirectory 'Libertix.exe'
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
             throw "Expected WPF executable was not produced: $executable"
           }
+          Copy-Item -LiteralPath LICENSE, THIRD_PARTY.md -Destination $outputDirectory
+          @(
+            "source-revision=$env:GITHUB_SHA"
+            "source-ref=$env:GITHUB_REF"
+            "workflow-run=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            "informational-version=1.0.0+$env:GITHUB_SHA"
+          ) | Set-Content -LiteralPath (Join-Path $outputDirectory 'BUILD-INFO.txt') -Encoding utf8
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $executable
           "Libertix.exe SHA-256: $($hash.Hash.ToLowerInvariant())" |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
@@ -305,6 +335,15 @@ jobs:
             release-input/iso/libertix-installer-uefi.iso \
             release-assets/
           test -s release-assets/Libertix-wpf.zip
+          (
+            cd release-assets
+            sha256sum \
+              Libertix-wpf.zip \
+              libertix-installer-bios.iso \
+              libertix-installer-uefi.iso \
+              > SHA256SUMS
+          )
+          test -s release-assets/SHA256SUMS
 
       - name: Publish alpha prerelease
         shell: bash
@@ -321,6 +360,7 @@ jobs:
             release-assets/Libertix-wpf.zip
             release-assets/libertix-installer-bios.iso
             release-assets/libertix-installer-uefi.iso
+            release-assets/SHA256SUMS
           )
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release edit "$tag" \

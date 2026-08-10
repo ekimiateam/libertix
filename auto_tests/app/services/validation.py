@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
+from app.api_runtime import mark_capture_workspace_owned
 from app.clients.ssh import CommandResult, SSHClient
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
@@ -40,7 +41,7 @@ class ValidationService:
             max_attempts=settings.llm_max_attempts,
             retry_base_seconds=settings.llm_retry_base_seconds,
         )
-        self.vnc = VNCClient()
+        self.vnc = VNCClient(settings.vnc_timeout_seconds)
 
     def run(
         self,
@@ -53,6 +54,7 @@ class ValidationService:
         capture_workspace = tempfile.TemporaryDirectory(
             prefix="validation-", dir=self.settings.capture_dir
         )
+        mark_capture_workspace_owned(Path(capture_workspace.name))
         previous_capture_dir = self._capture_dir
         self._capture_dir = Path(capture_workspace.name)
         result = ResultBuilder("validation", on_step=on_step)
@@ -145,7 +147,9 @@ class ValidationService:
     def _normalize_selector(value: str) -> str:
         return "".join(ch for ch in value.lower() if ch.isalnum())
 
-    def ssh(self, host: str, username: str, password: str) -> SSHClient:
+    def ssh(
+        self, host: str, username: str, password: str, *, remote_os: str = "linux"
+    ) -> SSHClient:
         return SSHClient(
             host,
             username,
@@ -153,6 +157,7 @@ class ValidationService:
             known_hosts_path=self.settings.ssh_known_hosts,
             port=self.settings.ssh_port,
             connect_timeout=self.settings.ssh_timeout_seconds,
+            remote_os=remote_os,
         )
 
     def run_windows_script(
@@ -197,17 +202,17 @@ class ValidationService:
             '-Force -ErrorAction SilentlyContinue"'
         )
 
-        ssh.upload_text(
-            remote_script_sftp,
-            script_path.read_text(encoding="utf-8"),
-            step=f"{step}.upload_script",
-        )
-        ssh.upload_text(
-            remote_config_sftp,
-            json.dumps(config, ensure_ascii=False),
-            step=f"{step}.upload_config",
-        )
         try:
+            ssh.upload_text(
+                remote_script_sftp,
+                script_path.read_text(encoding="utf-8"),
+                step=f"{step}.upload_script",
+            )
+            ssh.upload_text(
+                remote_config_sftp,
+                json.dumps(config, ensure_ascii=False),
+                step=f"{step}.upload_config",
+            )
             return ssh.run(command, step=step, timeout=timeout, sensitive=True)
         finally:
             try:
@@ -344,12 +349,14 @@ class ValidationService:
             archive = Path(tmp.name)
         try:
             with tarfile.open(archive, "w:gz") as tar:
-                for path in sorted(root.rglob("*")):
-                    if not self._include_local_source_path(root, path):
-                        continue
+                for path in self._local_source_files(root):
                     tar.add(path, arcname=path.relative_to(root), recursive=False)
 
-            archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+            digest = hashlib.sha256()
+            with archive.open("rb") as archive_stream:
+                for chunk in iter(lambda: archive_stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            archive_sha256 = digest.hexdigest()
 
             remote_archive = str(PurePosixPath(s.smb_root) / f".{archive.name}")
             ssh.upload_file(archive, remote_archive, step="server.copy_local_source.upload")
@@ -359,6 +366,7 @@ class ValidationService:
                 "set -eu; "
                 f"dest={shlex.quote(source_path)}; archive={shlex.quote(remote_archive)}; "
                 f"root={shlex.quote(s.smb_root)}; "
+                'root=$(realpath -m -- "$root"); dest=$(realpath -m -- "$dest"); '
                 'case "$dest" in "$root"/*) ;; *) '
                 'echo "Destination refusee: $dest" >&2; exit 22;; esac; '
                 'rm -rf "$dest"; mkdir -p "$dest"; '
@@ -382,14 +390,31 @@ class ValidationService:
             )
         finally:
             archive.unlink(missing_ok=True)
+            if "remote_archive" in locals():
+                try:
+                    ssh.run(
+                        f"rm -f -- {shlex.quote(remote_archive)}",
+                        step="server.copy_local_source.cleanup_remote_archive",
+                        timeout=30,
+                        check=False,
+                    )
+                except WorkflowError as exc:
+                    logger.warning(
+                        "Remote source archive could not be removed",
+                        extra={
+                            "step": "server.copy_local_source.cleanup_remote_archive",
+                            "target": ssh.host,
+                        },
+                        exc_info=exc,
+                    )
 
     @staticmethod
     def _local_repository_root() -> Path:
         return LocalSourceTree.repository_root()
 
     @staticmethod
-    def _include_local_source_path(root: Path, path: Path) -> bool:
-        return LocalSourceTree.include(root, path)
+    def _local_source_files(root: Path) -> tuple[Path, ...]:
+        return LocalSourceTree.selected_files(root)
 
     def _compile_release_on_build_vm(self, result: ResultBuilder) -> PurePosixPath:
         s = self.settings
@@ -397,6 +422,8 @@ class ValidationService:
             "share": s.samba_unc,
             "source": str(PureWindowsPath(s.samba_unc) / s.source_dir_name),
             "release": str(PureWindowsPath(s.samba_unc) / s.release_dir_name),
+            "source_dir_name": s.source_dir_name,
+            "release_dir_name": s.release_dir_name,
             "samba_username": s.samba_username,
             "samba_password": s.samba_password.get_secret_value(),
         }
@@ -405,6 +432,7 @@ class ValidationService:
             s.build_vm_host,
             s.build_vm_user,
             s.build_vm_password.get_secret_value(),
+            remote_os="windows",
         ) as ssh:
             response = self.run_windows_script(
                 ssh,
@@ -482,20 +510,47 @@ class ValidationService:
             seconds=self.settings.launch_wait_seconds,
         )
 
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        capture = self._capture_dir / f"{vm.name}-{stamp}.png"
-        self.vnc.capture(vm.vnc, capture)
-        result.ok("vnc.capture", "VNC capture saved", target=vm.vnc, path=str(capture))
-
-        verdict = self.vision_llm.analyze(capture, vm.name, vm.os)
-        context = verdict.model_dump()
-        if not verdict.valid:
-            raise WorkflowError(
-                "llm.verdict",
-                "Visual validation reported a problem",
-                details={"vm": vm.name, **context},
+        maximum_visual_attempts = 3
+        last_context: dict[str, object] = {}
+        for attempt in range(1, maximum_visual_attempts + 1):
+            if attempt > 1:
+                time.sleep(self.settings.launch_wait_seconds)
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            capture = self._capture_dir / f"{vm.name}-{stamp}.png"
+            self.vnc.capture(vm.vnc, capture)
+            result.ok(
+                "vnc.capture",
+                "VNC capture saved",
+                target=vm.vnc,
+                path=str(capture),
+                attempt=attempt,
             )
-        result.ok("llm.verdict", "Validation visuelle positive", target=vm.name, **context)
+
+            verdict = self.vision_llm.analyze(capture, vm.name, vm.os)
+            last_context = verdict.model_dump()
+            if verdict.valid:
+                result.ok(
+                    "llm.verdict",
+                    "Visual validation positive",
+                    target=vm.name,
+                    attempt=attempt,
+                    **last_context,
+                )
+                return
+            if attempt < maximum_visual_attempts:
+                result.ok(
+                    "llm.verdict_retry",
+                    "Libertix was not visible yet; the validation capture will be retried",
+                    target=vm.name,
+                    attempt=attempt,
+                    summary=last_context.get("summary"),
+                )
+
+        raise WorkflowError(
+            "llm.verdict",
+            "Visual validation reported a problem after all capture attempts",
+            details={"vm": vm.name, **last_context},
+        )
 
     def _validate_vm_isolated(
         self,
@@ -545,7 +600,10 @@ class ValidationService:
             "relative_executable": str(relative_executable),
         }
         with self.ssh(
-            vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
         ) as ssh:
             response = self.run_windows_script(
                 ssh,
@@ -596,7 +654,10 @@ class ValidationService:
         step: str,
     ) -> dict[str, str]:
         with self.ssh(
-            vm.host, vm.username, self.settings.windows_ssh_password.get_secret_value()
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
         ) as ssh:
             response = self.run_windows_script(
                 ssh,

@@ -125,16 +125,3 @@ def load_progress_json(content: str) -> dict[str, object]:
     if not candidates:
         raise json.JSONDecodeError("No complete install-progress verdict", content, 0)
     return candidates[-1]
-
-
-def load_json_object(content: str) -> object:
-    """Parse a JSON object while tolerating harmless provider output noise."""
-
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        start = content.find("{")
-        end = content.rfind("}")
-        if start == -1 or end <= start:
-            raise
-        return json.loads(content[start : end + 1])

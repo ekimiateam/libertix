@@ -114,6 +114,7 @@ on_exit() {
 . /usr/local/lib/libertix/libertix-install-platform-common.sh
 . /usr/local/lib/libertix/libertix-storage-common.sh
 . /usr/local/lib/libertix/libertix-install-runtime-common.sh
+. /usr/local/lib/libertix/libertix-distribution-common.sh
 . /usr/local/lib/libertix/libertix-target-common.sh
 . /usr/local/lib/libertix/libertix-rollback-common.sh
 . /usr/local/lib/libertix/libertix-installation-plan.sh
@@ -194,7 +195,7 @@ cleanup_windows_live_boot_artifacts
 mark "027-windows-live-boot-cleaned"
 write_windows_recovery_marker_best_effort "live-started" 0
 
-mark "030-check-mint-iso"
+mark "030-check-installer-iso"
 ISO_WINDOWS_REL=$(windows_path_to_relative "$ISO_WINDOWS_PATH")
 ISO_SOURCE="/mnt/windows/$ISO_WINDOWS_REL"
 
@@ -285,21 +286,31 @@ run_logged mount "$NEW_PART" /mnt/target
 complete_installation_state_step "live.target-filesystem-created"
 
 mark "100-remount-windows-ro"
+start_installation_state_step "live.distribution-extracted"
 mount_windows_ro_with_retry "$WINDOWS_PART" /mnt/windows
 wait_for_iso_source_or_die "$ISO_SOURCE" "$ISO_WINDOWS_REL"
+mark "105-verify-installer-iso"
+echo "Verifying installer ISO integrity..."
+verify_file_sha256 "$ISO_SOURCE" "$ISO_SHA256" || \
+    die "installer ISO SHA-256 does not match the validated installation plan"
 
 echo "Mounting installer ISO from Windows workspace..."
-mark "110-loop-mount-mint-iso"
+mark "110-loop-mount-installer-iso"
 run_logged mount -o loop,ro "$ISO_SOURCE" /mnt/iso
+distribution_rootfs="$(resolve_distribution_rootfs_or_die /mnt/iso)" || \
+    die "installer ISO does not expose one unambiguous squashfs root filesystem"
+assert_distribution_rootfs_compatible_or_die \
+    "$distribution_rootfs" "$DISTRIBUTION_OS_RELEASE_ID" || \
+    die "installer ISO payload is incompatible with the signed distribution plan"
 echo "Extracting system..."
-start_installation_state_step "live.distribution-extracted"
 mark "120-unsquashfs"
 if command -v stdbuf >/dev/null 2>&1; then
-    run_logged stdbuf -oL -eL unsquashfs -f -d /mnt/target /mnt/iso/casper/filesystem.squashfs
+    run_logged stdbuf -oL -eL unsquashfs -f -d /mnt/target "$distribution_rootfs"
 else
-    run_logged unsquashfs -f -d /mnt/target /mnt/iso/casper/filesystem.squashfs
+    run_logged unsquashfs -f -d /mnt/target "$distribution_rootfs"
 fi
 umount /mnt/iso
+umount /mnt/windows
 complete_installation_state_step "live.distribution-extracted"
 
 start_installation_state_step "target.system-configured"
@@ -323,7 +334,7 @@ else
 fi
 complete_installation_state_step "target.bootloader-installed"
 
-unmount_target_system
+unmount_target_system || die "target filesystem could not be released before final verification"
 
 if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
     # GRUB lives in the MBR and does not need the Linux partition marked active.
@@ -333,7 +344,6 @@ fi
 assert_recovery_unchanged_or_die
 start_installation_state_step "target.installation-verified"
 final_verify_or_die
-firmware_finalize_success_best_effort
 complete_installation_state_step "target.installation-verified"
 complete_installation_state
 
@@ -342,4 +352,5 @@ echo "=== INSTALLATION COMPLETED ==="
 INSTALL_SUCCESS=true
 append_install_result true 0 "not-needed"
 write_windows_recovery_marker_best_effort "install-success" 0
+firmware_retire_completed_transaction_best_effort
 exit 0

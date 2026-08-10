@@ -10,16 +10,51 @@ esac
 . /tmp/libertix-storage-common.sh
 
 configure_user() {
+    local group available_groups=""
+
     if id "$USERNAME" >/dev/null 2>&1; then
         [ "$(id -u "$USERNAME")" -ne 0 ] || { echo "Refusing UID 0 desktop account" >&2; exit 1; }
-        usermod -s /bin/bash -a -G sudo,adm,cdrom,audio,video,plugdev "$USERNAME"
     else
-        useradd -m -s /bin/bash -G sudo,adm,cdrom,audio,video,plugdev "$USERNAME"
+        useradd -m -s /bin/bash "$USERNAME"
     fi
+    getent group sudo >/dev/null || { echo "Required sudo group is missing" >&2; exit 1; }
+    for group in sudo adm cdrom audio video plugdev; do
+        getent group "$group" >/dev/null || continue
+        if [ -n "$available_groups" ]; then
+            available_groups="$available_groups,$group"
+        else
+            available_groups="$group"
+        fi
+    done
+    usermod -s /bin/bash -a -G "$available_groups" "$USERNAME"
     [[ "$PASSWORD_HASH" == \$6\$* ]] || { echo "Invalid Linux password hash" >&2; exit 1; }
     usermod --password "$PASSWORD_HASH" "$USERNAME"
     passwd -S "$USERNAME" | grep -Eq "^[^ ]+ P "
     echo "$COMPUTER_NAME" > /etc/hostname
+}
+
+assert_target_distribution_identity() {
+    local actual_id id_like token compatible=false
+
+    [ -r /etc/os-release ] || { echo "Target os-release is missing" >&2; exit 1; }
+    # os-release is part of the hash-verified squashfs and defines shell-safe
+    # assignments by specification.
+    . /etc/os-release
+    actual_id="${ID:-}"
+    id_like="${ID_LIKE:-}"
+    [ "$actual_id" = "$DISTRIBUTION_OS_RELEASE_ID" ] || {
+        echo "Target distribution mismatch: expected $DISTRIBUTION_OS_RELEASE_ID, found ${actual_id:-missing}" >&2
+        exit 1
+    }
+    for token in $actual_id $id_like; do
+        case "$token" in
+            debian|ubuntu) compatible=true ;;
+        esac
+    done
+    [ "$compatible" = true ] || {
+        echo "Target distribution is not in the Debian/Ubuntu family" >&2
+        exit 1
+    }
 }
 
 configure_windows_mount() {
@@ -78,13 +113,57 @@ configure_windows_readonly_request() {
 }
 
 configure_locale() {
-    sed -i "s/# $SYSTEM_LANG/$SYSTEM_LANG/" /etc/locale.gen 2>/dev/null || true
+    {
+        printf '%s UTF-8\n' "$SYSTEM_LANG"
+        if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]; then
+            printf '%s UTF-8\n' "en_US.UTF-8"
+        fi
+    } > /etc/locale.gen
     locale-gen
     cat > /etc/default/locale <<EOF
 LANG=$SYSTEM_LANG
 LC_ALL=$SYSTEM_LANG
 LANGUAGE=$LANGUAGE_CODE
 EOF
+}
+
+divert_grub_generator() {
+    local generator="$1" diverted="$2" requirement="$3" owner true_name
+
+    case "$requirement" in
+        required|optional) ;;
+        *) echo "Invalid GRUB generator requirement: $requirement" >&2; return 2 ;;
+    esac
+
+    owner="$(dpkg-divert --listpackage "$generator")"
+    if [ -n "$owner" ]; then
+        [ "$owner" = "LOCAL" ] || {
+            echo "GRUB generator has a foreign diversion: $generator ($owner)" >&2
+            return 1
+        }
+        true_name="$(dpkg-divert --truename "$generator")"
+        [ "$true_name" = "$diverted" ] || {
+            echo "GRUB generator diversion target mismatch: $generator -> $true_name" >&2
+            return 1
+        }
+    else
+        [ "$requirement" = optional ] || [ -f "$generator" ] || {
+            echo "Required GRUB generator is missing: $generator" >&2
+            return 1
+        }
+        [ ! -e "$diverted" ] || {
+            echo "GRUB generator diversion target already exists: $diverted" >&2
+            return 1
+        }
+        dpkg-divert --local --add --rename --divert "$diverted" "$generator"
+    fi
+
+    if [ -f "$diverted" ]; then
+        chmod 0755 "$diverted"
+    elif [ "$requirement" = required ]; then
+        echo "Diverted GRUB generator is missing: $diverted" >&2
+        return 1
+    fi
 }
 
 configure_keyboard() {
@@ -118,6 +197,8 @@ EOF
 layouts=['$keyboard_source']
 model='$KEYBOARD_MODEL'
 [org/cinnamon/desktop/input-sources]
+sources=[('xkb', '$keyboard_source')]
+[org/gnome/desktop/input-sources]
 sources=[('xkb', '$keyboard_source')]
 EOF
     dconf update
@@ -165,6 +246,39 @@ cleanup_live_boot_artifacts() {
     rm -f /usr/lib/systemd/system/casper*.service
     rm -f /usr/lib/systemd/system/*/casper*.service
     rm -rf /var/lib/casper
+}
+
+refresh_installed_initramfs() {
+    local initrd listing found=false
+
+    command -v update-initramfs >/dev/null || {
+        echo "Target distribution does not provide update-initramfs" >&2
+        return 1
+    }
+    command -v lsinitramfs >/dev/null || {
+        echo "Target distribution does not provide lsinitramfs" >&2
+        return 1
+    }
+
+    # Ubuntu-family live images can ship an initramfs that unconditionally
+    # starts Casper. Rebuild it from the installed target after removing live
+    # units so the next boot follows the real root filesystem capabilities.
+    env -u CASPER_GENERATE_UUID update-initramfs -u -k all
+
+    for initrd in /boot/initrd.img-*; do
+        [ -f "$initrd" ] || continue
+        found=true
+        listing="$(lsinitramfs "$initrd")"
+        if printf '%s\n' "$listing" | grep -Eq \
+            '(^|/)(conf/conf.d/default-boot-to-casper\.conf|conf/conf.d/live-initrd\.conf|conf/uuid\.conf)$'; then
+            echo "Installed initramfs still forces live boot: $initrd" >&2
+            return 1
+        fi
+    done
+    [ "$found" = true ] || {
+        echo "Target distribution has no installed initramfs" >&2
+        return 1
+    }
 }
 
 find_windows_boot_uuid() {
@@ -238,11 +352,11 @@ configure_grub() {
         exit 1
     }
 
-    cat > /etc/default/grub <<'EOF'
+    cat > /etc/default/grub <<EOF
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=-1
 GRUB_TIMEOUT_STYLE=menu
-GRUB_DISTRIBUTOR="Linux Mint"
+GRUB_DISTRIBUTOR="$DISTRIBUTION_GRUB_DISPLAY_NAME"
 GRUB_CMDLINE_LINUX_DEFAULT="quiet splash"
 GRUB_CMDLINE_LINUX=""
 GRUB_DISABLE_OS_PROBER=true
@@ -250,8 +364,8 @@ GRUB_RECORDFAIL_TIMEOUT=-1
 GRUB_THEME="/boot/grub/themes/Libertix/theme.txt"
 EOF
     printf 'GRUB_GFXMODE="%s,auto"\n' "$GRUB_RESOLUTION" >> /etc/default/grub
-
-    rm -f /etc/default/grub.d/50_linuxmint.cfg 2>/dev/null || true
+    mkdir -p /etc/default/grub.d
+    cp -f /etc/default/grub /etc/default/grub.d/99-libertix.cfg
     win_boot_uuid="$(find_windows_boot_uuid || true)"
 
     if [ -z "$win_boot_uuid" ]; then
@@ -261,23 +375,32 @@ EOF
     write_windows_grub_entry "$win_boot_uuid"
 
     mkdir -p /usr/local/lib/libertix/grub-generators
-    install -m 0755 /etc/grub.d/10_linux \
-        /usr/local/lib/libertix/grub-generators/10_linux
-    if [ -f /etc/grub.d/30_uefi-firmware ]; then
-        install -m 0755 /etc/grub.d/30_uefi-firmware \
-            /usr/local/lib/libertix/grub-generators/30_uefi-firmware
-    fi
+    divert_grub_generator \
+        /etc/grub.d/10_linux \
+        /usr/local/lib/libertix/grub-generators/10_linux \
+        required
+    divert_grub_generator \
+        /etc/grub.d/30_uefi-firmware \
+        /usr/local/lib/libertix/grub-generators/30_uefi-firmware \
+        optional
+    for generator in /etc/grub.d/20_memtest86+ /etc/grub.d/20_memtest86; do
+        divert_grub_generator \
+            "$generator" \
+            "/usr/local/lib/libertix/grub-generators/$(basename "$generator")" \
+            optional
+    done
     install -m 0755 /tmp/10_libertix /etc/grub.d/10_libertix
     install -m 0755 /tmp/render-libertix-menu.py \
         /usr/local/lib/libertix/render-libertix-menu.py
-    chmod -x /etc/grub.d/10_linux /etc/grub.d/30_uefi-firmware 2>/dev/null || true
     chmod -x /etc/grub.d/40_custom 2>/dev/null || true
 
     update-grub
     grub-script-check /boot/grub/grub.cfg
-    grep -Fq -- "--class linuxmint" /boot/grub/grub.cfg
+    grep -Fq -- "--class $DISTRIBUTION_GRUB_ICON" /boot/grub/grub.cfg
+    grep -Fq "menuentry '$DISTRIBUTION_GRUB_DISPLAY_NAME'" /boot/grub/grub.cfg
     grep -Fq "submenu 'Advanced options' --class efi" /boot/grub/grub.cfg
     grep -Fq "menuentry 'Shutdown' --class shutdown" /boot/grub/grub.cfg
+    [ "$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)" -eq 4 ]
 }
 
 enable_first_boot_resize() {
@@ -286,6 +409,7 @@ enable_first_boot_resize() {
 }
 
 main() {
+    assert_target_distribution_identity
     configure_user
     configure_windows_mount
     configure_windows_profile_shortcuts
@@ -295,6 +419,7 @@ main() {
     configure_timezone
     configure_development_access
     cleanup_live_boot_artifacts
+    refresh_installed_initramfs
     configure_grub
     enable_first_boot_resize
 }

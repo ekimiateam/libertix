@@ -38,7 +38,7 @@ namespace Libertix.Pages
                 return;
             }
 
-            UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
+            UpdateProgress(BiosProgress.Complete, Localized("ApplyChangesComplete", "Partitioning complete!"));
             Log("Installation preparation completed successfully!");
             Log($"- FAT32 live partition: {_biosInstallerDriveLetter}: ({installationSizes.StagingSizeMiB / 1024:N0}GB staging, {_linuxSizeGB:N0}GB reserved for Linux)");
             Log("- The live installer will expand it if needed, then reformat it as ext4 without deleting/recreating the MBR entry");
@@ -77,6 +77,14 @@ namespace Libertix.Pages
             }
             CompleteExecutionStep(InstallationStep.WindowsRecoveryArmed);
 
+            // The initial wizard recheck is read-only. Decryption can take
+            // hours and mutates persistent disk state, so only start it after
+            // the recovery guard and its original-state metadata are durable.
+            _storagePreflight = await RunStoragePreflightAsync(
+                FirmwareType.Bios,
+                decryptBitLocker: true);
+            ThrowIfCancellationRequested();
+
             if (_installationState.Sharing.ShareWindowsFilesInLinux &&
                 !SetHibernateEnabled(false))
             {
@@ -99,14 +107,14 @@ namespace Libertix.Pages
                 return false;
             }
 
-            UpdateProgress(10, Localized("ApplyChangesStep1", "Shrinking Windows partition..."));
-            Log($"Step 1: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
+            UpdateProgress(BiosProgress.ShrinkWindows, Localized("ApplyChangesStep1", "Shrinking Windows partition..."));
+            Log($"Step 2: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
             StartExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
             bool shrinkSucceeded = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
             ThrowIfCancellationRequested();
             if (!shrinkSucceeded)
             {
-                await FailBiosPreparationAndRollbackAsync("Failed to shrink Windows partition (step 1)");
+                await FailBiosPreparationAndRollbackAsync("Failed to shrink Windows partition (step 2)");
                 return false;
             }
             CompleteExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
@@ -115,12 +123,12 @@ namespace Libertix.Pages
             // allocations use an 8 GB staging partition that the live expands.
             double biosStagingMB = installationSizes.StagingSizeMiB;
             UpdateProgress(
-                30,
+                BiosProgress.CreateInstallerPartition,
                 Localized("ApplyChangesStep2", "Creating FAT32 boot partition..."));
             Log(
                 biosStagingMB < requestedLinuxMB
-                    ? $"Step 2: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; the live will expand it to {_linuxSizeGB:N0}GB..."
-                    : $"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
+                    ? $"Step 3: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; the live will expand it to {_linuxSizeGB:N0}GB..."
+                    : $"Step 3: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
 
             StartExecutionStep(InstallationStep.WindowsInstallerPartitionCreated);
             _biosInstallerDriveLetter = await CreateFat32PartitionSimpleAsync(biosStagingMB);
@@ -149,8 +157,8 @@ namespace Libertix.Pages
                 return false;
             }
 
-            Log("Step 3: No second shrink needed; live partition will become the Linux partition.");
-            UpdateProgress(50, Localized("ApplyChangesWaitDisk", "Waiting for disk update..."));
+            Log("Step 4: No second shrink needed; live partition will become the Linux partition.");
+            UpdateProgress(BiosProgress.PartitionReady, Localized("ApplyChangesWaitDisk", "Waiting for disk update..."));
             return true;
         }
 
@@ -165,81 +173,90 @@ namespace Libertix.Pages
                 return false;
             }
 
-            UpdateProgress(55, Localized("ApplyChangesDownloadingIso", "Downloading ISO..."));
-            Log($"Step 4: Downloading ISO from {isoUrl}...");
+            UpdateProgress(BiosProgress.LiveDownload, Localized("ApplyChangesDownloadingIso", "Downloading ISO..."));
+            Log($"Step 5: Downloading ISO from {isoUrl}...");
             StartExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
 
-            string tempIsoPath = Path.Combine(Path.GetTempPath(), "libertix_installer.iso");
-            string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
-            string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
-            bool downloadSuccess;
-            if (File.Exists(localIsoPath))
-            {
-                Log($"Found local ISO: {localIsoName}, copying...");
-                await Task.Run(() => File.Copy(localIsoPath, tempIsoPath, true));
-                ThrowIfCancellationRequested();
-                downloadSuccess = true;
-                UpdateProgress(80, Localized("ApplyChangesIsoCopied", "ISO copied from local folder"));
-            }
-            else
-            {
-                downloadSuccess = await DownloadIsoAsync(isoUrl, tempIsoPath);
-            }
-            ThrowIfCancellationRequested();
-
-            if (!downloadSuccess)
-            {
-                await FailBiosPreparationAndRollbackAsync("Failed to download ISO");
-                return false;
-            }
-            if (!await VerifySha256Async(
-                tempIsoPath,
-                distribution.LiveIsoSha256,
-                "Libertix BIOS ISO"))
-            {
-                await FailBiosPreparationAndRollbackAsync(
-                    "Libertix BIOS ISO integrity verification failed");
-                return false;
-            }
-            ThrowIfCancellationRequested();
-            UpdateProgress(80, Localized("ApplyChangesCopyingIsoContents", "Copying ISO contents..."));
-            Log($"Step 5: Mounting ISO and copying contents to {BiosInstallerRoot}...");
-            bool copySucceeded = await MountAndCopyIsoAsync(tempIsoPath);
-            ThrowIfCancellationRequested();
-            if (!copySucceeded)
-            {
-                await FailBiosPreparationAndRollbackAsync("Failed to copy ISO contents");
-                return false;
-            }
-
-            bool lowMemoryMode =
-                _installationState.Compatibility is CompatibilityInfo compatibility &&
-                compatibility.LowMemoryMode;
-            if (lowMemoryMode && !ConfigureBiosLowMemoryBoot())
-            {
-                await FailBiosPreparationAndRollbackAsync(
-                    "Failed to configure low-memory live boot");
-                return false;
-            }
-
+            string tempIsoDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "Libertix",
+                "Downloads",
+                _installationPlan.Runtime.RecoveryRunId);
+            Directory.CreateDirectory(tempIsoDirectory);
+            string tempIsoPath = Path.Combine(tempIsoDirectory, "bios-live.iso");
             try
             {
-                if (File.Exists(tempIsoPath))
-                    File.Delete(tempIsoPath);
-            }
-            catch
-            {
-                // Cleanup failure does not invalidate media already copied to
-                // the staging volume, and rollback can remove it later.
-            }
+                string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
+                string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
+                bool downloadSuccess;
+                if (File.Exists(localIsoPath))
+                {
+                    Log($"Found local ISO: {localIsoName}, copying...");
+                    await Task.Run(() => File.Copy(localIsoPath, tempIsoPath, true));
+                    ThrowIfCancellationRequested();
+                    downloadSuccess = true;
+                    UpdateProgress(BiosProgress.LiveMediaCopy, Localized("ApplyChangesIsoCopied", "ISO copied from local folder"));
+                }
+                else
+                {
+                    downloadSuccess = await DownloadIsoAsync(isoUrl, tempIsoPath);
+                }
+                ThrowIfCancellationRequested();
 
-            // The live must consume the same validated plan that authorized the
-            // Windows-side disk changes; no second shell contract is generated.
-            UpdateProgress(95, Localized("ApplyChangesWritingConfiguration", "Writing configuration..."));
-            PublishInstallationContextToLive(BiosInstallerRoot);
-            Log($"Installation plan published to {BiosInstallerRoot}installation-plan.json.");
-            CompleteExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
-            return true;
+                if (!downloadSuccess)
+                {
+                    await FailBiosPreparationAndRollbackAsync("Failed to download ISO");
+                    return false;
+                }
+                if (!await VerifySha256Async(
+                    tempIsoPath,
+                    distribution.LiveIsoSha256,
+                    "Libertix BIOS ISO"))
+                {
+                    await FailBiosPreparationAndRollbackAsync(
+                        "Libertix BIOS ISO integrity verification failed");
+                    return false;
+                }
+                ThrowIfCancellationRequested();
+                UpdateProgress(BiosProgress.LiveMediaCopy, Localized("ApplyChangesCopyingIsoContents", "Copying ISO contents..."));
+                Log($"Step 6: Mounting ISO and copying contents to {BiosInstallerRoot}...");
+                bool copySucceeded = await MountAndCopyIsoAsync(tempIsoPath);
+                ThrowIfCancellationRequested();
+                if (!copySucceeded)
+                {
+                    await FailBiosPreparationAndRollbackAsync("Failed to copy ISO contents");
+                    return false;
+                }
+
+                bool lowMemoryMode =
+                    _installationState.Compatibility is CompatibilityInfo compatibility &&
+                    compatibility.LowMemoryMode;
+                if (lowMemoryMode && !ConfigureBiosLowMemoryBoot())
+                {
+                    await FailBiosPreparationAndRollbackAsync(
+                        "Failed to configure low-memory live boot");
+                    return false;
+                }
+
+                // The live must consume the same validated plan that authorized the
+                // Windows-side disk changes; no second shell contract is generated.
+                UpdateProgress(BiosProgress.InstallationContextReady, Localized("ApplyChangesWritingConfiguration", "Writing configuration..."));
+                PublishInstallationContextToLive(BiosInstallerRoot);
+                Log($"Installation plan published to {BiosInstallerRoot}installation-plan.json.");
+                CompleteExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
+                return true;
+            }
+            finally
+            {
+                DeleteDownloadArtifactBestEffort(tempIsoPath, "Libertix BIOS ISO");
+                DeleteDownloadDirectoryBestEffort(
+                    tempIsoDirectory,
+                    "Libertix BIOS ISO transaction");
+                if (File.Exists(tempIsoPath) || Directory.Exists(tempIsoDirectory))
+                    Log("WARNING: Libertix BIOS ISO transaction cleanup could not be verified.");
+                else
+                    Log("Libertix BIOS ISO transaction cleanup verified.");
+            }
         }
 
         private async Task<bool> PrepareBiosDistributionIsoAsync(
@@ -256,8 +273,8 @@ namespace Libertix.Pages
                 return FailBiosBeforeMutation("Linux installer ISO metadata is missing");
             }
 
-            UpdateProgress(85, Localized("ApplyChangesDownloadingLinuxIso", "Downloading Linux installer ISO..."));
-            Log($"Step 6: Downloading Linux installer from {distribution.InstallerIsoUrl}...");
+            UpdateProgress(BiosProgress.DistributionDownload, Localized("ApplyChangesDownloadingLinuxIso", "Downloading Linux installer ISO..."));
+            Log($"Step 1: Downloading Linux installer from {distribution.InstallerIsoUrl}...");
 
             string installerPath = distribution.InstallerIsoWindowsPath;
             Directory.CreateDirectory(Path.GetDirectoryName(installerPath));
@@ -271,7 +288,7 @@ namespace Libertix.Pages
                 await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
                 ThrowIfCancellationRequested();
                 downloadSuccess = true;
-                UpdateProgress(95, Localized("ApplyChangesLinuxIsoCopied", "Linux installer copied from local folder"));
+                UpdateProgress(BiosProgress.DistributionReady, Localized("ApplyChangesLinuxIsoCopied", "Linux installer copied from local folder"));
             }
             else
             {
@@ -288,9 +305,9 @@ namespace Libertix.Pages
             if (!await VerifySha256Async(
                 installerPath,
                 distribution.InstallerIsoSha256,
-                "Mint ISO"))
+                "Linux installer ISO"))
             {
-                return FailBiosBeforeMutation("Mint ISO integrity verification failed");
+                return FailBiosBeforeMutation("Linux installer ISO integrity verification failed");
             }
             ThrowIfCancellationRequested();
             Log($"Linux installer saved to {installerPath}");
@@ -311,8 +328,8 @@ namespace Libertix.Pages
         {
             // GRUB4DOS is only a temporary Windows Boot Manager bridge. The
             // live installer removes these files before touching Linux.
-            UpdateProgress(96, Localized("ApplyChangesDownloadingBootloader", "Downloading bootloader files..."));
-            Log($"Step 8: Downloading GRUB4DOS files to {_storagePreflight.SystemDrive}\\...");
+            UpdateProgress(BiosProgress.BootloaderDownload, Localized("ApplyChangesDownloadingBootloader", "Downloading bootloader files..."));
+            Log($"Step 7: Downloading GRUB4DOS files to {_storagePreflight.SystemDrive}\\...");
             StartExecutionStep(InstallationStep.WindowsTemporaryBootPrepared);
 
             string[] grubFiles = { "grldr", "grldr.mbr" };
@@ -384,8 +401,8 @@ namespace Libertix.Pages
 
             // A one-shot boot sequence keeps Windows as the default BCD entry
             // if the live installer cannot finish.
-            UpdateProgress(98, Localized("ApplyChangesConfiguringBootEntry", "Configuring boot entry..."));
-            Log("Step 9: Configuring GRUB4DOS boot entry...");
+            UpdateProgress(BiosProgress.BootEntryReady, Localized("ApplyChangesConfiguringBootEntry", "Configuring boot entry..."));
+            Log("Step 8: Configuring GRUB4DOS boot entry...");
             bool bootConfigured = await ConfigureBootEntryAsync();
             ThrowIfCancellationRequested();
             if (!bootConfigured)
@@ -393,7 +410,48 @@ namespace Libertix.Pages
                 await FailBiosPreparationAndRollbackAsync("Failed to configure boot entry");
                 return false;
             }
+            // Persist the final Windows-side transition to the live volume before
+            // removing its drive letter. Every later transition is Windows-only;
+            // keeping D:\ as a mirror after this point would make the next ledger
+            // write fail because the access path intentionally no longer exists.
             CompleteExecutionStep(InstallationStep.WindowsTemporaryBootPrepared);
+            _executionLedger.SetMirrorPath(null);
+            if (!await RemoveBiosInstallerAccessPathAsync())
+            {
+                await FailBiosPreparationAndRollbackAsync(
+                    "Failed to hide the prepared installer partition from Windows");
+                return false;
+            }
+            return true;
+        }
+
+        private async Task<bool> RemoveBiosInstallerAccessPathAsync()
+        {
+            if (string.IsNullOrWhiteSpace(_biosInstallerDriveLetter))
+                return false;
+
+            char driveLetter = char.ToUpperInvariant(_biosInstallerDriveLetter[0]);
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
+            string command =
+                $"$p=Get-Partition -DriveLetter {driveLetter} -ErrorAction Stop; " +
+                "$disk=[int]$p.DiskNumber; $number=[int]$p.PartitionNumber; " +
+                $"Remove-PartitionAccessPath -InputObject $p -AccessPath '{driveLetter}:\\' " +
+                "-ErrorAction Stop; Update-HostStorageCache -ErrorAction SilentlyContinue; " +
+                "$verified=Get-Partition -DiskNumber $disk -PartitionNumber $number -ErrorAction Stop; " +
+                "if ($verified.DriveLetter) { throw 'Installer partition drive letter remains assigned.' }";
+            var result = await Task.Run(() => RunProcess(
+                powershell,
+                $"-NoProfile -Command {QuoteArgument(command)}",
+                (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds));
+            if (result.exitCode != 0)
+            {
+                Log(
+                    $"ERROR: Installer partition access-path removal failed rc={result.exitCode}: " +
+                    $"{result.error}");
+                return false;
+            }
+
+            Log("Prepared installer partition drive letter removed before reboot.");
             return true;
         }
 
@@ -412,16 +470,16 @@ namespace Libertix.Pages
                 string recoveryScript = Path.Combine(RecoveryRoot, "recover.ps1");
                 if (File.Exists(recoveryScript))
                 {
-                    string powershell = ResolveSystemExecutable(
-                        "WindowsPowerShell\\v1.0\\powershell.exe",
-                        "powershell.exe");
-                    int exitCode = await RunStreamingProcessAsync(
+                    string powershell = WindowsProcessRunner.ResolvePowerShell();
+                    StreamingProcessResult processResult = await RunStreamingProcessAsync(
                         powershell,
                         $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(recoveryScript)}",
                         TimeSpan.FromMinutes(10),
                         line => Log($"ROLLBACK: {line}"),
                         observeCancellation: false);
-                    rollbackSucceeded = exitCode == 0;
+                    rollbackSucceeded =
+                        processResult.Completion == StreamingProcessCompletion.Exited &&
+                        processResult.ExitCode == 0;
                 }
             }
 
@@ -487,13 +545,16 @@ namespace Libertix.Pages
 
                 Log($"Using bcdedit at: {bcdeditPath}");
 
-                // Create a temporary bootsector entry. The live ISO deletes this
-                // entry from the offline BCD store as its first cleanup step.
+                // Bind the temporary entry to this recovery run. The live
+                // cleanup accepts only this owned format and the legacy exact
+                // name, both with the expected GRUB4DOS path.
+                string bootDescription =
+                    $"Libertix BIOS Installer {_installationPlan.Runtime.RecoveryRunId}";
                 string guid = "";
                 var createResult = await Task.Run(() =>
                     RunProcess(
                         bcdeditPath,
-                        "/create /d \"Install Linux\" /application bootsector",
+                        $"/create /d {QuoteArgument(bootDescription)} /application bootsector",
                         (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
                         GetWindowsConsoleEncoding()));
                 string output = createResult.output;
@@ -509,16 +570,17 @@ namespace Libertix.Pages
                     return false;
                 }
 
-                int startIdx = output.IndexOf('{');
-                int endIdx = output.IndexOf('}');
-                if (startIdx >= 0 && endIdx > startIdx)
+                MatchCollection guidMatches = Regex.Matches(
+                    output ?? string.Empty,
+                    @"\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}");
+                if (guidMatches.Count == 1)
                 {
-                    guid = output.Substring(startIdx, endIdx - startIdx + 1);
+                    guid = guidMatches[0].Value;
                     Log($"Found GUID: {guid}");
                 }
                 else
                 {
-                    Log($"ERROR: Could not find GUID in output");
+                    Log($"ERROR: Expected one BCD GUID in output, found {guidMatches.Count}.");
                     return false;
                 }
 
@@ -528,16 +590,9 @@ namespace Libertix.Pages
 
                 await RunBcdeditCommandAsync(bcdeditPath, $"/set {guid} path \\grldr.mbr");
 
-                // Keep the entry visible in BCD metadata, but bootsequence makes
-                // it one-shot. If the user reboots later, Windows is still default.
+                // Keep the entry visible in BCD metadata so offline cleanup can
+                // remove it, while bootsequence makes the selection one-shot.
                 await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {guid} /addlast");
-
-                // Suppress the Windows selector for this automated run only.
-                await RunBcdeditCommandAsync(bcdeditPath, "/set {bootmgr} displaybootmenu no");
-
-                await RunBcdeditCommandAsync(bcdeditPath, "/timeout 0");
-
-                await RunBcdeditCommandAsync(bcdeditPath, "/default {current}");
 
                 await RunBcdeditCommandAsync(bcdeditPath, $"/bootsequence {guid}");
 
@@ -606,127 +661,167 @@ namespace Libertix.Pages
             }
         }
 
-        private static void NormalizeRootFileNameCase(string directory, string expectedName)
-        {
-            string[] matches = Directory.GetFiles(directory)
-                .Where(path => string.Equals(
-                    Path.GetFileName(path), expectedName, StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-            if (matches.Length != 1)
-                throw new IOException($"Expected exactly one file for {expectedName}; found {matches.Length}.");
-
-            string expectedPath = Path.Combine(directory, expectedName);
-            if (!string.Equals(Path.GetFileName(matches[0]), expectedName, StringComparison.Ordinal))
-            {
-                string temporaryPath = Path.Combine(
-                    directory, $".libertix-case-{Guid.NewGuid():N}");
-                File.Move(matches[0], temporaryPath);
-                File.Move(temporaryPath, expectedPath);
-            }
-            if (!string.Equals(
-                Path.GetFileName(new FileInfo(expectedPath).FullName),
-                expectedName,
-                StringComparison.Ordinal))
-            {
-                throw new IOException($"File name case normalization failed: {expectedName}.");
-            }
-        }
-
         private async Task<bool> MountAndCopyIsoAsync(string isoPath)
         {
-            return await Task.Run(() =>
+            string mountedDrive = "";
+            bool imageMounted = false;
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
+            string scriptPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Scripts",
+                "libertix-disk-image.ps1");
+
+            try
             {
-                string mountedDrive = "";
-                string powershell = ResolveSystemExecutable(
-                    "WindowsPowerShell\\v1.0\\powershell.exe",
-                    "powershell.exe");
+                var mountOutput = new StringBuilder();
+                object mountOutputLock = new object();
+                StreamingProcessResult mountResult = await RunStreamingProcessAsync(
+                    powershell,
+                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                    $"-Action Mount -ImagePath {QuoteArgument(isoPath)}",
+                    WindowsProcessTimeouts.DiskImageOperation,
+                    line => Log($"ISO mount: {line}"),
+                    captureStandardOutput: line =>
+                    {
+                        lock (mountOutputLock)
+                            mountOutput.AppendLine(line);
+                    });
+                if (mountResult.Completion == StreamingProcessCompletion.Cancelled)
+                    throw new OperationCanceledException(_installationCancellation.Token);
+                if (mountResult.Completion == StreamingProcessCompletion.TerminationFailed)
+                    throw new UnterminatedProcessException(
+                        "ISO mount process tree could not be proven stopped.");
+                if (mountResult.Completion != StreamingProcessCompletion.Exited || mountResult.ExitCode != 0)
+                    return false;
+                imageMounted = true;
 
-                try
+                string mountText;
+                lock (mountOutputLock)
+                    mountText = mountOutput.ToString();
+                string[] driveLetters = mountText
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(line => line.Trim())
+                    .Where(line => Regex.IsMatch(line, "^[A-Za-z]$"))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                if (driveLetters.Length != 1)
                 {
-                    string scriptPath = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory,
-                        "Scripts",
-                        "libertix-disk-image.ps1");
-
-                    var mountResult = RunProcess(
-                        powershell,
-                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
-                        $"-Action Mount -ImagePath {QuoteArgument(isoPath)}",
-                        (int)WindowsProcessTimeouts.DiskImageOperation.TotalMilliseconds);
-                    mountedDrive = mountResult.output.Trim();
-                    if (mountResult.exitCode != 0 || string.IsNullOrEmpty(mountedDrive))
-                    {
-                        Dispatcher.Invoke(() => Log($"ERROR mounting ISO: {mountResult.error}"));
-                        return false;
-                    }
-
-                    if (mountedDrive.Contains("\n"))
-                    {
-                        mountedDrive = mountedDrive.Split('\n')[0].Trim();
-                    }
-
-                    Dispatcher.Invoke(() => Log($"ISO mounted at {mountedDrive}:"));
-
-                    string sourceDir = $"{mountedDrive}:\\";
-                    string destDir = BiosInstallerRoot;
-
-                    if (!Directory.Exists(sourceDir))
-                    {
-                        Dispatcher.Invoke(() => Log($"ERROR: Source directory not found: {sourceDir}"));
-                        return false;
-                    }
-
-                    Dispatcher.Invoke(() => Log($"Copying files from {sourceDir} to {destDir}..."));
-
-                    // Use xcopy for reliable copying (robocopy can have issues with ISO).
-                    var copyResult = RunProcess(
-                        "xcopy",
-                        $"\"{sourceDir}*\" \"{destDir}\" /E /H /Y /Q",
-                        (int)WindowsProcessTimeouts.FileCopy.TotalMilliseconds);
-                    if (copyResult.exitCode != 0)
-                    {
-                        Dispatcher.Invoke(() => Log($"Copy error (exit {copyResult.exitCode}): {copyResult.error}"));
-                        return false;
-                    }
-
-                    var lines = copyResult.output.Split('\n');
-                    string lastLine = lines.Length > 0 ? lines[lines.Length - 1].Trim() : "done";
-                    if (string.IsNullOrWhiteSpace(lastLine) && lines.Length > 1)
-                        lastLine = lines[lines.Length - 2].Trim();
-                    Dispatcher.Invoke(() => Log($"Copy completed: {(string.IsNullOrWhiteSpace(lastLine) ? "done" : lastLine)}"));
-
-                    NormalizeLiveBootNames(destDir);
-                    Dispatcher.Invoke(() => Log("Live boot directory and file name casing verified"));
-
-                    Dispatcher.Invoke(() => Log("Files copied successfully"));
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() => Log($"Mount/copy failed: {ex.Message}"));
+                    Log($"ERROR: ISO mount returned {driveLetters.Length} drive letters.");
                     return false;
                 }
-                finally
+                mountedDrive = driveLetters[0];
+                Log($"ISO mounted at {mountedDrive}:");
+
+                string sourceDir = $"{mountedDrive}:\\";
+                string destDir = BiosInstallerRoot;
+                if (!Directory.Exists(sourceDir))
+                {
+                    Log($"ERROR: Source directory not found: {sourceDir}");
+                    return false;
+                }
+
+                Log($"Copying files from {sourceDir} to {destDir}...");
+                var copyOutput = new StringBuilder();
+                object copyOutputLock = new object();
+                StreamingProcessResult copyResult = await RunStreamingProcessAsync(
+                    "xcopy.exe",
+                    $"{QuoteArgument(sourceDir + "*")} {QuoteArgument(destDir)} /E /H /Y /Q",
+                    WindowsProcessTimeouts.FileCopy,
+                    line => Log($"XCOPY: {line}"),
+                    captureStandardOutput: line =>
+                    {
+                        lock (copyOutputLock)
+                            copyOutput.AppendLine(line);
+                    });
+                if (copyResult.Completion == StreamingProcessCompletion.Cancelled)
+                    throw new OperationCanceledException(_installationCancellation.Token);
+                if (copyResult.Completion == StreamingProcessCompletion.TerminationFailed)
+                    throw new UnterminatedProcessException(
+                        "ISO copy process tree could not be proven stopped.");
+                if (copyResult.Completion != StreamingProcessCompletion.Exited || copyResult.ExitCode != 0)
+                {
+                    Log($"Copy error (exit {copyResult.ExitCode}, {copyResult.Completion}).");
+                    return false;
+                }
+
+                string copyText;
+                lock (copyOutputLock)
+                    copyText = copyOutput.ToString();
+                string lastLine = copyText
+                    .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(line => line.Trim())
+                    .LastOrDefault() ?? "done";
+                Log($"Copy completed: {lastLine}");
+
+                NormalizeLiveBootNames(destDir);
+                Log("Live boot directory and file name casing verified");
+                Log("Files copied successfully");
+                if (!await DismountBiosIsoAsync(powershell, scriptPath, isoPath))
+                    return false;
+                imageMounted = false;
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (UnterminatedProcessException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Log($"Mount/copy failed: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (imageMounted)
                 {
                     try
                     {
-                        Dispatcher.Invoke(() => Log("Dismounting ISO..."));
-                        var unmountResult = RunProcess(
-                            powershell,
-                            $"-NoProfile -ExecutionPolicy Bypass -File " +
-                            $"{QuoteArgument(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Scripts", "libertix-disk-image.ps1"))} " +
-                            $"-Action Dismount -ImagePath {QuoteArgument(isoPath)}",
-                            (int)WindowsProcessTimeouts.DiskImageOperation.TotalMilliseconds);
-                        if (unmountResult.exitCode != 0)
-                            throw new InvalidOperationException(unmountResult.error);
-                        Dispatcher.Invoke(() => Log("ISO dismounted"));
+                        await DismountBiosIsoAsync(powershell, scriptPath, isoPath);
+                    }
+                    catch (UnterminatedProcessException)
+                    {
+                        throw;
                     }
                     catch (Exception unmountEx)
                     {
-                        Dispatcher.Invoke(() => Log($"Warning: Could not dismount ISO: {unmountEx.Message}"));
+                        Log($"Warning: Could not dismount ISO: {unmountEx.Message}");
                     }
                 }
-            });
+            }
+        }
+
+        private async Task<bool> DismountBiosIsoAsync(
+            string powershell,
+            string scriptPath,
+            string isoPath)
+        {
+            Log("Dismounting ISO...");
+            StreamingProcessResult unmountResult = await RunStreamingProcessAsync(
+                powershell,
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                $"-Action Dismount -ImagePath {QuoteArgument(isoPath)}",
+                WindowsProcessTimeouts.DiskImageOperation,
+                line => Log($"ISO dismount: {line}"),
+                observeCancellation: false);
+            if (unmountResult.Completion == StreamingProcessCompletion.TerminationFailed)
+            {
+                throw new UnterminatedProcessException(
+                    "ISO dismount process tree could not be proven stopped.");
+            }
+            if (unmountResult.Completion != StreamingProcessCompletion.Exited ||
+                unmountResult.ExitCode != 0)
+            {
+                Log(
+                    $"ERROR: ISO dismount failed with rc={unmountResult.ExitCode} " +
+                    $"({unmountResult.Completion}).");
+                return false;
+            }
+            Log("ISO dismounted");
+            return true;
         }
 
         private bool ConfigureBiosLowMemoryBoot()

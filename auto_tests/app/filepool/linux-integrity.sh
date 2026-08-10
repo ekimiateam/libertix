@@ -31,7 +31,7 @@ fi
 
 section "BOOT CONFIGURATION"
 run cat /etc/default/grub
-sudo_run grep -nE 'timeout|menuentry .(Linux Mint|Windows)' /boot/grub/grub.cfg
+sudo_run grep -nE 'timeout|^(menuentry|submenu) ' /boot/grub/grub.cfg
 if [[ -d /sys/firmware/efi ]]; then
     sudo_run efibootmgr -v
 else

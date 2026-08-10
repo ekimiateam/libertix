@@ -145,6 +145,12 @@ def validate_state(value: Any) -> dict[str, Any]:
         raise StateTransitionError("rollback-running requires the rollback phase")
     if status in TERMINAL_STATUSES and value["phase"] != "complete":
         raise StateTransitionError("terminal states require the complete phase")
+    if status == "succeeded" and completed != list(ORDERED_STEPS):
+        raise StateTransitionError("a successful state requires every installation step")
+    if status == "rolled-back":
+        required_compensations = {step for step in completed if step in COMPENSATABLE_STEPS}
+        if set(compensated) != required_compensations:
+            raise StateTransitionError("a rolled-back state requires every applicable compensation")
     if status in {"failed", "rollback-running"} | TERMINAL_STATUSES and active_step is not None:
         raise StateTransitionError(
             "failed, rollback, and terminal states cannot have an active step"

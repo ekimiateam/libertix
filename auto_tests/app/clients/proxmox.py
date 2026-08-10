@@ -132,6 +132,80 @@ class ProxmoxClient:
                 details={"vmid": vmid, "snapshot": snapshot},
             )
 
+    def get_vm_status(self, node: str, vmid: int, *, step: str) -> dict[str, object]:
+        data = self._request("GET", f"/nodes/{node}/qemu/{vmid}/status/current", step=step)
+        if not isinstance(data, dict):
+            raise WorkflowError(
+                step,
+                "Invalid Proxmox VM-status response",
+                details={"vmid": vmid, "node": node},
+            )
+        return data
+
+    def verify_rollback_state(
+        self,
+        node: str,
+        vmid: int,
+        snapshot: str,
+        *,
+        require_running: bool,
+    ) -> dict[str, object]:
+        snapshots = self._request(
+            "GET",
+            f"/nodes/{node}/qemu/{vmid}/snapshot",
+            step="proxmox.verify_rollback_snapshot",
+        )
+        current = (
+            [item for item in snapshots if isinstance(item, dict) and item.get("name") == "current"]
+            if isinstance(snapshots, list)
+            else []
+        )
+        if len(current) != 1 or str(current[0].get("parent") or "") != snapshot:
+            raise WorkflowError(
+                "proxmox.verify_rollback_snapshot",
+                "The VM current state is not based on the requested snapshot",
+                details={
+                    "vmid": vmid,
+                    "node": node,
+                    "expected_snapshot": snapshot,
+                    "current_count": len(current),
+                    "current_parent": (
+                        str(current[0].get("parent") or "") if len(current) == 1 else ""
+                    ),
+                },
+            )
+
+        status_data = self.get_vm_status(node, vmid, step="proxmox.verify_rollback_status")
+        status = str(status_data.get("status") or "")
+        qmpstatus = str(status_data.get("qmpstatus") or "")
+        if status not in {"running", "stopped"} or qmpstatus == "io-error":
+            raise WorkflowError(
+                "proxmox.verify_rollback_status",
+                "The VM is not in a healthy post-rollback state",
+                details={
+                    "vmid": vmid,
+                    "node": node,
+                    "status": status,
+                    "qmpstatus": qmpstatus,
+                },
+            )
+        if require_running and (status != "running" or qmpstatus != "running"):
+            raise WorkflowError(
+                "proxmox.verify_rollback_status",
+                "The automation VM is not running after snapshot rollback",
+                details={
+                    "vmid": vmid,
+                    "node": node,
+                    "status": status,
+                    "qmpstatus": qmpstatus,
+                },
+            )
+        return {
+            "snapshot_parent": snapshot,
+            "status": status,
+            "qmpstatus": qmpstatus,
+        }
+
     def rollback(self, node: str, vmid: int, snapshot: str) -> None:
         data = self._request(
             "POST",

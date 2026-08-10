@@ -6,7 +6,10 @@
       xmlns:local="clr-namespace:Libertix.Pages"
       xmlns:controls="clr-namespace:Libertix.Controls"
       mc:Ignorable="d"
-      Title="Resize Disk">
+      Title="Resize Disk"
+      KeyboardNavigation.TabNavigation="Cycle"
+      Loaded="ResizeDisk_Loaded"
+      PreviewKeyDown="ResizeDisk_PreviewKeyDown">
 
     <Page.Resources>
         <Style x:Key="SliderRepeatButton" TargetType="RepeatButton">
@@ -68,9 +71,9 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <Label Grid.Row="0" 
-               Content="{DynamicResource ResizeDiskTitle}" 
-               HorizontalAlignment="Center" 
+        <Label Grid.Row="0"
+               Content="{DynamicResource ResizeDiskTitle}"
+               HorizontalAlignment="Center"
                Margin="20"
                FontSize="48"
                FontWeight="Light"
@@ -159,17 +162,19 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                
+
                 <Slider x:Name="PartitionSlider"
                         Style="{StaticResource CustomSlider}"
                         Minimum="{Binding MinimumSize}"
                         Maximum="{Binding MaximumSize}"
                         Value="{Binding SelectedSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                         IsEnabled="{Binding CanAllocateLinux}"
+                        TabIndex="0"
                         TickFrequency="1"
                         IsSnapToTickEnabled="True"/>
-                
-                <TextBox Grid.Column="1"
+
+                <TextBox x:Name="ManualSizeBox"
+                         Grid.Column="1"
                          Width="80"
                          Height="30"
                          Margin="20,0,5,0"
@@ -180,9 +185,10 @@
                          VerticalContentAlignment="Center"
                          Text="{Binding ManualSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          IsEnabled="{Binding CanAllocateLinux}"
+                         TabIndex="1"
                          PreviewTextInput="NumberValidationTextBox"
                          DataObject.Pasting="ManualSize_Pasting"/>
-                
+
                 <TextBlock Grid.Column="2"
                           VerticalAlignment="Center"
                           Foreground="{DynamicResource TextPrimary}"
@@ -225,28 +231,30 @@
                            Title="{DynamicResource NotEnoughSpace}"
                            Message="{DynamicResource FreeUpSpace}"
                            Details="{Binding SystemRequirements}"
-                           AdditionalDetails="{Binding AdditionalSpaceNeeded}"
-                           ActionButtonText="{DynamicResource OpenDiskCleanup}"
-                           ActionCommand="{Binding OpenDiskCleanupCommand}"/>
+                           AdditionalDetails="{Binding AdditionalSpaceNeeded}"/>
 
         <Grid Grid.Row="3" Margin="20">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            
+
             <Button Content="{DynamicResource Back}"
                     Style="{StaticResource ModernButton}"
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Left"
+                    TabIndex="2"
                     Click="BackButton_Click"/>
-                    
-            <Button Grid.Column="1"
+
+            <Button x:Name="NextButton"
+                    Grid.Column="1"
                     Content="{DynamicResource Next}"
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Right"
+                    TabIndex="3"
+                    IsDefault="True"
                     Click="NextButton_Click">
                 <Button.Style>
                     <Style TargetType="Button" BasedOn="{StaticResource ModernButton}">

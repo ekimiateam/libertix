@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 
+from app.api_runtime import mark_capture_workspace_owned
 from app.clients.proxmox import ProxmoxClient
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
+from app.distributions import load_distribution_profile
 from app.errors import WorkflowError
 from app.models import OperationResult, SourceMode, StepResult
 from app.services.automation_monitoring import InstallationMonitoringMixin
@@ -43,8 +46,8 @@ class AutomationService(
         self.settings = settings
         self._capture_dir = Path(settings.capture_dir)
         self.validation = ValidationService(settings)
-        self.preflight = AutomationPreflight(self._proxmox)
-        self.vnc = VNCClient()
+        self.preflight = AutomationPreflight(self._proxmox, settings)
+        self.vnc = VNCClient(settings.vnc_timeout_seconds)
         self.vision_llm = VisionLLMClient(
             settings.llm_api_key.get_secret_value(),
             settings.llm_api_url,
@@ -62,6 +65,7 @@ class AutomationService(
         apply: bool,
         linux_username: str,
         linux_password: str,
+        distribution: str = "mint",
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
@@ -72,6 +76,7 @@ class AutomationService(
         capture_workspace = tempfile.TemporaryDirectory(
             prefix="automation-", dir=self.settings.capture_dir
         )
+        mark_capture_workspace_owned(Path(capture_workspace.name))
         previous_capture_dir = self._capture_dir
         self._capture_dir = Path(capture_workspace.name)
         result = ResultBuilder("automation", on_step=on_step)
@@ -98,6 +103,7 @@ class AutomationService(
                 linux_username=linux_username,
                 linux_password=linux_password,
                 monitor_iso=monitor_iso,
+                distribution=load_distribution_profile(distribution),
                 share_windows_files_in_linux=share_windows_files_in_linux,
                 share_linux_files_in_windows=share_linux_files_in_windows,
             )
@@ -263,35 +269,64 @@ class AutomationService(
             return result.failure(exc)
 
     def _prepare_windows_test_vm(self, vm: VMConfig, result: ResultBuilder) -> None:
-        with self.validation.ssh(
-            vm.host,
-            vm.username,
-            self.settings.windows_ssh_password.get_secret_value(),
-        ) as ssh:
-            response = self.validation.run_windows_script(
-                ssh,
-                script_name="prepare_windows_test_vm.ps1",
-                config={"utc_now": datetime.now(UTC).isoformat()},
-                step="automation.prepare_vm",
-                timeout=60,
-            )
-        values = self.validation.parse_powershell_results(
-            response.stdout,
-            prefixes=("UTC_NOW", "CLOCK_SKEW_SECONDS"),
-        )
-        if not values.get("UTC_NOW") or not values.get("CLOCK_SKEW_SECONDS"):
-            raise WorkflowError(
-                "automation.prepare_vm",
-                "Windows test VM did not confirm its synchronized clock",
-                details={"vm": vm.name, "host": vm.host},
-            )
+        values: dict[str, str] = {}
+        for attempt in range(1, 4):
+            try:
+                with self.validation.ssh(
+                    vm.host,
+                    vm.username,
+                    self.settings.windows_ssh_password.get_secret_value(),
+                    remote_os="windows",
+                ) as ssh:
+                    response = self.validation.run_windows_script(
+                        ssh,
+                        script_name="prepare_windows_test_vm.ps1",
+                        config={"utc_now": datetime.now(UTC).isoformat()},
+                        step="automation.prepare_vm",
+                        timeout=60,
+                    )
+                values = self.validation.parse_powershell_results(
+                    response.stdout,
+                    prefixes=(
+                        "UTC_NOW",
+                        "CLOCK_SKEW_SECONDS",
+                        "TOAST_NOTIFICATIONS_DISABLED",
+                        "WINDOWS_BACKUP_NOTIFICATIONS_DISABLED",
+                        "WINDOWS_NOTIFICATION_SERVICES_DISABLED",
+                    ),
+                )
+                if (
+                    not values.get("UTC_NOW")
+                    or not values.get("CLOCK_SKEW_SECONDS")
+                    or values.get("TOAST_NOTIFICATIONS_DISABLED") != "True"
+                    or values.get("WINDOWS_BACKUP_NOTIFICATIONS_DISABLED") != "True"
+                    or values.get("WINDOWS_NOTIFICATION_SERVICES_DISABLED") != "True"
+                ):
+                    raise WorkflowError(
+                        "automation.prepare_vm",
+                        "Windows test VM did not confirm its clock and notification policy",
+                        details={"vm": vm.name, "host": vm.host},
+                    )
+                break
+            except WorkflowError:
+                if attempt == 3:
+                    raise
+                logger.warning(
+                    "Windows VM preparation attempt %s/3 failed; retrying",
+                    attempt,
+                    extra={"step": "automation.prepare_vm_retry", "target": vm.host},
+                )
+                time.sleep(3)
         result.ok(
             "automation.prepare_vm",
-            "Windows test VM clock synchronized after snapshot restore",
+            "Windows test VM clock synchronized and notifications disabled after snapshot restore",
             vm=vm.name,
             target=vm.host,
             utc_now=values["UTC_NOW"],
             clock_skew_seconds=int(values["CLOCK_SKEW_SECONDS"]),
+            toast_notifications_disabled=True,
+            windows_backup_notifications_disabled=True,
+            windows_notification_services_disabled=True,
         )
 
     def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:

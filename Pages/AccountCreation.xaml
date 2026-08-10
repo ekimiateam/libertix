@@ -5,7 +5,10 @@
       xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
       xmlns:local="clr-namespace:Libertix.Pages"
       mc:Ignorable="d"
-      Title="Create Account">
+      Title="Create Account"
+      KeyboardNavigation.TabNavigation="Cycle"
+      Loaded="AccountCreation_Loaded"
+      PreviewKeyDown="AccountCreation_PreviewKeyDown">
 
     <Grid Background="{DynamicResource PrimaryBackground}">
         <Grid.RowDefinitions>
@@ -14,24 +17,25 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <Label Grid.Row="0" 
-               Content="{DynamicResource AccountCreationTitle}" 
-               HorizontalAlignment="Center" 
+        <Label Grid.Row="0"
+               Content="{DynamicResource AccountCreationTitle}"
+               HorizontalAlignment="Center"
                Margin="20"
                FontSize="48"
                FontWeight="Light"
                Foreground="{DynamicResource TextPrimary}"/>
 
-        <StackPanel Grid.Row="1" 
+        <StackPanel Grid.Row="1"
                     Width="400"
                     VerticalAlignment="Center">
-            
+
             <Label Content="{DynamicResource Username}"
                    Foreground="{DynamicResource TextPrimary}"
                    FontSize="16"
                    Margin="0,0,0,5"/>
             <TextBox x:Name="UsernameBox"
                      MaxLength="32"
+                     TabIndex="0"
                      Height="40"
                      FontSize="16"
                      Padding="10,5"
@@ -66,6 +70,7 @@
                    Margin="0,0,0,5"/>
             <PasswordBox x:Name="PasswordBox"
                          MaxLength="128"
+                         TabIndex="1"
                          Height="40"
                          FontSize="16"
                          Padding="10,5"
@@ -100,6 +105,7 @@
                    Margin="0,0,0,5"/>
             <PasswordBox x:Name="ConfirmPasswordBox"
                          MaxLength="128"
+                         TabIndex="2"
                          Height="40"
                          FontSize="16"
                          Padding="10,5"
@@ -134,6 +140,7 @@
                    Margin="0,0,0,5"/>
             <TextBox x:Name="HostnameBox"
                      MaxLength="63"
+                     TabIndex="3"
                      Height="40"
                      FontSize="16"
                      Padding="10,5"
@@ -168,14 +175,15 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            
+
             <Button Content="{DynamicResource Back}"
                     Style="{StaticResource ModernButton}"
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Left"
+                    TabIndex="4"
                     Click="BackButton_Click"/>
-                    
+
             <Button x:Name="NextButton"
                     Grid.Column="1"
                     Content="{DynamicResource Next}"
@@ -183,6 +191,8 @@
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Right"
+                    TabIndex="5"
+                    IsDefault="True"
                     Click="NextButton_Click"
                     IsEnabled="False"/>
         </Grid>

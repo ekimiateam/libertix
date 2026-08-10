@@ -8,6 +8,18 @@
 # functions. Keeping that contract explicit prevents firmware policy from
 # leaking into the common runtime.
 
+verify_file_sha256() {
+    local path="$1" expected="$2" actual
+
+    case "$expected" in
+        *[!0-9A-Fa-f]*|'') return 2 ;;
+    esac
+    [ "${#expected}" -eq 64 ] || return 2
+    [ -f "$path" ] || return 1
+    actual="$(sha256sum -- "$path" 2>/dev/null | awk '{print $1}')" || return 1
+    [ "$actual" = "$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')" ]
+}
+
 print_disk_state() {
     echo "--- Disk state: $1 ---"
     if [ -n "$DISK" ] && [ -b "$DISK" ]; then
@@ -205,6 +217,46 @@ mount_windows_ro_with_retry() {
     die "cannot mount Windows partition read-only: $partition"
 }
 
+mount_linux_root_read_only_or_die() {
+    local partition="$1"
+    local mountpoint="$2"
+    local attempt rc output mounted_source
+
+    mkdir -p "$mountpoint"
+    unmount_if_mounted "$mountpoint" || \
+        die "final verify: cannot release previous target verification mount"
+
+    for attempt in $(seq 1 10); do
+        echo "Mounting Linux root read-only, attempt $attempt/10: $partition -> $mountpoint"
+        sync || true
+        udevadm settle 2>/dev/null || true
+
+        if output=$(mount -t ext4 -o ro "$partition" "$mountpoint" 2>&1); then
+            rc=0
+        else
+            rc=$?
+        fi
+
+        if [ "$rc" -eq 0 ]; then
+            mounted_source="$(findmnt -rn -M "$mountpoint" -o SOURCE 2>/dev/null || true)"
+            if [ "$(readlink -f "$mounted_source" 2>/dev/null || true)" \
+                = "$(readlink -f "$partition" 2>/dev/null || true)" ]; then
+                echo "Linux root mounted read-only on $mountpoint"
+                return 0
+            fi
+            output="mount returned success but the expected source was not observed"
+            rc=1
+        fi
+
+        echo "WARNING: read-only ext4 mount failed rc=$rc on attempt $attempt"
+        [ -n "$output" ] && printf '%s\n' "$output"
+        unmount_if_mounted "$mountpoint" || true
+        sleep 1
+    done
+
+    die "final verify: cannot mount Linux partition read-only: $partition"
+}
+
 wait_for_iso_source_or_die() {
     local iso_path="$1"
     local relative_path="$2"
@@ -351,7 +403,7 @@ write_windows_recovery_marker_file_best_effort() {
     [ -n "$RECOVERY_RUN_ID" ] || return 0
     [ -n "$WINDOWS_PART" ] && [ -b "$WINDOWS_PART" ] || return 0
     case "$RECOVERY_ROOT_WINDOWS" in
-        [Cc]:\\*) ;;
+        [A-Za-z]:\\*) ;;
         *)
             echo "WARNING: refusing unexpected Windows recovery root: $RECOVERY_ROOT_WINDOWS"
             return 0
@@ -368,14 +420,22 @@ write_windows_recovery_marker_file_best_effort() {
     fi
 
     mkdir -p "$(dirname "$marker")" 2>/dev/null || true
+    local temporary
+    temporary="$(dirname "$marker")/.${state}.$$.tmp"
+    umask 077
     {
         echo "LIBERTIX_${namespace}_RECOVERY_RUN_ID=$RECOVERY_RUN_ID"
         echo "LIBERTIX_${namespace}_RECOVERY_STATE=$state"
         echo "LIBERTIX_${namespace}_RECOVERY_STAGE=$CURRENT_STAGE"
         echo "LIBERTIX_${namespace}_RECOVERY_RC=$rc"
         echo "LIBERTIX_${namespace}_RECOVERY_TIME=$(date -Is 2>/dev/null || date)"
-    } > "$marker" 2>/dev/null || true
-    sync || true
+    } > "$temporary" 2>/dev/null || true
+    if [ -s "$temporary" ]; then
+        sync "$temporary" 2>/dev/null || sync || true
+        mv -f "$temporary" "$marker" 2>/dev/null || true
+        sync "$marker" 2>/dev/null || sync || true
+    fi
+    rm -f "$temporary" 2>/dev/null || true
     umount "$mountpoint" 2>/dev/null || true
     return 0
 }

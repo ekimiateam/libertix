@@ -6,19 +6,27 @@
 # those policies intentionally differ between the BIOS and UEFI adapters. This
 # module owns only stable Linux device naming and manifest-based resolution.
 
-partition_path() {
-    local disk="$1"
-    local number="$2"
-
-    if [[ "$(basename "$disk")" == nvme* ]] || [[ "$(basename "$disk")" == mmcblk* ]]; then
-        echo "${disk}p${number}"
-    else
-        echo "${disk}${number}"
-    fi
-}
-
 partition_number() {
     echo "$1" | grep -oE '[0-9]+$'
+}
+
+disk_partition_table_identity() {
+    local disk="$1" style pt_uuid
+
+    [ -b "$disk" ] || return 1
+    style="$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}')"
+    pt_uuid="$(blkid -s PTUUID -o value "$disk" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    case "$style" in
+        gpt)
+            echo "$pt_uuid" | grep -Eq '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' || return 1
+            printf 'gpt:%s\n' "$pt_uuid"
+            ;;
+        msdos)
+            echo "$pt_uuid" | grep -Eq '^[0-9a-f]{8}$' || return 1
+            printf 'mbr:%s\n' "$pt_uuid"
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 parent_disk_from_part() {

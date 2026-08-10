@@ -200,16 +200,14 @@
     <div class="layout">
       <aside>
         <section class="panel stack">
-          <h2>Accès</h2>
-          <label for="apiKey">Clé API</label>
-          <input id="apiKey" type="password" autocomplete="off" />
+          <h2>Options</h2>
           <label for="sourceMode">Source build</label>
           <select id="sourceMode">
             <option value="local">Working tree local</option>
             <option value="remote">dev distant</option>
           </select>
           <div class="buttons">
-            <button id="saveKey">Enregistrer</button>
+            <button id="saveOptions">Enregistrer</button>
             <button id="health">Tester /health</button>
             <button id="loadVms">Charger les VM</button>
           </div>
@@ -226,6 +224,13 @@
 
         <section class="panel stack">
           <h2>Automation</h2>
+          <label>
+            Distribution
+            <select id="distribution">
+              <option value="mint">Linux Mint 22.3 Cinnamon</option>
+              <option value="zorin">Zorin OS 18.1 Core</option>
+            </select>
+          </label>
           <label>
             Utilisateur Linux
             <input id="linuxUsername" type="text" value="test" autocomplete="off" />
@@ -326,8 +331,8 @@
     </div>
 
     <script>
-      const apiKeyInput = document.getElementById("apiKey");
       const sourceModeInput = document.getElementById("sourceMode");
+      const distributionInput = document.getElementById("distribution");
       const linuxUsernameInput = document.getElementById("linuxUsername");
       const linuxPasswordInput = document.getElementById("linuxPassword");
       const monitorIsoInput = document.getElementById("monitorIso");
@@ -339,12 +344,14 @@
       const buttons = [...document.querySelectorAll("button")];
 
       sourceModeInput.value = sessionStorage.getItem("libertix_source_mode") || "local";
+      distributionInput.value = sessionStorage.getItem("libertix_distribution") || "mint";
       linuxUsernameInput.value = sessionStorage.getItem("libertix_linux_username") || "test";
 
-      document.getElementById("saveKey").addEventListener("click", () => {
+      document.getElementById("saveOptions").addEventListener("click", () => {
         sessionStorage.setItem("libertix_source_mode", sourceModeInput.value);
+        sessionStorage.setItem("libertix_distribution", distributionInput.value);
         sessionStorage.setItem("libertix_linux_username", linuxUsernameInput.value);
-        setStatus("Options non sensibles enregistrées pour cet onglet. Les secrets restent en mémoire.", false);
+        setStatus("Options enregistrées pour cet onglet. Le mot de passe Linux n'est pas stocké.", false);
       });
       document.getElementById("health").addEventListener("click", checkHealth);
       document.getElementById("loadVms").addEventListener("click", loadVms);
@@ -361,8 +368,8 @@
       document.getElementById("resetStream").addEventListener("click", () => confirmReset(() => runReset(true)));
       document.getElementById("resetJson").addEventListener("click", () => confirmReset(() => runReset(false)));
 
-      function apiHeaders(hasJsonBody = false) {
-        const headers = { "X-API-Key": apiKeyInput.value };
+      function requestHeaders(hasJsonBody = false) {
+        const headers = {};
         if (hasJsonBody) {
           headers["Content-Type"] = "application/json";
         }
@@ -375,16 +382,23 @@
 
       function requestBody() {
         const vms = selectedVms();
+        if (!vms.length) {
+          setStatus("Sélectionnez au moins une VM.", true);
+          return null;
+        }
         return {
-          ...(vms.length ? { vms } : {}),
+          vms,
           source: sourceModeInput.value || "local",
         };
       }
 
       function automationBody(apply) {
+        const body = requestBody();
+        if (!body) return null;
         return {
-          ...requestBody(),
+          ...body,
           apply,
+          distribution: distributionInput.value || "mint",
           linux_username: linuxUsernameInput.value || "test",
           linux_password: linuxPasswordInput.value,
           monitor_iso: monitorIsoInput.checked,
@@ -447,7 +461,7 @@
       async function loadVms() {
         setBusy(true);
         try {
-          const response = await fetch("/api/v1/vms", { headers: apiHeaders() });
+          const response = await fetch("/api/v1/vms");
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}: ${await response.text()}`);
           }
@@ -514,40 +528,47 @@
 
       function runValidation(stream) {
         const body = requestBody();
+        if (!body) return;
         if (stream) {
           runStream("/api/v1/validation/stream?format=ndjson", body, "validation stream");
           return;
         }
         runJson(
           "/api/v1/validation",
-          { method: "POST", headers: apiHeaders(true), body: JSON.stringify(body) },
+          { method: "POST", headers: requestHeaders(true), body: JSON.stringify(body) },
           "validation",
         );
       }
 
       function runAutomation(apply, stream) {
         const body = automationBody(apply);
+        if (!body) return;
         if (stream) {
           runStream("/api/v1/automation/stream?format=ndjson", body, apply ? "automation apply stream" : "automation launch-only stream");
           return;
         }
         runJson(
           "/api/v1/automation",
-          { method: "POST", headers: apiHeaders(true), body: JSON.stringify(body) },
+          { method: "POST", headers: requestHeaders(true), body: JSON.stringify(body) },
           apply ? "automation apply" : "automation launch-only",
         );
       }
 
       function runReset(stream) {
+        const vms = selectedVms();
+        if (!vms.length) {
+          setStatus("Sélectionnez au moins une VM.", true);
+          return;
+        }
         const params = new URLSearchParams();
-        selectedVms().forEach((vm) => params.append("vm", vm));
+        vms.forEach((vm) => params.append("vm", vm));
         const suffix = params.toString() ? `?${params.toString()}` : "";
         if (stream) {
           const separator = suffix ? "&" : "?";
           runStream(`/api/v1/reset/stream${suffix}${separator}format=ndjson`, {}, "reset stream");
           return;
         }
-        runJson(`/api/v1/reset${suffix}`, { method: "POST", headers: apiHeaders() }, "reset");
+        runJson(`/api/v1/reset${suffix}`, { method: "POST" }, "reset");
       }
 
       async function runJson(url, options, label) {
@@ -579,7 +600,7 @@
         try {
           const response = await fetch(url, {
             method: "POST",
-            headers: apiHeaders(true),
+            headers: requestHeaders(true),
             body: JSON.stringify(body),
           });
           if (!response.ok) {
@@ -631,7 +652,7 @@
       }
 
       function confirmReset(action) {
-        if (confirm("Confirmer le reset : vider le partage SMB configuré et restaurer clean2 sur les VM configurées ?")) {
+        if (confirm("Confirmer le reset : restaurer le snapshot configuré sur les VM sélectionnées ? Le partage SMB sera conservé.")) {
           action();
         }
       }

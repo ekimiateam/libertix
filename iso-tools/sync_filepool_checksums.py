@@ -35,20 +35,35 @@ def update_metadata(
     if not isinstance(distributions, list) or not distributions:
         raise ValueError("Distribution metadata must contain at least one entry.")
 
+    existing_distributions: list[dict[str, object]] = []
+    if template_path is not None and metadata_path.is_file():
+        existing = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if isinstance(existing, list) and all(isinstance(entry, dict) for entry in existing):
+            existing_distributions = existing
+
     updates = (
         ("isoUrl", "isoSha256", bios_iso),
         ("uefiIsoUrl", "uefiIsoSha256", uefi_iso),
     )
     for url_key, hash_key, artifact in updates:
         if artifact is None:
+            hashes_by_url: dict[object, str] = {}
+            for existing_entry in existing_distributions:
+                previous_hash = existing_entry.get(hash_key)
+                if isinstance(previous_hash, str) and len(previous_hash) == 64:
+                    hashes_by_url[existing_entry.get(url_key)] = previous_hash
+            for entry in distributions:
+                previous_hash = hashes_by_url.get(entry.get(url_key))
+                if previous_hash is not None:
+                    entry[hash_key] = previous_hash
             continue
         artifact = artifact.resolve(strict=True)
         matches = [entry for entry in distributions if entry.get(url_key) == artifact.name]
-        if len(matches) != 1:
-            raise ValueError(
-                f"Expected exactly one distribution for {artifact.name}, found {len(matches)}."
-            )
-        matches[0][hash_key] = sha256(artifact)
+        if not matches:
+            raise ValueError(f"Expected at least one distribution for {artifact.name}, found none.")
+        artifact_hash = sha256(artifact)
+        for entry in matches:
+            entry[hash_key] = artifact_hash
 
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     # Readers must see either the previous complete catalogue or the new one.

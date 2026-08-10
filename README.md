@@ -1,8 +1,9 @@
 # Libertix
 
-Libertix is a Windows application that installs Linux Mint alongside an existing Windows system.
-It handles the Windows-side preparation, boots a purpose-built live environment, installs Mint and
-configures a dual-boot menu for either BIOS/MBR or UEFI/GPT machines.
+Libertix is a Windows application that installs a supported Debian/Ubuntu-family desktop system
+alongside an existing Windows system. It handles the Windows-side preparation, boots a
+purpose-built live environment, installs the selected distribution and configures a dual-boot menu
+for either BIOS/MBR or UEFI/GPT machines.
 
 > [!WARNING]
 > Libertix modifies disk partitions and boot configuration. Back up important data before using it.
@@ -30,7 +31,7 @@ flowchart TB
         UefiPrep["Windows UEFI preparation<br/>recovery guard, shrink, staging, EFI media and firmware boot"]
     end
 
-    Filepool["Filepool<br/>Mint ISO, Libertix ISO, boot files and verified hashes"]
+    Filepool["Filepool<br/>distribution ISO, Libertix ISO, boot files and verified hashes"]
 
     subgraph Images["Versioned live images"]
         BiosImage["BIOS live ISO"]
@@ -38,13 +39,13 @@ flowchart TB
         LivePlan["Plan and hardware revalidation"]
         SharedRuntime["Shared live runtime<br/>translations, progress, storage and rollback"]
         FirmwareAdapters["Firmware adapters<br/>BIOS disk boot or UEFI firmware boot"]
-        Installer["Mint installation<br/>expand staging, ext4, extract and configure target"]
+        Installer["Linux installation<br/>inspect ISO, expand staging, ext4, extract and configure target"]
     end
 
     subgraph Installed["Installed dual-boot system"]
-        Mint["Linux Mint<br/>locale, keyboard, account and desktop"]
-        Grub["Final GRUB menu<br/>Mint, Windows, shutdown and advanced options"]
-        Sharing["Optional file sharing<br/>Windows folders in Mint and read-only Linux files in Windows"]
+        Linux["Selected Linux system<br/>locale, keyboard, account and desktop"]
+        Grub["Final GRUB menu<br/>Linux, Windows, shutdown and advanced options"]
+        Sharing["Optional file sharing<br/>Windows folders in Linux and read-only Linux files in Windows"]
     end
 
     Recovery["Verified recovery path<br/>cancel, compensate completed stages and restore Windows boot"]
@@ -69,7 +70,7 @@ flowchart TB
     FirmwareAdapters --> Installer
     Filepool --> Installer
 
-    Installer --> Mint
+    Installer --> Linux
     Installer --> Grub
     Installer --> Sharing
     State --> Recovery
@@ -89,7 +90,7 @@ flowchart TB
 
     class Startup,Wizard,Preflight,Plan,State,BiosPrep,UefiPrep windows
     class BiosImage,UefiImage,LivePlan,SharedRuntime,FirmwareAdapters,Installer live
-    class Mint,Grub,Sharing target
+    class Linux,Grub,Sharing target
     class Recovery,Tests,CI support
     class Filepool external
 ```
@@ -124,7 +125,7 @@ flowchart TB
 - BIOS with an MBR disk, or UEFI with a GPT disk
 - .NET Framework 4.8
 - Administrator privileges
-- Linux Mint 22.3 Cinnamon
+- Linux Mint 22.3 Cinnamon or Zorin OS 18.1 Core
 - At least 20 GiB of shrinkable space on the Windows system disk
 - A storage layout accepted by the compatibility preflight
 
@@ -138,7 +139,7 @@ outside the Linux allocation and is checked again before the live environment wr
 
 ## Optional file sharing
 
-The installer can expose Windows user folders in Mint and Linux user files in Windows. Linux files
+The installer can expose Windows user folders in Linux and Linux user files in Windows. Linux files
 are mounted read-only on Windows. Both directions are optional and selected before installation.
 
 ## Runtime configuration
@@ -149,6 +150,13 @@ The production executable uses this filepool by default:
 https://ekimia.fr/libertix
 ```
 
+Reusing local ISO files does not remove the catalogue requirement. With the production filepool,
+Libertix first downloads `distros.json` and its detached signature, verifies that signature, and
+only then looks beside `Libertix.exe` for the exact filenames selected by the catalogue. A matching
+local file is used after its SHA-256 is verified; otherwise Libertix downloads the artifact from the
+configured URL. A laboratory machine without Internet access therefore needs an accessible local
+HTTP filepool containing the catalogue and every artifact that is not beside the executable.
+
 Development and test runs can override it for one process without changing the production default:
 
 ```powershell
@@ -156,7 +164,8 @@ Development and test runs can override it for one process without changing the p
 ```
 
 The override must be an absolute HTTP or HTTPS URL without embedded credentials, query parameters or
-fragments.
+fragments. It is an explicit development mode and does not require the production catalogue
+signature; it must not be used to trust an unverified third-party server.
 
 Automated development installations also use an explicit static-address option:
 
@@ -215,23 +224,30 @@ libertix-installer-uefi.iso
 The builder verifies the embedded scripts, schemas, boot configuration, theme and required runtime
 tools before accepting either image.
 
+Version, origin, license and SHA-256 information for binaries and fonts stored in the repository is
+recorded in [THIRD_PARTY.md](THIRD_PARTY.md).
+
 ## Tests
 
 The automated test service is located in `auto_tests`. Its runtime configuration is loaded from a
 local `.env` file; `auto_tests/.env.example` documents the required fields.
+The complete developer environment, API reference, build workflow, and copy-paste Mint/Zorin
+commands are documented in [`auto_tests/README.md`](auto_tests/README.md).
 
 ```bash
 cd auto_tests
-python -m pip install --requirement requirements-dev.txt
-python -m ruff check app tests ../assets/live/*.py
-python -m ruff format --check app tests ../assets/live/*.py
-python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
+uv sync --frozen --extra dev
+uv run --frozen python -m ruff check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
+uv run --frozen python -m ruff format --check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
+uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 ```
 
 The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, analyzes PowerShell with
 PSScriptAnalyzer, runs the Pester contract suite, builds `Libertix.exe` on Windows and builds both
 ISO images on trusted `dev` branch runs. Successful workflow runs publish the WPF build and the
-verified ISO images as GitHub Actions artifacts.
+verified ISO images as GitHub Actions artifacts. Dev prereleases include the WPF archive, both ISO
+images and a `SHA256SUMS` file. The WPF archive contains `BUILD-INFO.txt`, `LICENSE` and
+`THIRD_PARTY.md`; the executable informational version records the complete source revision.
 
 ## Source layout
 

@@ -8,6 +8,7 @@ import time
 from typing import Literal
 
 from app.config import VMConfig
+from app.distributions import DistributionProfile, load_distribution_profile
 from app.errors import WorkflowError
 from app.services.automation_types import Point
 from app.services.common import ResultBuilder
@@ -23,9 +24,11 @@ class InstallationMonitoringMixin:
         vm: VMConfig,
         result: ResultBuilder,
         firmware: Literal["bios", "uefi"],
+        distribution: DistributionProfile | None = None,
     ) -> Literal["boot-menu", "linux-desktop"]:
         """Monitor Windows preparation and the following live boot as one transaction."""
 
+        distribution = distribution or load_distribution_profile("mint")
         deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
         attempt = 0
         last_context: dict[str, object] | None = None
@@ -120,7 +123,7 @@ class InstallationMonitoringMixin:
             # menu. This check precedes the model's generic finished flag so a
             # boot menu can never be mislabeled as a running Linux desktop.
             final_boot_evidence = f"{verdict.visible_text}\n{verdict.summary}"
-            if self._reboot_or_live_started(final_boot_evidence):
+            if self._reboot_or_live_started(final_boot_evidence, distribution):
                 result.ok(
                     "automation.installed_boot_menu_seen",
                     f"Installed {firmware.upper()} boot menu confirmed visually",
@@ -131,7 +134,7 @@ class InstallationMonitoringMixin:
                 reboot_attempts > 0
                 and verdict.installation_finished
                 and not verdict.active_install_progress_visible
-                and self._installed_linux_desktop_seen(final_boot_evidence)
+                and self._installed_linux_desktop_seen(final_boot_evidence, distribution)
             ):
                 result.ok(
                     "automation.installation_finished",
@@ -209,7 +212,9 @@ class InstallationMonitoringMixin:
         )
 
     @staticmethod
-    def _reboot_or_live_started(visible_text: str) -> bool:
+    def _reboot_or_live_started(
+        visible_text: str, distribution: DistributionProfile | None = None
+    ) -> bool:
         """Detect that Windows has left the wizard and the live boot path started.
 
         Both firmware paths must remain under observation after the reboot.
@@ -217,13 +222,14 @@ class InstallationMonitoringMixin:
         merely because the Windows preparation reached its restart prompt.
         """
 
+        distribution = distribution or load_distribution_profile("mint")
         text = visible_text.lower()
         # The final themed GRUB menu is conclusive evidence that the live
         # installer completed and handed control to the installed system.  It
         # contains both operating systems plus the Libertix advanced submenu;
         # a standalone Windows Boot Manager screen must remain a blocker.
         final_menu_markers = (
-            "linux mint gnu/linux",
+            distribution.grub_display_name.casefold(),
             "shutdown",
             "advanced options",
         )
@@ -249,15 +255,16 @@ class InstallationMonitoringMixin:
                 "écran de verrouillage",
                 "appliquer les modifications",
                 "creating uefi installer partition",
-                "downloading mint iso",
+                "downloading linux installer iso",
+                "downloading distribution iso",
                 "downloading uefi installer",
                 "copying uefi installer",
                 "copying iso contents",
                 "mounting iso",
                 "configuring uefi boot",
                 "libertixtools",
-                "c:\\mint.iso",
-                "c:/mint.iso",
+                f"c:\\{distribution.installer_iso_file_name.casefold()}",
+                f"c:/{distribution.installer_iso_file_name.casefold()}",
                 "c:\\libertixtools",
                 "c:/libertixtools",
             )
@@ -267,9 +274,12 @@ class InstallationMonitoringMixin:
         return False
 
     @staticmethod
-    def _installed_linux_desktop_seen(content: str) -> bool:
+    def _installed_linux_desktop_seen(
+        content: str, distribution: DistributionProfile | None = None
+    ) -> bool:
         """Require Linux-specific evidence before accepting a generic final verdict."""
 
+        distribution = distribution or load_distribution_profile("mint")
         text = content.casefold()
         if any(
             marker in text
@@ -282,7 +292,10 @@ class InstallationMonitoringMixin:
             )
         ):
             return False
-        linux_markers = ("linux mint", "cinnamon")
+        linux_markers = (
+            distribution.name.casefold(),
+            distribution.os_release_id.casefold(),
+        )
         desktop_markers = ("desktop", "bureau", "welcome", "bienvenue", "panel", "panneau")
         return any(marker in text for marker in linux_markers) and any(
             marker in text for marker in desktop_markers
@@ -296,11 +309,27 @@ class InstallationMonitoringMixin:
             # Small delays keep the click sequence visible and avoid racing the
             # confirmation dialog after the LLM declares the wizard complete.
             time.sleep(2)
-            reboot_point = Point(1045, 643) if vm.screen_width >= 1200 else Point(919, 628)
+            if vm.screen_width >= 1200:
+                reboot_point = Point(
+                    round(1045 * vm.screen_width / 1280),
+                    round(643 * vm.screen_height / 800),
+                )
+                confirm_point = Point(
+                    round(756 * vm.screen_width / 1280),
+                    round(427 * vm.screen_height / 800),
+                )
+            else:
+                reboot_point = Point(
+                    round(919 * vm.screen_width / 1024),
+                    round(628 * vm.screen_height / 768),
+                )
+                confirm_point = Point(
+                    round(640 * vm.screen_width / 1024),
+                    round(427 * vm.screen_height / 768),
+                )
             # The confirmation is a fixed-width WPF dialog rendered by
             # Libertix, not a native MessageBox. Click the center of its
             # localized affirmative button at each validated VM resolution.
-            confirm_point = Point(756, 427) if vm.screen_width >= 1200 else Point(640, 427)
             self._click_absolute(client, vm, reboot_point, 1.0)
             self._capture_from_client(client, vm, "reboot-confirm", result)
             time.sleep(1)
@@ -324,6 +353,6 @@ class InstallationMonitoringMixin:
                     client.disconnect()
                 except Exception:
                     logger.warning(
-                        "Fermeture VNC imparfaite",
+                        "VNC connection did not close cleanly",
                         extra={"step": "automation.vnc_close", "target": vm.vnc},
                     )

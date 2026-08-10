@@ -7,7 +7,8 @@ param(
     [string]$ExecutionStatePath = "",
     [switch]$Force = $false,
     [switch]$Revert = $false,
-    [switch]$SkipInstaller = $false,
+    [switch]$RestoreWindowsSettings = $false,
+    [string]$ExpectedRecoveryRunId = "",
     [string]$FilepoolBaseUrl = "",
     [string]$Aria2ExePath = "",
     [ValidateRange(1, 5)]
@@ -82,6 +83,7 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
 }
 
 $installationPlan = $null
+$RecoveryRunId = ""
 if (-not [string]::IsNullOrWhiteSpace($InstallationPlanPath)) {
     $installationPlan = Read-LibertixInstallationPlan -Path $InstallationPlanPath
     if ([string]$installationPlan.firmware -ne "uefi") {
@@ -114,7 +116,7 @@ if (-not [string]::IsNullOrWhiteSpace($InstallationPlanPath)) {
     }
 }
 
-if (-not $Revert -and $null -eq $installationPlan) {
+if (-not $Revert -and -not $RestoreWindowsSettings -and $null -eq $installationPlan) {
     throw "InstallationPlanPath is required for every UEFI preparation workflow."
 }
 
@@ -131,7 +133,7 @@ $SystemDriveLetter = $SystemDrive.TrimEnd(":")
 
 # A rollback only consumes the transaction state stored on disk. It must remain
 # available even when no download configuration is supplied by the caller.
-if (-not $Revert) {
+if (-not $Revert -and -not $RestoreWindowsSettings) {
     $parsedFilepoolUri = $null
     if (
         [string]::IsNullOrWhiteSpace($FilepoolBaseUrl) -or
@@ -153,7 +155,7 @@ $artifactCatalog = Get-Content -LiteralPath $artifactCatalogPath -Raw -ErrorActi
     ConvertFrom-Json -ErrorAction Stop
 $Aria2ZipName = [string]$artifactCatalog.aria2.archiveFileName
 $downloadUrls = $null
-if (-not $Revert) {
+if (-not $Revert -and -not $RestoreWindowsSettings) {
     $downloadUrls = New-LibertixDownloadUrls `
         -FilepoolBaseUrl $FilepoolBaseUrl `
         -Aria2ZipName $Aria2ZipName
@@ -161,9 +163,9 @@ if (-not $Revert) {
 $InstallerIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoUrl } else { "" }
 $InstallerIsoName = "libertix-installer-uefi.iso"
 $InstallerIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoSha256 } else { "" }
-$MintIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoUrl } else { "" }
-$MintIsoPath = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoWindowsPath } else { "" }
-$MintIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoSha256 } else { "" }
+$DistributionIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoUrl } else { "" }
+$DistributionIsoPath = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoWindowsPath } else { "" }
+$DistributionIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoSha256 } else { "" }
 $Aria2ZipUrl = if ($downloadUrls) { $downloadUrls.Aria2Zip } else { "" }
 $Aria2ZipSha256 = [string]$artifactCatalog.aria2.archiveSha256
 $Aria2ExeSha256 = [string]$artifactCatalog.aria2.executableSha256
@@ -174,8 +176,23 @@ $LowMemoryIsoPath = "$SystemDrive\libertix-live.iso"
 $InstallerLetter = Get-FreeDriveLetter
 $EspLetter = Get-FreeDriveLetter -ExcludedLetters @($InstallerLetter)
 $InstallerLabel = "LIBERTIXEFI"
-$InstallerBootDescription = "Libertix UEFI Installer"
+$firmwareOwnerRunId = if ($RecoveryRunId -match '^[0-9a-f]{32}$') {
+    $RecoveryRunId
+} elseif ($ExpectedRecoveryRunId -match '^[0-9a-f]{32}$') {
+    $ExpectedRecoveryRunId
+} else {
+    ""
+}
+$InstallerBootDescription = if ($firmwareOwnerRunId) {
+    "Libertix UEFI Installer $firmwareOwnerRunId"
+} else {
+    "Libertix UEFI Installer"
+}
+if (-not $RecoveryRunId -and $firmwareOwnerRunId) {
+    $RecoveryRunId = $firmwareOwnerRunId
+}
 $InstallerEspDirectory = "EFI\LibertixInstaller"
+$InstallerEspOwnershipFile = ".libertix-owner"
 $TransactionStatePath = "$SystemDrive\LibertixTools\uefi-transaction.json"
 
 if ($BootStrategy -notin @("BootNext", "FirmwareBootOrder")) {
@@ -187,18 +204,32 @@ if (-not (Test-Administrator)) {
     exit 1
 }
 
+if ($Revert -and $RestoreWindowsSettings) {
+    throw "Revert and RestoreWindowsSettings are mutually exclusive."
+}
+
 if ($Revert) {
+    Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $ExpectedRecoveryRunId
     Start-LibertixTrackedRollback
     Invoke-Revert
     Complete-LibertixTrackedRollback
     exit 0
 }
 
+if ($RestoreWindowsSettings) {
+    Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $ExpectedRecoveryRunId
+    Restore-LibertixTransactionWindowsSettings
+    exit 0
+}
+
+# Diagnostic only. The BootNext fallback deliberately re-enters this script
+# without -Force while its own firmware entry still exists, so reporting the
+# existing entry must never interrupt the workflow.
 if (-not $Force) {
     $already = Invoke-BcdeditCommand -Arguments @("/enum", "firmware") |
         Select-String -Pattern "Libertix UEFI Installer"
     if ($already) {
-        Write-Log "Libertix UEFI entry detected. Use -Force to recreate." "Yellow"
+        Write-Log "Libertix UEFI entry already exists and will be reused or replaced." "Yellow"
     }
 }
 
@@ -237,14 +268,9 @@ try {
     Set-WindowsVolumeReadableFromLinux
     Start-LibertixTrackedStep -Step "windows.artifacts-verified"
     Write-LibertixProgress -Stage "installer-iso-download" -Percent 30
-    Set-MintIsoOnWindows
+    Set-DistributionIsoOnWindows
     Write-LibertixProgress -Stage "installer-iso-ready" -Percent 45
     Complete-LibertixTrackedStep -Step "windows.artifacts-verified"
-
-    if ($SkipInstaller) {
-        Write-Log "Done (installer partition skipped)." "Green"
-        exit 0
-    }
 
     Write-LibertixProgress -Stage "staging-partition" -Percent 52
     $info = New-OrReuseInstallerPartition -SizeGB $InstallerPartitionSizeGB

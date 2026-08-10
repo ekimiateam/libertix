@@ -79,28 +79,6 @@ def test_live_boot_mode_function_is_fail_closed(
 
 
 @pytest.mark.parametrize(
-    ("disk", "number", "expected"),
-    [
-        ("/dev/sda", "3", "/dev/sda3"),
-        ("/dev/nvme0n1", "4", "/dev/nvme0n1p4"),
-        ("/dev/mmcblk0", "2", "/dev/mmcblk0p2"),
-    ],
-)
-def test_shared_storage_builds_partition_paths_for_supported_device_names(
-    run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
-    disk: str,
-    number: str,
-    expected: str,
-) -> None:
-    library = ROOT / "assets/live/libertix-storage-common.sh"
-
-    result = run_shell_function(library, "partition_path", disk, number)
-
-    assert result.returncode == 0
-    assert result.stdout.strip() == expected
-
-
-@pytest.mark.parametrize(
     ("windows_path", "expected"),
     [
         (
@@ -588,6 +566,85 @@ def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
     assert 'resize_end="100%"' not in rollback
 
 
+@pytest.mark.parametrize("failed_transition", ["begin", "compensate", "complete"])
+def test_live_rollback_rejects_success_when_state_persistence_fails(
+    failed_transition: str,
+) -> None:
+    rollback = ROOT / "assets/live/libertix-rollback-common.sh"
+    command = r"""
+source "$1"
+INSTALL_SUCCESS=false
+ROLLBACK_ATTEMPTED=false
+BOOTLOADER_WRITE_STARTED=false
+RECOVERY_GEOMETRY_BEFORE=""
+DISK=/dev/fake-disk
+WINDOWS_PART=/dev/fake-windows
+FAILED_TRANSITION="$2"
+resolve_rollback_storage_best_effort() { return 0; }
+cleanup_live_mounts_best_effort() { return 0; }
+swapoff() { return 0; }
+restore_pre_grub_mbr_best_effort() { return 0; }
+firmware_prepare_rollback_best_effort() { return 0; }
+delete_transaction_partition_best_effort() { return 0; }
+firmware_cleanup_partition_container_best_effort() { return 0; }
+restore_windows_partition_best_effort() { return 0; }
+firmware_restore_boot_state_best_effort() { return 0; }
+debug_disk_state() { return 0; }
+begin_installation_state_rollback() { [ "$FAILED_TRANSITION" != begin ]; }
+compensate_installation_state_step() { [ "$FAILED_TRANSITION" != compensate ]; }
+complete_installation_state_rollback() { [ "$FAILED_TRANSITION" != complete ]; }
+rollback_windows_layout_best_effort
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "rollback-state-test", str(rollback), failed_transition],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "durable rollback state is incomplete" in result.stdout
+    assert "ROLLBACK: completed best-effort Windows layout restore" not in result.stdout
+
+
+def test_live_rollback_reports_success_after_durable_state_completion() -> None:
+    rollback = ROOT / "assets/live/libertix-rollback-common.sh"
+    command = r"""
+source "$1"
+INSTALL_SUCCESS=false
+ROLLBACK_ATTEMPTED=false
+BOOTLOADER_WRITE_STARTED=false
+RECOVERY_GEOMETRY_BEFORE=""
+DISK=/dev/fake-disk
+WINDOWS_PART=/dev/fake-windows
+resolve_rollback_storage_best_effort() { return 0; }
+cleanup_live_mounts_best_effort() { return 0; }
+swapoff() { return 0; }
+restore_pre_grub_mbr_best_effort() { return 0; }
+firmware_prepare_rollback_best_effort() { return 0; }
+delete_transaction_partition_best_effort() { return 0; }
+firmware_cleanup_partition_container_best_effort() { return 0; }
+restore_windows_partition_best_effort() { return 0; }
+firmware_restore_boot_state_best_effort() { return 0; }
+debug_disk_state() { return 0; }
+begin_installation_state_rollback() { return 0; }
+compensate_installation_state_step() { return 0; }
+complete_installation_state_rollback() { return 0; }
+rollback_windows_layout_best_effort
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "rollback-state-test", str(rollback)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "ROLLBACK: completed best-effort Windows layout restore" in result.stdout
+
+
 def test_windows_rollbacks_require_the_exact_original_system_partition_size() -> None:
     shared_rollback = read("Scripts/modules/Libertix.Rollback.psm1")
     bios_guard = read("Scripts/libertix-recovery-guard.ps1")
@@ -609,6 +666,98 @@ def test_windows_rollbacks_require_the_exact_original_system_partition_size() ->
     assert "[Math]::Max" not in bios_guard
 
 
+def test_bios_downloader_verifies_bundled_aria2_before_execution() -> None:
+    downloader = read("Pages/ApplyChanges.Downloads.cs")
+    verification = downloader.index("Artifacts.Aria2.ExecutableSha256")
+    execution = downloader.index("RunStreamingProcessAsync(", verification)
+
+    assert verification < execution
+    assert "bundled aria2 hash mismatch, using HTTP downloader" in downloader
+
+
+def test_windows_download_and_bios_boot_temporary_state_is_transaction_scoped() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    downloads = read("Pages/ApplyChanges.Downloads.cs")
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+
+    assert '"Downloads",\n                _installationPlan.Runtime.RecoveryRunId' in bios
+    assert 'Path.Combine(tempIsoDirectory, "bios-live.iso")' in bios
+    assert "Environment.SpecialFolder.CommonApplicationData" in bios
+    assert 'Path.GetTempPath(), "libertix_installer.iso"' not in bios
+    assert "DeleteDownloadArtifactBestEffort(tempIsoPath" in bios
+    assert "DeleteDownloadDirectoryBestEffort(" in bios
+    assert "Libertix BIOS ISO transaction cleanup verified." in bios
+    assert "File.Exists(tempIsoPath) || Directory.Exists(tempIsoDirectory)" in bios
+    assert "removeDownloadDirectory = true;" in downloads
+    assert "finally" in downloads
+    assert "DeleteDownloadDirectoryBestEffort(downloadDir, label);" in downloads
+    assert "Directory.Delete(path, recursive: true);" in downloads
+    assert recovery.count("Restore-BcdState -Required") == 3
+    assert '[string]$recoveryExecutionState.status -eq "succeeded"' in recovery
+    assert '[string]$recoveryExecutionState.status -eq "rolled-back"' in recovery
+    assert "Restore-OriginalHibernationSetting" in recovery
+    assert 'throw "Required pre-install BCD backup is missing."' in recovery
+
+
+def test_bios_bcd_guid_and_live_copy_processes_use_strict_bounded_contracts() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    process_runner = read("Helpers/WindowsProcessRunner.cs")
+
+    assert "MatchCollection guidMatches = Regex.Matches" in bios
+    assert "guidMatches.Count == 1" in bios
+    assert "output.IndexOf('{')" not in bios
+    assert '"xcopy.exe"' in bios
+    assert 'QuoteArgument(sourceDir + "*")' in bios
+    assert "WindowsProcessTimeouts.FileCopy" in bios
+    assert '"ISO copy process tree could not be proven stopped."' in bios
+    assert "catch (UnterminatedProcessException)" in bios
+    assert "DismountBiosIsoAsync" in bios
+    assert '"ISO dismount process tree could not be proven stopped."' in bios
+    assert "treeTerminationProven" in process_runner
+    assert "taskKill.ExitCode == 0" in process_runner
+    assert "Timed-out process tree could not be proven stopped" in process_runner
+
+
+def test_live_target_disk_requires_cross_platform_partition_table_identity() -> None:
+    preflight = read("Scripts/libertix-storage-preflight.ps1")
+    plan_exporter = read("assets/live/libertix-installation-plan.py")
+    plan_loader = read("assets/live/libertix-installation-plan.sh")
+    storage = read("assets/live/libertix-storage-common.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    assert "function Get-PartitionTableIdentity" in preflight
+    assert "return \"gpt:$($guid.ToString('D').ToLowerInvariant())\"" in preflight
+    assert "return \"mbr:$(([uint32]$Disk.Signature).ToString('x8'))\"" in preflight
+    assert '"TARGET_DISK_PARTITION_TABLE_ID": disk["partitionTableId"]' in plan_exporter
+    assert "TARGET_DISK_PARTITION_TABLE_ID" in plan_loader
+    assert "disk_partition_table_identity()" in storage
+    assert "blkid -s PTUUID" in storage
+    for adapter in (bios, uefi):
+        assert 'actual_identity="$(disk_partition_table_identity "$disk" || true)"' in adapter
+        assert '[ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ]' in adapter
+
+
+def test_uefi_bitlocker_decryption_requests_surface_initial_and_retry_failures() -> None:
+    storage = read("Scripts/uefi/Libertix.Uefi.Storage.ps1")
+    helper = storage.split("function Request-BitLockerDecryption", 1)[1].split(
+        "function Set-WindowsVolumeReadableFromLinux", 1
+    )[0]
+    workflow = storage.split("function Set-WindowsVolumeReadableFromLinux", 1)[1]
+
+    assert "Disable-BitLocker -MountPoint $MountPoint -ErrorAction Stop" in helper
+    assert "$manageExitCode = $LASTEXITCODE" in helper
+    assert "if ($manageExitCode -ne 0)" in helper
+    assert "BitLocker decryption request failed" in helper
+    assert (
+        workflow.count(
+            "Request-BitLockerDecryption -MountPoint $SystemDrive -ManageBdePath $manageBde"
+        )
+        == 2
+    )
+    assert "-ErrorAction Continue" not in workflow
+
+
 def test_final_verification_counts_mbr_slots_instead_of_lsblk_children() -> None:
     bios = read("assets/live/libertix-bios-adapter.sh")
     uefi = read("assets/live/libertix-uefi-adapter.sh")
@@ -625,14 +774,55 @@ def test_success_retires_stale_uefi_transaction_state_after_final_verification()
     uefi = read("assets/live/libertix-uefi-adapter.sh")
 
     verify_position = installer.index("final_verify_or_die")
-    finalize_position = installer.index("firmware_finalize_success_best_effort", verify_position)
-    success_position = installer.index("append_install_result true", finalize_position)
+    terminal_state_position = installer.index("complete_installation_state", verify_position)
+    success_marker_position = installer.index(
+        'write_windows_recovery_marker_best_effort "install-success"',
+        terminal_state_position,
+    )
+    retire_position = installer.index(
+        "firmware_retire_completed_transaction_best_effort", success_marker_position
+    )
 
-    assert verify_position < finalize_position < success_position
-    assert "firmware_finalize_success_best_effort()" in bios
+    assert verify_position < terminal_state_position < success_marker_position < retire_position
+    assert "firmware_retire_completed_transaction_best_effort()" in bios
     assert "uefi-transaction.json" in uefi
     assert 'mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint"' in uefi
     assert 'rm -f -- "$transaction_state"' in uefi
+
+
+def test_uefi_live_failure_restores_windows_settings_for_the_same_run() -> None:
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    installer = read("Scripts/libertix-uefi-install.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+
+    live_failure = agent.split("$failedRunId = Read-EnvValue -Path $liveFailed", 1)[1].split(
+        "$startedRunId = Read-EnvValue -Path $liveStarted", 1
+    )[0]
+    assert "-RestoreWindowsSettings" in live_failure
+    assert "-ExpectedRecoveryRunId" in live_failure
+    assert "Remove-PendingWindowsSharePayload" in live_failure
+    assert (
+        'executionState.status -in @("failed", "rollback-running", "rolled-back")' in live_failure
+    )
+    assert "Read-ValidatedExecutionState" in agent
+    assert "executionState.planId" in agent
+    assert 'executionState.status -eq "succeeded"' in agent
+    assert "Restore-LibertixTransactionWindowsSettings" in installer
+    assert "Restore-LibertixTransactionWindowsSettings" in transaction
+    assert "OriginalHibernateEnabled" in transaction
+
+
+def test_uefi_recovery_cleanup_verifies_tasks_and_success_root_removal() -> None:
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    cleanup = agent.split("function Remove-RecoveryArtifacts", 1)[1].split(
+        "function Invoke-WindowsShareFinalize", 1
+    )[0]
+
+    assert "Unregister-ScheduledTask" in cleanup
+    assert "Get-ScheduledTask" in cleanup
+    assert "Recovery task still exists after removal" in cleanup
+    assert "Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop" in cleanup
+    assert "Recovery root still exists after removal" in cleanup
 
 
 def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
@@ -706,13 +896,30 @@ def run_localized_stage_function(function: str, argument: str) -> subprocess.Com
 def test_runner_stage_functions_return_stable_labels_and_percentages() -> None:
     label = run_localized_stage_function("libertix_stage_label", "120-unsquashfs")
     percent = run_localized_stage_function("libertix_stage_percent", "120-unsquashfs")
+    bios_normalization = run_localized_stage_function(
+        "libertix_stage_percent", "055-normalize-mbr-linux-slot"
+    )
     unknown_label = run_localized_stage_function("libertix_stage_label", "custom-stage")
 
     assert label.returncode == 0
-    assert label.stdout.strip() == "Extracting Mint"
+    assert label.stdout.strip() == "Extracting the Linux system"
     assert percent.returncode == 0
     assert percent.stdout.strip() == "54"
+    assert bios_normalization.returncode == 0
+    assert bios_normalization.stdout.strip() == "32"
     assert unknown_label.stdout.strip() == "custom-stage"
+
+
+def test_failure_shortcut_does_not_offer_reboot_before_verified_rollback() -> None:
+    runner = read("assets/live/libertix-runner-main.sh")
+    translations = json.loads(read("assets/live/libertix-translations.json"))
+
+    assert 'if [ "$rollback_status" = "completed" ]' in runner
+    assert "$LIBERTIX_I18N_SHORTCUTS_FAILURE_BLOCKED" in runner
+    for language in ("en", "fr", "es", "ja"):
+        blocked = translations[language]["shortcuts_failure_blocked"]
+        assert "[R]" in blocked
+        assert translations[language]["shortcuts_failure"] != blocked
 
 
 def test_shared_progress_helper_maps_unsquashfs_output(tmp_path: Path) -> None:
@@ -790,6 +997,310 @@ def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
     assert "Firmware BootOrder fallback verified" in boot_setup
 
 
+def test_uefi_firmware_fallback_is_blocked_by_secure_boot_after_verified_restore() -> None:
+    state_model = read("Helpers/UefiRecoveryState.cs")
+    apply_changes = read("Pages/ApplyChanges.Uefi.cs")
+    fallback = read("Pages/UefiBootFallback.xaml.cs")
+    fallback_xaml = read("Pages/UefiBootFallback.xaml")
+    recovery_agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+
+    assert "public bool SecureBootEnabled { get; set; }" in state_model
+    assert (
+        "SecureBootEnabled = _installationState.Compatibility?.SecureBootEnabled == true"
+        in apply_changes
+    )
+    assert "if (_state.SecureBootEnabled)" in fallback
+    secure_boot_flow = fallback.split("private void ConfigureSecureBootFlow()", 1)[1].split(
+        "private async void UefiBootFallback_Loaded", 1
+    )[0]
+    assert "FallbackButton.Visibility = Visibility.Collapsed" in secure_boot_flow
+    assert "CancelButton.Visibility = Visibility.Collapsed" in secure_boot_flow
+    assert "SecureBootCloseButton.Visibility = Visibility.Visible" in secure_boot_flow
+    restore_flow = fallback.split("private async Task RestoreWindowsForSecureBootAsync()", 1)[
+        1
+    ].split("private async Task<int> RestoreWindowsAsync()", 1)[0]
+    assert "await RestoreWindowsAsync()" in restore_flow
+    assert "_secureBootRestored = true" in restore_flow
+    assert restore_flow.index("await RestoreWindowsAsync()") < restore_flow.index(
+        "_secureBootRestored = true"
+    )
+    assert "-Action Cancel" in fallback
+    assert "-WaitForProcessId {processId}" in fallback
+    assert "Wait-Process -Id $WaitForProcessId" in recovery_agent
+    assert "-WaitForProcessId $WaitForProcessId" in recovery_agent
+    assert (
+        "https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/"
+        "disabling-secure-boot?view=windows-11" in fallback_xaml
+    )
+
+
+def test_uefi_firmware_reads_and_deletions_fail_closed() -> None:
+    firmware = read("Scripts/uefi/Libertix.Uefi.Firmware.ps1")
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+
+    reader = firmware.split("function Get-FirmwareVariableReadResult", 1)[1].split(
+        "function Test-FirmwareVariableExists", 1
+    )[0]
+    deletion = firmware.split("function Remove-FirmwareVariable", 1)[1].split(
+        "function Remove-FirmwareBootNumberFromOrder", 1
+    )[0]
+    fallback = staging.split("$fallbackEspDrive = $null", 1)[0].rsplit(
+        'if ($BootStrategy -eq "BootNext")', 1
+    )[1]
+
+    assert "[LibertixFirmwareApi]::LastError()" in reader
+    assert "$errorCode -in @(203, 1168)" in reader
+    assert "GetFirmwareEnvironmentVariable failed" in reader
+    assert "DeleteFirmwareEnvironmentVariable" in deletion
+    assert "if (-not $ok)" in deletion
+    assert "still exists after deletion" in deletion
+    assert 'Remove-FirmwareVariable -Name "BootNext"' in fallback
+    assert "refusing a BootOrder fallback" in fallback
+    assert "catch" not in fallback
+
+
+def test_uefi_firmware_ownership_is_persisted_before_bootnext_or_bcd_followup() -> None:
+    firmware = read("Scripts/uefi/Libertix.Uefi.Firmware.ps1")
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+
+    assert "function Remove-TrackedLibertixFirmwareEntry" in firmware
+    assert "Transaction state" in firmware
+    assert "$null -eq $state.InstallerBootNumber" in firmware
+    assert "[string]::IsNullOrWhiteSpace([string]$state.InstallerBootVariable)" in firmware
+    boot_next = staging.split('if ($BootStrategy -eq "BootNext")', 1)[1].split(
+        "$fallbackEspDrive = $null", 1
+    )[0]
+    assert boot_next.index("Update-TransactionFirmwareState") < boot_next.index(
+        'Set-FirmwareVariable -Name "BootNext"'
+    )
+    bcd_create = firmware.split("function New-LibertixBcdFirmwareEntry", 1)[1]
+    assert bcd_create.index("Update-TransactionFirmwareState") < bcd_create.index(
+        "Get-EfiLoadOptionOptionalDataLength"
+    )
+
+
+def test_uefi_temporary_artifacts_are_owned_by_the_recovery_run() -> None:
+    orchestration = read("Scripts/libertix-uefi-install.ps1")
+    firmware = read("Scripts/uefi/Libertix.Uefi.Firmware.ps1")
+    storage = read("Scripts/uefi/Libertix.Uefi.Storage.ps1")
+    staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    live = read("assets/live/libertix-uefi-adapter.sh")
+
+    assert '"Libertix UEFI Installer $firmwareOwnerRunId"' in orchestration
+    assert '$InstallerEspOwnershipFile = ".libertix-owner"' in orchestration
+    assert "function Assert-LibertixTemporaryEspOwnership" in storage
+    assert "belongs to another recovery run" in storage
+    assert "Assert-LibertixTemporaryEspOwnership -Directory $destination" in staging
+    assert "Remove-LibertixTemporaryEspFiles -EspDrive $esp" in transaction
+    assert "does not contain exactly one canonical object identifier" in firmware
+    assert "Could not parse exactly one canonical firmware entry identifier" in firmware
+    assert 'expected_description="Libertix UEFI Installer $RECOVERY_RUN_ID"' in live
+    assert "EFI/LibertixInstaller/.libertix-owner" in live
+    assert "EFI/Libertix/.libertix-owner" in live
+    assert 'LIBERTIX_FINAL_BOOTNUM="$bootnum"' in live
+    assert 'efibootmgr -b "$bootnum" -B' in live
+
+
+def test_release_restore_dismount_and_latest_logs_fail_closed() -> None:
+    build = read("auto_tests/app/scripts/build_libertix.ps1")
+    storage = read("Scripts/uefi/Libertix.Uefi.Storage.ps1")
+    log_copy = read("assets/live/libertix-copy-logs.sh")
+
+    restore = build.split("if ($releaseBackup -and (Test-Path -LiteralPath $releaseBackup))", 1)[1]
+    assert "Failed to restore the previous Libertix release" in restore
+    assert (
+        "Move-Item -LiteralPath $releaseBackup -Destination $releasePath -ErrorAction Stop"
+    ) in restore
+
+    dismount = storage.split("function Dismount-Letter", 1)[1].split(
+        "function Get-FreeDriveLetter", 1
+    )[0]
+    assert "$removedWithPowerShell" in dismount
+    assert "with PowerShell or diskpart" in dismount
+    assert "still exists after PowerShell and diskpart" in dismount
+    assert "continuing" not in dismount
+
+    assert 'latest_staging="$log_root/.latest-$RUN_ID"' in log_copy
+    assert 'latest_backup="$log_root/.latest-previous"' in log_copy
+    assert 'cp -a "$log_dir/." "$latest_staging/"' in log_copy
+    assert 'mv -- "$latest_staging" "$latest_dir"' in log_copy
+    assert 'cp -a "$LOG_DIR/." "$log_root/latest/"' not in log_copy
+
+
+def test_windows_process_tree_must_be_proven_stopped_before_rollback() -> None:
+    runner = read("Helpers/WindowsProcessRunner.cs")
+    termination = runner.split("public static bool TerminateProcessTree", 1)[1].split(
+        "public static WindowsProcessResult Run", 1
+    )[0]
+
+    assert "taskKillCompleted && taskKill.ExitCode == 0 && process.HasExited" in termination
+    assert "return treeTerminationProven;" in termination
+    assert "return false;" in termination
+    assert "Timed-out process tree could not be proven stopped" in runner
+
+
+def test_linux_hostname_contract_is_identical_in_every_runtime() -> None:
+    pattern = "^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    validator = read("Installation/InstallationPlanValidator.cs")
+    powershell = read("Scripts/modules/Libertix.InstallationPlan.psm1")
+    live = read("assets/live/libertix-installation-plan.py")
+    schema = read("schemas/installation-plan.schema.json")
+
+    assert pattern in validator
+    assert pattern in powershell
+    assert pattern[1:-1] in live
+    assert pattern in schema
+
+
+def test_uefi_aria2_and_ext4_installer_timeouts_stop_their_processes() -> None:
+    downloads = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
+    process_module = read("Scripts/modules/Libertix.Process.psm1")
+    windows_share = read("Scripts/libertix-configure-windows-share.ps1")
+
+    aria = downloads.split("function Start-Aria2Download", 1)[1].split(
+        "function Start-RobustDownload", 1
+    )[0]
+    aria_arguments = downloads.split("function New-Aria2DownloadArguments", 1)[1].split(
+        "function Start-Aria2Download", 1
+    )[0]
+    assert "Invoke-LibertixNativeProcess" in aria
+    assert "-TimeoutSeconds 14400" in aria
+    assert "ConvertTo-LibertixNativeArgument" in aria
+    assert "& $aria2 @aria2Arguments" not in aria
+    assert '"--dir=$DownloadDir"' in aria_arguments
+    assert "Push-Location" not in aria
+    assert "$downloadPath -ne $destinationFullPath" in aria
+    assert "Remove-Item -LiteralPath $downloadPath" in aria
+    assert "function ConvertTo-LibertixNativeArgument" in process_module
+    assert "PROCESS_TREE_NOT_STOPPED:" in process_module
+    assert '$_.Exception.Message -like "PROCESS_TREE_NOT_STOPPED:*"' in downloads
+
+    timeout = windows_share.split("function Invoke-ProcessWithTimeout", 1)[1].split(
+        "function Get-Config", 1
+    )[0]
+    assert 'taskkill.exe"' in timeout
+    assert "/T /F" in timeout
+    assert "$taskkillExitCode -ne 0 -or -not $process.HasExited" in timeout
+    assert "process tree could not be proven stopped" in timeout
+
+
+def test_all_download_transports_enforce_bounded_file_sizes() -> None:
+    downloads = read("Pages/ApplyChanges.Downloads.cs")
+    processes = read("Pages/ApplyChanges.Processes.cs")
+    types = read("Pages/ApplyChanges.Types.cs")
+    windows_share = read("Pages/ApplyChanges.Windows.cs")
+    uefi_downloads = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
+    uefi_staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    process_module = read("Scripts/modules/Libertix.Process.psm1")
+
+    for name in (
+        "MaximumLiveIsoBytes",
+        "MaximumInstallerIsoBytes",
+        "MaximumSupportArtifactBytes",
+        "MaximumBootArtifactBytes",
+    ):
+        assert name in types
+    assert "maximumBytes: MaximumLiveIsoBytes" in downloads
+    assert "maximumBytes: MaximumInstallerIsoBytes" in downloads
+    assert "maximumBytes: MaximumSupportArtifactBytes" in windows_share
+    assert "response.Content.Headers.ContentLength" in downloads
+    assert "totalRead > maximumBytes - bytesRead" in downloads
+    assert "policyLimitExceeded:" in downloads
+    assert "StreamingProcessCompletion.PolicyLimitExceeded" in downloads
+    assert "policyLimitExceeded?.Invoke()" in processes
+
+    boot_download = processes.split("private async Task<bool> DownloadFileAsync", 1)[1].split(
+        "private async Task<bool> VerifySha256Async", 1
+    )[0]
+    assert "HttpCompletionOption.ResponseHeadersRead" in boot_download
+    assert "MaximumBootArtifactBytes" in boot_download
+    assert "ReadAsByteArrayAsync" not in boot_download
+
+    assert "function Invoke-BoundedHttpDownload" in uefi_downloads
+    assert "DOWNLOAD_SIZE_LIMIT_EXCEEDED:" in uefi_downloads
+    assert "BytesTransferred" in uefi_downloads
+    assert "BytesTotal" in uefi_downloads
+    assert "-MonitoredFilePath $downloadPath" in uefi_downloads
+    assert "-MaximumFileBytes $MaxBytes" in uefi_downloads
+    assert "Invoke-WebRequest -Uri $Url -OutFile $Destination" not in uefi_downloads
+    assert "MaximumDistributionIsoBytes = 8GB" in uefi_downloads
+    assert "MaximumLiveIsoBytes = 2GB" in uefi_downloads
+    assert "-MaxBytes $script:MaximumLiveIsoBytes" in uefi_staging
+    assert "MaximumFileBytes" in process_module
+    assert "Stop-LibertixNativeProcessTree" in process_module
+
+
+def test_uefi_recovery_retires_only_the_exact_transaction_partition() -> None:
+    state = read("Helpers/UefiRecoveryState.cs")
+    creation = read("Pages/ApplyChanges.Uefi.cs")
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+
+    for field in (
+        "PlanId",
+        "SystemDiskUniqueId",
+        "SystemDiskPartitionTableId",
+        "SystemDiskSize",
+        "ExpectedLinuxPartitionOffset",
+        "ExpectedLinuxPartitionSize",
+    ):
+        assert field in state
+        assert field in creation
+        assert field in agent
+    partition_check = agent.split("function Test-LinuxPartitionPresent", 1)[1].split(
+        "function Remove-RecoveryArtifacts", 1
+    )[0]
+    assert "[int64]$_.Offset -eq $expectedOffset" in partition_check
+    assert "[int64]$_.Size -eq $expectedSize" in partition_check
+    assert "gpt:" in partition_check
+    assert "256MB" not in partition_check
+
+
+def test_windows_share_and_postinstall_checks_bind_ext4_to_the_planned_partition() -> None:
+    apply_changes = read("Pages/ApplyChanges.Windows.cs")
+    share = read("Scripts/libertix-configure-windows-share.ps1")
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    for field in (
+        "SystemDiskNumber",
+        "SystemDiskUniqueId",
+        "ExpectedLinuxPartitionOffset",
+        "ExpectedLinuxPartitionSize",
+    ):
+        assert field in apply_changes
+        assert field in share
+    partition_lookup = share.split("function Get-LinuxPartition", 1)[1].split(
+        "function Set-ReadOnlyDriverPolicy", 1
+    )[0]
+    assert "Get-Disk -Number" in partition_lookup
+    assert ".UniqueId" in partition_lookup
+    assert "[int64]$_.Offset -eq $expectedOffset" in partition_lookup
+    assert "[int64]$_.Size -eq $expected" in partition_lookup
+    assert "256MB" not in partition_lookup
+
+    assert "function Get-ExpectedLinuxMountIdentity" in checks
+    readonly_check = checks.split('"ext4_readonly_mount"', 1)[1].split('"linux_home"', 1)[0]
+    assert "$writableProcesses.Count -eq 0" in readonly_check
+    assert "$ownedProcesses.Count -eq 1" in readonly_check
+    assert "PhysicalDrive$($identity.DiskNumber)" in readonly_check
+    assert "$identity.PartitionNumber" in readonly_check
+
+
+def test_windows_postinstall_checks_all_libertix_recovery_tasks() -> None:
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    helper = checks.split("function Get-LibertixRecoveryTasks", 1)[1].split(
+        "function Get-ExpectedLinuxMountIdentity", 1
+    )[0]
+    for pattern in (
+        "LibertixInstallRecovery",
+        "LibertixUefiRecovery_*",
+        "LibertixUefiRecoveryPrompt_*",
+    ):
+        assert pattern in helper
+    assert checks.count("Get-LibertixRecoveryTasks") >= 4
+
+
 def test_uefi_fallback_publishes_recovery_phase_atomically() -> None:
     fallback = read("Pages/UefiBootFallback.xaml.cs")
 
@@ -798,6 +1309,36 @@ def test_uefi_fallback_publishes_recovery_phase_atomically() -> None:
     )[0]
     assert "AtomicJsonFile.Write(_statePath" in save_state
     assert "File.WriteAllText" not in save_state
+
+
+def test_uefi_fallback_fails_closed_when_process_termination_is_unknown() -> None:
+    fallback = read("Pages/UefiBootFallback.xaml.cs")
+
+    assert "bool stopped;" in fallback
+    assert "if (!stopped)" in fallback
+    assert "ProcessTreeTerminationException" in fallback
+    termination_handler = fallback.split("catch (ProcessTreeTerminationException ex)", 1)[1].split(
+        "catch (Exception ex)", 1
+    )[0]
+    assert "FallbackButton.IsEnabled = true" not in termination_handler
+    assert "CancelButton.IsEnabled = true" not in termination_handler
+    click_handler = fallback.split("FallbackButton_Click", 1)[1].split("CancelButton_Click", 1)[0]
+    assert click_handler.index("try") < click_handler.index("SaveState();")
+
+
+def test_uefi_fallback_buttons_fit_long_localized_labels() -> None:
+    fallback = read("Pages/UefiBootFallback.xaml")
+
+    for button_name in (
+        "CancelButton",
+        "FallbackButton",
+        "RebootButton",
+        "SecureBootCloseButton",
+    ):
+        button = fallback.split(f'x:Name="{button_name}"', 1)[1].split("/>", 1)[0]
+        assert 'Width="330"' in button
+        assert 'Height="56"' in button
+        assert 'Padding="20,8"' in button
 
 
 def test_bios_copy_preserves_live_boot_case_sensitive_names() -> None:
@@ -920,7 +1461,7 @@ def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
     assert "Set-Service -Name ExtFsWatcher -StartupType Disabled" in windows_share
 
 
-def test_installed_keyboard_layout_is_applied_once_after_cinnamon_starts() -> None:
+def test_installed_keyboard_layout_is_applied_once_after_the_desktop_starts() -> None:
     target = read("assets/live/configure-target-main.sh")
     target_common = read("assets/live/libertix-target-common.sh")
     first_session = read("assets/live/libertix-apply-keyboard-once.sh")
@@ -960,6 +1501,7 @@ def test_live_gui_sets_a_visible_pointer_on_both_boot_paths() -> None:
     gui = read("assets/live/libertix-gui.py")
     runner = read("assets/live/libertix-runner-main.sh")
 
+    assert 'option_add("*Cursor", "left_ptr")' in gui
     assert 'cursor="left_ptr"' in gui
     assert "xsetroot -cursor_name left_ptr" in runner
 
@@ -975,6 +1517,19 @@ def test_live_reboot_is_only_offered_after_verified_rollback() -> None:
     assert '["systemctl", "reboot", "-i"]' in gui
 
 
+def test_live_failure_summary_stays_bounded_with_reachable_details() -> None:
+    gui = read("assets/live/libertix-gui.py")
+
+    assert "def compact_failure_value" in gui
+    assert "maximum: int = 240" in gui
+    assert "height=5" in gui
+    assert 'anchor="nw"' in gui
+    assert 'if stage.startswith("installer-failed-"):' in gui
+    assert 'return label, 100, ""' in gui
+    assert "self.details_button" in gui
+    assert "self.details_frame.pack(fill=tk.BOTH, expand=True" in gui
+
+
 def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     xaml = read("Pages/ApplyChanges.xaml")
     cancellation = read("Pages/ApplyChanges.Cancellation.cs")
@@ -983,7 +1538,8 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     assert 'x:Name="CancelInstallationButton"' in xaml
     assert 'Click="CancelInstallationButton_Click"' in xaml
     assert "_installationCancellation.Cancel()" in cancellation
-    assert "WindowsProcessRunner.TerminateProcessTree(process)" in cancellation
+    processes = read("Pages/ApplyChanges.Processes.cs")
+    assert "WindowsProcessRunner.TerminateProcessTree(process)" in processes
     assert 'Arguments = $"/PID {processId} /T /F"' in read("Helpers/WindowsProcessRunner.cs")
     assert "FailBiosPreparationAndRollbackAsync" in cancellation
     assert '"ApplyChangesCancelledRestored"' in cancellation
@@ -991,6 +1547,66 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     assert "QuoteArgument(scriptPath)} -Revert" in cancellation
     assert "observeCancellation: false" in cancellation
     assert "catch (OperationCanceledException)" in apply_changes
+
+
+def test_process_termination_failure_never_starts_partition_rollback() -> None:
+    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    types = read("Pages/ApplyChanges.Types.cs")
+    downloads = read("Pages/ApplyChanges.Downloads.cs")
+    system = read("Pages/ApplyChanges.System.cs")
+    uefi = read("Pages/ApplyChanges.Uefi.cs")
+
+    assert "class UnterminatedProcessException" in types
+    handler = apply_changes.split("catch (UnterminatedProcessException ex)", 1)[1].split(
+        "catch (Exception ex)", 1
+    )[0]
+    assert "FailBiosPreparationAndRollbackAsync" not in handler
+    assert "FinishInstallation(enableBackButton: false)" in handler
+    assert "UnterminatedProcessException" in downloads
+    assert "UnterminatedProcessException" in system
+    assert "UnterminatedProcessException" in uefi
+
+
+def test_bios_mutating_preflight_matches_armed_plan_before_bitlocker() -> None:
+    preflight = read("Scripts/libertix-storage-preflight.ps1")
+    system = read("Pages/ApplyChanges.System.cs")
+
+    assert "[string]$ExpectedPlanPath" in preflight
+    assert "function Assert-StorageMatchesExpectedPlan" in preflight
+    assertion_position = preflight.index("Assert-StorageMatchesExpectedPlan `")
+    decryption_position = preflight.index('Write-Output "BITLOCKER_ACTION=decrypting"')
+    assert assertion_position < decryption_position
+    assert "-ExpectedPlanPath {QuoteArgument(_installationPlanPath)}" in system
+
+
+def test_bios_bootsequence_does_not_permanently_change_boot_manager_policy() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+
+    assert '"Libertix BIOS Installer {_installationPlan.Runtime.RecoveryRunId}"' in bios
+    assert '"/set {bootmgr} displaybootmenu no"' not in bios
+    assert '"/timeout 0"' not in bios
+    assert '"/default {current}"' not in bios
+    assert 'RunBcdeditCommandAsync(bcdeditPath, $"/bootsequence {guid}")' in bios
+
+
+def test_reboot_requests_are_bounded_checked_and_recoverable() -> None:
+    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    fallback = read("Pages/UefiBootFallback.xaml.cs")
+    main_window = read("MainWindow.xaml.cs")
+
+    for source in (apply_changes, fallback):
+        assert "WindowsProcessRunner.Run(" in source
+        assert '"shutdown.exe"' in source
+        assert "WindowsProcessTimeouts.QuickCommand" in source
+        assert "result.ExitCode != 0" in source
+        assert "CancelSystemRestartPreparation" in source
+    assert "public void CancelSystemRestartPreparation()" in main_window
+
+
+def test_uefi_cancellation_before_recovery_session_is_read_only() -> None:
+    cancellation = read("Pages/ApplyChanges.Cancellation.cs")
+
+    assert "_activeFirmware == FirmwareType.Uefi && _activeUefiRecovery != null" in cancellation
 
 
 def test_all_rollbacks_verify_bitlocker_against_the_pre_decryption_state() -> None:
@@ -1056,10 +1672,46 @@ def test_installation_log_controls_preserve_manual_scroll_and_button_layout() ->
     assert xaml.count('ScrollViewer.ScrollChanged="LogOutput_ScrollChanged"') == 2
     assert "double previousOffset" in append
     assert "DispatcherPriority.Background" in append
-    assert "forceScrollToEnd || IsAutoScrollEnabled(output)" in append
+    assert "if (IsAutoScrollEnabled(output))" in append
+    assert "forceScrollToEnd" not in append
     assert "SetAutoScrollEnabled(output, IsAtBottom(output))" in append
     assert "output.ScrollToEnd()" in append
     assert "output.ScrollToVerticalOffset(previousOffset)" in append
+
+
+def test_wpf_sensitive_state_catalog_and_timeout_guards_are_enforced() -> None:
+    warning = read("Pages/WarningConfirmation.xaml.cs")
+    account = read("Pages/AccountCreation.xaml.cs")
+    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    downloads = read("Pages/ApplyChanges.Downloads.cs")
+    processes = read("Pages/ApplyChanges.Processes.cs")
+    atomic_json = read("Installation/AtomicJsonFile.cs")
+
+    assert "_installationState.Account?.ClearPassword();" in warning
+    assert "ToLowerInvariant()" in account
+    assert "new Lazy<ArtifactCatalog>" in apply_changes
+    assert "ArtifactCatalog.LoadFromApplicationDirectory();" not in apply_changes
+    assert downloads.count("when (!_installationCancellation.IsCancellationRequested)") >= 1
+    assert "Boot artifact download timed out after 5 minutes" in processes
+    assert "Exception writeFailure = null;" in atomic_json
+    assert "when (writeFailure != null)" in atomic_json
+
+
+def test_distribution_catalogue_key_is_embedded_and_payloads_are_bounded() -> None:
+    project = read("Libertix.csproj")
+    chooser = read("Pages/ChooseDistro.xaml.cs")
+    trust = read("Installation/DistributionCatalogTrust.cs")
+
+    key_entry = project.split(
+        '<EmbeddedResource Include="Scripts\\config\\Libertix.CatalogPublicKey.xml">',
+        1,
+    )[1].split("</EmbeddedResource>", 1)[0]
+    assert "Libertix.Resources.CatalogPublicKey.xml" in key_entry
+    assert "CopyToOutputDirectory" not in key_entry
+    assert "VerifyWithApplicationKey" in chooser
+    assert "BoundedHttpContent.ReadAsync" in chooser
+    assert "MaximumCatalogBytes" in chooser
+    assert "GetManifestResourceStream" in trust
 
 
 def test_optional_uefi_detail_progress_is_not_bound_as_null() -> None:
@@ -1135,7 +1787,20 @@ def test_filepool_defaults_to_production_and_supports_an_explicit_override() -> 
     assert "FilepoolConfig.TryCreate(" in app
     assert "public sealed class FilepoolConfig" in filepool
     assert "public string BaseUrl { get; }" in filepool
+    assert "public bool IsDevelopmentMode => !RequiresCatalogSignature;" in filepool
     assert "public static string BaseUrl" not in filepool
+    assert "DEVELOPMENT MODE - catalog signature verification is disabled." in read(
+        "MainWindow.xaml"
+    )
+    main_window = read("MainWindow.xaml")
+    main_window_code = read("MainWindow.xaml.cs")
+    assert 'Panel.ZIndex="1000"' in main_window
+    assert 'VerticalAlignment="Top"' in main_window
+    assert 'IsHitTestVisible="False"' in main_window
+    assert 'Grid.Row="1"' not in main_window
+    assert "Height += DevelopmentModeBanner.Height" not in main_window_code
+    assert "MinHeight += DevelopmentModeBanner.Height" not in main_window_code
+    assert "application.Filepool.IsDevelopmentMode" in read("MainWindow.xaml.cs")
     assert '--filepool-base-url "{1}"' in launch
     assert '--dev-ssh-static-ip "{0}"' in launch
     assert '--dev-ssh-prefix-length "{0}"' in launch
@@ -1200,9 +1865,9 @@ def test_uefi_revert_does_not_require_download_configuration() -> None:
     )[1]
     downloads = script.split("# Download hashes and names", 1)[1].split("# Defaults", 1)[0]
 
-    assert "if (-not $Revert)" in validation
+    assert "if (-not $Revert -and -not $RestoreWindowsSettings)" in validation
     assert "FilepoolBaseUrl is required" in validation
-    assert "if (-not $Revert)" in downloads
+    assert "if (-not $Revert -and -not $RestoreWindowsSettings)" in downloads
     assert "New-LibertixDownloadUrls" in downloads
 
 
@@ -1305,9 +1970,8 @@ def test_uefi_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
         in create_or_reuse
     )
     assert "$stagingSizeGB = [int]($stagingBytes / 1GB)" in create_or_reuse
-    assert "Get-LibertixWindowsFreeSpaceBudget" in create_or_reuse
+    assert "Wait-LibertixWindowsFreeSpaceBudget" in create_or_reuse
     assert "-AllocationBytes $shrinkBytes" in create_or_reuse
-    assert "Get-Volume -DriveLetter $SystemDriveLetter" in create_or_reuse
     assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
     assert "$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes" in create_or_reuse
     assert "-Size $stagingBytes" in create_or_reuse
@@ -1440,9 +2104,7 @@ def test_uefi_shrink_uses_shared_geometry_for_partition_creation() -> None:
     assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
     assert "$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes" in create_or_reuse
     hibernation_position = create_or_reuse.index("Set-HibernateEnabled -Enabled $false")
-    free_space_position = create_or_reuse.index(
-        "$systemVolume = Get-Volume -DriveLetter $SystemDriveLetter"
-    )
+    free_space_position = create_or_reuse.index("Wait-LibertixWindowsFreeSpaceBudget")
     assert hibernation_position < free_space_position
     assert "-Size ($systemPartition.Size - $shrinkBytes)" in create_or_reuse
     assert "Windows partition geometry does not match the aligned shrink target" in create_or_reuse
@@ -1478,7 +2140,7 @@ def test_bios_storage_uses_the_same_alignment_geometry_as_uefi() -> None:
     assert "[Math]::Max" not in script
     assert "$allocationWithMbrMetadata = $SizeBytes + $partitionAlignmentBytes" in script
     assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in script
-    assert "Get-LibertixWindowsFreeSpaceBudget" in script
+    assert "Wait-LibertixWindowsFreeSpaceBudget" in script
     assert "-AllocationBytes ([int64]$shrinkGeometry.ShrinkBytes)" in script
     assert "-Offset $containerOffsetBytes" in script
     assert "-Alignment $partitionAlignmentBytes" in script
@@ -1486,21 +2148,22 @@ def test_bios_storage_uses_the_same_alignment_geometry_as_uefi() -> None:
 
 def test_uefi_preparation_failure_distinguishes_verified_and_incomplete_rollback() -> None:
     source = read("Pages/ApplyChanges.Uefi.cs")
-    exit_failure = source.split("if (exitCode != 0)", 1)[1].split(
-        "try\n            {\n                InstallUefiRecoveryAgent", 1
+    exit_failure = source.split(
+        "if (processResult.Completion != StreamingProcessCompletion.Exited", 1
+    )[1].split('recovery.Phase = "AwaitingReboot"', 1)[0]
+    recovery_arming = source.split("ArmUefiRecoveryAgent(recovery, powershell);", 1)[1].split(
+        "StreamingProcessResult processResult", 1
     )[0]
-    agent_failure = source.split(
-        'Log($"ERROR: UEFI recovery agent setup failed: {ex.Message}");', 1
-    )[1].split('UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"]', 1)[0]
     failure_handler = source.split("private async Task HandleUefiPreparationFailureAsync", 1)[
         1
     ].split("private UefiRecoveryState CreateUefiRecoverySession", 1)[0]
 
     assert "HandleUefiPreparationFailureAsync" in exit_failure
-    assert "HandleUefiPreparationFailureAsync" in agent_failure
-    assert '"UEFI_RECOVERY_AGENT_FAILED"' in agent_failure
+    assert '"UEFI_RECOVERY_AGENT_FAILED"' in recovery_arming
+    assert "before disk mutation" in recovery_arming
     assert "InstallationStatus.RolledBack" in failure_handler
     assert "-Revert" in failure_handler
+    assert "-ExpectedRecoveryRunId" in failure_handler
     assert "observeCancellation: false" in failure_handler
     assert '"ApplyChangesPreparationErrorRestored"' in failure_handler
     assert '"ApplyChangesRollbackIncomplete"' in failure_handler
@@ -1518,6 +2181,23 @@ def test_live_bitlocker_diagnostic_is_shared_by_bios_and_uefi() -> None:
     assert "find_biggest_bitlocker_partition()" not in bios
     assert "find_biggest_bitlocker_partition()" not in uefi
     assert 'find_biggest_bitlocker_partition "$DISK"' in installer
+
+
+def test_final_verification_waits_for_a_clean_target_release_in_both_modes() -> None:
+    installer = read("assets/live/libertix-install-main.sh")
+    target = read("assets/live/libertix-target-common.sh")
+    runtime = read("assets/live/libertix-install-runtime-common.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+
+    assert 'unmount_target_system || die "target filesystem could not be released' in installer
+    assert "for attempt in $(seq 1 10)" in target
+    assert "findmnt -rn -R /mnt/target" in target
+    assert 'findmnt -rn -S "$NEW_PART"' in target
+    assert "mount_linux_root_read_only_or_die()" in runtime
+    for adapter in (bios, uefi):
+        assert 'mount_linux_root_read_only_or_die "$NEW_PART" "$target_verify"' in adapter
+        assert 'mount -o ro "$NEW_PART" "$target_verify"' not in adapter
 
 
 def test_live_boot_partition_identity_never_scans_other_disks() -> None:
@@ -1655,7 +2335,9 @@ def test_uefi_iso_download_uses_the_canonical_url_without_cache_busting() -> Non
 
     assert "$downloadUrl = $InstallerIsoUrl" in download
     assert "cacheBust" not in download
-    assert "Start-RobustDownload -Url $downloadUrl" in download
+    assert "Start-RobustDownload `" in download
+    assert "-Url $downloadUrl `" in download
+    assert "-MaxBytes $script:MaximumLiveIsoBytes" in download
 
 
 def test_mint_installer_uses_the_official_mirror_in_every_download_contract() -> None:
@@ -1669,6 +2351,90 @@ def test_mint_installer_uses_the_official_mirror_in_every_download_contract() ->
     )
     assert "MintIso =" not in download_module
     assert "$baseUrl/mint.iso" not in download_module
+
+
+def test_bios_windows_progress_does_not_regress_after_distribution_download() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    downloads = read("Pages/ApplyChanges.Downloads.cs")
+    progress_catalogue = read("Pages/ApplyChanges.Types.cs")
+
+    assert "DistributionDownload = 2" in progress_catalogue
+    assert "DistributionReady = 8" in progress_catalogue
+    assert "ShrinkWindows = 10" in progress_catalogue
+    assert "LiveDownloadTransferStart = 60" in progress_catalogue
+    assert "LiveDownloadTransferSpan = 20" in progress_catalogue
+    assert "InstallationContextReady = 95" in progress_catalogue
+    assert "BootloaderDownload = 96" in progress_catalogue
+    assert "BootEntryReady = 98" in progress_catalogue
+    assert "BiosProgress.DistributionDownload" in bios
+    assert "BiosProgress.DistributionReady" in bios
+    installer_download = downloads.split("private async Task<bool> DownloadInstallerIsoAsync", 1)[
+        1
+    ].split("private async Task<bool> DownloadFileWithRetriesAsync", 1)[0]
+    assert "progressStart: BiosProgress.DistributionDownload" in installer_download
+    assert (
+        "progressSpan: BiosProgress.DistributionReady - BiosProgress.DistributionDownload"
+        in installer_download
+    )
+
+
+def test_bios_preparation_log_steps_follow_execution_order() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    messages = [
+        "Step 1: Downloading Linux installer",
+        "Step 2: Shrinking Windows",
+        "Step 3: Creating",
+        "Step 4: No second shrink needed",
+        "Step 5: Downloading ISO",
+        "Step 6: Mounting ISO",
+        "Step 7: Downloading GRUB4DOS",
+        "Step 8: Configuring GRUB4DOS",
+    ]
+    for message in messages:
+        assert message in bios
+    assert "Step 9:" not in bios
+
+
+def test_windows_pages_share_the_wow64_safe_powershell_resolver() -> None:
+    page_sources = [
+        read("Pages/ApplyChanges.Bios.cs"),
+        read("Pages/ApplyChanges.Cancellation.cs"),
+        read("Pages/ApplyChanges.Plan.cs"),
+        read("Pages/ApplyChanges.System.cs"),
+        read("Pages/ApplyChanges.Uefi.cs"),
+        read("Pages/ApplyChanges.Windows.cs"),
+        read("Pages/ChooseDistro.xaml.cs"),
+        read("Pages/UefiBootFallback.xaml.cs"),
+    ]
+
+    assert (
+        sum(source.count("WindowsProcessRunner.ResolvePowerShell()") for source in page_sources)
+        == 12
+    )
+    assert all(
+        'SpecialFolder.System), "WindowsPowerShell"' not in source for source in page_sources
+    )
+
+
+def test_live_handoff_is_published_atomically_and_hidden_before_reboot() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    uefi = read("Scripts/uefi/Libertix.Uefi.Execution.ps1")
+    orchestrator = read("Scripts/libertix-uefi-install.ps1")
+
+    assert "RemoveBiosInstallerAccessPathAsync" in bios
+    assert "Remove-PartitionAccessPath -InputObject $p" in bios
+    assert "Installer partition drive letter remains assigned" in bios
+    assert "[IO.File]::Replace($temporary, $destination, $backup)" in uefi
+    assert "$outputStream.Flush($true)" in uefi
+    assert "Installation context publication hash mismatch" in uefi
+    assert 'Dismount-Letter -Letter ($drive.TrimEnd(":"))' in orchestrator
+
+
+def test_distribution_minimum_uses_the_shared_installation_size_policy() -> None:
+    chooser = read("Pages/ChooseDistro.xaml.cs")
+
+    assert "distroJson.SizeInGB < InstallationSizePolicy.MinimumFinalSizeGiB" in chooser
+    assert "distroJson.SizeInGB < 20" not in chooser
 
 
 def test_bios_iso_output_name_matches_the_filepool_contract() -> None:
@@ -1695,6 +2461,38 @@ def test_iso_build_defaults_do_not_embed_account_or_locale_fallbacks() -> None:
         assert "KEYBOARD_LAYOUT=" not in defaults
 
 
+def test_published_artifacts_are_traceable_and_include_notices() -> None:
+    workflow = read(".github/workflows/ci.yml")
+    assembly = read("Properties/AssemblyInfo.cs")
+
+    assert 'AssemblyInformationalVersion("1.0.0+local")' in assembly
+    assert "Stamp source revision in the executable" in workflow
+    assert "Copy-Item -LiteralPath LICENSE, THIRD_PARTY.md" in workflow
+    assert "BUILD-INFO.txt" in workflow
+    assert "informational-version=1.0.0+$env:GITHUB_SHA" in workflow
+    assert "> SHA256SUMS" in workflow
+    assert "release-assets/SHA256SUMS" in workflow
+
+
+def test_offline_documentation_preserves_the_catalogue_requirement() -> None:
+    readme = read("README.md")
+    architecture = read("docs/ARCHITECTURE.md")
+
+    assert "Reusing local ISO files does not remove the catalogue requirement" in readme
+    assert "downloads `distros.json` and its detached signature" in readme
+    assert "Local ISO files reduce artifact downloads" in architecture
+    assert "do not provide a standalone" in architecture
+    assert "An isolated laboratory must expose a local HTTP filepool" in architecture
+
+
+def test_recovery_documentation_does_not_promise_reversible_decryption() -> None:
+    architecture = read("docs/ARCHITECTURE.md")
+
+    assert "BitLocker is verified separately against its captured state" in architecture
+    assert "cannot be reversed safely by the installer" in architecture
+    assert "prevents Libertix from reporting a fully verified rollback" in architecture
+
+
 def test_wpf_and_automation_require_the_same_minimum_password_length() -> None:
     account_page = (ROOT / "Pages" / "AccountCreation.xaml.cs").read_text(encoding="utf-8-sig")
     api_models = (ROOT / "auto_tests" / "app" / "models.py").read_text(encoding="utf-8")
@@ -1707,7 +2505,7 @@ def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     script = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
     bits = script.split("function Start-BitsDownload", 1)[1].split("function Get-Aria2Exe", 1)[0]
     robust = script.split("function Start-RobustDownload", 1)[1].split(
-        "function Set-MintIsoOnWindows", 1
+        "function Set-DistributionIsoOnWindows", 1
     )[0]
 
     assert "NoProgressTimeoutSeconds = 120" in bits
@@ -1717,8 +2515,8 @@ def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     assert "if (-not $completed)" in bits
     assert "Remove-BitsTransfer -BitsJob $remainingJob" in bits
     assert "BITS completed but the downloaded file is missing" in bits
-    assert "Invoke-WebRequest" in robust
-    assert "-TimeoutSec 120" in robust
+    assert "Invoke-BoundedHttpDownload" in robust
+    assert "-TimeoutSeconds 120" in robust
 
 
 def test_terminal_fallback_does_not_reset_video_mode_on_redraw() -> None:
@@ -1778,6 +2576,248 @@ def test_grub_submenu_entries_always_have_a_transparent_icon_class() -> None:
     assert "add_invisible_icon_class" in renderer
     assert "--class find.none" in renderer
     assert (ROOT / "assets/grub-theme/icons/find.none.png").is_file()
+
+
+@pytest.mark.parametrize(
+    ("display_name", "icon"),
+    [
+        ("Linux Mint 22.3 Cinnamon", "linuxmint"),
+        ("Zorin OS 18.1 Core", "zorin"),
+    ],
+)
+def test_grub_renderer_uses_plan_presentation_without_flattening_advanced_entries(
+    tmp_path: Path,
+    display_name: str,
+    icon: str,
+) -> None:
+    linux = tmp_path / "linux.cfg"
+    windows = tmp_path / "windows.cfg"
+    firmware = tmp_path / "firmware.cfg"
+    plan = tmp_path / "installation-plan.json"
+    linux.write_text(
+        "menuentry 'Vendor Linux' --class vendor --class gnu-linux {\n"
+        "\tlinux /vmlinuz\n"
+        "}\n"
+        "submenu 'Advanced options for Vendor Linux' --class vendor {\n"
+        "\tmenuentry 'Vendor Linux recovery' --class vendor {\n"
+        "\t}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    windows.write_text("menuentry 'Windows Boot Manager' --class windows {\n}\n", encoding="utf-8")
+    firmware.write_text(
+        "menuentry 'UEFI Firmware Settings' --class firmware {\n}\n", encoding="utf-8"
+    )
+    plan.write_text(
+        json.dumps({"distribution": {"grubDisplayName": display_name, "grubIcon": icon}}),
+        encoding="utf-8",
+    )
+
+    rendered = subprocess.run(
+        [
+            "python3",
+            str(ROOT / "grub/render-libertix-menu.py"),
+            "--linux",
+            str(linux),
+            "--windows",
+            str(windows),
+            "--firmware",
+            str(firmware),
+            "--plan",
+            str(plan),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert f"menuentry '{display_name}' --class {icon} --class vendor" in rendered
+    assert rendered.count("submenu 'Advanced options' --class efi") == 1
+    advanced = rendered.split("submenu 'Advanced options' --class efi", 1)[1]
+    assert "Vendor Linux recovery" in advanced
+    assert "UEFI Firmware Settings" in advanced
+    assert (ROOT / f"assets/grub-theme/icons/{icon}.png").is_file()
+
+
+def test_grub_renderer_nests_capability_generators_without_extra_root_entries(
+    tmp_path: Path,
+) -> None:
+    linux = tmp_path / "linux.cfg"
+    windows = tmp_path / "windows.cfg"
+    firmware = tmp_path / "firmware.cfg"
+    memtest = tmp_path / "memtest.cfg"
+    plan = tmp_path / "installation-plan.json"
+    linux.write_text(
+        "menuentry 'Vendor Linux' --class vendor {\n}\n"
+        "submenu 'Advanced options for Vendor Linux' --class vendor {\n"
+        "\tmenuentry 'Vendor recovery' --class vendor {\n\t}\n}\n",
+        encoding="utf-8",
+    )
+    windows.write_text("menuentry 'Windows' --class windows {\n}\n", encoding="utf-8")
+    firmware.write_text("menuentry 'UEFI Firmware Settings' {\n}\n", encoding="utf-8")
+    memtest.write_text(
+        "menuentry 'Memory test' --class memtest86 {\n\tlinux16 /memtest86+.bin\n}\n",
+        encoding="utf-8",
+    )
+    plan.write_text(
+        json.dumps({"distribution": {"grubDisplayName": "Vendor Linux", "grubIcon": "vendor"}}),
+        encoding="utf-8",
+    )
+
+    rendered = subprocess.run(
+        [
+            "python3",
+            str(ROOT / "grub/render-libertix-menu.py"),
+            "--linux",
+            str(linux),
+            "--windows",
+            str(windows),
+            "--firmware",
+            str(firmware),
+            "--extra",
+            str(memtest),
+            "--plan",
+            str(plan),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    root_entries = [
+        line for line in rendered.splitlines() if line.startswith(("menuentry ", "submenu "))
+    ]
+    assert len(root_entries) == 4
+    advanced = rendered.split("submenu 'Advanced options' --class efi", 1)[1]
+    assert "Memory test" in advanced
+    assert "UEFI Firmware Settings" in advanced
+
+
+def test_distribution_payload_validation_is_capability_driven(tmp_path: Path) -> None:
+    iso_root = tmp_path / "iso"
+    rootfs = iso_root / "casper/filesystem.squashfs"
+    rootfs.parent.mkdir(parents=True)
+    rootfs.write_bytes(b"test rootfs")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_unsquashfs = fake_bin / "unsquashfs"
+    fake_unsquashfs.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = -ll ]; then printf \'%s\\n\' "squashfs-root/$3"; exit 0; fi\n'
+        'if [ "$1" = -cat ] && [ "$3" = etc/os-release ]; then\n'
+        "  printf '%s\\n' 'ID=sample' 'ID_LIKE=\"ubuntu debian\"'; exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_unsquashfs.chmod(0o755)
+    module = ROOT / "assets/live/libertix-distribution-common.sh"
+    command = (
+        f"PATH={str(fake_bin)!r}:$PATH; . {str(module)!r}; "
+        f"resolved=$(resolve_distribution_rootfs_or_die {str(iso_root)!r}); "
+        'test "$resolved" = ' + repr(str(rootfs)) + "; "
+        'assert_distribution_rootfs_compatible_or_die "$resolved" sample; '
+        'if assert_distribution_rootfs_compatible_or_die "$resolved" other; then exit 9; fi'
+    )
+
+    result = subprocess.run(["bash", "-c", command], check=False, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "Distribution payload verified: ID=sample ID_LIKE=ubuntu debian" in result.stdout
+    source = module.read_text(encoding="utf-8")
+    assert 'case "$DISTRIBUTION_ID"' not in source
+    assert "mint" not in source.casefold()
+    assert "zorin" not in source.casefold()
+
+
+def test_target_rebuilds_initramfs_without_live_boot_markers() -> None:
+    target = read("assets/live/configure-target-main.sh")
+    distribution = read("assets/live/libertix-distribution-common.sh")
+
+    assert "refresh_installed_initramfs" in target
+    assert "env -u CASPER_GENERATE_UUID update-initramfs -u -k all" in target
+    assert "default-boot-to-casper" in target
+    assert "live-initrd" in target
+    assert "conf/uuid" in target
+    assert target.index("cleanup_live_boot_artifacts") < target.index("refresh_installed_initramfs")
+    assert "usr/sbin/update-initramfs" in distribution
+    assert "usr/bin/lsinitramfs" in distribution
+
+
+def test_windows_storage_waits_only_for_small_transient_free_space_deficits() -> None:
+    policy = read("Scripts/modules/Libertix.StorageGeometry.psm1")
+    bios = read("Scripts/libertix-bios-storage.ps1")
+    uefi = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+
+    assert "$script:MinimumWindowsFreeSpaceBytes = 10GB" in policy
+    assert "$script:WindowsFreeSpaceToleranceBytes = 2GB" in policy
+    assert "$script:WindowsFreeSpaceRetryWindowBytes = 2GB" in policy
+    assert "function Wait-LibertixWindowsFreeSpaceBudget" in policy
+    assert "$deficitBytes -gt $script:WindowsFreeSpaceRetryWindowBytes" in policy
+    assert "$stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds" in policy
+    assert "Wait-LibertixWindowsFreeSpaceBudget" in bios
+    assert "Wait-LibertixWindowsFreeSpaceBudget" in uefi
+
+
+def test_grub_generators_remain_nested_after_package_updates() -> None:
+    target = read("assets/live/configure-target-main.sh")
+    postinstall = read("auto_tests/app/services/automation_postinstall.py")
+
+    assert "dpkg-divert --local --add --rename --divert" in target
+    assert "dpkg-divert --truename" in target
+    assert "/usr/local/lib/libertix/grub-generators/10_linux" in target
+    assert "/usr/local/lib/libertix/grub-generators/30_uefi-firmware" in target
+    assert "/etc/grub.d/20_memtest86+" in target
+    assert '"/usr/local/lib/libertix/grub-generators/$(basename "$generator")"' in target
+    firmware_diversion = (
+        "/usr/local/lib/libertix/grub-generators/30_uefi-firmware \\\n        optional"
+    )
+    assert firmware_diversion in target
+    assert target.count("optional") >= 3
+    assert 'parser.add_argument("--extra"' in read("grub/render-libertix-menu.py")
+    assert "chmod -x /etc/grub.d/10_linux" not in target
+    root_entry_contract = "grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg"
+    assert root_entry_contract in target
+    assert root_entry_contract in postinstall
+    assert 'RemoteCheck(\n                "linux.grub_regeneration"' in postinstall
+    assert "update-grub; grub-script-check /boot/grub/grub.cfg" in postinstall
+    assert "dpkg-divert --listpackage" in postinstall
+
+
+@pytest.mark.parametrize(
+    ("system_lang", "expected"),
+    [
+        ("fr_FR.UTF-8", ["fr_FR.UTF-8 UTF-8", "en_US.UTF-8 UTF-8"]),
+        ("en_US.UTF-8", ["en_US.UTF-8 UTF-8"]),
+        ("es_ES.UTF-8", ["es_ES.UTF-8 UTF-8", "en_US.UTF-8 UTF-8"]),
+        ("ja_JP.UTF-8", ["ja_JP.UTF-8 UTF-8", "en_US.UTF-8 UTF-8"]),
+    ],
+)
+def test_target_generates_only_the_selected_and_fallback_locales(
+    system_lang: str,
+    expected: list[str],
+) -> None:
+    command = r"""
+set -eu
+SYSTEM_LANG="$1"
+{
+    printf '%s UTF-8\n' "$SYSTEM_LANG"
+    if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]; then
+        printf '%s UTF-8\n' "en_US.UTF-8"
+    fi
+}
+"""
+    result = subprocess.run(
+        ["bash", "-c", command, "locale-test", system_lang],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == expected
+    target = read("assets/live/configure-target-main.sh")
+    assert "> /etc/locale.gen" in target
+    assert 'if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]' in target
 
 
 def test_grub_kernel_update_keeps_all_advanced_entries_nested() -> None:
@@ -1859,15 +2899,14 @@ def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
     assert "systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0" in page
     assert "_initialFreeSpace = Math.Round" not in page
     assert "_installationState.Compatibility?.ShrinkAvailableBytes" in page
-    available_linux_size = (
-        "Math.Min(\n"
-        "            _initialFreeSpace - MinimumWindowsFree,\n"
-        "            _shrinkAvailableSpace)"
-    )
-    assert available_linux_size in page
-    assert "MinimumWindowsFreeSpaceGiB = 10" in size_policy
+    assert "InstallationSizePolicy.AvailableLinuxSizeGiB(" in page
+    assert "InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(" in page
+    assert "initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB" in size_policy
+    assert "TargetWindowsFreeSpaceGiB = 10" in size_policy
+    assert "WindowsFreeSpaceToleranceGiB = 2" in size_policy
+    assert "TargetWindowsFreeSpaceGiB - WindowsFreeSpaceToleranceGiB" in size_policy
     assert "$script:MinimumWindowsFreeSpaceBytes = 10GB" in storage_policy
-    assert "$script:WindowsFreeSpaceToleranceBytes = 1GB" in storage_policy
+    assert "$script:WindowsFreeSpaceToleranceBytes = 2GB" in storage_policy
     assert "InstallationSizePolicy.MinimumWindowsFreeSpaceGiB" in page
 
 
@@ -1911,6 +2950,18 @@ def test_nvram_probe_tests_bootnext_without_a_vendor_variable() -> None:
     assert 'Set-NvramVariable -Name "BootNext" -Guid $global -Bytes $bootCurrent.Bytes' in script
     assert '$bootNext = Get-NvramVariable -Name "BootNext"' in script
     assert 'Set-NvramVariable -Name "BootNext" -Guid $global -Bytes $null' in script
+
+
+def test_force_uefi_diagnostic_uses_a_unique_remote_script_and_finally_cleanup() -> None:
+    tool = read("auto_tests/tools/force_uefi_bootnext_failure.py")
+
+    assert "uuid.uuid4().hex" in tool
+    assert 'remote_os="windows"' in tool
+    assert "finally:" in tool
+    assert "force-uefi-bootnext-failure-{run_id}.ps1" in tool
+    assert "if exist {remote_windows_script} exit /b 1" in tool
+    assert 'step="test.force_bootnext.cleanup"' in tool
+    assert "check=True" in tool
 
 
 def test_compatibility_output_is_persisted_in_the_application_log() -> None:
@@ -1967,6 +3018,19 @@ def test_large_local_artifacts_do_not_use_tmpfs_paths() -> None:
     assert "/var/lib/libertix-work/uefi" in uefi_defaults
 
 
+def test_iso_verification_covers_state_runtime_and_builds_are_serialized() -> None:
+    builder = read("iso-tools/build-isos-docker.sh")
+    verifier = read("docker/iso-builder/verify-built-iso.sh")
+
+    assert "libertix-installation-state.py" in verifier
+    assert "libertix_progress.py" in verifier
+    assert 'LOCK_FILE="$LOCK_DIR/iso-build.lock"' in builder
+    assert "flock -n 9" in builder
+    assert "label=com.ekimia.libertix.iso-builder=true" in builder
+    assert "label=com.ekimia.libertix.iso-workspace=$WORKSPACE_ID" in builder
+    assert 'docker ps -q --filter "ancestor=$IMAGE_NAME"' not in builder
+
+
 def test_uefi_rollback_proves_firmware_and_esp_cleanup() -> None:
     live = read("assets/live/libertix-uefi-adapter.sh")
     firmware = read("Scripts/uefi/Libertix.Uefi.Firmware.ps1")
@@ -1992,3 +3056,25 @@ def test_uefi_rollback_proves_firmware_and_esp_cleanup() -> None:
     assert (
         "Temporary Libertix firmware entry Boot{0:X4} remains after cleanup" in powershell_cleanup
     )
+
+
+def test_wpf_runtime_failure_paths_are_bounded_and_recoverable() -> None:
+    app = read("App.xaml.cs")
+    localization = read("Localization.cs")
+    apply_page = read("Pages/ApplyChanges.xaml.cs")
+    resize_page = read("Pages/ResizeDisk.xaml.cs")
+    resize_xaml = read("Pages/ResizeDisk.xaml")
+
+    assert '@"Global\\Libertix.Installation"' in app
+    assert "_ownsSingleInstanceMutex = createdNew;" in app
+    assert "if (_ownsSingleInstanceMutex)" in app
+    assert "_singleInstanceMutex.Dispose();" in app.split("if (!createdNew)", 1)[1]
+    assert '"Resources/Lang/Strings."' in localization
+    assert "foreach (ResourceDictionary oldDictionary in oldDictionaries)" in localization
+    assert "return fallback;" in localization
+    assert "Unloaded += ApplyChanges_Unloaded;" in apply_page
+    assert "_installationCancellation.Dispose();" in apply_page
+    assert "cleanmgr.exe" not in resize_page
+    assert "OpenDiskCleanup" not in resize_page
+    assert "OpenDiskCleanup" not in resize_xaml
+    assert 'Message="{DynamicResource FreeUpSpace}"' in resize_xaml

@@ -22,6 +22,8 @@ namespace Libertix.Helpers
             ProductionBaseUrl,
             StringComparison.OrdinalIgnoreCase);
 
+        public bool IsDevelopmentMode => !RequiresCatalogSignature;
+
         public static FilepoolConfig Production { get; } =
             new FilepoolConfig(ProductionBaseUrl);
 

@@ -219,16 +219,75 @@ function Publish-LibertixInstallationContext {
     if (-not (Test-LibertixTrackedExecution)) {
         return
     }
-    # The plan and state are the only cross-environment contracts. Publishing
-    # both prevents the live from reconstructing disk intent from probe order.
-    Copy-Item `
-        -LiteralPath $InstallationPlanPath `
-        -Destination (Join-Path $PartitionDrive "installation-plan.json") `
-        -Force
-    Copy-Item `
-        -LiteralPath $ExecutionStatePath `
-        -Destination (Join-Path $PartitionDrive "installation-state.json") `
-        -Force
+    # The plan and state are the only cross-environment contracts. A direct
+    # Copy-Item can expose a truncated JSON document if power is lost while an
+    # existing handoff is refreshed, so stage and verify each file before the
+    # same-directory replacement.
+    $contextFiles = @(
+        [pscustomobject]@{
+            Source = $InstallationPlanPath
+            Destination = Join-Path $PartitionDrive "installation-plan.json"
+        },
+        [pscustomobject]@{
+            Source = $ExecutionStatePath
+            Destination = Join-Path $PartitionDrive "installation-state.json"
+        }
+    )
+    foreach ($contextFile in $contextFiles) {
+        $source = [IO.Path]::GetFullPath([string]$contextFile.Source)
+        $destination = [IO.Path]::GetFullPath([string]$contextFile.Destination)
+        $directory = [IO.Path]::GetDirectoryName($destination)
+        $temporary = Join-Path `
+            $directory `
+            ".$([IO.Path]::GetFileName($destination)).$([Guid]::NewGuid().ToString('N')).tmp"
+        $backup = Join-Path `
+            $directory `
+            ".$([IO.Path]::GetFileName($destination)).$([Guid]::NewGuid().ToString('N')).bak"
+        try {
+            $inputStream = New-Object IO.FileStream(
+                $source,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read
+            )
+            try {
+                $outputStream = New-Object IO.FileStream(
+                    $temporary,
+                    [IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::Write,
+                    [IO.FileShare]::None,
+                    4096,
+                    [IO.FileOptions]::WriteThrough
+                )
+                try {
+                    $inputStream.CopyTo($outputStream)
+                    $outputStream.Flush($true)
+                } finally {
+                    $outputStream.Dispose()
+                }
+            } finally {
+                $inputStream.Dispose()
+            }
+
+            $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+            $temporaryHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+            if ($sourceHash -ne $temporaryHash) {
+                throw "Installation context staging hash mismatch for $([IO.Path]::GetFileName($destination))."
+            }
+            if ([IO.File]::Exists($destination)) {
+                [IO.File]::Replace($temporary, $destination, $backup)
+            } else {
+                [IO.File]::Move($temporary, $destination)
+            }
+            $publishedHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+            if ($sourceHash -ne $publishedHash) {
+                throw "Installation context publication hash mismatch for $([IO.Path]::GetFileName($destination))."
+            }
+        } finally {
+            if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+            if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
+        }
+    }
 }
 
 function Write-ExceptionDiagnostics {

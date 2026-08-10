@@ -52,6 +52,11 @@ namespace Libertix.Pages
             _startInstallation();
         }
 
+        private void Welcome_Loaded(object sender, RoutedEventArgs e)
+        {
+            StartButton.Focus();
+        }
+
         private void About_Click(object sender, RoutedEventArgs e)
         {
             _openAbout();

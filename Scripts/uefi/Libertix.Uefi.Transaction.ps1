@@ -152,6 +152,43 @@ function Get-TransactionPartitionState {
     }
 }
 
+function Assert-LibertixTransactionRecoveryRunId {
+    param([Parameter(Mandatory = $true)][string]$ExpectedRecoveryRunId)
+
+    if ($ExpectedRecoveryRunId -notmatch '^[0-9a-f]{32}$') {
+        throw "A valid ExpectedRecoveryRunId is required for UEFI rollback."
+    }
+    $state = Get-TransactionPartitionState
+    if (-not $state) {
+        return
+    }
+    if (
+        -not ($state.PSObject.Properties.Name -contains "RecoveryRunId") -or
+        [string]$state.RecoveryRunId -ne $ExpectedRecoveryRunId
+    ) {
+        throw "The UEFI transaction belongs to another recovery run; refusing rollback."
+    }
+}
+
+function Restore-LibertixTransactionWindowsSettings {
+    $state = Get-TransactionPartitionState
+    if (-not $state) {
+        throw "UEFI transaction state is missing; Windows settings cannot be restored."
+    }
+    if (
+        $state.PSObject.Properties.Name -contains "OriginalHibernateEnabled" -and
+        $null -ne $state.OriginalHibernateEnabled
+    ) {
+        $expected = [bool]$state.OriginalHibernateEnabled
+        if ($expected -ne (Get-HibernateEnabled)) {
+            Set-HibernateEnabled -Enabled $expected
+        }
+        if ($expected -ne (Get-HibernateEnabled)) {
+            throw "Windows hibernation did not return to its pre-installation state."
+        }
+    }
+}
+
 function Save-PreparedInstallerManifest {
     param([Parameter(Mandatory = $true)][string]$InstallerDrive)
 
@@ -261,13 +298,7 @@ function Invoke-Revert {
     try {
         $esp = Mount-Esp -Letter $EspLetter
 
-        foreach ($relativeDir in @("EFI\LibertixInstaller")) {
-            $path = Join-Path $esp $relativeDir
-            if (Test-Path $path) {
-                Write-Log "Removing ESP directory: $relativeDir" "Cyan"
-                Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
-            }
-        }
+        Remove-LibertixTemporaryEspFiles -EspDrive $esp
 
         Remove-LibertixTemporaryFirmwareEntries
         Restore-OriginalFirmwareBootOrder

@@ -4,14 +4,16 @@ using System.Text.Json.Serialization;
 namespace Libertix.Installation
 {
     /// <summary>
-    /// Immutable-in-practice description of one Libertix installation.
+    /// Validated, atomically published description of one Libertix installation.
     ///
     /// The Windows application creates this plan before changing the disk. Every
     /// later component consumes the same values instead of recalculating them.
+    /// Runtime code may atomically record the observed staging-partition identity
+    /// or a validated boot-strategy fallback after those values become known.
     /// </summary>
     public sealed class InstallationPlan
     {
-        public const int CurrentSchemaVersion = 1;
+        public const int CurrentSchemaVersion = 2;
 
         [JsonPropertyName("schemaVersion")]
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
@@ -69,8 +71,20 @@ namespace Libertix.Installation
 
     public sealed class InstallationDistribution
     {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
         [JsonPropertyName("name")]
         public string Name { get; set; }
+
+        [JsonPropertyName("osReleaseId")]
+        public string OsReleaseId { get; set; }
+
+        [JsonPropertyName("grubDisplayName")]
+        public string GrubDisplayName { get; set; }
+
+        [JsonPropertyName("grubIcon")]
+        public string GrubIcon { get; set; }
 
         [JsonPropertyName("installerIsoFileName")]
         public string InstallerIsoFileName { get; set; }
@@ -131,6 +145,9 @@ namespace Libertix.Installation
 
         [JsonPropertyName("uniqueId")]
         public string UniqueId { get; set; }
+
+        [JsonPropertyName("partitionTableId")]
+        public string PartitionTableId { get; set; }
 
         [JsonPropertyName("sizeBytes")]
         public long SizeBytes { get; set; }

@@ -113,7 +113,8 @@ namespace Libertix.Pages
                             label: "ext4 Windows read-only support",
                             progressMessage: Localized(
                                 "ApplyChangesPreparingWindowsShare",
-                                "Preparing Windows file sharing...")))
+                                "Preparing Windows file sharing..."),
+                            maximumBytes: MaximumSupportArtifactBytes))
                             return false;
                         if (!await VerifySha256Async(
                             setupPath,
@@ -126,6 +127,12 @@ namespace Libertix.Pages
                 long expectedLinuxSize = InstallationSizePolicy
                     .FromRequestedGigabytes(_linuxSizeGB)
                     .FinalSizeBytes;
+                long originalWindowsEnd = checked(
+                    _storagePreflight.SystemPartitionOffset +
+                    _storagePreflight.SystemPartitionSize);
+                long alignmentPadding = originalWindowsEnd % (1024L * 1024L);
+                long expectedLinuxOffset = checked(
+                    originalWindowsEnd - expectedLinuxSize - alignmentPadding);
                 string configPath = Path.Combine(WindowsShareRoot, "config.json");
                 File.WriteAllText(
                     configPath,
@@ -133,8 +140,13 @@ namespace Libertix.Pages
                     {
                         Enabled = options.ShareLinuxFilesInWindows,
                         SystemDiskNumber = _storagePreflight.SystemDiskNumber,
+                        SystemDiskUniqueId = _storagePreflight.SystemDiskUniqueId,
+                        ExpectedLinuxPartitionOffset = expectedLinuxOffset,
                         ExpectedLinuxPartitionSize = expectedLinuxSize,
                         LinuxUsername = account.Username,
+                        ShortcutDescription = Localized(
+                            "WindowsShareShortcutDescription",
+                            "Linux files (read-only)"),
                         SetupPath = setupPath,
                         SetupSha256 = Artifacts.Ext4Driver.Sha256
                     }),
@@ -301,6 +313,7 @@ namespace Libertix.Pages
                         $"RECOVERY_PARTITION_OFFSET_BYTES={_storagePreflight.RecoveryPartitionOffset}",
                         $"RECOVERY_PARTITION_SIZE_BYTES={_storagePreflight.RecoveryPartitionSize}",
                         $"RECOVERY_RUN_ID={_installationPlan.Runtime.RecoveryRunId}",
+                        $"PLAN_ID={_installationPlan.PlanId}",
                         // Captured before Fast Startup is disabled so a rollback
                         // can put the user's original setting back.
                         $"ORIGINAL_HIBERNATE_ENABLED={FormatOptionalBool(GetHibernateEnabled())}",
@@ -324,9 +337,7 @@ namespace Libertix.Pages
                     // dual-boot clock correction can move the next Windows boot before
                     // that boundary and silently suppress recovery. The ScheduledTasks
                     // API creates a boot trigger without a wall-clock dependency.
-                    string powershell = ResolveSystemExecutable(
-                        "WindowsPowerShell\\v1.0\\powershell.exe",
-                        "powershell.exe");
+                    string powershell = WindowsProcessRunner.ResolvePowerShell();
                     string args = $"-NoProfile -ExecutionPolicy Bypass -File " +
                         $"{QuoteArgument(registrationScript)} " +
                         $"-TaskName {QuoteArgument(RuntimeNames.BiosRecoveryTask)} " +
@@ -439,9 +450,7 @@ namespace Libertix.Pages
             if (!File.Exists(scriptPath))
                 throw new FileNotFoundException("BIOS storage helper is missing.", scriptPath);
 
-            string powershell = ResolveSystemExecutable(
-                @"WindowsPowerShell\v1.0\powershell.exe",
-                "powershell.exe");
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
             string arguments =
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
                 $"-Action {QuoteArgument(action)} " +

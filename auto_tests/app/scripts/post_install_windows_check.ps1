@@ -31,6 +31,89 @@ function Get-LinuxDrive {
     throw "The read-only Linux volume is not mounted on any supported drive letter."
 }
 
+function Get-LibertixRecoveryTasks {
+    $tasks = @()
+    foreach ($pattern in @(
+        "LibertixInstallRecovery",
+        "LibertixUefiRecovery_*",
+        "LibertixUefiRecoveryPrompt_*"
+    )) {
+        $tasks += @(Get-ScheduledTask -TaskName $pattern -ErrorAction SilentlyContinue)
+    }
+    return @($tasks | Sort-Object TaskName -Unique)
+}
+
+function Get-ExpectedLinuxMountIdentity {
+    $planPath = "C:\LibertixInstallLogs\latest\installation-plan.json"
+    Assert-Condition (Test-Path -LiteralPath $planPath -PathType Leaf) `
+        "The archived installation plan is missing for Linux mount verification."
+    $plan = Get-Content -LiteralPath $planPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    $disk = Get-Disk -Number ([int]$plan.disk.number) -ErrorAction Stop
+    Assert-Condition (
+        ([string]$disk.UniqueId).Trim() -eq ([string]$plan.disk.uniqueId).Trim()
+    ) "The Linux mount disk identity differs from the installation plan."
+    $partitions = @(
+        Get-Partition -DiskNumber $disk.Number -ErrorAction Stop |
+            Where-Object {
+                [int64]$_.Offset -eq [int64]$plan.disk.installer.offsetBytes -and
+                [int64]$_.Size -eq [int64]$plan.disk.installer.finalSizeBytes
+            }
+    )
+    Assert-Condition ($partitions.Count -eq 1) `
+        "The Linux mount partition does not match the installation plan."
+    return [pscustomobject]@{
+        DiskNumber = [int]$disk.Number
+        PartitionNumber = [int]$partitions[0].PartitionNumber
+    }
+}
+
+function Get-CommandLineTokens {
+    param([Parameter(Mandatory = $true)][string]$CommandLine)
+
+    $tokens = @()
+    foreach ($match in [regex]::Matches($CommandLine, '"([^\"]*)"|([^\s]+)')) {
+        if ($match.Groups[1].Success) {
+            $tokens += $match.Groups[1].Value
+        } else {
+            $tokens += $match.Groups[2].Value
+        }
+    }
+    return @($tokens)
+}
+
+function Test-CommandLineToken {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Tokens,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    return @($Tokens | Where-Object { $_ -ieq $Value }).Count -eq 1
+}
+
+function Test-CommandLineOptionValue {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Tokens,
+        [Parameter(Mandatory = $true)][string]$Option,
+        [Parameter(Mandatory = $true)][string]$Value
+    )
+
+    $optionValues = @()
+    for ($index = 0; $index -lt $Tokens.Count; $index++) {
+        if ($Tokens[$index] -ieq $Option) {
+            if ($index + 1 -ge $Tokens.Count) {
+                return $false
+            }
+            $optionValues += $Tokens[$index + 1]
+            continue
+        }
+        $prefix = "$Option="
+        if ($Tokens[$index].StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $optionValues += $Tokens[$index].Substring($prefix.Length)
+        }
+    }
+    return $optionValues.Count -eq 1 -and $optionValues[0] -ieq $Value
+}
+
 function Invoke-NativeCheck {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -44,6 +127,7 @@ function Invoke-NativeCheck {
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
 $check = [string]$config.check
+$installerIsoPattern = [regex]::Escape([string]$config.installer_iso_file_name)
 
 try {
     switch ($check) {
@@ -52,11 +136,7 @@ try {
             do {
                 $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
                 $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
-                $recoveryTasks = @(
-                    Get-ScheduledTask `
-                        -TaskName "LibertixInstallRecovery" `
-                        -ErrorAction SilentlyContinue
-                )
+                $recoveryTasks = @(Get-LibertixRecoveryTasks)
                 if (-not $biosPending -and -not $uefiTransaction -and $recoveryTasks.Count -eq 0) {
                     Write-Output "LIBERTIX_FINALIZATION=ready"
                     break
@@ -85,11 +165,7 @@ try {
             $coreServices = @(Get-Service -Name @("EventLog", "RpcSs", "Schedule") -ErrorAction Stop)
             $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
             $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
-            $recoveryTasks = @(
-                Get-ScheduledTask `
-                    -TaskName "LibertixInstallRecovery" `
-                    -ErrorAction SilentlyContinue
-            )
+            $recoveryTasks = @(Get-LibertixRecoveryTasks)
             $bcdEntries = @(& bcdedit.exe /enum all 2>&1)
             Assert-Condition ($LASTEXITCODE -eq 0) "bcdedit failed during the final Windows check."
             $bcdText = $bcdEntries -join "`n"
@@ -119,7 +195,7 @@ try {
             Assert-Condition ($recoveryTasks.Count -eq 0) "The recovery task remains after the final boot."
             Assert-Condition ($bcdText -match "(?i)winload[.]e(?:xe|fi)") `
                 "The Windows loader is absent after the final boot."
-            Assert-Condition ($bcdText -notmatch "(?i)Libertix Installer|mint[.]iso|grldr") `
+            Assert-Condition ($bcdText -notmatch "(?i)Libertix Installer|$installerIsoPattern|grldr") `
                 "A temporary Libertix boot entry remains after the final boot."
         }
         "identity" {
@@ -239,7 +315,7 @@ try {
             Assert-Condition ($LASTEXITCODE -eq 0) "bcdedit failed to enumerate the boot configuration."
             $text = $entries -join "`n"
             Assert-Condition ($text -match "(?i)winload[.]e(?:xe|fi)") "The Windows loader is absent from BCD."
-            Assert-Condition ($text -notmatch "(?i)Libertix Installer|mint[.]iso|grldr") "A temporary Libertix boot entry remains in BCD."
+            Assert-Condition ($text -notmatch "(?i)Libertix Installer|$installerIsoPattern|grldr") "A temporary Libertix boot entry remains in BCD."
         }
         "recovery" {
             $recoveryPartitions = @(Get-Partition | Where-Object {
@@ -271,7 +347,7 @@ try {
             $installerVolumes = @(Get-Volume -FileSystemLabel "LIBERTIXEFI" -ErrorAction SilentlyContinue)
             $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
             $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
-            $recoveryTasks = @(Get-ScheduledTask -TaskName "LibertixInstallRecovery" -ErrorAction SilentlyContinue)
+            $recoveryTasks = @(Get-LibertixRecoveryTasks)
             Write-Output ("INSTALLER_VOLUMES={0}" -f $installerVolumes.Count)
             Write-Output ("UEFI_TRANSACTION={0}" -f $uefiTransaction)
             Write-Output ("BIOS_PENDING={0}" -f $biosPending)
@@ -389,11 +465,70 @@ try {
         }
         "ext4_readonly_mount" {
             $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)
+            $driveRoot = $drive
+            $identity = Get-ExpectedLinuxMountIdentity
+            $expectedExecutable = "$env:ProgramFiles\ext4-win-driver\ext4.exe"
             $processes = @(Get-CimInstance Win32_Process -Filter "Name='ext4.exe'")
             Write-Output ("LINUX_DRIVE={0}" -f $drive)
             $processes | Format-List ProcessId, ExecutablePath, CommandLine
             Assert-Condition ($processes.Count -ge 1) "No ext4 mount process is running."
-            Assert-Condition ([bool]($processes.CommandLine -match "(?i)(?:^|\s)--ro(?:\s|$)")) "The active ext4 mount is not read-only."
+            $writableProcesses = @($processes | Where-Object {
+                $_.CommandLine -notmatch "(?i)(?:^|\s)--ro(?:\s|$)"
+            })
+            Assert-Condition ($writableProcesses.Count -eq 0) `
+                "At least one active ext4 mount is not read-only."
+            $processIdentityResults = @($processes | ForEach-Object {
+                $commandLine = [string]$_.CommandLine
+                $commandLineTokens = @(Get-CommandLineTokens -CommandLine $commandLine)
+                $executableMatches = [string]$_.ExecutablePath -ieq $expectedExecutable
+                $diskMatches = Test-CommandLineToken `
+                    -Tokens $commandLineTokens `
+                    -Value "\\.\PhysicalDrive$($identity.DiskNumber)"
+                $driveMatches = Test-CommandLineOptionValue `
+                    -Tokens $commandLineTokens `
+                    -Option "--drive" `
+                    -Value $driveRoot
+                $partitionMatches = Test-CommandLineOptionValue `
+                    -Tokens $commandLineTokens `
+                    -Option "--part" `
+                    -Value ([string]$identity.PartitionNumber)
+                $readOnlyMatches = Test-CommandLineToken -Tokens $commandLineTokens -Value "--ro"
+                [pscustomobject]@{
+                    Process = $_
+                    ProcessId = $_.ProcessId
+                    ExecutableMatches = $executableMatches
+                    DiskMatches = $diskMatches
+                    DriveMatches = $driveMatches
+                    PartitionMatches = $partitionMatches
+                    ReadOnlyMatches = $readOnlyMatches
+                    ExpectedDisk = "\\.\PhysicalDrive$($identity.DiskNumber)"
+                    ExpectedDrive = $driveRoot
+                    ExpectedPartition = [string]$identity.PartitionNumber
+                    Tokens = $commandLineTokens -join " | "
+                }
+            })
+            $processIdentityResults |
+                Select-Object `
+                    ProcessId, `
+                    ExecutableMatches, `
+                    DiskMatches, `
+                    DriveMatches, `
+                    PartitionMatches, `
+                    ReadOnlyMatches, `
+                    ExpectedDisk, `
+                    ExpectedDrive, `
+                    ExpectedPartition, `
+                    Tokens |
+                Format-List
+            $ownedProcesses = @($processIdentityResults | Where-Object {
+                $_.ExecutableMatches -and
+                $_.DiskMatches -and
+                $_.DriveMatches -and
+                $_.PartitionMatches -and
+                $_.ReadOnlyMatches
+            })
+            Assert-Condition ($ownedProcesses.Count -eq 1) `
+                "The active ext4 mount is not uniquely tied to the planned disk and partition."
         }
         "linux_home" {
             $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)

@@ -21,7 +21,9 @@ def configure_logging(level: str, log_dir: Path) -> None:
     file_handler.setFormatter(formatter)
 
     root = logging.getLogger()
-    root.handlers.clear()
+    for handler in root.handlers[:]:
+        root.removeHandler(handler)
+        handler.close()
     root.addHandler(console_handler)
     root.addHandler(file_handler)
     root.setLevel(level.upper())

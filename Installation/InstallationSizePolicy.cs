@@ -9,7 +9,10 @@ namespace Libertix.Installation
     public static class InstallationSizePolicy
     {
         public const int MinimumFinalSizeGiB = 20;
-        public const int MinimumWindowsFreeSpaceGiB = 10;
+        public const int TargetWindowsFreeSpaceGiB = 10;
+        public const int WindowsFreeSpaceToleranceGiB = 2;
+        public const int MinimumWindowsFreeSpaceGiB =
+            TargetWindowsFreeSpaceGiB - WindowsFreeSpaceToleranceGiB;
         public const int MaximumDirectFat32SizeGiB = 31;
         public const int LargeInstallationStagingSizeGiB = 8;
         public const long BytesPerGiB = 1024L * 1024L * 1024L;
@@ -28,6 +31,24 @@ namespace Libertix.Installation
                 : finalSizeGiB;
 
             return new InstallationSizes(finalSizeGiB, stagingSizeGiB);
+        }
+
+        public static double AvailableLinuxSizeGiB(
+            double initialWindowsFreeGiB,
+            double shrinkAvailableGiB,
+            double installerIsoGiB)
+        {
+            double windowsBudget =
+                initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB;
+            return Math.Max(0, Math.Min(windowsBudget, shrinkAvailableGiB));
+        }
+
+        public static double RemainingWindowsFreeSpaceGiB(
+            double initialWindowsFreeGiB,
+            double installerIsoGiB,
+            double linuxSizeGiB)
+        {
+            return initialWindowsFreeGiB - installerIsoGiB - linuxSizeGiB;
         }
 
     }

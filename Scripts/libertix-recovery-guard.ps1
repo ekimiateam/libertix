@@ -75,9 +75,9 @@ function Remove-RecoveryTask {
     }
 }
 
-function Initialize-RecoveryExecutionState {
+function Read-RecoveryExecutionState {
     if (-not (Test-Path -LiteralPath $ExecutionStatePath -PathType Leaf)) {
-        return $false
+        throw "Recovery execution state is missing."
     }
     if (-not (Test-Path -LiteralPath $ExecutionStateModulePath -PathType Leaf)) {
         throw "Recovery execution state exists but its transition module is missing."
@@ -85,6 +85,20 @@ function Initialize-RecoveryExecutionState {
 
     Import-Module -Name $ExecutionStateModulePath -Force -ErrorAction Stop
     $state = Read-LibertixExecutionState -Path $ExecutionStatePath
+    $expectedPlanId = Read-EnvValue -Path $Pending -Name "PLAN_ID"
+    if ($expectedPlanId -notmatch '^[0-9a-f]{32}$') {
+        throw "Pending metadata plan identity is missing or invalid."
+    }
+    if ([string]$state.planId -ne $expectedPlanId) {
+        throw "Recovery execution state does not belong to the pending installation plan."
+    }
+    return $state
+}
+
+function Initialize-RecoveryExecutionState {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $state = $State
     if ([string]$state.status -in @("running", "failed")) {
         $null = Start-LibertixRollback -Path $ExecutionStatePath
     } elseif ([string]$state.status -ne "rollback-running") {
@@ -113,8 +127,37 @@ function Save-RecoveryLog {
     }
 }
 
+function Restore-OriginalHibernationSetting {
+    $originalHibernate = Read-EnvValue -Path $Pending -Name "ORIGINAL_HIBERNATE_ENABLED"
+    if ($originalHibernate -eq "true") {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
+        $hibernateOutput = & "$env:SystemRoot\System32\powercfg.exe" /hibernate on 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Hibernation restore failed with rc=$LASTEXITCODE output=$($hibernateOutput -join ' ')"
+        }
+        $hibernateEnabled = (
+            Get-ItemProperty `
+                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
+                -Name "HibernateEnabled" `
+                -ErrorAction Stop
+        ).HibernateEnabled
+        if ($hibernateEnabled -ne 1) {
+            throw "Hibernation restore did not enable HibernateEnabled."
+        }
+    } elseif ($originalHibernate -eq "false") {
+        Write-RecoveryLog "Hibernation was already disabled before installation; left off."
+    } else {
+        Write-RecoveryLog "Original hibernation state unknown; left unchanged."
+    }
+}
+
 function Restore-BcdState {
+    param([switch]$Required)
+
     if (-not (Test-Path -LiteralPath $BcdBackup -PathType Leaf)) {
+        if ($Required) {
+            throw "Required pre-install BCD backup is missing."
+        }
         Write-RecoveryLog "No BCD backup present; BCD restore skipped."
         return
     }
@@ -268,6 +311,7 @@ function Remove-EmptyTransactionExtendedContainer {
 try {
     Write-RecoveryLog "Recovery guard started."
     $script:TrackRecoveryExecutionState = $false
+    $recoveryExecutionState = Read-RecoveryExecutionState
 
     $expectedRecoveryRunId = Read-EnvValue -Path $Pending -Name "RECOVERY_RUN_ID"
     $successRecoveryRunId = Read-EnvValue `
@@ -279,9 +323,11 @@ try {
     if (
         -not [string]::IsNullOrWhiteSpace($expectedRecoveryRunId) -and
         $successRecoveryRunId -eq $expectedRecoveryRunId -and
-        $successRecoveryState -eq "install-success"
+        $successRecoveryState -eq "install-success" -and
+        [string]$recoveryExecutionState.status -eq "succeeded"
     ) {
         Write-RecoveryLog "Dedicated successful install marker found; no disk rollback needed."
+        Restore-BcdState -Required
         Remove-TemporaryBootPayload
         Invoke-WindowsShareFinalize
         Remove-RecoveryTask
@@ -309,8 +355,13 @@ try {
         (Test-Path -LiteralPath $Pending -PathType Leaf) -and
         ((Get-Item -LiteralPath $Result).LastWriteTimeUtc -gt (Get-Item -LiteralPath $Pending).LastWriteTimeUtc)
     )
-    if ($success -eq "true" -and $resultIsFresh) {
+    if (
+        $success -eq "true" -and
+        $resultIsFresh -and
+        [string]$recoveryExecutionState.status -eq "succeeded"
+    ) {
         Write-RecoveryLog "Successful install marker found; no disk rollback needed."
+        Restore-BcdState -Required
         Remove-TemporaryBootPayload
         Invoke-WindowsShareFinalize
         Remove-RecoveryTask
@@ -340,6 +391,26 @@ try {
             $liveFailedState -eq "live-failed"
         )
     )
+    $liveRollbackCompleted = (
+        -not [string]::IsNullOrWhiteSpace($expectedRecoveryRunId) -and
+        $liveFailedRunId -eq $expectedRecoveryRunId -and
+        $liveFailedState -eq "live-failed" -and
+        [string]$recoveryExecutionState.status -eq "rolled-back"
+    )
+    if ($liveRollbackCompleted) {
+        Write-RecoveryLog (
+            "The live installer reported failure after a verified rollback; " +
+            "restoring Windows settings and retiring the recovery task."
+        )
+        Restore-BcdState -Required
+        Remove-PendingWindowsSharePayload
+        Restore-OriginalHibernationSetting
+        Remove-TemporaryBootPayload
+        Remove-RecoveryTask -Required
+        Save-RecoveryLog
+        Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
+        exit 0
+    }
     if ($liveStartedWithoutFailure) {
         Write-RecoveryLog (
             "The live installer started but produced neither a success nor a failure marker. " +
@@ -349,7 +420,8 @@ try {
         exit 2
     }
 
-    $script:TrackRecoveryExecutionState = Initialize-RecoveryExecutionState
+    $script:TrackRecoveryExecutionState = Initialize-RecoveryExecutionState `
+        -State $recoveryExecutionState
 
     $expectedMbText = Read-EnvValue -Path $Pending -Name "LINUX_SIZE_MB"
     $stagingMbText = Read-EnvValue -Path $Pending -Name "STAGING_SIZE_MB"
@@ -524,25 +596,9 @@ try {
     Restore-BcdState
     Remove-PendingWindowsSharePayload
 
-    # Hibernation is switched off during preparation so the installed Linux can
-    # safely mount Windows read-write. A rollback removes that installation, so
-    # the user's original setting must come back with it.
-    $originalHibernate = Read-EnvValue -Path $Pending -Name "ORIGINAL_HIBERNATE_ENABLED"
-    if ($originalHibernate -eq "true") {
-        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
-        $hibernateOutput = & "$env:SystemRoot\System32\powercfg.exe" /hibernate on 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Hibernation restore failed with rc=$LASTEXITCODE output=$($hibernateOutput -join ' ')"
-        }
-        $hibernateEnabled = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -ErrorAction Stop).HibernateEnabled
-        if ($hibernateEnabled -ne 1) {
-            throw "Hibernation restore did not enable HibernateEnabled."
-        }
-    } elseif ($originalHibernate -eq "false") {
-        Write-RecoveryLog "Hibernation was already disabled before installation; left off."
-    } else {
-        Write-RecoveryLog "Original hibernation state unknown; left unchanged."
-    }
+    # A rollback removes the installation that required Fast Startup to be
+    # disabled, so restore the captured Windows setting before retiring guard.
+    Restore-OriginalHibernationSetting
 
     Remove-TemporaryBootPayload
 

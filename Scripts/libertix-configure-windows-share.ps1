@@ -33,7 +33,13 @@ function Invoke-ProcessWithTimeout {
         -ArgumentList $ArgumentList `
         -PassThru
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+        & $taskkill /PID $process.Id /T /F 2>&1 | Out-Null
+        $taskkillExitCode = $LASTEXITCODE
+        $process.WaitForExit(10000) | Out-Null
+        if ($taskkillExitCode -ne 0 -or -not $process.HasExited) {
+            throw "$FilePath timed out and its process tree could not be proven stopped."
+        }
         throw "$FilePath timed out after $TimeoutSeconds seconds."
     }
     return $process.ExitCode
@@ -42,24 +48,37 @@ function Invoke-ProcessWithTimeout {
 function Get-Config {
     $config = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
     if (-not $config.Enabled) { return $config }
-    if ([int]$config.SystemDiskNumber -lt 0 -or [int64]$config.ExpectedLinuxPartitionSize -le 0) {
+    if (
+        [int]$config.SystemDiskNumber -lt 0 -or
+        [string]::IsNullOrWhiteSpace([string]$config.SystemDiskUniqueId) -or
+        [int64]$config.ExpectedLinuxPartitionOffset -le 0 -or
+        [int64]$config.ExpectedLinuxPartitionSize -le 0
+    ) {
         throw "Windows share configuration has invalid disk metadata."
     }
     if ([string]::IsNullOrWhiteSpace([string]$config.LinuxUsername)) {
         throw "Windows share configuration has no Linux username."
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$config.ShortcutDescription)) {
+        throw "Windows share configuration has no localized shortcut description."
     }
     return $config
 }
 
 function Get-LinuxPartition {
     param([Parameter(Mandatory = $true)]$Config)
-    $tolerance = 256MB
+    $disk = Get-Disk -Number ([int]$Config.SystemDiskNumber) -ErrorAction Stop
+    if (([string]$disk.UniqueId).Trim() -ne ([string]$Config.SystemDiskUniqueId).Trim()) {
+        throw "Windows share configuration disk identity no longer matches the system disk."
+    }
+    $expectedOffset = [int64]$Config.ExpectedLinuxPartitionOffset
     $expected = [int64]$Config.ExpectedLinuxPartitionSize
     $linuxGptType = "{0fc63daf-8483-4772-8e79-3d69d8477de4}"
     $linuxPartitions = @(
         Get-Partition -DiskNumber ([int]$Config.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
-                [math]::Abs([int64]$_.Size - $expected) -le $tolerance -and
+                [int64]$_.Offset -eq $expectedOffset -and
+                [int64]$_.Size -eq $expected -and
                 ($_.GptType -eq $linuxGptType -or [int]$_.MbrType -eq 131 -or $_.Type -match "Linux")
             }
     )
@@ -228,7 +247,7 @@ function Install-ExplorerShortcuts {
         $shortcutPath = Join-Path $links "Linux_$($Config.LinuxUsername)_read-only.lnk"
         $shortcut = $shell.CreateShortcut($shortcutPath)
         $shortcut.TargetPath = $LinuxHome
-        $shortcut.Description = "Fichiers Linux en lecture seule"
+        $shortcut.Description = [string]$Config.ShortcutDescription
         $shortcut.Save()
         Write-ShareLog "Explorer shortcut created: $shortcutPath"
     }

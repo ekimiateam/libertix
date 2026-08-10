@@ -21,8 +21,13 @@ namespace Libertix
 
         public MainWindow()
         {
-            _installationState = ((App)Application.Current).InstallationState;
+            var application = (App)Application.Current;
+            _installationState = application.InstallationState;
             InitializeComponent();
+            if (application.Filepool.IsDevelopmentMode)
+            {
+                DevelopmentModeBanner.Visibility = Visibility.Visible;
+            }
             _installationState.InstallationRunningChanged += InstallationState_InstallationRunningChanged;
 
             string windowsLang = Localization.GetWindowsLanguageCode();
@@ -87,6 +92,11 @@ namespace Libertix
         public void PrepareForSystemRestart()
         {
             _allowClose = true;
+        }
+
+        public void CancelSystemRestartPreparation()
+        {
+            _allowClose = false;
         }
 
         private void HideInTrayDuringInstallation()

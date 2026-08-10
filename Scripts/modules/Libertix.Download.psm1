@@ -7,7 +7,6 @@ function New-LibertixDownloadUrls {
     )
     $baseUrl = $FilepoolBaseUrl.TrimEnd("/")
     return [pscustomobject]@{
-        InstallerIso = "$baseUrl/libertix-installer-uefi.iso"
         Aria2Zip = "$baseUrl/$Aria2ZipName"
     }
 }

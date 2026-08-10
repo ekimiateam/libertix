@@ -6,10 +6,14 @@ import shlex
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
+
+from PIL import Image
 
 from app.clients.ssh import CommandResult, SSHClient
 from app.config import VMConfig
+from app.distributions import DistributionProfile
 from app.errors import WorkflowError
 from app.services.automation_types import AutomationOptions
 from app.services.common import ResultBuilder
@@ -64,6 +68,7 @@ class PostInstallValidationMixin:
             expected="LIBERTIX_LINUX_READY",
             phase="linux",
             grub_entry=None if monitor_outcome == "boot-menu" else "linux",
+            distribution=options.distribution,
         )
         try:
             result.ok(
@@ -97,6 +102,7 @@ class PostInstallValidationMixin:
             expected="LIBERTIX_WINDOWS_READY",
             phase="windows",
             grub_entry="windows",
+            distribution=options.distribution,
         )
         try:
             result.ok(
@@ -107,7 +113,10 @@ class PostInstallValidationMixin:
                 test="windows.ssh",
                 server_key_sha256=windows_ssh.server_key_sha256,
             )
-            self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
+            try:
+                self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
+            finally:
+                self._cleanup_windows_cross_os_artifact(windows_ssh, vm, options, artifacts, result)
             self._request_linux_boot_from_windows(windows_ssh, vm, result)
         finally:
             windows_ssh.__exit__(None, None, None)
@@ -129,27 +138,33 @@ class PostInstallValidationMixin:
             expected="LIBERTIX_LINUX_READY",
             phase="linux_return",
             grub_entry="linux",
+            distribution=options.distribution,
         )
         try:
-            firmware_test = (
-                "test -d /sys/firmware/efi"
-                if vm.firmware == "uefi"
-                else "test ! -d /sys/firmware/efi"
-            )
-            self._run_remote_check(
-                returned_linux_ssh,
-                vm,
-                result,
-                "linux",
-                RemoteCheck(
-                    "linux.return_after_windows",
-                    f"{firmware_test}; test -s /boot/grub/grub.cfg; "
-                    "grub-script-check /boot/grub/grub.cfg; "
-                    'test "$(findmnt -n -o FSTYPE /)" = ext4',
-                    requires_sudo=True,
-                ),
-                sudo_password=options.linux_password,
-            )
+            try:
+                firmware_test = (
+                    "test -d /sys/firmware/efi"
+                    if vm.firmware == "uefi"
+                    else "test ! -d /sys/firmware/efi"
+                )
+                self._run_remote_check(
+                    returned_linux_ssh,
+                    vm,
+                    result,
+                    "linux",
+                    RemoteCheck(
+                        "linux.return_after_windows",
+                        f"{firmware_test}; test -s /boot/grub/grub.cfg; "
+                        "grub-script-check /boot/grub/grub.cfg; "
+                        'test "$(findmnt -n -o FSTYPE /)" = ext4',
+                        requires_sudo=True,
+                    ),
+                    sudo_password=options.linux_password,
+                )
+            finally:
+                self._cleanup_linux_cross_os_artifact(
+                    returned_linux_ssh, vm, options, artifacts, result
+                )
             self._request_windows_boot(
                 returned_linux_ssh,
                 vm,
@@ -177,6 +192,7 @@ class PostInstallValidationMixin:
             expected="LIBERTIX_WINDOWS_READY",
             phase="windows_final",
             grub_entry="windows",
+            distribution=options.distribution,
         )
         try:
             try:
@@ -187,6 +203,7 @@ class PostInstallValidationMixin:
                         "check": "final_state",
                         "expected_firmware": vm.firmware,
                         "expected_ipv4": vm.host,
+                        "installer_iso_file_name": options.distribution.installer_iso_file_name,
                     },
                     step="automation.test.windows",
                     timeout=300,
@@ -220,7 +237,11 @@ class PostInstallValidationMixin:
             client = self.vnc.connect(vm.vnc)
             client.mouseMove(5, 5)
             client.keyPress("home")
-            client.keyPress("enter")
+            client.keyDown("enter")
+            try:
+                time.sleep(0.15)
+            finally:
+                client.keyUp("enter")
             result.ok(
                 "automation.post_install_phase",
                 "Selected the first installed Linux entry in GRUB",
@@ -250,13 +271,25 @@ class PostInstallValidationMixin:
         expected: str,
         phase: str,
         grub_entry: Literal["linux", "windows"] | None = None,
+        distribution: DistributionProfile | None = None,
     ) -> SSHClient:
         deadline = time.monotonic() + self.settings.post_install_boot_timeout_seconds
         last_error: WorkflowError | None = None
         attempt = 0
-        grub_selection_done = grub_entry is None
+        if grub_entry is not None:
+            self._select_grub_entry_when_theme_ready(
+                vm,
+                result,
+                grub_entry,
+                distribution=distribution,
+            )
         while time.monotonic() < deadline:
             attempt += 1
+            # Keep the slower vision-assisted retry for a lost VNC key event.
+            if grub_entry is not None and attempt % 3 == 0:
+                self._select_grub_entry_if_visible(
+                    vm, result, grub_entry, attempt, distribution=distribution
+                )
             client = SSHClient(
                 vm.host,
                 username,
@@ -269,6 +302,7 @@ class PostInstallValidationMixin:
                 port=self.settings.ssh_port,
                 connect_timeout=self.settings.ssh_timeout_seconds,
                 trust_on_first_use=trust_on_first_use,
+                remote_os="linux" if trust_on_first_use else "windows",
             )
             try:
                 client.__enter__()
@@ -282,13 +316,6 @@ class PostInstallValidationMixin:
             except WorkflowError as exc:
                 last_error = exc
             client.__exit__(None, None, None)
-            # The installed menu has no timeout by design. Only confirm a
-            # choice after vision identifies the complete GRUB menu, avoiding
-            # blind keystrokes in a booting OS or on a login screen.
-            if not grub_selection_done and attempt % 3 == 0:
-                grub_selection_done = self._select_grub_entry_if_visible(
-                    vm, result, grub_entry, attempt
-                )
             time.sleep(self.settings.post_install_poll_interval_seconds)
 
         details = {"vm": vm.name, "host": vm.host, "phase": phase}
@@ -300,33 +327,117 @@ class PostInstallValidationMixin:
             details=details,
         )
 
+    def _select_grub_entry_when_theme_ready(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+        entry: Literal["linux", "windows"],
+        *,
+        distribution: DistributionProfile | None,
+    ) -> bool:
+        deadline = time.monotonic() + self.settings.post_install_grub_detection_timeout_seconds
+        consecutive_theme_frames = 0
+        capture_attempt = 0
+        while time.monotonic() < deadline:
+            capture_attempt += 1
+            capture = self._capture_with_name(
+                vm,
+                f"post-install-{entry}-grub-ready-{capture_attempt:03d}",
+            )
+            if self._installed_grub_theme_visible(capture):
+                consecutive_theme_frames += 1
+                if consecutive_theme_frames >= 2:
+                    return self._send_grub_entry(vm, result, entry)
+            else:
+                consecutive_theme_frames = 0
+            time.sleep(self.settings.post_install_grub_detection_interval_seconds)
+
+        # Retain the semantic vision fallback for unexpected rendering,
+        # framebuffer color conversion, or a future theme revision.
+        return self._select_grub_entry_if_visible(
+            vm,
+            result,
+            entry,
+            0,
+            distribution=distribution,
+        )
+
+    @staticmethod
+    def _installed_grub_theme_visible(capture: Path) -> bool:
+        try:
+            with Image.open(capture) as screenshot:
+                sample = screenshot.convert("RGB").resize(
+                    (160, 100),
+                    Image.Resampling.NEAREST,
+                )
+        except (OSError, ValueError):
+            return False
+
+        pixels = sample.get_flattened_data()
+        total = len(pixels)
+        if total == 0:
+            return False
+
+        def matches(
+            pixel: tuple[int, int, int], target: tuple[int, int, int], tolerance: int
+        ) -> bool:
+            return all(
+                abs(channel - expected) <= tolerance
+                for channel, expected in zip(pixel, target, strict=True)
+            )
+
+        background_pixels = sum(matches(pixel, (34, 33, 52), 3) for pixel in pixels)
+        selected_item_pixels = sum(matches(pixel, (66, 66, 82), 5) for pixel in pixels)
+        return background_pixels / total >= 0.70 and selected_item_pixels / total >= 0.005
+
     def _select_grub_entry_if_visible(
         self,
         vm: VMConfig,
         result: ResultBuilder,
         entry: Literal["linux", "windows"],
         attempt: int,
+        distribution: DistributionProfile | None = None,
     ) -> bool:
         capture = self._capture_with_name(vm, f"post-install-{entry}-grub-{attempt:03d}")
-        try:
-            verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
-        except WorkflowError:
-            # SSH remains authoritative. A transient vision failure must not
-            # abort the operating-system boot wait.
-            return False
+        if not self._installed_grub_theme_visible(capture):
+            try:
+                verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
+            except WorkflowError:
+                # SSH remains authoritative. A transient vision failure must not
+                # abort the operating-system boot wait.
+                return False
 
-        evidence = f"{verdict.visible_text}\n{verdict.summary}"
-        if not self._reboot_or_live_started(evidence):
-            return False
+            evidence = f"{verdict.visible_text}\n{verdict.summary}"
+            if not self._reboot_or_live_started(evidence, distribution):
+                return False
 
+        return self._send_grub_entry(vm, result, entry)
+
+    def _send_grub_entry(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+        entry: Literal["linux", "windows"],
+    ) -> bool:
         client = None
         try:
             client = self.vnc.connect(vm.vnc)
             client.mouseMove(5, 5)
+            time.sleep(0.5)
             client.keyPress("home")
+            time.sleep(0.25)
             if entry == "windows":
                 client.keyPress("down")
-            client.keyPress("enter")
+                time.sleep(0.25)
+            client.keyDown("enter")
+            try:
+                time.sleep(0.15)
+            finally:
+                client.keyUp("enter")
+            # Keep the VNC transport alive long enough to flush the final key
+            # event. SSH, not this write, remains the authoritative success
+            # signal and the menu will be retried if it stays visible.
+            time.sleep(1.0)
         except Exception as exc:
             raise WorkflowError(
                 "automation.grub_selection",
@@ -339,7 +450,7 @@ class PostInstallValidationMixin:
 
         result.ok(
             "automation.post_install_phase",
-            f"Selected {entry} from the installed GRUB menu",
+            f"Sent the {entry} selection from the installed GRUB menu",
             vm=vm.name,
             target=vm.vnc,
             phase=f"{entry}-boot",
@@ -354,6 +465,15 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
     ) -> None:
         username = shlex.quote(options.linux_username)
+        expected_os_release_id = shlex.quote(options.distribution.os_release_id)
+        expected_grub_entry = shlex.quote(
+            "menuentry '"
+            + options.distribution.grub_display_name
+            + "' --class "
+            + options.distribution.grub_icon
+            + " --class "
+        )
+        windows_grub_entry_pattern = shlex.quote("""menuentry ['\"]Windows( Boot Manager)?['\"]""")
         firmware_test = (
             "test -d /sys/firmware/efi" if vm.firmware == "uefi" else "test ! -d /sys/firmware/efi"
         )
@@ -390,6 +510,26 @@ class PostInstallValidationMixin:
                 else "! grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
             )
         )
+        grub_regeneration_test = (
+            "for generator in 10_linux 30_uefi-firmware 20_memtest86+ 20_memtest86; do "
+            "source=/etc/grub.d/$generator; "
+            "diverted=/usr/local/lib/libertix/grub-generators/$generator; "
+            'test "$(dpkg-divert --listpackage "$source")" = LOCAL; '
+            'test "$(dpkg-divert --truename "$source")" = "$diverted"; '
+            "done; "
+            "update-grub; grub-script-check /boot/grub/grub.cfg; "
+            "test \"$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)\" = 4; "
+            f"grep -Eq -- {windows_grub_entry_pattern} /boot/grub/grub.cfg; "
+            "grep -Fq \"submenu 'Advanced options' --class efi\" /boot/grub/grub.cfg; "
+            "grep -Fq \"menuentry 'Shutdown' --class shutdown\" /boot/grub/grub.cfg; "
+            f"grep -Fq -- {expected_grub_entry} /boot/grub/grub.cfg; "
+            'grep -Fq -- "$(uname -r)" /boot/grub/grub.cfg'
+            + (
+                "; grep -Fq 'UEFI Firmware Settings' /boot/grub/grub.cfg"
+                if vm.firmware == "uefi"
+                else ""
+            )
+        )
         profile_shortcut_test = (
             "profiles=$(python3 -c 'import base64,json,sys; "
             'p=json.load(open(sys.argv[1], encoding="utf-8")); '
@@ -414,7 +554,7 @@ class PostInstallValidationMixin:
                 "linux.os_release",
                 ". /etc/os-release; "
                 'printf \'ID=%s VERSION_ID=%s\\n\' "$ID" "$VERSION_ID"; '
-                'test "$ID" = linuxmint',
+                f'test "$ID" = {expected_os_release_id}',
             ),
             RemoteCheck("linux.kernel", "uname -a; test -r /proc/version"),
             RemoteCheck(
@@ -506,10 +646,17 @@ class PostInstallValidationMixin:
                 "linux.grub",
                 "test -s /boot/grub/grub.cfg; "
                 "grub-script-check /boot/grub/grub.cfg; "
-                'grep -Eq "menuentry [\'\\"]Windows( Boot Manager)?[\'\\"]" '
-                "/boot/grub/grub.cfg; "
+                "test \"$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)\" = 4; "
+                f"grep -Eq -- {windows_grub_entry_pattern} /boot/grub/grub.cfg; "
                 "grep -Fq \"submenu 'Advanced options' --class efi\" /boot/grub/grub.cfg; "
-                "grep -Fq \"menuentry 'Shutdown' --class shutdown\" /boot/grub/grub.cfg",
+                "grep -Fq \"menuentry 'Shutdown' --class shutdown\" /boot/grub/grub.cfg; "
+                f"grep -Fq -- {expected_grub_entry} /boot/grub/grub.cfg",
+                requires_sudo=True,
+            ),
+            RemoteCheck(
+                "linux.grub_regeneration",
+                grub_regeneration_test,
+                timeout=180,
                 requires_sudo=True,
             ),
             RemoteCheck("linux.boot_mode_files", boot_mode_test, requires_sudo=True),
@@ -521,12 +668,31 @@ class PostInstallValidationMixin:
                 "-print -quit | grep -q .",
             ),
             RemoteCheck(
+                "linux.running_kernel_artifacts",
+                'kernel="$(uname -r)"; '
+                'test -s "/boot/vmlinuz-$kernel"; '
+                'test -s "/boot/initrd.img-$kernel"; '
+                "for image in /boot/vmlinuz-*; do "
+                'version="${image#/boot/vmlinuz-}"; '
+                'test -s "/boot/initrd.img-$version"; done',
+            ),
+            RemoteCheck(
+                "linux.initramfs_integrity",
+                'kernel="$(uname -r)"; '
+                'contents="$(lsinitramfs "/boot/initrd.img-$kernel")"; '
+                "printf '%s\\n' \"$contents\" | grep -Eq '(^|/)init$'; "
+                "! printf '%s\\n' \"$contents\" | "
+                "grep -Eq '(^|/)conf/uuid$|default-boot-to-casper'",
+                requires_sudo=True,
+            ),
+            RemoteCheck(
                 "linux.windows_mount",
                 windows_mount_test,
             ),
             RemoteCheck(
                 "linux.sharing_policy",
                 sharing_policy_test,
+                requires_sudo=True,
             ),
             RemoteCheck(
                 "linux.windows_profile_shortcuts",
@@ -534,8 +700,10 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck(
                 "linux.desktop_stack",
-                "test \"$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package}\\n' "
-                "cinnamon lightdm | grep -c '^ii ')\" = 2; systemctl is-active lightdm",
+                'test -n "$(systemctl show -p Id --value display-manager.service)"; '
+                "systemctl is-active display-manager.service; "
+                "find /usr/share/xsessions /usr/share/wayland-sessions -maxdepth 1 "
+                "-type f -name '*.desktop' -print -quit 2>/dev/null | grep -q .",
             ),
             RemoteCheck(
                 "linux.first_boot_cleanup",
@@ -567,6 +735,12 @@ class PostInstallValidationMixin:
             RemoteCheck(
                 "linux.package_database",
                 'test -z "$(dpkg --audit)"; dpkg --audit',
+                requires_sudo=True,
+            ),
+            RemoteCheck(
+                "linux.package_dependencies",
+                "apt-get check",
+                timeout=180,
                 requires_sudo=True,
             ),
             RemoteCheck(
@@ -625,6 +799,86 @@ class PostInstallValidationMixin:
             linux_relative_path=linux_relative,
             linux_sha256=linux_hash,
         )
+
+    def _cleanup_windows_cross_os_artifact(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        artifacts: CrossOsArtifacts,
+        result: ResultBuilder,
+    ) -> None:
+        if not options.share_windows_files_in_linux:
+            return
+        path = rf"C:\{artifacts.windows_relative_path}"
+        command = f'cmd.exe /d /c "del /f /q {path} 2>nul & if exist {path} exit /b 1"'
+        self._run_cross_os_cleanup(
+            ssh,
+            vm,
+            result,
+            name="sharing.windows_artifact_cleanup",
+            command=command,
+        )
+
+    def _cleanup_linux_cross_os_artifact(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        artifacts: CrossOsArtifacts,
+        result: ResultBuilder,
+    ) -> None:
+        if not options.share_linux_files_in_windows:
+            return
+        path = f"/home/{options.linux_username}/{artifacts.linux_relative_path}"
+        quoted_path = shlex.quote(path)
+        command = f"rm -f -- {quoted_path}; test ! -e {quoted_path}"
+        self._run_cross_os_cleanup(
+            ssh,
+            vm,
+            result,
+            name="sharing.linux_artifact_cleanup",
+            command=f"sh -eu -c {shlex.quote(command)}",
+        )
+
+    @staticmethod
+    def _run_cross_os_cleanup(
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        *,
+        name: str,
+        command: str,
+    ) -> None:
+        try:
+            response = ssh.run(
+                command,
+                step="automation.test.artifact_cleanup",
+                timeout=60,
+                check=False,
+            )
+        except WorkflowError as exc:
+            result.error(
+                "automation.test.artifact_cleanup",
+                f"{name}: FAILED",
+                vm=vm.name,
+                target=vm.host,
+                test=name,
+                **exc.details,
+            )
+            return
+        context = {
+            "vm": vm.name,
+            "target": vm.host,
+            "test": name,
+            "exit_code": response.exit_code,
+            "stdout": response.stdout,
+            "stderr": response.stderr,
+        }
+        if response.exit_code == 0:
+            result.ok("automation.test.artifact_cleanup", f"{name}: OK", **context)
+        else:
+            result.error("automation.test.artifact_cleanup", f"{name}: FAILED", **context)
 
     def _run_artifact_check(
         self,
@@ -835,6 +1089,7 @@ class PostInstallValidationMixin:
         base_config = {
             "expected_firmware": vm.firmware,
             "expected_ipv4": vm.host,
+            "installer_iso_file_name": options.distribution.installer_iso_file_name,
             "linux_username": options.linux_username,
             "windows_relative_path": artifacts.windows_relative_path,
             "windows_sha256": artifacts.windows_sha256,

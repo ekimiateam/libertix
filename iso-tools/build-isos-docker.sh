@@ -9,6 +9,9 @@ WORK_VOLUME="libertix-iso-work"
 MODE="${1:-all}"
 LOG_DIR="${LIBERTIX_ISO_BUILD_LOG_DIR:-$ROOT_DIR/build-logs}"
 LOG_FILE="$LOG_DIR/iso-build-$(date -u +%Y%m%dT%H%M%SZ)-$MODE.log"
+LOCK_DIR="$ROOT_DIR/.work"
+LOCK_FILE="$LOCK_DIR/iso-build.lock"
+WORKSPACE_ID="$(printf '%s' "$ROOT_DIR" | sha256sum | awk '{print $1}')"
 
 # One version file pins the base image digest and the Debian package archive.
 source "$BUILDER_DIR/versions.env"
@@ -25,13 +28,24 @@ command -v docker >/dev/null 2>&1 || {
     echo "Docker is required to build the Libertix ISO images" >&2
     exit 1
 }
+command -v flock >/dev/null 2>&1 || {
+    echo "flock is required to serialize Libertix ISO builds" >&2
+    exit 1
+}
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$LOCK_DIR"
 : > "$LOG_FILE"
+exec 9> "$LOCK_FILE"
+if ! flock -n 9; then
+    echo "Another Libertix ISO build is already using this workspace" >&2
+    exit 1
+fi
 
 # A builder left behind by an interrupted run still holds the shared apt cache
 # lock, which makes every later build fail before it downloads anything.
-stale_builders="$(docker ps -q --filter "ancestor=$IMAGE_NAME")"
+stale_builders="$(docker ps -q \
+    --filter "label=com.ekimia.libertix.iso-builder=true" \
+    --filter "label=com.ekimia.libertix.iso-workspace=$WORKSPACE_ID")"
 if [ -n "$stale_builders" ]; then
     echo "Removing leftover ISO builder containers"
     # shellcheck disable=SC2086
@@ -40,6 +54,8 @@ fi
 
 docker_run_options=(
     --rm --privileged
+    --label "com.ekimia.libertix.iso-builder=true"
+    --label "com.ekimia.libertix.iso-workspace=$WORKSPACE_ID"
     --env "HOST_UID=$(id -u)"
     --env "HOST_GID=$(id -g)"
     --env "LIBERTIX_DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT"
@@ -125,7 +141,22 @@ case "$MODE" in
         ;;
 esac
 
+publish_filepool_artifact() {
+    local source="$1" destination temporary
+
+    destination="$ROOT_DIR/auto_tests/app/filepool/$(basename "$source")"
+    temporary="${destination}.tmp.$$"
+    cp -- "$source" "$temporary"
+    chmod 0644 "$temporary"
+    mv -f -- "$temporary" "$destination"
+    cmp -s -- "$source" "$destination" || {
+        echo "Published filepool artifact does not match: $destination" >&2
+        return 1
+    }
+}
+
 for output in "${outputs[@]}"; do
+    publish_filepool_artifact "$output"
     echo "ARTIFACT $(basename "$output") sha256=$(sha256sum "$output" | awk '{print $1}')"
 done
 echo "RESULT OK log=$LOG_FILE"

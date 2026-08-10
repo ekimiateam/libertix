@@ -10,7 +10,8 @@ $script:InstallationPlanPropertySets = [ordered]@{
         "locale", "account", "disk", "features", "runtime", "development"
     )
     distribution = @(
-        "name", "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath",
+        "id", "name", "osReleaseId", "grubDisplayName", "grubIcon",
+        "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath",
         "installerIsoSha256", "liveIsoUrl", "liveIsoSha256"
     )
     locale = @(
@@ -19,7 +20,7 @@ $script:InstallationPlanPropertySets = [ordered]@{
     )
     account = @("username", "passwordHashWindowsPath", "computerName")
     disk = @(
-        "number", "uniqueId", "sizeBytes", "logicalSectorSizeBytes", "partitionStyle",
+        "number", "uniqueId", "partitionTableId", "sizeBytes", "logicalSectorSizeBytes", "partitionStyle",
         "systemDrive", "windows", "boot", "recovery", "installer"
     )
     partition = @("number", "offsetBytes", "sizeBytes")
@@ -250,7 +251,7 @@ function Assert-LibertixInstallationPlan {
     Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
 
     $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
-    if ([int]$schemaVersion -ne 1) {
+    if ([int]$schemaVersion -ne 2) {
         throw "Unsupported installation plan schemaVersion: $schemaVersion."
     }
 
@@ -274,7 +275,10 @@ function Assert-LibertixInstallationPlan {
         -Object $distribution `
         -Path "distribution" `
         -PropertySet "distribution"
-    foreach ($name in @("name", "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath", "liveIsoUrl")) {
+    foreach ($name in @(
+        "id", "name", "osReleaseId", "grubDisplayName", "grubIcon",
+        "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath", "liveIsoUrl"
+    )) {
         $value = [string](Assert-LibertixPlanProperty `
             -Object $distribution `
             -Name $name `
@@ -282,6 +286,14 @@ function Assert-LibertixInstallationPlan {
         if ([string]::IsNullOrWhiteSpace($value)) {
             throw "Installation plan field distribution.$name cannot be empty."
         }
+    }
+    foreach ($name in @("id", "osReleaseId", "grubIcon")) {
+        if ([string]$distribution.$name -notmatch '^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$') {
+            throw "Installation plan field distribution.$name must be a safe lowercase identifier."
+        }
+    }
+    if ([string]$distribution.grubDisplayName -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$') {
+        throw "Installation plan field distribution.grubDisplayName contains unsupported GRUB label characters."
     }
     foreach ($name in @("installerIsoUrl", "liveIsoUrl")) {
         [Uri]$uri = $null
@@ -346,8 +358,8 @@ function Assert-LibertixInstallationPlan {
     if ($passwordHashWindowsPath -notmatch '^[A-Za-z]:\\' -or $passwordHashWindowsPath -match '(^|\\)\.\.(\\|$)') {
         throw "Installation plan account.passwordHashWindowsPath must be an absolute safe Windows path."
     }
-    if ([string]::IsNullOrWhiteSpace($computerName) -or $computerName.Length -gt 63) {
-        throw "Installation plan account.computerName must contain between 1 and 63 characters."
+    if ($computerName -notmatch '^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
+        throw "Installation plan account.computerName is not a valid Linux hostname."
     }
 
     $disk = Assert-LibertixPlanProperty -Object $Plan -Name "disk" -Path "disk"
@@ -357,7 +369,7 @@ function Assert-LibertixInstallationPlan {
     if (-not [int]::TryParse([string]$diskNumber, [ref]$parsedDiskNumber) -or $parsedDiskNumber -lt 0) {
         throw "Installation plan disk.number cannot be negative."
     }
-    foreach ($name in @("uniqueId", "systemDrive")) {
+    foreach ($name in @("uniqueId", "partitionTableId", "systemDrive")) {
         $value = [string](Assert-LibertixPlanProperty -Object $disk -Name $name -Path "disk.$name")
         if ([string]::IsNullOrWhiteSpace($value)) {
             throw "Installation plan field disk.$name cannot be empty."
@@ -384,6 +396,14 @@ function Assert-LibertixInstallationPlan {
     $expectedStyle = if ($firmware -eq "bios") { "MBR" } else { "GPT" }
     if ($partitionStyle -ne $expectedStyle) {
         throw "Installation plan firmware '$firmware' requires partitionStyle '$expectedStyle'."
+    }
+    $partitionTablePattern = if ($firmware -eq "bios") {
+        '^mbr:[0-9a-f]{8}$'
+    } else {
+        '^gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    }
+    if ([string]$disk.partitionTableId -notmatch $partitionTablePattern) {
+        throw "Installation plan disk.partitionTableId is not canonical for firmware '$firmware'."
     }
 
     foreach ($name in @("windows", "boot", "recovery")) {
@@ -543,8 +563,30 @@ function Assert-LibertixInstallationPlan {
     if ($hasRecoveryRoot -and [string]::IsNullOrWhiteSpace([string]$recoveryRoot)) {
         throw "Installation plan recoveryRootWindows cannot be empty."
     }
+    if (
+        $hasRecoveryRoot -and
+        (
+            [string]$recoveryRoot -notmatch '^[A-Za-z]:\\' -or
+            [string]$recoveryRoot -match '(^|\\)\.\.(\\|$)'
+        )
+    ) {
+        throw "Installation plan runtime.recoveryRootWindows must be an absolute safe Windows path."
+    }
     if ($hasRecoveryRunId -and [string]$recoveryRunId -notmatch '^[0-9a-f]{32}$') {
         throw "Installation plan recoveryRunId must contain 32 lowercase hexadecimal characters."
+    }
+
+    $windowsPaths = [ordered]@{
+        "distribution.installerIsoWindowsPath" = [string]$distribution.installerIsoWindowsPath
+        "account.passwordHashWindowsPath" = $passwordHashWindowsPath
+    }
+    if ($hasRecoveryRoot) {
+        $windowsPaths["runtime.recoveryRootWindows"] = [string]$recoveryRoot
+    }
+    foreach ($entry in $windowsPaths.GetEnumerator()) {
+        if ($entry.Value.Substring(0, 2).ToUpperInvariant() -ne ([string]$disk.systemDrive)) {
+            throw "Installation plan $($entry.Key) must be located on disk.systemDrive."
+        }
     }
 
     if (Test-LibertixPlanProperty -Object $Plan -Name "development") {

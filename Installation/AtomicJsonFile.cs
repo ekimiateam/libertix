@@ -31,6 +31,7 @@ namespace Libertix.Installation
                 directory,
                 $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
 
+            Exception writeFailure = null;
             try
             {
                 using (var stream = new FileStream(
@@ -50,10 +51,25 @@ namespace Libertix.Installation
 
                 Publish(temporaryPath, fullPath);
             }
+            catch (Exception exception)
+            {
+                writeFailure = exception;
+                throw;
+            }
             finally
             {
                 if (File.Exists(temporaryPath))
-                    File.Delete(temporaryPath);
+                {
+                    try
+                    {
+                        File.Delete(temporaryPath);
+                    }
+                    catch (Exception) when (writeFailure != null)
+                    {
+                        // Preserve the publication failure. A cleanup error must
+                        // not replace why no JSON document was published.
+                    }
+                }
             }
         }
 

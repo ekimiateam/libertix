@@ -7,7 +7,7 @@
 # partition-layout rules that must not leak into the common orchestrator.
 
 
-firmware_finalize_success_best_effort() {
+firmware_retire_completed_transaction_best_effort() {
     return 0
 }
 
@@ -46,13 +46,15 @@ candidate_disks() {
 }
 
 disk_matches_manifest() {
-    local disk="$1" actual_size actual_style expected_style windows_candidate boot_candidate
+    local disk="$1" actual_size actual_style actual_identity expected_style windows_candidate boot_candidate
     actual_size=$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)
     [ "$actual_size" = "$TARGET_DISK_SIZE_BYTES" ] || return 1
     actual_style=$(parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}')
     expected_style=$(echo "$EXPECTED_PARTITION_STYLE" | tr '[:upper:]' '[:lower:]')
     [ "$expected_style" != "mbr" ] || expected_style="msdos"
     [ "$actual_style" = "$expected_style" ] || return 1
+    actual_identity="$(disk_partition_table_identity "$disk" || true)"
+    [ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ] || return 1
     windows_candidate=$(partition_at_offset "$disk" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
     [ -n "$windows_candidate" ] || return 1
     [ "$(blkid -s TYPE -o value "$windows_candidate" 2>/dev/null || true)" = "ntfs" ] || return 1
@@ -143,7 +145,7 @@ set_bios_boot_flags_or_die() {
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
     local windows_verify="/mnt/libertix-windows-final-verify"
-    local fs uuid primary_slot_count windows_boot_part_num
+    local fs uuid primary_slot_count windows_boot_part_num dpkg_audit
 
     mark "150-final-verify"
     echo "FINAL VERIFY: checking installed system before success"
@@ -173,8 +175,7 @@ final_verify_or_die() {
     uuid="$(blkid -s UUID -o value "$NEW_PART" 2>/dev/null || true)"
     [ -n "$uuid" ] || die "final verify: Linux partition UUID missing"
 
-    mkdir -p "$target_verify"
-    mount -o ro "$NEW_PART" "$target_verify"
+    mount_linux_root_read_only_or_die "$NEW_PART" "$target_verify"
     [ -f "$target_verify/etc/os-release" ] || die "final verify: target os-release missing"
     [ -f "$target_verify/etc/fstab" ] || die "final verify: target fstab missing"
     grep -q "$uuid" "$target_verify/etc/fstab" || die "final verify: root UUID missing from fstab"

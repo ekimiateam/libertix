@@ -1,6 +1,7 @@
 using System;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using Libertix.Helpers;
 using Libertix.Models;
 
@@ -30,6 +31,20 @@ namespace Libertix.Pages
                 ShareWindowsFilesInLinux = WindowsToLinuxCheckBox.IsChecked == true,
                 ShareLinuxFilesInWindows = LinuxToWindowsCheckBox.IsChecked == true
             };
+        }
+
+        private void SharingOptionsPage_Loaded(object sender, RoutedEventArgs e)
+        {
+            WindowsToLinuxCheckBox.Focus();
+        }
+
+        private void SharingOptionsPage_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Home && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                WindowsToLinuxCheckBox.Focus();
+                e.Handled = true;
+            }
         }
 
         private void BackButton_Click(object sender, RoutedEventArgs e)

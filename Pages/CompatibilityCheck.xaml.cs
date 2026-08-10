@@ -59,6 +59,7 @@ namespace Libertix.Pages
                     : Localization.GetString("CompatibilitySuccess");
                 StatusText.Foreground = (System.Windows.Media.Brush)FindResource("AccentColor");
                 ContinueButton.IsEnabled = true;
+                ContinueButton.Focus();
                 foreach (string warning in info.Warnings)
                     AppendDetail(Localization.GetString("CompatibilityWarningPrefix") + warning);
             }
@@ -71,6 +72,7 @@ namespace Libertix.Pages
                 StatusText.Foreground = (System.Windows.Media.Brush)FindResource("ErrorColor");
                 AppendDetail(ex.Diagnostics);
                 RetryButton.Visibility = Visibility.Visible;
+                RetryButton.Focus();
             }
             catch (Exception ex)
             {
@@ -80,6 +82,7 @@ namespace Libertix.Pages
                 StatusText.Text = Localization.GetString("CompatibilityUnexpectedPrefix") + ex.Message;
                 StatusText.Foreground = (System.Windows.Media.Brush)FindResource("ErrorColor");
                 RetryButton.Visibility = Visibility.Visible;
+                RetryButton.Focus();
             }
             finally
             {

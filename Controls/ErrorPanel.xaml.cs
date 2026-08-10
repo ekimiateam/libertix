@@ -65,12 +65,5 @@ namespace Libertix.Controls
             InitializeComponent();
         }
 
-        private void Expander_Expanded(object sender, RoutedEventArgs e)
-        {
-            if (sender is Expander expander)
-            {
-                expander.BringIntoView();
-            }
-        }
     }
 }

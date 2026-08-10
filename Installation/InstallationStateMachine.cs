@@ -324,6 +324,26 @@ namespace Libertix.Installation
             {
                 throw new InvalidOperationException("A terminal execution state requires the complete phase.");
             }
+            if (state.Status == InstallationStatus.Succeeded &&
+                !state.CompletedSteps.SequenceEqual(OrderedSteps, StringComparer.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "A successful execution state requires every installation step.");
+            }
+            if (state.Status == InstallationStatus.RolledBack)
+            {
+                var requiredCompensations = new HashSet<string>(
+                    state.CompletedSteps.Where(CompensatableSteps.Contains),
+                    StringComparer.Ordinal);
+                var recordedCompensations = new HashSet<string>(
+                    state.CompensatedSteps,
+                    StringComparer.Ordinal);
+                if (!recordedCompensations.SetEquals(requiredCompensations))
+                {
+                    throw new InvalidOperationException(
+                        "A rolled-back execution state requires every applicable compensation.");
+                }
+            }
             if ((state.Status == InstallationStatus.Failed ||
                  state.Status == InstallationStatus.RollbackRunning ||
                  state.Status == InstallationStatus.Succeeded ||

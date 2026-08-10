@@ -21,14 +21,18 @@
                         <Setter Property="Padding" Value="20,10"/>
                         <Setter Property="FontSize" Value="16"/>
                         <Setter Property="FontWeight" Value="SemiBold"/>
+                        <Setter Property="BorderBrush" Value="#f6c177"/>
+                        <Setter Property="BorderThickness" Value="0"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="Button">
-                                    <Border Background="{TemplateBinding Background}"
+                                    <Border x:Name="ButtonBorder"
+                                            Background="{TemplateBinding Background}"
                                             CornerRadius="8"
-                                            BorderThickness="0"
+                                            BorderBrush="{TemplateBinding BorderBrush}"
+                                            BorderThickness="{TemplateBinding BorderThickness}"
                                             Padding="{TemplateBinding Padding}">
-                                        <ContentPresenter HorizontalAlignment="Center" 
+                                        <ContentPresenter HorizontalAlignment="Center"
                                                         VerticalAlignment="Center"/>
                                     </Border>
                                     <ControlTemplate.Triggers>
@@ -38,12 +42,15 @@
                                         <Trigger Property="IsPressed" Value="True">
                                             <Setter Property="Background" Value="#2d7a9e"/>
                                         </Trigger>
+                                        <Trigger Property="IsKeyboardFocused" Value="True">
+                                            <Setter TargetName="ButtonBorder" Property="BorderThickness" Value="2"/>
+                                        </Trigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
                             </Setter.Value>
                         </Setter>
                     </Style>
-                    
+
                     <SolidColorBrush x:Key="PrimaryBackground" Color="#232136"/>
                     <SolidColorBrush x:Key="SecondaryBackground" Color="#2a273f"/>
                     <SolidColorBrush x:Key="AccentColor" Color="#3e8fb0"/>
@@ -79,7 +86,7 @@
                                                     IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
                                             <ToggleButton.Template>
                                                 <ControlTemplate TargetType="ToggleButton">
-                                                    <Border x:Name="Border" 
+                                                    <Border x:Name="Border"
                                                             Background="{TemplateBinding Background}"
                                                             BorderBrush="{TemplateBinding BorderBrush}"
                                                             BorderThickness="1"
@@ -129,7 +136,7 @@
                                                     CornerRadius="4"
                                                     Effect="{StaticResource DropShadowEffect}"
                                                     Margin="0,4,0,0">
-                                                <ScrollViewer MaxHeight="200" 
+                                                <ScrollViewer MaxHeight="200"
                                                             VerticalScrollBarVisibility="Auto"
                                                             Background="Transparent">
                                                     <StackPanel IsItemsHost="True"
@@ -175,7 +182,7 @@
                         </Setter>
                     </Style>
                 </ResourceDictionary>
-                
+
                 <ResourceDictionary Source="pack://application:,,,/Resources/Lang/Strings.en.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>

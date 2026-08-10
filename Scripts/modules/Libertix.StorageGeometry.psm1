@@ -2,7 +2,8 @@ Set-StrictMode -Version Latest
 
 $script:WindowsPartitionAlignmentBytes = 1MB
 $script:MinimumWindowsFreeSpaceBytes = 10GB
-$script:WindowsFreeSpaceToleranceBytes = 1GB
+$script:WindowsFreeSpaceToleranceBytes = 2GB
+$script:WindowsFreeSpaceRetryWindowBytes = 2GB
 
 function Get-LibertixPartitionAlignmentBytes {
     return [int64]$script:WindowsPartitionAlignmentBytes
@@ -26,8 +27,9 @@ function Get-LibertixWindowsFreeSpaceBudget {
 
     # Windows can grow its page file and other managed files after the wizard
     # measures free space. The tolerance keeps that bounded drift from making
-    # a valid minimum-size installation fail, while the 10 GiB reserve remains
-    # the nominal policy and deficits beyond one GiB still fail closed.
+    # a valid minimum-size installation fail. The wizard still targets a 10 GiB
+    # reserve, while the execution-time floor stays bounded at 8 GiB and larger
+    # deficits fail closed.
     return [pscustomobject]@{
         Accepted = [bool]($AvailableBytes -ge $acceptedFloorBytes)
         WithinTolerance = [bool](
@@ -41,6 +43,40 @@ function Get-LibertixWindowsFreeSpaceBudget {
         ReserveBytes = [int64]$script:MinimumWindowsFreeSpaceBytes
         ToleranceBytes = [int64]$script:WindowsFreeSpaceToleranceBytes
     }
+}
+
+function Wait-LibertixWindowsFreeSpaceBudget {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z]$')]
+        [string]$DriveLetter,
+        [Parameter(Mandatory = $true)]
+        [int64]$AllocationBytes,
+        [ValidateRange(0, 300)]
+        [int]$TimeoutSeconds = 60,
+        [ValidateRange(1, 30)]
+        [int]$PollIntervalSeconds = 5
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction Stop
+        $budget = Get-LibertixWindowsFreeSpaceBudget `
+            -AvailableBytes ([int64]$volume.SizeRemaining) `
+            -AllocationBytes $AllocationBytes
+        if ($budget.Accepted) {
+            return $budget
+        }
+
+        [int64]$deficitBytes = $budget.AcceptedFloorBytes - $budget.AvailableBytes
+        if (
+            $deficitBytes -gt $script:WindowsFreeSpaceRetryWindowBytes -or
+            $stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds
+        ) {
+            return $budget
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+    } while ($true)
 }
 
 function Get-LibertixPartitionEndAlignmentPadding {
@@ -113,6 +149,7 @@ function Get-LibertixAlignedShrinkGeometry {
 Export-ModuleMember -Function @(
     "Get-LibertixPartitionAlignmentBytes",
     "Get-LibertixWindowsFreeSpaceBudget",
+    "Wait-LibertixWindowsFreeSpaceBudget",
     "Get-LibertixPartitionEndAlignmentPadding",
     "Get-LibertixAlignedShrinkGeometry"
 )

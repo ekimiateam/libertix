@@ -535,7 +535,7 @@ success_screen_and_reboot() {
 
 failure_screen_loop() {
     local rc="$1"
-    local key=""
+    local key="" rollback_status="unknown"
     UI_MODE="progress"
     while true; do
         if switch_to_terminal_ui_if_requested; then
@@ -581,7 +581,16 @@ failure_screen_loop() {
                 printf ' %s\n' "$LIBERTIX_I18N_RECENT_LINES"
                 tail -10 "$LOG" 2>/dev/null | clip_tty_lines | sed 's/^/  /'
                 printf '\n ------------------------------------------------------------\n'
-                printf ' %s\n' "$LIBERTIX_I18N_SHORTCUTS_FAILURE"
+                rollback_status="$(
+                    grep '^LIBERTIX_INSTALL_ROLLBACK=' "$RESULT_FILE" 2>/dev/null |
+                        tail -1 |
+                        cut -d= -f2- || true
+                )"
+                if [ "$rollback_status" = "completed" ]; then
+                    printf ' %s\n' "$LIBERTIX_I18N_SHORTCUTS_FAILURE"
+                else
+                    printf ' %s\n' "$LIBERTIX_I18N_SHORTCUTS_FAILURE_BLOCKED"
+                fi
                 printf ' %s\n' "$LIBERTIX_I18N_LOGS_PATH"
             } | write_tty1_screen
             render_serial_status

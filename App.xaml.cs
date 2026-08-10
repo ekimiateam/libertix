@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Principal;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using Libertix.Helpers;
@@ -12,12 +13,33 @@ namespace Libertix
 {
     public partial class App : Application
     {
+        private Mutex _singleInstanceMutex;
+        private bool _ownsSingleInstanceMutex;
         public InstallationState InstallationState { get; } = new InstallationState();
         public StartupOptions RuntimeOptions { get; private set; } = new StartupOptions();
         public FilepoolConfig Filepool { get; private set; } = FilepoolConfig.Production;
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            _singleInstanceMutex = new Mutex(
+                initiallyOwned: true,
+                name: @"Global\Libertix.Installation",
+                createdNew: out bool createdNew);
+            _ownsSingleInstanceMutex = createdNew;
+            if (!createdNew)
+            {
+                _singleInstanceMutex.Dispose();
+                _singleInstanceMutex = null;
+                MessageBox.Show(
+                    Localization.GetBootstrapString(
+                        "SingleInstanceRequired",
+                        "Another Libertix instance is already running."),
+                    "Libertix",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                Shutdown(3);
+                return;
+            }
             ApplicationLogger.Initialize();
             ApplicationLogger.Write("Libertix.exe startup.");
             RegisterApplicationErrorLogging();
@@ -84,8 +106,14 @@ namespace Libertix
         {
             ApplicationLogger.Write("Startup refused: " + error);
             MessageBox.Show(
-                error,
-                "Libertix - invalid startup option",
+                string.Format(
+                    Localization.GetBootstrapString(
+                        "InvalidStartupOptionsMessage",
+                        "Invalid startup option: {0}"),
+                    error),
+                Localization.GetBootstrapString(
+                    "InvalidStartupOptionsTitle",
+                    "Libertix - invalid startup option"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Current.Shutdown(2);
@@ -94,6 +122,14 @@ namespace Libertix
         protected override void OnExit(ExitEventArgs e)
         {
             ApplicationLogger.Write($"Libertix.exe exit, code={e.ApplicationExitCode}.");
+            if (_singleInstanceMutex != null)
+            {
+                if (_ownsSingleInstanceMutex)
+                    _singleInstanceMutex.ReleaseMutex();
+                _singleInstanceMutex.Dispose();
+                _singleInstanceMutex = null;
+                _ownsSingleInstanceMutex = false;
+            }
             base.OnExit(e);
         }
 
@@ -138,7 +174,9 @@ namespace Libertix
 
         private static string AdministratorRequiredMessage()
         {
-            return Localization.GetBootstrapString("AdministratorRequired");
+            return Localization.GetBootstrapString(
+                "AdministratorRequired",
+                "Libertix must be run as administrator.");
         }
 
         private static bool IsRunningAsAdministrator()

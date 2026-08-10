@@ -417,7 +417,10 @@ class VisionLLMClient:
         if response is not None:
             with suppress(ValueError):
                 retry_after = float(response.headers.get("retry-after", "0"))
-        delay = max(retry_after, self.retry_base_seconds * (2 ** (attempt - 1)))
+        delay = min(
+            60.0,
+            max(retry_after, self.retry_base_seconds * (2 ** (attempt - 1))),
+        )
         logger.warning(
             "Retrying LLM request in %.1fs (%s/%s)",
             delay,

@@ -71,9 +71,7 @@ namespace Libertix.Pages
             Log($"aria2: bundled, max {Aria2MaxConnections} connections");
             Log($"Linux account: {account.Username}");
 
-            string powershell = ResolveSystemExecutable(
-                "WindowsPowerShell\\v1.0\\powershell.exe",
-                "powershell.exe");
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
             UefiRecoveryState recovery = CreateUefiRecoverySession();
             _activeUefiRecovery = recovery;
 
@@ -96,17 +94,69 @@ namespace Libertix.Pages
             File.Copy(configPath, recovery.ConfigPath, true);
             WriteUefiRecoveryState(recovery);
 
-            int exitCode;
+            try
+            {
+                ArmUefiRecoveryAgent(recovery, powershell);
+            }
+            catch (Exception ex)
+            {
+                RecordExecutionFailure(
+                    "UEFI_RECOVERY_AGENT_FAILED",
+                    ex.Message,
+                    InstallationPhase.Windows);
+                Log($"ERROR: UEFI recovery agent setup failed before disk mutation: {ex.Message}");
+                CleanupPendingWindowsSharePayload();
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+                FinishInstallation(enableBackButton: true);
+                return;
+            }
+
+            StreamingProcessResult processResult;
             try
             {
                 string arguments =
                     $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
                     $"-ConfigPath {QuoteArgument(configPath)} -Force -PreserveConfig";
-                exitCode = await RunStreamingProcessAsync(
+                processResult = await RunStreamingProcessAsync(
                     powershell,
                     arguments,
                     WindowsProcessTimeouts.InstallerOperation,
                     HandleUefiInstallerOutput);
+
+                if (processResult.Completion == StreamingProcessCompletion.Cancelled)
+                    throw new OperationCanceledException(_installationCancellation.Token);
+
+                if (processResult.Completion == StreamingProcessCompletion.TerminationFailed)
+                    throw new UnterminatedProcessException(
+                        "UEFI installer process tree could not be proven stopped.");
+
+                if (processResult.Completion != StreamingProcessCompletion.Exited || processResult.ExitCode != 0)
+                {
+                    await HandleUefiPreparationFailureAsync(
+                        scriptPath,
+                        powershell,
+                        $"UEFI installer preparation failed with rc={processResult.ExitCode} ({processResult.Completion}).");
+                    return;
+                }
+
+                recovery.Phase = "AwaitingReboot";
+                WriteUefiRecoveryState(recovery);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (UnterminatedProcessException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                await HandleUefiPreparationFailureAsync(
+                    scriptPath,
+                    powershell,
+                    $"Unexpected UEFI preparation failure: {ex.Message}");
+                return;
             }
             finally
             {
@@ -119,33 +169,6 @@ namespace Libertix.Pages
                 {
                     Log($"Temporary UEFI configuration cleanup failed: {ex.Message}");
                 }
-            }
-
-            if (_installationCancellation.IsCancellationRequested || exitCode == -2)
-                throw new OperationCanceledException(_installationCancellation.Token);
-
-            if (exitCode != 0)
-            {
-                await HandleUefiPreparationFailureAsync(
-                    scriptPath,
-                    powershell,
-                    $"UEFI installer preparation failed with rc={exitCode}.");
-                return;
-            }
-
-            try
-            {
-                InstallUefiRecoveryAgent(recovery, powershell);
-            }
-            catch (Exception ex)
-            {
-                Log($"ERROR: UEFI recovery agent setup failed: {ex.Message}");
-                await HandleUefiPreparationFailureAsync(
-                    scriptPath,
-                    powershell,
-                    $"UEFI recovery agent setup failed: {ex.Message}",
-                    "UEFI_RECOVERY_AGENT_FAILED");
-                return;
             }
 
             UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
@@ -168,14 +191,18 @@ namespace Libertix.Pages
             {
                 RecordExecutionFailure(failureCode, reason, InstallationPhase.Windows);
                 BeginExecutionRollback();
-                int revertExitCode = await RunStreamingProcessAsync(
+                StreamingProcessResult revertResult = await RunStreamingProcessAsync(
                     powershell,
-                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert",
+                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert " +
+                    $"-ExpectedRecoveryRunId {QuoteArgument(_activeUefiRecovery.RunId)}",
                     WindowsProcessTimeouts.DiskImageOperation,
                     line => Log($"ROLLBACK: {line}"),
                     observeCancellation: false);
-                Log($"UEFI automatic revert finished with rc={revertExitCode}.");
-                if (revertExitCode == 0)
+                Log($"UEFI automatic revert finished with rc={revertResult.ExitCode} ({revertResult.Completion}).");
+                if (
+                    revertResult.Completion == StreamingProcessCompletion.Exited &&
+                    revertResult.ExitCode == 0
+                )
                     CompleteExecutionRollback();
                 ReloadExecutionState();
                 rollbackVerified = _executionLedger != null &&
@@ -263,9 +290,18 @@ namespace Libertix.Pages
             if (_storagePreflight == null)
                 throw new InvalidOperationException("UEFI recovery requires a completed storage preflight.");
 
+            long expectedLinuxSize =
+                InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB).FinalSizeBytes;
+            long originalWindowsEnd = checked(
+                _storagePreflight.SystemPartitionOffset + _storagePreflight.SystemPartitionSize);
+            long alignmentPadding = originalWindowsEnd % (1024L * 1024L);
+            long expectedLinuxOffset = checked(
+                originalWindowsEnd - expectedLinuxSize - alignmentPadding);
+
             return new UefiRecoveryState
             {
                 RunId = runId,
+                PlanId = runId,
                 RecoveryRoot = root,
                 PayloadRoot = payloadRoot,
                 ConfigPath = Path.Combine(root, "uefi-config.json"),
@@ -274,8 +310,12 @@ namespace Libertix.Pages
                 Phase = "Preparing",
                 CreatedUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
                 SystemDiskNumber = _storagePreflight.SystemDiskNumber,
-                ExpectedLinuxPartitionSize =
-                    InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB).FinalSizeBytes
+                SystemDiskUniqueId = _storagePreflight.SystemDiskUniqueId,
+                SystemDiskPartitionTableId = _storagePreflight.SystemDiskPartitionTableId,
+                SystemDiskSize = _storagePreflight.SystemDiskSize,
+                ExpectedLinuxPartitionOffset = expectedLinuxOffset,
+                ExpectedLinuxPartitionSize = expectedLinuxSize,
+                SecureBootEnabled = _installationState.Compatibility?.SecureBootEnabled == true
             };
         }
 
@@ -311,7 +351,7 @@ namespace Libertix.Pages
             AtomicJsonFile.Write(statePath, JsonSerializer.Serialize(state));
         }
 
-        private void InstallUefiRecoveryAgent(UefiRecoveryState recovery, string powershell)
+        private void ArmUefiRecoveryAgent(UefiRecoveryState recovery, string powershell)
         {
             string agent = Path.Combine(recovery.PayloadRoot, "Scripts", "libertix-uefi-recovery-agent.ps1");
             string taskRegistrationScript = Path.Combine(
@@ -321,7 +361,7 @@ namespace Libertix.Pages
             if (!File.Exists(agent) || !File.Exists(taskRegistrationScript) || !File.Exists(recovery.ConfigPath))
                 throw new InvalidOperationException("Cached UEFI recovery payload is incomplete.");
 
-            recovery.Phase = "AwaitingReboot";
+            recovery.Phase = "Preparing";
             WriteUefiRecoveryState(recovery);
 
             string registrationArguments =
@@ -338,23 +378,7 @@ namespace Libertix.Pages
             if (result.exitCode != 0)
                 throw new InvalidOperationException($"Cannot create UEFI recovery tasks: {result.output} {result.error}".Trim());
 
-            Log($"UEFI return-to-Windows guards installed: {recovery.TaskName}, {recovery.PromptTaskName}");
-        }
-
-        private static void DeleteUefiRecoverySession(UefiRecoveryState recovery)
-        {
-            if (recovery == null || string.IsNullOrWhiteSpace(recovery.RecoveryRoot))
-                return;
-            try
-            {
-                if (Directory.Exists(recovery.RecoveryRoot))
-                    Directory.Delete(recovery.RecoveryRoot, true);
-            }
-            catch
-            {
-                // Recovery session cleanup is best-effort. The scheduled
-                // recovery guard owns the same directory and can remove it.
-            }
+            Log($"UEFI recovery guards armed before disk mutation: {recovery.TaskName}, {recovery.PromptTaskName}");
         }
 
         private static string WriteProtectedUefiConfig(object config)
@@ -484,10 +508,10 @@ namespace Libertix.Pages
                             _storagePreflight.SystemDrive));
                     break;
                 case "installer-iso-download":
-                    UpdateProgress(percent, Localized("ApplyChangesDownloadingMint", "Downloading Mint ISO..."));
+                    UpdateProgress(percent, Localized("ApplyChangesDownloadingDistribution", "Downloading Linux installer ISO..."));
                     break;
                 case "installer-iso-ready":
-                    UpdateProgress(percent, Localized("ApplyChangesMintReady", "Mint ISO ready"));
+                    UpdateProgress(percent, Localized("ApplyChangesDistributionReady", "Linux installer ISO ready"));
                     break;
                 case "staging-partition":
                     UpdateProgress(percent, Localized("ApplyChangesCreatingUefiPartition", "Creating UEFI installer partition..."));

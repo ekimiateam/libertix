@@ -24,6 +24,8 @@ HEX_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 USERNAME_PATTERN = re.compile(r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$")
 XKB_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
+SAFE_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
+SAFE_GRUB_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$")
 
 
 class PlanValidationError(ValueError):
@@ -79,7 +81,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError(f"installation plan schema validation failed: {error}") from error
 
     root = require_mapping(plan, "plan")
-    if root.get("schemaVersion") != 1:
+    if root.get("schemaVersion") != 2:
         raise PlanValidationError("unsupported installation plan schemaVersion")
     if not HEX_ID_PATTERN.fullmatch(str(root.get("planId", ""))):
         raise PlanValidationError("planId must contain 32 lowercase hexadecimal characters")
@@ -97,12 +99,23 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
 
     distribution = require_mapping(root.get("distribution"), "distribution")
     for name in (
+        "id",
         "name",
+        "osReleaseId",
+        "grubDisplayName",
+        "grubIcon",
         "installerIsoFileName",
         "installerIsoUrl",
         "installerIsoWindowsPath",
     ):
         require_text(require_property(distribution, name, "distribution"), f"distribution.{name}")
+    for name in ("id", "osReleaseId", "grubIcon"):
+        if not SAFE_IDENTIFIER_PATTERN.fullmatch(distribution[name]):
+            raise PlanValidationError(f"distribution.{name} must be a safe lowercase identifier")
+    if not SAFE_GRUB_LABEL_PATTERN.fullmatch(distribution["grubDisplayName"]):
+        raise PlanValidationError(
+            "distribution.grubDisplayName contains unsupported GRUB label characters"
+        )
     if "/" in distribution["installerIsoFileName"] or "\\" in distribution["installerIsoFileName"]:
         raise PlanValidationError("distribution.installerIsoFileName must not contain a path")
     if not re.match(r"^[A-Za-z]:[\\/]", distribution["installerIsoWindowsPath"]):
@@ -145,14 +158,24 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
             "account.passwordHashWindowsPath must be an absolute safe Windows path"
         )
     computer_name = require_text(account.get("computerName"), "account.computerName")
-    if len(computer_name) > 63:
-        raise PlanValidationError("account.computerName cannot exceed 63 characters")
+    if not re.fullmatch(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", computer_name):
+        raise PlanValidationError("account.computerName is not a valid Linux hostname")
 
     disk = require_mapping(root.get("disk"), "disk")
     disk_number = disk.get("number")
     if isinstance(disk_number, bool) or not isinstance(disk_number, int) or disk_number < 0:
         raise PlanValidationError("disk.number cannot be negative")
     require_text(disk.get("uniqueId"), "disk.uniqueId")
+    partition_table_id = require_text(disk.get("partitionTableId"), "disk.partitionTableId")
+    expected_partition_table_pattern = (
+        r"mbr:[0-9a-f]{8}"
+        if firmware == "bios"
+        else r"gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    )
+    if not re.fullmatch(expected_partition_table_pattern, partition_table_id):
+        raise PlanValidationError(
+            "disk.partitionTableId is not canonical for the selected firmware"
+        )
     disk_size = require_positive_integer(disk.get("sizeBytes"), "disk.sizeBytes")
     logical_sector_size = require_positive_integer(
         disk.get("logicalSectorSizeBytes"), "disk.logicalSectorSizeBytes"
@@ -278,8 +301,24 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         )
     if recovery_root is not None:
         require_text(recovery_root, "runtime.recoveryRootWindows")
+        if not re.fullmatch(r"[A-Za-z]:\\.+", recovery_root) or any(
+            part == ".." for part in recovery_root[3:].split("\\")
+        ):
+            raise PlanValidationError(
+                "runtime.recoveryRootWindows must be an absolute safe Windows path"
+            )
         if not HEX_ID_PATTERN.fullmatch(str(recovery_id)):
             raise PlanValidationError("runtime.recoveryRunId is invalid")
+
+    windows_paths = {
+        "distribution.installerIsoWindowsPath": distribution["installerIsoWindowsPath"],
+        "account.passwordHashWindowsPath": password_hash_windows_path,
+    }
+    if recovery_root is not None:
+        windows_paths["runtime.recoveryRootWindows"] = recovery_root
+    for path_name, windows_path in windows_paths.items():
+        if windows_path[:2].upper() != system_drive:
+            raise PlanValidationError(f"{path_name} must be located on disk.systemDrive")
 
     development = root.get("development")
     if development is not None:
@@ -385,6 +424,11 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
     values = {
         "INSTALLATION_PLAN_ID": plan["planId"],
         "INSTALLATION_FIRMWARE": plan["firmware"],
+        "DISTRIBUTION_ID": distribution["id"],
+        "DISTRIBUTION_NAME": distribution["name"],
+        "DISTRIBUTION_OS_RELEASE_ID": distribution["osReleaseId"],
+        "DISTRIBUTION_GRUB_DISPLAY_NAME": distribution["grubDisplayName"],
+        "DISTRIBUTION_GRUB_ICON": distribution["grubIcon"],
         "LANGUAGE_CODE": locale["languageCode"],
         "SYSTEM_LANG": locale["systemLanguage"],
         "KEYBOARD_LAYOUT": locale["keyboardLayout"],
@@ -401,6 +445,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "LINUX_SIZE_GB": str(final_size // GIB),
         "TARGET_DISK_NUMBER": str(disk["number"]),
         "TARGET_DISK_UNIQUE_ID": disk["uniqueId"],
+        "TARGET_DISK_PARTITION_TABLE_ID": disk["partitionTableId"],
         "TARGET_DISK_SIZE_BYTES": str(disk["sizeBytes"]),
         "TARGET_LOGICAL_SECTOR_SIZE_BYTES": str(disk["logicalSectorSizeBytes"]),
         "WINDOWS_PARTITION_NUMBER": str(disk["windows"]["number"]),

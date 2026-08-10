@@ -29,13 +29,23 @@ def contains_install_blocker(content: str) -> bool:
 
 
 def contains_final_reboot_prompt(content: str) -> bool:
-    text = content.lower()
-    reboot_button = "redemarrer" in text or "redémarrer" in text
+    text = content.casefold()
+    reboot_button = any(
+        marker in text
+        for marker in ("redemarrer", "redémarrer", "reboot", "restart", "reiniciar", "再起動")
+    )
     final_state = any(
         marker in text
         for marker in (
             "partitionnement termine",
             "partitionnement terminé",
+            "partitioning complete",
+            "particionamiento completado",
+            "パーティション作成完了",
+            "uefi preparation complete",
+            "préparation uefi terminée",
+            "preparación uefi completada",
+            "uefi の準備が完了",
             "next reboot will automatically boot",
             "boot entry configured",
             "grub4dos installed",
@@ -85,7 +95,7 @@ def contains_active_install_progress(content: str) -> bool:
     if re.search(progress_pattern, text):
         return True
     if re.search(r"\b[0-9][0-9\s]*/[0-9][0-9\s]*\s*mb\b", text) and any(
-        marker in text for marker in ("downloading", "télécharg", "linux iso", "mint.iso")
+        marker in text for marker in ("downloading", "télécharg", "linux iso", ".iso")
     ):
         return True
     if any(
@@ -111,19 +121,6 @@ def contains_active_install_progress(content: str) -> bool:
             "extraction de mint",
             "configuration du systeme installe",
             "configuration du système installé",
-        )
-    )
-
-
-def contains_live_install_success(content: str) -> bool:
-    text = content.lower()
-    return any(
-        marker in text
-        for marker in (
-            "installer-success",
-            "installation terminée et vérifiée",
-            "installation terminee et verifiee",
-            "libertix_install_success=true",
         )
     )
 

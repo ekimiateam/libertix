@@ -207,16 +207,28 @@
   },
   "bootstrapMessages": {
     "en": {
-      "AdministratorRequired": "Libertix must be run as administrator to modify partitions and the Windows boot configuration."
+      "AdministratorRequired": "Libertix must be run as administrator to modify partitions and the Windows boot configuration.",
+      "SingleInstanceRequired": "Another Libertix instance is already running.",
+      "InvalidStartupOptionsTitle": "Libertix - invalid startup option",
+      "InvalidStartupOptionsMessage": "Invalid startup option: {0}"
     },
     "fr": {
-      "AdministratorRequired": "Libertix doit être lancé en administrateur pour modifier les partitions et le démarrage Windows."
+      "AdministratorRequired": "Libertix doit être lancé en administrateur pour modifier les partitions et le démarrage Windows.",
+      "SingleInstanceRequired": "Une autre instance de Libertix est déjà en cours d'exécution.",
+      "InvalidStartupOptionsTitle": "Libertix - option de démarrage invalide",
+      "InvalidStartupOptionsMessage": "Option de démarrage invalide : {0}"
     },
     "es": {
-      "AdministratorRequired": "Libertix debe ejecutarse como administrador para modificar las particiones y el arranque de Windows."
+      "AdministratorRequired": "Libertix debe ejecutarse como administrador para modificar las particiones y el arranque de Windows.",
+      "SingleInstanceRequired": "Ya se está ejecutando otra instancia de Libertix.",
+      "InvalidStartupOptionsTitle": "Libertix - opción de inicio no válida",
+      "InvalidStartupOptionsMessage": "Opción de inicio no válida: {0}"
     },
     "ja": {
-      "AdministratorRequired": "パーティションと Windows の起動設定を変更するため、Libertix は管理者として実行する必要があります。"
+      "AdministratorRequired": "パーティションと Windows の起動設定を変更するため、Libertix は管理者として実行する必要があります。",
+      "SingleInstanceRequired": "別の Libertix インスタンスが既に実行されています。",
+      "InvalidStartupOptionsTitle": "Libertix - 無効な起動オプション",
+      "InvalidStartupOptionsMessage": "起動オプションが無効です: {0}"
     }
   }
 }

@@ -223,17 +223,7 @@ function Enable-FirmwareAccessOnce {
     $script:LibertixFirmwarePrivilegeEnabled = $true
 }
 
-function Test-FirmwareVariableExists {
-    param([Parameter(Mandatory = $true)][string]$Name)
-
-    Enable-FirmwareAccessOnce
-    $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
-    $buffer = New-Object byte[] 65536
-    $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
-    return $size -ne 0
-}
-
-function Get-FirmwareVariableBytes {
+function Get-FirmwareVariableReadResult {
     param([Parameter(Mandatory = $true)][string]$Name)
 
     Enable-FirmwareAccessOnce
@@ -241,12 +231,38 @@ function Get-FirmwareVariableBytes {
     $buffer = New-Object byte[] 65536
     $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
     if ($size -eq 0) {
-        return $null
+        $errorCode = [LibertixFirmwareApi]::LastError()
+        if ($errorCode -in @(203, 1168)) {
+            return [pscustomobject]@{
+                Exists = $false
+                Bytes = $null
+            }
+        }
+        throw "GetFirmwareEnvironmentVariable failed for ${Name}: Win32 error ${errorCode}"
     }
 
     $result = New-Object byte[] $size
     [Array]::Copy($buffer, $result, $size)
-    return $result
+    return [pscustomobject]@{
+        Exists = $true
+        Bytes = $result
+    }
+}
+
+function Test-FirmwareVariableExists {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return [bool](Get-FirmwareVariableReadResult -Name $Name).Exists
+}
+
+function Get-FirmwareVariableBytes {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $readResult = Get-FirmwareVariableReadResult -Name $Name
+    if (-not $readResult.Exists) {
+        return $null
+    }
+    return [byte[]]$readResult.Bytes
 }
 
 function Set-FirmwareVariable {
@@ -275,11 +291,21 @@ function Set-FirmwareVariable {
 function Remove-FirmwareVariable {
     param([Parameter(Mandatory = $true)][string]$Name)
 
+    if (-not (Test-FirmwareVariableExists -Name $Name)) {
+        return
+    }
+
     Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $attributes = [uint32]0x00000007
-    [LibertixFirmwareApi]::DeleteFirmwareEnvironmentVariable($Name, $global, $attributes) |
-        Out-Null
+    $ok = [LibertixFirmwareApi]::DeleteFirmwareEnvironmentVariable($Name, $global, $attributes)
+    if (-not $ok) {
+        $errorCode = [LibertixFirmwareApi]::LastError()
+        throw "SetFirmwareEnvironmentVariableEx failed to delete ${Name}: Win32 error ${errorCode}"
+    }
+    if (Test-FirmwareVariableExists -Name $Name) {
+        throw "Firmware variable ${Name} still exists after deletion."
+    }
 }
 
 function Remove-FirmwareBootNumberFromOrder {
@@ -315,11 +341,14 @@ function Get-BcdFirmwareEntryIdsByDescription {
             # bcdedit localizes field labels but keeps object identifiers in
             # braces. Match the stable identifier token only after the exact
             # description has selected the entry block.
-            $identifierMatch = [regex]::Match($entryBlock, "\{[0-9a-fA-F-]+\}")
-            if (-not $identifierMatch.Success) {
-                throw "A BCD firmware entry named '$description' has no object identifier."
+            $identifierMatches = [regex]::Matches(
+                $entryBlock,
+                "\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}"
+            )
+            if ($identifierMatches.Count -ne 1) {
+                throw "A BCD firmware entry named '$description' does not contain exactly one canonical object identifier."
             }
-            $identifiers.Add($identifierMatch.Value)
+            $identifiers.Add($identifierMatches[0].Value)
             break
         }
     }
@@ -359,7 +388,46 @@ function Remove-NativeFirmwareEntriesByDescription {
     }
 }
 
+function Remove-TrackedLibertixFirmwareEntry {
+    $state = Get-TransactionPartitionState
+    if (
+        -not $state -or
+        -not ($state.PSObject.Properties.Name -contains "InstallerBootNumber") -or
+        -not ($state.PSObject.Properties.Name -contains "InstallerBootVariable") -or
+        $null -eq $state.InstallerBootNumber -or
+        [string]::IsNullOrWhiteSpace([string]$state.InstallerBootVariable)
+    ) {
+        return
+    }
+
+    [int]$savedNumber = [int]$state.InstallerBootNumber
+    [string]$savedVariable = [string]$state.InstallerBootVariable
+    $expectedVariable = "Boot{0:X4}" -f [uint16]$savedNumber
+    if ($savedNumber -lt 0 -or $savedNumber -gt 0xFFFF -or $savedVariable -ne $expectedVariable) {
+        throw "Saved UEFI firmware ownership is invalid."
+    }
+
+    $bytes = Get-FirmwareVariableBytes -Name $savedVariable
+    if (-not $bytes) {
+        return
+    }
+    if ((Get-EfiLoadOptionDescription -Bytes $bytes) -ne $InstallerBootDescription) {
+        throw "$savedVariable exists but is not owned by this Libertix recovery run."
+    }
+
+    $bootNext = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext"))
+    if ($bootNext.Count -eq 1 -and [uint16]$bootNext[0] -eq [uint16]$savedNumber) {
+        Remove-FirmwareVariable -Name "BootNext"
+    }
+    Remove-FirmwareBootNumberFromOrder -BootNumber ([uint16]$savedNumber)
+    Remove-FirmwareVariable -Name $savedVariable
+}
+
 function Remove-LibertixTemporaryFirmwareEntries {
+    # A Boot#### variable can exist without appearing in BootOrder or BootNext
+    # if firmware setup was interrupted between those writes. Transaction state
+    # is the authoritative ownership proof for that orphaned entry.
+    Remove-TrackedLibertixFirmwareEntry
     Remove-BcdFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
     Remove-NativeFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
 
@@ -527,15 +595,20 @@ function Assert-LibertixFirmwareEntry {
 function New-LibertixBcdFirmwareEntry {
     param(
         [Parameter(Mandatory = $true)][string]$EspDrive,
-        [Parameter(Mandatory = $true)][string]$LoaderPath
+        [Parameter(Mandatory = $true)][string]$LoaderPath,
+        [hashtable]$EspLoaderSha256 = @{},
+        [uint16[]]$OriginalBootOrder = @()
     )
 
     $copyText = Invoke-BcdeditCommand -Arguments @("/copy", "{bootmgr}", "/d", $InstallerBootDescription)
-    $entryIdMatch = [regex]::Match($copyText, "(\{[0-9a-fA-F-]+\})")
-    if (-not $entryIdMatch.Success) {
-        throw "Could not parse firmware entry identifier from bcdedit output: $copyText"
+    $entryIdMatches = [regex]::Matches(
+        $copyText,
+        "\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}"
+    )
+    if ($entryIdMatches.Count -ne 1) {
+        throw "Could not parse exactly one canonical firmware entry identifier from bcdedit output: $copyText"
     }
-    $entryId = $entryIdMatch.Groups[1].Value
+    $entryId = $entryIdMatches[0].Value
 
     Invoke-BcdeditCommand -Arguments @("/set", $entryId, "device", "partition=$EspDrive") | Out-Null
     Invoke-BcdeditCommand -Arguments @("/set", $entryId, "path", $LoaderPath) | Out-Null
@@ -561,6 +634,14 @@ function New-LibertixBcdFirmwareEntry {
     }
 
     $bootVariable = "Boot{0:X4}" -f $bootNumber
+    # Persist ownership immediately. A crash after Boot#### materialization but
+    # before BootOrder verification must still leave rollback an exact target.
+    Update-TransactionFirmwareState `
+        -BootNumber $bootNumber `
+        -BootVariable $bootVariable `
+        -FirmwareEntryId $entryId `
+        -EspLoaderSha256 $EspLoaderSha256 `
+        -OriginalBootOrder $OriginalBootOrder
     $loadOption = Get-FirmwareVariableBytes -Name $bootVariable
     $optionalLength = Get-EfiLoadOptionOptionalDataLength -Bytes $loadOption
     if ($optionalLength -lt 0) {

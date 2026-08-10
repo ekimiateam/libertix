@@ -173,12 +173,12 @@ restore_windows_partition_best_effort() {
 }
 
 rollback_windows_layout_best_effort() {
-    local rollback_ok=false boot_restore_ok=true
+    local rollback_ok=false boot_restore_ok=true state_rollback_ok=true
 
     [ "$INSTALL_SUCCESS" = false ] || return 0
     [ "$ROLLBACK_ATTEMPTED" = false ] || return 0
     ROLLBACK_ATTEMPTED=true
-    begin_installation_state_rollback_best_effort
+    begin_installation_state_rollback || state_rollback_ok=false
 
     echo "=== ROLLBACK: best-effort Windows layout restore ==="
     resolve_rollback_storage_best_effort || return 1
@@ -212,11 +212,16 @@ rollback_windows_layout_best_effort() {
             "windows.installer-partition-created" \
             "windows.system-volume-shrunk" \
             "windows.recovery-armed"; do
-            compensate_installation_state_step_best_effort "$rollback_step"
+            compensate_installation_state_step "$rollback_step" || state_rollback_ok=false
         done
-        complete_installation_state_rollback_best_effort
-        echo "ROLLBACK: completed best-effort Windows layout restore"
-        return 0
+        if [ "$state_rollback_ok" = true ]; then
+            complete_installation_state_rollback || state_rollback_ok=false
+        fi
+        if [ "$state_rollback_ok" = true ]; then
+            echo "ROLLBACK: completed best-effort Windows layout restore"
+            return 0
+        fi
+        echo "ROLLBACK: physical restore completed but durable rollback state is incomplete"
     fi
     return 1
 }
@@ -228,6 +233,9 @@ fail_and_exit() {
     trap - ERR
     set +e
     echo "ERROR: $message"
+    # Release the ISO loop and NTFS mounts before persisting the failed state.
+    # The durable state mirror must never race an existing read-only mount.
+    cleanup_live_mounts_best_effort
     fail_installation_state_best_effort "$rc" "$message"
     debug_disk_state || true
     if rollback_windows_layout_best_effort; then

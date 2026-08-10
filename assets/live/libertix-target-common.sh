@@ -30,6 +30,19 @@ mount_target_windows_partitions_read_only() {
     done < <(partitions_of_disk "$DISK")
 }
 
+unmount_target_windows_partitions() {
+    local partition partition_number_value mount_directory
+
+    while read -r partition; do
+        [ -n "$partition" ] || continue
+        partition_number_value=$(partition_number "$partition")
+        mount_directory="/mnt/target/mnt/win_$partition_number_value"
+        if mountpoint -q "$mount_directory"; then
+            umount "$mount_directory" || return 1
+        fi
+    done < <(partitions_of_disk "$DISK")
+}
+
 install_target_configuration_payload() {
     install -d -m 0755 /mnt/target/etc/libertix
     install -m 0644 "$INSTALLATION_PLAN_PATH" \
@@ -67,6 +80,11 @@ install_target_configuration_payload() {
 run_target_configuration() {
     chroot /mnt/target /usr/bin/env \
         LANGUAGE_CODE="$LANGUAGE_CODE" \
+        DISTRIBUTION_ID="$DISTRIBUTION_ID" \
+        DISTRIBUTION_NAME="$DISTRIBUTION_NAME" \
+        DISTRIBUTION_OS_RELEASE_ID="$DISTRIBUTION_OS_RELEASE_ID" \
+        DISTRIBUTION_GRUB_DISPLAY_NAME="$DISTRIBUTION_GRUB_DISPLAY_NAME" \
+        DISTRIBUTION_GRUB_ICON="$DISTRIBUTION_GRUB_ICON" \
         SYSTEM_LANG="$SYSTEM_LANG" \
         KEYBOARD_LAYOUT="$KEYBOARD_LAYOUT" \
         KEYBOARD_VARIANT="$KEYBOARD_VARIANT" \
@@ -108,23 +126,40 @@ configure_target_system() {
     mount_target_windows_partitions_read_only
     install_target_configuration_payload
     run_target_configuration
+    unmount_target_windows_partitions
 }
 
 unmount_target_system() {
-    local partition partition_number_value mount_directory
+    local attempt
 
-    while read -r partition; do
-        [ -n "$partition" ] || continue
-        partition_number_value=$(partition_number "$partition")
-        mount_directory="/mnt/target/mnt/win_$partition_number_value"
-        [ -d "$mount_directory" ] && umount "$mount_directory" 2>/dev/null || true
-    done < <(partitions_of_disk "$DISK")
+    # Some storage controllers release a recently active filesystem
+    # asynchronously. Do not continue to the independent read-only verification
+    # while any target mount is still present.
+    for attempt in $(seq 1 10); do
+        unmount_target_windows_partitions || true
+        umount /mnt/target/dev/pts 2>/dev/null || true
+        umount /mnt/target/dev 2>/dev/null || true
+        umount /mnt/target/proc 2>/dev/null || true
+        umount /mnt/target/sys 2>/dev/null || true
+        umount /mnt/target/boot/efi 2>/dev/null || true
+        if findmnt -rn -R /mnt/target 2>/dev/null | grep -q .; then
+            umount -R /mnt/target 2>/dev/null || true
+        fi
+        umount /mnt/target 2>/dev/null || true
+        umount /mnt/windows 2>/dev/null || true
 
-    umount /mnt/target/dev/pts 2>/dev/null || true
-    umount /mnt/target/dev 2>/dev/null || true
-    umount /mnt/target/proc 2>/dev/null || true
-    umount /mnt/target/sys 2>/dev/null || true
-    umount /mnt/target/boot/efi 2>/dev/null || true
-    umount /mnt/target 2>/dev/null || true
-    umount /mnt/windows 2>/dev/null || true
+        if ! findmnt -rn -R /mnt/target 2>/dev/null | grep -q . \
+            && ! findmnt -rn -S "$NEW_PART" 2>/dev/null | grep -q .; then
+            return 0
+        fi
+
+        sync || true
+        udevadm settle 2>/dev/null || true
+        sleep 1
+    done
+
+    echo "ERROR: target filesystem is still mounted after 10 release attempts"
+    findmnt -rn -R /mnt/target 2>/dev/null || true
+    findmnt -rn -S "$NEW_PART" 2>/dev/null || true
+    return 1
 }

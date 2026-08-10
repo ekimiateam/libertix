@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from app.distributions import DistributionProfile, load_distribution_profile
 
 
 @dataclass(frozen=True)
@@ -9,6 +11,9 @@ class AutomationOptions:
     linux_username: str
     linux_password: str
     monitor_iso: bool
+    distribution: DistributionProfile = field(
+        default_factory=lambda: load_distribution_profile("mint")
+    )
     share_windows_files_in_linux: bool = True
     share_linux_files_in_windows: bool = True
 
@@ -17,20 +22,6 @@ class AutomationOptions:
 class Point:
     x: int
     y: int
-
-
-@dataclass(frozen=True)
-class WizardLayout:
-    welcome_next: Point
-    distribution: Point
-    next_button: Point
-    sharing_next: Point
-    windows_to_linux_checkbox: Point
-    linux_to_windows_checkbox: Point
-    username: Point
-    password: Point
-    password_confirmation: Point
-    warning_acknowledgement: Point
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,6 @@ from app.errors import WorkflowError
 from app.services.automation_types import (
     AutomationOptions,
     Point,
-    WizardLayout,
     WizardProfile,
 )
 from app.services.common import ResultBuilder
@@ -33,34 +32,6 @@ COMPATIBILITY_SUCCESS_MARKERS = (
 
 class WizardAutomationMixin:
     """Drive and validate wizard pages through the configured VNC desktop."""
-
-    # VNC cannot discover WPF controls semantically. Keep the two validated
-    # layouts centralized so UI changes update one explicit contract instead of
-    # leaving unrelated pixel literals throughout the navigation workflow.
-    BIOS_LAYOUT = WizardLayout(
-        welcome_next=Point(512, 403),
-        distribution=Point(145, 395),
-        next_button=Point(919, 628),
-        sharing_next=Point(899, 588),
-        windows_to_linux_checkbox=Point(125, 310),
-        linux_to_windows_checkbox=Point(125, 415),
-        username=Point(512, 220),
-        password=Point(512, 333),
-        password_confirmation=Point(512, 445),
-        warning_acknowledgement=Point(430, 575),
-    )
-    UEFI_LAYOUT = WizardLayout(
-        welcome_next=Point(512, 403),
-        distribution=Point(220, 389),
-        next_button=Point(838, 614),
-        sharing_next=Point(822, 579),
-        windows_to_linux_checkbox=Point(125, 310),
-        linux_to_windows_checkbox=Point(125, 415),
-        username=Point(508, 223),
-        password=Point(508, 330),
-        password_confirmation=Point(508, 438),
-        warning_acknowledgement=Point(430, 566),
-    )
 
     def _click_wizard(
         self,
@@ -85,8 +56,7 @@ class WizardAutomationMixin:
                 )
                 return None
 
-            layout = self.UEFI_LAYOUT if profile.name == "uefi" else self.BIOS_LAYOUT
-            self._click_wizard_path(client, vm, options, result, layout)
+            self._click_wizard_path(client, vm, options, result)
         except WorkflowError:
             raise
         except Exception as exc:
@@ -106,7 +76,7 @@ class WizardAutomationMixin:
                     )
 
         if options.monitor_iso:
-            return self._monitor_until_live_boot(vm, result, profile.name)
+            return self._monitor_until_live_boot(vm, result, profile.name, options.distribution)
         return None
 
     def _click_wizard_path(
@@ -115,65 +85,40 @@ class WizardAutomationMixin:
         vm: VMConfig,
         options: AutomationOptions,
         result: ResultBuilder,
-        layout: WizardLayout,
     ) -> None:
-        self._click(client, vm, layout.welcome_next, 2.0)
+        self._press_key(client, "enter", 2.0)
         self._capture_from_client(client, vm, "01-distro", result)
         self._navigate_to_account(
             client,
             vm,
-            welcome_point=layout.welcome_next,
-            distro_point=layout.distribution,
-            next_point=layout.next_button,
-            sharing_point=layout.sharing_next,
-            windows_to_linux_checkbox=layout.windows_to_linux_checkbox,
-            linux_to_windows_checkbox=layout.linux_to_windows_checkbox,
+            distribution_index=options.distribution.catalog_index,
             share_windows_files_in_linux=options.share_windows_files_in_linux,
             share_linux_files_in_windows=options.share_linux_files_in_windows,
             username=options.linux_username,
             result=result,
         )
 
-        self._fill_account_fields(
+        self._fill_and_confirm_account_fields(
             client,
             vm,
-            username_point=layout.username,
-            password_point=layout.password,
-            confirmation_point=layout.password_confirmation,
             username=options.linux_username,
             password=options.linux_password,
-        )
-        time.sleep(0.5)
-        account_capture, account_capture_latest = self._capture_wizard_pair(
-            client, vm, "04-account-filled", result
-        )
-        self._assert_wizard_state(
-            account_capture,
-            vm,
-            latest_capture=account_capture_latest,
-            expected_screen="account",
-            expected_username=options.linux_username,
             result=result,
         )
 
         # Navigation can complete after the button handler returns while WPF is
         # busy rendering three concurrent test VMs. Let the animation settle
         # before asking vision to prove that the warning page replaced account.
-        self._click(client, vm, layout.next_button, 5.0)
-        warning_capture, warning_capture_latest = self._capture_wizard_pair(
-            client, vm, "05-warning", result
-        )
-        self._assert_wizard_state(
-            warning_capture,
+        self._press_key(client, "enter", 5.0)
+        self._confirm_warning_page(
+            client,
             vm,
-            latest_capture=warning_capture_latest,
-            expected_screen="warning",
-            expected_username=options.linux_username,
-            result=result,
+            options.linux_username,
+            result,
         )
 
-        self._click(client, vm, layout.warning_acknowledgement, 0.5)
-        self._click(client, vm, layout.next_button, 10.0)
+        self._press_key(client, "space", 0.5)
+        self._press_key(client, "enter", 10.0)
         self._capture_from_client(client, vm, "06-apply-started", result)
 
     def _navigate_to_account(
@@ -181,19 +126,17 @@ class WizardAutomationMixin:
         client: object,
         vm: VMConfig,
         *,
-        welcome_point: Point,
-        distro_point: Point,
-        next_point: Point,
-        sharing_point: Point,
+        distribution_index: int,
         username: str,
         result: ResultBuilder,
-        windows_to_linux_checkbox: Point | None = None,
-        linux_to_windows_checkbox: Point | None = None,
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
     ) -> None:
-        windows_to_linux_checkbox = windows_to_linux_checkbox or Point(125, 310)
-        linux_to_windows_checkbox = linux_to_windows_checkbox or Point(125, 415)
+        if distribution_index < 0:
+            raise WorkflowError(
+                "automation.distribution_catalog",
+                "The selected distribution has an invalid catalog position",
+            )
         deadline = time.monotonic() + 300
         last_screen: str | None = None
         attempt = 0
@@ -308,21 +251,23 @@ class WizardAutomationMixin:
                 # transition instead of from the beginning of the whole path.
                 deadline = time.monotonic() + 300
                 last_screen = verdict.detected_screen
-            if verdict.detected_screen == "welcome":
-                self._click(client, vm, welcome_point, 1.0)
-            elif verdict.detected_screen == "compatibility":
-                self._click(client, vm, next_point, 1.0)
+            if verdict.detected_screen in {"welcome", "compatibility"}:
+                if verdict.detected_screen == "welcome":
+                    # A scheduled task can display Libertix without making it
+                    # the foreground window. Recover focus with the standard
+                    # window-switching shortcut instead of screen coordinates.
+                    self._press_chord(client, "alt", "tab", 0.5)
+                self._press_key(client, "enter", 1.0)
             elif verdict.detected_screen == "distro":
-                self._click(client, vm, distro_point, 0.3)
-                self._click(client, vm, next_point, 1.0)
+                self._select_distribution_with_keyboard(client, distribution_index)
             elif verdict.detected_screen == "resize":
-                self._click(client, vm, next_point, 1.0)
+                self._press_key(client, "enter", 1.0)
             elif verdict.detected_screen == "sharing":
-                if not share_windows_files_in_linux:
-                    self._click(client, vm, windows_to_linux_checkbox, 0.3)
-                if not share_linux_files_in_windows:
-                    self._click(client, vm, linux_to_windows_checkbox, 0.3)
-                self._click(client, vm, sharing_point, 1.0)
+                self._configure_sharing_with_keyboard(
+                    client,
+                    share_windows_files_in_linux=share_windows_files_in_linux,
+                    share_linux_files_in_windows=share_linux_files_in_windows,
+                )
             elif verdict.detected_screen in {"warning", "apply"}:
                 raise WorkflowError(
                     "automation.wizard_navigation",
@@ -351,15 +296,11 @@ class WizardAutomationMixin:
                     "protection contre les virus et menaces",
                 )
             ):
-                client.keyDown("alt")
-                client.keyPress("f4")
-                client.keyUp("alt")
-                time.sleep(3)
-                result.ok(
-                    "automation.dismiss_windows_security_window",
-                    "Windows Security window closed to bring Libertix to the foreground",
-                    target=vm.vnc,
-                    vm=vm.name,
+                self._close_windows_interference(
+                    vm,
+                    kind="security",
+                    step="automation.dismiss_windows_security_window",
+                    result=result,
                 )
             elif verdict.detected_screen == "other" and any(
                 marker in analysis_lower
@@ -370,15 +311,11 @@ class WizardAutomationMixin:
                     "system settings",
                 )
             ):
-                client.keyDown("alt")
-                client.keyPress("f4")
-                client.keyUp("alt")
-                time.sleep(3)
-                result.ok(
-                    "automation.dismiss_windows_settings",
-                    "Windows Settings closed to bring Libertix to the foreground",
-                    target=vm.vnc,
-                    vm=vm.name,
+                self._close_windows_interference(
+                    vm,
+                    kind="settings",
+                    step="automation.dismiss_windows_settings",
+                    result=result,
                 )
             else:
                 time.sleep(3)
@@ -388,6 +325,126 @@ class WizardAutomationMixin:
             "Timed out waiting for the account creation screen",
             details={"vm": vm.name, "target": vm.vnc},
         )
+
+    def _confirm_warning_page(
+        self,
+        client: object,
+        vm: VMConfig,
+        username: str,
+        result: ResultBuilder,
+    ) -> None:
+        for attempt in range(1, 4):
+            capture, latest_capture = self._capture_wizard_pair(
+                client, vm, f"05-warning-{attempt:02d}", result
+            )
+            try:
+                self._assert_wizard_state(
+                    capture,
+                    vm,
+                    latest_capture=latest_capture,
+                    expected_screen="warning",
+                    expected_username=username,
+                    result=result,
+                )
+                return
+            except WorkflowError as exc:
+                diagnostic = " ".join(
+                    str(exc.details.get(name, "")) for name in ("summary", "visible_text")
+                ).lower()
+                settings_is_obscuring = any(
+                    marker in diagnostic
+                    for marker in (
+                        "windows settings",
+                        "paramètres windows",
+                        "parametres windows",
+                        "system settings",
+                    )
+                )
+                account_is_still_visible = (
+                    exc.details.get("detected_screen") == "account"
+                    and exc.details.get("username_confirmed") is True
+                    and exc.details.get("password_fields_confirmed") is True
+                )
+                if account_is_still_visible and attempt < 3:
+                    self._press_key(client, "enter", 5.0)
+                    continue
+                if not settings_is_obscuring or attempt == 3:
+                    raise
+                self._close_windows_interference(
+                    vm,
+                    kind="settings",
+                    step="automation.dismiss_windows_settings",
+                    result=result,
+                )
+
+        raise AssertionError("Warning-page confirmation loop ended unexpectedly")
+
+    def _close_windows_interference(
+        self,
+        vm: VMConfig,
+        *,
+        kind: Literal["settings", "security"],
+        step: str,
+        result: ResultBuilder,
+    ) -> None:
+        with self.validation.ssh(
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
+        ) as ssh:
+            response = self.validation.run_windows_script(
+                ssh,
+                script_name="close_windows_interference.ps1",
+                config={"kind": kind},
+                step=step,
+                timeout=30,
+            )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "INTERFERENCE_CLOSED",
+                "INTERFERENCE_KIND",
+                "CLOSED_PROCESS_COUNT",
+                "LIBERTIX_PROCESS_COUNT",
+            ),
+        )
+        if (
+            values.get("INTERFERENCE_CLOSED") != "True"
+            or values.get("INTERFERENCE_KIND") != kind
+            or int(values.get("LIBERTIX_PROCESS_COUNT", "0")) < 1
+        ):
+            raise WorkflowError(
+                step,
+                "Windows interference was not closed safely",
+                details={"vm": vm.name, "target": vm.host, "kind": kind},
+            )
+        closed_process_count = int(values.get("CLOSED_PROCESS_COUNT", "0"))
+        if closed_process_count > 0:
+            time.sleep(3)
+            result.ok(
+                step,
+                "Windows interference closed by verified process identity",
+                target=vm.vnc,
+                vm=vm.name,
+                kind=kind,
+                closed_process_count=closed_process_count,
+                libertix_process_count=int(values["LIBERTIX_PROCESS_COUNT"]),
+            )
+            return True
+
+        # Vision can classify a transient toast as Settings because both use
+        # the Windows shell style. Never click through the bottom-right overlay.
+        time.sleep(10)
+        result.ok(
+            "automation.wait_windows_overlay",
+            "No matching window process existed; waited for the transient overlay to expire",
+            target=vm.vnc,
+            vm=vm.name,
+            kind=kind,
+            libertix_process_count=int(values["LIBERTIX_PROCESS_COUNT"]),
+        )
+        return False
 
     def _assert_wizard_state(
         self,
@@ -497,12 +554,45 @@ class WizardAutomationMixin:
         safe_label = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in label)
         return self._capture_dir / f"{vm.name}-auto-{stamp}-{safe_label}.png"
 
-    def _click(self, client: object, vm: VMConfig, point: Point, delay: float) -> None:
-        x = round(point.x * vm.screen_width / self.REFERENCE_WIDTH)
-        y = round(point.y * vm.screen_height / self.REFERENCE_HEIGHT)
-        client.mouseMove(x, y)
-        client.mousePress(1)
+    @staticmethod
+    def _press_key(client: object, key: str, delay: float = 0.2) -> None:
+        client.keyPress(key)
         time.sleep(delay)
+
+    @staticmethod
+    def _press_chord(client: object, modifier: str, key: str, delay: float = 0.2) -> None:
+        modifier_is_down = False
+        try:
+            client.keyDown(modifier)
+            modifier_is_down = True
+            time.sleep(0.05)
+            client.keyPress(key)
+            time.sleep(0.05)
+        finally:
+            if modifier_is_down:
+                client.keyUp(modifier)
+        time.sleep(delay)
+
+    def _select_distribution_with_keyboard(self, client: object, catalog_index: int) -> None:
+        self._press_chord(client, "ctrl", "home")
+        for _ in range(catalog_index):
+            self._press_chord(client, "ctrl", "right")
+        self._press_key(client, "enter", 1.0)
+
+    def _configure_sharing_with_keyboard(
+        self,
+        client: object,
+        *,
+        share_windows_files_in_linux: bool,
+        share_linux_files_in_windows: bool,
+    ) -> None:
+        self._press_chord(client, "ctrl", "home")
+        if not share_windows_files_in_linux:
+            self._press_key(client, "space")
+        self._press_key(client, "tab")
+        if not share_linux_files_in_windows:
+            self._press_key(client, "space")
+        self._press_key(client, "enter", 1.0)
 
     @staticmethod
     def _click_absolute(client: object, vm: VMConfig, point: Point, delay: float) -> None:
@@ -516,8 +606,7 @@ class WizardAutomationMixin:
         client.mousePress(1)
         time.sleep(delay)
 
-    def _fill_field(self, client: object, vm: VMConfig, point: Point, text: str) -> None:
-        self._click(client, vm, point, 0.35)
+    def _replace_focused_field(self, client: object, vm: VMConfig, text: str) -> None:
         self._select_all(client)
         time.sleep(0.15)
         self._type_text(client, text, vm.vnc_keyboard_layout)
@@ -528,20 +617,62 @@ class WizardAutomationMixin:
         client: object,
         vm: VMConfig,
         *,
-        username_point: Point,
-        password_point: Point,
-        confirmation_point: Point,
         username: str,
         password: str,
     ) -> None:
-        self._fill_field(client, vm, username_point, username)
-        self._fill_field(client, vm, password_point, password)
-        self._fill_field(client, vm, confirmation_point, password)
+        self._press_chord(client, "ctrl", "home")
+        self._replace_focused_field(client, vm, username)
+        self._press_key(client, "tab")
+        self._replace_focused_field(client, vm, password)
+        self._press_key(client, "tab")
+        self._replace_focused_field(client, vm, password)
         # WPF can recreate the first PasswordBox when its initial validation
         # error clears. A second selected write makes both password controls
         # deterministic without relying on clipboard or OCR.
-        self._fill_field(client, vm, password_point, password)
-        self._fill_field(client, vm, confirmation_point, password)
+        self._press_chord(client, "shift", "tab")
+        self._replace_focused_field(client, vm, password)
+        self._press_key(client, "tab")
+        self._replace_focused_field(client, vm, password)
+
+    def _fill_and_confirm_account_fields(
+        self,
+        client: object,
+        vm: VMConfig,
+        *,
+        username: str,
+        password: str,
+        result: ResultBuilder,
+    ) -> None:
+        for attempt in range(1, 4):
+            self._fill_account_fields(
+                client,
+                vm,
+                username=username,
+                password=password,
+            )
+            time.sleep(0.5)
+            capture, latest_capture = self._capture_wizard_pair(
+                client,
+                vm,
+                f"04-account-filled-{attempt:02d}",
+                result,
+            )
+            try:
+                self._assert_wizard_state(
+                    capture,
+                    vm,
+                    latest_capture=latest_capture,
+                    expected_screen="account",
+                    expected_username=username,
+                    result=result,
+                )
+                return
+            except WorkflowError as exc:
+                if exc.details.get("detected_screen") != "account" or attempt == 3:
+                    raise
+                time.sleep(1)
+
+        raise AssertionError("Account-field confirmation loop ended unexpectedly")
 
     @staticmethod
     def _type_text(client: object, text: str, keyboard_layout: str = "us") -> None:

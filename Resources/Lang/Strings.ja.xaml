@@ -1,21 +1,21 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
-    
+
     <system:String x:Key="Welcome">Libertixへようこそ！</system:String>
     <system:String x:Key="Subtitle">シンプルでモダンなLinuxインストーラー</system:String>
     <system:String x:Key="GetStarted">始める</system:String>
     <system:String x:Key="Language">言語</system:String>
 
     <system:String x:Key="ChooseDistroTitle">お好みのLinuxディストリビューションを選ぶ</system:String>
-    
+
 
     <system:String x:Key="ResizeDiskTitle">ディスクのサイズを変更</system:String>
     <system:String x:Key="Windows">Windows</system:String>
     <system:String x:Key="Linux">Linux</system:String>
     <system:String x:Key="NotEnoughSpace">空き領域が不足しています</system:String>
-    <system:String x:Key="FreeUpSpace">Linuxをインストールするにはさらに空き領域が必要です。不要なファイルを削除して再試行してください。</system:String>
-    <system:String x:Key="OpenDiskCleanup">ディスククリーンアップを開く</system:String>
+    <system:String x:Key="FreeUpSpace">Libertix を閉じ、Windows のシステムドライブで不要なファイルを削除または移動して空き領域を増やしてから、Libertix を再度開いてください。必要な容量と現在の空き容量は以下に表示されます。</system:String>
+    <system:String x:Key="ErrorPanelSystemRequirements">システム要件</system:String>
 
     <system:String x:Key="AccountCreationTitle">Linuxアカウントを作成</system:String>
     <system:String x:Key="Username">ユーザー名</system:String>
@@ -25,7 +25,7 @@
 
     <system:String x:Key="Back">戻る</system:String>
     <system:String x:Key="Next">次へ</system:String>
-    
+
     <system:String x:Key="ResizeDiskSizeEmpty">サイズを空にすることはできません</system:String>
     <system:String x:Key="ResizeDiskSizeTooSmall">サイズは少なくとも {0} GB 必要です</system:String>
     <system:String x:Key="ResizeDiskNotEnoughSpace">空き容量が不足しています。Windows には {0} GB の空きが、Linux には少なくとも {1} GB が必要です</system:String>
@@ -90,6 +90,15 @@
 
     <system:String x:Key="UefiFallbackTitle">UEFI ブートでインストーラーを起動できませんでした</system:String>
     <system:String x:Key="UefiFallbackDescription">live のマーカーがないまま Windows に戻りました。Libertix は検証済みのローカルコピーを保持しており、検証済みの UEFI ファームウェアエントリから live を再起動できます。</system:String>
+    <system:String x:Key="UefiFallbackSecureBootTitle">Secure Boot により復旧用の起動方法を使用できません</system:String>
+    <system:String x:Key="UefiFallbackSecureBootDescription">BootNext から live システムを起動できませんでした。Secure Boot が有効なため、ファームウェアを使う別の起動方法は表示されません。</system:String>
+    <system:String x:Key="UefiFallbackSecureBootGuidance">Libertix は最初に Windows と UEFI を元の状態へ復元します。復元後も PC は通常どおり使用でき、Linux のインストールを中止できます。Secure Boot の無効化方法は PC ごとに異なり、複雑な場合があります。不安がある場合は、ファームウェア設定に詳しい人へ依頼してください。</system:String>
+    <system:String x:Key="UefiFallbackSecureBootHelpLink">Secure Boot を無効にする Microsoft の英語ガイドを開く</system:String>
+    <system:String x:Key="UefiFallbackSecureBootRestoring">Windows と元の UEFI 状態を復元しています...</system:String>
+    <system:String x:Key="UefiFallbackSecureBootWindowsRestored">Windows と元の UEFI 状態が復元されました。PC は通常どおり使用できます。Libertix を閉じてインストールを中止できます。</system:String>
+    <system:String x:Key="UefiFallbackSecureBootBlockedLog">Secure Boot が有効なため、ファームウェアを使う代替起動は無効です。</system:String>
+    <system:String x:Key="UefiFallbackSecureBootClose">閉じて Windows を使用</system:String>
+    <system:String x:Key="UefiFallbackSecureBootRetry">復元を再試行</system:String>
     <system:String x:Key="UefiFallbackChecking">回復状態を確認しています...</system:String>
     <system:String x:Key="UefiFallbackCancel">キャンセルして Windows を復元</system:String>
     <system:String x:Key="UefiFallbackUseFirmware">ファームウェアブートを使用</system:String>
@@ -110,6 +119,9 @@
     <system:String x:Key="UefiFallbackCancelledLog">UEFI トランザクションをキャンセルし、一時ファイルを削除するよう設定しました。</system:String>
     <system:String x:Key="UefiFallbackRestoreFailed">UEFI の復元に失敗しました。</system:String>
     <system:String x:Key="UefiFallbackTimeoutLog">エラー: 回復処理が 30 分の制限時間を超えました</system:String>
+    <system:String x:Key="UefiFallbackTerminationFailed">回復プロセスの停止を確認できませんでした。再試行または再起動しないでください。</system:String>
+    <system:String x:Key="UefiFallbackRebootFailed">Windows が再起動要求を拒否しました。もう一度お試しください。</system:String>
+    <system:String x:Key="UefiFallbackRebootFailedFormat">Windows の再起動に失敗しました (rc={0})。</system:String>
 
     <system:String x:Key="ApplyChangesTitle">変更を適用</system:String>
     <system:String x:Key="ApplyChangesWaiting">パーティション作成の準備完了</system:String>
@@ -120,6 +132,7 @@
     <system:String x:Key="ApplyChangesError">エラーが発生しました</system:String>
     <system:String x:Key="ApplyChangesReboot">再起動</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">インストールを完了するためにコンピューターを再起動します。続行しますか？</system:String>
+    <system:String x:Key="ApplyChangesRebootFailed">Windows が再起動要求を拒否しました。もう一度お試しください。</system:String>
     <system:String x:Key="ConfirmationYes">はい</system:String>
     <system:String x:Key="ConfirmationNo">いいえ</system:String>
     <system:String x:Key="ApplyChangesCancel">インストールをキャンセル</system:String>
@@ -129,6 +142,7 @@
     <system:String x:Key="ApplyChangesLogsTitle">インストールログ</system:String>
     <system:String x:Key="ApplyChangesCloseExpandedLogs">ログを縮小</system:String>
     <system:String x:Key="ApplyChangesPreparingWindowsShare">Windows ファイル共有を準備しています...</system:String>
+    <system:String x:Key="WindowsShareShortcutDescription">Linux ファイル（読み取り専用）</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">UEFI インストールを準備しています...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Secure Boot を確認しています...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Windows {0} の暗号化解除を初期化しています...</system:String>
@@ -143,8 +157,8 @@
     <system:String x:Key="ApplyChangesWritingConfiguration">設定を書き込んでいます...</system:String>
     <system:String x:Key="ApplyChangesDownloadingBootloader">ブートローダーファイルをダウンロードしています...</system:String>
     <system:String x:Key="ApplyChangesConfiguringBootEntry">ブートエントリを設定しています...</system:String>
-    <system:String x:Key="ApplyChangesDownloadingMint">Mint ISO をダウンロードしています...</system:String>
-    <system:String x:Key="ApplyChangesMintReady">Mint ISO の準備ができました</system:String>
+    <system:String x:Key="ApplyChangesDownloadingDistribution">Linux インストール ISO をダウンロードしています...</system:String>
+    <system:String x:Key="ApplyChangesDistributionReady">Linux インストール ISO の準備ができました</system:String>
     <system:String x:Key="ApplyChangesCreatingUefiPartition">UEFI インストーラーパーティションを作成しています...</system:String>
     <system:String x:Key="ApplyChangesDownloadingUefiIso">Libertix UEFI ISO をダウンロードしています...</system:String>
     <system:String x:Key="ApplyChangesCopyingUefiInstaller">UEFI インストーラーをコピーしています...</system:String>

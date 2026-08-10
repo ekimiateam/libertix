@@ -1,11 +1,13 @@
 ﻿<Page x:Class="Libertix.Pages.ChooseDistro"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
       xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
       mc:Ignorable="d"
       Title="Choose a Distribution"
-      xmlns:local="clr-namespace:Libertix.Pages">
+      xmlns:local="clr-namespace:Libertix.Pages"
+      KeyboardNavigation.TabNavigation="Cycle"
+      PreviewKeyDown="ChooseDistro_PreviewKeyDown">
 
     <Page.Resources>
         <Style x:Key="DistroCard" TargetType="Border">
@@ -79,32 +81,44 @@
             </StackPanel>
         </Border>
 
-        <ScrollViewer Grid.Row="2" 
-                      VerticalScrollBarVisibility="Auto" 
-                      HorizontalScrollBarVisibility="Disabled">
-            <ItemsControl x:Name="DistrosItemsControl">
-                <ItemsControl.ItemsPanel>
+        <ListBox x:Name="DistrosListBox"
+                 Grid.Row="2"
+                 Background="Transparent"
+                 BorderThickness="0"
+                 TabIndex="0"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                 SelectionChanged="DistrosListBox_SelectionChanged">
+                <ListBox.ItemsPanel>
                     <ItemsPanelTemplate>
                         <WrapPanel/>
                     </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="Background" Value="Transparent"/>
+                        <Setter Property="BorderThickness" Value="0"/>
+                        <Setter Property="Padding" Value="0"/>
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
                     <DataTemplate>
                         <Border Style="{StaticResource DistroCard}"
-                                Width="300"
-                                MouseLeftButtonDown="Border_MouseLeftButtonDown">
+                                Width="300">
                             <Grid>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="*"/>
                                     <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
-                                
-                                <Image Source="{Binding ImageUrl}" 
-                                       Height="150" 
+
+                                <Image Source="{Binding ImageUrl}"
+                                       Height="150"
                                        Stretch="Uniform"
                                        Margin="0,0,0,10"/>
-                                
+
                                 <StackPanel Grid.Row="1">
                                     <TextBlock Text="{Binding Name}"
                                                FontSize="20"
@@ -118,7 +132,7 @@
                                                Foreground="{DynamicResource TextPrimary}"
                                                TextWrapping="Wrap"/>
                                 </StackPanel>
-                                
+
                                 <Border Grid.Row="2"
                                         Height="4"
                                         Margin="0,10,0,0"
@@ -137,9 +151,8 @@
                             </Grid>
                         </Border>
                     </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
+                </ListBox.ItemTemplate>
+        </ListBox>
 
         <Button Grid.Row="3"
                 x:Name="NextButton"
@@ -149,6 +162,8 @@
                 Height="50"
                 Margin="20"
                 HorizontalAlignment="Right"
+                TabIndex="1"
+                IsDefault="True"
                 Click="NextButton_Click"
                 IsEnabled="False"/>
     </Grid>

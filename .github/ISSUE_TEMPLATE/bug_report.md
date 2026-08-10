@@ -1,38 +1,41 @@
 ---
 name: Bug report
-about: Create a report to help us improve
-title: ''
-labels: ''
+about: Report a Libertix installation, rollback, boot, or sharing failure
+title: '[Bug] '
+labels: 'bug'
 assignees: ''
 
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+## Summary
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+Describe what Libertix did, what you expected, and whether Windows still boots.
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+## Failure details
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+- Libertix build shown in the log or error screen:
+- Error code and stage:
+- Firmware: BIOS/Legacy or UEFI
+- Secure Boot: enabled, disabled, or unavailable
+- Windows edition, version, and build (`winver`):
+- Disk controller and partition layout, if known:
+- Requested Linux size:
+- Did automatic rollback report success?
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+## Reproduction steps
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+1.
+2.
+3.
 
-**Additional context**
-Add any other context about the problem here.
+## Logs and screenshots
+
+Attach the Libertix log and a screenshot of the complete error screen when available. Remove names,
+IP addresses, passwords, API keys, recovery keys, and other secrets before uploading files.
+
+## Current boot state
+
+- [ ] Windows boots normally
+- [ ] The Libertix boot menu appears
+- [ ] Linux boots
+- [ ] The machine no longer boots either operating system

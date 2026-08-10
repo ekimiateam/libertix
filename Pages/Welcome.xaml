@@ -1,7 +1,9 @@
 <Page x:Class="Libertix.Pages.Welcome"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-      Background="{DynamicResource PrimaryBackground}">
+      Background="{DynamicResource PrimaryBackground}"
+      KeyboardNavigation.TabNavigation="Cycle"
+      Loaded="Welcome_Loaded">
     <Grid Background="{DynamicResource PrimaryBackground}">
         <StackPanel VerticalAlignment="Center">
             <Label Content="{DynamicResource Welcome}"
@@ -18,12 +20,15 @@
                    FontWeight="Light"
                    Foreground="{DynamicResource TextSecondary}"/>
 
-            <Button Content="{DynamicResource GetStarted}"
+            <Button x:Name="StartButton"
+                    Content="{DynamicResource GetStarted}"
                     Style="{StaticResource ModernButton}"
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Center"
                     Margin="0,0,0,40"
+                    TabIndex="0"
+                    IsDefault="True"
                     Click="Start_Click"/>
 
             <StackPanel Orientation="Horizontal"
@@ -35,6 +40,7 @@
                            Margin="0,0,10,0"/>
                 <ComboBox x:Name="LanguageComboBox"
                           Width="120"
+                          TabIndex="1"
                           Style="{StaticResource ModernComboBox}"
                           SelectionChanged="LanguageComboBox_SelectionChanged">
                     <ComboBoxItem Content="English" Tag="en" Style="{StaticResource ModernComboBoxItem}"/>
@@ -50,6 +56,7 @@
                     Height="42"
                     HorizontalAlignment="Center"
                     Margin="0,24,0,0"
+                    TabIndex="2"
                     Click="About_Click"/>
         </StackPanel>
     </Grid>

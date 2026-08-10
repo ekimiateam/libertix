@@ -22,6 +22,10 @@ namespace Libertix.Installation
             "^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$",
             RegexOptions.CultureInvariant);
 
+        private static readonly Regex ComputerNamePattern = new Regex(
+            "^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+            RegexOptions.CultureInvariant);
+
         private static readonly Regex AbsoluteWindowsPathPattern = new Regex(
             "^[A-Za-z]:[\\\\/]",
             RegexOptions.CultureInvariant);
@@ -29,6 +33,15 @@ namespace Libertix.Installation
         private static readonly Regex XkbNamePattern = new Regex(
             "^[a-z0-9_-]+$",
             RegexOptions.CultureInvariant);
+
+        private static readonly Regex SafeIdentifierPattern = new Regex(
+            "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$",
+            RegexOptions.CultureInvariant);
+
+        private static readonly Regex SafeGrubLabelPattern = new Regex(
+            "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$",
+            RegexOptions.CultureInvariant);
+
         private static readonly Regex TimezonePattern = new Regex(
             "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)+$",
             RegexOptions.CultureInvariant);
@@ -56,9 +69,53 @@ namespace Libertix.Installation
             ValidateFeatures(plan.Features, errors);
             ValidateRuntime(plan.Firmware, plan.Runtime, errors);
             ValidateDevelopment(plan.Development, errors);
+            ValidateWindowsPathDrives(plan, errors);
 
             if (errors.Count > 0)
                 throw new InstallationPlanValidationException(errors);
+        }
+
+        private static void ValidateWindowsPathDrives(
+            InstallationPlan plan,
+            ICollection<string> errors)
+        {
+            string systemDrive = plan.Disk?.SystemDrive;
+            if (string.IsNullOrEmpty(systemDrive) || systemDrive.Length != 2)
+                return;
+
+            ValidateWindowsPathDrive(
+                plan.Distribution?.InstallerIsoWindowsPath,
+                "distribution.installerIsoWindowsPath",
+                systemDrive,
+                errors);
+            ValidateWindowsPathDrive(
+                plan.Account?.PasswordHashWindowsPath,
+                "account.passwordHashWindowsPath",
+                systemDrive,
+                errors);
+            if (plan.Runtime?.RecoveryRootWindows != null)
+            {
+                ValidateWindowsPathDrive(
+                    plan.Runtime.RecoveryRootWindows,
+                    "runtime.recoveryRootWindows",
+                    systemDrive,
+                    errors);
+            }
+        }
+
+        private static void ValidateWindowsPathDrive(
+            string path,
+            string pathName,
+            string systemDrive,
+            ICollection<string> errors)
+        {
+            if (!AbsoluteWindowsPathPattern.IsMatch(path ?? string.Empty))
+                return;
+
+            Require(
+                string.Equals(path.Substring(0, 2), systemDrive, StringComparison.OrdinalIgnoreCase),
+                errors,
+                $"{pathName} must be located on disk.systemDrive.");
         }
 
         private static void ValidateDistribution(
@@ -71,7 +128,20 @@ namespace Libertix.Installation
                 return;
             }
 
+            RequireSafeIdentifier(distribution.Id, "distribution.id", errors);
             RequireNotBlank(distribution.Name, "distribution.name", errors);
+            RequireSafeIdentifier(
+                distribution.OsReleaseId,
+                "distribution.osReleaseId",
+                errors);
+            RequireSafeGrubLabel(
+                distribution.GrubDisplayName,
+                "distribution.grubDisplayName",
+                errors);
+            RequireSafeIdentifier(
+                distribution.GrubIcon,
+                "distribution.grubIcon",
+                errors);
             RequireNotBlank(distribution.InstallerIsoFileName, "distribution.installerIsoFileName", errors);
             Require(
                 !string.IsNullOrEmpty(distribution.InstallerIsoFileName) &&
@@ -150,10 +220,8 @@ namespace Libertix.Installation
                     RegexOptions.CultureInvariant),
                 errors,
                 "account.passwordHashWindowsPath must be an absolute safe Windows path.");
-            Require(
-                !string.IsNullOrWhiteSpace(account.ComputerName) && account.ComputerName.Length <= 63,
-                errors,
-                "account.computerName must contain between 1 and 63 characters.");
+            Require(ComputerNamePattern.IsMatch(account.ComputerName ?? string.Empty), errors,
+                "account.computerName is not a valid Linux hostname.");
         }
 
         private static void ValidateDisk(
@@ -173,6 +241,20 @@ namespace Libertix.Installation
 
             Require(disk.Number >= 0, errors, "disk.number cannot be negative.");
             RequireNotBlank(disk.UniqueId, "disk.uniqueId", errors);
+            string expectedPartitionTablePrefix = isBios ? "mbr:" : "gpt:";
+            Require(
+                !string.IsNullOrWhiteSpace(disk.PartitionTableId) &&
+                disk.PartitionTableId.StartsWith(
+                    expectedPartitionTablePrefix,
+                    StringComparison.Ordinal) &&
+                Regex.IsMatch(
+                    disk.PartitionTableId,
+                    isBios
+                        ? "^mbr:[0-9a-f]{8}$"
+                        : "^gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
+                errors,
+                $"disk.partitionTableId must be a canonical " +
+                $"{expectedPartitionTablePrefix.TrimEnd(':').ToUpperInvariant()} identifier.");
             RequirePositive(disk.SizeBytes, "disk.sizeBytes", errors);
             bool sectorSizeIsSupported =
                 disk.LogicalSectorSizeBytes == 512 || disk.LogicalSectorSizeBytes == 4096;
@@ -434,7 +516,17 @@ namespace Libertix.Installation
             Require(hasRecoveryRoot == hasRecoveryRunId, errors,
                 "runtime recoveryRootWindows and recoveryRunId must either both be set or both be null.");
             if (hasRecoveryRoot)
+            {
                 RequireNotBlank(runtime.RecoveryRootWindows, "runtime.recoveryRootWindows", errors);
+                Require(
+                    !string.IsNullOrWhiteSpace(runtime.RecoveryRootWindows) &&
+                    Regex.IsMatch(
+                        runtime.RecoveryRootWindows,
+                        @"^[A-Za-z]:\\(?!.*(?:^|\\)\.\.(?:\\|$)).+$",
+                        RegexOptions.CultureInvariant),
+                    errors,
+                    "runtime.recoveryRootWindows must be an absolute safe Windows path.");
+            }
             if (hasRecoveryRunId)
             {
                 Require(HexIdPattern.IsMatch(runtime.RecoveryRunId), errors,
@@ -483,6 +575,24 @@ namespace Libertix.Installation
         {
             Require(Sha256Pattern.IsMatch(value ?? string.Empty), errors,
                 $"{name} must contain exactly 64 lowercase hexadecimal characters.");
+        }
+
+        private static void RequireSafeIdentifier(
+            string value,
+            string name,
+            ICollection<string> errors)
+        {
+            Require(SafeIdentifierPattern.IsMatch(value ?? string.Empty), errors,
+                $"{name} must be a safe lowercase identifier.");
+        }
+
+        private static void RequireSafeGrubLabel(
+            string value,
+            string name,
+            ICollection<string> errors)
+        {
+            Require(SafeGrubLabelPattern.IsMatch(value ?? string.Empty), errors,
+                $"{name} contains unsupported GRUB label characters.");
         }
 
         private static void RequireNotBlank(

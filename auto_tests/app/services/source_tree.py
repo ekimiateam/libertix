@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 
@@ -11,46 +12,35 @@ class LocalSourceTree:
         return Path(__file__).resolve().parents[3]
 
     @staticmethod
-    def include(root: Path, path: Path) -> bool:
-        relative = path.relative_to(root)
-        parts = set(relative.parts)
-        excluded_dirs = {
-            ".git",
-            ".venv",
-            ".pytest_cache",
-            ".ruff_cache",
-            "__pycache__",
-            "bin",
-            "obj",
-            "captures",
-            "filepool",
-        }
-        if parts & excluded_dirs:
-            return False
-        if len(relative.parts) >= 2 and relative.parts[:2] == ("auto_tests", "captures"):
-            return False
-        if len(relative.parts) >= 3 and relative.parts[:3] == (
-            "auto_tests",
-            "app",
-            "filepool",
-        ):
-            return False
-        if path.is_dir():
-            return True
-        if path.name != ".env.example" and (path.name == ".env" or path.name.startswith(".env.")):
-            return False
-        if relative.parts == ("Tools", "aria2", "aria2c.exe"):
-            return True
-        if path.suffix.lower() in {
-            ".cache",
-            ".dll",
-            ".exe",
-            ".iso",
-            ".pdb",
-            ".pyc",
-            ".tar",
-            ".gz",
-            ".zip",
-        }:
-            return False
-        return path.name not in {"uv.lock"}
+    def selected_files(root: Path) -> tuple[Path, ...]:
+        """Return tracked and non-ignored files from the current Git worktree."""
+
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Git could not enumerate the local source tree: {diagnostic}")
+
+        selected: list[Path] = []
+        for raw_relative in completed.stdout.split(b"\0"):
+            if not raw_relative:
+                continue
+            relative = Path(raw_relative.decode("utf-8", errors="strict"))
+            if relative.is_absolute() or ".." in relative.parts:
+                raise RuntimeError(f"Git returned an unsafe source path: {relative}")
+            path = root / relative
+            if path.is_file() or path.is_symlink():
+                selected.append(path)
+        return tuple(sorted(selected, key=lambda path: path.as_posix()))

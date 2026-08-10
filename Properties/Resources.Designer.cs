@@ -10,8 +10,8 @@
 
 namespace Libertix.Properties {
     using System;
-    
-    
+
+
     /// <summary>
     ///   Provides strongly typed access to localized resources.
     /// </summary>
@@ -21,15 +21,15 @@ namespace Libertix.Properties {
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
     [global::System.Runtime.CompilerServices.CompilerGeneratedAttribute()]
     internal class Resources {
-        
+
         private static global::System.Resources.ResourceManager resourceMan;
-        
+
         private static global::System.Globalization.CultureInfo resourceCulture;
-        
+
         [global::System.Diagnostics.CodeAnalysis.SuppressMessageAttribute("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode")]
         internal Resources() {
         }
-        
+
         /// <summary>
         ///   Returns the cached ResourceManager used by this class.
         /// </summary>
@@ -43,7 +43,7 @@ namespace Libertix.Properties {
                 return resourceMan;
             }
         }
-        
+
         /// <summary>
         ///   Overrides CurrentUICulture for resource lookups through this class.
         /// </summary>

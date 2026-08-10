@@ -7,6 +7,12 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+$utf8NoBom = New-Object Text.UTF8Encoding($false)
+& "$env:SystemRoot\System32\chcp.com" 65001 > $null
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+
 # Python parses only NAME=VALUE lines. Other output remains human-readable
 # diagnostic context and must not imitate that protocol.
 function Write-Result {
@@ -187,6 +193,12 @@ $srcLocal = Join-Path $temp "source"
 $releaseStaging = $null
 $releaseBackup = $null
 
+foreach ($directoryName in @([string]$config.source_dir_name, [string]$config.release_dir_name)) {
+    if ($directoryName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+        throw "Source and release directory names must be simple directory names"
+    }
+}
+
 # Keep the NuGet cache inside the disposable build directory so the shared
 # build host retains no package state from an automation run.
 $env:NUGET_PACKAGES = Join-Path $temp "nuget-packages"
@@ -360,10 +372,18 @@ finally {
         Remove-Item -LiteralPath $releaseStaging -Recurse -Force -ErrorAction SilentlyContinue
     }
     if ($releaseBackup -and (Test-Path -LiteralPath $releaseBackup)) {
-        if (Test-Path -LiteralPath $releasePath) {
-            Remove-Item -LiteralPath $releasePath -Recurse -Force -ErrorAction SilentlyContinue
+        try {
+            if (Test-Path -LiteralPath $releasePath) {
+                Remove-Item -LiteralPath $releasePath -Recurse -Force -ErrorAction Stop
+            }
+            Move-Item -LiteralPath $releaseBackup -Destination $releasePath -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $releasePath -PathType Container)) {
+                throw "Restored release directory is missing."
+            }
+            $releaseBackup = $null
+        } catch {
+            throw "Failed to restore the previous Libertix release after publication failure: $($_.Exception.Message)"
         }
-        Move-Item -LiteralPath $releaseBackup -Destination $releasePath -ErrorAction SilentlyContinue
     }
     if ($mapped) {
         if ($mappedDrive) {

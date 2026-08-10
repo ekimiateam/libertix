@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 
 from app.clients.vision_llm import INSTALL_PROGRESS_SYSTEM_PROMPT, SYSTEM_PROMPT, VisionLLMClient
+from app.clients.vision_models import contains_final_reboot_prompt
 from app.clients.vision_parsing import load_wizard_json
 from app.errors import WorkflowError
 
@@ -319,6 +320,19 @@ def test_install_progress_normalizes_contradictory_final_reboot_json(
     assert verdict.installation_finished is True
     assert verdict.reboot_prompt_visible is True
     assert verdict.still_in_progress is False
+
+
+@pytest.mark.parametrize(
+    "visible_text",
+    [
+        "Partitionnement termine ! 100% Redemarrer",
+        "Partitioning complete! 100% Reboot",
+        "Particionamiento completado! 100% Reiniciar",
+        "パーティション作成完了！ 100% 再起動",
+    ],
+)
+def test_final_reboot_prompt_is_detected_in_every_supported_language(visible_text: str) -> None:
+    assert contains_final_reboot_prompt(visible_text)
 
 
 def test_install_progress_never_hides_error_during_active_download(

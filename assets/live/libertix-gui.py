@@ -57,15 +57,7 @@ def read_text(path: Path, default: str = "") -> str:
         return default
 
 
-def tail(path: Path, lines: int) -> str:
-    try:
-        data = path.read_text(errors="replace").splitlines()
-    except OSError:
-        return ""
-    return "\n".join(data[-lines:])
-
-
-def detailed_logs() -> str:
+def detailed_logs(install_log, debug_log) -> str:
     sections: list[str] = []
     if STAGE_FILE.exists():
         sections.append("===== stage =====\n" + read_text(STAGE_FILE))
@@ -74,10 +66,9 @@ def detailed_logs() -> str:
     if RESULT_FILE.exists():
         sections.append("===== result.env =====\n" + read_text(RESULT_FILE))
     if LOG.exists():
-        sections.append("===== install.log =====\n" + tail(LOG, 5000))
-    debug_log = LOG_DIR / "debug.log"
-    if debug_log.exists() and debug_log.stat().st_size:
-        sections.append("===== debug.log =====\n" + tail(debug_log, 700))
+        sections.append("===== install.log =====\n" + install_log.tail(5000))
+    if debug_log.path.exists() and debug_log.path.stat().st_size:
+        sections.append("===== debug.log =====\n" + debug_log.tail(700))
     return "\n\n".join(section for section in sections if section.strip())
 
 
@@ -98,14 +89,25 @@ def stage_info(stage: str) -> tuple[str, int]:
     return (tr(key) if key else stage or tr("unknown_state")), percent
 
 
-def progress_info(stage: str) -> tuple[str, int, str]:
+def progress_info(stage: str, install_log) -> tuple[str, int, str]:
     label, _catalogue_percent = stage_info(stage)
-    percent, sub_percent = PROGRESS_MODULE.stage_progress(LOG, stage, STAGES)
+    if stage.startswith("installer-failed-"):
+        return label, 100, ""
+    percent, sub_percent = PROGRESS_MODULE.stage_progress_from_subpercent(
+        stage, STAGES, install_log.subpercent(stage)
+    )
     if sub_percent is not None:
         return label, percent, tr("extraction_progress", percent=sub_percent)
     if STAGES.get(stage, ("", percent, percent))[2] != percent:
         return label, percent, tr("extraction_initializing")
     return label, percent, ""
+
+
+def compact_failure_value(value: str, maximum: int = 240) -> str:
+    compact = " ".join(value.split())
+    if len(compact) <= maximum:
+        return compact
+    return compact[: maximum - 3].rstrip() + "..."
 
 
 def short_failure_message(rc: str) -> str:
@@ -118,9 +120,9 @@ def short_failure_message(rc: str) -> str:
     if values.get("stage"):
         lines.append(tr("failure_stage", stage=values["stage"]))
     if values.get("error"):
-        lines.append(values["error"])
+        lines.append(compact_failure_value(values["error"]))
     elif values.get("cmd"):
-        lines.append(tr("failure_command", command=values["cmd"]))
+        lines.append(tr("failure_command", command=compact_failure_value(values["cmd"])))
     if values.get("rc"):
         lines.append(f"rc={values['rc']}")
 
@@ -133,6 +135,7 @@ class LibertixGui:
     def __init__(self) -> None:
         self.root = tk.Tk()
         self.root.title("Libertix Installer")
+        self.root.option_add("*Cursor", "left_ptr")
         self.root.configure(bg="#0b1020", cursor="left_ptr")
         self.root.overrideredirect(True)
         self.root.attributes("-fullscreen", True)
@@ -148,6 +151,8 @@ class LibertixGui:
         self.progress_tick = 0
         self.subprogress_text = ""
         self.last_log_text = ""
+        self.install_log = PROGRESS_MODULE.IncrementalLogReader(LOG, 5000)
+        self.debug_log = PROGRESS_MODULE.IncrementalLogReader(LOG_DIR / "debug.log", 700)
 
         self.container = tk.Frame(self.root, bg="#0b1020", cursor="left_ptr")
         self.container.place(x=0, y=0, relwidth=1, relheight=1)
@@ -222,6 +227,8 @@ class LibertixGui:
             font=("DejaVu Sans", 16),
             justify=tk.LEFT,
             wraplength=1100,
+            height=5,
+            anchor="nw",
         )
         self.message_label.pack(anchor="w", fill=tk.X, pady=(0, 18))
 
@@ -449,9 +456,11 @@ class LibertixGui:
         self.root.after(500, self.animate_progress)
 
     def refresh(self) -> None:
+        self.install_log.refresh()
+        self.debug_log.refresh()
         stage = read_text(STAGE_FILE, "runner-start")
         result = parse_env(RESULT_FILE)
-        label, percent, subprogress = progress_info(stage)
+        label, percent, subprogress = progress_info(stage, self.install_log)
         build = read_text(BUILD_ID_FILE, "unknown")
         success = result.get("LIBERTIX_INSTALL_SUCCESS")
         rc = result.get("LIBERTIX_INSTALL_RC")
@@ -489,7 +498,11 @@ class LibertixGui:
         first, last = self.log_text.yview()
         follow_tail = not self.details_visible or last > 0.98
 
-        log_text = detailed_logs() if self.details_visible else tail(LOG, 240)
+        log_text = (
+            detailed_logs(self.install_log, self.debug_log)
+            if self.details_visible
+            else self.install_log.tail(240)
+        )
         if log_text != self.last_log_text:
             self.last_log_text = log_text
             self.log_text.configure(state=tk.NORMAL)

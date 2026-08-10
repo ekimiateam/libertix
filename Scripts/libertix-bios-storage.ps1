@@ -91,9 +91,8 @@ switch ($Action) {
             -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
         $targetSize = [int64]$shrinkGeometry.TargetSizeBytes
         $installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
-        $systemVolume = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
-        $freeSpaceBudget = Get-LibertixWindowsFreeSpaceBudget `
-            -AvailableBytes ([int64]$systemVolume.SizeRemaining) `
+        $freeSpaceBudget = Wait-LibertixWindowsFreeSpaceBudget `
+            -DriveLetter $driveLetter `
             -AllocationBytes ([int64]$shrinkGeometry.ShrinkBytes)
         if (-not $freeSpaceBudget.Accepted) {
             throw (

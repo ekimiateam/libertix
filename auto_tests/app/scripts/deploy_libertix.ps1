@@ -76,6 +76,10 @@ $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $mapped = $false
 $mappedDrive = $null
 
+if ([string]$config.release_dir_name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+    throw "release_dir_name must be a simple directory name"
+}
+
 try {
     $sourcePath = $config.source
 

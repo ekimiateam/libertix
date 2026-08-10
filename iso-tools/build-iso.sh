@@ -168,6 +168,7 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-install-platform-common.sh|/usr/local/lib/libertix/libertix-install-platform-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-storage-common.sh|/usr/local/lib/libertix/libertix-storage-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-install-runtime-common.sh|/usr/local/lib/libertix/libertix-install-runtime-common.sh"
+        "0755|$ROOT_DIR/assets/live/libertix-distribution-common.sh|/usr/local/lib/libertix/libertix-distribution-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-installation-plan.py|/usr/local/lib/libertix/libertix-installation-plan.py"
         "0755|$ROOT_DIR/assets/live/libertix-installation-state.py|/usr/local/lib/libertix/libertix-installation-state.py"
         "0755|$ROOT_DIR/assets/live/libertix_json_schema.py|/usr/local/lib/libertix/libertix_json_schema.py"

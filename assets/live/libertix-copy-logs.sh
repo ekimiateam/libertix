@@ -64,18 +64,33 @@ fi
 
 log_root="$target/LibertixInstallLogs"
 log_dir="$log_root/$RUN_ID"
-mkdir -p "$log_dir" "$log_root/latest" || fail "cannot create $log_dir"
+latest_dir="$log_root/latest"
+latest_staging="$log_root/.latest-$RUN_ID"
+latest_backup="$log_root/.latest-previous"
+mkdir -p "$log_dir" || fail "cannot create $log_dir"
 printf 'copying: %s\n' "$log_dir" > "$STATUS_FILE"
 cp -a "$LOG_DIR/." "$log_dir/" || fail "cannot copy complete log directory"
-cp -a "$LOG_DIR/." "$log_root/latest/" || fail "cannot update latest log directory"
 
 printf 'success: %s\n' "$log_dir" > "$STATUS_FILE"
 cp -f "$STATUS_FILE" "$log_dir/log-copy-status.txt"
-cp -f "$STATUS_FILE" "$log_root/latest/log-copy-status.txt"
 cp -f "$LOG_DIR/install.log" "$log_dir/install.log"
-cp -f "$LOG_DIR/install.log" "$log_root/latest/install.log"
 (cd "$log_dir" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
-cp -f "$log_dir/SHA256SUMS" "$log_root/latest/SHA256SUMS"
+
+rm -rf -- "$latest_staging" || fail "cannot clear latest log staging directory"
+mkdir -p "$latest_staging" || fail "cannot create latest log staging directory"
+cp -a "$log_dir/." "$latest_staging/" || fail "cannot stage latest log directory"
+if [ ! -e "$latest_dir" ] && [ -d "$latest_backup" ]; then
+    mv -- "$latest_backup" "$latest_dir" || fail "cannot recover previous latest log directory"
+fi
+rm -rf -- "$latest_backup" || fail "cannot clear previous latest log backup"
+if [ -e "$latest_dir" ]; then
+    mv -- "$latest_dir" "$latest_backup" || fail "cannot preserve previous latest log directory"
+fi
+if ! mv -- "$latest_staging" "$latest_dir"; then
+    [ ! -d "$latest_backup" ] || mv -- "$latest_backup" "$latest_dir" || true
+    fail "cannot publish latest log directory"
+fi
+rm -rf -- "$latest_backup" || fail "cannot retire previous latest log directory"
 
 # Keep the newest twenty boot diagnostics. The stable latest directory and the
 # Windows-side preparation logs are outside this timestamped-directory set.

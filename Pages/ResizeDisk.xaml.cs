@@ -6,10 +6,8 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.IO;
-using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
-using Libertix.Commands;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -32,15 +30,15 @@ namespace Libertix.Pages
         private string _manualSize;
         private string _sizeErrorMessage;
         private bool _hasSizeError;
-        private readonly ICommand _openDiskCleanupCommand;
 
         public event PropertyChangedEventHandler PropertyChanged;
 
         public double MinimumSize => InstallationSizePolicy.MinimumFinalSizeGiB;
         public double MinimumWindowsFree => InstallationSizePolicy.MinimumWindowsFreeSpaceGiB;
-        private double AvailableLinuxSize => Math.Min(
-            _initialFreeSpace - MinimumWindowsFree,
-            _shrinkAvailableSpace);
+        private double AvailableLinuxSize => InstallationSizePolicy.AvailableLinuxSizeGiB(
+            _initialFreeSpace,
+            _shrinkAvailableSpace,
+            IsoSize);
         // WPF rejects a slider whose maximum is lower than its minimum. The
         // separate CanAllocateLinux flag still prevents an invalid install.
         public double MaximumSize => Math.Max(MinimumSize, AvailableLinuxSize);
@@ -159,7 +157,10 @@ namespace Libertix.Pages
         private void UpdatePartitionSizes(double linuxSize)
         {
             LinuxSize = linuxSize;
-            WindowsFreeSpace = _initialFreeSpace - linuxSize;
+            WindowsFreeSpace = InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(
+                _initialFreeSpace,
+                IsoSize,
+                linuxSize);
 
             // These bindings depend on calculated properties rather than stored
             // fields, so changing LinuxSize does not notify them automatically.
@@ -201,8 +202,6 @@ namespace Libertix.Pages
                 Math.Max(0, MinimumSize - AvailableLinuxSize))
             : null;
 
-        public ICommand OpenDiskCleanupCommand => _openDiskCleanupCommand;
-
         public ResizeDisk() : this(((App)Application.Current).InstallationState)
         {
         }
@@ -211,7 +210,6 @@ namespace Libertix.Pages
         {
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
-            _openDiskCleanupCommand = new RelayCommand(_ => Process.Start("cleanmgr.exe"));
             DataContext = this;
 
             // Use the actual Windows system drive instead of relying on DriveInfo enumeration order.
@@ -243,6 +241,26 @@ namespace Libertix.Pages
             ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
         }
 
+        private void ResizeDisk_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (PartitionSlider.IsEnabled)
+                PartitionSlider.Focus();
+            else
+                NextButton.Focus();
+        }
+
+        private void ResizeDisk_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Home && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                if (PartitionSlider.IsEnabled)
+                    PartitionSlider.Focus();
+                else
+                    NextButton.Focus();
+                e.Handled = true;
+            }
+        }
+
         private void SaveState()
         {
             _installationState.SelectedLinuxSizeGiB = SelectedSize;
@@ -250,7 +268,8 @@ namespace Libertix.Pages
 
         private void LoadState(DistroInfo distro)
         {
-            IsoSize = distro.SizeInGB;
+            IsoSize = distro.IsoInstallerSizeBytes /
+                (double)InstallationSizePolicy.BytesPerGiB;
             RecommendedSize = CalculateRecommendedSize();
 
             if (_installationState.SelectedLinuxSizeGiB is double savedSize)

@@ -38,8 +38,9 @@ namespace Libertix.Pages
         private const int Aria2MaxConnections = 5;
         private static readonly string WindowsShareRoot =
             Path.Combine(WindowsSystemDrive, @"ProgramData\Libertix\WindowsShare");
-        private static readonly ArtifactCatalog Artifacts =
-            ArtifactCatalog.LoadFromApplicationDirectory();
+        private static readonly Lazy<ArtifactCatalog> ArtifactCatalogHolder =
+            new Lazy<ArtifactCatalog>(ArtifactCatalog.LoadFromApplicationDirectory);
+        private static ArtifactCatalog Artifacts => ArtifactCatalogHolder.Value;
         private bool _isRunning = false;
         private int _lastUefiProgressRevision = -1;
         private StoragePreflightInfo _storagePreflight;
@@ -69,6 +70,16 @@ namespace Libertix.Pages
             InitializeInstallationControls();
             LoadSummary();
             Loaded += ApplyChanges_Loaded;
+            Unloaded += ApplyChanges_Unloaded;
+        }
+
+        private void ApplyChanges_Unloaded(object sender, RoutedEventArgs e)
+        {
+            if (_isRunning || _cancellationDisposed)
+                return;
+
+            _installationCancellation.Dispose();
+            _cancellationDisposed = true;
         }
 
         private async void ApplyChanges_Loaded(object sender, RoutedEventArgs e)
@@ -116,7 +127,11 @@ namespace Libertix.Pages
                 // The wizard preflight prevents an invalid topology from being selected.
                 // Re-run it immediately before mutation because disk layout and BitLocker
                 // state may have changed while the user completed the remaining pages.
-                _storagePreflight = await RunStoragePreflightAsync(firmware);
+                // The first pass is deliberately read-only. Firmware-specific
+                // recovery must be armed before BitLocker or storage is changed.
+                _storagePreflight = await RunStoragePreflightAsync(
+                    firmware,
+                    decryptBitLocker: false);
                 ThrowIfCancellationRequested();
                 if (!await PrepareWindowsSharePayloadAsync())
                     throw new InvalidOperationException("Windows read-only Linux sharing payload preparation failed.");
@@ -147,6 +162,20 @@ namespace Libertix.Pages
             {
                 await HandleCancellationAsync();
             }
+            catch (UnterminatedProcessException ex)
+            {
+                RecordExecutionFailure(
+                    "WINDOWS_PROCESS_TERMINATION_UNVERIFIED",
+                    ex.Message,
+                    InstallationPhase.Windows);
+                Log($"CRITICAL: {ex.Message} Rollback and retry are disabled while the process state is unknown.");
+                UpdateProgress(
+                    0,
+                    Localized(
+                        "ApplyChangesRollbackIncomplete",
+                        "Rollback incomplete. Manual intervention is required."));
+                FinishInstallation(enableBackButton: false);
+            }
             catch (Exception ex)
             {
                 if (_biosRecoveryGuardInstalled)
@@ -165,7 +194,7 @@ namespace Libertix.Pages
             }
         }
 
-        private void RebootButton_Click(object sender, RoutedEventArgs e)
+        private async void RebootButton_Click(object sender, RoutedEventArgs e)
         {
             bool confirmed = LocalizedConfirmationDialog.Show(
                 Application.Current.MainWindow,
@@ -178,8 +207,34 @@ namespace Libertix.Pages
 
             if (confirmed)
             {
-                (Application.Current.MainWindow as MainWindow)?.PrepareForSystemRestart();
-                Process.Start("shutdown", "/r /t 0");
+                RebootButton.IsEnabled = false;
+                MainWindow mainWindow = Application.Current.MainWindow as MainWindow;
+                mainWindow?.PrepareForSystemRestart();
+                try
+                {
+                    WindowsProcessResult result = await Task.Run(() =>
+                        WindowsProcessRunner.Run(
+                            "shutdown.exe",
+                            "/r /t 0",
+                            WindowsProcessTimeouts.QuickCommand,
+                            Encoding.UTF8));
+                    if (result.ExitCode != 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"shutdown.exe failed with rc={result.ExitCode}: {result.StandardError}".Trim());
+                    }
+                }
+                catch (Exception ex)
+                {
+                    mainWindow?.CancelSystemRestartPreparation();
+                    RebootButton.IsEnabled = true;
+                    Log($"ERROR: Restart request failed: {ex.Message}");
+                    UpdateProgress(
+                        100,
+                        Localized(
+                            "ApplyChangesRebootFailed",
+                            "Windows refused the restart request. Try again."));
+                }
             }
         }
 
@@ -214,25 +269,17 @@ namespace Libertix.Pages
         private void Log(string message)
         {
             string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
-            bool forceScrollToEnd =
-                message.StartsWith("ERROR:", StringComparison.OrdinalIgnoreCase) ||
-                message.StartsWith("CRITICAL:", StringComparison.OrdinalIgnoreCase);
             Dispatcher.Invoke(() =>
             {
-                if (forceScrollToEnd)
-                {
-                    _logOutputAutoScroll = true;
-                    _expandedLogOutputAutoScroll = true;
-                }
-                AppendLogLine(LogOutput, line, forceScrollToEnd);
+                AppendLogLine(LogOutput, line);
                 if (ExpandedLogsOverlay.Visibility == Visibility.Visible)
-                    AppendLogLine(ExpandedLogOutput, line, forceScrollToEnd);
+                    AppendLogLine(ExpandedLogOutput, line);
             });
             AppendPersistentLog(line);
             ApplicationLogger.Write($"INSTALLATION: {message}");
         }
 
-        private void AppendLogLine(TextBox output, string line, bool forceScrollToEnd)
+        private void AppendLogLine(TextBox output, string line)
         {
             double previousOffset = output.VerticalOffset;
 
@@ -244,7 +291,7 @@ namespace Libertix.Pages
                 DispatcherPriority.Background,
                 new Action(() =>
                 {
-                    if (forceScrollToEnd || IsAutoScrollEnabled(output))
+                    if (IsAutoScrollEnabled(output))
                         output.ScrollToEnd();
                     else
                         output.ScrollToVerticalOffset(previousOffset);

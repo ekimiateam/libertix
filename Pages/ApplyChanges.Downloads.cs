@@ -22,10 +22,11 @@ namespace Libertix.Pages
                 attempts: 3,
                 timeout: TimeSpan.FromHours(2),
                 bufferSize: 8192,
-                progressStart: 60,
-                progressSpan: 20,
+                progressStart: BiosProgress.LiveDownloadTransferStart,
+                progressSpan: BiosProgress.LiveDownloadTransferSpan,
                 label: "ISO",
-                progressMessage: Localized("ApplyChangesDownloading", "Downloading..."));
+                progressMessage: Localized("ApplyChangesDownloading", "Downloading..."),
+                maximumBytes: MaximumLiveIsoBytes);
         }
 
         private async Task<bool> DownloadInstallerIsoAsync(string url, string destinationPath)
@@ -36,12 +37,13 @@ namespace Libertix.Pages
                 attempts: 3,
                 timeout: TimeSpan.FromHours(4),
                 bufferSize: 81920,
-                progressStart: 85,
-                progressSpan: 10,
+                progressStart: BiosProgress.DistributionDownload,
+                progressSpan: BiosProgress.DistributionReady - BiosProgress.DistributionDownload,
                 label: "Linux installer ISO",
                 progressMessage: Localized(
                     "ApplyChangesDownloadingLinuxIso",
-                    "Downloading Linux ISO..."));
+                    "Downloading Linux ISO..."),
+                maximumBytes: MaximumInstallerIsoBytes);
         }
 
         private async Task<bool> DownloadFileWithRetriesAsync(
@@ -53,8 +55,11 @@ namespace Libertix.Pages
             int progressStart,
             int progressSpan,
             string label,
-            string progressMessage)
+            string progressMessage,
+            long maximumBytes)
         {
+            if (maximumBytes <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maximumBytes));
             for (int attempt = 1; attempt <= attempts; attempt++)
             {
                 try
@@ -68,7 +73,8 @@ namespace Libertix.Pages
                         label,
                         progressMessage,
                         attempt,
-                        attempts);
+                        attempts,
+                        maximumBytes);
                     if (aria2Downloaded)
                     {
                         Dispatcher.Invoke(() => Log($"{label} download completed with aria2"));
@@ -85,13 +91,36 @@ namespace Libertix.Pages
                         label,
                         progressMessage,
                         attempt,
-                        attempts);
+                        attempts,
+                        maximumBytes);
                     Dispatcher.Invoke(() => Log($"{label} download completed"));
                     return true;
                 }
                 catch (OperationCanceledException)
+                    when (!_installationCancellation.IsCancellationRequested)
                 {
                     DeleteDownloadArtifactBestEffort(destinationPath, label);
+                    Dispatcher.Invoke(() =>
+                        Log($"{label} download attempt {attempt}/{attempts} timed out."));
+                    if (attempt == attempts)
+                        return false;
+                    await Task.Delay(
+                        TimeSpan.FromSeconds(2 * attempt),
+                        _installationCancellation.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    DeleteDownloadArtifactBestEffort(destinationPath, label);
+                    throw;
+                }
+                catch (DownloadSizeLimitExceededException ex)
+                {
+                    DeleteDownloadArtifactBestEffort(destinationPath, label);
+                    Dispatcher.Invoke(() => Log($"{label} download rejected: {ex.Message}"));
+                    return false;
+                }
+                catch (UnterminatedProcessException)
+                {
                     throw;
                 }
                 catch (Exception ex)
@@ -116,12 +145,22 @@ namespace Libertix.Pages
             string label,
             string progressMessage,
             int attempt,
-            int attempts)
+            int attempts,
+            long maximumBytes)
         {
             string aria2Path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "aria2", "aria2c.exe");
             if (!File.Exists(aria2Path))
             {
                 Dispatcher.Invoke(() => Log($"{label}: bundled aria2 not found, using HTTP downloader"));
+                return false;
+            }
+            if (!await VerifySha256Async(
+                aria2Path,
+                Artifacts.Aria2.ExecutableSha256,
+                "bundled aria2c.exe"))
+            {
+                Dispatcher.Invoke(() =>
+                    Log($"{label}: bundled aria2 hash mismatch, using HTTP downloader"));
                 return false;
             }
 
@@ -132,6 +171,7 @@ namespace Libertix.Pages
             string fileName = Path.GetFileName(destinationPath);
             string downloadDir = destinationDir;
             string aria2OutputPath = destinationPath;
+            bool removeDownloadDirectory = false;
 
             // aria2 is less predictable when writing directly to a drive root
             // on Windows. Use a temp folder, then move the completed file.
@@ -141,13 +181,16 @@ namespace Libertix.Pages
             {
                 downloadDir = Path.Combine(Path.GetTempPath(), "LibertixDownloads", Guid.NewGuid().ToString("N"));
                 aria2OutputPath = Path.Combine(downloadDir, fileName);
+                removeDownloadDirectory = true;
             }
 
-            Directory.CreateDirectory(downloadDir);
-            Directory.CreateDirectory(destinationDir);
-
-            var args = new[]
+            try
             {
+                Directory.CreateDirectory(downloadDir);
+                Directory.CreateDirectory(destinationDir);
+
+                var args = new[]
+                {
                 "--allow-overwrite=true",
                 "--auto-file-renaming=false",
                 "--continue=true",
@@ -160,53 +203,69 @@ namespace Libertix.Pages
                 $"--dir={downloadDir}",
                 $"--out={fileName}",
                 url
-            };
+                };
 
-            Dispatcher.Invoke(() =>
-            {
-                Log($"{label}: downloading with bundled aria2 ({Aria2MaxConnections} connections, attempt {attempt}/{attempts})");
-                UpdateProgress(progressStart, progressMessage);
-            });
-
-            int exitCode = await RunStreamingProcessAsync(
-                aria2Path,
-                string.Join(" ", Array.ConvertAll(args, QuoteArgument)),
-                timeout,
-                line => HandleAria2DownloadOutput(line, label, progressMessage, progressStart, progressSpan));
-
-            if (_installationCancellation.IsCancellationRequested || exitCode == -2)
-                throw new OperationCanceledException(_installationCancellation.Token);
-
-            if (exitCode != 0)
-            {
-                Dispatcher.Invoke(() => Log($"{label}: aria2 failed with rc={exitCode}, using HTTP fallback"));
-                DeleteDownloadArtifactBestEffort(aria2OutputPath, label);
-                return false;
-            }
-
-            if (!File.Exists(aria2OutputPath) || new FileInfo(aria2OutputPath).Length == 0)
-            {
-                Dispatcher.Invoke(() => Log($"{label}: aria2 output missing or empty, using HTTP fallback"));
-                return false;
-            }
-
-            if (!string.Equals(aria2OutputPath, destinationPath, StringComparison.OrdinalIgnoreCase))
-            {
-                if (File.Exists(destinationPath))
-                    File.Delete(destinationPath);
-                File.Move(aria2OutputPath, destinationPath);
-                try
+                Dispatcher.Invoke(() =>
                 {
-                    Directory.Delete(downloadDir, true);
-                }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() =>
-                        Log($"{label}: temporary download directory cleanup failed: {ex.Message}"));
-                }
-            }
+                    Log($"{label}: downloading with bundled aria2 ({Aria2MaxConnections} connections, attempt {attempt}/{attempts})");
+                    UpdateProgress(progressStart, progressMessage);
+                });
 
-            return true;
+                StreamingProcessResult processResult = await RunStreamingProcessAsync(
+                    aria2Path,
+                    string.Join(" ", Array.ConvertAll(args, QuoteArgument)),
+                    timeout,
+                    line => HandleAria2DownloadOutput(
+                        line,
+                        label,
+                        progressMessage,
+                        progressStart,
+                        progressSpan),
+                    policyLimitExceeded: () =>
+                        File.Exists(aria2OutputPath) &&
+                        new FileInfo(aria2OutputPath).Length > maximumBytes);
+
+                if (processResult.Completion == StreamingProcessCompletion.Cancelled)
+                    throw new OperationCanceledException(_installationCancellation.Token);
+
+                if (processResult.Completion == StreamingProcessCompletion.TerminationFailed)
+                    throw new UnterminatedProcessException(
+                        $"{label}: timed-out process tree could not be proven stopped.");
+
+                if (processResult.Completion == StreamingProcessCompletion.PolicyLimitExceeded)
+                    throw new DownloadSizeLimitExceededException(
+                        $"{label} exceeds {maximumBytes} bytes.");
+
+                if (processResult.Completion != StreamingProcessCompletion.Exited || processResult.ExitCode != 0)
+                {
+                    Dispatcher.Invoke(() => Log($"{label}: aria2 failed with rc={processResult.ExitCode}, using HTTP fallback"));
+                    DeleteDownloadArtifactBestEffort(aria2OutputPath, label);
+                    return false;
+                }
+
+                if (!File.Exists(aria2OutputPath) || new FileInfo(aria2OutputPath).Length == 0)
+                {
+                    Dispatcher.Invoke(() => Log($"{label}: aria2 output missing or empty, using HTTP fallback"));
+                    return false;
+                }
+                if (new FileInfo(aria2OutputPath).Length > maximumBytes)
+                    throw new DownloadSizeLimitExceededException(
+                        $"{label} exceeds {maximumBytes} bytes.");
+
+                if (!string.Equals(aria2OutputPath, destinationPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (File.Exists(destinationPath))
+                        File.Delete(destinationPath);
+                    File.Move(aria2OutputPath, destinationPath);
+                }
+
+                return true;
+            }
+            finally
+            {
+                if (removeDownloadDirectory)
+                    DeleteDownloadDirectoryBestEffort(downloadDir, label);
+            }
         }
 
         private void DeleteDownloadArtifactBestEffort(string path, string label)
@@ -220,6 +279,20 @@ namespace Libertix.Pages
             {
                 Dispatcher.Invoke(() =>
                     Log($"{label}: partial download cleanup failed: {ex.Message}"));
+            }
+        }
+
+        private void DeleteDownloadDirectoryBestEffort(string path, string label)
+        {
+            try
+            {
+                if (Directory.Exists(path))
+                    Directory.Delete(path, recursive: true);
+            }
+            catch (Exception ex)
+            {
+                Dispatcher.Invoke(() =>
+                    Log($"{label}: temporary download directory cleanup failed: {ex.Message}"));
             }
         }
 
@@ -257,7 +330,8 @@ namespace Libertix.Pages
             string label,
             string progressMessage,
             int attempt,
-            int attempts)
+            int attempts,
+            long maximumBytes)
         {
             using (var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 _installationCancellation.Token))
@@ -271,6 +345,9 @@ namespace Libertix.Pages
                     response.EnsureSuccessStatusCode();
 
                     var totalBytes = response.Content.Headers.ContentLength ?? 0;
+                    if (totalBytes > maximumBytes)
+                        throw new DownloadSizeLimitExceededException(
+                            $"{label} exceeds {maximumBytes} bytes.");
                     var totalMB = totalBytes / 1024.0 / 1024.0;
                     Dispatcher.Invoke(() => Log($"{label} size: {totalMB:N0} MB (attempt {attempt}/{attempts})"));
 
@@ -294,6 +371,9 @@ namespace Libertix.Pages
                             buffer.Length,
                             timeoutCancellation.Token)) > 0)
                         {
+                            if (totalRead > maximumBytes - bytesRead)
+                                throw new DownloadSizeLimitExceededException(
+                                    $"{label} exceeds {maximumBytes} bytes.");
                             await fileStream.WriteAsync(
                                 buffer,
                                 0,

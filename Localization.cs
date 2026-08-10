@@ -40,24 +40,24 @@ namespace Libertix
 
         public static void SetLanguage(string cultureName)
         {
-            if (!AvailableLanguages.Contains(cultureName, StringComparer.OrdinalIgnoreCase))
-                cultureName = "en";
+            cultureName = AvailableLanguages.FirstOrDefault(
+                language => string.Equals(
+                    language,
+                    cultureName,
+                    StringComparison.OrdinalIgnoreCase)) ?? "en";
             CurrentLanguage = cultureName;
 
-            ResourceDictionary oldDict = null;
-            foreach (ResourceDictionary dict in Application.Current.Resources.MergedDictionaries)
-            {
-                if (dict.Source != null && dict.Source.OriginalString.StartsWith("/Resources/Lang/Strings."))
-                {
-                    oldDict = dict;
-                    break;
-                }
-            }
+            List<ResourceDictionary> oldDictionaries = Application.Current.Resources
+                .MergedDictionaries
+                .Where(dict =>
+                    dict.Source != null &&
+                    dict.Source.OriginalString.IndexOf(
+                        "Resources/Lang/Strings.",
+                        StringComparison.OrdinalIgnoreCase) >= 0)
+                .ToList();
 
-            if (oldDict != null)
-            {
-                Application.Current.Resources.MergedDictionaries.Remove(oldDict);
-            }
+            foreach (ResourceDictionary oldDictionary in oldDictionaries)
+                Application.Current.Resources.MergedDictionaries.Remove(oldDictionary);
 
             var newDict = new ResourceDictionary
             {
@@ -76,7 +76,7 @@ namespace Libertix
             try
             {
                 var culture = CultureInfo.CurrentUICulture;
-                string twoLetterCode = culture.TwoLetterISOLanguageName.ToLower();
+                string twoLetterCode = culture.TwoLetterISOLanguageName.ToLowerInvariant();
 
                 foreach (var lang in AvailableLanguages)
                 {
@@ -92,7 +92,7 @@ namespace Libertix
             }
         }
 
-        public static string GetBootstrapString(string key)
+        public static string GetBootstrapString(string key, string fallback)
         {
             string path = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
@@ -111,7 +111,7 @@ namespace Libertix
                     {
                         if (language == "en" ||
                             !section.GetProperty("en").TryGetProperty(key, out value))
-                            return "Libertix must be run as administrator.";
+                            return fallback;
                     }
                     string message = value.GetString();
                     if (!string.IsNullOrWhiteSpace(message))
@@ -121,13 +121,19 @@ namespace Libertix
             catch (IOException)
             {
             }
+            catch (UnauthorizedAccessException)
+            {
+            }
+            catch (KeyNotFoundException)
+            {
+            }
             catch (JsonException)
             {
             }
             catch (InvalidOperationException)
             {
             }
-            return "Libertix must be run as administrator.";
+            return fallback;
         }
 
         /// <summary>
@@ -137,19 +143,31 @@ namespace Libertix
         {
             try
             {
-                if (WindowsToIanaZones.Value.TryGetValue(
+                return ResolveWindowsTimezoneAsLinux(
                     TimeZoneInfo.Local.Id,
-                    out string ianaZone))
-                    return ianaZone;
-
-                ApplicationLogger.Write(
-                    $"No CLDR time-zone mapping for Windows ID '{TimeZoneInfo.Local.Id}'; using UTC.");
-                return "UTC";
+                    WindowsToIanaZones.Value);
             }
             catch
             {
-                return "UTC";
+                return "Etc/UTC";
             }
+        }
+
+        internal static string ResolveWindowsTimezoneAsLinux(
+            string windowsTimezoneId,
+            IReadOnlyDictionary<string, string> mappings)
+        {
+            if (!string.IsNullOrWhiteSpace(windowsTimezoneId) &&
+                mappings != null &&
+                mappings.TryGetValue(windowsTimezoneId, out string ianaZone) &&
+                !string.IsNullOrWhiteSpace(ianaZone))
+            {
+                return ianaZone;
+            }
+
+            ApplicationLogger.Write(
+                $"No CLDR time-zone mapping for Windows ID '{windowsTimezoneId}'; using Etc/UTC.");
+            return "Etc/UTC";
         }
 
         private static IReadOnlyDictionary<string, string> LoadWindowsToIanaZones()

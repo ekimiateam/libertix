@@ -1,13 +1,72 @@
 #requires -Version 5.1
 
-# Download transports and verified Mint ISO acquisition.
+# Download transports and verified distribution ISO acquisition.
+
+$script:MaximumDistributionIsoBytes = 8GB
+$script:MaximumLiveIsoBytes = 2GB
+$script:MaximumHelperArchiveBytes = 128MB
+
+function Invoke-BoundedHttpDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][int64]$MaxBytes,
+        [ValidateRange(10, 3600)][int]$TimeoutSeconds = 120
+    )
+
+    if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
+
+    $request = [Net.HttpWebRequest]::Create($Url)
+    $request.AllowAutoRedirect = $true
+    $request.Timeout = $TimeoutSeconds * 1000
+    $request.ReadWriteTimeout = $TimeoutSeconds * 1000
+    $response = $null
+    $inputStream = $null
+    $outputStream = $null
+    try {
+        $response = $request.GetResponse()
+        if ([int64]$response.ContentLength -gt $MaxBytes) {
+            throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $Url exceeds $MaxBytes bytes."
+        }
+        $inputStream = $response.GetResponseStream()
+        $outputStream = [IO.File]::Open(
+            $Destination,
+            [IO.FileMode]::Create,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::None
+        )
+        $buffer = New-Object byte[] (1MB)
+        [int64]$total = 0
+        while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            if ($total -gt $MaxBytes - $read) {
+                throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $Url exceeds $MaxBytes bytes."
+            }
+            $outputStream.Write($buffer, 0, $read)
+            $total += $read
+        }
+    } catch {
+        if ($outputStream) {
+            $outputStream.Dispose()
+            $outputStream = $null
+        }
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        throw
+    } finally {
+        if ($outputStream) { $outputStream.Dispose() }
+        if ($inputStream) { $inputStream.Dispose() }
+        if ($response) { $response.Dispose() }
+    }
+}
 
 function Start-BitsDownload {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][int64]$MaxBytes,
         [ValidateRange(10, 3600)][int]$NoProgressTimeoutSeconds = 120
     )
+
+    if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
 
     $job = Start-BitsTransfer -Source $Url -Destination $Destination `
         -Asynchronous -DisplayName "Download: $([IO.Path]::GetFileName($Destination))" `
@@ -26,6 +85,12 @@ function Start-BitsDownload {
             }
 
             $bytesTransferred = [uint64]$j.BytesTransferred
+            if (
+                ($j.BytesTotal -ne [uint64]::MaxValue -and [uint64]$j.BytesTotal -gt [uint64]$MaxBytes) -or
+                $bytesTransferred -gt [uint64]$MaxBytes
+            ) {
+                throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $Url exceeds $MaxBytes bytes."
+            }
             if ($bytesTransferred -gt $lastBytesTransferred) {
                 $lastBytesTransferred = $bytesTransferred
                 $lastProgressAt = [DateTime]::UtcNow
@@ -89,6 +154,10 @@ function Start-BitsDownload {
     if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
         throw "BITS completed but the downloaded file is missing: $Destination"
     }
+    if ([int64](Get-Item -LiteralPath $Destination -ErrorAction Stop).Length -gt $MaxBytes) {
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $Url exceeds $MaxBytes bytes."
+    }
 }
 
 function Get-Aria2Exe {
@@ -127,7 +196,11 @@ function Get-Aria2Exe {
     Write-Log "Downloading aria2 download helper..." "Cyan"
     $ProgressPreference = "SilentlyContinue"
     try {
-        Invoke-WebRequest -Uri $Aria2ZipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
+        Invoke-BoundedHttpDownload `
+            -Url $Aria2ZipUrl `
+            -Destination $zipPath `
+            -MaxBytes $script:MaximumHelperArchiveBytes `
+            -TimeoutSeconds 120
     } finally {
         $ProgressPreference = "Continue"
     }
@@ -158,11 +231,36 @@ function Get-Aria2Exe {
     return $aria2.FullName
 }
 
+function New-Aria2DownloadArguments {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$DownloadDir,
+        [Parameter(Mandatory = $true)][string]$DestinationName
+    )
+
+    return @(
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
+        "--continue=true",
+        "--max-connection-per-server=$Aria2Connections",
+        "--split=$Aria2Connections",
+        "--min-split-size=1M",
+        "--summary-interval=5",
+        "--console-log-level=warn",
+        "--dir=$DownloadDir",
+        "--out=$DestinationName",
+        $Url
+    )
+}
+
 function Start-Aria2Download {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
-        [Parameter(Mandatory = $true)][string]$Destination
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [Parameter(Mandatory = $true)][int64]$MaxBytes
     )
+
+    if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
 
     $aria2 = Get-Aria2Exe
     $destinationFullPath = [IO.Path]::GetFullPath($Destination)
@@ -182,44 +280,52 @@ function Start-Aria2Download {
         $downloadDir = $Aria2DownloadDir
         $downloadPath = Join-Path $downloadDir $destinationName
     }
-    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-    if (Test-Path -LiteralPath $downloadPath) {
-        Remove-Item -LiteralPath $downloadPath -Force
-    }
-
-    Write-Log "Downloading with aria2: $destinationName" "Cyan"
-    $aria2Arguments = @(
-        "--allow-overwrite=true",
-        "--auto-file-renaming=false",
-        "--continue=true",
-        "--max-connection-per-server=$Aria2Connections",
-        "--split=$Aria2Connections",
-        "--min-split-size=1M",
-        "--summary-interval=5",
-        "--console-log-level=warn",
-        "--out=$destinationName",
-        $Url
-    )
-
-    Push-Location -LiteralPath $downloadDir
     try {
-        & $aria2 @aria2Arguments
-        if ($LASTEXITCODE -ne 0) {
-            throw "aria2 failed with exit code $LASTEXITCODE."
+        New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+        if (Test-Path -LiteralPath $downloadPath) {
+            Remove-Item -LiteralPath $downloadPath -Force
         }
-    } finally {
-        Pop-Location
-    }
 
-    if (-not (Test-Path -LiteralPath $downloadPath)) {
-        throw "aria2 completed but downloaded file is missing: $downloadPath"
-    }
-
-    if ($downloadPath -ne $destinationFullPath) {
-        if (Test-Path -LiteralPath $destinationFullPath) {
-            Remove-Item -LiteralPath $destinationFullPath -Force
+        Write-Log "Downloading with aria2: $destinationName" "Cyan"
+        $aria2Arguments = New-Aria2DownloadArguments `
+            -Url $Url `
+            -DownloadDir $downloadDir `
+            -DestinationName $destinationName
+        $nativeArguments = ($aria2Arguments | ForEach-Object {
+            ConvertTo-LibertixNativeArgument -Value ([string]$_)
+        }) -join " "
+        $aria2Result = Invoke-LibertixNativeProcess `
+            -FilePath $aria2 `
+            -Arguments $nativeArguments `
+            -TimeoutSeconds 14400 `
+            -MonitoredFilePath $downloadPath `
+            -MaximumFileBytes $MaxBytes
+        if ($aria2Result.ExitCode -ne 0) {
+            $diagnostic = ($aria2Result.StandardOutput + [Environment]::NewLine +
+                $aria2Result.StandardError).Trim()
+            throw "aria2 failed with exit code $($aria2Result.ExitCode): $diagnostic"
         }
-        Move-Item -LiteralPath $downloadPath -Destination $destinationFullPath -Force
+
+        if (-not (Test-Path -LiteralPath $downloadPath)) {
+            throw "aria2 completed but downloaded file is missing: $downloadPath"
+        }
+        if ([int64](Get-Item -LiteralPath $downloadPath -ErrorAction Stop).Length -gt $MaxBytes) {
+            throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $Url exceeds $MaxBytes bytes."
+        }
+
+        if ($downloadPath -ne $destinationFullPath) {
+            if (Test-Path -LiteralPath $destinationFullPath) {
+                Remove-Item -LiteralPath $destinationFullPath -Force
+            }
+            Move-Item -LiteralPath $downloadPath -Destination $destinationFullPath -Force
+        }
+    } catch {
+        # A failed transport must not leave a second ISO beside a later BITS
+        # fallback. Only the dedicated aria2 staging path is owned here.
+        if ($downloadPath -ne $destinationFullPath -and (Test-Path -LiteralPath $downloadPath)) {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+        }
+        throw
     }
 }
 
@@ -227,53 +333,78 @@ function Start-RobustDownload {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Destination,
-        [Parameter(Mandatory = $true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][int64]$MaxBytes
     )
 
+    if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
+
     try {
-        Start-Aria2Download -Url $Url -Destination $Destination
+        Start-Aria2Download -Url $Url -Destination $Destination -MaxBytes $MaxBytes
         return
     } catch {
+        if (
+            $_.Exception.Message -like "PROCESS_TREE_NOT_STOPPED:*" -or
+            $_.Exception.Message -like "DOWNLOAD_SIZE_LIMIT_EXCEEDED:*"
+        ) {
+            throw
+        }
         Write-Log "aria2 failed for $Label; using BITS fallback: $($_.Exception.Message)" "Yellow"
     }
 
     try {
-        Start-BitsDownload -Url $Url -Destination $Destination
+        Start-BitsDownload -Url $Url -Destination $Destination -MaxBytes $MaxBytes
         return
     } catch {
+        if ($_.Exception.Message -like "DOWNLOAD_SIZE_LIMIT_EXCEEDED:*") {
+            throw
+        }
         Write-Log "BITS failed for $Label; using Invoke-WebRequest fallback: $($_.Exception.Message)" "Yellow"
     }
 
     $ProgressPreference = "SilentlyContinue"
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 120
+        Invoke-BoundedHttpDownload `
+            -Url $Url `
+            -Destination $Destination `
+            -MaxBytes $MaxBytes `
+            -TimeoutSeconds 120
     } finally {
         $ProgressPreference = "Continue"
     }
 }
 
-function Set-MintIsoOnWindows {
-    $existing = Get-Item -LiteralPath $MintIsoPath -ErrorAction SilentlyContinue
+function Set-DistributionIsoOnWindows {
+    $existing = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction SilentlyContinue
+    if ($existing -and $existing.Length -gt $script:MaximumDistributionIsoBytes) {
+        Write-Log "Existing distribution ISO exceeds the supported size limit; replacing it." "Yellow"
+        Remove-Item -LiteralPath $DistributionIsoPath -Force
+        $existing = $null
+    }
     if ($existing -and $existing.Length -gt 100MB) {
-        $existingHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $MintIsoPath).Hash.ToLowerInvariant()
-        if ($existingHash -eq $MintIsoSha256) {
-            Write-Log "Mint ISO already present and verified: $MintIsoPath" "Green"
+        $existingHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $DistributionIsoPath).Hash.ToLowerInvariant()
+        if ($existingHash -eq $DistributionIsoSha256) {
+            Write-Log "Distribution ISO already present and verified: $DistributionIsoPath" "Green"
             return
         }
-        Write-Log "Existing Mint ISO hash mismatch; downloading a verified copy." "Yellow"
-        Remove-Item -LiteralPath $MintIsoPath -Force
+        Write-Log "Existing distribution ISO hash mismatch; downloading a verified copy." "Yellow"
+        Remove-Item -LiteralPath $DistributionIsoPath -Force
     }
 
-    Write-Log "Downloading Mint ISO to $MintIsoPath..." "Cyan"
-    Start-RobustDownload -Url $MintIsoUrl -Destination $MintIsoPath -Label "Mint ISO"
+    Write-Log "Downloading distribution ISO to $DistributionIsoPath..." "Cyan"
+    Start-RobustDownload `
+        -Url $DistributionIsoUrl `
+        -Destination $DistributionIsoPath `
+        -Label "distribution ISO" `
+        -MaxBytes $script:MaximumDistributionIsoBytes
 
-    $downloadedIso = Get-Item -LiteralPath $MintIsoPath -ErrorAction Stop
+    $downloadedIso = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction Stop
     if ($downloadedIso.Length -le 100MB) {
-        throw "Mint ISO download is too small: $($downloadedIso.Length) bytes"
+        throw "Distribution ISO download is too small: $($downloadedIso.Length) bytes"
     }
-    $downloadedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $MintIsoPath).Hash.ToLowerInvariant()
-    if ($downloadedHash -ne $MintIsoSha256) {
-        throw "Mint ISO hash mismatch. Expected $MintIsoSha256, got $downloadedHash"
+    $downloadedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $DistributionIsoPath).Hash.ToLowerInvariant()
+    if ($downloadedHash -ne $DistributionIsoSha256) {
+        throw "Distribution ISO hash mismatch. Expected $DistributionIsoSha256, got $downloadedHash"
     }
-    Write-Log "Mint ISO ready: $MintIsoPath" "Green"
+    Write-Log "Distribution ISO ready: $DistributionIsoPath" "Green"
 }

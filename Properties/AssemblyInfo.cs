@@ -4,11 +4,11 @@ using System.Runtime.InteropServices;
 using System.Windows;
 
 [assembly: AssemblyTitle("Libertix")]
-[assembly: AssemblyDescription("")]
+[assembly: AssemblyDescription("Install a supported Linux distribution alongside Windows with verified rollback support.")]
 [assembly: AssemblyConfiguration("")]
-[assembly: AssemblyCompany("")]
+[assembly: AssemblyCompany("Ekimia")]
 [assembly: AssemblyProduct("Libertix")]
-[assembly: AssemblyCopyright("Copyright ©  2025")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 Ekimia")]
 [assembly: AssemblyTrademark("")]
 [assembly: AssemblyCulture("")]
 
@@ -22,3 +22,4 @@ using System.Windows;
 
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyInformationalVersion("1.0.0+local")]

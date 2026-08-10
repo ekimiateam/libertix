@@ -10,6 +10,9 @@ namespace Libertix.Installation
     /// </summary>
     public static class DistributionCatalogTrust
     {
+        private const string ApplicationPublicKeyResource =
+            "Libertix.Resources.CatalogPublicKey.xml";
+
         public static void Verify(byte[] manifest, string signatureBase64, string publicKeyPath)
         {
             if (manifest == null || manifest.Length == 0)
@@ -20,6 +23,35 @@ namespace Libertix.Installation
                 throw new FileNotFoundException(
                     "Distribution catalogue public key is missing.",
                     publicKeyPath);
+
+            VerifyWithPublicKeyXml(
+                manifest,
+                signatureBase64,
+                File.ReadAllText(publicKeyPath));
+        }
+
+        public static void VerifyWithApplicationKey(byte[] manifest, string signatureBase64)
+        {
+            using (Stream keyStream = typeof(DistributionCatalogTrust).Assembly
+                .GetManifestResourceStream(ApplicationPublicKeyResource))
+            {
+                if (keyStream == null)
+                    throw new InvalidDataException(
+                        "The embedded distribution catalogue public key is missing.");
+                using (var reader = new StreamReader(keyStream))
+                    VerifyWithPublicKeyXml(manifest, signatureBase64, reader.ReadToEnd());
+            }
+        }
+
+        private static void VerifyWithPublicKeyXml(
+            byte[] manifest,
+            string signatureBase64,
+            string publicKeyXml)
+        {
+            if (manifest == null || manifest.Length == 0)
+                throw new InvalidDataException("Distribution manifest is empty.");
+            if (string.IsNullOrWhiteSpace(signatureBase64))
+                throw new InvalidDataException("Distribution manifest signature is missing.");
 
             byte[] signature;
             try
@@ -36,7 +68,7 @@ namespace Libertix.Installation
             using (var rsa = new RSACryptoServiceProvider())
             {
                 rsa.PersistKeyInCsp = false;
-                rsa.FromXmlString(File.ReadAllText(publicKeyPath));
+                rsa.FromXmlString(publicKeyXml);
                 if (!rsa.VerifyData(
                     manifest,
                     CryptoConfig.MapNameToOID("SHA256"),
@@ -46,15 +78,6 @@ namespace Libertix.Installation
                         "Distribution manifest signature verification failed.");
                 }
             }
-        }
-
-        public static string GetApplicationPublicKeyPath()
-        {
-            return Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                "Scripts",
-                "config",
-                "Libertix.CatalogPublicKey.xml");
         }
     }
 }

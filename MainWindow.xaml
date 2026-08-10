@@ -11,7 +11,26 @@
         ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen">
 
-    <Frame x:Name="MainFrame"
-           NavigationUIVisibility="Hidden"
-           Background="{DynamicResource PrimaryBackground}"/>
+    <Grid>
+        <Frame x:Name="MainFrame"
+               NavigationUIVisibility="Hidden"
+               Background="{DynamicResource PrimaryBackground}"/>
+
+        <Border x:Name="DevelopmentModeBanner"
+                Height="32"
+                VerticalAlignment="Top"
+                Background="#3A2400"
+                BorderBrush="#FFF0A234"
+                BorderThickness="0,0,0,1"
+                IsHitTestVisible="False"
+                Panel.ZIndex="1000"
+                Visibility="Collapsed">
+            <TextBlock Text="DEVELOPMENT MODE - catalog signature verification is disabled."
+                       Foreground="#FFFFB347"
+                       FontSize="14"
+                       FontWeight="SemiBold"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"/>
+        </Border>
+    </Grid>
 </Window>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
@@ -15,8 +16,8 @@ class VMConfig(BaseModel):
     os: str
     vnc: str
     username: str = "admin"
-    screen_width: int = Field(gt=0)
-    screen_height: int = Field(gt=0)
+    screen_width: int = Field(gt=0, le=16384)
+    screen_height: int = Field(gt=0, le=16384)
     vmid: int = Field(gt=0)
     firmware: Literal["bios", "uefi"]
     vnc_keyboard_layout: Literal["fr", "us"] = "us"
@@ -43,15 +44,19 @@ class Settings(BaseSettings):
     build_vm_host: str
     build_vm_user: str
     build_vm_password: SecretStr
-    ssh_port: int = 22
-    ssh_timeout_seconds: float = 15
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_timeout_seconds: float = Field(default=15, gt=0)
     ssh_known_hosts: Path
-    command_timeout_seconds: float = 180
+    command_timeout_seconds: float = Field(default=180, gt=0)
     repository_url: str
     repository_branch: str = "dev"
     smb_root: str
     allowed_smb_roots: tuple[str, ...] = Field(min_length=1)
     allowed_proxmox_vmids: tuple[int, ...] = Field(min_length=1)
+    reset_snapshot: str = "clean2"
+    proxmox_storage: str = "local-lvm"
+    proxmox_storage_min_free_gib: int = Field(default=20, ge=0)
+    proxmox_storage_min_free_per_vm_gib: int = Field(default=20, ge=0)
     source_dir_name: str = "Libertix-source"
     release_dir_name: str = "Libertix-release"
     filepool_base_url: str
@@ -63,30 +68,31 @@ class Settings(BaseSettings):
     llm_api_key: SecretStr
     llm_model: str
     llm_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
-    llm_timeout_seconds: float = 180
-    llm_max_attempts: int = 3
-    llm_retry_base_seconds: float = 3
+    llm_timeout_seconds: float = Field(default=180, gt=0)
+    llm_max_attempts: int = Field(default=3, ge=1, le=10)
+    llm_retry_base_seconds: float = Field(default=3, gt=0, le=60)
 
     proxmox_url: str
     proxmox_token_id: str
     proxmox_token_secret: SecretStr
     proxmox_verify_tls: bool = True
     proxmox_ca_bundle: Path | None = None
-    proxmox_timeout_seconds: float = 30
-    proxmox_task_timeout_seconds: float = 300
+    proxmox_timeout_seconds: float = Field(default=30, gt=0)
+    proxmox_task_timeout_seconds: float = Field(default=300, gt=0)
 
     runtime_dir: Path = Path(__file__).resolve().parents[1] / "runtime"
     capture_dir: Path = Path(__file__).resolve().parents[1] / "runtime" / "captures"
     operation_log_dir: Path = Path(__file__).resolve().parents[1] / "logs"
-    launch_wait_seconds: float = 2
-    automation_monitor_interval_seconds: float = 30
-    automation_monitor_timeout_seconds: float = 23400
-    post_install_boot_timeout_seconds: float = 1200
-    post_install_poll_interval_seconds: float = 10
+    vnc_timeout_seconds: float = Field(default=15, gt=0)
+    launch_wait_seconds: float = Field(default=2, gt=0)
+    automation_monitor_interval_seconds: float = Field(default=30, gt=0)
+    automation_monitor_timeout_seconds: float = Field(default=23400, gt=0)
+    post_install_boot_timeout_seconds: float = Field(default=1200, gt=0)
+    post_install_poll_interval_seconds: float = Field(default=10, gt=0)
+    post_install_grub_detection_timeout_seconds: float = Field(default=20, gt=0)
+    post_install_grub_detection_interval_seconds: float = Field(default=1, gt=0)
     log_level: str = "INFO"
-    api_access_token: SecretStr
-
-    vms: tuple[VMConfig, ...]
+    vms: tuple[VMConfig, ...] = Field(min_length=1)
 
     @field_validator("smb_root")
     @classmethod
@@ -135,24 +141,58 @@ class Settings(BaseSettings):
             )
         return value.rstrip("/")
 
+    @field_validator("reset_snapshot", "proxmox_storage")
+    @classmethod
+    def validate_proxmox_identifier(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", normalized):
+            raise ValueError(
+                "Proxmox identifiers must use only letters, digits, dot, underscore or dash"
+            )
+        return normalized
+
+    @field_validator("source_dir_name", "release_dir_name")
+    @classmethod
+    def validate_workspace_directory_name(cls, value: str) -> str:
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", normalized):
+            raise ValueError("source_dir_name and release_dir_name must be simple directory names")
+        return normalized
+
     @field_validator("development_static_ipv4_gateway")
     @classmethod
     def validate_development_gateway(cls, value: str) -> str:
         try:
-            return str(ipaddress.IPv4Address(value))
+            address = ipaddress.IPv4Address(value)
         except ipaddress.AddressValueError as error:
             raise ValueError("development_static_ipv4_gateway must be IPv4") from error
+        if not cls._is_configurable_ipv4(address):
+            raise ValueError("development_static_ipv4_gateway is not a configurable unicast IPv4")
+        return str(address)
 
     @field_validator("development_dns_servers")
     @classmethod
     def validate_development_dns_servers(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         try:
-            normalized = tuple(str(ipaddress.IPv4Address(value)) for value in values)
+            addresses = tuple(ipaddress.IPv4Address(value) for value in values)
         except ipaddress.AddressValueError as error:
             raise ValueError("development_dns_servers must contain only IPv4 addresses") from error
+        if any(not cls._is_configurable_ipv4(address) for address in addresses):
+            raise ValueError("development_dns_servers contains a non-configurable IPv4 address")
+        normalized = tuple(str(address) for address in addresses)
         if len(normalized) != len(set(normalized)):
             raise ValueError("development_dns_servers must not contain duplicates")
         return normalized
+
+    @staticmethod
+    def _is_configurable_ipv4(address: ipaddress.IPv4Address) -> bool:
+        return not (
+            address.is_unspecified
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_multicast
+            or address.is_reserved
+        )
 
     @model_validator(mode="after")
     def validate_vm_identity(self) -> Settings:
@@ -166,6 +206,10 @@ class Settings(BaseSettings):
             raise ValueError("smb_root is outside allowed_smb_roots")
         if not set(vmids).issubset(set(self.allowed_proxmox_vmids)):
             raise ValueError("A configured VM ID is outside allowed_proxmox_vmids")
+        runtime_dir = self.runtime_dir.resolve()
+        capture_dir = self.capture_dir.resolve()
+        if capture_dir == runtime_dir or runtime_dir not in capture_dir.parents:
+            raise ValueError("capture_dir must be a strict child of runtime_dir")
         return self
 
 

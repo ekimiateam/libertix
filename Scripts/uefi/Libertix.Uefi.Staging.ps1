@@ -89,11 +89,10 @@ function New-OrReuseInstallerPartition {
     # several GiB, so checking the earlier volume snapshot rejects layouts that
     # become safely shrinkable as part of this transaction. The shared budget
     # applies the same bounded Windows free-space policy to BIOS and UEFI.
-    $systemVolume = Get-Volume -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    [int64]$remainingBytes = [int64]$systemVolume.SizeRemaining
-    $freeSpaceBudget = Get-LibertixWindowsFreeSpaceBudget `
-        -AvailableBytes $remainingBytes `
+    $freeSpaceBudget = Wait-LibertixWindowsFreeSpaceBudget `
+        -DriveLetter $SystemDriveLetter `
         -AllocationBytes $shrinkBytes
+    [int64]$remainingBytes = [int64]$freeSpaceBudget.AvailableBytes
     if (-not $freeSpaceBudget.Accepted) {
         throw (
             "Not enough free space on $SystemDrive " +
@@ -259,7 +258,11 @@ function Install-LibertixIsoToPartition {
         # parameters; integrity is already enforced by the SHA-256 check below.
         $downloadUrl = $InstallerIsoUrl
 
-        Start-RobustDownload -Url $downloadUrl -Destination $isoPath -Label "Libertix UEFI ISO"
+        Start-RobustDownload `
+            -Url $downloadUrl `
+            -Destination $isoPath `
+            -Label "Libertix UEFI ISO" `
+            -MaxBytes $script:MaximumLiveIsoBytes
 
         if (-not (Test-Path $isoPath)) {
             throw "ISO download failed."
@@ -423,6 +426,7 @@ function Set-LibertixUefiBootEntry {
                 throw "Temporary ESP loader SHA256 state is missing; refusing firmware fallback."
             }
             $destination = Join-Path $espDrive $InstallerEspDirectory
+            Assert-LibertixTemporaryEspOwnership -Directory $destination
             foreach ($relativePath in @("BOOTX64.EFI", "grubx64.efi", "mmx64.efi", "grub.cfg")) {
                 $saved = $state.EspLoaderSha256.PSObject.Properties[$relativePath]
                 if (-not $saved -or [string]::IsNullOrWhiteSpace([string]$saved.Value)) {
@@ -506,18 +510,27 @@ function Set-LibertixUefiBootEntry {
 
         $bootNumber = [Convert]::ToUInt16($bootVariableMatch.Groups[1].Value, 16)
         Assert-LibertixFirmwareEntry -BootNumber $bootNumber -LoaderPath $loaderPath
-        Set-FirmwareVariable -Name "BootNext" -Value (ConvertTo-BootOrderBytes -Order @($bootNumber))
-        $bootNext = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext"))
-        if ($bootNext.Count -ne 1 -or [uint16]$bootNext[0] -ne $bootNumber) {
-            throw "UEFI BootNext read-back does not point to $bootVariable."
-        }
+        # Record the exact Boot#### owner before writing BootNext so recovery
+        # can remove an entry left by an interruption at either boundary.
         Update-TransactionFirmwareState `
             -BootNumber $bootNumber `
             -BootVariable $bootVariable `
             -EspLoaderSha256 $loaderHashes `
             -OriginalBootOrder $originalBootOrder
+        Set-FirmwareVariable -Name "BootNext" -Value (ConvertTo-BootOrderBytes -Order @($bootNumber))
+        $bootNext = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext"))
+        if ($bootNext.Count -ne 1 -or [uint16]$bootNext[0] -ne $bootNumber) {
+            throw "UEFI BootNext read-back does not point to $bootVariable."
+        }
         Write-Log "BootNext verified: $bootVariable -> ESP:$loaderPath" "Green"
         return
+    }
+
+    if (Test-FirmwareVariableExists -Name "BootNext") {
+        Remove-FirmwareVariable -Name "BootNext"
+    }
+    if (Test-FirmwareVariableExists -Name "BootNext") {
+        throw "UEFI BootNext still exists; refusing a BootOrder fallback that firmware would bypass."
     }
 
     $fallbackEspDrive = $null
@@ -525,7 +538,9 @@ function Set-LibertixUefiBootEntry {
         $fallbackEspDrive = Mount-Esp -Letter $EspLetter
         $firmwareEntry = New-LibertixBcdFirmwareEntry `
             -EspDrive $fallbackEspDrive `
-            -LoaderPath $loaderPath
+            -LoaderPath $loaderPath `
+            -EspLoaderSha256 $loaderHashes `
+            -OriginalBootOrder $originalBootOrder
     } finally {
         if ($fallbackEspDrive) {
             Dismount-Letter -Letter $EspLetter
@@ -536,11 +551,6 @@ function Set-LibertixUefiBootEntry {
     )
     if ($fallbackOrder.Count -eq 0 -or [uint16]$fallbackOrder[0] -ne $firmwareEntry.BootNumber) {
         throw "BCD firmware fallback did not place $($firmwareEntry.BootVariable) first in UEFI BootOrder."
-    }
-    try {
-        Remove-FirmwareVariable -Name "BootNext"
-    } catch {
-        Write-Verbose "BootNext removal was not required by this firmware: $($_.Exception.Message)"
     }
     Update-TransactionFirmwareState `
         -BootNumber $firmwareEntry.BootNumber `

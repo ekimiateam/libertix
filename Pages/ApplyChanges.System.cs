@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Libertix.Helpers;
 using Libertix.Installation;
@@ -53,27 +54,49 @@ namespace Libertix.Pages
                 throw new FileNotFoundException("Storage preflight script is missing.", scriptPath);
 
             string expected = firmware == FirmwareType.Uefi ? "UEFI" : "BIOS";
-            string powershell = ResolveSystemExecutable(
-                "WindowsPowerShell\\v1.0\\powershell.exe",
-                "powershell.exe");
-            var result = await Task.Run(() => RunProcess(
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
+            var output = new StringBuilder();
+            object outputLock = new object();
+            string expectedPlanArgument = firmware == FirmwareType.Bios && decryptBitLocker
+                ? $" -ExpectedPlanPath {QuoteArgument(_installationPlanPath)}"
+                : string.Empty;
+            StreamingProcessResult processResult = await RunStreamingProcessAsync(
                 powershell,
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
                 $"-ExpectedFirmware {expected} " +
-                (firmware == FirmwareType.Bios && decryptBitLocker ? "-DecryptBitLocker" : ""),
+                (firmware == FirmwareType.Bios && decryptBitLocker ? "-DecryptBitLocker" : "") +
+                expectedPlanArgument,
                 firmware == FirmwareType.Bios && decryptBitLocker
-                    ? (int)WindowsProcessTimeouts.InstallerOperation.TotalMilliseconds
-                    : (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds));
+                    ? WindowsProcessTimeouts.InstallerOperation
+                    : WindowsProcessTimeouts.DiskOperation,
+                line => Log(line),
+                captureStandardOutput: line =>
+                {
+                    lock (outputLock)
+                        output.AppendLine(line);
+                });
 
-            if (!string.IsNullOrWhiteSpace(result.output))
-                Log(result.output.Trim());
-            if (!string.IsNullOrWhiteSpace(result.error))
-                Log($"ERROR: {result.error.Trim()}");
-            PowerShellJsonResult values = PowerShellJsonResult.ParseFinalObject(result.output);
-            if (result.exitCode != 0 || !values.GetBoolean("preflightOk"))
+            string standardOutput;
+            lock (outputLock)
+                standardOutput = output.ToString();
+            if (processResult.Completion == StreamingProcessCompletion.Cancelled)
+                throw new OperationCanceledException(_installationCancellation.Token);
+            if (processResult.Completion == StreamingProcessCompletion.TerminationFailed)
+                throw new UnterminatedProcessException(
+                    "Storage preflight process tree could not be proven stopped.");
+
+            if (processResult.Completion != StreamingProcessCompletion.Exited)
                 throw new InvalidOperationException(
-                    $"Storage preflight failed with rc={result.exitCode}: " +
-                    values.GetOptionalString("errorMessage", result.error));
+                    $"Storage preflight did not complete ({processResult.Completion}).");
+
+            PowerShellJsonResult values = PowerShellJsonResult.ParseFinalObject(standardOutput);
+            if (
+                processResult.ExitCode != 0 ||
+                !values.GetBoolean("preflightOk")
+            )
+                throw new InvalidOperationException(
+                    $"Storage preflight failed with rc={processResult.ExitCode} ({processResult.Completion}): " +
+                    values.GetOptionalString("errorMessage", "No structured error was returned."));
 
             var info = new StoragePreflightInfo
             {
@@ -87,6 +110,7 @@ namespace Libertix.Pages
                 BootPartitionOffset = values.GetInt64("bootPartitionOffset"),
                 BootPartitionSize = values.GetInt64("bootPartitionSize"),
                 SystemDiskUniqueId = values.GetString("systemDiskUniqueId"),
+                SystemDiskPartitionTableId = values.GetString("systemDiskPartitionTableId"),
                 SystemDiskSize = values.GetInt64("systemDiskSize"),
                 LogicalSectorSize = values.GetInt32("logicalSectorSize"),
                 PartitionStyle = values.GetString("partitionStyle"),

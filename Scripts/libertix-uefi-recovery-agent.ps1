@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$StatePath,
-    [ValidateSet("Check", "Prompt", "Cancel")][string]$Action = "Check"
+    [ValidateSet("Check", "Prompt", "Cancel")][string]$Action = "Check",
+    [ValidateRange(0, 2147483647)][int]$WaitForProcessId = 0
 )
 
 Set-StrictMode -Version Latest
@@ -91,6 +92,13 @@ function Assert-RecoveryState {
     param([Parameter(Mandatory = $true)]$State)
 
     $expectedRoot = (Join-Path $env:ProgramData "Libertix\UefiRecovery") + "\"
+    if (
+        [string]$State.RunId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$State.PlanId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$State.PlanId -ne [string]$State.RunId
+    ) {
+        throw "Recovery state plan identity is invalid."
+    }
     $fullRoot = [IO.Path]::GetFullPath([string]$State.RecoveryRoot)
     if (-not $fullRoot.StartsWith($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Recovery state is outside the Libertix recovery root."
@@ -103,6 +111,24 @@ function Assert-RecoveryState {
             throw "Recovery payload path is outside the declared recovery root."
         }
     }
+}
+
+function Read-ValidatedExecutionState {
+    param([Parameter(Mandatory = $true)]$RecoveryState)
+
+    $executionStatePath = Join-Path $RecoveryState.RecoveryRoot "installation-state.json"
+    $modulePath = Join-Path `
+        $RecoveryState.PayloadRoot `
+        "Scripts\modules\Libertix.InstallationState.psm1"
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        throw "Installation state validation module is missing."
+    }
+    Import-Module -Name $modulePath -Force -ErrorAction Stop
+    $executionState = Read-LibertixExecutionState -Path $executionStatePath
+    if ([string]$executionState.planId -ne [string]$RecoveryState.PlanId) {
+        throw "Installation state does not belong to the UEFI recovery transaction."
+    }
+    return $executionState
 }
 
 function Test-RecoveryPayload {
@@ -132,16 +158,37 @@ function Test-RecoveryPayload {
 function Test-LinuxPartitionPresent {
     param([Parameter(Mandatory = $true)]$State)
 
-    if ($null -eq $State.SystemDiskNumber -or $null -eq $State.ExpectedLinuxPartitionSize) {
+    if (
+        $null -eq $State.SystemDiskNumber -or
+        [string]::IsNullOrWhiteSpace([string]$State.SystemDiskUniqueId) -or
+        [string]::IsNullOrWhiteSpace([string]$State.SystemDiskPartitionTableId) -or
+        $null -eq $State.SystemDiskSize -or
+        $null -eq $State.ExpectedLinuxPartitionOffset -or
+        $null -eq $State.ExpectedLinuxPartitionSize
+    ) {
+        return $false
+    }
+    $disk = Get-Disk -Number ([int]$State.SystemDiskNumber) -ErrorAction Stop
+    if (
+        ([string]$disk.UniqueId).Trim() -ne ([string]$State.SystemDiskUniqueId).Trim() -or
+        [int64]$disk.Size -ne [int64]$State.SystemDiskSize -or
+        [string]$disk.PartitionStyle -ne "GPT" -or
+        -not $disk.Guid
+    ) {
+        return $false
+    }
+    $partitionTableId = "gpt:$(([Guid]$disk.Guid).ToString('D').ToLowerInvariant())"
+    if ($partitionTableId -ne [string]$State.SystemDiskPartitionTableId) {
         return $false
     }
     $expectedSize = [int64]$State.ExpectedLinuxPartitionSize
-    $tolerance = 256MB
+    $expectedOffset = [int64]$State.ExpectedLinuxPartitionOffset
     $linuxGptType = "{0fc63daf-8483-4772-8e79-3d69d8477de4}"
     $installerPartitions = @(
         Get-Partition -DiskNumber ([int]$State.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
-                [math]::Abs([int64]$_.Size - $expectedSize) -le $tolerance -and
+                [int64]$_.Offset -eq $expectedOffset -and
+                [int64]$_.Size -eq $expectedSize -and
                 ($_.GptType -eq $linuxGptType -or $_.Type -match "Linux")
             }
     )
@@ -149,19 +196,49 @@ function Test-LinuxPartitionPresent {
 }
 
 function Remove-RecoveryArtifacts {
-    param([Parameter(Mandatory = $true)]$State)
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [switch]$DeferRootRemoval,
+        [ValidateRange(0, 2147483647)][int]$WaitForProcessId = 0
+    )
 
-    schtasks.exe /Delete /TN $State.TaskName /F 2>$null | Out-Null
-    if (-not [string]::IsNullOrWhiteSpace([string]$State.PromptTaskName)) {
-        schtasks.exe /Delete /TN $State.PromptTaskName /F 2>$null | Out-Null
+    $taskNames = @([string]$State.TaskName, [string]$State.PromptTaskName) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($taskName in $taskNames) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            throw "Recovery task still exists after removal: $taskName"
+        }
     }
     Remove-Item `
         -LiteralPath (Join-Path $SystemDrive "libertix-live.iso") `
         -Force `
         -ErrorAction SilentlyContinue
     $root = [IO.Path]::GetFullPath([string]$State.RecoveryRoot)
-    $quotedRoot = '"' + $root.Replace('"', '""') + '"'
-    Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c ping 127.0.0.1 -n 3 > nul & rmdir /s /q $quotedRoot" -WindowStyle Hidden
+    if ($DeferRootRemoval) {
+        if ($WaitForProcessId -gt 0) {
+            $escapedRoot = $root.Replace("'", "''")
+            $cleanupCommand = @"
+try { Wait-Process -Id $WaitForProcessId -Timeout 3600 -ErrorAction SilentlyContinue } catch {}
+Remove-Item -LiteralPath '$escapedRoot' -Recurse -Force -ErrorAction SilentlyContinue
+"@
+            $encodedCommand = [Convert]::ToBase64String(
+                [Text.Encoding]::Unicode.GetBytes($cleanupCommand)
+            )
+            Start-Process `
+                -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+                -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $encodedCommand" `
+                -WindowStyle Hidden
+        } else {
+            $quotedRoot = '"' + $root.Replace('"', '""') + '"'
+            Start-Process -FilePath "$env:ComSpec" -ArgumentList "/c ping 127.0.0.1 -n 3 > nul & rmdir /s /q $quotedRoot" -WindowStyle Hidden
+        }
+        return
+    }
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $root) {
+        throw "Recovery root still exists after removal: $root"
+    }
 }
 
 function Invoke-WindowsShareFinalize {
@@ -206,17 +283,23 @@ try {
     $state = Get-Content -LiteralPath $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Assert-RecoveryState -State $state
     Test-RecoveryPayload -State $state
+    $executionState = Read-ValidatedExecutionState -RecoveryState $state
     Write-AgentLog "Recovery agent started. action=$Action phase=$($state.Phase)"
 
     if ($Action -eq "Cancel") {
         $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript -Revert
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
+            -Revert `
+            -ExpectedRecoveryRunId ([string]$state.RunId)
         if ($LASTEXITCODE -ne 0) {
             throw "UEFI revert failed with rc=$LASTEXITCODE."
         }
         Write-AgentLog "Fallback was declined; UEFI transaction reverted."
         Remove-PendingWindowsSharePayload
-        Remove-RecoveryArtifacts -State $state
+        Remove-RecoveryArtifacts `
+            -State $state `
+            -DeferRootRemoval `
+            -WaitForProcessId $WaitForProcessId
         exit 0
     }
 
@@ -226,7 +309,11 @@ try {
     $successRunId = Read-EnvValue -Path $installSuccess -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
     $successState = Read-EnvValue -Path $installSuccess -Name "LIBERTIX_UEFI_RECOVERY_STATE"
 
-    if ($successRunId -eq [string]$state.RunId -and $successState -eq "install-success") {
+    if (
+        $successRunId -eq [string]$state.RunId -and
+        $successState -eq "install-success" -and
+        [string]$executionState.status -eq "succeeded"
+    ) {
         if (-not (Test-LinuxPartitionPresent -State $state)) {
             throw "Live success marker exists but the expected Linux partition is absent."
         }
@@ -239,10 +326,21 @@ try {
     }
 
     $failedRunId = Read-EnvValue -Path $liveFailed -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
-    if ($failedRunId -eq [string]$state.RunId) {
+    if (
+        $failedRunId -eq [string]$state.RunId -and
+        [string]$executionState.status -in @("failed", "rollback-running", "rolled-back")
+    ) {
+        $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
+            -RestoreWindowsSettings `
+            -ExpectedRecoveryRunId ([string]$state.RunId)
+        if ($LASTEXITCODE -ne 0) {
+            throw "Windows setting restoration failed after live rollback with rc=$LASTEXITCODE."
+        }
+        Remove-PendingWindowsSharePayload
         $state.Phase = "LiveFailed"
         Save-State -State $state
-        Write-AgentLog "The live installer started but reported a failure; fallback is not retried automatically."
+        Write-AgentLog "The live installer failed; Windows settings were restored and recovery evidence was retained."
         exit 2
     }
 

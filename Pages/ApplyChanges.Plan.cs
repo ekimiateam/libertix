@@ -83,6 +83,9 @@ namespace Libertix.Pages
             _executionLedger = InstallationExecutionLedger.Create(
                 planId,
                 Path.Combine(persistenceRoot, InstallationStateFileName));
+            // The protected hash and validated plan are now durable. Keeping
+            // the clear-text password referenced cannot help recovery or retry.
+            account.ClearPassword();
             StartExecutionStep(InstallationStep.WindowsPreflightVerified);
             CompleteExecutionStep(InstallationStep.WindowsPreflightVerified);
             Log($"Installation plan created: {planId}, firmware={_installationPlan.Firmware}, " +
@@ -101,9 +104,7 @@ namespace Libertix.Pages
             if (_installationPlan == null)
                 throw new InvalidOperationException("Installation plan is not initialized.");
 
-            string powershell = ResolveSystemExecutable(
-                "WindowsPowerShell\\v1.0\\powershell.exe",
-                "powershell.exe");
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
             string command =
                 $"$p=Get-Partition -DriveLetter {char.ToUpperInvariant(driveLetter)} -ErrorAction Stop; " +
                 "[Console]::Out.WriteLine(('{0}|{1}|{2}' -f $p.PartitionNumber,$p.Offset,$p.Size))";

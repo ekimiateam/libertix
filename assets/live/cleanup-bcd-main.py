@@ -60,11 +60,26 @@ def set_guid_list(hive: Any, elements: int, element_name: str, guids: list[str])
 def is_libertix_temporary_entry(description: str, path: str) -> bool:
     normalized_description = description.casefold()
     normalized_path = path.replace("/", "\\").casefold()
-    temporary_bios_entry = normalized_description == "install linux" and normalized_path in (
+    owned_bios_prefix = "libertix bios installer "
+    owned_bios_suffix = normalized_description.removeprefix(owned_bios_prefix)
+    owned_uefi_prefix = "libertix uefi installer "
+    owned_uefi_suffix = normalized_description.removeprefix(owned_uefi_prefix)
+    temporary_bios_entry = (
+        normalized_description == "install linux"
+        or (
+            normalized_description.startswith(owned_bios_prefix)
+            and len(owned_bios_suffix) == 32
+            and all(character in "0123456789abcdef" for character in owned_bios_suffix)
+        )
+    ) and normalized_path in (
         "\\grldr.mbr",
         "\\\\grldr.mbr",
     )
-    temporary_uefi_entry = normalized_description == "libertix uefi installer"
+    temporary_uefi_entry = normalized_description == "libertix uefi installer" or (
+        normalized_description.startswith(owned_uefi_prefix)
+        and len(owned_uefi_suffix) == 32
+        and all(character in "0123456789abcdef" for character in owned_uefi_suffix)
+    )
     return temporary_bios_entry or temporary_uefi_entry
 
 

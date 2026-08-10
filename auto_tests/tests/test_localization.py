@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 from types import ModuleType
 from xml.etree import ElementTree
@@ -100,6 +101,22 @@ def test_live_translation_catalogues_have_identical_keys() -> None:
     assert all(catalogue[language] for language in LANGUAGES)
 
 
+def test_linux_extraction_labels_are_concise_in_every_language() -> None:
+    catalogue = json.loads(
+        (ROOT / "assets/live/libertix-translations.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "en": ("Extracting the Linux system", "Extracting the Linux system:"),
+        "fr": ("Extraction du système Linux", "Extraction du système Linux :"),
+        "es": ("Extrayendo el sistema Linux", "Extrayendo el sistema Linux:"),
+        "ja": ("Linux システムを展開しています", "Linux システムを展開中："),
+    }
+
+    for language, (label, progress_prefix) in expected.items():
+        assert catalogue[language]["stage_120_unsquashfs"] == label
+        assert catalogue[language]["extraction_progress"].startswith(progress_prefix)
+
+
 def test_compatibility_message_catalogue_has_language_and_key_parity() -> None:
     catalogue = json.loads(
         (ROOT / "Scripts/config/Libertix.CompatibilityMessages.json").read_text(encoding="utf-8")
@@ -115,6 +132,13 @@ def test_compatibility_message_catalogue_has_language_and_key_parity() -> None:
         assert set(section) == set(LANGUAGES)
         assert len({frozenset(entries) for entries in section.values()}) == 1
         assert all(section[language] for language in LANGUAGES)
+
+    assert {
+        "AdministratorRequired",
+        "SingleInstanceRequired",
+        "InvalidStartupOptionsTitle",
+        "InvalidStartupOptionsMessage",
+    } <= set(catalogue["bootstrapMessages"]["en"])
 
     script = (ROOT / "Scripts/libertix-compatibility-preflight.ps1").read_text(encoding="utf-8-sig")
     assert "Libertix.CompatibilityMessages.json" in script
@@ -200,6 +224,7 @@ def test_apply_changes_runtime_messages_are_translated_in_every_language() -> No
         "ConfirmationYes",
         "ConfirmationNo",
         "ApplyChangesPreparingWindowsShare",
+        "WindowsShareShortcutDescription",
         "ApplyChangesPreparingUefi",
         "ApplyChangesCheckingSecureBoot",
         "ApplyChangesDecryptingWindowsInit",
@@ -208,12 +233,62 @@ def test_apply_changes_runtime_messages_are_translated_in_every_language() -> No
         "ApplyChangesDownloading",
         "ApplyChangesDownloadingIso",
         "ApplyChangesDownloadingLinuxIso",
-        "ApplyChangesDownloadingMint",
+        "ApplyChangesDownloadingDistribution",
+        "ApplyChangesDistributionReady",
         "ApplyChangesDownloadingUefiIso",
         "ApplyChangesRollbackInProgress",
         "ApplyChangesCancelledRestored",
         "ApplyChangesErrorRollback",
         "ApplyChangesRollbackIncomplete",
+        "ApplyChangesBitLockerReenable",
+        "ApplyChangesBitLockerReenableDetails",
+        "ApplyChangesBitLockerReenableTitle",
+    }
+
+    assert all(required_keys <= resource_keys(language) for language in LANGUAGES)
+
+
+def test_every_csharp_localization_reference_exists_in_every_language() -> None:
+    patterns = (
+        re.compile(r'\bLocalized(?:Format)?\(\s*"([A-Za-z0-9_.-]+)"'),
+        re.compile(r'\bLocalization\.GetString\(\s*"([A-Za-z0-9_.-]+)"'),
+    )
+    referenced_keys: set[str] = set()
+    for source in ROOT.rglob("*.cs"):
+        if any(part in {"bin", "obj", ".work", "runtime"} for part in source.parts):
+            continue
+        content = source.read_text(encoding="utf-8-sig")
+        for pattern in patterns:
+            referenced_keys.update(pattern.findall(content))
+
+    assert referenced_keys
+    assert all(referenced_keys <= resource_keys(language) for language in LANGUAGES)
+
+
+def test_wpf_translation_placeholders_match_in_every_language() -> None:
+    values_by_language: dict[str, dict[str, str]] = {}
+    for language in LANGUAGES:
+        path = ROOT / f"Resources/Lang/Strings.{language}.xaml"
+        tree = ElementTree.parse(path)
+        values_by_language[language] = {
+            element.attrib[XAML_KEY]: "".join(element.itertext())
+            for element in tree.getroot()
+            if XAML_KEY in element.attrib
+        }
+
+    for key, english_value in values_by_language["en"].items():
+        expected = set(re.findall(r"\{\d+(?::[^}]*)?\}", english_value))
+        for language in LANGUAGES:
+            actual = set(re.findall(r"\{\d+(?::[^}]*)?\}", values_by_language[language][key]))
+            assert actual == expected, f"{language}:{key} has mismatched format placeholders"
+
+
+def test_insufficient_disk_space_panel_is_translated() -> None:
+    required_keys = {
+        "ErrorPanelSystemRequirements",
+        "NotEnoughSpace",
+        "FreeUpSpace",
+        "ResizeDiskAdditionalSpace",
     }
 
     assert all(required_keys <= resource_keys(language) for language in LANGUAGES)

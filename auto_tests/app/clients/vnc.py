@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import logging
-import tempfile
 import time
 from pathlib import Path
-from uuid import uuid4
 
 from vncdotool import api
 
@@ -14,8 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 class VNCClient:
+    def __init__(self, connect_timeout: float = 15) -> None:
+        if connect_timeout <= 0:
+            raise ValueError("connect_timeout must be positive")
+        self.connect_timeout = connect_timeout
+
     def connect(self, address: str):
-        return api.connect(self.vncdotool_address(address))
+        return api.connect(self.vncdotool_address(address), timeout=self.connect_timeout)
 
     @staticmethod
     def vncdotool_address(address: str) -> str:
@@ -50,7 +53,8 @@ class VNCClient:
                     client.disconnect()
                 except Exception:
                     logger.warning(
-                        "Fermeture VNC imparfaite", extra={"step": "vnc.close", "target": address}
+                        "VNC connection did not close cleanly",
+                        extra={"step": "vnc.close", "target": address},
                     )
         if not destination.is_file() or destination.stat().st_size == 0:
             raise WorkflowError(
@@ -58,35 +62,3 @@ class VNCClient:
             )
         logger.info("VNC capture completed", extra={"step": "vnc.capture", "target": address})
         return destination
-
-    def launch_desktop_shortcut(self, address: str, *, width: int, height: int) -> None:
-        logger.info("Lancement interactif VNC", extra={"step": "vnc.launch", "target": address})
-        client = None
-        try:
-            client = self.connect(address)
-            time.sleep(1)
-            # The clean2 snapshots place the Libertix shortcut in the fourth
-            # desktop-icon slot; the following capture synchronizes the click.
-            client.mouseMove(48, 330)
-            client.mousePress(1)
-            sync_path = Path(tempfile.gettempdir()) / f"vnc-sync-{uuid4().hex}.png"
-            try:
-                client.captureScreen(str(sync_path))
-            finally:
-                sync_path.unlink(missing_ok=True)
-            client.keyPress("enter")
-            time.sleep(1)
-        except Exception as exc:
-            raise WorkflowError(
-                "vnc.launch",
-                "Failed to activate the Libertix desktop shortcut",
-                details={"address": address, "error": str(exc)},
-            ) from exc
-        finally:
-            if client is not None:
-                try:
-                    client.disconnect()
-                except Exception:
-                    logger.warning(
-                        "Fermeture VNC imparfaite", extra={"step": "vnc.close", "target": address}
-                    )

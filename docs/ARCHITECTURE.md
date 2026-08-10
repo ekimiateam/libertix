@@ -12,14 +12,19 @@ preparation, the live installer, the installed system, and rollback. The JSON sc
    creates the staging partition, copies verified media, and selects the live environment for the
    next boot.
 3. The live installer validates both the plan and current hardware again. It expands or reformats
-   only the transaction-owned staging partition, extracts Mint, configures the target, installs the
-   firmware-specific bootloader, and verifies the final system.
+   only the transaction-owned staging partition, discovers and extracts the selected distribution,
+   configures the target, installs the firmware-specific bootloader, and verifies the final system.
 4. The installed system boots through GRUB and applies the optional sharing policy recorded in the
    plan.
 
 ## Installation plan
 
-The plan is immutable after publication. It records:
+The plan is atomically published before disk mutation. User choices, original disk geometry,
+artifact identity, sizing policy, locale, account, sharing, and development-network settings do not
+change after publication. Two runtime-resolved fields may be updated atomically after they become
+known: the observed staging-partition identity after creation, and a validated UEFI boot-strategy
+fallback. Every writer revalidates the complete document before replacing the previous version.
+The plan records:
 
 - disk identity, size, sector size, and partition style;
 - original Windows and Recovery geometry;
@@ -43,22 +48,46 @@ checks.
 and rollback completion. The WPF installation page orchestrates those services but does not
 implement their contracts.
 
+All Windows paths recorded in a plan must use the same drive as `disk.systemDrive`. The live maps
+that validated drive to the Windows partition identified by disk geometry; it never assumes that
+Windows is installed as `C:`. Plan and state handoff files are staged, flushed, hash-checked, and
+replaced in their destination directory before the staging volume is hidden from Windows.
+
 ## Distribution catalogue trust
 
 The production distribution catalogue is authenticated independently of the filepool. Libertix
 verifies `distros.json.sig` with the RSA public key bundled in the executable before trusting any
-download URL or checksum. The signing key remains offline; maintainers create the detached
-signature with `iso-tools/sign-distribution-catalog.sh` and publish both files atomically. An
-explicit development filepool override skips this production trust check so isolated auto-tests
+download URL or checksum. The private signing key is excluded from Git and must be supplied in the
+local ignored path expected by `iso-tools/sign-distribution-catalog.sh`; it is not embedded in the
+application or CI artifacts. Maintainers publish the catalogue and detached signature atomically.
+An explicit development filepool override skips this production trust check so isolated auto-tests
 can publish per-build ISO hashes.
+
+The catalogue is always fetched from the configured HTTP filepool before local ISO reuse is
+considered. Local ISO files reduce artifact downloads but do not provide a standalone disconnected
+mode. An isolated laboratory must expose a local HTTP filepool for the catalogue and any artifact
+that is not already beside the executable; only the production filepool requires the detached
+signature.
 
 ## Installation state
 
-The persisted state follows the ordered stage catalogue in `assets/live/libertix-stages.tsv`. Only
-the next required stage may start, an installation can succeed only after every required stage has
-completed, and rollback records compensation separately for every completed compensable stage.
-Atomic publication ensures that readers see either the previous complete state or the next complete
-state.
+The persisted state follows one ordered step catalogue that each runtime restates: `OrderedSteps` in
+`Installation/InstallationStateMachine.cs`, `Scripts/modules/Libertix.InstallationState.psm1` and
+`assets/live/libertix-installation-state.py`, plus the reversed compensation order in
+`assets/live/libertix-rollback-common.sh`. CI compares all four copies, so a step cannot be renamed,
+reordered or forgotten in a single runtime. Only the next required step may start, an installation
+can succeed only after every required step has completed, and rollback records compensation
+separately for every completed compensable step. Atomic publication ensures that readers see either
+the previous complete state or the next complete state.
+
+The live keeps its working copy under `/run`, but every accepted transition is also mirrored
+atomically to the transaction recovery directory on the Windows volume. Windows recovery accepts
+terminal marker files only when the validated mirrored state belongs to the same plan and has the
+corresponding terminal status. Marker files are diagnostic signals, not standalone proof.
+
+`assets/live/libertix-stages.tsv` is a separate, presentation-only catalogue: it maps the live
+progress markers to translated labels and percentages for the installer screens. It carries no
+authority over the persisted state.
 
 ## Recovery and rollback
 
@@ -70,7 +99,12 @@ geometry. A successful rollback requires all of the following:
 - the temporary partition and boot entries are absent;
 - original Windows and Recovery geometry is restored;
 - BIOS boot code or UEFI firmware and ESP state is restored;
-- BitLocker, hibernation, and recovery settings match their captured values.
+- hibernation and recovery settings match their captured values.
+
+BitLocker is verified separately against its captured state. Decryption that has already continued
+or completed cannot be reversed safely by the installer on every supported Windows edition. A
+mismatch therefore prevents Libertix from reporting a fully verified rollback and the application
+instructs the user to re-enable protection; it is never hidden behind a successful rollback result.
 
 Logging is diagnostic evidence, not a success signal. Failure to copy logs cannot turn a completed
 installation into a rollback request, and best-effort cleanup cannot be reported as verified

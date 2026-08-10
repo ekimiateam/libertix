@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
 using Libertix.Helpers;
 using Libertix.Models;
 using Libertix.Pages;
@@ -16,12 +15,15 @@ using System.Threading.Tasks;
 using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Windows.Input;
 using Libertix.Installation;
 
 namespace Libertix.Pages
 {
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
+        private const long MaximumCatalogBytes = 1024 * 1024;
+        private const long MaximumCatalogSignatureBytes = 16 * 1024;
         private readonly InstallationState _installationState;
         private readonly FilepoolConfig _filepool;
         private ObservableCollection<DistroInfo> _distros;
@@ -73,6 +75,49 @@ namespace Libertix.Pages
             await LoadDistrosAsync();
             await CheckPartitionConfigurationAsync();
             LoadState();
+            DistrosListBox.Focus();
+        }
+
+        private void ChooseDistro_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter &&
+                Keyboard.Modifiers == ModifierKeys.None &&
+                NextButton.IsEnabled)
+            {
+                NavigateToSelectedDistro();
+                e.Handled = true;
+                return;
+            }
+
+            if (Keyboard.Modifiers != ModifierKeys.Control || DistrosListBox.Items.Count == 0)
+            {
+                return;
+            }
+
+            int selectedIndex = DistrosListBox.SelectedIndex;
+            if (e.Key == Key.Home)
+            {
+                selectedIndex = 0;
+            }
+            else if (e.Key == Key.Right)
+            {
+                selectedIndex = Math.Min(
+                    Math.Max(selectedIndex, 0) + 1,
+                    DistrosListBox.Items.Count - 1);
+            }
+            else if (e.Key == Key.Left)
+            {
+                selectedIndex = Math.Max(selectedIndex - 1, 0);
+            }
+            else
+            {
+                return;
+            }
+
+            DistrosListBox.Focus();
+            DistrosListBox.SelectedIndex = selectedIndex;
+            DistrosListBox.ScrollIntoView(DistrosListBox.SelectedItem);
+            e.Handled = true;
         }
 
         private async Task LoadDistrosAsync()
@@ -85,7 +130,10 @@ namespace Libertix.Pages
                     timeoutCancellation.Token))
                 {
                     response.EnsureSuccessStatusCode();
-                    byte[] manifest = await response.Content.ReadAsByteArrayAsync();
+                    byte[] manifest = await BoundedHttpContent.ReadAsync(
+                        response.Content,
+                        MaximumCatalogBytes,
+                        timeoutCancellation.Token);
                     if (_filepool.RequiresCatalogSignature)
                     {
                         using (var signatureResponse = await SharedHttpClient.GetAsync(
@@ -93,11 +141,14 @@ namespace Libertix.Pages
                             timeoutCancellation.Token))
                         {
                             signatureResponse.EnsureSuccessStatusCode();
-                            string signature = await signatureResponse.Content.ReadAsStringAsync();
-                            DistributionCatalogTrust.Verify(
+                            byte[] signatureBytes = await BoundedHttpContent.ReadAsync(
+                                signatureResponse.Content,
+                                MaximumCatalogSignatureBytes,
+                                timeoutCancellation.Token);
+                            string signature = Encoding.UTF8.GetString(signatureBytes);
+                            DistributionCatalogTrust.VerifyWithApplicationKey(
                                 manifest,
-                                signature,
-                                DistributionCatalogTrust.GetApplicationPublicKeyPath());
+                                signature);
                         }
                     }
 
@@ -111,11 +162,16 @@ namespace Libertix.Pages
                     {
                         throw new InvalidOperationException("Distribution list JSON is empty or invalid.");
                     }
-                    
+
                     _distros.Clear();
+                    var seenDistroIds = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var distroJson in distroList)
                     {
-                        if (string.IsNullOrWhiteSpace(distroJson.Name) ||
+                        if (!Regex.IsMatch(distroJson.Id ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
+                            string.IsNullOrWhiteSpace(distroJson.Name) ||
+                            !Regex.IsMatch(distroJson.OsReleaseId ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
+                            !Regex.IsMatch(distroJson.GrubDisplayName ?? "", "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$") ||
+                            !Regex.IsMatch(distroJson.GrubIcon ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
                             string.IsNullOrWhiteSpace(distroJson.IsoUrl) ||
                             string.IsNullOrWhiteSpace(distroJson.IsoInstaller) ||
                             string.IsNullOrWhiteSpace(distroJson.IsoInstallerFileName) ||
@@ -123,13 +179,22 @@ namespace Libertix.Pages
                             string.IsNullOrWhiteSpace(distroJson.UefiIsoUrl) ||
                             !Regex.IsMatch(distroJson.UefiIsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
                             !Regex.IsMatch(distroJson.IsoInstallerSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
-                            distroJson.SizeInGB < 20)
+                            distroJson.IsoInstallerSizeBytes <= 0 ||
+                            distroJson.SizeInGB < InstallationSizePolicy.MinimumFinalSizeGiB)
                         {
                             throw new InvalidOperationException("Distribution manifest contains an invalid entry.");
                         }
+                        if (!seenDistroIds.Add(distroJson.Id))
+                        {
+                            throw new InvalidOperationException("Distribution manifest contains a duplicate id.");
+                        }
                         _distros.Add(new DistroInfo
                         {
+                            Id = distroJson.Id,
                             Name = distroJson.Name,
+                            OsReleaseId = distroJson.OsReleaseId,
+                            GrubDisplayName = distroJson.GrubDisplayName,
+                            GrubIcon = distroJson.GrubIcon,
                             Description = distroJson.Description ?? "No description available",
                             ImageUrl = distroJson.ImageUrl,
                             IsoUrl = _filepool.ResolveUrl(distroJson.IsoUrl),
@@ -139,11 +204,12 @@ namespace Libertix.Pages
                             UefiIsoUrl = _filepool.ResolveUrl(distroJson.UefiIsoUrl),
                             UefiIsoSha256 = distroJson.UefiIsoSha256,
                             IsoInstallerSha256 = distroJson.IsoInstallerSha256,
+                            IsoInstallerSizeBytes = distroJson.IsoInstallerSizeBytes,
                             SizeInGB = distroJson.SizeInGB
                         });
                     }
                 }
-                DistrosItemsControl.ItemsSource = _distros;
+                DistrosListBox.ItemsSource = _distros;
             }
             catch (Exception ex)
             {
@@ -158,12 +224,12 @@ namespace Libertix.Pages
 
         private void LoadState()
         {
-            string selectedDistroName = _installationState.SelectedDistro?.Name;
-            if (!string.IsNullOrWhiteSpace(selectedDistroName))
+            string selectedDistroId = _installationState.SelectedDistro?.Id;
+            if (!string.IsNullOrWhiteSpace(selectedDistroId))
             {
                 foreach (var distro in _distros)
                 {
-                    if (distro.Name == selectedDistroName)
+                    if (distro.Id == selectedDistroId)
                     {
                         SelectDistro(distro);
                         break;
@@ -181,12 +247,16 @@ namespace Libertix.Pages
 
             _selectedDistro = distro;
             _selectedDistro.IsSelected = true;
+            if (!ReferenceEquals(DistrosListBox.SelectedItem, distro))
+            {
+                DistrosListBox.SelectedItem = distro;
+            }
             UpdateNextButtonState();
         }
 
-        private void Border_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        private void DistrosListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (sender is FrameworkElement element && element.DataContext is DistroInfo distro)
+            if (DistrosListBox.SelectedItem is DistroInfo distro)
             {
                 if (_selectedDistro != distro)
                 {
@@ -197,6 +267,11 @@ namespace Libertix.Pages
         }
 
         private void NextButton_Click(object sender, RoutedEventArgs e)
+        {
+            NavigateToSelectedDistro();
+        }
+
+        private void NavigateToSelectedDistro()
         {
             if (_selectedDistro != null)
             {

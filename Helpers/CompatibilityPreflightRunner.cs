@@ -110,14 +110,21 @@ namespace Libertix.Helpers
                 process.BeginErrorReadLine();
                 if (!process.WaitForExit((int)WindowsProcessTimeouts.CompatibilityPreflight.TotalMilliseconds))
                 {
+                    bool stopped;
                     try
                     {
-                        WindowsProcessRunner.TerminateProcessTree(process);
+                        stopped = WindowsProcessRunner.TerminateProcessTree(process);
                     }
                     catch
                     {
-                        // The process can exit after the timeout is observed
-                        // but before the termination request reaches it.
+                        stopped = false;
+                    }
+                    if (!stopped)
+                    {
+                        throw new CompatibilityPreflightException(
+                            "COMPAT_E_TERMINATION_FAILED",
+                            "The compatibility process could not be proven stopped.",
+                            output + error.ToString());
                     }
                     throw new CompatibilityPreflightException(
                         "COMPAT_E_TIMEOUT",

@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Text.Json;
 using Libertix.Helpers;
 using Libertix.Installation;
+using Libertix.Models;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
 namespace Libertix.Tests
@@ -16,6 +19,7 @@ namespace Libertix.Tests
                 "https://ekimia.fr/libertix/distros.json",
                 FilepoolConfig.Production.DistrosUrl);
             Assert.IsTrue(FilepoolConfig.Production.RequiresCatalogSignature);
+            Assert.IsFalse(FilepoolConfig.Production.IsDevelopmentMode);
             Assert.AreEqual(
                 "https://ekimia.fr/libertix/distros.json.sig",
                 FilepoolConfig.Production.DistrosSignatureUrl);
@@ -33,6 +37,7 @@ namespace Libertix.Tests
                 "http://192.0.2.10:8000/filepool/live.iso",
                 filepool.ResolveUrl("live.iso"));
             Assert.IsFalse(filepool.RequiresCatalogSignature);
+            Assert.IsTrue(filepool.IsDevelopmentMode);
         }
 
         [TestMethod]
@@ -44,9 +49,27 @@ namespace Libertix.Tests
             string publicKey = Path.Combine(testData, "Libertix.CatalogPublicKey.xml");
 
             DistributionCatalogTrust.Verify(manifest, signature, publicKey);
+            DistributionCatalogTrust.VerifyWithApplicationKey(manifest, signature);
             manifest[0] ^= 1;
             Assert.ThrowsException<InvalidDataException>(
                 () => DistributionCatalogTrust.Verify(manifest, signature, publicKey));
+        }
+
+        [TestMethod]
+        public void VersionedDistributionManifestIncludesTheInstallerByteSize()
+        {
+            string testData = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "TestData");
+            string manifest = File.ReadAllText(Path.Combine(testData, "distros.json"));
+            var distributions = JsonSerializer.Deserialize<List<DistroInfoJson>>(manifest);
+
+            Assert.IsNotNull(distributions);
+            Assert.AreEqual(2, distributions.Count);
+            Assert.AreEqual("mint", distributions[0].Id);
+            Assert.AreEqual(3091660800L, distributions[0].IsoInstallerSizeBytes);
+            Assert.AreEqual(20d, distributions[0].SizeInGB);
+            Assert.AreEqual("zorin", distributions[1].Id);
+            Assert.AreEqual(3909091328L, distributions[1].IsoInstallerSizeBytes);
+            Assert.AreEqual(20d, distributions[1].SizeInGB);
         }
 
         [TestMethod]
@@ -78,6 +101,39 @@ namespace Libertix.Tests
             Assert.AreEqual("LibertixInstallRecovery", RuntimeNames.BiosRecoveryDirectory);
             Assert.AreEqual("LibertixInstallRecovery", RuntimeNames.BiosRecoveryTask);
             Assert.AreEqual("LibertixLinuxReadOnly", RuntimeNames.LinuxReadOnlyTask);
+        }
+
+        [TestMethod]
+        public void UnknownWindowsTimezoneFallsBackToAValidIanaIdentifier()
+        {
+            var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                { "Romance Standard Time", "Europe/Paris" }
+            };
+
+            Assert.AreEqual(
+                "Europe/Paris",
+                Localization.ResolveWindowsTimezoneAsLinux("Romance Standard Time", mappings));
+            Assert.AreEqual(
+                "Etc/UTC",
+                Localization.ResolveWindowsTimezoneAsLinux("Unknown Test Zone", mappings));
+        }
+
+        [TestMethod]
+        public void AccountPasswordReferenceCanBeReleasedAfterPlanCreation()
+        {
+            var account = new AccountInfo
+            {
+                Username = "test",
+                Password = "test-passphrase",
+                ComputerName = "test-machine"
+            };
+
+            account.ClearPassword();
+
+            Assert.IsNull(account.Password);
+            Assert.AreEqual("test", account.Username);
+            Assert.AreEqual("test-machine", account.ComputerName);
         }
     }
 }

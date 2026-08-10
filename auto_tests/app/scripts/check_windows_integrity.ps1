@@ -296,17 +296,17 @@ $shareShortcuts |
     Format-Table -AutoSize
 Write-Output ("LINUX_EXPLORER_SHORTCUT_COUNT={0}" -f $shareShortcuts.Count)
 
-$mintWriteMarkers = @(
-    Get-ChildItem -Path "C:\Users\*\Documents\libertix-mint-write-*.txt" -File -ErrorAction SilentlyContinue
+$linuxWriteMarkers = @(
+    Get-ChildItem -Path "C:\Users\*\Documents\libertix-linux-write-*.txt" -File -ErrorAction SilentlyContinue
 )
-$mintWriteMarkers |
+$linuxWriteMarkers |
     Select-Object FullName, Length, LastWriteTime |
     Format-Table -AutoSize
-foreach ($marker in $mintWriteMarkers) {
+foreach ($marker in $linuxWriteMarkers) {
     Write-Output ("--- {0} ---" -f $marker.FullName)
     Get-Content -LiteralPath $marker.FullName -ErrorAction SilentlyContinue
 }
-Write-Output ("MINT_TO_WINDOWS_WRITE_MARKER_COUNT={0}" -f $mintWriteMarkers.Count)
+Write-Output ("LINUX_TO_WINDOWS_WRITE_MARKER_COUNT={0}" -f $linuxWriteMarkers.Count)
 
 if (Test-Path -LiteralPath $shareLogPath -PathType Leaf) {
     Write-Output ("--- {0} ---" -f $shareLogPath)

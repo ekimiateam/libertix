@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v1.json",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v2.json",
   "title": "Libertix Installation Plan",
   "description": "Versioned contract shared by the Windows application, the live installer, the installed target and rollback tooling.",
   "type": "object",
@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "planId": {
       "type": "string",
@@ -62,7 +62,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "id",
         "name",
+        "osReleaseId",
+        "grubDisplayName",
+        "grubIcon",
         "installerIsoFileName",
         "installerIsoUrl",
         "installerIsoWindowsPath",
@@ -71,9 +75,25 @@
         "liveIsoSha256"
       ],
       "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
         "name": {
           "type": "string",
           "minLength": 1
+        },
+        "osReleaseId": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
+        "grubDisplayName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$"
+        },
+        "grubIcon": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
         },
         "installerIsoFileName": {
           "type": "string",
@@ -156,8 +176,7 @@
         },
         "computerName": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 63
+          "pattern": "^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
         }
       }
     },
@@ -167,6 +186,7 @@
       "required": [
         "number",
         "uniqueId",
+        "partitionTableId",
         "sizeBytes",
         "logicalSectorSizeBytes",
         "partitionStyle",
@@ -184,6 +204,10 @@
         "uniqueId": {
           "type": "string",
           "minLength": 1
+        },
+        "partitionTableId": {
+          "type": "string",
+          "pattern": "^(?:mbr:[0-9a-f]{8}|gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
         },
         "sizeBytes": {
           "$ref": "#/$defs/positiveInteger"
@@ -327,7 +351,8 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "pattern": "^[A-Za-z]:\\\\"
         },
         "recoveryRunId": {
           "type": [
@@ -404,6 +429,9 @@
             "properties": {
               "partitionStyle": {
                 "const": "MBR"
+              },
+              "partitionTableId": {
+                "pattern": "^mbr:[0-9a-f]{8}$"
               }
             }
           },
@@ -434,6 +462,9 @@
             "properties": {
               "partitionStyle": {
                 "const": "GPT"
+              },
+              "partitionTableId": {
+                "pattern": "^gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
               }
             }
           },

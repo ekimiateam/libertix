@@ -181,6 +181,22 @@ function Assert-LibertixExecutionState {
     if ([string]$State.status -in $script:TerminalStatuses -and [string]$State.phase -ne "complete") {
         throw "A terminal execution state requires the complete phase."
     }
+    if (
+        [string]$State.status -eq "succeeded" -and
+        ($completed.Count -ne $script:OrderedSteps.Count -or
+         [string]$completed[-1] -ne $script:OrderedSteps[-1])
+    ) {
+        throw "A successful execution state requires every installation step."
+    }
+    if ([string]$State.status -eq "rolled-back") {
+        $requiredCompensations = @($completed | Where-Object { $_ -in $script:CompensatableSteps })
+        if (
+            $compensated.Count -ne $requiredCompensations.Count -or
+            @($requiredCompensations | Where-Object { $_ -notin $compensated }).Count -ne 0
+        ) {
+            throw "A rolled-back execution state requires every applicable compensation."
+        }
+    }
     if ([string]$State.status -eq "failed" -and $null -eq $State.failure) {
         throw "A failed execution state requires failure details."
     }

@@ -59,11 +59,6 @@ namespace Libertix.Pages
         {
             BackButton.IsEnabled = enableBackButton;
             SetInstallationRunning(false);
-            if (!_cancellationDisposed)
-            {
-                _installationCancellation.Dispose();
-                _cancellationDisposed = true;
-            }
         }
 
         private void ThrowIfCancellationRequested()
@@ -95,7 +90,10 @@ namespace Libertix.Pages
                     "Cancellation requested. Restoring Windows..."));
             Log("User requested installation cancellation.");
             _installationCancellation.Cancel();
-            await TerminateActiveProcessTreeAsync();
+            // The tracked streaming loop owns termination and does not return
+            // until it has verified that the process tree stopped. A second
+            // concurrent taskkill here can race that verification.
+            await Task.Yield();
         }
 
         private async Task HandleCancellationAsync()
@@ -122,7 +120,7 @@ namespace Libertix.Pages
                 return;
             }
 
-            if (_activeFirmware == FirmwareType.Uefi)
+            if (_activeFirmware == FirmwareType.Uefi && _activeUefiRecovery != null)
             {
                 await RollbackUefiCancellationAsync();
                 return;
@@ -144,9 +142,7 @@ namespace Libertix.Pages
                 AppDomain.CurrentDomain.BaseDirectory,
                 "Scripts",
                 "libertix-uefi-install.ps1");
-            string powershell = ResolveSystemExecutable(
-                "WindowsPowerShell\\v1.0\\powershell.exe",
-                "powershell.exe");
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
 
             // PowerShell owns the UEFI state while it runs. Reload its latest
             // durable snapshot before recording the cancellation transition so
@@ -158,16 +154,20 @@ namespace Libertix.Pages
                 InstallationPhase.Windows);
             BeginExecutionRollback();
 
-            int exitCode = await RunStreamingProcessAsync(
+            StreamingProcessResult processResult = await RunStreamingProcessAsync(
                 powershell,
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert",
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert " +
+                $"-ExpectedRecoveryRunId {QuoteArgument(_activeUefiRecovery.RunId)}",
                 WindowsProcessTimeouts.DiskImageOperation,
                 line => Log($"ROLLBACK: {line}"),
                 observeCancellation: false);
 
             CleanupPendingWindowsSharePayload();
 
-            if (exitCode == 0)
+            if (
+                processResult.Completion == StreamingProcessCompletion.Exited &&
+                processResult.ExitCode == 0
+            )
             {
                 if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
                 {
@@ -188,7 +188,7 @@ namespace Libertix.Pages
                 return;
             }
 
-            Log($"CRITICAL: UEFI cancellation rollback failed with rc={exitCode}.");
+            Log($"CRITICAL: UEFI cancellation rollback failed with rc={processResult.ExitCode} ({processResult.Completion}).");
             UpdateProgress(
                 0,
                 Localized(
@@ -280,39 +280,6 @@ namespace Libertix.Pages
                 if (ReferenceEquals(_activeStreamingProcess, process))
                     _activeStreamingProcess = null;
             }
-        }
-
-        private async Task TerminateActiveProcessTreeAsync()
-        {
-            Process process;
-            lock (_activeProcessLock)
-                process = _activeStreamingProcess;
-
-            if (process == null)
-                return;
-
-            int processId;
-            try
-            {
-                if (process.HasExited)
-                    return;
-                processId = process.Id;
-            }
-            catch
-            {
-                return;
-            }
-
-            await Task.Run(() =>
-            {
-                try { StopProcessTree(process); }
-                catch (Exception ex) { Dispatcher.Invoke(() => Log($"Cancellation process-tree stop warning: {ex.Message}")); }
-            });
-        }
-
-        private static void StopProcessTree(Process process)
-        {
-            WindowsProcessRunner.TerminateProcessTree(process);
         }
 
         private void AppendPersistentLog(string line)

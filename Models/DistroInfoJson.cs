@@ -4,8 +4,20 @@ namespace Libertix.Models
 {
     public class DistroInfoJson
     {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
         [JsonPropertyName("name")]
         public string Name { get; set; }
+
+        [JsonPropertyName("osReleaseId")]
+        public string OsReleaseId { get; set; }
+
+        [JsonPropertyName("grubDisplayName")]
+        public string GrubDisplayName { get; set; }
+
+        [JsonPropertyName("grubIcon")]
+        public string GrubIcon { get; set; }
 
         [JsonPropertyName("description")]
         public string Description { get; set; }
@@ -33,6 +45,9 @@ namespace Libertix.Models
 
         [JsonPropertyName("isoInstallerSha256")]
         public string IsoInstallerSha256 { get; set; }
+
+        [JsonPropertyName("isoInstallerSizeBytes")]
+        public long IsoInstallerSizeBytes { get; set; }
 
         [JsonPropertyName("sizeInGB")]
         public double SizeInGB { get; set; }

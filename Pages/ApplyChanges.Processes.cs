@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -12,12 +13,14 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges
     {
-        private async Task<int> RunStreamingProcessAsync(
+        private async Task<StreamingProcessResult> RunStreamingProcessAsync(
             string fileName,
             string arguments,
             TimeSpan timeout,
             Action<string> onLine,
-            bool observeCancellation = true)
+            bool observeCancellation = true,
+            Action<string> captureStandardOutput = null,
+            Func<bool> policyLimitExceeded = null)
         {
             return await Task.Run(() =>
             {
@@ -38,7 +41,10 @@ namespace Libertix.Pages
                     process.OutputDataReceived += (_, e) =>
                     {
                         if (e.Data != null)
+                        {
+                            captureStandardOutput?.Invoke(e.Data);
                             Dispatcher.BeginInvoke(new Action(() => onLine(e.Data)));
+                        }
                     };
                     process.ErrorDataReceived += (_, e) =>
                     {
@@ -58,22 +64,50 @@ namespace Libertix.Pages
                         var timer = Stopwatch.StartNew();
                         while (!process.WaitForExit(250))
                         {
+                            if (policyLimitExceeded?.Invoke() == true)
+                            {
+                                bool stopped = WindowsProcessRunner.TerminateProcessTree(process);
+                                return new StreamingProcessResult
+                                {
+                                    ExitCode = process.HasExited ? process.ExitCode : -1,
+                                    Completion = stopped
+                                        ? StreamingProcessCompletion.PolicyLimitExceeded
+                                        : StreamingProcessCompletion.TerminationFailed
+                                };
+                            }
+
                             if (observeCancellation && _installationCancellation.IsCancellationRequested)
                             {
-                                StopProcessTree(process);
-                                return -2;
+                                bool stopped = WindowsProcessRunner.TerminateProcessTree(process);
+                                return new StreamingProcessResult
+                                {
+                                    ExitCode = process.HasExited ? process.ExitCode : -1,
+                                    Completion = stopped
+                                        ? StreamingProcessCompletion.Cancelled
+                                        : StreamingProcessCompletion.TerminationFailed
+                                };
                             }
 
                             if (timer.Elapsed > timeout)
                             {
-                                StopProcessTree(process);
+                                bool stopped = WindowsProcessRunner.TerminateProcessTree(process);
                                 Dispatcher.Invoke(() => Log($"ERROR: process timed out after {timeout.TotalMinutes:N0} minutes"));
-                                return -1;
+                                return new StreamingProcessResult
+                                {
+                                    ExitCode = process.HasExited ? process.ExitCode : -1,
+                                    Completion = stopped
+                                        ? StreamingProcessCompletion.TimedOut
+                                        : StreamingProcessCompletion.TerminationFailed
+                                };
                             }
                         }
 
                         process.WaitForExit();
-                        return process.ExitCode;
+                        return new StreamingProcessResult
+                        {
+                            ExitCode = process.ExitCode,
+                            Completion = StreamingProcessCompletion.Exited
+                        };
                     }
                     finally
                     {
@@ -91,22 +125,65 @@ namespace Libertix.Pages
                     _installationCancellation.Token))
                 {
                     timeoutCancellation.CancelAfter(TimeSpan.FromMinutes(5));
-                    using (var response = await SharedHttpClient.GetAsync(url, timeoutCancellation.Token))
+                    using (var response = await SharedHttpClient.GetAsync(
+                        url,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        timeoutCancellation.Token))
                     {
                         response.EnsureSuccessStatusCode();
-                        var data = await response.Content.ReadAsByteArrayAsync();
-                        ThrowIfCancellationRequested();
-                        File.WriteAllBytes(destinationPath, data);
+                        long contentLength = response.Content.Headers.ContentLength ?? 0;
+                        if (contentLength > MaximumBootArtifactBytes)
+                            throw new DownloadSizeLimitExceededException(
+                                $"Boot artifact exceeds {MaximumBootArtifactBytes} bytes.");
+                        using (var source = await response.Content.ReadAsStreamAsync())
+                        using (var destination = new FileStream(
+                            destinationPath,
+                            FileMode.Create,
+                            FileAccess.Write,
+                            FileShare.None,
+                            81920,
+                            true))
+                        {
+                            var buffer = new byte[81920];
+                            long totalRead = 0;
+                            int bytesRead;
+                            while ((bytesRead = await source.ReadAsync(
+                                buffer,
+                                0,
+                                buffer.Length,
+                                timeoutCancellation.Token)) > 0)
+                            {
+                                if (totalRead > MaximumBootArtifactBytes - bytesRead)
+                                    throw new DownloadSizeLimitExceededException(
+                                        $"Boot artifact exceeds {MaximumBootArtifactBytes} bytes.");
+                                await destination.WriteAsync(
+                                    buffer,
+                                    0,
+                                    bytesRead,
+                                    timeoutCancellation.Token);
+                                totalRead += bytesRead;
+                            }
+                        }
                     }
                     return true;
                 }
             }
             catch (OperationCanceledException)
+                when (!_installationCancellation.IsCancellationRequested)
             {
+                DeleteDownloadArtifactBestEffort(destinationPath, "boot artifact");
+                Dispatcher.Invoke(() =>
+                    Log($"Boot artifact download timed out after 5 minutes: {url}"));
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                DeleteDownloadArtifactBestEffort(destinationPath, "boot artifact");
                 throw;
             }
             catch (Exception ex)
             {
+                DeleteDownloadArtifactBestEffort(destinationPath, "boot artifact");
                 Dispatcher.Invoke(() => Log($"Download failed for {url}: {ex.Message}"));
                 return false;
             }

@@ -17,6 +17,7 @@ namespace Libertix.Installation
         public string SystemDrive { get; set; }
         public int SystemDiskNumber { get; set; }
         public string SystemDiskUniqueId { get; set; }
+        public string SystemDiskPartitionTableId { get; set; }
         public long SystemDiskSize { get; set; }
         public int LogicalSectorSize { get; set; }
         public string PartitionStyle { get; set; }

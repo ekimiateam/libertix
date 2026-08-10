@@ -174,8 +174,28 @@ function Remove-LibertixTemporaryEspFiles {
 
     $path = Join-Path $EspDrive $InstallerEspDirectory
     if (Test-Path $path) {
+        Assert-LibertixTemporaryEspOwnership -Directory $path
         Write-Log "Removing temporary ESP boot directory: $InstallerEspDirectory" "Cyan"
         Remove-Item -Path $path -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $path) {
+            throw "Temporary ESP boot directory still exists after deletion: $InstallerEspDirectory"
+        }
+    }
+}
+
+function Assert-LibertixTemporaryEspOwnership {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    if ($RecoveryRunId -notmatch '^[0-9a-f]{32}$') {
+        throw "A valid recovery run identifier is required for temporary ESP ownership checks."
+    }
+    $ownerPath = Join-Path $Directory $InstallerEspOwnershipFile
+    if (-not (Test-Path -LiteralPath $ownerPath -PathType Leaf)) {
+        throw "Temporary ESP directory has no Libertix ownership marker; refusing modification."
+    }
+    $owner = (Get-Content -LiteralPath $ownerPath -Raw -ErrorAction Stop).Trim()
+    if ($owner -ne $RecoveryRunId) {
+        throw "Temporary ESP directory belongs to another recovery run; refusing modification."
     }
 }
 
@@ -195,6 +215,11 @@ function Install-LibertixTemporaryBootloaderOnEsp {
     $destination = Join-Path $EspDrive $InstallerEspDirectory
     Remove-LibertixTemporaryEspFiles -EspDrive $EspDrive
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    Set-Content `
+        -LiteralPath (Join-Path $destination $InstallerEspOwnershipFile) `
+        -Value $RecoveryRunId `
+        -Encoding ASCII `
+        -NoNewline
 
     $sourceBoot = Join-Path $InstallerDrive "EFI\BOOT"
     $bootx64 = Join-Path $sourceBoot "BOOTX64.EFI"
@@ -401,6 +426,7 @@ function Dismount-Letter {
 
     if (Test-Path "${Letter}:\") {
         Close-ExplorerWindowsForDrive -Letter $Letter
+        $removedWithPowerShell = $false
         try {
             $part = Get-Partition -DriveLetter $Letter -ErrorAction Stop
             Remove-PartitionAccessPath `
@@ -416,9 +442,13 @@ function Dismount-Letter {
                 -Letter $Letter `
                 -IncludeErrorDialogs `
                 -RetryCount 25
-            return
+            $removedWithPowerShell = -not (Test-Path "${Letter}:\")
         } catch {
             Write-Log "Could not remove ${Letter}: with PowerShell; trying diskpart best-effort..." "Yellow"
+        }
+
+        if ($removedWithPowerShell) {
+            return
         }
 
         try {
@@ -432,7 +462,10 @@ exit
                 -IncludeErrorDialogs `
                 -RetryCount 25
         } catch {
-            Write-Log "Could not remove drive letter ${Letter}:; continuing." "Yellow"
+            throw "Could not remove drive letter ${Letter}: with PowerShell or diskpart: $($_.Exception.Message)"
+        }
+        if (Test-Path "${Letter}:\") {
+            throw "Drive letter ${Letter}: still exists after PowerShell and diskpart removal attempts."
         }
     }
 }
@@ -504,6 +537,37 @@ function Set-VolumeLetterByLabel {
     return "${letterToUse}:"
 }
 
+function Request-BitLockerDecryption {
+    param(
+        [Parameter(Mandatory = $true)][string]$MountPoint,
+        [Parameter(Mandatory = $true)][string]$ManageBdePath
+    )
+
+    $cmdletError = $null
+    try {
+        Disable-BitLocker -MountPoint $MountPoint -ErrorAction Stop
+    } catch {
+        $cmdletError = $_.Exception.Message
+    }
+
+    $manageOutput = & $ManageBdePath -off $MountPoint 2>&1
+    $manageExitCode = $LASTEXITCODE
+    if ($manageExitCode -ne 0) {
+        $cmdletStatus = if ($cmdletError) { $cmdletError } else { "no terminating error" }
+        throw (
+            "BitLocker decryption request failed for ${MountPoint}: " +
+            "Disable-BitLocker=$cmdletStatus; " +
+            "manage-bde rc=$manageExitCode output=$($manageOutput -join ' ')"
+        )
+    }
+    if ($cmdletError) {
+        Write-Log (
+            "Disable-BitLocker reported '$cmdletError'; " +
+            "the verified manage-bde fallback accepted the request."
+        ) "Yellow"
+    }
+}
+
 function Set-WindowsVolumeReadableFromLinux {
     $manageBde = Get-NativeSystemExecutable -FileName "manage-bde.exe"
 
@@ -524,8 +588,7 @@ function Set-WindowsVolumeReadableFromLinux {
 
     Write-LibertixProgress -Stage "windows-decryption-start" -Percent 18
     Write-Log "Disabling BitLocker/device encryption on $SystemDrive before Linux live boot..." "Cyan"
-    Disable-BitLocker -MountPoint $SystemDrive -ErrorAction Continue
-    & $manageBde -off $SystemDrive 2>&1 | Out-Null
+    Request-BitLockerDecryption -MountPoint $SystemDrive -ManageBdePath $manageBde
 
     $maxDecryptionWait = [TimeSpan]::FromHours(6)
     $decryptionTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -563,8 +626,7 @@ function Set-WindowsVolumeReadableFromLinux {
 
         if (($attempt % 12) -eq 0 -or $samePercentCount -ge 12) {
             Write-Log "Reasserting BitLocker decryption request for $SystemDrive..." "Yellow"
-            Disable-BitLocker -MountPoint $SystemDrive -ErrorAction Continue
-            & $manageBde -off $SystemDrive 2>&1 | Out-Null
+            Request-BitLockerDecryption -MountPoint $SystemDrive -ManageBdePath $manageBde
             $samePercentCount = 0
         }
 

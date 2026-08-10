@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Net.Http;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -287,6 +288,38 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public async Task BoundedHttpContentRejectsDeclaredAndChunkedOversizePayloads()
+        {
+            using (var accepted = new ByteArrayContent(new byte[16]))
+            {
+                byte[] result = await BoundedHttpContent.ReadAsync(
+                    accepted,
+                    16,
+                    CancellationToken.None);
+                Assert.AreEqual(16, result.Length);
+            }
+
+            using (var declaredOversize = new ByteArrayContent(new byte[17]))
+            {
+                await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+                    BoundedHttpContent.ReadAsync(
+                        declaredOversize,
+                        16,
+                        CancellationToken.None));
+            }
+
+            using (var chunkedOversize = new ByteArrayContent(new byte[17]))
+            {
+                chunkedOversize.Headers.ContentLength = null;
+                await Assert.ThrowsExceptionAsync<InvalidDataException>(() =>
+                    BoundedHttpContent.ReadAsync(
+                        chunkedOversize,
+                        16,
+                        CancellationToken.None));
+            }
+        }
+
+        [TestMethod]
         public void AtomicJsonFileReplacesCompleteUtf8DocumentWithoutTemporaryResidue()
         {
             string directory = Path.Combine(Path.GetTempPath(), "libertix-tests-" + Guid.NewGuid());
@@ -407,6 +440,58 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void LinuxAllocationReservesTheInstallerIsoAndWindowsMinimum()
+        {
+            Assert.AreEqual(
+                30d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(41d, 35d, 3d));
+            Assert.AreEqual(
+                10d,
+                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 3d, 28d));
+            Assert.AreEqual(
+                8d,
+                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 3d, 30d));
+            Assert.AreEqual(
+                0d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(10d, 35d, 3d));
+            Assert.AreEqual(10, InstallationSizePolicy.TargetWindowsFreeSpaceGiB);
+            Assert.AreEqual(2, InstallationSizePolicy.WindowsFreeSpaceToleranceGiB);
+            Assert.AreEqual(8, InstallationSizePolicy.MinimumWindowsFreeSpaceGiB);
+        }
+
+        [TestMethod]
+        public void StateValidatorRejectsForgedIncompleteTerminalStates()
+        {
+            InstallationStateMachine succeeded = InstallationStateMachine.Create(PlanId);
+            succeeded.StartStep(InstallationStep.WindowsPreflightVerified);
+            succeeded.CompleteStep(InstallationStep.WindowsPreflightVerified);
+            succeeded.State.Status = InstallationStatus.Succeeded;
+            succeeded.State.Phase = InstallationPhase.Complete;
+
+            Assert.ThrowsException<InvalidOperationException>(
+                () => InstallationStateMachine.ValidateState(succeeded.State));
+
+            InstallationStateMachine rolledBack = InstallationStateMachine.Create(PlanId);
+            rolledBack.StartStep(InstallationStep.WindowsPreflightVerified);
+            rolledBack.CompleteStep(InstallationStep.WindowsPreflightVerified);
+            rolledBack.StartStep(InstallationStep.WindowsArtifactsVerified);
+            rolledBack.CompleteStep(InstallationStep.WindowsArtifactsVerified);
+            rolledBack.StartStep(InstallationStep.WindowsRecoveryArmed);
+            rolledBack.CompleteStep(InstallationStep.WindowsRecoveryArmed);
+            rolledBack.State.Status = InstallationStatus.RolledBack;
+            rolledBack.State.Phase = InstallationPhase.Complete;
+            rolledBack.State.Failure = new InstallationFailure
+            {
+                Code = "failure",
+                Message = "failure",
+                Component = InstallationPhase.Windows
+            };
+
+            Assert.ThrowsException<InvalidOperationException>(
+                () => InstallationStateMachine.ValidateState(rolledBack.State));
+        }
+
+        [TestMethod]
         public void ProgressIsStoredAsValidatedStructuredState()
         {
             InstallationStateMachine machine = InstallationStateMachine.Create(PlanId);
@@ -463,6 +548,44 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void ExecutionLedgerStopsUpdatingDetachedMirror()
+        {
+            string directory = Path.Combine(
+                Path.GetTempPath(),
+                "libertix-ledger-detach-" + Guid.NewGuid().ToString("N"));
+            string statePath = Path.Combine(directory, "installation-state.json");
+            string mirrorPath = Path.Combine(directory, "live", "installation-state.json");
+            try
+            {
+                InstallationExecutionLedger ledger =
+                    InstallationExecutionLedger.Create(PlanId, statePath);
+                ledger.SetMirrorPath(mirrorPath);
+                ledger.StartStep(InstallationStep.WindowsPreflightVerified);
+                ledger.CompleteStep(InstallationStep.WindowsPreflightVerified);
+
+                ledger.SetMirrorPath(null);
+                ledger.RecordFailure(
+                    "WINDOWS_ONLY_FAILURE",
+                    "The live handoff is already durable.",
+                    InstallationPhase.Windows);
+
+                InstallationExecutionState primary = InstallationStateStore.Read(statePath);
+                InstallationExecutionState mirror = InstallationStateStore.Read(mirrorPath);
+
+                Assert.AreEqual(InstallationStatus.Failed, primary.Status);
+                Assert.AreEqual(InstallationStatus.Running, mirror.Status);
+                CollectionAssert.Contains(
+                    mirror.CompletedSteps.ToArray(),
+                    InstallationStep.WindowsPreflightVerified);
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, true);
+            }
+        }
+
+        [TestMethod]
         public void PlanFactoryBuildsValidatedUefiIntentFromWindowsInputs()
         {
             const long GiB = InstallationSizePolicy.BytesPerGiB;
@@ -478,7 +601,11 @@ namespace Libertix.Tests
                     Firmware = FirmwareType.Uefi,
                     Distribution = new DistroInfo
                     {
+                        Id = "mint",
                         Name = "Linux Mint",
+                        OsReleaseId = "linuxmint",
+                        GrubDisplayName = "Linux Mint 22.3 Cinnamon",
+                        GrubIcon = "linuxmint",
                         IsoInstallerFileName = "mint.iso",
                         IsoInstaller = "https://example.test/mint.iso",
                         IsoInstallerSha256 = new string('a', 64),
@@ -498,6 +625,7 @@ namespace Libertix.Tests
                     {
                         SystemDiskNumber = 0,
                         SystemDiskUniqueId = "test-disk",
+                        SystemDiskPartitionTableId = "gpt:12345678-1234-1234-1234-123456789abc",
                         SystemDiskSize = 256L * GiB,
                         LogicalSectorSize = 512,
                         PartitionStyle = InstallationPartitionStyle.Gpt,
@@ -609,11 +737,34 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void InstallationPlanRejectsWindowsPathsOnAnotherDrive()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Account.PasswordHashWindowsPath = @"D:\ProgramData\Libertix\account-secret.env";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        [TestMethod]
+        public void InstallationPlanAcceptsConsistentNonCSystemDrivePaths()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.SystemDrive = "D:";
+            plan.Distribution.InstallerIsoWindowsPath = @"D:\mint.iso";
+            plan.Account.PasswordHashWindowsPath = @"D:\ProgramData\Libertix\account-secret.env";
+            plan.Runtime.RecoveryRootWindows = @"D:\ProgramData\Libertix\Recovery";
+
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
         public void InstallationPlanAcceptsReservedPrimaryMbrOffset()
         {
             InstallationPlan plan = CreateValidPlan();
             plan.Firmware = InstallationFirmware.Bios;
             plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+            plan.Disk.PartitionTableId = "mbr:12345678";
             plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
             plan.Disk.Installer.OffsetBytes -= 1024L * 1024L;
 
@@ -640,7 +791,11 @@ namespace Libertix.Tests
                 Firmware = InstallationFirmware.Uefi,
                 Distribution = new InstallationDistribution
                 {
+                    Id = "mint",
                     Name = "Linux Mint",
+                    OsReleaseId = "linuxmint",
+                    GrubDisplayName = "Linux Mint 22.3 Cinnamon",
+                    GrubIcon = "linuxmint",
                     InstallerIsoFileName = "mint.iso",
                     InstallerIsoUrl = "https://example.test/mint.iso",
                     InstallerIsoWindowsPath = @"C:\mint.iso",
@@ -666,6 +821,7 @@ namespace Libertix.Tests
                 {
                     Number = 0,
                     UniqueId = "test-disk",
+                    PartitionTableId = "gpt:12345678-1234-1234-1234-123456789abc",
                     SizeBytes = 256L * GiB,
                     LogicalSectorSizeBytes = 512,
                     PartitionStyle = InstallationPartitionStyle.Gpt,

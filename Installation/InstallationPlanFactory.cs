@@ -54,7 +54,11 @@ namespace Libertix.Installation
                 Firmware = isUefi ? InstallationFirmware.Uefi : InstallationFirmware.Bios,
                 Distribution = new InstallationDistribution
                 {
+                    Id = options.Distribution.Id,
                     Name = options.Distribution.Name,
+                    OsReleaseId = options.Distribution.OsReleaseId,
+                    GrubDisplayName = options.Distribution.GrubDisplayName,
+                    GrubIcon = options.Distribution.GrubIcon,
                     InstallerIsoFileName = options.Distribution.IsoInstallerFileName,
                     InstallerIsoUrl = options.Distribution.IsoInstaller,
                     InstallerIsoWindowsPath = isUefi
@@ -90,6 +94,7 @@ namespace Libertix.Installation
                 {
                     Number = options.Storage.SystemDiskNumber,
                     UniqueId = options.Storage.SystemDiskUniqueId.Trim(),
+                    PartitionTableId = options.Storage.SystemDiskPartitionTableId.Trim(),
                     SizeBytes = options.Storage.SystemDiskSize,
                     LogicalSectorSizeBytes = options.Storage.LogicalSectorSize,
                     PartitionStyle = options.Storage.PartitionStyle,

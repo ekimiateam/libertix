@@ -1,18 +1,18 @@
 <UserControl x:Class="Libertix.Controls.ErrorPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:converters="clr-namespace:Libertix.Converters"
              mc:Ignorable="d">
-    
+
     <UserControl.Resources>
         <Style x:Key="CustomScrollBarThumb" TargetType="{x:Type Thumb}">
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type Thumb}">
                         <Rectangle Fill="{DynamicResource TextSecondary}"
-                                 RadiusX="4" 
+                                 RadiusX="4"
                                  RadiusY="4"/>
                     </ControlTemplate>
                 </Setter.Value>
@@ -27,9 +27,9 @@
                     <ControlTemplate TargetType="{x:Type ScrollBar}">
                         <Grid>
                             <Rectangle Fill="{DynamicResource PanelBorder}"
-                                     RadiusX="4" 
+                                     RadiusX="4"
                                      RadiusY="4"/>
-                            <Track x:Name="PART_Track" 
+                            <Track x:Name="PART_Track"
                                   IsDirectionReversed="True">
                                 <Track.Thumb>
                                     <Thumb Style="{StaticResource CustomScrollBarThumb}"/>
@@ -71,7 +71,7 @@
             MaxWidth="{Binding MaxWidth, RelativeSource={RelativeSource AncestorType=UserControl}}"
             MaxHeight="500"
             MinWidth="300">
-        
+
         <ScrollViewer Style="{StaticResource CustomScrollViewer}"
                       VerticalScrollBarVisibility="Auto"
                       Margin="40,30">
@@ -83,18 +83,18 @@
                       TextAlignment="Center"
                       TextWrapping="Wrap"
                       Margin="0,0,0,20"/>
-            
+
             <TextBlock Text="{Binding Message, RelativeSource={RelativeSource AncestorType=UserControl}}"
                       Foreground="{DynamicResource TextPrimary}"
                       FontSize="16"
                       TextAlignment="Center"
                       TextWrapping="Wrap"/>
 
-            <Expander Margin="0,20,0,0" 
+            <Expander Margin="0,20,0,0"
                       BorderThickness="0"
                       IsExpanded="True">
                 <Expander.Header>
-                    <TextBlock Text="System Requirements" 
+                    <TextBlock Text="{DynamicResource ErrorPanelSystemRequirements}"
                              Foreground="{DynamicResource TextSecondary}"
                              FontSize="16"
                              FontWeight="SemiBold"/>
@@ -105,7 +105,7 @@
                             <Trigger Property="IsExpanded" Value="True">
                                 <Setter Property="Header">
                                     <Setter.Value>
-                                        <TextBlock Text="System Requirements" 
+                                        <TextBlock Text="{DynamicResource ErrorPanelSystemRequirements}"
                                                  Foreground="{DynamicResource TextSecondary}"
                                                  FontSize="16"
                                                  FontWeight="SemiBold"/>
@@ -116,7 +116,7 @@
                     </Style>
                 </Expander.Style>
                 <Border Background="{DynamicResource PanelBorder}"
-                        CornerRadius="4" 
+                        CornerRadius="4"
                         Padding="20"
                         Margin="0,10,0,0">
                     <StackPanel>
@@ -125,7 +125,7 @@
                                  FontFamily="Consolas"
                                  FontSize="14"
                                  TextWrapping="Wrap"/>
-                        
+
                         <TextBlock Text="{Binding AdditionalDetails, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                  Foreground="{DynamicResource ErrorColor}"
                                  FontSize="14"

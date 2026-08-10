@@ -81,18 +81,19 @@ namespace Libertix.Helpers
             return quoted.ToString();
         }
 
-        public static void TerminateProcessTree(Process process)
+        public static bool TerminateProcessTree(Process process)
         {
             int processId;
+            bool treeTerminationProven = false;
             try
             {
                 if (process == null || process.HasExited)
-                    return;
+                    return true;
                 processId = process.Id;
             }
             catch
             {
-                return;
+                return false;
             }
 
             try
@@ -108,19 +109,42 @@ namespace Libertix.Helpers
                 }))
                 {
                     if (taskKill != null)
-                        taskKill.WaitForExit(10000);
+                    {
+                        bool taskKillCompleted = taskKill.WaitForExit(10000);
+                        process.WaitForExit(10000);
+                        treeTerminationProven =
+                            taskKillCompleted && taskKill.ExitCode == 0 && process.HasExited;
+                        if (treeTerminationProven)
+                            return true;
+                    }
                 }
             }
             catch
             {
-                try
+                // Fall through to the direct-process fallback below.
+            }
+            try
+            {
+                if (!process.HasExited)
                 {
                     process.Kill();
+                    process.WaitForExit(10000);
                 }
-                catch
-                {
-                    // The process may exit between the timeout and fallback.
-                }
+            }
+            catch
+            {
+                // The process may exit between the taskkill attempt and fallback.
+            }
+            try
+            {
+                // Killing only the parent is a useful last resort, but it does
+                // not prove that descendants stopped. Callers must therefore
+                // fail closed instead of beginning rollback over unknown writers.
+                return treeTerminationProven;
+            }
+            catch
+            {
+                return false;
             }
         }
 
@@ -158,15 +182,13 @@ namespace Libertix.Helpers
                 Task<string> errorTask = process.StandardError.ReadToEndAsync();
                 if (!process.WaitForExit(checked((int)timeout.TotalMilliseconds)))
                 {
-                    try
-                    {
-                        TerminateProcessTree(process);
-                    }
-                    catch
-                    {
-                        // The child may have exited at the timeout boundary.
-                    }
+                    bool stopped = TerminateProcessTree(process);
                     Task.WaitAll(new Task[] { outputTask, errorTask }, 2000);
+                    if (!stopped)
+                    {
+                        throw new InvalidOperationException(
+                            $"Timed-out process tree could not be proven stopped: {startInfo.FileName}.");
+                    }
                     return new WindowsProcessResult
                     {
                         ExitCode = -1,

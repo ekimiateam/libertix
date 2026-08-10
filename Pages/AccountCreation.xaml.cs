@@ -2,6 +2,7 @@ using System;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using Libertix.Helpers;
 using Libertix.Models;
 
@@ -27,14 +28,14 @@ namespace Libertix.Pages
 
         private void UpdateDefaultValues()
         {
-            string windowsUsername = Environment.UserName.ToLower();
+            string windowsUsername = Environment.UserName.ToLowerInvariant();
             string sanitizedUsername = Regex.Replace(windowsUsername, "[^a-z0-9-]", "");
             if (!string.IsNullOrEmpty(sanitizedUsername) && char.IsLetter(sanitizedUsername[0]))
             {
                 UsernameBox.Text = sanitizedUsername;
             }
 
-            string windowsHostname = Environment.MachineName.ToLower();
+            string windowsHostname = Environment.MachineName.ToLowerInvariant();
             string sanitizedHostname = Regex.Replace(windowsHostname, "[^a-z0-9-]", "");
             if (!string.IsNullOrEmpty(sanitizedHostname) && char.IsLetter(sanitizedHostname[0]))
             {
@@ -57,6 +58,22 @@ namespace Libertix.Pages
             };
         }
 
+        private void AccountCreation_Loaded(object sender, RoutedEventArgs e)
+        {
+            UsernameBox.Focus();
+            UsernameBox.SelectAll();
+        }
+
+        private void AccountCreation_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Home && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                UsernameBox.Focus();
+                UsernameBox.SelectAll();
+                e.Handled = true;
+            }
+        }
+
         private void LoadState()
         {
             if (_installationState.Account is AccountInfo info)
@@ -70,7 +87,7 @@ namespace Libertix.Pages
         private void ValidateInput(object sender, RoutedEventArgs e)
         {
             bool isValid = true;
-            
+
             if (string.IsNullOrEmpty(UsernameBox.Text))
             {
                 UsernameError.Text = Localization.GetString("UsernameRequired");

@@ -5,12 +5,16 @@ BeforeAll {
     function New-ValidInstallationPlan {
         return @'
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "planId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "createdAtUtc": "2026-07-15T12:00:00Z",
   "firmware": "uefi",
   "distribution": {
+    "id": "mint",
     "name": "Linux Mint",
+    "osReleaseId": "linuxmint",
+    "grubDisplayName": "Linux Mint 22.3 Cinnamon",
+    "grubIcon": "linuxmint",
     "installerIsoFileName": "mint.iso",
     "installerIsoUrl": "https://example.test/mint.iso",
     "installerIsoWindowsPath": "C:\\mint.iso",
@@ -34,6 +38,7 @@ BeforeAll {
   "disk": {
     "number": 0,
     "uniqueId": "disk-0",
+    "partitionTableId": "gpt:12345678-1234-1234-1234-123456789abc",
     "sizeBytes": 274877906944,
     "logicalSectorSizeBytes": 512,
     "partitionStyle": "GPT",
@@ -83,6 +88,22 @@ Describe "Installation plan contract" {
         { Assert-LibertixInstallationPlan -Plan $plan } |
             Should -Throw "*contains unsupported field 'unexpected'*"
     }
+
+    It "rejects Windows paths on another drive" {
+        $plan = New-ValidInstallationPlan
+        $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\account-secret.env"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*must be located on disk.systemDrive*"
+    }
+
+    It "accepts consistent Windows paths on a non-C system drive" {
+        $plan = New-ValidInstallationPlan
+        $plan.disk.systemDrive = "D:"
+        $plan.distribution.installerIsoWindowsPath = "D:\mint.iso"
+        $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\account-secret.env"
+        $plan.runtime.recoveryRootWindows = "D:\ProgramData\Libertix\Recovery"
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
 }
 
 Describe "Installation state ordering" {
@@ -109,6 +130,31 @@ Describe "Installation state ordering" {
             -Step "windows.preflight-verified"
         { Complete-LibertixInstallation -Path $script:StatePath } |
             Should -Throw "*final target verification*"
+    }
+
+    It "rejects forged incomplete terminal states" {
+        $succeeded = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
+        $succeeded.status = "succeeded"
+        $succeeded.phase = "complete"
+        $succeeded.completedSteps = @("windows.preflight-verified")
+        { Assert-LibertixExecutionState -State $succeeded } |
+            Should -Throw "*every installation step*"
+
+        $rolledBack = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
+        $rolledBack.status = "rolled-back"
+        $rolledBack.phase = "complete"
+        $rolledBack.completedSteps = @(
+            "windows.preflight-verified",
+            "windows.artifacts-verified",
+            "windows.recovery-armed"
+        )
+        $rolledBack.failure = [pscustomobject]@{
+            code = "failure"
+            message = "failure"
+            component = "windows"
+        }
+        { Assert-LibertixExecutionState -State $rolledBack } |
+            Should -Throw "*every applicable compensation*"
     }
 
     It "rejects an unknown persisted state property" {

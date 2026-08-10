@@ -46,8 +46,14 @@ compare_rootfs_file usr/local/lib/libertix/libertix-storage-common.sh \
     /workspace/assets/live/libertix-storage-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-install-runtime-common.sh \
     /workspace/assets/live/libertix-install-runtime-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-distribution-common.sh \
+    /workspace/assets/live/libertix-distribution-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.py \
     /workspace/assets/live/libertix-installation-plan.py
+compare_rootfs_file usr/local/lib/libertix/libertix-installation-state.py \
+    /workspace/assets/live/libertix-installation-state.py
+compare_rootfs_file usr/local/lib/libertix/libertix_progress.py \
+    /workspace/assets/live/libertix_progress.py
 compare_rootfs_file usr/local/lib/libertix/libertix_json_schema.py \
     /workspace/assets/live/libertix_json_schema.py
 compare_rootfs_file usr/local/lib/libertix/schemas/installation-plan.schema.json \

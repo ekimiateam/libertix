@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 SourceMode = Literal["remote", "local"]
+DistributionId = Literal["mint", "zorin"]
 
 
 class StepResult(BaseModel):
@@ -52,6 +53,9 @@ class AutomationRequest(ValidationRequest):
     """
 
     apply: bool = Field(default=False, description="Run the full installer UI and click Apply")
+    distribution: DistributionId = Field(
+        default="mint", description="Distribution catalog id selected in the Libertix wizard"
+    )
     linux_username: str = Field(
         default="test",
         min_length=1,

@@ -1,7 +1,8 @@
 param(
     [ValidateSet("BIOS", "UEFI")]
     [string]$ExpectedFirmware,
-    [switch]$DecryptBitLocker
+    [switch]$DecryptBitLocker,
+    [string]$ExpectedPlanPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +10,22 @@ Set-StrictMode -Version Latest
 & "$env:SystemRoot\System32\chcp.com" 65001 > $null
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
+
+function Get-PartitionTableIdentity {
+    param([Parameter(Mandatory = $true)][object]$Disk)
+
+    if ([string]$Disk.PartitionStyle -eq "GPT") {
+        [guid]$guid = [guid]$Disk.Guid
+        if ($guid -eq [guid]::Empty) {
+            throw "The GPT disk does not expose a partition-table GUID."
+        }
+        return "gpt:$($guid.ToString('D').ToLowerInvariant())"
+    }
+    if ([string]$Disk.PartitionStyle -eq "MBR") {
+        return "mbr:$(([uint32]$Disk.Signature).ToString('x8'))"
+    }
+    throw "Unsupported partition style for disk identity: $($Disk.PartitionStyle)."
+}
 
 function Get-FirmwareMode {
     $signature = @"
@@ -80,6 +97,58 @@ function Get-BitLockerState {
     }
 }
 
+function Assert-PartitionMatchesExpectedPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$Actual,
+        [Parameter(Mandatory = $true)][object]$Expected,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if (
+        [int]$Actual.PartitionNumber -ne [int]$Expected.number -or
+        [int64]$Actual.Offset -ne [int64]$Expected.offsetBytes -or
+        [int64]$Actual.Size -ne [int64]$Expected.sizeBytes
+    ) {
+        throw "Windows $Label partition no longer matches the armed recovery plan."
+    }
+}
+
+function Assert-StorageMatchesExpectedPlan {
+    param(
+        [Parameter(Mandatory = $true)][string]$PlanPath,
+        [Parameter(Mandatory = $true)][object]$Disk,
+        [Parameter(Mandatory = $true)][object]$SystemPartition,
+        [Parameter(Mandatory = $true)][object]$BootPartition,
+        [Parameter(Mandatory = $true)][object]$RecoveryPartition
+    )
+
+    if (-not (Test-Path -LiteralPath $PlanPath -PathType Leaf)) {
+        throw "Expected installation plan is missing: $PlanPath"
+    }
+    $plan = Get-Content -LiteralPath $PlanPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    $expectedFirmwareName = $ExpectedFirmware.ToLowerInvariant()
+    if ([string]$plan.firmware -ne $expectedFirmwareName) {
+        throw "Installation plan firmware does not match the requested preflight."
+    }
+
+    if (
+        [int]$Disk.Number -ne [int]$plan.disk.number -or
+        ([string]$Disk.UniqueId).Trim() -ne ([string]$plan.disk.uniqueId).Trim() -or
+        [string]$Disk.PartitionStyle -ne [string]$plan.disk.partitionStyle -or
+        [int64]$Disk.Size -ne [int64]$plan.disk.sizeBytes -or
+        [int]$Disk.LogicalSectorSize -ne [int]$plan.disk.logicalSectorSizeBytes
+    ) {
+        throw "Windows system disk no longer matches the armed recovery plan."
+    }
+
+    Assert-PartitionMatchesExpectedPlan `
+        -Actual $SystemPartition -Expected $plan.disk.windows -Label "system"
+    Assert-PartitionMatchesExpectedPlan `
+        -Actual $BootPartition -Expected $plan.disk.boot -Label "boot"
+    Assert-PartitionMatchesExpectedPlan `
+        -Actual $RecoveryPartition -Expected $plan.disk.recovery -Label "recovery"
+}
+
 try {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -119,30 +188,6 @@ try {
         ).Count -ne 0
     ) {
         throw "An existing MBR extended partition makes this BIOS layout unsafe to modify."
-    }
-
-    $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
-    $initialBitLocker = $bitLocker
-    if (-not $bitLocker.Safe -and $DecryptBitLocker) {
-        Write-Output "BITLOCKER_ACTION=decrypting"
-        $disableOutput = & manage-bde.exe -off $systemDrive 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "manage-bde could not start decryption: $($disableOutput -join ' ')"
-        }
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        $maximumWait = [TimeSpan]::FromHours(6)
-        while ($timer.Elapsed -lt $maximumWait) {
-            Start-Sleep -Seconds 10
-            $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
-            Write-Output "BITLOCKER_PROGRESS=$($bitLocker.EncryptionPercentage)"
-            if ($bitLocker.Safe) {
-                break
-            }
-        }
-        $timer.Stop()
-        if (-not $bitLocker.Safe) {
-            throw "Timed out waiting for BitLocker decryption."
-        }
     }
 
     $recoveryPartitions = @(
@@ -186,6 +231,45 @@ try {
     }
     $boot = $bootPartitions[0]
 
+    if ($DecryptBitLocker) {
+        if ([string]::IsNullOrWhiteSpace($ExpectedPlanPath)) {
+            throw "ExpectedPlanPath is required before BitLocker can be modified."
+        }
+        Assert-StorageMatchesExpectedPlan `
+            -PlanPath $ExpectedPlanPath `
+            -Disk $disk `
+            -SystemPartition $partition `
+            -BootPartition $boot `
+            -RecoveryPartition $recovery
+    }
+
+    # Validate the complete disk topology before starting decryption. The
+    # caller has armed recovery, but a rejected Recovery or boot layout must
+    # still leave BitLocker untouched.
+    $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
+    $initialBitLocker = $bitLocker
+    if (-not $bitLocker.Safe -and $DecryptBitLocker) {
+        Write-Output "BITLOCKER_ACTION=decrypting"
+        $disableOutput = & manage-bde.exe -off $systemDrive 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "manage-bde could not start decryption: $($disableOutput -join ' ')"
+        }
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        $maximumWait = [TimeSpan]::FromHours(6)
+        while ($timer.Elapsed -lt $maximumWait) {
+            Start-Sleep -Seconds 10
+            $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
+            Write-Output "BITLOCKER_PROGRESS=$($bitLocker.EncryptionPercentage)"
+            if ($bitLocker.Safe) {
+                break
+            }
+        }
+        $timer.Stop()
+        if (-not $bitLocker.Safe) {
+            throw "Timed out waiting for BitLocker decryption."
+        }
+    }
+
     [ordered]@{
         preflightOk = $true
         firmware = $firmware
@@ -198,6 +282,7 @@ try {
         bootPartitionOffset = [long]$boot.Offset
         bootPartitionSize = [long]$boot.Size
         systemDiskUniqueId = [string]$disk.UniqueId
+        systemDiskPartitionTableId = Get-PartitionTableIdentity -Disk $disk
         systemDiskSize = [long]$disk.Size
         logicalSectorSize = [int]$disk.LogicalSectorSize
         partitionStyle = [string]$disk.PartitionStyle

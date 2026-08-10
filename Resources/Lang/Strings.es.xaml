@@ -1,21 +1,21 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:system="clr-namespace:System;assembly=mscorlib">
-    
+
     <system:String x:Key="Welcome">¡Bienvenido a Libertix!</system:String>
     <system:String x:Key="Subtitle">Un instalador de Linux simple y moderno</system:String>
     <system:String x:Key="GetStarted">Comenzar</system:String>
     <system:String x:Key="Language">Idioma</system:String>
 
     <system:String x:Key="ChooseDistroTitle">Elija su versión de Linux</system:String>
-    
+
 
     <system:String x:Key="ResizeDiskTitle">Redimensiona tu disco</system:String>
     <system:String x:Key="Windows">Windows</system:String>
     <system:String x:Key="Linux">Linux</system:String>
     <system:String x:Key="NotEnoughSpace">Espacio insuficiente</system:String>
-    <system:String x:Key="FreeUpSpace">Tu sistema necesita más espacio libre para instalar Linux. Libera algo de espacio e inténtalo de nuevo.</system:String>
-    <system:String x:Key="OpenDiskCleanup">Abrir limpieza de disco</system:String>
+    <system:String x:Key="FreeUpSpace">Cierra Libertix, libera espacio o mueve archivos de la unidad del sistema de Windows, vuelve a abrir Libertix e inténtalo de nuevo. Debajo se muestran el espacio necesario y el disponible.</system:String>
+    <system:String x:Key="ErrorPanelSystemRequirements">Requisitos del sistema</system:String>
 
     <system:String x:Key="AccountCreationTitle">Crea tu cuenta de Linux</system:String>
     <system:String x:Key="Username">Nombre de usuario</system:String>
@@ -25,7 +25,7 @@
 
     <system:String x:Key="Back">Atrás</system:String>
     <system:String x:Key="Next">Siguiente</system:String>
-    
+
     <system:String x:Key="ResizeDiskSizeEmpty">El tamaño no puede estar vacío</system:String>
     <system:String x:Key="ResizeDiskSizeTooSmall">El tamaño debe ser de al menos {0} GB</system:String>
     <system:String x:Key="ResizeDiskNotEnoughSpace">Espacio libre insuficiente. Windows necesita {0} GB libres y Linux al menos {1} GB</system:String>
@@ -90,6 +90,15 @@
 
     <system:String x:Key="UefiFallbackTitle">El arranque UEFI no inició el instalador</system:String>
     <system:String x:Key="UefiFallbackDescription">Windows regresó sin el marcador del sistema live. Libertix conservó una copia local verificada y puede usar la entrada UEFI validada para reiniciar el sistema live.</system:String>
+    <system:String x:Key="UefiFallbackSecureBootTitle">Secure Boot bloquea el método de recuperación</system:String>
+    <system:String x:Key="UefiFallbackSecureBootDescription">BootNext no inició el sistema live. No se ofrece el método alternativo de arranque mediante el firmware porque Secure Boot está activado.</system:String>
+    <system:String x:Key="UefiFallbackSecureBootGuidance">Libertix restaurará primero el estado original de Windows y UEFI. Después, el PC funcionará con normalidad y podrás abandonar la instalación de Linux. Desactivar Secure Boot puede ser complejo y varía según el equipo; si tienes dudas, pide ayuda a una persona familiarizada con la configuración del firmware.</system:String>
+    <system:String x:Key="UefiFallbackSecureBootHelpLink">Abrir la guía de Microsoft en inglés para desactivar Secure Boot</system:String>
+    <system:String x:Key="UefiFallbackSecureBootRestoring">Restaurando Windows y el estado UEFI original...</system:String>
+    <system:String x:Key="UefiFallbackSecureBootWindowsRestored">Windows y el estado UEFI original se han restaurado. El PC se puede usar con normalidad. Puedes cerrar Libertix y abandonar la instalación.</system:String>
+    <system:String x:Key="UefiFallbackSecureBootBlockedLog">Secure Boot está activado; el método alternativo del firmware está deshabilitado.</system:String>
+    <system:String x:Key="UefiFallbackSecureBootClose">Cerrar y usar Windows</system:String>
+    <system:String x:Key="UefiFallbackSecureBootRetry">Reintentar la restauración</system:String>
     <system:String x:Key="UefiFallbackChecking">Comprobando el estado de recuperación...</system:String>
     <system:String x:Key="UefiFallbackCancel">Cancelar y restaurar Windows</system:String>
     <system:String x:Key="UefiFallbackUseFirmware">Usar el arranque del firmware</system:String>
@@ -110,6 +119,9 @@
     <system:String x:Key="UefiFallbackCancelledLog">Transacción UEFI cancelada y archivos temporales programados para su eliminación.</system:String>
     <system:String x:Key="UefiFallbackRestoreFailed">Falló la restauración UEFI.</system:String>
     <system:String x:Key="UefiFallbackTimeoutLog">ERROR: el proceso de recuperación superó el límite de 30 minutos</system:String>
+    <system:String x:Key="UefiFallbackTerminationFailed">No se pudo comprobar que el proceso de recuperación se detuvo. No vuelva a intentarlo ni reinicie.</system:String>
+    <system:String x:Key="UefiFallbackRebootFailed">Windows rechazó la solicitud de reinicio. Inténtelo de nuevo.</system:String>
+    <system:String x:Key="UefiFallbackRebootFailedFormat">El reinicio de Windows falló (rc={0}).</system:String>
 
     <system:String x:Key="ApplyChangesTitle">Aplicar cambios</system:String>
     <system:String x:Key="ApplyChangesWaiting">Listo para iniciar el particionamiento</system:String>
@@ -120,6 +132,7 @@
     <system:String x:Key="ApplyChangesError">Ocurrio un error</system:String>
     <system:String x:Key="ApplyChangesReboot">Reiniciar</system:String>
     <system:String x:Key="ApplyChangesRebootConfirm">El ordenador se reiniciara para completar la instalacion. Continuar?</system:String>
+    <system:String x:Key="ApplyChangesRebootFailed">Windows rechazó la solicitud de reinicio. Inténtelo de nuevo.</system:String>
     <system:String x:Key="ConfirmationYes">Sí</system:String>
     <system:String x:Key="ConfirmationNo">No</system:String>
     <system:String x:Key="ApplyChangesCancel">Cancelar la instalacion</system:String>
@@ -129,6 +142,7 @@
     <system:String x:Key="ApplyChangesLogsTitle">Registros de instalación</system:String>
     <system:String x:Key="ApplyChangesCloseExpandedLogs">Reducir registros</system:String>
     <system:String x:Key="ApplyChangesPreparingWindowsShare">Preparando el uso compartido de archivos de Windows...</system:String>
+    <system:String x:Key="WindowsShareShortcutDescription">Archivos de Linux en modo de solo lectura</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">Preparando la instalación UEFI...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Comprobando Secure Boot...</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Inicializando el descifrado de Windows {0}...</system:String>
@@ -143,8 +157,8 @@
     <system:String x:Key="ApplyChangesWritingConfiguration">Escribiendo la configuración...</system:String>
     <system:String x:Key="ApplyChangesDownloadingBootloader">Descargando archivos del cargador de arranque...</system:String>
     <system:String x:Key="ApplyChangesConfiguringBootEntry">Configurando la entrada de arranque...</system:String>
-    <system:String x:Key="ApplyChangesDownloadingMint">Descargando la ISO de Mint...</system:String>
-    <system:String x:Key="ApplyChangesMintReady">ISO de Mint lista</system:String>
+    <system:String x:Key="ApplyChangesDownloadingDistribution">Descargando la ISO de instalación de Linux...</system:String>
+    <system:String x:Key="ApplyChangesDistributionReady">ISO de instalación de Linux lista</system:String>
     <system:String x:Key="ApplyChangesCreatingUefiPartition">Creando la partición de instalación UEFI...</system:String>
     <system:String x:Key="ApplyChangesDownloadingUefiIso">Descargando la ISO UEFI de Libertix...</system:String>
     <system:String x:Key="ApplyChangesCopyingUefiInstaller">Copiando el instalador UEFI...</system:String>

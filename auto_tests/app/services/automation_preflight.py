@@ -6,14 +6,12 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.clients.proxmox import ProxmoxClient
+from app.config import Settings
 from app.errors import WorkflowError
 from app.services.automation_types import WizardProfile
 from app.services.common import ResultBuilder
-from app.services.reset import RESET_SNAPSHOT
 
 GIB = 1024**3
-LOCAL_LVM_MIN_FREE_BYTES = 20 * GIB
-LOCAL_LVM_MIN_FREE_PER_VM_BYTES = 20 * GIB
 
 
 class AutomationPreflight:
@@ -24,28 +22,40 @@ class AutomationPreflight:
     all-VM preflight barrier used by the original implementation.
     """
 
-    def __init__(self, proxmox_factory: Callable[[], ProxmoxClient]) -> None:
+    def __init__(
+        self,
+        proxmox_factory: Callable[[], ProxmoxClient],
+        settings: Settings,
+    ) -> None:
         self._proxmox_factory = proxmox_factory
+        self._settings = settings
 
     def restore_clean_snapshot(self, result: ResultBuilder, profile: WizardProfile) -> None:
         vmid = profile.vmid
         with self._proxmox_factory() as proxmox:
             node = proxmox.locate_vm(vmid)
-            proxmox.assert_snapshot(node, vmid, RESET_SNAPSHOT)
+            proxmox.assert_snapshot(node, vmid, self._settings.reset_snapshot)
             result.ok(
                 "automation.rollback_preflight",
                 "VM and snapshot verified before automation",
                 target=str(vmid),
                 node=node,
-                snapshot=RESET_SNAPSHOT,
+                snapshot=self._settings.reset_snapshot,
             )
-            proxmox.rollback(node, vmid, RESET_SNAPSHOT)
+            proxmox.rollback(node, vmid, self._settings.reset_snapshot)
+            verified = proxmox.verify_rollback_state(
+                node,
+                vmid,
+                self._settings.reset_snapshot,
+                require_running=True,
+            )
             result.ok(
                 "automation.reset_vm_done",
-                f"VM{vmid} reset completed: clean2 restored and Proxmox task verified",
+                f"VM{vmid} reset completed: configured snapshot restored and Proxmox task verified",
                 target=str(vmid),
                 node=node,
-                snapshot=RESET_SNAPSHOT,
+                snapshot=self._settings.reset_snapshot,
+                **verified,
             )
 
     def restore_clean_snapshots(
@@ -57,7 +67,7 @@ class AutomationPreflight:
         with self._proxmox_factory() as proxmox:
             for profile in profiles:
                 node = proxmox.locate_vm(profile.vmid)
-                proxmox.assert_snapshot(node, profile.vmid, RESET_SNAPSHOT)
+                proxmox.assert_snapshot(node, profile.vmid, self._settings.reset_snapshot)
                 self.assert_vm_not_in_io_error(proxmox, node, profile.vmid, result)
                 locations[profile.vmid] = node
                 result.ok(
@@ -65,26 +75,34 @@ class AutomationPreflight:
                     "VM and snapshot verified before automation",
                     target=str(profile.vmid),
                     node=node,
-                    snapshot=RESET_SNAPSHOT,
+                    snapshot=self._settings.reset_snapshot,
                 )
             self.assert_proxmox_storage_headroom(proxmox, locations, len(profiles), result)
 
-        def restore(profile: WizardProfile) -> tuple[int, str]:
+        def restore(profile: WizardProfile) -> tuple[int, str, dict[str, object]]:
             node = locations[profile.vmid]
             with self._proxmox_factory() as proxmox:
-                proxmox.rollback(node, profile.vmid, RESET_SNAPSHOT)
-            return profile.vmid, node
+                proxmox.rollback(node, profile.vmid, self._settings.reset_snapshot)
+                verified = proxmox.verify_rollback_state(
+                    node,
+                    profile.vmid,
+                    self._settings.reset_snapshot,
+                    require_running=True,
+                )
+            return profile.vmid, node, verified
 
         with ThreadPoolExecutor(max_workers=len(profiles)) as executor:
             futures = {executor.submit(restore, profile): profile for profile in profiles}
             for future in as_completed(futures):
-                vmid, node = future.result()
+                vmid, node, verified = future.result()
                 result.ok(
                     "automation.reset_vm_done",
-                    f"VM{vmid} reset completed: clean2 restored and Proxmox task verified",
+                    f"VM{vmid} reset completed: configured snapshot restored "
+                    "and Proxmox task verified",
                     target=str(vmid),
                     node=node,
-                    snapshot=RESET_SNAPSHOT,
+                    snapshot=self._settings.reset_snapshot,
+                    **verified,
                 )
 
     @staticmethod
@@ -94,17 +112,7 @@ class AutomationPreflight:
         vmid: int,
         result: ResultBuilder,
     ) -> None:
-        data = proxmox._request(
-            "GET",
-            f"/nodes/{node}/qemu/{vmid}/status/current",
-            step="automation.vm_status",
-        )
-        if not isinstance(data, dict):
-            raise WorkflowError(
-                "automation.vm_status",
-                "Invalid Proxmox response while checking VM status",
-                details={"vmid": vmid, "node": node},
-            )
+        data = proxmox.get_vm_status(node, vmid, step="automation.vm_status")
         qmpstatus = str(data.get("qmpstatus") or "")
         status = str(data.get("status") or "")
         if qmpstatus == "io-error":
@@ -122,40 +130,41 @@ class AutomationPreflight:
             qmpstatus=qmpstatus,
         )
 
-    @staticmethod
     def assert_proxmox_storage_headroom(
+        self,
         proxmox: ProxmoxClient,
         locations: dict[int, str],
         vm_count: int,
         result: ResultBuilder,
     ) -> None:
+        storage = self._settings.proxmox_storage
         for node in sorted(set(locations.values())):
             data = proxmox._request(
                 "GET",
-                f"/nodes/{node}/storage/local-lvm/status",
+                f"/nodes/{node}/storage/{storage}/status",
                 step="automation.storage",
             )
             if not isinstance(data, dict):
                 raise WorkflowError(
                     "automation.storage",
                     "Invalid Proxmox response while checking storage",
-                    details={"node": node, "storage": "local-lvm"},
+                    details={"node": node, "storage": storage},
                 )
             total = int(data.get("total") or 0)
             used = int(data.get("used") or 0)
             available = int(data.get("avail") or 0)
             minimum_free = max(
-                LOCAL_LVM_MIN_FREE_BYTES,
-                LOCAL_LVM_MIN_FREE_PER_VM_BYTES * vm_count,
+                self._settings.proxmox_storage_min_free_gib * GIB,
+                self._settings.proxmox_storage_min_free_per_vm_gib * GIB * vm_count,
             )
             used_percent = (used / total * 100.0) if total else 100.0
             if available < minimum_free:
                 raise WorkflowError(
                     "automation.storage_headroom",
-                    "Automation refused: insufficient local-lvm headroom to avoid io-error",
+                    f"Automation refused: insufficient {storage} headroom to avoid io-error",
                     details={
                         "node": node,
-                        "storage": "local-lvm",
+                        "storage": storage,
                         "available_gib": round(available / GIB, 2),
                         "required_gib": round(minimum_free / GIB, 2),
                         "used_percent": round(used_percent, 2),
@@ -163,9 +172,9 @@ class AutomationPreflight:
                 )
             result.ok(
                 "automation.storage_headroom",
-                "local-lvm headroom verified before rollback",
+                f"{storage} headroom verified before rollback",
                 target=node,
-                storage="local-lvm",
+                storage=storage,
                 available_gib=round(available / GIB, 2),
                 required_gib=round(minimum_free / GIB, 2),
                 used_percent=round(used_percent, 2),

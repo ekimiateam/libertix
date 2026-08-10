@@ -1,17 +1,43 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import pickle
 from pathlib import Path
 
 import pytest
-from starlette.testclient import TestClient
+from starlette.testclient import TestClient as StarletteTestClient
 
 import app.main as main_module
-from app.api_runtime import ProcessOperationLock, cleanup_capture_workspaces
+from app.api_runtime import (
+    ProcessOperationLock,
+    cleanup_capture_workspaces,
+    mark_capture_workspace_owned,
+)
 from app.main import create_app
-from app.models import OperationResult, StepResult
+from app.models import AutomationRequest, OperationResult, StepResult
 
 from .test_core import settings
+
+
+class TestClient(StarletteTestClient):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("client", ("127.0.0.1", 50000))
+        super().__init__(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def preserve_monkeypatched_workers_with_a_fork_test_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_get_context = multiprocessing.get_context
+
+    def get_test_context(method: str):
+        assert method == "spawn"
+        return real_get_context("fork")
+
+    monkeypatch.setattr(main_module.multiprocessing, "get_context", get_test_context)
 
 
 class FakeOperationLock:
@@ -44,19 +70,72 @@ def test_process_operation_lock_can_be_reused_without_network(tmp_path: Path) ->
     lock.release()
 
 
+def test_spawn_worker_arguments_and_target_are_serializable() -> None:
+    request = AutomationRequest(linux_password="test-passphrase")
+
+    assert pickle.loads(pickle.dumps(main_module._stream_operation_worker)) is (  # noqa: SLF001
+        main_module._stream_operation_worker  # noqa: SLF001
+    )
+    restored_settings, restored_request = pickle.loads(pickle.dumps((settings(), request)))
+    assert restored_request.linux_password == "test-passphrase"
+
+
+def test_process_operation_lock_refuses_a_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.lock"
+    outside.write_text("unchanged\n", encoding="ascii")
+    lock_path = tmp_path / "operation.lock"
+    lock_path.symlink_to(outside)
+
+    assert ProcessOperationLock(lock_path).acquire() is False
+    assert outside.read_text(encoding="ascii") == "unchanged\n"
+
+
 def test_capture_cleanup_is_scoped_to_the_configured_workspace(tmp_path: Path) -> None:
     capture_dir = tmp_path / "captures"
     capture_dir.mkdir()
     (capture_dir / "run-a").mkdir()
     (capture_dir / "run-a" / "screen.png").write_bytes(b"png")
     (capture_dir / "orphan.png").write_bytes(b"png")
+    stale = capture_dir / "automation-stale"
+    stale.mkdir()
+    (stale / "screen.png").write_bytes(b"png")
     outside = tmp_path / "outside.png"
     outside.write_bytes(b"keep")
 
     cleanup_capture_workspaces(settings(capture_dir=capture_dir))
 
-    assert list(capture_dir.iterdir()) == []
+    assert sorted(path.name for path in capture_dir.iterdir()) == ["orphan.png", "run-a"]
+    assert not stale.exists()
     assert outside.read_bytes() == b"keep"
+
+
+def test_capture_cleanup_preserves_workspace_owned_by_a_live_process(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "captures"
+    active = capture_dir / "automation-active"
+    stale = capture_dir / "automation-stale"
+    active.mkdir(parents=True)
+    stale.mkdir()
+    mark_capture_workspace_owned(active)
+    (stale / ".owner-pid").write_text("999999999\n", encoding="ascii")
+
+    cleanup_capture_workspaces(settings(capture_dir=capture_dir))
+
+    assert (active / ".owner-pid").read_text(encoding="ascii").strip() == str(os.getpid())
+    assert not stale.exists()
+
+
+def test_capture_cleanup_refuses_a_workspace_named_symlink(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "captures"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    capture_dir.mkdir()
+    (capture_dir / "automation-linked").symlink_to(outside, target_is_directory=True)
+
+    cleanup_capture_workspaces(settings(capture_dir=capture_dir))
+
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert (capture_dir / "automation-linked").is_symlink()
 
 
 def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
@@ -95,7 +174,6 @@ def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
     with TestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
-            headers={"X-API-Key": "secret"},
             json={
                 "vms": ["vm1"],
                 "apply": False,
@@ -136,7 +214,6 @@ def test_stream_converts_worker_exception_to_safe_terminal_result(
     with TestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
-            headers={"X-API-Key": "secret"},
             json={
                 "vms": ["vm1"],
                 "source": "local",
@@ -174,7 +251,6 @@ def test_stream_refuses_concurrent_operation_without_starting_service(
     with TestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
-            headers={"X-API-Key": "secret"},
             json={
                 "vms": ["vm1"],
                 "source": "local",
@@ -268,7 +344,6 @@ def test_stream_keeps_full_log_but_emits_only_phase_changes(
     with TestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
-            headers={"X-API-Key": "secret"},
             json={
                 "vms": ["vm1"],
                 "source": "local",
@@ -343,7 +418,6 @@ def test_stream_preserves_complete_installation_errors(
     with TestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
-            headers={"X-API-Key": "secret"},
             json={
                 "vms": ["vm1"],
                 "source": "local",
@@ -408,7 +482,6 @@ def test_compact_stream_uses_short_success_lines_and_verbose_errors(
     with TestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream",
-            headers={"X-API-Key": "secret"},
             json={"vms": ["vm1"], "linux_password": "test-passphrase"},
         )
 
