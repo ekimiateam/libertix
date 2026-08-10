@@ -116,11 +116,13 @@ def test_distribution_metadata_resolution_returns_none_when_both_sources_are_mis
 
 
 def test_filepool_exposes_every_regular_file_in_its_directory() -> None:
+    filepool_dir = Path(main_module.__file__).resolve().parent / "filepool"
+    expected_files = sorted(path.name for path in filepool_dir.iterdir() if path.is_file())
+    assert expected_files
+
     with TestClient(create_app(settings())) as client:
-        assert client.head("/filepool/aria2-64.zip").status_code == 200
-        assert client.head("/filepool/distros.json.sig").status_code == 200
-        assert client.get("/filepool/linux-integrity.sh").status_code == 200
-        assert client.get("/filepool/menu.lst").status_code == 200
+        for filename in expected_files:
+            assert client.head(f"/filepool/{filename}").status_code == 200
         assert client.get("/filepool/../main.py").status_code == 404
 
 

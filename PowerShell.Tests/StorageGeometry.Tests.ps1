@@ -36,7 +36,7 @@ Describe "Windows free-space stabilization" {
         }
 
         It "rejects a material deficit immediately" {
-            Mock Get-Volume { [pscustomobject]@{ SizeRemaining = [int64](26GB) } }
+            Mock Get-Volume { [pscustomobject]@{ SizeRemaining = [int64](25GB) } }
             Mock Start-Sleep {}
 
             $budget = Wait-LibertixWindowsFreeSpaceBudget `
