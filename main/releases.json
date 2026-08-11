@@ -4,26 +4,29 @@
   "latest": {
     "version": "0.1",
     "tag": "0.1",
-    "commit": "abb20d4875c20c4f30785c37b5e3a15c03f9ddfe",
+    "commit": "b5ca8376f37f0561ea3a22b6383dcdd8290a0bd5",
     "title": "Libertix 0.1",
     "notes": "First stable Libertix release.",
-    "publishedAt": "2026-08-11T01:02:07.337573Z",
+    "publishedAt": "2026-08-11T09:35:19.208898Z",
     "releaseUrl": "https://github.com/ekimiateam/libertix/releases/tag/0.1",
     "wpf": {
       "url": "https://github.com/ekimiateam/libertix/releases/download/0.1/Libertix-wpf.zip",
-      "sha256": "029c6a050ebaa7b69064c28b3893abb7a0c4550f7c35e6600a5c9fae57987d07",
-      "sizeBytes": 3582813
+      "sha256": "7712fe12c8142a90c862a83b877d954ec938b5340a12c32ad7adf971445637af",
+      "sizeBytes": 3586525,
+      "fileName": "Libertix-wpf.zip"
     },
     "miniIso": {
       "bios": {
         "url": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-bios.iso",
-        "sha256": "fd3d7002a8d3e5814ab898107d3c54f2583bb7eacc687f5066728a440c53bc36",
-        "sizeBytes": 524288000
+        "sha256": "d8bfd8daae3834abdc50b604f8933481c538cc72e0209b4d5980d7586f2f67b9",
+        "sizeBytes": 524288000,
+        "fileName": "libertix-installer-bios.iso"
       },
       "uefi": {
         "url": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-uefi.iso",
-        "sha256": "d952cdab9f6996220132111abf772596082e48263002ca19b7bf756768ea8589",
-        "sizeBytes": 558891008
+        "sha256": "c301c5d554bb49f21b6b6560a12cd9f5d3f5d8506e9e082e3470bc2609606399",
+        "sizeBytes": 558891008,
+        "fileName": "libertix-installer-uefi.iso"
       }
     }
   }
