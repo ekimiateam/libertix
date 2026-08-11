@@ -21,6 +21,11 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+& "$env:SystemRoot\System32\chcp.com" 65001 > $null
+$utf8NoBom = New-Object Text.UTF8Encoding($false)
+[Console]::OutputEncoding = $utf8NoBom
+[Console]::InputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
 $bootStrategyWasSpecified = $PSBoundParameters.ContainsKey("BootStrategy")
 
 $policyModulePath = Join-Path $PSScriptRoot "modules\Libertix.InstallationPolicy.psm1"

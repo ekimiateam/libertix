@@ -6,6 +6,14 @@ namespace Libertix.Models
     {
         private bool _isSelected;
 
+        public string IsoUrl { get; set; }
+
+        public string IsoSha256 { get; set; }
+
+        public string UefiIsoUrl { get; set; }
+
+        public string UefiIsoSha256 { get; set; }
+
         public bool IsSelected
         {
             get => _isSelected;

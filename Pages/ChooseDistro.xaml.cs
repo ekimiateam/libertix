@@ -124,7 +124,7 @@ namespace Libertix.Pages
             {
                 using (var timeoutCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
                 using (var response = await SharedHttpClient.GetAsync(
-                    _filepool.DistrosUrl,
+                    _filepool.CatalogUrl,
                     timeoutCancellation.Token))
                 {
                     response.EnsureSuccessStatusCode();
@@ -135,7 +135,7 @@ namespace Libertix.Pages
                     if (_filepool.RequiresCatalogSignature)
                     {
                         using (var signatureResponse = await SharedHttpClient.GetAsync(
-                            _filepool.DistrosSignatureUrl,
+                            _filepool.CatalogSignatureUrl,
                             timeoutCancellation.Token))
                         {
                             signatureResponse.EnsureSuccessStatusCode();
@@ -155,27 +155,44 @@ namespace Libertix.Pages
                     {
                         PropertyNameCaseInsensitive = true
                     };
-                    var distroList = JsonSerializer.Deserialize<List<DistroInfoJson>>(json, options);
-                    if (distroList == null || distroList.Count == 0)
+                    var catalog = JsonSerializer.Deserialize<DistributionCatalogJson>(json, options);
+                    if (catalog == null ||
+                        catalog.SchemaVersion != 1 ||
+                        catalog.Artifacts?.MiniIso == null ||
+                        catalog.Artifacts.Support == null ||
+                        catalog.Distributions == null ||
+                        catalog.Distributions.Count == 0)
                     {
-                        throw new InvalidOperationException("Distribution list JSON is empty or invalid.");
+                        throw new InvalidOperationException("Distribution catalog JSON is empty or invalid.");
                     }
 
-                    var validatedDistros = new List<DistroInfo>(distroList.Count);
+                    ValidateCatalogArtifact(catalog.Artifacts.Wpf, "Libertix-wpf.zip");
+                    ValidateCatalogArtifact(
+                        catalog.Artifacts.MiniIso.Bios,
+                        "libertix-installer-bios.iso");
+                    ValidateCatalogArtifact(
+                        catalog.Artifacts.MiniIso.Uefi,
+                        "libertix-installer-uefi.iso");
+                    ValidateCatalogArtifact(catalog.Artifacts.Support.Aria2Archive, "aria2-64.zip");
+                    ValidateCatalogArtifact(
+                        catalog.Artifacts.Support.Ext4Driver,
+                        "ext4-win-driver.exe");
+                    ValidateCatalogArtifact(catalog.Artifacts.Support.Grub4DosLoader, "grldr");
+                    ValidateCatalogArtifact(catalog.Artifacts.Support.Grub4DosMbr, "grldr.mbr");
+
+                    CatalogArtifactJson biosMiniIso = catalog.Artifacts.MiniIso.Bios;
+                    CatalogArtifactJson uefiMiniIso = catalog.Artifacts.MiniIso.Uefi;
+                    var validatedDistros = new List<DistroInfo>(catalog.Distributions.Count);
                     var seenDistroIds = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var distroJson in distroList)
+                    foreach (var distroJson in catalog.Distributions)
                     {
                         if (!Regex.IsMatch(distroJson.Id ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
                             string.IsNullOrWhiteSpace(distroJson.Name) ||
                             !Regex.IsMatch(distroJson.OsReleaseId ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
                             !Regex.IsMatch(distroJson.GrubDisplayName ?? "", "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$") ||
                             !Regex.IsMatch(distroJson.GrubIcon ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
-                            string.IsNullOrWhiteSpace(distroJson.IsoUrl) ||
                             string.IsNullOrWhiteSpace(distroJson.IsoInstaller) ||
                             string.IsNullOrWhiteSpace(distroJson.IsoInstallerFileName) ||
-                            !Regex.IsMatch(distroJson.IsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
-                            string.IsNullOrWhiteSpace(distroJson.UefiIsoUrl) ||
-                            !Regex.IsMatch(distroJson.UefiIsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
                             !Regex.IsMatch(distroJson.IsoInstallerSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
                             distroJson.IsoInstallerSizeBytes <= 0 ||
                             distroJson.SizeInGB < InstallationSizePolicy.MinimumFinalSizeGiB)
@@ -195,12 +212,12 @@ namespace Libertix.Pages
                             GrubIcon = distroJson.GrubIcon,
                             Description = distroJson.Description ?? "No description available",
                             ImageUrl = distroJson.ImageUrl,
-                            IsoUrl = _filepool.ResolveUrl(distroJson.IsoUrl),
+                            IsoUrl = _filepool.ResolveUrl(biosMiniIso.Url),
                             IsoInstaller = _filepool.ResolveUrl(distroJson.IsoInstaller),
                             IsoInstallerFileName = distroJson.IsoInstallerFileName,
-                            IsoSha256 = distroJson.IsoSha256,
-                            UefiIsoUrl = _filepool.ResolveUrl(distroJson.UefiIsoUrl),
-                            UefiIsoSha256 = distroJson.UefiIsoSha256,
+                            IsoSha256 = biosMiniIso.Sha256,
+                            UefiIsoUrl = _filepool.ResolveUrl(uefiMiniIso.Url),
+                            UefiIsoSha256 = uefiMiniIso.Sha256,
                             IsoInstallerSha256 = distroJson.IsoInstallerSha256,
                             IsoInstallerSizeBytes = distroJson.IsoInstallerSizeBytes,
                             SizeInGB = distroJson.SizeInGB
@@ -223,6 +240,21 @@ namespace Libertix.Pages
                     Localization.GetString("ErrorTitle"),
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
+            }
+        }
+
+        private static void ValidateCatalogArtifact(
+            CatalogArtifactJson artifact,
+            string expectedFileName)
+        {
+            if (artifact == null ||
+                !string.Equals(artifact.FileName, expectedFileName, StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(artifact.Url) ||
+                !Regex.IsMatch(artifact.Sha256 ?? "", "^[0-9a-fA-F]{64}$") ||
+                artifact.SizeBytes <= 0)
+            {
+                throw new InvalidOperationException(
+                    "Distribution catalog contains invalid artifact metadata.");
             }
         }
 

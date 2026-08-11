@@ -106,6 +106,7 @@ class AutomationService(
                 distribution=load_distribution_profile(distribution),
                 share_windows_files_in_linux=share_windows_files_in_linux,
                 share_linux_files_in_windows=share_linux_files_in_windows,
+                use_default_filepool=source == "published",
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
                 futures = {
@@ -247,7 +248,11 @@ class AutomationService(
                 vm=vm.name,
                 executable=str(local_executable),
             )
-            launch = self._launch_elevated(vm, local_executable)
+            launch = self._launch_elevated(
+                vm,
+                local_executable,
+                use_default_filepool=options.use_default_filepool,
+            )
             result.ok(
                 "automation.launch_elevated",
                 "Libertix launched as administrator through an interactive scheduled task",
@@ -329,13 +334,20 @@ class AutomationService(
             windows_notification_services_disabled=True,
         )
 
-    def _launch_elevated(self, vm: VMConfig, executable: PureWindowsPath) -> dict[str, object]:
+    def _launch_elevated(
+        self,
+        vm: VMConfig,
+        executable: PureWindowsPath,
+        *,
+        use_default_filepool: bool = False,
+    ) -> dict[str, object]:
         task_name = f"LibertixAutoInstall_{vm.name}"
         values = self.validation.launch_elevated_process(
             vm,
             executable,
             task_name=task_name,
             step="automation.launch_elevated",
+            use_default_filepool=use_default_filepool,
         )
         return {
             "pid": int(values["PID"]),

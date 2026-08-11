@@ -23,7 +23,7 @@ class DistributionProfile:
 
 
 def load_distribution_profile(distribution_id: str) -> DistributionProfile:
-    catalog_path = Path(__file__).resolve().parent / "filepool" / "distros.json"
+    catalog_path = Path(__file__).resolve().parent / "filepool" / "catalog.json"
     try:
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -33,15 +33,16 @@ def load_distribution_profile(distribution_id: str) -> DistributionProfile:
             details={"path": str(catalog_path), "error": str(exc)},
         ) from exc
 
-    if not isinstance(catalog, list):
+    distributions = catalog.get("distributions") if isinstance(catalog, dict) else None
+    if not isinstance(distributions, list):
         raise WorkflowError(
             "automation.distribution_catalog",
-            "The source distribution catalog is not a JSON array",
+            "The source catalog does not contain a distribution array",
             details={"path": str(catalog_path)},
         )
 
     matches: list[DistributionProfile] = []
-    for index, entry in enumerate(catalog):
+    for index, entry in enumerate(distributions):
         if not isinstance(entry, dict) or entry.get("id") != distribution_id:
             continue
         values = {

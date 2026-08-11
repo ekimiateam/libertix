@@ -100,13 +100,17 @@ namespace Libertix.Pages
                 catch (OperationCanceledException)
                     when (!_installationCancellation.IsCancellationRequested)
                 {
-                    DeleteDownloadArtifactBestEffort(destinationPath, label);
                     Dispatcher.Invoke(() =>
                         Log($"{label} download attempt {attempt}/{attempts} timed out."));
                     if (attempt == attempts)
+                    {
+                        DeleteDownloadArtifactBestEffort(destinationPath, label);
                         return false;
+                    }
+                    Dispatcher.Invoke(() =>
+                        Log($"{label}: partial download retained for the next resume attempt."));
                     await Task.Delay(
-                        TimeSpan.FromSeconds(2 * attempt),
+                        TimeSpan.FromSeconds(10 * attempt),
                         _installationCancellation.Token);
                 }
                 catch (OperationCanceledException)
@@ -126,11 +130,17 @@ namespace Libertix.Pages
                 }
                 catch (Exception ex)
                 {
-                    DeleteDownloadArtifactBestEffort(destinationPath, label);
                     Dispatcher.Invoke(() => Log($"{label} download attempt {attempt}/{attempts} failed: {ex.Message}"));
                     if (attempt == attempts)
+                    {
+                        DeleteDownloadArtifactBestEffort(destinationPath, label);
                         return false;
-                    await Task.Delay(TimeSpan.FromSeconds(2 * attempt), _installationCancellation.Token);
+                    }
+                    Dispatcher.Invoke(() =>
+                        Log($"{label}: partial download retained for the next resume attempt."));
+                    await Task.Delay(
+                        TimeSpan.FromSeconds(10 * attempt),
+                        _installationCancellation.Token);
                 }
             }
 
@@ -198,8 +208,13 @@ namespace Libertix.Pages
                 $"--max-connection-per-server={Aria2MaxConnections}",
                 $"--split={Aria2MaxConnections}",
                 "--min-split-size=1M",
+                "--max-tries=5",
+                "--retry-wait=10",
+                "--connect-timeout=30",
+                "--timeout=60",
                 "--summary-interval=2",
                 "--console-log-level=warn",
+                "--enable-color=false",
                 "--check-certificate=true",
                 $"--dir={downloadDir}",
                 $"--out={fileName}",
@@ -239,7 +254,15 @@ namespace Libertix.Pages
 
                 if (processResult.Completion != StreamingProcessCompletion.Exited || processResult.ExitCode != 0)
                 {
-                    Dispatcher.Invoke(() => Log($"{label}: aria2 failed with rc={processResult.ExitCode}, using HTTP fallback"));
+                    if (attempt < attempts)
+                    {
+                        throw new IOException(
+                            $"{label}: aria2 failed with rc={processResult.ExitCode}; " +
+                            "the partial file will be resumed.");
+                    }
+                    Dispatcher.Invoke(() => Log(
+                        $"{label}: aria2 failed with rc={processResult.ExitCode} after " +
+                        $"{attempts} attempts; using HTTP fallback"));
                     DeleteDownloadArtifactBestEffort(aria2OutputPath, label);
                     return false;
                 }

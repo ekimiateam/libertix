@@ -153,7 +153,7 @@ dev_<sha7>  -> https://ekimiateam.github.io/libertix/dev
 ```
 
 Reusing local ISO files does not remove the catalogue requirement. Libertix first downloads
-`distros.json` and its detached signature, verifies that signature, and only then looks beside
+`catalog.json` and its detached signature, verifies that signature, and only then looks beside
 `Libertix.exe` for the exact filenames selected by the catalogue. A matching local file is used
 after its SHA-256 is verified; otherwise Libertix downloads the artifact from the configured URL.
 Stable builds also verify signed `releases.json` metadata and refuse to start when a newer stable
@@ -249,9 +249,9 @@ uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-
 The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, analyzes PowerShell with
 PSScriptAnalyzer, runs the Pester contract suite, builds `Libertix.exe` on Windows and builds both
 ISO images on trusted `dev` and `main` branch runs. Successful runs publish the WPF archive, both ISO
-images, the verified runtime support files and `SHA256SUMS` in a GitHub Release. The CI then
-generates and signs the channel metadata and publishes the metadata plus the verified support files
-only in the corresponding `dev/` or `main/` directory on GitHub Pages. The WPF archive contains
+images in a GitHub Release. The CI then generates and signs one artifact and distribution catalogue
+and publishes it, its detached signature, and the verified support files only in the corresponding
+`dev/` or `main/` directory on GitHub Pages. The WPF archive contains
 `BUILD-INFO.txt`, `LICENSE` and `THIRD_PARTY.md`.
 
 The complete versioning, signing, release and Pages workflow is documented in

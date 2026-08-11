@@ -29,15 +29,15 @@ For a push to `dev` or `main`, [the CI workflow](../.github/workflows/ci.yml) pe
 1. Resolve the channel, release tag and WPF informational version.
 2. Run source-quality, Python, PowerShell and C# tests and build `Libertix.exe`.
 3. Rebuild and verify the generic BIOS and UEFI mini-ISO images.
-4. Package the WPF output, verify the pinned aria2, ext4 and GRUB4DOS support files against
-   `Scripts/config/Libertix.Artifacts.json`, and calculate every release-asset SHA-256.
-5. Generate `distros.json` and `releases.json` from the one configuration and the built artifacts.
+4. Package the WPF output and verify the pinned aria2, ext4 and GRUB4DOS support files against
+   `Scripts/config/Libertix.Artifacts.json`.
+5. Generate `catalog.json` and `releases.json` from the one configuration and the built artifacts.
 6. Sign both JSON files with RSA/SHA-256 and verify that the private key matches the public key
    embedded in Libertix.
-7. Publish `Libertix-wpf.zip`, both mini-ISO files, the four runtime support files and
-   `SHA256SUMS` in a GitHub Release.
-8. Commit the JSON/signature files, `SHA256SUMS` and the four runtime support files to only the
-   selected channel on `gh-pages`, then request a GitHub Pages build.
+7. Publish only `Libertix-wpf.zip` and both mini-ISO files in a GitHub Release.
+8. Commit the JSON/signature files and the four runtime support files to only the selected channel
+   on `gh-pages`, then request a GitHub Pages build. Every published SHA-256 is stored once in the
+   signed catalogue.
 
 Dev release creation is safe to rerun for the same commit. A main run fails before publication if
 its stable tag already exists; update `mainRelease.version` before publishing another stable release.
@@ -55,13 +55,13 @@ Repository workflow permissions must allow the workflow token to write repositor
 
 ## Runtime behavior
 
-A stamped dev executable reads `https://ekimiateam.github.io/libertix/dev/distros.json`, verifies
+A stamped dev executable reads `https://ekimiateam.github.io/libertix/dev/catalog.json`, verifies
 its signature and downloads its mini-ISO from the release tagged with its SHA. It does not fetch
 `releases.json` and never blocks because a newer dev commit exists.
 
 Both Pages channels also contain `aria2-64.zip`, `ext4-win-driver.exe`, `grldr` and `grldr.mbr`.
 Libertix verifies each support file against the SHA-256 embedded in its versioned artifact catalogue
-before using it. The same files are attached to the corresponding GitHub Release for traceability.
+before using it. Support files are deliberately not attached to GitHub Releases.
 
 A stable executable first downloads and verifies `/main/releases.json` and its signature. It starts
 only when `latest.version` exactly matches its embedded version. Otherwise it shows a translated
@@ -81,11 +81,15 @@ uv run --project auto_tests --frozen python iso-tools/generate-release-metadata.
   --bios-iso libertix-installer-bios.iso \
   --uefi-iso libertix-installer-uefi.iso \
   --wpf-zip path/to/Libertix-wpf.zip \
+  --aria2-archive auto_tests/app/filepool/aria2-64.zip \
+  --ext4-driver auto_tests/app/filepool/ext4-win-driver.exe \
+  --grub4dos-loader auto_tests/app/filepool/grldr \
+  --grub4dos-mbr auto_tests/app/filepool/grldr.mbr \
   --output-dir .work/release-metadata
 
 uv run --project auto_tests --frozen python iso-tools/sign-release-metadata.py \
   --private-key /secure/path/catalog-signing-private.pem \
-  .work/release-metadata/distros.json \
+  .work/release-metadata/catalog.json \
   .work/release-metadata/releases.json
 ```
 

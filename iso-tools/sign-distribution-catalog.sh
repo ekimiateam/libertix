@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-served_manifest="$repo_root/auto_tests/app/filepool/distros.json"
-fixture_manifest="$repo_root/Libertix.Tests/TestData/distros.json"
+served_manifest="$repo_root/auto_tests/app/filepool/catalog.json"
+fixture_manifest="$repo_root/Libertix.Tests/TestData/catalog.json"
 served_signature="$served_manifest.sig"
 fixture_signature="$fixture_manifest.sig"
 private_key="$repo_root/local-markdown/catalog-signing-private.pem"
@@ -18,7 +18,7 @@ die() {
 }
 
 usage() {
-    printf 'Usage: %s [distros.json]\n' "${0##*/}"
+    printf 'Usage: %s [catalog.json]\n' "${0##*/}"
     printf 'Without an argument, an interactive catalog menu is displayed.\n'
 }
 
@@ -36,7 +36,7 @@ choose_manifest() {
     printf 'Libertix signed catalog tool\n'
     print_configured_paths
     printf '\n'
-    printf '  1) Sign and synchronize distros.json\n'
+    printf '  1) Sign and synchronize catalog.json\n'
     printf '  q) Quit\n'
     printf '> '
     IFS= read -r choice
@@ -54,7 +54,7 @@ resolve_manifest() {
     case "$resolved" in
         "$served_manifest"|"$fixture_manifest") printf '%s\n' "$resolved" ;;
         *)
-            die "Only the versioned distros.json catalogs are supported: $served_manifest or $fixture_manifest"
+            die "Only the versioned catalog.json files are supported: $served_manifest or $fixture_manifest"
             ;;
     esac
 }
@@ -113,7 +113,7 @@ sign_and_synchronize_catalog() {
     assert_private_key_matches_application_key
 
     mkdir -p "$work_dir"
-    signature_tmp="$(mktemp "$work_dir/distros.json.sig.XXXXXX")"
+    signature_tmp="$(mktemp "$work_dir/catalog.json.sig.XXXXXX")"
     trap 'rm -f -- "$signature_tmp"' EXIT
 
     openssl dgst -sha256 -sign "$private_key" "$source_manifest" |

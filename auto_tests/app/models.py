@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-SourceMode = Literal["remote", "local"]
+SourceMode = Literal["remote", "local", "published"]
 DistributionId = Literal["mint", "zorin"]
 
 
@@ -33,7 +33,10 @@ class ValidationRequest(BaseModel):
     vm: str | None = Field(default=None, description="Single VM selector shortcut")
     source: SourceMode = Field(
         default="local",
-        description="Build source: remote clones origin/branch, local copies this working tree",
+        description=(
+            "Build source: remote clones and builds the configured branch, local builds this "
+            "working tree, published downloads the latest signed dev release"
+        ),
     )
 
     def selectors(self) -> list[str] | None:

@@ -36,7 +36,7 @@ OperationName = Literal["validation", "reset", "automation"]
 
 
 def _resolve_distribution_metadata(runtime_dir: Path, filepool_dir: Path) -> Path | None:
-    for candidate in (runtime_dir / "filepool" / "distros.json", filepool_dir / "distros.json"):
+    for candidate in (runtime_dir / "filepool" / "catalog.json", filepool_dir / "catalog.json"):
         if candidate.is_file():
             return candidate
     return None
@@ -147,7 +147,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     filepool_dir = Path(__file__).resolve().parent / "filepool"
 
-    @api.api_route("/filepool/distros.json", methods=["GET", "HEAD"], include_in_schema=False)
+    @api.api_route("/filepool/catalog.json", methods=["GET", "HEAD"], include_in_schema=False)
     async def filepool_distribution_metadata() -> FileResponse:
         metadata = _resolve_distribution_metadata(configured.runtime_dir, filepool_dir)
         if metadata is None:

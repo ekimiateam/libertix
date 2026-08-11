@@ -1283,9 +1283,13 @@ def test_uefi_aria2_and_ext4_installer_timeouts_stop_their_processes() -> None:
     assert "ConvertTo-LibertixNativeArgument" in aria
     assert "& $aria2 @aria2Arguments" not in aria
     assert '"--dir=$DownloadDir"' in aria_arguments
+    assert '"--continue=true"' in aria_arguments
+    assert '"--max-tries=5"' in aria_arguments
+    assert '"--retry-wait=10"' in aria_arguments
+    assert '"--enable-color=false"' in aria_arguments
     assert "Push-Location" not in aria
     assert "$downloadPath -ne $destinationFullPath" in aria
-    assert "Remove-Item -LiteralPath $downloadPath" in aria
+    assert "Resuming the partial aria2 download" in aria
     assert "function ConvertTo-LibertixNativeArgument" in process_module
     assert "PROCESS_TREE_NOT_STOPPED:" in process_module
     assert '$_.Exception.Message -like "PROCESS_TREE_NOT_STOPPED:*"' in downloads
@@ -1918,7 +1922,9 @@ def test_filepool_defaults_to_a_signed_build_channel_and_supports_an_override() 
     assert "Height += DevelopmentModeBanner.Height" not in main_window_code
     assert "MinHeight += DevelopmentModeBanner.Height" not in main_window_code
     assert "application.Filepool.IsDevelopmentMode" in read("MainWindow.xaml.cs")
-    assert '--filepool-base-url "{1}"' in launch
+    assert "$useDefaultFilepool" in launch
+    assert "if (-not $useDefaultFilepool)" in launch
+    assert "$taskCommand += ' --filepool-base-url \"{0}\"' -f $filepoolBaseUrl" in launch
     assert '--dev-ssh-static-ip "{0}"' in launch
     assert '--dev-ssh-prefix-length "{0}"' in launch
     assert '--dev-ssh-gateway "{0}"' in launch
@@ -2588,13 +2594,14 @@ def test_bios_iso_output_name_matches_the_filepool_contract() -> None:
     defaults = read("iso/config/defaults.env")
     docker_builder = read("docker/iso-builder/build-isos.sh")
     workflow = read(".github/workflows/ci.yml")
-    distros = read("auto_tests/app/filepool/distros.json")
+    catalog = read("auto_tests/app/filepool/catalog.json")
 
     expected_name = "libertix-installer-bios.iso"
     assert f'OUTPUT_ISO="{expected_name}"' in defaults
     assert f"/workspace/{expected_name}" in docker_builder
     assert expected_name in workflow
-    assert f'"isoUrl": "{expected_name}"' in distros
+    assert f'"fileName": "{expected_name}"' in catalog
+    assert f'"url": "{expected_name}"' in catalog
     assert "libertix-installer.iso" not in defaults
     assert "/workspace/libertix-installer.iso" not in docker_builder
 
@@ -2626,8 +2633,7 @@ def test_published_artifacts_are_traceable_and_include_notices() -> None:
     ):
         assert f"release-assets/{support_file}" in workflow
         assert f"release-metadata/{support_file}" in workflow
-    assert "> SHA256SUMS" in workflow
-    assert "release-assets/SHA256SUMS" in workflow
+    assert "SHA256SUMS" not in workflow
 
 
 def test_release_metadata_is_generated_signed_and_isolated_by_channel() -> None:
@@ -2639,7 +2645,7 @@ def test_release_metadata_is_generated_signed_and_isolated_by_channel() -> None:
     assert set(config) == {"schemaVersion", "mainRelease", "distributions"}
     assert '--channel "$RELEASE_CHANNEL"' in workflow
     assert "LIBERTIX_SIGNING_PRIVATE_KEY" in workflow
-    assert "release-metadata/distros.json" in workflow
+    assert "release-metadata/catalog.json" in workflow
     assert "release-metadata/releases.json" in workflow
     assert "group: libertix-pages-publication" in workflow
     assert 'install -d -m 0755 "pages-branch/$RELEASE_CHANNEL"' in workflow
@@ -2656,7 +2662,7 @@ def test_offline_documentation_preserves_the_catalogue_requirement() -> None:
     architecture = read("docs/ARCHITECTURE.md")
 
     assert "Reusing local ISO files does not remove the catalogue requirement" in readme
-    assert "`distros.json` and its detached signature" in readme
+    assert "`catalog.json` and its detached signature" in readme
     assert "Local ISO files reduce artifact" in architecture
     assert "do not provide a standalone" in architecture
     assert "An isolated laboratory must expose a" in architecture
@@ -2697,6 +2703,25 @@ def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     assert "BITS completed but the downloaded file is missing" in bits
     assert "Invoke-BoundedHttpDownload" in robust
     assert "-TimeoutSeconds 120" in robust
+    assert "$maximumAria2Attempts = 3" in robust
+    assert "retaining the partial download and retrying" in robust
+
+
+def test_windows_downloads_resume_and_present_clean_utf8_diagnostics() -> None:
+    downloads = read("Pages/ApplyChanges.Downloads.cs")
+    runner = read("Helpers/WindowsProcessRunner.cs")
+    apply_page = read("Pages/ApplyChanges.xaml.cs")
+    uefi = read("Scripts/libertix-uefi-install.ps1")
+
+    assert '"--continue=true"' in downloads
+    assert '"--max-tries=5"' in downloads
+    assert '"--retry-wait=10"' in downloads
+    assert '"--enable-color=false"' in downloads
+    assert "partial download retained for the next resume attempt" in downloads
+    assert "NormalizeTerminalText" in runner
+    assert "WindowsProcessRunner.NormalizeTerminalText(message)" in apply_page
+    assert "[Console]::OutputEncoding = $utf8NoBom" in uefi
+    assert "$OutputEncoding = $utf8NoBom" in uefi
 
 
 def test_terminal_fallback_does_not_reset_video_mode_on_redraw() -> None:

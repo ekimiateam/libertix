@@ -70,10 +70,10 @@
       <Link>Scripts\config\Libertix.InstallationPolicy.json</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="TestData\distros.json">
+    <None Include="TestData\catalog.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="TestData\distros.json.sig">
+    <None Include="TestData\catalog.json.sig">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

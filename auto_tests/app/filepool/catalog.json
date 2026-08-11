@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "artifacts": {
+    "wpf": {
+      "fileName": "Libertix-wpf.zip",
+      "url": "https://github.com/ekimiateam/libertix/releases/download/0.1/Libertix-wpf.zip",
+      "sha256": "029c6a050ebaa7b69064c28b3893abb7a0c4550f7c35e6600a5c9fae57987d07",
+      "sizeBytes": 3582813
+    },
+    "miniIso": {
+      "bios": {
+        "fileName": "libertix-installer-bios.iso",
+        "url": "libertix-installer-bios.iso",
+        "sha256": "fefcef6020b1d0ed7d89dcc4bd32d604d5465e534da4b41ceb9fb7ce316981ab",
+        "sizeBytes": 524288000
+      },
+      "uefi": {
+        "fileName": "libertix-installer-uefi.iso",
+        "url": "libertix-installer-uefi.iso",
+        "sha256": "32176f1faf5448a394202429e1806908d8d70adfcb99507d1991a023bb9f87cc",
+        "sizeBytes": 558891008
+      }
+    },
+    "support": {
+      "aria2Archive": {
+        "fileName": "aria2-64.zip",
+        "url": "aria2-64.zip",
+        "sha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+        "sizeBytes": 2475379
+      },
+      "ext4Driver": {
+        "fileName": "ext4-win-driver.exe",
+        "url": "ext4-win-driver.exe",
+        "sha256": "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031",
+        "sizeBytes": 3518926
+      },
+      "grub4DosLoader": {
+        "fileName": "grldr",
+        "url": "grldr",
+        "sha256": "124988a6091248111f5d372ad210f21250a42cfd05d9d6366be28347b6368675",
+        "sizeBytes": 217769
+      },
+      "grub4DosMbr": {
+        "fileName": "grldr.mbr",
+        "url": "grldr.mbr",
+        "sha256": "53fce0d82a09531b1a7af728e712a957db3966835304e8bdae5e350220270b33",
+        "sizeBytes": 9216
+      }
+    }
+  },
+  "distributions": [
+    {
+      "id": "mint",
+      "name": "Linux Mint 22.3 Cinnamon",
+      "osReleaseId": "linuxmint",
+      "grubDisplayName": "Linux Mint 22.3 Cinnamon",
+      "grubIcon": "linuxmint",
+      "description": "Linux Mint is an operating system for desktop and laptop computers. It is designed to work out of the box and comes fully equipped with the apps most people need.",
+      "imageUrl": "https://www.linuxmint.com/web/img/screenshots/c1.jpg",
+      "isoInstaller": "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso",
+      "isoInstallerFileName": "mint.iso",
+      "isoInstallerSha256": "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4",
+      "isoInstallerSizeBytes": 3091660800,
+      "sizeInGB": 20
+    },
+    {
+      "id": "zorin",
+      "name": "Zorin OS 18.1 Core",
+      "osReleaseId": "zorin",
+      "grubDisplayName": "Zorin OS 18.1 Core",
+      "grubIcon": "zorin",
+      "description": "Zorin OS Core is a free Ubuntu-based desktop operating system with standard apps and four desktop layouts.",
+      "imageUrl": "https://assets.zorincdn.com/zorin.com/images/download/18/core.png",
+      "isoInstaller": "https://mirrors.univ-reims.fr/IMAGES/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso",
+      "isoInstallerFileName": "zorin.iso",
+      "isoInstallerSha256": "44649b97bd307fc4c8529205d098ebbf98575a1e1ba2ee7d7005b697af1721d5",
+      "isoInstallerSizeBytes": 3909091328,
+      "sizeInGB": 20
+    }
+  ]
+}

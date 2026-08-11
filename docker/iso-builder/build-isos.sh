@@ -98,5 +98,5 @@ esac
 chown "$host_uid:$host_gid" \
     "${outputs[@]}" \
     /workspace/auto_tests/runtime/filepool \
-    /workspace/auto_tests/runtime/filepool/distros.json
+    /workspace/auto_tests/runtime/filepool/catalog.json
 sha256sum "${outputs[@]}"

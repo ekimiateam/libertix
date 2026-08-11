@@ -205,6 +205,7 @@
           <select id="sourceMode">
             <option value="local">Working tree local</option>
             <option value="remote">dev distant</option>
+            <option value="published">Dernier build GitHub dev publié</option>
           </select>
           <div class="buttons">
             <button id="saveOptions">Enregistrer</button>
@@ -259,7 +260,7 @@
             <button id="checkFilepool">Vérifier les fichiers</button>
           </div>
           <div>
-            <a href="/filepool/distros.json" target="_blank" rel="noreferrer">distros.json</a>
+            <a href="/filepool/catalog.json" target="_blank" rel="noreferrer">catalog.json</a>
             <span class="pill">JSON</span>
           </div>
           <div>
@@ -490,7 +491,7 @@
         setBusy(true);
         setStatus("Vérification du filepool...", false);
         const files = [
-          "distros.json",
+          "catalog.json",
           "libertix-installer-bios.iso",
           "libertix-installer-uefi.iso",
           "aria2-64.zip",

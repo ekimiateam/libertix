@@ -414,19 +414,6 @@ jobs:
             --source-dir auto_tests/app/filepool \
             --output-dir release-assets
           test -s release-assets/Libertix-wpf.zip
-          (
-            cd release-assets
-            sha256sum \
-              Libertix-wpf.zip \
-              aria2-64.zip \
-              ext4-win-driver.exe \
-              grldr \
-              grldr.mbr \
-              libertix-installer-bios.iso \
-              libertix-installer-uefi.iso \
-              > SHA256SUMS
-          )
-          test -s release-assets/SHA256SUMS
 
       - name: Generate and sign channel metadata
         shell: bash
@@ -450,15 +437,18 @@ jobs:
             --bios-iso release-assets/libertix-installer-bios.iso \
             --uefi-iso release-assets/libertix-installer-uefi.iso \
             --wpf-zip release-assets/Libertix-wpf.zip \
+            --aria2-archive release-assets/aria2-64.zip \
+            --ext4-driver release-assets/ext4-win-driver.exe \
+            --grub4dos-loader release-assets/grldr \
+            --grub4dos-mbr release-assets/grldr.mbr \
             --output-dir release-metadata
           uv run --project auto_tests --frozen python iso-tools/sign-release-metadata.py \
             --private-key release-work/signing-private.pem \
-            release-metadata/distros.json \
+            release-metadata/catalog.json \
             release-metadata/releases.json
-          test -s release-metadata/distros.json.sig
+          test -s release-metadata/catalog.json.sig
           test -s release-metadata/releases.json.sig
           cp -- \
-            release-assets/SHA256SUMS \
             release-assets/aria2-64.zip \
             release-assets/ext4-win-driver.exe \
             release-assets/grldr \
@@ -495,13 +485,8 @@ jobs:
           notes="$(jq -r '.latest.notes' release-metadata/releases.json)"
           assets=(
             release-assets/Libertix-wpf.zip
-            release-assets/aria2-64.zip
-            release-assets/ext4-win-driver.exe
-            release-assets/grldr
-            release-assets/grldr.mbr
             release-assets/libertix-installer-bios.iso
             release-assets/libertix-installer-uefi.iso
-            release-assets/SHA256SUMS
           )
           if [ "$RELEASE_CHANNEL" = dev ] && gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
@@ -554,10 +539,9 @@ jobs:
         with:
           name: Libertix-pages-${{ needs.identity.outputs.channel }}-${{ github.sha }}
           path: |
-            release-metadata/SHA256SUMS
             release-metadata/aria2-64.zip
-            release-metadata/distros.json
-            release-metadata/distros.json.sig
+            release-metadata/catalog.json
+            release-metadata/catalog.json.sig
             release-metadata/ext4-win-driver.exe
             release-metadata/grldr
             release-metadata/grldr.mbr
@@ -610,10 +594,9 @@ jobs:
             *) printf 'Invalid Pages channel: %s\n' "$RELEASE_CHANNEL" >&2; exit 1 ;;
           esac
           channel_files=(
-            SHA256SUMS
             aria2-64.zip
-            distros.json
-            distros.json.sig
+            catalog.json
+            catalog.json.sig
             ext4-win-driver.exe
             grldr
             grldr.mbr
@@ -682,10 +665,9 @@ jobs:
 
           mkdir -p .work/pages-verification
           channel_files=(
-            SHA256SUMS
             aria2-64.zip
-            distros.json
-            distros.json.sig
+            catalog.json
+            catalog.json.sig
             ext4-win-driver.exe
             grldr
             grldr.mbr

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate runtime filepool metadata with hashes from built mini-ISO images."""
+"""Generate a runtime catalog with hashes from built mini-ISO images."""
 
 from __future__ import annotations
 
@@ -11,40 +11,22 @@ import tempfile
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TEMPLATE = REPOSITORY_ROOT / "release-config.json"
-DEFAULT_METADATA = REPOSITORY_ROOT / "auto_tests" / "runtime" / "filepool" / "distros.json"
+DEFAULT_TEMPLATE = REPOSITORY_ROOT / "auto_tests" / "app" / "filepool" / "catalog.json"
+DEFAULT_METADATA = REPOSITORY_ROOT / "auto_tests" / "runtime" / "filepool" / "catalog.json"
 
 
-def load_distribution_template(path: Path) -> list[dict[str, object]]:
+def load_catalog(path: Path) -> dict[str, object]:
     source = json.loads(path.read_text(encoding="utf-8"))
-    from_release_config = isinstance(source, dict)
-    if isinstance(source, dict):
-        if set(source) != {"schemaVersion", "mainRelease", "distributions"}:
-            raise ValueError("Release configuration has missing or unknown top-level properties.")
-        source = source.get("distributions")
     if (
-        not isinstance(source, list)
-        or not source
-        or not all(isinstance(item, dict) for item in source)
+        not isinstance(source, dict)
+        or set(source) != {"schemaVersion", "artifacts", "distributions"}
+        or source.get("schemaVersion") != 1
+        or not isinstance(source.get("artifacts"), dict)
+        or not isinstance(source.get("distributions"), list)
+        or not source["distributions"]
     ):
-        raise ValueError("Distribution metadata must contain at least one entry.")
-
-    distributions: list[dict[str, object]] = []
-    for configured in source:
-        entry = dict(configured)
-        defaults = {
-            "isoUrl": "libertix-installer-bios.iso",
-            "isoSha256": "0" * 64,
-            "uefiIsoUrl": "libertix-installer-uefi.iso",
-            "uefiIsoSha256": "0" * 64,
-        }
-        if from_release_config:
-            entry.update(defaults)
-        else:
-            for key, value in defaults.items():
-                entry.setdefault(key, value)
-        distributions.append(entry)
-    return distributions
+        raise ValueError("Catalog must contain schemaVersion, artifacts and distributions.")
+    return source
 
 
 def sha256(path: Path) -> str:
@@ -62,38 +44,49 @@ def update_metadata(
     *,
     template_path: Path | None = None,
 ) -> None:
-    source_path = template_path or metadata_path
-    distributions = load_distribution_template(source_path)
-
-    existing_distributions: list[dict[str, object]] = []
+    catalog = load_catalog(template_path or metadata_path)
+    existing_catalog: dict[str, object] | None = None
     if template_path is not None and metadata_path.is_file():
-        existing = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if isinstance(existing, list) and all(isinstance(entry, dict) for entry in existing):
-            existing_distributions = existing
+        try:
+            existing_catalog = load_catalog(metadata_path)
+        except (OSError, ValueError, json.JSONDecodeError):
+            existing_catalog = None
 
-    updates = (
-        ("isoUrl", "isoSha256", bios_iso),
-        ("uefiIsoUrl", "uefiIsoSha256", uefi_iso),
-    )
-    for url_key, hash_key, artifact in updates:
+    artifacts = catalog.get("artifacts")
+    if not isinstance(artifacts, dict) or not isinstance(artifacts.get("miniIso"), dict):
+        raise ValueError("Catalog artifacts must define miniIso.bios and miniIso.uefi.")
+    mini_iso = artifacts["miniIso"]
+    assert isinstance(mini_iso, dict)
+
+    updates = (("bios", bios_iso), ("uefi", uefi_iso))
+    for key, artifact in updates:
+        entry = mini_iso.get(key)
+        if not isinstance(entry, dict):
+            raise ValueError(f"Catalog miniIso.{key} metadata is missing.")
         if artifact is None:
-            hashes_by_url: dict[object, str] = {}
-            for existing_entry in existing_distributions:
-                previous_hash = existing_entry.get(hash_key)
-                if isinstance(previous_hash, str) and len(previous_hash) == 64:
-                    hashes_by_url[existing_entry.get(url_key)] = previous_hash
-            for entry in distributions:
-                previous_hash = hashes_by_url.get(entry.get(url_key))
-                if previous_hash is not None:
-                    entry[hash_key] = previous_hash
+            if existing_catalog is not None:
+                existing_artifacts = existing_catalog.get("artifacts")
+                existing_mini_iso = (
+                    existing_artifacts.get("miniIso")
+                    if isinstance(existing_artifacts, dict)
+                    else None
+                )
+                existing_entry = (
+                    existing_mini_iso.get(key)
+                    if isinstance(existing_mini_iso, dict)
+                    else None
+                )
+                if isinstance(existing_entry, dict):
+                    mini_iso[key] = existing_entry
             continue
         artifact = artifact.resolve(strict=True)
-        matches = [entry for entry in distributions if entry.get(url_key) == artifact.name]
-        if not matches:
-            raise ValueError(f"Expected at least one distribution for {artifact.name}, found none.")
-        artifact_hash = sha256(artifact)
-        for entry in matches:
-            entry[hash_key] = artifact_hash
+        if entry.get("fileName") != artifact.name:
+            raise ValueError(
+                f"Catalog miniIso.{key} expects {entry.get('fileName')}, not {artifact.name}."
+            )
+        entry["url"] = artifact.name
+        entry["sha256"] = sha256(artifact)
+        entry["sizeBytes"] = artifact.stat().st_size
 
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
     # Readers must see either the previous complete catalogue or the new one.
@@ -105,7 +98,7 @@ def update_metadata(
         suffix=".tmp",
         delete=False,
     ) as temporary:
-        json.dump(distributions, temporary, ensure_ascii=False, indent=2)
+        json.dump(catalog, temporary, ensure_ascii=False, indent=2)
         temporary.write("\n")
         temporary.flush()
         os.fsync(temporary.fileno())

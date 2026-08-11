@@ -55,9 +55,10 @@ replaced in their destination directory before the staging volume is hidden from
 
 ## Distribution catalogue and release trust
 
-CI generates the distribution catalogue from `release-config.json` after both mini-ISO images have
-been built. It combines maintainer-supplied hashes for external distribution images with hashes it
-calculates for the built BIOS and UEFI images. CI signs both `distros.json` and `releases.json` with
+CI generates the artifact and distribution catalogue from `release-config.json` after both mini-ISO
+images have been built. It combines maintainer-supplied hashes for external distribution images
+with hashes it calculates for WPF, the two mini-ISO images and every support file. CI signs both
+`catalog.json` and `releases.json` with
 the RSA private key stored in the `LIBERTIX_SIGNING_PRIVATE_KEY` Actions secret. The matching public
 key is bundled in the executable; the private key is never embedded in an application or artifact.
 

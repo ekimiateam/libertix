@@ -150,8 +150,12 @@ def generate_metadata(
     bios_iso: Path,
     uefi_iso: Path,
     wpf_zip: Path,
+    aria2_archive: Path,
+    ext4_driver: Path,
+    grub4dos_loader: Path,
+    grub4dos_mbr: Path,
     published_at: str,
-) -> tuple[list[dict[str, object]], dict[str, object]]:
+) -> tuple[dict[str, object], dict[str, object]]:
     if channel not in {"dev", "main"}:
         raise ValueError("channel must be dev or main")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -175,24 +179,35 @@ def generate_metadata(
     release_url = f"{REPOSITORY_URL}/releases/tag/{encoded_tag}"
     download_base = f"{RELEASE_DOWNLOAD_BASE}/{encoded_tag}"
     bios = _artifact(bios_iso, f"{download_base}/libertix-installer-bios.iso")
+    bios["fileName"] = "libertix-installer-bios.iso"
     uefi = _artifact(uefi_iso, f"{download_base}/libertix-installer-uefi.iso")
+    uefi["fileName"] = "libertix-installer-uefi.iso"
     wpf = _artifact(wpf_zip, f"{download_base}/Libertix-wpf.zip")
+    wpf["fileName"] = "Libertix-wpf.zip"
 
-    distributions = []
     configured_distributions = config["distributions"]
     assert isinstance(configured_distributions, list)
-    for source in configured_distributions:
-        assert isinstance(source, dict)
-        entry = dict(source)
-        entry.update(
-            {
-                "isoUrl": bios["url"],
-                "isoSha256": bios["sha256"],
-                "uefiIsoUrl": uefi["url"],
-                "uefiIsoSha256": uefi["sha256"],
-            }
-        )
-        distributions.append(entry)
+    distributions = [dict(source) for source in configured_distributions]
+
+    def support_artifact(path: Path, file_name: str) -> dict[str, object]:
+        artifact = _artifact(path, file_name)
+        artifact["fileName"] = file_name
+        return artifact
+
+    catalog = {
+        "schemaVersion": 1,
+        "artifacts": {
+            "wpf": wpf,
+            "miniIso": {"bios": bios, "uefi": uefi},
+            "support": {
+                "aria2Archive": support_artifact(aria2_archive, "aria2-64.zip"),
+                "ext4Driver": support_artifact(ext4_driver, "ext4-win-driver.exe"),
+                "grub4DosLoader": support_artifact(grub4dos_loader, "grldr"),
+                "grub4DosMbr": support_artifact(grub4dos_mbr, "grldr.mbr"),
+            },
+        },
+        "distributions": distributions,
+    }
 
     releases = {
         "schemaVersion": 1,
@@ -209,7 +224,7 @@ def generate_metadata(
             "miniIso": {"bios": bios, "uefi": uefi},
         },
     }
-    return distributions, releases
+    return catalog, releases
 
 
 def write_json(path: Path, value: object) -> None:
@@ -230,6 +245,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bios-iso", type=Path, required=True)
     parser.add_argument("--uefi-iso", type=Path, required=True)
     parser.add_argument("--wpf-zip", type=Path, required=True)
+    parser.add_argument("--aria2-archive", type=Path, required=True)
+    parser.add_argument("--ext4-driver", type=Path, required=True)
+    parser.add_argument("--grub4dos-loader", type=Path, required=True)
+    parser.add_argument("--grub4dos-mbr", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--published-at")
     return parser.parse_args()
@@ -239,7 +258,7 @@ def main() -> None:
     args = parse_args()
     published_at = args.published_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     config = load_config(args.config)
-    distros, releases = generate_metadata(
+    catalog, releases = generate_metadata(
         config,
         channel=args.channel,
         tag=args.tag,
@@ -247,9 +266,13 @@ def main() -> None:
         bios_iso=args.bios_iso,
         uefi_iso=args.uefi_iso,
         wpf_zip=args.wpf_zip,
+        aria2_archive=args.aria2_archive,
+        ext4_driver=args.ext4_driver,
+        grub4dos_loader=args.grub4dos_loader,
+        grub4dos_mbr=args.grub4dos_mbr,
         published_at=published_at,
     )
-    write_json(args.output_dir / "distros.json", distros)
+    write_json(args.output_dir / "catalog.json", catalog)
     write_json(args.output_dir / "releases.json", releases)
 
 
