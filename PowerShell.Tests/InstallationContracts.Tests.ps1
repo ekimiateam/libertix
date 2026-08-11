@@ -97,15 +97,16 @@ Describe "Atomic file publication" {
         Set-Content -LiteralPath $destination -Value '{"revision":1}' -NoNewline
         Set-Content -LiteralPath $temporary -Value '{"revision":2}' -NoNewline
         $lockJob = Start-Job -ArgumentList $destination, $ready -ScriptBlock {
-            param($Path, $ReadyPath)
+            $path = $args[0]
+            $readyPath = $args[1]
             $stream = [IO.File]::Open(
-                $Path,
+                $path,
                 [IO.FileMode]::Open,
                 [IO.FileAccess]::Read,
                 [IO.FileShare]::None
             )
             try {
-                [IO.File]::WriteAllText($ReadyPath, "ready")
+                [IO.File]::WriteAllText($readyPath, "ready")
                 Start-Sleep -Milliseconds 150
             } finally {
                 $stream.Dispose()
