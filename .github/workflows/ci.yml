@@ -409,11 +409,19 @@ jobs:
             release-input/iso/libertix-installer-bios.iso \
             release-input/iso/libertix-installer-uefi.iso \
             release-assets/
+          uv run --project auto_tests --frozen python iso-tools/prepare-support-artifacts.py \
+            --catalog Scripts/config/Libertix.Artifacts.json \
+            --source-dir auto_tests/app/filepool \
+            --output-dir release-assets
           test -s release-assets/Libertix-wpf.zip
           (
             cd release-assets
             sha256sum \
               Libertix-wpf.zip \
+              aria2-64.zip \
+              ext4-win-driver.exe \
+              grldr \
+              grldr.mbr \
               libertix-installer-bios.iso \
               libertix-installer-uefi.iso \
               > SHA256SUMS
@@ -449,6 +457,13 @@ jobs:
             release-metadata/releases.json
           test -s release-metadata/distros.json.sig
           test -s release-metadata/releases.json.sig
+          cp -- \
+            release-assets/SHA256SUMS \
+            release-assets/aria2-64.zip \
+            release-assets/ext4-win-driver.exe \
+            release-assets/grldr \
+            release-assets/grldr.mbr \
+            release-metadata/
 
       - name: Validate an existing stable version
         if: needs.identity.outputs.channel == 'main'
@@ -480,6 +495,10 @@ jobs:
           notes="$(jq -r '.latest.notes' release-metadata/releases.json)"
           assets=(
             release-assets/Libertix-wpf.zip
+            release-assets/aria2-64.zip
+            release-assets/ext4-win-driver.exe
+            release-assets/grldr
+            release-assets/grldr.mbr
             release-assets/libertix-installer-bios.iso
             release-assets/libertix-installer-uefi.iso
             release-assets/SHA256SUMS
@@ -530,13 +549,18 @@ jobs:
             gh release delete "$stale_tag" --cleanup-tag --yes
           done
 
-      - name: Upload signed Pages metadata
+      - name: Upload signed Pages payload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Libertix-pages-${{ needs.identity.outputs.channel }}-${{ github.sha }}
           path: |
+            release-metadata/SHA256SUMS
+            release-metadata/aria2-64.zip
             release-metadata/distros.json
             release-metadata/distros.json.sig
+            release-metadata/ext4-win-driver.exe
+            release-metadata/grldr
+            release-metadata/grldr.mbr
             release-metadata/releases.json
             release-metadata/releases.json.sig
           if-no-files-found: error
@@ -568,7 +592,7 @@ jobs:
           fetch-depth: 0
           path: pages-branch
 
-      - name: Download signed channel metadata
+      - name: Download signed channel payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: Libertix-pages-${{ needs.identity.outputs.channel }}-${{ github.sha }}
@@ -585,25 +609,32 @@ jobs:
             dev|main) ;;
             *) printf 'Invalid Pages channel: %s\n' "$RELEASE_CHANNEL" >&2; exit 1 ;;
           esac
-          for filename in distros.json distros.json.sig releases.json releases.json.sig; do
+          channel_files=(
+            SHA256SUMS
+            aria2-64.zip
+            distros.json
+            distros.json.sig
+            ext4-win-driver.exe
+            grldr
+            grldr.mbr
+            releases.json
+            releases.json.sig
+          )
+          for filename in "${channel_files[@]}"; do
             test -s "generated-metadata/$filename"
           done
           install -d -m 0755 "pages-branch/$RELEASE_CHANNEL"
-          install -m 0644 generated-metadata/distros.json \
-            "pages-branch/$RELEASE_CHANNEL/distros.json"
-          install -m 0644 generated-metadata/distros.json.sig \
-            "pages-branch/$RELEASE_CHANNEL/distros.json.sig"
-          install -m 0644 generated-metadata/releases.json \
-            "pages-branch/$RELEASE_CHANNEL/releases.json"
-          install -m 0644 generated-metadata/releases.json.sig \
-            "pages-branch/$RELEASE_CHANNEL/releases.json.sig"
+          for filename in "${channel_files[@]}"; do
+            install -m 0644 "generated-metadata/$filename" \
+              "pages-branch/$RELEASE_CHANNEL/$filename"
+          done
           touch pages-branch/.nojekyll
           git -C pages-branch config user.name "felix068"
           git -C pages-branch config user.email "77407722+felix068@users.noreply.github.com"
           git -C pages-branch add -- .nojekyll "$RELEASE_CHANNEL"
           if ! git -C pages-branch diff --cached --quiet; then
             git -C pages-branch commit \
-              -m "Publish $RELEASE_CHANNEL metadata for $RELEASE_TAG"
+              -m "Publish $RELEASE_CHANNEL artifacts for $RELEASE_TAG"
           fi
 
       - name: Push Pages branch with conflict retry
@@ -625,6 +656,46 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel }}
         run: |
           set -Eeuo pipefail
-          gh api --method POST "repos/$GH_REPO/pages/builds" >/dev/null
+          pages_commit="$(git -C pages-branch rev-parse HEAD)"
+          build_url="$(gh api --method POST "repos/$GH_REPO/pages/builds" --jq '.url')"
+          for attempt in $(seq 1 60); do
+            build="$(gh api "$build_url")"
+            status="$(jq -r '.status' <<<"$build")"
+            commit="$(jq -r '.commit // ""' <<<"$build")"
+            if [ "$status" = built ] && [ "$commit" = "$pages_commit" ]; then
+              break
+            fi
+            if [ "$status" = errored ] && [ "$commit" = "$pages_commit" ]; then
+              jq -r '.error.message // "GitHub Pages build failed."' <<<"$build" >&2
+              exit 1
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              printf 'GitHub Pages did not publish commit %s within five minutes.\n' \
+                "$pages_commit" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+
+          mkdir -p .work/pages-verification
+          channel_files=(
+            SHA256SUMS
+            aria2-64.zip
+            distros.json
+            distros.json.sig
+            ext4-win-driver.exe
+            grldr
+            grldr.mbr
+            releases.json
+            releases.json.sig
+          )
+          for filename in "${channel_files[@]}"; do
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              "https://ekimiateam.github.io/libertix/$RELEASE_CHANNEL/$filename?commit=$pages_commit" \
+              --output ".work/pages-verification/$filename"
+            cmp -- "generated-metadata/$filename" ".work/pages-verification/$filename"
+          done

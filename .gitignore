@@ -69,6 +69,7 @@ auto_tests/**/*.pyc
 auto_tests/app/filepool/*.iso
 auto_tests/app/filepool/*.iso.*
 auto_tests/app/filepool/*.zip
+!auto_tests/app/filepool/aria2-64.zip
 auto_tests/app/filepool/distros.json.*
 !auto_tests/app/filepool/distros.json.sig
 auto_tests/known_hosts

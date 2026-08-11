@@ -249,9 +249,10 @@ uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-
 The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, analyzes PowerShell with
 PSScriptAnalyzer, runs the Pester contract suite, builds `Libertix.exe` on Windows and builds both
 ISO images on trusted `dev` and `main` branch runs. Successful runs publish the WPF archive, both ISO
-images and `SHA256SUMS` in a GitHub Release. The CI then generates and signs the channel metadata and
-publishes only the corresponding `dev/` or `main/` directory on GitHub Pages. The WPF archive
-contains `BUILD-INFO.txt`, `LICENSE` and `THIRD_PARTY.md`.
+images, the verified runtime support files and `SHA256SUMS` in a GitHub Release. The CI then
+generates and signs the channel metadata and publishes the metadata plus the verified support files
+only in the corresponding `dev/` or `main/` directory on GitHub Pages. The WPF archive contains
+`BUILD-INFO.txt`, `LICENSE` and `THIRD_PARTY.md`.
 
 The complete versioning, signing, release and Pages workflow is documented in
 [`docs/RELEASES.md`](docs/RELEASES.md).

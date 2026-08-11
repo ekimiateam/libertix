@@ -9,7 +9,9 @@
     "sha256": "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031"
   },
   "grub4Dos": {
+    "loaderFileName": "grldr",
     "loaderSha256": "124988a6091248111f5d372ad210f21250a42cfd05d9d6366be28347b6368675",
+    "mbrLoaderFileName": "grldr.mbr",
     "mbrLoaderSha256": "53fce0d82a09531b1a7af728e712a957db3966835304e8bdae5e350220270b33"
   }
 }
