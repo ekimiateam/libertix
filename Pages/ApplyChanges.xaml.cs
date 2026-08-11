@@ -2,84 +2,108 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Globalization;
+using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
+using System.Windows.Threading;
+using Libertix.Helpers;
+using Libertix.Dialogs;
+using Libertix.Installation;
+using Libertix.Models;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public partial class ApplyChanges : Page
     {
+        private readonly InstallationState _installationState;
+        private FilepoolConfig Filepool => ((App)Application.Current).Filepool;
         private double _linuxSizeGB;
-        private const double FAT32_SIZE_GB = 2.0;
+        private static readonly string WindowsSystemDrive =
+            Path.GetPathRoot(Environment.SystemDirectory);
+        private static readonly string RecoveryRoot =
+            Path.Combine(WindowsSystemDrive, RuntimeNames.BiosRecoveryDirectory);
+        private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
+        private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
+        private static int Aria2MaxConnections =>
+            InstallationPolicy.Current.Download.Aria2MaximumConnections;
+        private static readonly string WindowsShareRoot =
+            Path.Combine(WindowsSystemDrive, @"ProgramData\Libertix\WindowsShare");
+        private static readonly Lazy<ArtifactCatalog> ArtifactCatalogHolder =
+            new Lazy<ArtifactCatalog>(ArtifactCatalog.LoadFromApplicationDirectory);
+        private static ArtifactCatalog Artifacts => ArtifactCatalogHolder.Value;
         private bool _isRunning = false;
-        private bool _automaticRebootScheduled = false;
+        private int _lastUefiProgressRevision = -1;
+        private StoragePreflightInfo _storagePreflight;
+        private bool _biosRecoveryGuardInstalled;
+        private string _biosInstallerDriveLetter;
+        private bool _logOutputAutoScroll = true;
+        private bool _expandedLogOutputAutoScroll = true;
 
-        public ApplyChanges()
+        private string BiosInstallerRoot
         {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(_biosInstallerDriveLetter))
+                    throw new InvalidOperationException("BIOS installer drive is not mounted.");
+                return _biosInstallerDriveLetter + @":\";
+            }
+        }
+
+        public ApplyChanges() : this(((App)Application.Current).InstallationState)
+        {
+        }
+
+        public ApplyChanges(InstallationState installationState)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
+            InitializeInstallationControls();
             LoadSummary();
             Loaded += ApplyChanges_Loaded;
+            Unloaded += ApplyChanges_Unloaded;
+        }
+
+        private void ApplyChanges_Unloaded(object sender, RoutedEventArgs e)
+        {
+            if (_isRunning || _cancellationDisposed)
+                return;
+
+            _installationCancellation.Dispose();
+            _cancellationDisposed = true;
         }
 
         private async void ApplyChanges_Loaded(object sender, RoutedEventArgs e)
         {
-            // Partition validation is now done in ChooseDistro page
             await StartInstallationAsync();
         }
 
         private void LoadSummary()
         {
-            // Load Linux size from saved state
-            var stateKey = $"ResizeDisk_{(App.Current.Properties["SelectedDistro"] as DistroInfo)?.Name}";
-            var state = StateManager.GetState(stateKey);
-            if (state?.State is System.Collections.Generic.Dictionary<string, double> savedState)
-            {
-                _linuxSizeGB = savedState["LinuxSize"];
-            }
-        }
-
-        private async Task<string> RunDiskpartAndGetOutputAsync(string scriptPath)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = "diskpart.exe",
-                        Arguments = $"/s \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var process = Process.Start(psi))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        process.WaitForExit();
-                        return output;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    return $"Error: {ex.Message}";
-                }
-            });
+            if (_installationState.SelectedLinuxSizeGiB is double linuxSize)
+                _linuxSizeGB = linuxSize;
         }
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
             if (_isRunning) return;
 
+            Page retryPage = _installationState.Account?.HasPassword == true
+                ? (Page)new WarningConfirmation(_installationState)
+                : new AccountCreation(_installationState);
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new WarningConfirmation(),
+                retryPage,
                 TimeSpan.FromSeconds(0.3),
                 slideLeft: false);
         }
@@ -88,1054 +112,136 @@ namespace LinuxGate.Pages
         {
             if (_isRunning) return;
 
-            _isRunning = true;
+            SetInstallationRunning(true);
             BackButton.IsEnabled = false;
 
             try
             {
-                await ExecutePartitioningAsync();
+                if (_linuxSizeGB < InstallationSizePolicy.MinimumFinalSizeGiB ||
+                    double.IsNaN(_linuxSizeGB) ||
+                    double.IsInfinity(_linuxSizeGB))
+                {
+                    Log($"ERROR: Invalid Linux partition size: {_linuxSizeGB:N1}GB");
+                    UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+                    FinishInstallation(enableBackButton: true);
+                    return;
+                }
+
+                FirmwareType firmware = DetectFirmwareTypeOrThrow();
+                _activeFirmware = firmware;
+                ThrowIfCancellationRequested();
+                // The wizard preflight prevents an invalid topology from being selected.
+                // Re-run it immediately before mutation because disk layout and BitLocker
+                // state may have changed while the user completed the remaining pages.
+                // The first pass is deliberately read-only. Firmware-specific
+                // recovery must be armed before BitLocker or storage is changed.
+                _storagePreflight = await RunStoragePreflightAsync(
+                    firmware,
+                    decryptBitLocker: false);
+                ThrowIfCancellationRequested();
+                if (!await PrepareWindowsSharePayloadAsync())
+                    throw new InvalidOperationException("Windows read-only Linux sharing payload preparation failed.");
+                ThrowIfCancellationRequested();
+
+                if (firmware == FirmwareType.Uefi)
+                {
+                    Log("UEFI firmware detected. Using Libertix UEFI workflow.");
+                    await ExecuteUefiInstallationAsync();
+                }
+                else if (firmware == FirmwareType.Bios)
+                {
+                    Log("BIOS firmware detected. Using existing BIOS workflow.");
+                    string biosRecoveryRunId = Guid.NewGuid().ToString("N");
+                    InitializeInstallationContext(
+                        firmware,
+                        RecoveryRoot,
+                        RecoveryRoot,
+                        biosRecoveryRunId);
+                    await ExecutePartitioningAsync();
+                }
+                else
+                {
+                    throw new InvalidOperationException("Unsupported firmware type.");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                await HandleCancellationAsync();
+            }
+            catch (UnterminatedProcessException ex)
+            {
+                RecordExecutionFailure(
+                    "WINDOWS_PROCESS_TERMINATION_UNVERIFIED",
+                    ex.Message,
+                    InstallationPhase.Windows);
+                Log($"CRITICAL: {ex.Message} Rollback and retry are disabled while the process state is unknown.");
+                UpdateProgress(
+                    0,
+                    Localized(
+                        "ApplyChangesRollbackIncomplete",
+                        "Rollback incomplete. Manual intervention is required."));
+                FinishInstallation(enableBackButton: false);
             }
             catch (Exception ex)
             {
+                if (_biosRecoveryGuardInstalled)
+                {
+                    await FailBiosPreparationAndRollbackAsync($"Unexpected preparation failure: {ex.Message}");
+                    return;
+                }
+                RecordExecutionFailure(
+                    "WINDOWS_PREPARATION_FAILED",
+                    ex.Message,
+                    InstallationPhase.Windows);
                 Log($"ERROR: {ex.Message}");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
+                CleanupPendingWindowsSharePayload();
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+                FinishInstallation(enableBackButton: true);
             }
         }
 
-        private async Task ExecutePartitioningAsync()
+        private async void RebootButton_Click(object sender, RoutedEventArgs e)
         {
-            // Query available shrink space first
-            Log("Checking available shrink space...");
-            double maxShrinkMB = await QueryShrinkSpaceAsync();
-            Log($"Maximum shrinkable space: {maxShrinkMB / 1024:N1}GB ({maxShrinkMB:N0}MB)");
+            bool confirmed = LocalizedConfirmationDialog.Show(
+                Application.Current.MainWindow,
+                Localized("WarningTitle", "Warning"),
+                Localized(
+                    "ApplyChangesRebootConfirm",
+                    "The computer will restart to complete the installation. Continue?"),
+                Localized("ConfirmationYes", "Yes"),
+                Localized("ConfirmationNo", "No"));
 
-            // The temporary FAT32 live partition is created at the final Linux size.
-            // The live system reformats this same slot as ext4, avoiding MBR delete/recreate.
-            double requestedLinuxMB = _linuxSizeGB * 1024;
-            double minRequiredMB = requestedLinuxMB;
-            if (maxShrinkMB < minRequiredMB)
+            if (confirmed)
             {
-                Log($"ERROR: Not enough shrinkable space!");
-                Log($"  Minimum required: {minRequiredMB / 1024:N1}GB");
-                Log($"  Available: {maxShrinkMB / 1024:N1}GB");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
-                return;
-            }
-
-            // Step 1: Shrink Windows by the full requested Linux size.
-            UpdateProgress(10, Application.Current.Resources["ApplyChangesStep1"] as string ?? "Shrinking Windows partition...");
-            Log($"Step 1: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
-
-            bool step1Success = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
-            if (!step1Success)
-            {
-                Log("ERROR: Failed to shrink Windows partition (step 1)");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
-                return;
-            }
-
-            // Wait for disk to update
-            Log("Waiting for disk to update...");
-            await Task.Delay(3000);
-
-            // Step 2: Create FAT32 partition in the free space (no offset - goes right after Windows).
-            // It is intentionally sized like the final Linux partition; the live installer reformats it.
-            UpdateProgress(30, Application.Current.Resources["ApplyChangesStep2"] as string ?? "Creating FAT32 boot partition (Z:)...");
-            Log($"Step 2: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
-
-            bool step2Success = await CreateFat32PartitionSimpleAsync(requestedLinuxMB);
-            if (!step2Success)
-            {
-                Log("ERROR: Failed to create FAT32 partition");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
-                return;
-            }
-
-            // Wait for disk to update
-            Log("Waiting for disk to update...");
-            await Task.Delay(3000);
-
-            Log("Step 3: No second shrink needed; live partition will become the Linux partition.");
-
-            // Wait for disk to update
-            Log("Waiting for disk to update...");
-            UpdateProgress(50, Application.Current.Resources["ApplyChangesWaitDisk"] as string ?? "Waiting for disk update...");
-            await Task.Delay(3000);
-
-            // Step 4: Download ISO
-            string isoUrl = "";
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro && !string.IsNullOrEmpty(distro.IsoUrl))
-            {
-                isoUrl = distro.IsoUrl;
-            }
-
-            if (string.IsNullOrEmpty(isoUrl))
-            {
-                Log("ERROR: No ISO URL found for selected distribution");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
-                return;
-            }
-
-            UpdateProgress(55, "Downloading ISO...");
-            Log($"Step 4: Downloading ISO from {isoUrl}...");
-
-            string tempIsoPath = Path.Combine(Path.GetTempPath(), "linuxgate_installer.iso");
-            string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
-            string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
-            bool downloadSuccess = false;
-
-            if (File.Exists(localIsoPath))
-            {
-                Log($"Found local ISO: {localIsoName}, copying...");
-                await Task.Run(() => File.Copy(localIsoPath, tempIsoPath, true));
-                downloadSuccess = true;
-                UpdateProgress(80, "ISO copied from local folder");
-            }
-            else
-            {
-                downloadSuccess = await DownloadIsoAsync(isoUrl, tempIsoPath);
-            }
-
-            if (!downloadSuccess)
-            {
-                Log("ERROR: Failed to download ISO");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
-                return;
-            }
-
-            // Step 5: Mount ISO and copy contents to Z:
-            UpdateProgress(80, "Copying ISO contents to Z:...");
-            Log("Step 5: Mounting ISO and copying contents to Z:...");
-
-            bool copySuccess = await MountAndCopyIsoAsync(tempIsoPath);
-            if (!copySuccess)
-            {
-                Log("ERROR: Failed to copy ISO contents");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
-                return;
-            }
-
-            // Cleanup temp ISO
-            try
-            {
-                if (File.Exists(tempIsoPath))
-                    File.Delete(tempIsoPath);
-            }
-            catch { }
-
-            // Step 6: Download Linux installer ISO to C:\
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo selectedDistro &&
-                !string.IsNullOrEmpty(selectedDistro.IsoInstaller) &&
-                !string.IsNullOrEmpty(selectedDistro.IsoInstallerFileName))
-            {
-                UpdateProgress(85, "Downloading Linux installer ISO...");
-                Log($"Step 6: Downloading Linux installer from {selectedDistro.IsoInstaller}...");
-
-                string installerDir = Path.Combine(Path.GetTempPath(), "LinuxGate");
-                Directory.CreateDirectory(installerDir);
-                string installerPath = Path.Combine(installerDir, selectedDistro.IsoInstallerFileName);
-                string localInstallerPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, selectedDistro.IsoInstallerFileName);
-                bool installerDownloadSuccess = false;
-
-                if (File.Exists(localInstallerPath))
-                {
-                    Log($"Found local installer ISO: {selectedDistro.IsoInstallerFileName}, copying...");
-                    await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
-                    installerDownloadSuccess = true;
-                    UpdateProgress(95, "Linux installer copied from local folder");
-                }
-                else
-                {
-                    installerDownloadSuccess = await DownloadInstallerIsoAsync(selectedDistro.IsoInstaller, installerPath);
-                }
-
-                if (!installerDownloadSuccess)
-                {
-                    Log("ERROR: Failed to download Linux installer ISO");
-                    UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                    BackButton.IsEnabled = true;
-                    _isRunning = false;
-                    return;
-                }
-                Log($"Linux installer saved to {installerPath}");
-            }
-
-            // Step 7: Write config.txt AFTER ISO copy (so it doesn't get overwritten)
-            UpdateProgress(95, "Writing configuration...");
-            Log("Step 7: Writing configuration to Z:\\config.txt...");
-
-            bool configSuccess = await WriteConfigToFat32Async();
-            if (!configSuccess)
-            {
-                Log("WARNING: Failed to write config.txt, will use defaults");
-            }
-
-            // Step 8: Download GRUB4DOS files to C:\
-            UpdateProgress(96, "Downloading bootloader files...");
-            Log("Step 8: Downloading GRUB4DOS files to C:\\...");
-
-            string[] grubFiles = { "grldr", "grldr.mbr", "menu.lst" };
-            foreach (var file in grubFiles)
-            {
-                string url = $"{FilepoolConfig.BaseUrl}/{file}";
-                string destPath = Path.Combine(@"C:\", file);
-                string localFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
-                bool success = false;
-
-                if (File.Exists(localFile))
-                {
-                    Log($"Found local {file}, copying...");
-                    try
-                    {
-                        File.Copy(localFile, destPath, true);
-                        success = true;
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"ERROR: Failed to copy local {file}: {ex.Message}");
-                    }
-                }
-
-                if (!success)
-                {
-                    success = await DownloadFileAsync(url, destPath);
-                }
-
-                if (!success)
-                {
-                    Log($"ERROR: Failed to obtain {file}");
-                    UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                    BackButton.IsEnabled = true;
-                    _isRunning = false;
-                    return;
-                }
-                Log($"Ready: {file} at C:\\");
-            }
-
-            // Step 9: Configure boot entry with bcdedit
-            UpdateProgress(98, "Configuring boot entry...");
-            Log("Step 9: Configuring GRUB4DOS boot entry...");
-            System.Threading.Thread.Sleep(1000);
-
-            bool bootConfigured = await ConfigureBootEntryAsync();
-            if (!bootConfigured)
-            {
-                Log("ERROR: Failed to configure boot entry");
-                UpdateProgress(0, Application.Current.Resources["ApplyChangesError"] as string ?? "Error occurred");
-                BackButton.IsEnabled = true;
-                _isRunning = false;
-                return;
-            }
-
-            // Done
-            UpdateProgress(100, Application.Current.Resources["ApplyChangesComplete"] as string ?? "Partitioning complete!");
-            Log("Installation preparation completed successfully!");
-            Log($"- FAT32 live partition: Z: ({_linuxSizeGB:N0}GB, final Linux slot)");
-            Log("- The live installer will reformat Z: as ext4 instead of deleting/recreating the MBR entry");
-            Log("- ISO contents copied to Z:");
-            Log("- GRUB4DOS bootloader installed");
-            Log("- Boot entry 'Install Linux' added to the Windows Boot Manager menu");
-            Log("- Boot menu will be shown for 30 seconds; Windows remains the default");
-            Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
-
-            RebootButton.Visibility = Visibility.Visible;
-            ScheduleAutomaticReboot();
-        }
-
-        private async Task<bool> DownloadFileAsync(string url, string destinationPath)
-        {
-            try
-            {
-                using (var client = new HttpClient())
-                {
-                    client.Timeout = TimeSpan.FromMinutes(5);
-                    var data = await client.GetByteArrayAsync(url);
-                    File.WriteAllBytes(destinationPath, data);
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                Dispatcher.Invoke(() => Log($"Download failed for {url}: {ex.Message}"));
-                return false;
-            }
-        }
-
-        private async Task<bool> ConfigureBootEntryAsync()
-        {
-            try
-            {
-                // Full path to bcdedit.exe - use Sysnative to bypass WOW64 redirection
-                string bcdeditPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Sysnative", "bcdedit.exe");
-
-                // If Sysnative doesn't exist (running as 64-bit), use System32
-                if (!File.Exists(bcdeditPath))
-                {
-                    bcdeditPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "bcdedit.exe");
-                }
-
-                Log($"Using bcdedit at: {bcdeditPath}");
-
-                // Step 1: Create the boot entry and capture the GUID
-                var createPsi = new ProcessStartInfo
-                {
-                    FileName = bcdeditPath,
-                    Arguments = "/create /d \"Install Linux\" /application bootsector",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    Verb = "runas"
-                };
-
-                string guid = "";
-                string output = "";
-                string error = "";
-
-                await Task.Run(() =>
-                {
-                    using (var process = Process.Start(createPsi))
-                    {
-                        output = process.StandardOutput.ReadToEnd();
-                        error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
-                    }
-                });
-
-                Log($"bcdedit create output: {output}");
-                if (!string.IsNullOrEmpty(error))
-                    Log($"bcdedit create error: {error}");
-
-                // Find GUID between { and } in the output
-                int startIdx = output.IndexOf('{');
-                int endIdx = output.IndexOf('}');
-                if (startIdx >= 0 && endIdx > startIdx)
-                {
-                    guid = output.Substring(startIdx, endIdx - startIdx + 1);
-                    Log($"Found GUID: {guid}");
-                }
-                else
-                {
-                    Log($"ERROR: Could not find GUID in output");
-                    return false;
-                }
-
-                // Wait 1 second before next bcdedit commands
-                await Task.Delay(1000);
-
-                // Step 2: Set device partition
-                await RunBcdeditCommandAsync(bcdeditPath, $"/set {guid} device partition=C:");
-
-                await Task.Delay(1000);
-
-                // Step 3: Set path to grldr.mbr
-                await RunBcdeditCommandAsync(bcdeditPath, $"/set {guid} path \\grldr.mbr");
-
-                await Task.Delay(1000);
-
-                // Step 4: Put Windows first and Linux second. This keeps the
-                // recovery path simple if the user lets the timeout expire.
-                await RunBcdeditCommandAsync(bcdeditPath, $"/displayorder {{current}} {guid}");
-
-                await Task.Delay(1000);
-
-                // Step 5: Ask Windows 10 for the modern boot selector, show it
-                // every boot, and wait before defaulting to Windows.
-                await RunBcdeditCommandAsync(bcdeditPath, "/set {current} bootmenupolicy Standard");
-
-                await Task.Delay(1000);
-
-                await RunBcdeditCommandAsync(bcdeditPath, "/set {bootmgr} displaybootmenu yes");
-
-                await Task.Delay(1000);
-
-                await RunBcdeditCommandAsync(bcdeditPath, "/timeout 30");
-
-                await Task.Delay(1000);
-
-                await RunBcdeditCommandAsync(bcdeditPath, "/default {current}");
-
-                Log("Boot entry configured successfully");
-                Log("Boot menu will be shown; Windows remains first and default if no choice is made.");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Log($"Boot configuration failed: {ex.Message}");
-                return false;
-            }
-        }
-
-        private async Task RunBcdeditCommandAsync(string bcdeditPath, string arguments)
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = bcdeditPath,
-                Arguments = arguments,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            int exitCode = 0;
-            await Task.Run(() =>
-            {
-                using (var process = Process.Start(psi))
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    process.WaitForExit();
-                    exitCode = process.ExitCode;
-                }
-            });
-
-            Log($"bcdedit {arguments}: {(exitCode == 0 ? "OK" : "Failed")}");
-        }
-
-        private async Task<bool> WriteConfigToFat32Async()
-        {
-            // Get locale settings from main thread before running on background thread
-            string systemLang = "";
-            string keyboardLayout = "";
-            string timezone = "";
-
-            Dispatcher.Invoke(() =>
-            {
-                systemLang = Localization.GetLinuxLocale();
-                keyboardLayout = Localization.GetKeyboardLayout();
-                timezone = Localization.GetWindowsTimezoneAsLinux();
-            });
-
-            return await Task.Run(() =>
-            {
+                RebootButton.IsEnabled = false;
+                MainWindow mainWindow = Application.Current.MainWindow as MainWindow;
+                mainWindow?.PrepareForSystemRestart();
                 try
                 {
-                    string configPath = @"Z:\config.txt";
-
-                    // Get account info
-                    string username = "user";
-                    string password = "password";
-                    string computerName = "linux-pc";
-
-                    if (App.Current.Properties["AccountInfo"] is AccountInfo account)
+                    WindowsProcessResult result = await Task.Run(() =>
+                        WindowsProcessRunner.Run(
+                            "shutdown.exe",
+                            "/r /t 0",
+                            WindowsProcessTimeouts.QuickCommand,
+                            Encoding.UTF8));
+                    if (result.ExitCode != 0)
                     {
-                        username = account.Username;
-                        password = account.Password;
-                        computerName = account.ComputerName;
-                    }
-
-                    // Get distro info - use IsoInstallerFileName for config
-                    string isoFilename = "mint.iso";
-                    if (App.Current.Properties["SelectedDistro"] is DistroInfo distro && !string.IsNullOrEmpty(distro.IsoInstallerFileName))
-                    {
-                        isoFilename = distro.IsoInstallerFileName;
-                    }
-
-                    string isoWindowsPath = isoFilename;
-                    if (App.Current.Properties["SelectedDistro"] is DistroInfo selectedInstaller &&
-                        !string.IsNullOrEmpty(selectedInstaller.IsoInstallerFileName))
-                    {
-                        isoWindowsPath = Path.Combine(
-                            Path.GetTempPath(),
-                            "LinuxGate",
-                            selectedInstaller.IsoInstallerFileName);
-                    }
-
-                    // Build config content with user settings
-                    var configLines = new List<string>
-                    {
-                        $"SYSTEM_LANG=\"{systemLang}\"",
-                        $"KEYBOARD_LAYOUT=\"{keyboardLayout}\"",
-                        "KEYBOARD_MODEL=\"pc105\"",
-                        $"TIMEZONE=\"{timezone}\"",
-                        $"USERNAME=\"{username}\"",
-                        $"PASSWORD=\"{password}\"",
-                        $"ISO_FILENAME=\"{isoFilename}\"",
-                        $"ISO_WINDOWS_PATH=\"{isoWindowsPath}\"",
-                        $"LINUX_SIZE_GB=\"{_linuxSizeGB:F0}\""
-                    };
-
-                    File.WriteAllText(configPath, string.Join("\n", configLines));
-
-                    Dispatcher.Invoke(() =>
-                    {
-                        Log($"Config written to Z:\\config.txt:");
-                        Log($"  SYSTEM_LANG={systemLang}");
-                        Log($"  KEYBOARD_LAYOUT={keyboardLayout}");
-                        Log($"  TIMEZONE={timezone}");
-                        Log($"  USERNAME={username}");
-                        Log($"  LINUX_SIZE_GB={_linuxSizeGB:F0}");
-                    });
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() => Log($"Failed to write config: {ex.Message}"));
-                    return false;
-                }
-            });
-        }
-
-        private async Task<bool> DownloadIsoAsync(string url, string destinationPath)
-        {
-            try
-            {
-                using (var client = new HttpClient())
-                {
-                    client.Timeout = TimeSpan.FromHours(2); // Long timeout for large files
-
-                    using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
-                    {
-                        response.EnsureSuccessStatusCode();
-
-                        var totalBytes = response.Content.Headers.ContentLength ?? 0;
-                        var totalMB = totalBytes / 1024.0 / 1024.0;
-
-                        Dispatcher.Invoke(() => Log($"ISO size: {totalMB:N0} MB"));
-
-                        using (var contentStream = await response.Content.ReadAsStreamAsync())
-                        using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
-                        {
-                            var buffer = new byte[8192];
-                            long totalRead = 0;
-                            int bytesRead;
-                            var lastProgressUpdate = DateTime.Now;
-
-                            while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
-                            {
-                                await fileStream.WriteAsync(buffer, 0, bytesRead);
-                                totalRead += bytesRead;
-
-                                // Update progress every 500ms
-                                if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)
-                                {
-                                    var progressPercent = totalBytes > 0 ? (int)(totalRead * 100 / totalBytes) : 0;
-                                    var downloadedMB = totalRead / 1024.0 / 1024.0;
-                                    Dispatcher.Invoke(() =>
-                                    {
-                                        var overallProgress = 60 + (progressPercent * 20 / 100); // 60-80%
-                                        UpdateProgress(overallProgress, $"Downloading... {downloadedMB:N0}/{totalMB:N0} MB ({progressPercent}%)");
-                                    });
-                                    lastProgressUpdate = DateTime.Now;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Dispatcher.Invoke(() => Log("ISO download completed"));
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Dispatcher.Invoke(() => Log($"Download failed: {ex.Message}"));
-                return false;
-            }
-        }
-
-        private async Task<bool> DownloadInstallerIsoAsync(string url, string destinationPath)
-        {
-            try
-            {
-                using (var client = new HttpClient())
-                {
-                    client.Timeout = TimeSpan.FromHours(4); // Very long timeout for large Linux ISOs
-
-                    using (var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
-                    {
-                        response.EnsureSuccessStatusCode();
-
-                        var totalBytes = response.Content.Headers.ContentLength ?? 0;
-                        var totalMB = totalBytes / 1024.0 / 1024.0;
-
-                        Dispatcher.Invoke(() => Log($"Linux installer ISO size: {totalMB:N0} MB"));
-
-                        using (var contentStream = await response.Content.ReadAsStreamAsync())
-                        using (var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
-                        {
-                            var buffer = new byte[81920]; // Larger buffer for big files
-                            long totalRead = 0;
-                            int bytesRead;
-                            var lastProgressUpdate = DateTime.Now;
-
-                            while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
-                            {
-                                await fileStream.WriteAsync(buffer, 0, bytesRead);
-                                totalRead += bytesRead;
-
-                                // Update progress every 500ms
-                                if ((DateTime.Now - lastProgressUpdate).TotalMilliseconds > 500)
-                                {
-                                    var progressPercent = totalBytes > 0 ? (int)(totalRead * 100 / totalBytes) : 0;
-                                    var downloadedMB = totalRead / 1024.0 / 1024.0;
-                                    Dispatcher.Invoke(() =>
-                                    {
-                                        var overallProgress = 85 + (progressPercent * 10 / 100); // 85-95%
-                                        UpdateProgress(overallProgress, $"Downloading Linux ISO... {downloadedMB:N0}/{totalMB:N0} MB ({progressPercent}%)");
-                                    });
-                                    lastProgressUpdate = DateTime.Now;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Dispatcher.Invoke(() => Log("Linux installer ISO download completed"));
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Dispatcher.Invoke(() => Log($"Linux installer download failed: {ex.Message}"));
-                return false;
-            }
-        }
-
-        private async Task<bool> MountAndCopyIsoAsync(string isoPath)
-        {
-            return await Task.Run(() =>
-            {
-                string mountedDrive = "";
-
-                try
-                {
-                    // Create a PowerShell script file to avoid escaping issues
-                    string scriptPath = Path.Combine(Path.GetTempPath(), $"mount_iso_{Guid.NewGuid()}.ps1");
-                    string scriptContent = $@"
-$ErrorActionPreference = 'Stop'
-try {{
-    $mountResult = Mount-DiskImage -ImagePath '{isoPath.Replace("'", "''")}' -PassThru
-    Start-Sleep -Seconds 2
-    $volume = $mountResult | Get-Volume
-    if ($volume -and $volume.DriveLetter) {{
-        Write-Output $volume.DriveLetter
-    }} else {{
-        Write-Error 'Failed to get drive letter'
-        exit 1
-    }}
-}} catch {{
-    Write-Error $_.Exception.Message
-    exit 1
-}}
-";
-                    File.WriteAllText(scriptPath, scriptContent);
-
-                    // Run the mount script
-                    var mountPsi = new ProcessStartInfo
-                    {
-                        FileName = "powershell.exe",
-                        Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var process = Process.Start(mountPsi))
-                    {
-                        mountedDrive = process.StandardOutput.ReadToEnd().Trim();
-                        string error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
-
-                        if (process.ExitCode != 0 || string.IsNullOrEmpty(mountedDrive))
-                        {
-                            Dispatcher.Invoke(() => Log($"ERROR mounting ISO: {error}"));
-                            File.Delete(scriptPath);
-                            return false;
-                        }
-                    }
-
-                    File.Delete(scriptPath);
-
-                    // Get only the first letter if multiple lines
-                    if (mountedDrive.Contains("\n"))
-                    {
-                        mountedDrive = mountedDrive.Split('\n')[0].Trim();
-                    }
-
-                    Dispatcher.Invoke(() => Log($"ISO mounted at {mountedDrive}:"));
-
-                    // Wait a bit for the drive to be ready
-                    System.Threading.Thread.Sleep(2000);
-
-                    // Copy all contents from mounted ISO to Z:
-                    string sourceDir = $"{mountedDrive}:\\";
-                    string destDir = @"Z:\";
-
-                    if (!Directory.Exists(sourceDir))
-                    {
-                        Dispatcher.Invoke(() => Log($"ERROR: Source directory not found: {sourceDir}"));
-                        return false;
-                    }
-
-                    Dispatcher.Invoke(() => Log($"Copying files from {sourceDir} to {destDir}..."));
-
-                    // Use xcopy for reliable copying (robocopy can have issues with ISO)
-                    var copyPsi = new ProcessStartInfo
-                    {
-                        FileName = "xcopy",
-                        Arguments = $"\"{sourceDir}*\" \"{destDir}\" /E /H /Y /Q",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var copyProcess = Process.Start(copyPsi))
-                    {
-                        string copyOutput = copyProcess.StandardOutput.ReadToEnd();
-                        string copyError = copyProcess.StandardError.ReadToEnd();
-                        copyProcess.WaitForExit();
-
-                        if (copyProcess.ExitCode != 0)
-                        {
-                            Dispatcher.Invoke(() => Log($"Copy error (exit {copyProcess.ExitCode}): {copyError}"));
-                            // Continue anyway, some files may have copied
-                        }
-
-                        // Get file count from xcopy output
-                        var lines = copyOutput.Split('\n');
-                        string lastLine = lines.Length > 0 ? lines[lines.Length - 1].Trim() : "done";
-                        if (string.IsNullOrWhiteSpace(lastLine) && lines.Length > 1)
-                            lastLine = lines[lines.Length - 2].Trim();
-                        Dispatcher.Invoke(() => Log($"Copy completed: {(string.IsNullOrWhiteSpace(lastLine) ? "done" : lastLine)}"));
-                    }
-
-                    Dispatcher.Invoke(() => Log("Files copied successfully"));
-                    return true;
-                }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() => Log($"Mount/copy failed: {ex.Message}"));
-                    return false;
-                }
-                finally
-                {
-                    // Always try to unmount the ISO
-                    try
-                    {
-                        Dispatcher.Invoke(() => Log("Dismounting ISO..."));
-                        var unmountPsi = new ProcessStartInfo
-                        {
-                            FileName = "powershell.exe",
-                            Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"Dismount-DiskImage -ImagePath '{isoPath.Replace("'", "''")}'\"",
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-
-                        using (var unmountProcess = Process.Start(unmountPsi))
-                        {
-                            unmountProcess.WaitForExit();
-                        }
-                        Dispatcher.Invoke(() => Log("ISO dismounted"));
-                    }
-                    catch (Exception unmountEx)
-                    {
-                        Dispatcher.Invoke(() => Log($"Warning: Could not dismount ISO: {unmountEx.Message}"));
-                    }
-                }
-            });
-        }
-
-        private async Task<(double freeSpaceSizeMB, double recoveryOffsetMB)> GetFreeSpaceInfoAsync()
-        {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"freespace_{Guid.NewGuid()}.txt");
-
-            try
-            {
-                // Query partition layout to find free space
-                string script = @"select disk 0
-list partition
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                string output = await RunDiskpartAndGetOutputAsync(diskpartScript);
-
-                // Parse partitions to find free space location
-                var partitions = new List<(int number, double offsetMB, double sizeMB)>();
-
-                var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (var line in lines)
-                {
-                    // Match: "Partition 2    Principale         127 G octets     51 M octets"
-                    // The first size is the partition size, the second is the offset
-                    var partitionMatch = Regex.Match(line, @"Partition\s+(\d+)", RegexOptions.IgnoreCase);
-                    if (!partitionMatch.Success)
-                        continue;
-
-                    int partitionNumber = int.Parse(partitionMatch.Groups[1].Value);
-
-                    // Find all size/offset values in the line
-                    var sizeMatches = Regex.Matches(line, @"(\d+)\s*(G|M|K)\s*o?", RegexOptions.IgnoreCase);
-
-                    if (sizeMatches.Count >= 2)
-                    {
-                        // First match = size, Second match = offset
-                        double sizeMB = ParseSizeToMB(sizeMatches[0]);
-                        double offsetMB = ParseSizeToMB(sizeMatches[1]);
-
-                        partitions.Add((partitionNumber, offsetMB, sizeMB));
-                        Log($"  Partition {partitionNumber}: size={sizeMB:N0}MB, offset={offsetMB:N0}MB");
-                    }
-                }
-
-                if (partitions.Count < 2)
-                {
-                    Log("ERROR: Could not find enough partitions to determine free space");
-                    return (0, 0);
-                }
-
-                // Sort by offset
-                partitions.Sort((a, b) => a.offsetMB.CompareTo(b.offsetMB));
-
-                // Find Windows partition (second partition after sorting) and where it ends
-                var windowsPartition = partitions[1];
-                double windowsEndMB = windowsPartition.offsetMB + windowsPartition.sizeMB;
-
-                // Find Recovery partition (last partition by offset)
-                var recoveryPartition = partitions[partitions.Count - 1];
-                double recoveryOffsetMB = recoveryPartition.offsetMB;
-
-                // Free space is between Windows end and Recovery start
-                double freeSpaceSizeMB = recoveryOffsetMB - windowsEndMB;
-
-                Log($"Windows ends at: {windowsEndMB:N0}MB");
-                Log($"Recovery starts at: {recoveryOffsetMB:N0}MB");
-                Log($"Free space size: {freeSpaceSizeMB:N0}MB");
-
-                return (freeSpaceSizeMB, recoveryOffsetMB);
-            }
-            catch (Exception ex)
-            {
-                Log($"Error getting free space info: {ex.Message}");
-                return (0, 0);
-            }
-            finally
-            {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
-            }
-        }
-
-        private double ParseSizeToMB(Match match)
-        {
-            double size = double.Parse(match.Groups[1].Value);
-            string unit = match.Groups[2].Value.ToUpper();
-
-            switch (unit)
-            {
-                case "G":
-                    return size * 1024;
-                case "K":
-                    return size / 1024;
-                default:
-                    return size;
-            }
-        }
-
-        private async Task<double> QueryShrinkSpaceAsync()
-        {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"querymax_{Guid.NewGuid()}.txt");
-
-            try
-            {
-                string systemDrive = Path.GetPathRoot(Environment.SystemDirectory).TrimEnd('\\');
-
-                string script = $@"rescan
-select volume {systemDrive[0]}
-shrink querymax
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                var (success, output) = await RunDiskpartWithResultAsync(diskpartScript);
-
-                // Parse the max shrink size from output
-                // French: "Le nombre maximal d'octets récupérables est :   12 GB (12445 Mo)"
-                // English: "The maximum number of reclaimable bytes is: 12 GB"
-                var match = Regex.Match(output, @"(\d+)\s*(?:GB|Go|G)\s*\((\d+)\s*Mo\)", RegexOptions.IgnoreCase);
-                if (match.Success)
-                {
-                    return double.Parse(match.Groups[2].Value); // Return MB value
-                }
-
-                // Try alternative pattern
-                match = Regex.Match(output, @"(\d+)\s*(?:MB|Mo|M)", RegexOptions.IgnoreCase);
-                if (match.Success)
-                {
-                    return double.Parse(match.Groups[1].Value);
-                }
-
-                return 0;
-            }
-            finally
-            {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
-            }
-        }
-
-        private async Task<bool> ShrinkWindowsPartitionAsync(double shrinkSizeMB)
-        {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"shrink_{Guid.NewGuid()}.txt");
-
-            try
-            {
-                // Get system drive letter
-                string systemDrive = Path.GetPathRoot(Environment.SystemDirectory).TrimEnd('\\');
-
-                // Create diskpart script with rescan to refresh disk state
-                string script = $@"rescan
-list volume
-select volume {systemDrive[0]}
-shrink desired={shrinkSizeMB:F0}
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                Log($"Running diskpart: shrink {shrinkSizeMB:F0}MB from {systemDrive}");
-
-                var (success, output) = await RunDiskpartWithResultAsync(diskpartScript);
-
-                // Check if shrink was successful by looking for success message
-                if (output.Contains("réduit") || output.Contains("shrunk") || output.Contains("reduced"))
-                {
-                    return true;
-                }
-
-                // Check for specific error messages
-                if (output.Contains("insuffisant") || output.Contains("pas assez") || output.Contains("not enough"))
-                {
-                    Log("ERROR: Not enough space available for shrinking");
-                    return false;
-                }
-
-                return success;
-            }
-            finally
-            {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
-            }
-        }
-
-        private async Task<bool> CreateFat32PartitionSimpleAsync(double sizeMB)
-        {
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"create_fat32_{Guid.NewGuid()}.txt");
-
-            try
-            {
-                // Create FAT32 partition in the first available free space (right after Windows)
-                // No offset specified - diskpart will place it at the beginning of free space
-                string script = $@"rescan
-select disk 0
-create partition primary size={sizeMB:F0}
-format fs=fat32 quick label=LINUXGATE
-assign letter=Z
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                Log($"Diskpart command: create partition primary size={sizeMB:F0} (no offset)");
-                Log("Running diskpart to create FAT32 partition...");
-
-                var (success, output) = await RunDiskpartWithResultAsync(diskpartScript);
-
-                // Check for success indicators
-                if (output.Contains("créé") || output.Contains("created") || output.Contains("formaté") || output.Contains("formatted"))
-                {
-                    return true;
-                }
-
-                return success;
-            }
-            finally
-            {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
-            }
-        }
-
-        private async Task<(bool success, string output)> RunDiskpartWithResultAsync(string scriptPath)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = "diskpart.exe",
-                        Arguments = $"/s \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var process = Process.Start(psi))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        string error = process.StandardError.ReadToEnd();
-                        process.WaitForExit();
-
-                        Dispatcher.Invoke(() =>
-                        {
-                            if (!string.IsNullOrWhiteSpace(output))
-                                Log(output);
-                            if (!string.IsNullOrWhiteSpace(error))
-                                Log($"ERROR: {error}");
-                        });
-
-                        // Check for error keywords in output
-                        bool hasError = output.ToLower().Contains("introuvable") ||
-                                       output.ToLower().Contains("erreur") ||
-                                       output.ToLower().Contains("error") ||
-                                       output.ToLower().Contains("failed") ||
-                                       output.ToLower().Contains("impossible") ||
-                                       output.ToLower().Contains("insuffisant");
-
-                        return (process.ExitCode == 0 && !hasError, output);
+                        throw new InvalidOperationException(
+                            $"shutdown.exe failed with rc={result.ExitCode}: {result.StandardError}".Trim());
                     }
                 }
                 catch (Exception ex)
                 {
-                    Dispatcher.Invoke(() => Log($"Exception: {ex.Message}"));
-                    return (false, ex.Message);
+                    mainWindow?.CancelSystemRestartPreparation();
+                    RebootButton.IsEnabled = true;
+                    Log($"ERROR: Restart request failed: {ex.Message}");
+                    UpdateProgress(
+                        100,
+                        Localized(
+                            "ApplyChangesRebootFailed",
+                            "Windows refused the restart request. Try again."));
                 }
-            });
-        }
-
-        private void RebootButton_Click(object sender, RoutedEventArgs e)
-        {
-            var result = MessageBox.Show(
-                Application.Current.Resources["ApplyChangesRebootConfirm"] as string ?? "The computer will restart to complete the installation. Continue?",
-                Application.Current.Resources["WarningTitle"] as string ?? "Warning",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Question);
-
-            if (result == MessageBoxResult.Yes)
-            {
-                Process.Start("shutdown", "/r /t 0");
             }
-        }
-
-        private void ScheduleAutomaticReboot()
-        {
-            if (_automaticRebootScheduled)
-                return;
-
-            _automaticRebootScheduled = true;
-            Log("Automatic reboot scheduled in 5 seconds...");
-            Process.Start("shutdown", "/r /t 5");
         }
 
         private void UpdateProgress(int percent, string step)
@@ -1148,13 +254,102 @@ exit";
             });
         }
 
+        /// <summary>
+        /// Resolves runtime status text from the active language dictionary.
+        /// Progress messages are created in code, so normal XAML bindings do
+        /// not translate them automatically.
+        /// </summary>
+        private static string Localized(string key, string englishFallback)
+        {
+            return Localization.GetString(key, englishFallback);
+        }
+
+        private static string LocalizedFormat(string key, string englishFallback, params object[] args)
+        {
+            return string.Format(
+                CultureInfo.CurrentCulture,
+                Localized(key, englishFallback),
+                args);
+        }
+
         private void Log(string message)
         {
+            string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
             Dispatcher.Invoke(() =>
             {
-                LogOutput.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}\n");
-                LogOutput.ScrollToEnd();
+                AppendLogLine(LogOutput, line);
+                if (ExpandedLogsOverlay.Visibility == Visibility.Visible)
+                    AppendLogLine(ExpandedLogOutput, line);
             });
+            AppendPersistentLog(line);
+            ApplicationLogger.Write($"INSTALLATION: {message}");
+        }
+
+        private void AppendLogLine(TextBox output, string line)
+        {
+            double previousOffset = output.VerticalOffset;
+
+            output.AppendText(line + Environment.NewLine);
+            // TextBox updates its scroll extent after the append has returned.
+            // Re-check the user's state on the next layout pass. This avoids a
+            // queued append overriding a manual scroll that happened meanwhile.
+            output.Dispatcher.BeginInvoke(
+                DispatcherPriority.Background,
+                new Action(() =>
+                {
+                    if (IsAutoScrollEnabled(output))
+                        output.ScrollToEnd();
+                    else
+                        output.ScrollToVerticalOffset(previousOffset);
+                }));
+        }
+
+        private void LogOutput_ScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            // Content growth changes the scroll extent before ScrollToEnd runs.
+            // Only a pure viewport movement represents a user scroll decision.
+            if (e.ExtentHeightChange != 0 || !(sender is TextBox output))
+                return;
+
+            SetAutoScrollEnabled(output, IsAtBottom(output));
+        }
+
+        private static bool IsAtBottom(TextBox output)
+        {
+            const double bottomTolerance = 4.0;
+            return output.ExtentHeight <= output.ViewportHeight ||
+                output.VerticalOffset >=
+                    output.ExtentHeight - output.ViewportHeight - bottomTolerance;
+        }
+
+        private bool IsAutoScrollEnabled(TextBox output)
+        {
+            return ReferenceEquals(output, ExpandedLogOutput)
+                ? _expandedLogOutputAutoScroll
+                : _logOutputAutoScroll;
+        }
+
+        private void SetAutoScrollEnabled(TextBox output, bool enabled)
+        {
+            if (ReferenceEquals(output, ExpandedLogOutput))
+                _expandedLogOutputAutoScroll = enabled;
+            else
+                _logOutputAutoScroll = enabled;
+        }
+
+        private void ExpandLogsButton_Click(object sender, RoutedEventArgs e)
+        {
+            ExpandedLogOutput.Text = LogOutput.Text;
+            ExpandedLogsOverlay.Visibility = Visibility.Visible;
+            _expandedLogOutputAutoScroll = true;
+            ExpandedLogOutput.ScrollToEnd();
+            ExpandedLogOutput.Focus();
+        }
+
+        private void CloseExpandedLogsButton_Click(object sender, RoutedEventArgs e)
+        {
+            ExpandedLogsOverlay.Visibility = Visibility.Collapsed;
+            ExpandLogsButton.Focus();
         }
     }
 }

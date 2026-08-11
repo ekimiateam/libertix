@@ -1,102 +1,198 @@
 ﻿using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
 using System.Windows.Navigation;
-using LinuxGate.Helpers;
-using LinuxGate.Pages;
+using Libertix.Helpers;
+using Libertix.Dialogs;
+using Libertix.Pages;
+using Libertix.Models;
 
-namespace LinuxGate
+namespace Libertix
 {
     public partial class MainWindow : Window
     {
+        private readonly InstallationState _installationState;
+        private readonly TrayIconController _trayIcon;
+        private string _selectedLanguageCode;
+        private bool _hiddenInTray;
+        private bool _allowClose;
+
         public MainWindow()
         {
+            var application = (App)Application.Current;
+            _installationState = application.InstallationState;
             InitializeComponent();
-
-            // Detect Windows language and set as default
-            string windowsLang = Localization.GetWindowsLanguageCode();
-            int langIndex = 0; // Default to English
-
-            switch (windowsLang)
+            if (application.Filepool.IsDevelopmentMode)
             {
-                case "en": langIndex = 0; break;
-                case "fr": langIndex = 1; break;
-                case "es": langIndex = 2; break;
-                case "ja": langIndex = 3; break;
+                DevelopmentModeBanner.Visibility = Visibility.Visible;
+            }
+            _installationState.InstallationRunningChanged += InstallationState_InstallationRunningChanged;
+
+            string windowsLang = Localization.GetWindowsLanguageCode();
+            Localization.SetLanguage(windowsLang);
+            _selectedLanguageCode = windowsLang;
+            _trayIcon = new TrayIconController(
+                RestoreFromTray,
+                ResourceText("TrayOpenLibertix", "Open Libertix"));
+            MainFrame.Content = CreateWelcomePage();
+
+            if (_installationState.UefiRecoveryStatePath is string recoveryStatePath &&
+                !string.IsNullOrWhiteSpace(recoveryStatePath))
+            {
+                Dispatcher.BeginInvoke(new Action(() =>
+                    NavigationHelper.NavigateWithAnimationInFrame(
+                        MainFrame,
+                        new UefiBootFallback(_installationState),
+                        TimeSpan.Zero)));
             }
 
-            LanguageComboBox.SelectedIndex = langIndex;
-            Localization.SetLanguage(windowsLang);
-
-/*#if DEBUG
-            DebugPanel.Visibility = Visibility.Visible;
-#endif*/
         }
 
-        private void Button_Click(object sender, RoutedEventArgs e)
+        protected override void OnClosing(CancelEventArgs e)
         {
-            StateManager.ClearState("ChooseDistro"); // Clear state when starting fresh
+            if (_allowClose)
+            {
+                base.OnClosing(e);
+                return;
+            }
+
+            if (_installationState.IsInstallationRunning)
+            {
+                e.Cancel = true;
+                HideInTrayDuringInstallation();
+                return;
+            }
+
+            e.Cancel = true;
+            bool confirmed = LocalizedConfirmationDialog.Show(
+                this,
+                ResourceText("CloseConfirmationTitle", "Close Libertix"),
+                ResourceText("CloseConfirmationMessage", "Do you really want to close Libertix?"),
+                ResourceText("ConfirmationYes", "Yes"),
+                ResourceText("ConfirmationNo", "No"));
+            if (!confirmed)
+            {
+                return;
+            }
+
+            _allowClose = true;
+            e.Cancel = false;
+            base.OnClosing(e);
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            _installationState.InstallationRunningChanged -= InstallationState_InstallationRunningChanged;
+            _trayIcon.Dispose();
+            base.OnClosed(e);
+        }
+
+        public void PrepareForSystemRestart()
+        {
+            _allowClose = true;
+        }
+
+        public void CancelSystemRestartPreparation()
+        {
+            _allowClose = false;
+        }
+
+        private void HideInTrayDuringInstallation()
+        {
+            _hiddenInTray = true;
+            Hide();
+            _trayIcon.Show(
+                ResourceText("TrayInstallTitle", "Libertix installation in progress"),
+                ResourceText(
+                    "TrayInstallMessage",
+                    "The installation is still running. Double-click the Libertix icon near the clock to reopen the window."));
+        }
+
+        private void RestoreFromTray()
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _hiddenInTray = false;
+                _trayIcon.Hide();
+                Show();
+                WindowState = WindowState.Normal;
+                Activate();
+                Topmost = true;
+                Topmost = false;
+                Focus();
+            }));
+        }
+
+        private void InstallationState_InstallationRunningChanged(object sender, EventArgs e)
+        {
+            if (!_installationState.IsInstallationRunning && _hiddenInTray)
+                RestoreFromTray();
+        }
+
+        private static string ResourceText(string key, string fallback)
+        {
+            return Localization.GetString(key, fallback);
+        }
+
+        private void StartInstallation()
+        {
+            _installationState.SelectedDistro = null;
+            _installationState.SelectedLinuxSizeGiB = null;
+            _installationState.Account = null;
             NavigationHelper.NavigateWithAnimationInFrame(
                 MainFrame,
-                new ChooseDistro(),
+                new CompatibilityCheck(_installationState),
                 TimeSpan.FromSeconds(0.3));
         }
 
-        private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private void OpenAbout()
         {
-            if (LanguageComboBox.SelectedItem is ComboBoxItem item)
-            {
-                string cultureName = item.Tag.ToString();
-                Localization.SetLanguage(cultureName);
-            }
+            NavigationHelper.NavigateWithAnimationInFrame(
+                MainFrame,
+                new About(),
+                TimeSpan.FromSeconds(0.3));
         }
 
-        private void LanguageSelector_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        /// <summary>Restores a fresh welcome page outside the installation journal.</summary>
+        public void ReturnToWelcome()
         {
-            if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item)
+            NavigationService navigation = MainFrame.NavigationService;
+            NavigatedEventHandler navigated = null;
+            navigated = (sender, args) =>
             {
-                string lang = (string)item.Tag;
-                Localization.SetLanguage(lang);
-            }
+                navigation.Navigated -= navigated;
+
+                // Auxiliary pages must not become part of the installation journal.
+                // Clear About only after the fresh welcome page has become current.
+                while (navigation.RemoveBackEntry() != null)
+                {
+                }
+            };
+
+            navigation.Navigated += navigated;
+            NavigationHelper.NavigateWithAnimationInFrame(
+                MainFrame,
+                CreateWelcomePage(),
+                TimeSpan.FromSeconds(0.3),
+                slideLeft: false);
         }
 
-        private void DebugPageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private Welcome CreateWelcomePage()
         {
-            if (DebugPageComboBox.SelectedItem is ComboBoxItem item)
-            {
-                string pageName = item.Tag.ToString();
-                Page targetPage = null;
+            return new Welcome(
+                _selectedLanguageCode,
+                StartInstallation,
+                OpenAbout,
+                ChangeLanguage);
+        }
 
-                switch (pageName)
-                {
-                    case "ChooseDistro":
-                        targetPage = new ChooseDistro();
-                        break;
-                    case "ResizeDisk":
-                        targetPage = new ResizeDisk();
-                        break;
-                    case "AccountCreation":
-                        targetPage = new AccountCreation();
-                        break;
-                    case "WarningConfirmation":
-                        targetPage = new WarningConfirmation();
-                        break;
-                    case "ApplyChanges":
-                        targetPage = new ApplyChanges();
-                        break;
-                }
-
-                if (targetPage != null)
-                {
-                    NavigationHelper.NavigateWithAnimationInFrame(
-                        MainFrame,
-                        targetPage,
-                        TimeSpan.FromSeconds(0.3));
-                }
-            }
+        private void ChangeLanguage(string cultureName)
+        {
+            _selectedLanguageCode = cultureName;
+            Localization.SetLanguage(cultureName);
+            _trayIcon?.SetOpenLabel(ResourceText("TrayOpenLibertix", "Open Libertix"));
         }
     }
 }

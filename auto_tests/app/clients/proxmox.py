@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
+import ssl
 import time
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
@@ -18,15 +21,26 @@ class ProxmoxClient:
         token_id: str,
         token_secret: str,
         *,
-        verify_tls: bool,
         timeout: float,
         task_timeout: float,
+        verify_tls: bool = True,
+        ca_bundle: Path | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/") + "/api2/json"
+        self.api_origin = base_url.rstrip("/")
+        self.base_url = self.api_origin + "/api2/json"
         self.task_timeout = task_timeout
+        self.timeout = timeout
+        self.authorization = f"PVEAPIToken={token_id}={token_secret}"
+
+        # TLS verification is the safe default. Private Proxmox deployments may
+        # opt into their own CA bundle; disabling verification requires an
+        # explicit runtime setting and is never hidden in the transport client.
+        tls_verification: bool | ssl.SSLContext = verify_tls
+        if ca_bundle is not None:
+            tls_verification = ssl.create_default_context(cafile=str(ca_bundle))
         self.client = httpx.Client(
-            headers={"Authorization": f"PVEAPIToken={token_id}={token_secret}"},
-            verify=verify_tls,
+            headers={"Authorization": self.authorization},
+            verify=tls_verification,
             timeout=timeout,
         )
 
@@ -36,17 +50,24 @@ class ProxmoxClient:
     def __exit__(self, *_args: object) -> None:
         self.client.close()
 
-    def _request(self, method: str, path: str, *, step: str) -> object:
-        logger.info("Requête Proxmox", extra={"step": step, "target": path})
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        step: str,
+        data: dict[str, object] | None = None,
+    ) -> object:
+        logger.info("Proxmox request", extra={"step": step, "target": path})
         try:
-            response = self.client.request(method, f"{self.base_url}{path}")
+            response = self.client.request(method, f"{self.base_url}{path}", data=data)
             response.raise_for_status()
             return response.json()["data"]
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             response = getattr(exc, "response", None)
             raise WorkflowError(
                 step,
-                "Échec de l'appel Proxmox",
+                "Proxmox request failed",
                 details={
                     "path": path,
                     "http_status": getattr(response, "status_code", None),
@@ -59,19 +80,19 @@ class ProxmoxClient:
     def locate_vm(self, vmid: int) -> str:
         nodes = self._request("GET", "/nodes", step="proxmox.list_nodes")
         if not isinstance(nodes, list):
-            raise WorkflowError("proxmox.list_nodes", "Format de liste des nœuds invalide")
+            raise WorkflowError("proxmox.list_nodes", "Invalid node-list response")
         for item in nodes:
             if not isinstance(item, dict) or not item.get("node"):
                 continue
             node = str(item["node"])
             path = f"/nodes/{node}/qemu/{vmid}/status/current"
-            logger.info("Recherche VM ciblée", extra={"step": "proxmox.locate_vm", "target": path})
+            logger.info("Looking up target VM", extra={"step": "proxmox.locate_vm", "target": path})
             try:
                 response = self.client.get(f"{self.base_url}{path}")
             except httpx.HTTPError as exc:
                 raise WorkflowError(
                     "proxmox.locate_vm",
-                    "Échec réseau pendant la recherche de la VM ciblée",
+                    "Network failure while locating target VM",
                     details={"vmid": vmid, "node": node, "error": str(exc)},
                 ) from exc
             if response.status_code == 200:
@@ -79,7 +100,7 @@ class ProxmoxClient:
             if response.status_code in (401, 403):
                 raise WorkflowError(
                     "proxmox.permissions",
-                    "Le token Proxmox n'a pas le droit VM.Audit sur la VM ciblée",
+                    "The Proxmox token lacks VM.Audit on the target VM",
                     details={
                         "vmid": vmid,
                         "node": node,
@@ -90,10 +111,10 @@ class ProxmoxClient:
             if response.status_code != 404:
                 raise WorkflowError(
                     "proxmox.locate_vm",
-                    "Réponse inattendue pour la VM ciblée",
+                    "Unexpected target VM response",
                     details={"vmid": vmid, "node": node, "http_status": response.status_code},
                 )
-        raise WorkflowError("proxmox.locate_vm", "VM ciblée introuvable", details={"vmid": vmid})
+        raise WorkflowError("proxmox.locate_vm", "Target VM not found", details={"vmid": vmid})
 
     def assert_snapshot(self, node: str, vmid: int, snapshot: str) -> None:
         data = self._request(
@@ -107,9 +128,83 @@ class ProxmoxClient:
         if snapshot not in names:
             raise WorkflowError(
                 "proxmox.check_snapshot",
-                "Snapshot requis absent",
+                "Required snapshot is missing",
                 details={"vmid": vmid, "snapshot": snapshot},
             )
+
+    def get_vm_status(self, node: str, vmid: int, *, step: str) -> dict[str, object]:
+        data = self._request("GET", f"/nodes/{node}/qemu/{vmid}/status/current", step=step)
+        if not isinstance(data, dict):
+            raise WorkflowError(
+                step,
+                "Invalid Proxmox VM-status response",
+                details={"vmid": vmid, "node": node},
+            )
+        return data
+
+    def verify_rollback_state(
+        self,
+        node: str,
+        vmid: int,
+        snapshot: str,
+        *,
+        require_running: bool,
+    ) -> dict[str, object]:
+        snapshots = self._request(
+            "GET",
+            f"/nodes/{node}/qemu/{vmid}/snapshot",
+            step="proxmox.verify_rollback_snapshot",
+        )
+        current = (
+            [item for item in snapshots if isinstance(item, dict) and item.get("name") == "current"]
+            if isinstance(snapshots, list)
+            else []
+        )
+        if len(current) != 1 or str(current[0].get("parent") or "") != snapshot:
+            raise WorkflowError(
+                "proxmox.verify_rollback_snapshot",
+                "The VM current state is not based on the requested snapshot",
+                details={
+                    "vmid": vmid,
+                    "node": node,
+                    "expected_snapshot": snapshot,
+                    "current_count": len(current),
+                    "current_parent": (
+                        str(current[0].get("parent") or "") if len(current) == 1 else ""
+                    ),
+                },
+            )
+
+        status_data = self.get_vm_status(node, vmid, step="proxmox.verify_rollback_status")
+        status = str(status_data.get("status") or "")
+        qmpstatus = str(status_data.get("qmpstatus") or "")
+        if status not in {"running", "stopped"} or qmpstatus == "io-error":
+            raise WorkflowError(
+                "proxmox.verify_rollback_status",
+                "The VM is not in a healthy post-rollback state",
+                details={
+                    "vmid": vmid,
+                    "node": node,
+                    "status": status,
+                    "qmpstatus": qmpstatus,
+                },
+            )
+        if require_running and (status != "running" or qmpstatus != "running"):
+            raise WorkflowError(
+                "proxmox.verify_rollback_status",
+                "The automation VM is not running after snapshot rollback",
+                details={
+                    "vmid": vmid,
+                    "node": node,
+                    "status": status,
+                    "qmpstatus": qmpstatus,
+                },
+            )
+        return {
+            "snapshot_parent": snapshot,
+            "status": status,
+            "qmpstatus": qmpstatus,
+        }
 
     def rollback(self, node: str, vmid: int, snapshot: str) -> None:
         data = self._request(
@@ -118,10 +213,10 @@ class ProxmoxClient:
             step="proxmox.rollback",
         )
         if not isinstance(data, str) or not data.startswith("UPID:"):
-            raise WorkflowError("proxmox.rollback", "UPID Proxmox invalide", details={"vmid": vmid})
-        self._wait_task(node, data, vmid)
+            raise WorkflowError("proxmox.rollback", "Invalid Proxmox UPID", details={"vmid": vmid})
+        self._wait_task(node, data, vmid, action="rollback")
 
-    def _wait_task(self, node: str, upid: str, vmid: int) -> None:
+    def _wait_task(self, node: str, upid: str, vmid: int, *, action: str) -> None:
         deadline = time.monotonic() + self.task_timeout
         encoded = quote(upid, safe="")
         while time.monotonic() < deadline:
@@ -129,14 +224,31 @@ class ProxmoxClient:
                 "GET", f"/nodes/{node}/tasks/{encoded}/status", step="proxmox.wait_task"
             )
             if isinstance(data, dict) and data.get("status") == "stopped":
-                if data.get("exitstatus") != "OK":
+                exit_status = str(data.get("exitstatus") or "")
+                if exit_status == "OK":
+                    return
+                if re.fullmatch(r"WARNINGS: [1-9][0-9]*", exit_status):
+                    # Proxmox reports completed tasks with non-fatal warnings
+                    # separately from failed tasks. The caller validates the
+                    # resulting VM state after the task completes.
+                    logger.warning(
+                        "Proxmox task completed with warnings",
+                        extra={"step": "proxmox.wait_task", "target": str(vmid)},
+                    )
+                    return
+                else:
                     raise WorkflowError(
                         "proxmox.wait_task",
-                        "Rollback Proxmox en échec",
-                        details={"vmid": vmid, "exitstatus": data.get("exitstatus")},
+                        "Proxmox task failed",
+                        details={
+                            "vmid": vmid,
+                            "action": action,
+                            "exitstatus": exit_status,
+                        },
                     )
-                return
             time.sleep(2)
         raise WorkflowError(
-            "proxmox.wait_task", "Délai du rollback dépassé", details={"vmid": vmid}
+            "proxmox.wait_task",
+            "Proxmox task timeout exceeded",
+            details={"vmid": vmid, "action": action},
         )

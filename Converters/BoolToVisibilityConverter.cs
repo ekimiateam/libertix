@@ -2,7 +2,7 @@ using System;
 using System.Windows;
 using System.Windows.Data;
 
-namespace LinuxGate.Converters
+namespace Libertix.Converters
 {
     public class BoolToVisibilityConverter : IValueConverter
     {

@@ -1,0 +1,79 @@
+<Page x:Class="Libertix.Pages.CompatibilityCheck"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="Compatibility check"
+      KeyboardNavigation.TabNavigation="Cycle">
+    <Grid Background="{DynamicResource PrimaryBackground}" Margin="40">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,10,0,24">
+            <TextBlock Text="{DynamicResource CompatibilityTitle}"
+                       HorizontalAlignment="Center"
+                       Foreground="{DynamicResource TextPrimary}"
+                       FontSize="42"
+                       FontWeight="Light"/>
+            <TextBlock Text="{DynamicResource CompatibilityDescription}"
+                       HorizontalAlignment="Center"
+                       Foreground="{DynamicResource TextSecondary}"
+                       FontSize="15"
+                       Margin="0,8,0,0"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Margin="40,0,40,20">
+            <TextBlock x:Name="StatusText"
+                       Text="{DynamicResource CompatibilityStarting}"
+                       Foreground="{DynamicResource TextPrimary}"
+                       FontSize="18"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,10"/>
+            <ProgressBar x:Name="CheckProgress"
+                         Height="14"
+                         Minimum="0"
+                         Maximum="100"
+                         IsIndeterminate="True"/>
+        </StackPanel>
+
+        <Border Grid.Row="2"
+                Background="{DynamicResource SecondaryBackground}"
+                BorderBrush="{DynamicResource CompatibilityBorder}"
+                BorderThickness="1"
+                CornerRadius="6"
+                Padding="16"
+                Margin="40,0">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="DetailsText"
+                           Foreground="{DynamicResource HighlightColor}"
+                           FontFamily="Consolas"
+                           FontSize="13"
+                           TextWrapping="Wrap"/>
+            </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="3" Margin="40,20,40,0">
+            <Button x:Name="RetryButton"
+                    Content="{DynamicResource CompatibilityRetry}"
+                    Style="{StaticResource ModernButton}"
+                    Width="180"
+                    Height="48"
+                    HorizontalAlignment="Left"
+                    TabIndex="0"
+                    Visibility="Collapsed"
+                    Click="RetryButton_Click"/>
+            <Button x:Name="ContinueButton"
+                    Content="{DynamicResource CompatibilityContinue}"
+                    Style="{StaticResource ModernButton}"
+                    Width="180"
+                    Height="48"
+                    HorizontalAlignment="Right"
+                    TabIndex="1"
+                    IsDefault="True"
+                    IsEnabled="False"
+                    Click="ContinueButton_Click"/>
+        </Grid>
+    </Grid>
+</Page>

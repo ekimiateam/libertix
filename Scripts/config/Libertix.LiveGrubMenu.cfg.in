@@ -1,0 +1,8 @@
+menuentry "Install selected Linux distribution (Automatic)" --class linux --class gnu-linux --class os {
+    linux /live/vmlinuz @LIBERTIX_NORMAL_KERNEL_ARGUMENTS@
+    initrd /live/initrd.img
+}
+menuentry "Install (Verbose mode)" --class recovery --class gnu-linux --class os {
+    linux /live/vmlinuz @LIBERTIX_VERBOSE_KERNEL_ARGUMENTS@
+    initrd /live/initrd.img
+}

@@ -1,0 +1,120 @@
+<Page x:Class="Libertix.Pages.UefiBootFallback"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="UefiBootFallback">
+    <Grid Background="{DynamicResource PrimaryBackground}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="PageTitleText"
+                   Grid.Row="0"
+                   Margin="32,28,32,12"
+                   HorizontalAlignment="Center"
+                   Text="{DynamicResource UefiFallbackTitle}"
+                   Foreground="{DynamicResource TextPrimary}"
+                   FontSize="34"
+                   FontWeight="Light"
+                   TextAlignment="Center"
+                   TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="1" Width="680" VerticalAlignment="Center">
+            <TextBlock x:Name="DescriptionText"
+                       Text="{DynamicResource UefiFallbackDescription}"
+                       Foreground="{DynamicResource TextPrimary}"
+                       FontSize="17"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,22"/>
+            <StackPanel x:Name="SecureBootGuidancePanel"
+                        Visibility="Collapsed"
+                        Margin="0,0,0,22">
+                <TextBlock Text="{DynamicResource UefiFallbackSecureBootGuidance}"
+                           Foreground="{DynamicResource TextPrimary}"
+                           FontSize="16"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"/>
+                <TextBlock Margin="0,14,0,0"
+                           FontSize="15"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap">
+                    <Hyperlink NavigateUri="https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/disabling-secure-boot?view=windows-11"
+                               RequestNavigate="SecureBootHelpLink_RequestNavigate">
+                        <Run Text="{DynamicResource UefiFallbackSecureBootHelpLink}"/>
+                    </Hyperlink>
+                </TextBlock>
+            </StackPanel>
+            <Border Background="{DynamicResource SecondaryBackground}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="8" Padding="18">
+                <StackPanel>
+                    <TextBlock x:Name="CurrentStepText"
+                               Text="{DynamicResource UefiFallbackChecking}"
+                               Foreground="{DynamicResource TextPrimary}"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"/>
+                    <ProgressBar x:Name="ProgressBar"
+                                 Height="20"
+                                 Minimum="0"
+                                 Maximum="100"
+                                 Value="0"
+                                 Margin="0,16,0,0"
+                                 Foreground="{DynamicResource AccentColor}"
+                                 Background="{DynamicResource PanelBorder}"/>
+                    <TextBox x:Name="LogOutput"
+                             Height="180"
+                             Margin="0,16,0,0"
+                             Background="{DynamicResource DeepBackground}"
+                             Foreground="{DynamicResource TextSecondary}"
+                             BorderBrush="{DynamicResource PanelBorder}"
+                             BorderThickness="1"
+                             FontFamily="Consolas"
+                             FontSize="12"
+                             IsReadOnly="True"
+                             VerticalScrollBarVisibility="Auto"
+                             TextWrapping="Wrap"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <Grid Grid.Row="2" Margin="24">
+            <Button x:Name="CancelButton"
+                    Content="{DynamicResource UefiFallbackCancel}"
+                    Style="{StaticResource ModernButton}"
+                    Width="330"
+                    Height="56"
+                    Padding="20,8"
+                    HorizontalAlignment="Left"
+                    Click="CancelButton_Click"/>
+            <Button x:Name="FallbackButton"
+                    Content="{DynamicResource UefiFallbackUseFirmware}"
+                    Style="{StaticResource ModernButton}"
+                    Width="330"
+                    Height="56"
+                    Padding="20,8"
+                    HorizontalAlignment="Right"
+                    Click="FallbackButton_Click"/>
+            <Button x:Name="RebootButton"
+                    Content="{DynamicResource UefiFallbackReboot}"
+                    Style="{StaticResource ModernButton}"
+                    Width="330"
+                    Height="56"
+                    Padding="20,8"
+                    HorizontalAlignment="Right"
+                    Visibility="Collapsed"
+                    Click="RebootButton_Click"/>
+            <Button x:Name="SecureBootCloseButton"
+                    Content="{DynamicResource UefiFallbackSecureBootClose}"
+                    Style="{StaticResource ModernButton}"
+                    Width="330"
+                    Height="56"
+                    Padding="20,8"
+                    HorizontalAlignment="Center"
+                    Visibility="Collapsed"
+                    IsEnabled="False"
+                    Click="SecureBootCloseButton_Click"/>
+        </Grid>
+    </Grid>
+</Page>

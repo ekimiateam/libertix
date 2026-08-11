@@ -3,19 +3,22 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
+using Libertix.Helpers;
+using Libertix.Installation;
+using Libertix.Models;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public partial class AccountCreation : Page
     {
-        private const string STATE_KEY = "AccountCreation";
-        private readonly Regex usernameRegex = new Regex("^[a-z][a-z0-9-]*$");
-        private readonly Regex hostnameRegex = new Regex("^[a-z][a-z0-9-]*$");
-
-        public AccountCreation()
+        private readonly InstallationState _installationState;
+        public AccountCreation() : this(((App)Application.Current).InstallationState)
         {
+        }
+
+        public AccountCreation(InstallationState installationState)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             UpdateDefaultValues();
             LoadState();
@@ -23,23 +26,15 @@ namespace LinuxGate.Pages
 
         private void UpdateDefaultValues()
         {
-            // Get current Windows username and convert to lowercase
-            string windowsUsername = Environment.UserName.ToLower();
-
-            // Remove any characters that don't match our regex
+            string windowsUsername = Environment.UserName.ToLowerInvariant();
             string sanitizedUsername = Regex.Replace(windowsUsername, "[^a-z0-9-]", "");
-
-            // Ensure it starts with a letter
             if (!string.IsNullOrEmpty(sanitizedUsername) && char.IsLetter(sanitizedUsername[0]))
             {
                 UsernameBox.Text = sanitizedUsername;
             }
 
-            // Get Windows computer name and create Linux hostname
-            string windowsHostname = Environment.MachineName.ToLower();
+            string windowsHostname = Environment.MachineName.ToLowerInvariant();
             string sanitizedHostname = Regex.Replace(windowsHostname, "[^a-z0-9-]", "");
-
-            // Ensure it starts with a letter
             if (!string.IsNullOrEmpty(sanitizedHostname) && char.IsLetter(sanitizedHostname[0]))
             {
                 HostnameBox.Text = sanitizedHostname + "-linux";
@@ -48,31 +43,38 @@ namespace LinuxGate.Pages
             {
                 HostnameBox.Text = "linux-pc";
             }
-
-            // Validate the default values
             ValidateInput(null, null);
         }
 
         private void SaveState()
         {
-            var state = new PageState
+            _installationState.Account = new AccountInfo
             {
-                PageType = typeof(AccountCreation),
-                StateKey = STATE_KEY,
-                State = new AccountInfo
-                {
-                    Username = UsernameBox.Text,
-                    ComputerName = HostnameBox.Text
-                    // Don't save password for security
-                }
+                Username = UsernameBox.Text,
+                ComputerName = HostnameBox.Text
+                // Passwords never survive backward navigation.
             };
-            StateManager.SaveState(STATE_KEY, state);
+        }
+
+        private void AccountCreation_Loaded(object sender, RoutedEventArgs e)
+        {
+            UsernameBox.Focus();
+            UsernameBox.SelectAll();
+        }
+
+        private void AccountCreation_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Home && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                UsernameBox.Focus();
+                UsernameBox.SelectAll();
+                e.Handled = true;
+            }
         }
 
         private void LoadState()
         {
-            var state = StateManager.GetState(STATE_KEY);
-            if (state?.State is AccountInfo info)
+            if (_installationState.Account is AccountInfo info)
             {
                 UsernameBox.Text = info.Username;
                 HostnameBox.Text = info.ComputerName;
@@ -83,16 +85,15 @@ namespace LinuxGate.Pages
         private void ValidateInput(object sender, RoutedEventArgs e)
         {
             bool isValid = true;
-            
-            // Validate username
+
             if (string.IsNullOrEmpty(UsernameBox.Text))
             {
-                UsernameError.Text = "Username is required";
+                UsernameError.Text = Localization.GetString("UsernameRequired");
                 isValid = false;
             }
-            else if (!usernameRegex.IsMatch(UsernameBox.Text))
+            else if (!AccountPolicy.IsValidUsername(UsernameBox.Text) || UsernameBox.Text == "root")
             {
-                UsernameError.Text = "Username must start with a letter and contain only lowercase letters, numbers, or hyphens";
+                UsernameError.Text = Localization.GetString("UsernameInvalid");
                 isValid = false;
             }
             else
@@ -100,15 +101,21 @@ namespace LinuxGate.Pages
                 UsernameError.Text = "";
             }
 
-            // Validate password (min 4 characters)
             if (string.IsNullOrEmpty(PasswordBox.Password))
             {
-                PasswordError.Text = Application.Current.Resources["PasswordRequired"] as string ?? "Password is required";
+                PasswordError.Text = Localization.GetString("PasswordRequired", "Password is required");
                 isValid = false;
             }
-            else if (PasswordBox.Password.Length < 4)
+            else if (PasswordBox.Password.Length < AccountPolicy.MinimumPasswordLength)
             {
-                PasswordError.Text = Application.Current.Resources["PasswordTooShort"] as string ?? "Password must be at least 4 characters";
+                PasswordError.Text = Localization.GetString(
+                    "PasswordTooShort",
+                    "Password must be at least 8 characters");
+                isValid = false;
+            }
+            else if (PasswordBox.Password.Length > AccountPolicy.MaximumPasswordLength)
+            {
+                PasswordError.Text = Localization.GetString("PasswordTooLong");
                 isValid = false;
             }
             else
@@ -116,15 +123,14 @@ namespace LinuxGate.Pages
                 PasswordError.Text = "";
             }
 
-            // Validate confirm password
             if (string.IsNullOrEmpty(ConfirmPasswordBox.Password))
             {
-                ConfirmPasswordError.Text = "Please confirm your password";
+                ConfirmPasswordError.Text = Localization.GetString("ConfirmPasswordRequired");
                 isValid = false;
             }
             else if (PasswordBox.Password != ConfirmPasswordBox.Password)
             {
-                ConfirmPasswordError.Text = "Passwords do not match";
+                ConfirmPasswordError.Text = Localization.GetString("PasswordsDoNotMatch");
                 isValid = false;
             }
             else
@@ -132,15 +138,14 @@ namespace LinuxGate.Pages
                 ConfirmPasswordError.Text = "";
             }
 
-            // Validate hostname
             if (string.IsNullOrEmpty(HostnameBox.Text))
             {
-                HostnameError.Text = "Computer name is required";
+                HostnameError.Text = Localization.GetString("ComputerNameRequired");
                 isValid = false;
             }
-            else if (!hostnameRegex.IsMatch(HostnameBox.Text))
+            else if (!AccountPolicy.IsValidComputerName(HostnameBox.Text))
             {
-                HostnameError.Text = "Computer name must start with a letter and contain only lowercase letters, numbers, or hyphens";
+                HostnameError.Text = Localization.GetString("ComputerNameInvalid");
                 isValid = false;
             }
             else
@@ -156,7 +161,7 @@ namespace LinuxGate.Pages
             SaveState();
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new ResizeDisk(),
+                new SharingOptionsPage(_installationState),
                 TimeSpan.FromSeconds(0.3),
                 slideLeft: false);
         }
@@ -170,20 +175,12 @@ namespace LinuxGate.Pages
                 ComputerName = HostnameBox.Text
             };
 
-            App.Current.Properties["AccountInfo"] = accountInfo;
-            SaveState();
-            NavigationHelper.NavigateWithAnimation(NavigationService, new WarningConfirmation(), TimeSpan.FromSeconds(0.3));
+            _installationState.Account = accountInfo;
+            NavigationHelper.NavigateWithAnimation(
+                NavigationService,
+                new WarningConfirmation(_installationState),
+                TimeSpan.FromSeconds(0.3));
         }
 
-        private void PasswordBox_PreviewExecuted(object sender, ExecutedRoutedEventArgs e)
-        {
-            // Block paste and copy commands on password boxes
-            if (e.Command == ApplicationCommands.Paste ||
-                e.Command == ApplicationCommands.Copy ||
-                e.Command == ApplicationCommands.Cut)
-            {
-                e.Handled = true;
-            }
-        }
     }
 }

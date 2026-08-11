@@ -1,18 +1,18 @@
-<UserControl x:Class="LinuxGate.Controls.ErrorPanel"
+<UserControl x:Class="Libertix.Controls.ErrorPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" 
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-             xmlns:converters="clr-namespace:LinuxGate.Converters"
+             xmlns:converters="clr-namespace:Libertix.Converters"
              mc:Ignorable="d">
-    
+
     <UserControl.Resources>
         <Style x:Key="CustomScrollBarThumb" TargetType="{x:Type Thumb}">
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type Thumb}">
-                        <Rectangle Fill="#908caa" 
-                                 RadiusX="4" 
+                        <Rectangle Fill="{DynamicResource TextSecondary}"
+                                 RadiusX="4"
                                  RadiusY="4"/>
                     </ControlTemplate>
                 </Setter.Value>
@@ -26,10 +26,10 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type ScrollBar}">
                         <Grid>
-                            <Rectangle Fill="#363252" 
-                                     RadiusX="4" 
+                            <Rectangle Fill="{DynamicResource PanelBorder}"
+                                     RadiusX="4"
                                      RadiusY="4"/>
-                            <Track x:Name="PART_Track" 
+                            <Track x:Name="PART_Track"
                                   IsDirectionReversed="True">
                                 <Track.Thumb>
                                     <Thumb Style="{StaticResource CustomScrollBarThumb}"/>
@@ -64,38 +64,38 @@
         </Style>
     </UserControl.Resources>
 
-    <Border Background="#2a273f"
-            BorderBrush="#eb6f92"
+    <Border Background="{DynamicResource SecondaryBackground}"
+            BorderBrush="{DynamicResource ErrorColor}"
             BorderThickness="1"
             CornerRadius="8"
             MaxWidth="{Binding MaxWidth, RelativeSource={RelativeSource AncestorType=UserControl}}"
             MaxHeight="500"
             MinWidth="300">
-        
+
         <ScrollViewer Style="{StaticResource CustomScrollViewer}"
                       VerticalScrollBarVisibility="Auto"
                       Margin="40,30">
             <StackPanel>
                 <TextBlock Text="{Binding Title, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                      Foreground="#eb6f92"
+                      Foreground="{DynamicResource ErrorColor}"
                       FontSize="32"
                       FontWeight="Light"
                       TextAlignment="Center"
                       TextWrapping="Wrap"
                       Margin="0,0,0,20"/>
-            
+
             <TextBlock Text="{Binding Message, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                      Foreground="#e0def4"
+                      Foreground="{DynamicResource TextPrimary}"
                       FontSize="16"
                       TextAlignment="Center"
                       TextWrapping="Wrap"/>
 
-            <Expander Margin="0,20,0,0" 
+            <Expander Margin="0,20,0,0"
                       BorderThickness="0"
                       IsExpanded="True">
                 <Expander.Header>
-                    <TextBlock Text="System Requirements" 
-                             Foreground="#908caa"
+                    <TextBlock Text="{DynamicResource ErrorPanelSystemRequirements}"
+                             Foreground="{DynamicResource TextSecondary}"
                              FontSize="16"
                              FontWeight="SemiBold"/>
                 </Expander.Header>
@@ -105,8 +105,8 @@
                             <Trigger Property="IsExpanded" Value="True">
                                 <Setter Property="Header">
                                     <Setter.Value>
-                                        <TextBlock Text="System Requirements" 
-                                                 Foreground="#908caa"
+                                        <TextBlock Text="{DynamicResource ErrorPanelSystemRequirements}"
+                                                 Foreground="{DynamicResource TextSecondary}"
                                                  FontSize="16"
                                                  FontWeight="SemiBold"/>
                                     </Setter.Value>
@@ -115,21 +115,19 @@
                         </Style.Triggers>
                     </Style>
                 </Expander.Style>
-                <Border Background="#363252" 
-                        CornerRadius="4" 
+                <Border Background="{DynamicResource PanelBorder}"
+                        CornerRadius="4"
                         Padding="20"
                         Margin="0,10,0,0">
                     <StackPanel>
-                        <!-- System Requirements -->
                         <TextBlock Text="{Binding Details, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                 Foreground="#e0def4"
+                                 Foreground="{DynamicResource TextPrimary}"
                                  FontFamily="Consolas"
                                  FontSize="14"
                                  TextWrapping="Wrap"/>
-                        
-                        <!-- Additional Space Needed -->
+
                         <TextBlock Text="{Binding AdditionalDetails, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                                 Foreground="#eb6f92"
+                                 Foreground="{DynamicResource ErrorColor}"
                                  FontSize="14"
                                  FontWeight="SemiBold"
                                  Margin="0,10,0,0"
@@ -139,13 +137,6 @@
                 </Border>
             </Expander>
 
-            <Button Content="{Binding ActionButtonText, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                    Style="{StaticResource ModernButton}"
-                    Width="250"
-                    Height="50"
-                    Margin="0,30,0,0"
-                    Command="{Binding ActionCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
-                    Visibility="{Binding ActionButtonText, RelativeSource={RelativeSource AncestorType=UserControl}, Converter={StaticResource StringToVisibilityConverter}}"/>
             </StackPanel>
         </ScrollViewer>
     </Border>

@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
@@ -7,18 +6,22 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.IO;
-using System.Diagnostics;
-using LinuxGate.Commands;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
+using System.Globalization;
+using System.Linq;
+using Libertix.Helpers;
+using Libertix.Installation;
+using Libertix.Models;
 
-namespace LinuxGate.Pages
+namespace Libertix.Pages
 {
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {
-        private const string STATE_KEY = "ResizeDisk";
+        private const double RecommendedLinuxFractionOfFreeSpace = 0.4;
+        private const double MaximumRecommendedLinuxSizeGiB = 100;
+        private readonly InstallationState _installationState;
         private readonly double _totalSpace;
         private readonly double _initialFreeSpace;
+        private readonly double _shrinkAvailableSpace;
         private double _selectedSize;
         private double _windowsUsedSpace;
         private double _windowsFreeSpace;
@@ -32,18 +35,20 @@ namespace LinuxGate.Pages
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        public double MinimumSize => 20; // Linux Mint requires 20GB minimum; 100GB is recommended.
-        public double MinimumWindowsFree => 15; // Minimum 15GB free for Windows
-        public double MaximumSize => _initialFreeSpace - MinimumWindowsFree; // Reserve space for Windows
+        public double MinimumSize => InstallationSizePolicy.MinimumFinalSizeGiB;
+        public double MinimumWindowsFree => InstallationSizePolicy.MinimumWindowsFreeSpaceGiB;
+        private double AvailableLinuxSize => InstallationSizePolicy.AvailableLinuxSizeGiB(
+            _initialFreeSpace,
+            _shrinkAvailableSpace,
+            IsoSize);
+        // WPF rejects a slider whose maximum is lower than its minimum. The
+        // separate CanAllocateLinux flag still prevents an invalid install.
+        public double MaximumSize => Math.Max(MinimumSize, AvailableLinuxSize);
+        public bool CanAllocateLinux => AvailableLinuxSize >= MinimumSize;
 
-        // Windows total = Used + remaining free after Linux allocation
         public double WindowsTotalSpace => _windowsUsedSpace + _windowsFreeSpace;
-
-        // Percentage calculations for the two-partition view (Windows vs Linux)
         public GridLength WindowsPartitionPercentage => new GridLength(WindowsTotalSpace * 100 / _totalSpace, GridUnitType.Star);
         public GridLength LinuxPartitionPercentage => new GridLength(_linuxSize * 100 / _totalSpace, GridUnitType.Star);
-
-        // Used/Free ratio inside the Windows partition (for the usage indicator)
         public GridLength WindowsUsedPercentage => new GridLength(_windowsUsedSpace, GridUnitType.Star);
         public GridLength WindowsFreeInPartitionPercentage => new GridLength(_windowsFreeSpace > 0 ? _windowsFreeSpace : 0.001, GridUnitType.Star);
 
@@ -55,6 +60,7 @@ namespace LinuxGate.Pages
                 _windowsUsedSpace = value;
                 NotifyPropertyChanged(nameof(WindowsUsedSpace));
                 NotifyPropertyChanged(nameof(WindowsUsedPercentage));
+                NotifyPropertyChanged(nameof(SystemRequirements));
             }
         }
 
@@ -68,6 +74,8 @@ namespace LinuxGate.Pages
                 NotifyPropertyChanged(nameof(WindowsTotalSpace));
                 NotifyPropertyChanged(nameof(WindowsPartitionPercentage));
                 NotifyPropertyChanged(nameof(WindowsFreeInPartitionPercentage));
+                NotifyPropertyChanged(nameof(SystemRequirements));
+                NotifyPropertyChanged(nameof(AdditionalSpaceNeeded));
             }
         }
 
@@ -78,6 +86,7 @@ namespace LinuxGate.Pages
             {
                 _isoSize = value;
                 NotifyPropertyChanged(nameof(IsoSize));
+                NotifyPropertyChanged(nameof(SystemRequirements));
             }
         }
 
@@ -100,7 +109,7 @@ namespace LinuxGate.Pages
                 {
                     _selectedSize = value;
                     UpdatePartitionSizes(value);
-                    ManualSize = value.ToString("F0");
+                    ManualSize = value.ToString("F0", CultureInfo.InvariantCulture);
                     NotifyPropertyChanged(nameof(SelectedSize));
                 }
             }
@@ -150,9 +159,13 @@ namespace LinuxGate.Pages
         private void UpdatePartitionSizes(double linuxSize)
         {
             LinuxSize = linuxSize;
-            WindowsFreeSpace = _initialFreeSpace - linuxSize;
+            WindowsFreeSpace = InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(
+                _initialFreeSpace,
+                IsoSize,
+                linuxSize);
 
-            // Force update of all percentage bindings for proper visual refresh
+            // These bindings depend on calculated properties rather than stored
+            // fields, so changing LinuxSize does not notify them automatically.
             NotifyPropertyChanged(nameof(WindowsTotalSpace));
             NotifyPropertyChanged(nameof(WindowsPartitionPercentage));
             NotifyPropertyChanged(nameof(LinuxPartitionPercentage));
@@ -169,95 +182,145 @@ namespace LinuxGate.Pages
             {
                 _hasError = value;
                 NotifyPropertyChanged(nameof(HasError));
+                NotifyPropertyChanged(nameof(AdditionalSpaceNeeded));
             }
         }
 
-        public string SystemRequirements => 
-            $"Windows Used Space: {WindowsUsedSpace:N1} GB\n" +
-            $"Windows Free Space: {WindowsFreeSpace:N1} GB\n" +
-            $"ISO Partition: {IsoSize:N1} GB\n" +
-            $"Required Linux Space: {MinimumSize:N1} GB";
+        public string SystemRequirements => string.Join(
+            Environment.NewLine,
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskWindowsUsedSpace"), WindowsUsedSpace),
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskWindowsFreeSpace"), WindowsFreeSpace),
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskIsoSize"), IsoSize),
+            string.Format(CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskLinuxMinimum"), MinimumSize));
 
-        public string AdditionalSpaceNeeded => HasError ? 
-            $"Additional space needed: {(MinimumSize - WindowsFreeSpace):N1} GB" : null;
+        public string AdditionalSpaceNeeded => HasError
+            ? string.Format(
+                CultureInfo.CurrentCulture,
+                Localization.GetString("ResizeDiskAdditionalSpace"),
+                Math.Max(0, MinimumSize - AvailableLinuxSize))
+            : null;
 
-        public ICommand OpenDiskCleanupCommand => new RelayCommand(_ => Process.Start("cleanmgr.exe"));
-
-        public ResizeDisk()
+        public ResizeDisk() : this(((App)Application.Current).InstallationState)
         {
+        }
+
+        public ResizeDisk(InstallationState installationState)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             DataContext = this;
 
-            // Get system drive info
-            var systemDrive = DriveInfo.GetDrives()[0];
-            _totalSpace = Math.Round(systemDrive.TotalSize / 1024.0 / 1024.0 / 1024.0);
-            WindowsUsedSpace = Math.Round((systemDrive.TotalSize - systemDrive.AvailableFreeSpace) / 1024.0 / 1024.0 / 1024.0);
-            _initialFreeSpace = Math.Round(systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0);
+            // Use the actual Windows system drive instead of relying on DriveInfo enumeration order.
+            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
+            var systemDrive = DriveInfo.GetDrives()
+                .FirstOrDefault(d => d.IsReady && string.Equals(d.Name, systemRoot, StringComparison.OrdinalIgnoreCase));
+            if (systemDrive == null)
+                throw new InvalidOperationException($"System drive not found: {systemRoot}");
+            _totalSpace = systemDrive.TotalSize / 1024.0 / 1024.0 / 1024.0;
+            WindowsUsedSpace =
+                (systemDrive.TotalSize - systemDrive.AvailableFreeSpace) /
+                1024.0 / 1024.0 / 1024.0;
+            // Keep the exact byte-derived value for policy decisions. Rounding
+            // up here can offer a Linux size that the storage layer must reject
+            // later when the machine is close to the minimum Windows reserve.
+            _initialFreeSpace =
+                systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0;
+            _shrinkAvailableSpace = Math.Max(
+                0,
+                (_installationState.Compatibility?.ShrinkAvailableBytes ?? 0) /
+                    1024d / 1024d / 1024d);
             WindowsFreeSpace = _initialFreeSpace;
 
-            if (App.Current.Properties["SelectedDistro"] is Models.DistroInfo distro)
+            if (_installationState.SelectedDistro is Models.DistroInfo distro)
             {
                 LoadState(distro);
             }
 
-            ManualSize = RecommendedSize.ToString("F0");
+            ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
         }
 
-        private void SaveState(DistroInfo distro)
+        private void ResizeDisk_Loaded(object sender, RoutedEventArgs e)
         {
-            var stateKey = $"{STATE_KEY}_{distro.Name}";
-            var state = new PageState
+            if (PartitionSlider.IsEnabled)
+                PartitionSlider.Focus();
+            else
+                NextButton.Focus();
+        }
+
+        private void ResizeDisk_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Home && Keyboard.Modifiers == ModifierKeys.Control)
             {
-                PageType = typeof(ResizeDisk),
-                StateKey = stateKey,
-                State = new Dictionary<string, double>
-                {
-                    { "SelectedSize", SelectedSize },
-                    { "WindowsFreeSpace", WindowsFreeSpace },
-                    { "LinuxSize", LinuxSize }
-                }
-            };
-            StateManager.SaveState(stateKey, state);
+                if (PartitionSlider.IsEnabled)
+                    PartitionSlider.Focus();
+                else
+                    NextButton.Focus();
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.End && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                NextButton.Focus();
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Enter &&
+                Keyboard.Modifiers == ModifierKeys.None &&
+                NextButton.IsEnabled)
+            {
+                NavigateToSharingOptions();
+                e.Handled = true;
+            }
+        }
+
+        private void SaveState()
+        {
+            _installationState.SelectedLinuxSizeGiB = SelectedSize;
         }
 
         private void LoadState(DistroInfo distro)
         {
-            var stateKey = $"{STATE_KEY}_{distro.Name}";
-            var state = StateManager.GetState(stateKey);
-            
-            // Initialize ISO size
-            IsoSize = distro.SizeInGB;
-            
-            // Calculate recommended size
+            IsoSize = distro.IsoInstallerSizeBytes /
+                (double)InstallationSizePolicy.BytesPerGiB;
             RecommendedSize = CalculateRecommendedSize();
-            
-            if (state?.State is Dictionary<string, double> savedState)
+
+            if (_installationState.SelectedLinuxSizeGiB is double savedSize)
             {
-                // Restore saved values
-                SelectedSize = savedState["SelectedSize"];
-                WindowsFreeSpace = savedState["WindowsFreeSpace"];
-                LinuxSize = savedState["LinuxSize"];
-                ManualSize = SelectedSize.ToString("F0");
+                // A previously saved choice can become invalid after Windows
+                // moves unmovable files or consumes disk space. Clamp it to the
+                // current typed preflight result instead of displaying an
+                // allocation that the storage layer will later reject.
+                SelectedSize = Math.Min(savedSize, MaximumSize);
+                ManualSize = SelectedSize.ToString("F0", CultureInfo.InvariantCulture);
             }
             else
             {
-                // Initialize with recommended size
                 SelectedSize = RecommendedSize;
-                ManualSize = RecommendedSize.ToString("F0");
+                ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
             }
         }
 
         private double CalculateRecommendedSize()
         {
-            // Use 40% of available space or minimum 30GB, maximum 100GB
-            double recommendedSize = Math.Max(MinimumSize, _initialFreeSpace * 0.4);
-            return Math.Min(recommendedSize, 100);
+            if (!CanAllocateLinux)
+                return MinimumSize;
+            double recommendedSize = Math.Max(
+                MinimumSize,
+                _initialFreeSpace * RecommendedLinuxFractionOfFreeSpace);
+            return Math.Min(
+                Math.Min(recommendedSize, MaximumRecommendedLinuxSizeGiB),
+                AvailableLinuxSize);
         }
 
         private void CheckSpaceRequirements()
         {
-            // Check if Windows has enough free space (minimum 15GB)
-            HasError = WindowsFreeSpace < MinimumWindowsFree;
+            HasError = WindowsFreeSpace < MinimumWindowsFree || AvailableLinuxSize < MinimumSize;
         }
 
         private void ValidateAndUpdateSize(string value)
@@ -265,23 +328,31 @@ namespace LinuxGate.Pages
             if (string.IsNullOrWhiteSpace(value))
             {
                 HasSizeError = true;
-                SizeErrorMessage = "Size cannot be empty";
+                SizeErrorMessage = Localization.GetString("ResizeDiskSizeEmpty");
                 return;
             }
 
-            if (double.TryParse(value, out double size))
+            if (uint.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out uint parsed))
             {
+                double size = parsed;
                 if (size < MinimumSize)
                 {
                     HasSizeError = true;
-                    SizeErrorMessage = $"Size must be at least {MinimumSize}GB";
+                    SizeErrorMessage = string.Format(CultureInfo.CurrentCulture, Localization.GetString("ResizeDiskSizeTooSmall"), MinimumSize);
                     return;
                 }
 
-                if (size > MaximumSize)
+                if (AvailableLinuxSize < MinimumSize)
                 {
                     HasSizeError = true;
-                    SizeErrorMessage = $"Size cannot exceed {MaximumSize:N0}GB (Windows needs {MinimumWindowsFree}GB free)";
+                    SizeErrorMessage = string.Format(CultureInfo.CurrentCulture, Localization.GetString("ResizeDiskNotEnoughSpace"), MinimumWindowsFree, MinimumSize);
+                    return;
+                }
+
+                if (size > AvailableLinuxSize)
+                {
+                    HasSizeError = true;
+                    SizeErrorMessage = string.Format(CultureInfo.CurrentCulture, Localization.GetString("ResizeDiskSizeTooLarge"), AvailableLinuxSize, MinimumWindowsFree);
                     return;
                 }
 
@@ -292,7 +363,7 @@ namespace LinuxGate.Pages
             else
             {
                 HasSizeError = true;
-                SizeErrorMessage = "Please enter a valid number";
+                SizeErrorMessage = Localization.GetString("ResizeDiskInvalidNumber");
             }
         }
 
@@ -303,7 +374,20 @@ namespace LinuxGate.Pages
 
         private static bool IsTextAllowed(string text)
         {
-            return double.TryParse(text, out _) || text == ".";
+            return text.All(char.IsDigit);
+        }
+
+        private void ManualSize_Pasting(object sender, DataObjectPastingEventArgs e)
+        {
+            if (!e.SourceDataObject.GetDataPresent(DataFormats.UnicodeText, true))
+            {
+                e.CancelCommand();
+                return;
+            }
+
+            string text = e.SourceDataObject.GetData(DataFormats.UnicodeText) as string;
+            if (string.IsNullOrEmpty(text) || !text.All(char.IsDigit))
+                e.CancelCommand();
         }
 
         private void NotifyPropertyChanged(string propertyName)
@@ -313,39 +397,43 @@ namespace LinuxGate.Pages
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro)
+            if (_installationState.SelectedDistro != null)
             {
-                SaveState(distro);
+                SaveState();
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new ChooseDistro(),
+                new ChooseDistro(_installationState),
                 TimeSpan.FromSeconds(0.3),
                 slideLeft: false);
         }
 
         private void NextButton_Click(object sender, RoutedEventArgs e)
         {
-            if (App.Current.Properties["SelectedDistro"] is DistroInfo distro)
+            NavigateToSharingOptions();
+        }
+
+        private void NavigateToSharingOptions()
+        {
+            ValidateAndUpdateSize(ManualSize);
+            if (HasError || HasSizeError)
             {
-                SaveState(distro);
+                MessageBox.Show(
+                    SizeErrorMessage ?? Localization.GetString("ResizeDiskNoSpace"),
+                    Localization.GetString("ResizeDiskErrorTitle"),
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            if (_installationState.SelectedDistro != null)
+            {
+                SaveState();
             }
             NavigationHelper.NavigateWithAnimation(
                 NavigationService,
-                new AccountCreation(),
+                new SharingOptionsPage(_installationState),
                 TimeSpan.FromSeconds(0.3));
-        }
-
-        // In ChooseDistro when a different distro is selected
-        private void OnDistroSelected(DistroInfo distro)
-        {
-            StateManager.ClearDependentStates(STATE_KEY);
-            // ... rest of selection code
-        }
-
-        private void FallbackPanel_Loaded(object sender, RoutedEventArgs e)
-        {
-
         }
     }
 }

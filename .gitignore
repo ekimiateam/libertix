@@ -3,6 +3,7 @@ bin/
 obj/
 
 # User-specific files
+.env
 *.rsuser
 *.suo
 *.user
@@ -33,6 +34,14 @@ project.lock.json
 project.fragment.lock.json
 artifacts/
 
+# Python-generated files
+__pycache__/
+*.py[cod]
+.coverage
+.coverage.*
+.pytest_cache/
+.ruff_cache/
+
 # Rider
 .idea/
 *.sln.iml
@@ -43,6 +52,9 @@ artifacts/
 
 # Local ISO/build artifacts
 *.iso
+*.iso.*
+build-logs/
+.work/
 
 # auto_tests runtime artifacts
 auto_tests/.env
@@ -51,5 +63,17 @@ auto_tests/__pycache__/
 auto_tests/.pytest_cache/
 auto_tests/.ruff_cache/
 auto_tests/captures/
+auto_tests/runtime/
 auto_tests/*.log
 auto_tests/**/*.pyc
+auto_tests/app/filepool/*.iso
+auto_tests/app/filepool/*.iso.*
+auto_tests/app/filepool/*.zip
+auto_tests/app/filepool/distros.json.*
+!auto_tests/app/filepool/distros.json.sig
+auto_tests/known_hosts
+auto_tests/logs/
+auto_tests/tools/__pycache__/
+
+# Local Markdown reports preserved outside the versioned documentation
+/local-markdown/

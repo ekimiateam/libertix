@@ -1,45 +1,13 @@
 # Libertix
 
-> [!IMPORTANT]
-> The code on the `main` branch is currently **not up to date**. All development and changes
-> happen on the
-> #### **-->** [`dev`](https://github.com/ekimiateam/libertix/tree/dev) **<--** branch, where beta releases are published.
-> Since the project is currently in beta, the "final files" (Windows
-> application, scripts and ISO images) live on the `dev` branch, not on `main`. If you want to
-> test Libertix, use the `dev` branch.
->
-> The README below describes the project as it exists on the `dev` branch, not the features
-> currently present on `main`.
-
-Libertix is a Windows application that installs Linux Mint alongside an existing Windows system.
-It handles the Windows-side preparation, boots a purpose-built live environment, installs Mint and
-configures a dual-boot menu for either BIOS/MBR or UEFI/GPT machines.
+Libertix is a Windows application that installs a supported Debian/Ubuntu-family desktop system
+alongside an existing Windows system. It handles the Windows-side preparation, boots a
+purpose-built live environment, installs the selected distribution and configures a dual-boot menu
+for either BIOS/MBR or UEFI/GPT machines.
 
 > [!WARNING]
 > Libertix modifies disk partitions and boot configuration. Back up important data before using it.
 > The compatibility checks deliberately reject layouts that cannot be handled safely.
-
-## What Libertix does
-
-1. Checks the firmware, disk layout, storage controller, available memory, BitLocker state and
-   shrinkable space before changing the disk.
-2. Builds and persists one installation plan describing the selected disk, Windows and Recovery
-   partitions, requested Linux size, staging size and expected file hashes.
-3. Shrinks the Windows partition while preserving the detected Recovery partition.
-4. Creates a temporary FAT32 staging partition and configures a one-time boot into the matching
-   Libertix live image.
-5. The live environment verifies the plan again, expands the staging partition to the requested
-   Linux size, formats it as ext4 and installs Linux Mint.
-6. Installs the final GRUB bootloader and adds Linux Mint, Windows, shutdown and advanced options to
-   the boot menu.
-7. Records each completed stage so an intercepted cancellation or failure can run and verify the
-   appropriate rollback.
-
-The BIOS and UEFI paths produce separate ISO images, but share the installation plan, size rules,
-state tracking, target configuration and rollback logic. Only the firmware-specific boot operations
-remain separate.
-
-![Libertix BIOS and UEFI installation workflows](docs/assets/libertix-installation-workflows.svg)
 
 ## Architecture overview
 
@@ -47,6 +15,9 @@ Libertix is split into three execution environments: the Windows application pre
 a small live system performs the Linux installation, and the installed system receives the final
 boot and sharing configuration. BIOS and UEFI use separate boot adapters, while the safety rules,
 installation plan, state tracking and most live operations are shared.
+
+The authoritative lifecycle, state, and rollback guarantees are documented in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ```mermaid
 flowchart TB
@@ -56,11 +27,11 @@ flowchart TB
         Preflight["Compatibility preflight<br/>firmware, storage, BitLocker and shrinkable space"]
         Plan["Typed installation plan<br/>disk identity, partitions, hashes, locale and features"]
         State["Persisted state machine<br/>completed stages, failure and rollback state"]
-        BiosPrep["BIOS adapter<br/>FAT32 staging, GRUB4DOS and temporary BCD entry"]
-        UefiPrep["UEFI adapter<br/>FAT32 staging, EFI files and BootNext or BootOrder fallback"]
+        BiosPrep["Windows BIOS preparation<br/>recovery guard, shrink, staging, media and GRUB4DOS"]
+        UefiPrep["Windows UEFI preparation<br/>recovery guard, shrink, staging, EFI media and firmware boot"]
     end
 
-    Filepool["Filepool<br/>Mint ISO, Libertix ISO, boot files and verified hashes"]
+    Filepool["Filepool<br/>distribution ISO, Libertix ISO, boot files and verified hashes"]
 
     subgraph Images["Versioned live images"]
         BiosImage["BIOS live ISO"]
@@ -68,13 +39,13 @@ flowchart TB
         LivePlan["Plan and hardware revalidation"]
         SharedRuntime["Shared live runtime<br/>translations, progress, storage and rollback"]
         FirmwareAdapters["Firmware adapters<br/>BIOS disk boot or UEFI firmware boot"]
-        Installer["Mint installation<br/>expand staging, ext4, extract and configure target"]
+        Installer["Linux installation<br/>inspect ISO, expand staging, ext4, extract and configure target"]
     end
 
     subgraph Installed["Installed dual-boot system"]
-        Mint["Linux Mint<br/>locale, keyboard, account and desktop"]
-        Grub["Final GRUB menu<br/>Mint, Windows, shutdown and advanced options"]
-        Sharing["Optional file sharing<br/>Windows folders in Mint and read-only Linux files in Windows"]
+        Linux["Selected Linux system<br/>locale, keyboard, account and desktop"]
+        Grub["Final GRUB menu<br/>Linux, Windows, shutdown and advanced options"]
+        Sharing["Optional file sharing<br/>Windows folders in Linux and read-only Linux files in Windows"]
     end
 
     Recovery["Verified recovery path<br/>cancel, compensate completed stages and restore Windows boot"]
@@ -99,7 +70,7 @@ flowchart TB
     FirmwareAdapters --> Installer
     Filepool --> Installer
 
-    Installer --> Mint
+    Installer --> Linux
     Installer --> Grub
     Installer --> Sharing
     State --> Recovery
@@ -119,7 +90,7 @@ flowchart TB
 
     class Startup,Wizard,Preflight,Plan,State,BiosPrep,UefiPrep windows
     class BiosImage,UefiImage,LivePlan,SharedRuntime,FirmwareAdapters,Installer live
-    class Mint,Grub,Sharing target
+    class Linux,Grub,Sharing target
     class Recovery,Tests,CI support
     class Filepool external
 ```
@@ -131,10 +102,18 @@ flowchart TB
   calculate its own disk values.
 - `Installation/` contains the typed plan, size policy, validation and persisted state machine used
   to keep BIOS and UEFI behavior consistent.
-- `Pages/ApplyChanges.Bios.cs` and `Scripts/uefi/` are firmware adapters. They implement only the
-  temporary boot operations that genuinely differ between BIOS and UEFI.
-- `assets/live/` contains the shared live installer. The `iso/` and `iso-uefi/` directories add the
-  minimum boot files and settings needed for their firmware.
+- `Pages/ApplyChanges.Bios.cs` owns the complete Windows-side BIOS preparation: recovery guard,
+  hibernation policy, shrink validation, FAT32 staging, live and distribution media, GRUB4DOS and
+  the temporary BCD boot sequence.
+- `Pages/ApplyChanges.Uefi.cs`, `Scripts/modules/` and `Scripts/uefi/` own the Windows-side UEFI
+  preparation. The C# layer starts and observes the operation; the PowerShell modules implement
+  staging, EFI media, firmware variables, transaction state and Windows-side rollback.
+- `assets/live/` contains the shared live orchestrator and the small BIOS/UEFI adapters used after
+  reboot. `iso/live/libertix-install.sh`, `iso/live/libertix-runner.sh` and their `iso-uefi/live/`
+  counterparts are the actual image entry points; each is a thin wrapper that selects the firmware
+  mode and executes the shared implementation.
+- `iso/` and `iso-uefi/` contain the remaining firmware-specific boot inputs used to construct the
+  two distinct live images.
 - The recovery path reads the persisted state and compensates only operations that were completed;
   it then verifies the disk and boot state before reporting a successful rollback.
 - `auto_tests/` builds and deploys the current working tree, controls the three authorized test VMs
@@ -146,7 +125,7 @@ flowchart TB
 - BIOS with an MBR disk, or UEFI with a GPT disk
 - .NET Framework 4.8
 - Administrator privileges
-- Linux Mint 22.3 Cinnamon
+- Linux Mint 22.3 Cinnamon or Zorin OS 18.1 Core
 - At least 20 GiB of shrinkable space on the Windows system disk
 - A storage layout accepted by the compatibility preflight
 
@@ -160,16 +139,26 @@ outside the Linux allocation and is checked again before the live environment wr
 
 ## Optional file sharing
 
-The installer can expose Windows user folders in Mint and Linux user files in Windows. Linux files
+The installer can expose Windows user folders in Linux and Linux user files in Windows. Linux files
 are mounted read-only on Windows. Both directions are optional and selected before installation.
 
 ## Runtime configuration
 
-The production executable uses this filepool by default:
+Without a command-line override, the executable selects a signed GitHub Pages channel from its
+embedded build version:
 
 ```text
-https://ekimia.fr/libertix
+dev_<sha7>  -> https://ekimiateam.github.io/libertix/dev
+0.1        -> https://ekimiateam.github.io/libertix/main
 ```
+
+Reusing local ISO files does not remove the catalogue requirement. Libertix first downloads
+`distros.json` and its detached signature, verifies that signature, and only then looks beside
+`Libertix.exe` for the exact filenames selected by the catalogue. A matching local file is used
+after its SHA-256 is verified; otherwise Libertix downloads the artifact from the configured URL.
+Stable builds also verify signed `releases.json` metadata and refuse to start when a newer stable
+version has been published. Development builds deliberately skip only this freshness check; their
+distribution catalogue remains signed.
 
 Development and test runs can override it for one process without changing the production default:
 
@@ -178,7 +167,33 @@ Development and test runs can override it for one process without changing the p
 ```
 
 The override must be an absolute HTTP or HTTPS URL without embedded credentials, query parameters or
-fragments.
+fragments. It is an explicit laboratory mode, displays a permanent warning, and disables catalogue
+signature verification for that process; it must not be used to trust an unverified third-party
+server.
+
+Automated development installations also use an explicit static-address option:
+
+```powershell
+.\Libertix.exe --filepool-base-url "http://192.0.2.10:8000/filepool" `
+  --dev-ssh-static-ip "192.0.2.50" `
+  --dev-ssh-prefix-length 24 `
+  --dev-ssh-gateway "192.0.2.1" `
+  --dev-ssh-dns "9.9.9.9" `
+  --dev-ssh-dns "1.1.1.1"
+```
+
+These development options are intentionally absent from production launches. They configure the
+installed system with the supplied IPv4 profile, then install and enable password SSH for the Linux
+account created by Libertix. The address, prefix, gateway and at least one DNS server form one
+mandatory profile; providing only part of it is rejected. Repeat `--dev-ssh-dns` to configure more
+than one resolver. Libertix rejects network, broadcast, loopback, multicast and link-local addresses,
+prefixes outside `/1` through `/30`, and gateways outside the selected subnet.
+
+On UEFI systems the compatibility preflight normally verifies firmware support by writing, reading
+and restoring `BootNext` itself. Diagnostic environments that cannot permit this write can
+explicitly use `--skip-nvram-write-probe`. The preflight records the probe as skipped and warns that
+`BootNext` support is unproven; it never reports the skipped probe as successful. This option
+reduces compatibility assurance and is not intended for normal installations.
 
 ## Build the Windows application
 
@@ -213,32 +228,43 @@ libertix-installer-uefi.iso
 The builder verifies the embedded scripts, schemas, boot configuration, theme and required runtime
 tools before accepting either image.
 
+Version, origin, license and SHA-256 information for binaries and fonts stored in the repository is
+recorded in [THIRD_PARTY.md](THIRD_PARTY.md).
+
 ## Tests
 
 The automated test service is located in `auto_tests`. Its runtime configuration is loaded from a
 local `.env` file; `auto_tests/.env.example` documents the required fields.
+The complete developer environment, API reference, build workflow, and copy-paste Mint/Zorin
+commands are documented in [`auto_tests/README.md`](auto_tests/README.md).
 
 ```bash
 cd auto_tests
-python -m pip install --requirement requirements-dev.txt
-python -m ruff check app tests
-python -m ruff format --check app tests
-python -m pytest --cov=app --cov-report=term-missing
+uv sync --frozen --extra dev
+uv run --frozen python -m ruff check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
+uv run --frozen python -m ruff format --check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
+uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 ```
 
-The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, parses the PowerShell
-sources, builds `Libertix.exe` on Windows and builds both ISO images on trusted `dev` branch runs.
-Successful workflow runs publish the WPF build and the verified ISO images as GitHub Actions
-artifacts.
+The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, analyzes PowerShell with
+PSScriptAnalyzer, runs the Pester contract suite, builds `Libertix.exe` on Windows and builds both
+ISO images on trusted `dev` and `main` branch runs. Successful runs publish the WPF archive, both ISO
+images and `SHA256SUMS` in a GitHub Release. The CI then generates and signs the channel metadata and
+publishes only the corresponding `dev/` or `main/` directory on GitHub Pages. The WPF archive
+contains `BUILD-INFO.txt`, `LICENSE` and `THIRD_PARTY.md`.
+
+The complete versioning, signing, release and Pages workflow is documented in
+[`docs/RELEASES.md`](docs/RELEASES.md).
 
 ## Source layout
 
 - `Installation/` — typed installation plan, validation, size policy and persisted state machine
-- `Pages/ApplyChanges.*.cs` — Windows orchestration split by responsibility and firmware adapter
+- `Pages/ApplyChanges.*.cs` — Windows orchestration, including the complete BIOS preparation and
+  the C# control layer for the PowerShell UEFI workflow
 - `Scripts/modules/` — shared PowerShell plan, state, download, storage and rollback functions
 - `Scripts/uefi/` — operations that are specific to UEFI preparation
-- `assets/live/` — shared live installer runtime plus BIOS and UEFI adapters
-- `iso/` and `iso-uefi/` — firmware-specific ISO build inputs
+- `assets/live/` — shared live installer, runner, target configuration and firmware adapters
+- `iso/` and `iso-uefi/` — firmware-specific boot inputs and thin live entry wrappers
 - `schemas/` — versioned JSON contracts for the plan and execution state
 - `auto_tests/` — API, VM automation, visual checks and regression tests
 
@@ -265,6 +291,10 @@ Development takes place on the `dev` branch. Keep firmware-neutral behavior in t
 runtime modules, and limit BIOS/UEFI adapters to operations that genuinely differ. Changes to disk
 or rollback behavior should include parity tests for both firmware paths and a replay of the
 relevant failure scenario where possible.
+
+The separate [development and auto-test guide](auto_tests/README.md) documents the locked `uv`
+environment, Windows and mini-ISO builds, filepool, API, `curl` workflows, VM automation, and local
+verification commands.
 
 ## License
 

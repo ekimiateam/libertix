@@ -5,7 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Navigation;
 
-namespace LinuxGate.Helpers
+namespace Libertix.Helpers
 {
     public static class NavigationHelper
     {
@@ -16,39 +16,16 @@ namespace LinuxGate.Helpers
             double slideOffset = 100,
             bool slideLeft = true)
         {
-            // Ensure background color consistency
-            if (newPage.Content is Grid grid)
-            {
-                grid.Background = Brushes.Transparent;
-            }
+            if (navigation == null)
+                throw new ArgumentNullException(nameof(navigation));
 
-            // Create animations
-            var fadeOut = CreateFadeAnimation(1.0, 0.0, duration);
-            var slideOut = CreateSlideAnimation(
-                new Thickness(0),
-                new Thickness(slideLeft ? -slideOffset : slideOffset, 0, 0, 0),
-                duration);
-
-            fadeOut.Completed += (s, _) =>
-            {
-                navigation.Navigate(newPage);
-
-                var fadeIn = CreateFadeAnimation(0.0, 1.0, duration);
-                var slideIn = CreateSlideAnimation(
-                    new Thickness(slideLeft ? slideOffset : -slideOffset, 0, 0, 0),
-                    new Thickness(0),
-                    duration);
-
-                newPage.BeginAnimation(UIElement.OpacityProperty, fadeIn);
-                newPage.BeginAnimation(FrameworkElement.MarginProperty, slideIn);
-            };
-
-            // Start exit animations on current page
-            if (navigation.Content is UIElement currentPage)
-            {
-                currentPage.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-                currentPage.BeginAnimation(FrameworkElement.MarginProperty, slideOut);
-            }
+            NavigateWithAnimationCore(
+                navigation.Content,
+                page => navigation.Navigate(page),
+                newPage,
+                duration,
+                slideOffset,
+                slideLeft);
         }
 
         public static void NavigateWithAnimationInFrame(
@@ -58,9 +35,50 @@ namespace LinuxGate.Helpers
             double slideOffset = 100,
             bool slideLeft = true)
         {
+            if (frame == null)
+                throw new ArgumentNullException(nameof(frame));
+
+            NavigateWithAnimationCore(
+                frame.Content,
+                page => frame.Navigate(page),
+                newPage,
+                duration,
+                slideOffset,
+                slideLeft);
+        }
+
+        private static void NavigateWithAnimationCore(
+            object currentContent,
+            Func<Page, bool> navigate,
+            Page newPage,
+            TimeSpan duration,
+            double slideOffset,
+            bool slideLeft)
+        {
+            if (newPage == null)
+                throw new ArgumentNullException(nameof(newPage));
+
             if (newPage.Content is Grid grid)
             {
                 grid.Background = Brushes.Transparent;
+            }
+
+            if (!(currentContent is UIElement currentPage))
+            {
+                navigate(newPage);
+                return;
+            }
+
+            // Default buttons can receive another Enter while a transition is
+            // still running. Ignore that duplicate activation so two completed
+            // handlers cannot race to replace the same frame content.
+            if (!currentPage.IsHitTestVisible)
+                return;
+
+            if (duration <= TimeSpan.Zero)
+            {
+                navigate(newPage);
+                return;
             }
 
             var fadeOut = CreateFadeAnimation(1.0, 0.0, duration);
@@ -71,7 +89,12 @@ namespace LinuxGate.Helpers
 
             fadeOut.Completed += (s, _) =>
             {
-                frame.Navigate(newPage);
+                currentPage.BeginAnimation(UIElement.OpacityProperty, null);
+                currentPage.BeginAnimation(FrameworkElement.MarginProperty, null);
+                currentPage.IsHitTestVisible = true;
+
+                if (!navigate(newPage))
+                    return;
 
                 var fadeIn = CreateFadeAnimation(0.0, 1.0, duration);
                 var slideIn = CreateSlideAnimation(
@@ -83,11 +106,9 @@ namespace LinuxGate.Helpers
                 newPage.BeginAnimation(FrameworkElement.MarginProperty, slideIn);
             };
 
-            if (frame.Content is UIElement currentPage)
-            {
-                currentPage.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-                currentPage.BeginAnimation(FrameworkElement.MarginProperty, slideOut);
-            }
+            currentPage.IsHitTestVisible = false;
+            currentPage.BeginAnimation(UIElement.OpacityProperty, fadeOut);
+            currentPage.BeginAnimation(FrameworkElement.MarginProperty, slideOut);
         }
 
         private static DoubleAnimation CreateFadeAnimation(double from, double to, TimeSpan duration)
@@ -97,6 +118,7 @@ namespace LinuxGate.Helpers
                 From = from,
                 To = to,
                 Duration = duration,
+                FillBehavior = FillBehavior.Stop,
                 EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut }
             };
         }
@@ -108,6 +130,7 @@ namespace LinuxGate.Helpers
                 From = from,
                 To = to,
                 Duration = duration,
+                FillBehavior = FillBehavior.Stop,
                 EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseInOut }
             };
         }

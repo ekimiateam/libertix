@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+
+workdir="$(mktemp -d)"
+trap 'rm -rf "$workdir"' EXIT HUP INT TERM
+
+/usr/local/lib/libertix/grub-generators/10_linux > "$workdir/linux.cfg"
+if [ -x /usr/local/lib/libertix/grub-generators/30_uefi-firmware ]; then
+    /usr/local/lib/libertix/grub-generators/30_uefi-firmware > "$workdir/firmware.cfg"
+fi
+
+set -- \
+    --linux "$workdir/linux.cfg" \
+    --windows /etc/libertix/grub-windows.cfg \
+    --firmware "$workdir/firmware.cfg" \
+    --plan /etc/libertix/installation-plan.json
+
+for generator in \
+    /usr/local/lib/libertix/grub-generators/20_memtest86+ \
+    /usr/local/lib/libertix/grub-generators/20_memtest86; do
+    [ -x "$generator" ] || continue
+    output="$workdir/$(basename "$generator").cfg"
+    "$generator" > "$output"
+    set -- "$@" --extra "$output"
+done
+
+python3 /usr/local/lib/libertix/render-libertix-menu.py "$@"

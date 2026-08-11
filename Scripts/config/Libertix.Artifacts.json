@@ -1,0 +1,15 @@
+{
+  "aria2": {
+    "archiveFileName": "aria2-64.zip",
+    "archiveSha256": "67d015301eef0b612191212d564c5bb0a14b5b9c4796b76454276a4d28d9b288",
+    "executableSha256": "be2099c214f63a3cb4954b09a0becd6e2e34660b886d4c898d260febfe9d70c2"
+  },
+  "ext4Driver": {
+    "fileName": "ext4-win-driver.exe",
+    "sha256": "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031"
+  },
+  "grub4Dos": {
+    "loaderSha256": "124988a6091248111f5d372ad210f21250a42cfd05d9d6366be28347b6368675",
+    "mbrLoaderSha256": "53fce0d82a09531b1a7af728e712a957db3966835304e8bdae5e350220270b33"
+  }
+}

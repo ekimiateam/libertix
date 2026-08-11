@@ -3,30 +3,35 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
-using LinuxGate.Helpers;
-using LinuxGate.Models;
-using LinuxGate.Pages;
+using Libertix.Helpers;
+using Libertix.Models;
+using Libertix.Pages;
 using System.ComponentModel;
-using System.Windows.Media.Animation;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Diagnostics;
-using System.IO;
 using System.Text.RegularExpressions;
+using System.Windows.Input;
+using Libertix.Installation;
 
-namespace LinuxGate
+namespace Libertix.Pages
 {
     public partial class ChooseDistro : Page, INotifyPropertyChanged
     {
-        private const string STATE_KEY = "ChooseDistro";
-        private const string DISTROS_URL = FilepoolConfig.DistrosUrl;
+        private const long MaximumCatalogBytes = 1024 * 1024;
+        private const long MaximumCatalogSignatureBytes = 16 * 1024;
+        private readonly InstallationState _installationState;
+        private readonly FilepoolConfig _filepool;
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
-        private bool _partitionConfigValid = true;
-        private bool _partitionWarningAcknowledged = false;
+        private bool _partitionConfigValid = false;
+        private static readonly HttpClient SharedHttpClient = new HttpClient
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
 
         public bool IsDistroSelected
         {
@@ -40,79 +45,195 @@ namespace LinuxGate
 
         public event PropertyChangedEventHandler PropertyChanged;
 
-        public ChooseDistro()
+        public ChooseDistro() : this(
+            ((App)Application.Current).InstallationState,
+            ((App)Application.Current).Filepool)
         {
-            InitializeComponent();
-            _distros = new ObservableCollection<DistroInfo>();
-            LoadDistrosAsync();
-            LoadState();
-            DataContext = this;
-            IsDistroSelected = false;
-            CheckPartitionConfigurationAsync();
         }
 
-        private async void LoadDistrosAsync()
+        public ChooseDistro(InstallationState installationState)
+            : this(installationState, ((App)Application.Current).Filepool)
+        {
+        }
+
+        public ChooseDistro(InstallationState installationState, FilepoolConfig filepool)
+        {
+            _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
+            _filepool = filepool ?? throw new ArgumentNullException(nameof(filepool));
+            _partitionConfigValid = _installationState.Compatibility != null;
+            InitializeComponent();
+            _distros = new ObservableCollection<DistroInfo>();
+            DataContext = this;
+            IsDistroSelected = false;
+            Loaded += ChooseDistro_Loaded;
+        }
+
+        private async void ChooseDistro_Loaded(object sender, RoutedEventArgs e)
+        {
+            Loaded -= ChooseDistro_Loaded;
+            await LoadDistrosAsync();
+            LoadState();
+            DistrosListBox.Focus();
+        }
+
+        private void ChooseDistro_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Enter &&
+                Keyboard.Modifiers == ModifierKeys.None &&
+                NextButton.IsEnabled)
+            {
+                NavigateToSelectedDistro();
+                e.Handled = true;
+                return;
+            }
+
+            if (Keyboard.Modifiers != ModifierKeys.Control || DistrosListBox.Items.Count == 0)
+            {
+                return;
+            }
+
+            int selectedIndex = DistrosListBox.SelectedIndex;
+            if (e.Key == Key.Home)
+            {
+                selectedIndex = 0;
+            }
+            else if (e.Key == Key.Right)
+            {
+                selectedIndex = Math.Min(
+                    Math.Max(selectedIndex, 0) + 1,
+                    DistrosListBox.Items.Count - 1);
+            }
+            else if (e.Key == Key.Left)
+            {
+                selectedIndex = Math.Max(selectedIndex - 1, 0);
+            }
+            else
+            {
+                return;
+            }
+
+            DistrosListBox.Focus();
+            DistrosListBox.SelectedIndex = selectedIndex;
+            DistrosListBox.ScrollIntoView(DistrosListBox.SelectedItem);
+            e.Handled = true;
+        }
+
+        private async Task LoadDistrosAsync()
         {
             try
             {
-                using (var client = new HttpClient())
+                using (var timeoutCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                using (var response = await SharedHttpClient.GetAsync(
+                    _filepool.DistrosUrl,
+                    timeoutCancellation.Token))
                 {
-                    var json = await client.GetStringAsync(DISTROS_URL);
+                    response.EnsureSuccessStatusCode();
+                    byte[] manifest = await BoundedHttpContent.ReadAsync(
+                        response.Content,
+                        MaximumCatalogBytes,
+                        timeoutCancellation.Token);
+                    if (_filepool.RequiresCatalogSignature)
+                    {
+                        using (var signatureResponse = await SharedHttpClient.GetAsync(
+                            _filepool.DistrosSignatureUrl,
+                            timeoutCancellation.Token))
+                        {
+                            signatureResponse.EnsureSuccessStatusCode();
+                            byte[] signatureBytes = await BoundedHttpContent.ReadAsync(
+                                signatureResponse.Content,
+                                MaximumCatalogSignatureBytes,
+                                timeoutCancellation.Token);
+                            string signature = Encoding.UTF8.GetString(signatureBytes);
+                            DistributionCatalogTrust.VerifyWithApplicationKey(
+                                manifest,
+                                signature);
+                        }
+                    }
+
+                    string json = Encoding.UTF8.GetString(manifest);
                     var options = new JsonSerializerOptions
                     {
                         PropertyNameCaseInsensitive = true
                     };
                     var distroList = JsonSerializer.Deserialize<List<DistroInfoJson>>(json, options);
-                    
-                    _distros.Clear();
+                    if (distroList == null || distroList.Count == 0)
+                    {
+                        throw new InvalidOperationException("Distribution list JSON is empty or invalid.");
+                    }
+
+                    var validatedDistros = new List<DistroInfo>(distroList.Count);
+                    var seenDistroIds = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var distroJson in distroList)
                     {
-                        _distros.Add(new DistroInfo
+                        if (!Regex.IsMatch(distroJson.Id ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
+                            string.IsNullOrWhiteSpace(distroJson.Name) ||
+                            !Regex.IsMatch(distroJson.OsReleaseId ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
+                            !Regex.IsMatch(distroJson.GrubDisplayName ?? "", "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$") ||
+                            !Regex.IsMatch(distroJson.GrubIcon ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
+                            string.IsNullOrWhiteSpace(distroJson.IsoUrl) ||
+                            string.IsNullOrWhiteSpace(distroJson.IsoInstaller) ||
+                            string.IsNullOrWhiteSpace(distroJson.IsoInstallerFileName) ||
+                            !Regex.IsMatch(distroJson.IsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
+                            string.IsNullOrWhiteSpace(distroJson.UefiIsoUrl) ||
+                            !Regex.IsMatch(distroJson.UefiIsoSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
+                            !Regex.IsMatch(distroJson.IsoInstallerSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
+                            distroJson.IsoInstallerSizeBytes <= 0 ||
+                            distroJson.SizeInGB < InstallationSizePolicy.MinimumFinalSizeGiB)
                         {
+                            throw new InvalidOperationException("Distribution manifest contains an invalid entry.");
+                        }
+                        if (!seenDistroIds.Add(distroJson.Id))
+                        {
+                            throw new InvalidOperationException("Distribution manifest contains a duplicate id.");
+                        }
+                        validatedDistros.Add(new DistroInfo
+                        {
+                            Id = distroJson.Id,
                             Name = distroJson.Name,
+                            OsReleaseId = distroJson.OsReleaseId,
+                            GrubDisplayName = distroJson.GrubDisplayName,
+                            GrubIcon = distroJson.GrubIcon,
                             Description = distroJson.Description ?? "No description available",
                             ImageUrl = distroJson.ImageUrl,
-                            IsoUrl = distroJson.IsoUrl,
-                            IsoInstaller = distroJson.IsoInstaller,
-                            IsoInstallerFileName = distroJson.IsoInstallerFileName
+                            IsoUrl = _filepool.ResolveUrl(distroJson.IsoUrl),
+                            IsoInstaller = _filepool.ResolveUrl(distroJson.IsoInstaller),
+                            IsoInstallerFileName = distroJson.IsoInstallerFileName,
+                            IsoSha256 = distroJson.IsoSha256,
+                            UefiIsoUrl = _filepool.ResolveUrl(distroJson.UefiIsoUrl),
+                            UefiIsoSha256 = distroJson.UefiIsoSha256,
+                            IsoInstallerSha256 = distroJson.IsoInstallerSha256,
+                            IsoInstallerSizeBytes = distroJson.IsoInstallerSizeBytes,
+                            SizeInGB = distroJson.SizeInGB
                         });
                     }
+
+                    _distros.Clear();
+                    foreach (DistroInfo distro in validatedDistros)
+                    {
+                        _distros.Add(distro);
+                    }
                 }
-                DistrosItemsControl.ItemsSource = _distros;
+                DistrosListBox.ItemsSource = _distros;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
                 MessageBox.Show(
-                    Application.Current.Resources["DistroLoadError"] as string ?? "Failed to load distributions",
-                    "Error",
+                    Localization.GetString("DistroLoadError", "Failed to load distributions") +
+                    Environment.NewLine + ex.Message,
+                    Localization.GetString("ErrorTitle"),
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }
         }
 
-        private void SaveState()
-        {
-            if (_selectedDistro != null)
-            {
-                var state = new PageState
-                {
-                    PageType = typeof(ChooseDistro),
-                    StateKey = STATE_KEY,
-                    State = _selectedDistro.Name // Save just the name of the selected distro
-                };
-                StateManager.SaveState(STATE_KEY, state);
-            }
-        }
-
         private void LoadState()
         {
-            var state = StateManager.GetState(STATE_KEY);
-            if (state?.State is string selectedDistroName)
+            string selectedDistroId = _installationState.SelectedDistro?.Id;
+            if (!string.IsNullOrWhiteSpace(selectedDistroId))
             {
-                // Find and select the previously selected distro
                 foreach (var distro in _distros)
                 {
-                    if (distro.Name == selectedDistroName)
+                    if (distro.Id == selectedDistroId)
                     {
                         SelectDistro(distro);
                         break;
@@ -123,27 +244,27 @@ namespace LinuxGate
 
         private void SelectDistro(DistroInfo distro)
         {
-            // Deselect previous selection
             if (_selectedDistro != null)
             {
                 _selectedDistro.IsSelected = false;
             }
 
-            // Select new distro
             _selectedDistro = distro;
             _selectedDistro.IsSelected = true;
-
-            // Update next button state (considers partition validation)
+            if (!ReferenceEquals(DistrosListBox.SelectedItem, distro))
+            {
+                DistrosListBox.SelectedItem = distro;
+            }
             UpdateNextButtonState();
         }
 
-        private void Border_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        private void DistrosListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (sender is FrameworkElement element && element.DataContext is DistroInfo distro)
+            if (DistrosListBox.SelectedItem is DistroInfo distro)
             {
                 if (_selectedDistro != distro)
                 {
-                    StateManager.ClearDependentStates("ResizeDisk");
+                    _installationState.SelectedLinuxSizeGiB = null;
                 }
                 SelectDistro(distro);
             }
@@ -151,244 +272,28 @@ namespace LinuxGate
 
         private void NextButton_Click(object sender, RoutedEventArgs e)
         {
+            NavigateToSelectedDistro();
+        }
+
+        private void NavigateToSelectedDistro()
+        {
             if (_selectedDistro != null)
             {
-                SaveState();
-                App.Current.Properties["SelectedDistro"] = _selectedDistro;
-                NavigationHelper.NavigateWithAnimation(NavigationService, new ResizeDisk(), TimeSpan.FromSeconds(0.3));
+                _installationState.SelectedDistro = _selectedDistro;
+                NavigationHelper.NavigateWithAnimation(
+                    NavigationService,
+                    new ResizeDisk(_installationState),
+                    TimeSpan.FromSeconds(0.3));
             }
-        }
-
-        private void NavigateWithAnimation(Page nextPage)
-        {
-            var fadeOut = new DoubleAnimation
-            {
-                From = 1.0,
-                To = 0.0,
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
-
-            var slideOut = new ThicknessAnimation
-            {
-                From = new Thickness(0),
-                To = new Thickness(-100, 0, 0, 0),
-                Duration = TimeSpan.FromSeconds(0.3)
-            };
-
-            fadeOut.Completed += (s, _) =>
-            {
-                var currentBackground = ((Grid)this.Content).Background;
-                NavigationService.Navigate(nextPage);
-                ((Grid)nextPage.Content).Background = currentBackground;
-
-                var fadeIn = new DoubleAnimation
-                {
-                    From = 0.0,
-                    To = 1.0,
-                    Duration = TimeSpan.FromSeconds(0.3)
-                };
-
-                var slideIn = new ThicknessAnimation
-                {
-                    From = new Thickness(100, 0, 0, 0),
-                    To = new Thickness(0),
-                    Duration = TimeSpan.FromSeconds(0.3)
-                };
-
-                nextPage.BeginAnimation(UIElement.OpacityProperty, fadeIn);
-                nextPage.BeginAnimation(FrameworkElement.MarginProperty, slideIn);
-            };
-
-            this.BeginAnimation(UIElement.OpacityProperty, fadeOut);
-            this.BeginAnimation(FrameworkElement.MarginProperty, slideOut);
-        }
-
-        #region Partition Validation
-
-        private async void CheckPartitionConfigurationAsync()
-        {
-            var (isValid, warnings) = await ValidatePartitionLayoutAsync();
-
-            _partitionConfigValid = isValid;
-
-            if (!isValid)
-            {
-                string warningMessage = string.Join("\n", warnings);
-                PartitionWarningText.Text = warningMessage;
-                PartitionWarningPanel.Visibility = Visibility.Visible;
-            }
-
-            UpdateNextButtonState();
-        }
-
-        private void PartitionWarningCheckbox_Changed(object sender, RoutedEventArgs e)
-        {
-            _partitionWarningAcknowledged = PartitionWarningCheckbox.IsChecked == true;
-            UpdateNextButtonState();
         }
 
         private void UpdateNextButtonState()
         {
-            // Button is enabled if:
-            // 1. A distro is selected AND
-            // 2. Either partition config is valid OR user acknowledged the warning
-            bool canProceed = _selectedDistro != null &&
-                              (_partitionConfigValid || _partitionWarningAcknowledged);
+            // Compatibility is completed on the preceding page and the full
+            // storage preflight is repeated immediately before disk mutation.
+            // Re-running PowerShell here made a visible selection appear frozen.
+            bool canProceed = _selectedDistro != null && _partitionConfigValid;
             NextButton.IsEnabled = canProceed;
         }
-
-        private async Task<(bool isValid, List<string> warnings)> ValidatePartitionLayoutAsync()
-        {
-            var warnings = new List<string>();
-
-            string diskpartScript = Path.Combine(Path.GetTempPath(), $"check_partitions_{Guid.NewGuid()}.txt");
-
-            try
-            {
-                string script = @"select disk 0
-list partition
-exit";
-
-                File.WriteAllText(diskpartScript, script);
-                string output = await RunDiskpartAndGetOutputAsync(diskpartScript);
-
-                var partitions = ParsePartitionList(output);
-
-                // Check 1: Should have exactly 3 partitions
-                if (partitions.Count > 3)
-                {
-                    warnings.Add($"Expected 3 partitions, found {partitions.Count}");
-                }
-                else if (partitions.Count < 3)
-                {
-                    warnings.Add($"Expected 3 partitions, found only {partitions.Count}");
-                }
-
-                // Check 2: First partition should be between 40-150MB (EFI/System)
-                if (partitions.Count > 0)
-                {
-                    var firstPartition = partitions[0];
-                    if (firstPartition.SizeMB < 40 || firstPartition.SizeMB > 150)
-                    {
-                        warnings.Add($"First partition size is {firstPartition.SizeMB:F0}MB (expected 40-150MB for System)");
-                    }
-                }
-
-                // Check 3: Last partition should be between 400-700MB (Recovery)
-                if (partitions.Count > 0)
-                {
-                    var lastPartition = partitions[partitions.Count - 1];
-                    if (lastPartition.SizeMB < 400 || lastPartition.SizeMB > 700)
-                    {
-                        warnings.Add($"Last partition size is {lastPartition.SizeMB:F0}MB (expected 400-700MB for Recovery)");
-                    }
-                }
-
-                return (warnings.Count == 0, warnings);
-            }
-            catch (Exception ex)
-            {
-                warnings.Add($"Error checking partitions: {ex.Message}");
-                return (false, warnings);
-            }
-            finally
-            {
-                if (File.Exists(diskpartScript))
-                    File.Delete(diskpartScript);
-            }
-        }
-
-        private class PartitionInfo
-        {
-            public int Number { get; set; }
-            public string Type { get; set; }
-            public double SizeMB { get; set; }
-        }
-
-        private List<PartitionInfo> ParsePartitionList(string output)
-        {
-            var partitions = new List<PartitionInfo>();
-            var lines = output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-            foreach (var line in lines)
-            {
-                var partitionMatch = Regex.Match(line, @"Partition\s+(\d+)", RegexOptions.IgnoreCase);
-                if (!partitionMatch.Success)
-                    continue;
-
-                int partitionNumber = int.Parse(partitionMatch.Groups[1].Value);
-
-                var sizeMatches = Regex.Matches(line, @"(\d+)\s*(G|M|K)\s*o?", RegexOptions.IgnoreCase);
-
-                if (sizeMatches.Count > 0)
-                {
-                    var sizeMatch = sizeMatches[0];
-                    double size = double.Parse(sizeMatch.Groups[1].Value);
-                    string unit = sizeMatch.Groups[2].Value.ToUpper();
-
-                    double sizeMB;
-                    switch (unit)
-                    {
-                        case "G":
-                            sizeMB = size * 1024;
-                            break;
-                        case "K":
-                            sizeMB = size / 1024;
-                            break;
-                        default:
-                            sizeMB = size;
-                            break;
-                    }
-
-                    string type = "Unknown";
-                    var typeMatch = Regex.Match(line, @"Partition\s+\d+\s+(\w+)", RegexOptions.IgnoreCase);
-                    if (typeMatch.Success)
-                    {
-                        type = typeMatch.Groups[1].Value;
-                    }
-
-                    partitions.Add(new PartitionInfo
-                    {
-                        Number = partitionNumber,
-                        Type = type,
-                        SizeMB = sizeMB
-                    });
-                }
-            }
-
-            return partitions;
-        }
-
-        private async Task<string> RunDiskpartAndGetOutputAsync(string scriptPath)
-        {
-            return await Task.Run(() =>
-            {
-                try
-                {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = "diskpart.exe",
-                        Arguments = $"/s \"{scriptPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var process = Process.Start(psi))
-                    {
-                        string output = process.StandardOutput.ReadToEnd();
-                        process.WaitForExit();
-                        return output;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    return $"Error: {ex.Message}";
-                }
-            });
-        }
-
-        #endregion
     }
 }

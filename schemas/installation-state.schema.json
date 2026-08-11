@@ -1,0 +1,308 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-state-v1.json",
+  "title": "Libertix Installation Execution State",
+  "description": "Durable progress and compensation state for one installation plan.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planId",
+    "revision",
+    "status",
+    "phase",
+    "activeStep",
+    "completedSteps",
+    "compensatedSteps",
+    "failure",
+    "updatedAtUtc"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "running",
+        "failed",
+        "rollback-running",
+        "rolled-back",
+        "succeeded"
+      ]
+    },
+    "phase": {
+      "enum": [
+        "windows",
+        "live",
+        "target",
+        "rollback",
+        "complete"
+      ]
+    },
+    "activeStep": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1
+    },
+    "completedSteps": {
+      "$ref": "#/$defs/stepList"
+    },
+    "compensatedSteps": {
+      "$ref": "#/$defs/stepList"
+    },
+    "failure": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/failure"
+        }
+      ]
+    },
+    "progress": {
+      "$ref": "#/$defs/progress"
+    },
+    "updatedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "stepList": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(windows|live|target)\\.[a-z0-9]+(?:-[a-z0-9]+)*$"
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "component"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "component": {
+          "enum": [
+            "windows",
+            "live",
+            "target",
+            "rollback"
+          ]
+        }
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "overallPercent"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "overallPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "detailPercent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "activeStep": {
+            "type": "null"
+          },
+          "failure": {
+            "$ref": "#/$defs/failure"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["pending", "running", "succeeded"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "failure": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "rollback-running"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "phase": {
+            "const": "rollback"
+          },
+          "activeStep": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["rolled-back", "succeeded"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "phase": {
+            "const": "complete"
+          },
+          "activeStep": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "succeeded"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "completedSteps": {
+            "const": [
+              "windows.preflight-verified",
+              "windows.artifacts-verified",
+              "windows.recovery-armed",
+              "windows.system-volume-shrunk",
+              "windows.installer-partition-created",
+              "windows.live-media-prepared",
+              "windows.temporary-boot-prepared",
+              "live.preflight-verified",
+              "live.installer-partition-expanded",
+              "live.target-filesystem-created",
+              "live.distribution-extracted",
+              "target.system-configured",
+              "target.bootloader-installed",
+              "target.installation-verified"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "rolled-back"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "allOf": [
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "windows.recovery-armed"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "windows.recovery-armed"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "windows.system-volume-shrunk"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "windows.system-volume-shrunk"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "windows.installer-partition-created"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "windows.installer-partition-created"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "windows.live-media-prepared"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "windows.live-media-prepared"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "windows.temporary-boot-prepared"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "windows.temporary-boot-prepared"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "live.installer-partition-expanded"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "live.installer-partition-expanded"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "live.target-filesystem-created"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "live.target-filesystem-created"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "live.distribution-extracted"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "live.distribution-extracted"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "target.system-configured"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "target.system-configured"}}}}
+          },
+          {
+            "if": {"properties": {"completedSteps": {"contains": {"const": "target.bootloader-installed"}}}},
+            "then": {"properties": {"compensatedSteps": {"contains": {"const": "target.bootloader-installed"}}}}
+          }
+        ]
+      }
+    }
+  ]
+}

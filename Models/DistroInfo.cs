@@ -1,18 +1,10 @@
 using System.ComponentModel;
 
-namespace LinuxGate.Models
+namespace Libertix.Models
 {
-    public class DistroInfo : INotifyPropertyChanged
+    public class DistroInfo : DistroInfoJson, INotifyPropertyChanged
     {
         private bool _isSelected;
-
-        public string Name { get; set; }
-        public string Description { get; set; }
-        public string ImageUrl { get; set; }
-        public string IsoUrl { get; set; }
-        public string IsoInstaller { get; set; }
-        public string IsoInstallerFileName { get; set; }
-        public double SizeInGB { get; set; }
 
         public bool IsSelected
         {
