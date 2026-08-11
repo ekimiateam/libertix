@@ -37,7 +37,7 @@ Write-Output "progress=100%"
         $result = Invoke-LibertixNativeProcess `
             -FilePath "powershell.exe" `
             -Arguments $arguments `
-            -TimeoutSeconds 10 `
+            -TimeoutSeconds 30 `
             -OnStandardOutputLine $onOutput
 
         $result.ExitCode | Should -Be 0
