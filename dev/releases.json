@@ -2,29 +2,29 @@
   "schemaVersion": 1,
   "channel": "dev",
   "latest": {
-    "version": "dev_d140a15",
-    "tag": "d140a15",
-    "commit": "d140a158e33c8bb1449f79e044672ecac36586f7",
-    "title": "Alpha d140a15",
-    "notes": "Automated Libertix alpha build for commit d140a15.",
-    "publishedAt": "2026-08-11T08:13:57.288176Z",
-    "releaseUrl": "https://github.com/ekimiateam/libertix/releases/tag/d140a15",
+    "version": "dev_065d789",
+    "tag": "065d789",
+    "commit": "065d789a36a977d696613bfb4b1df4295172eda7",
+    "title": "Alpha 065d789",
+    "notes": "Automated Libertix alpha build for commit 065d789.",
+    "publishedAt": "2026-08-11T08:28:47.721965Z",
+    "releaseUrl": "https://github.com/ekimiateam/libertix/releases/tag/065d789",
     "wpf": {
-      "url": "https://github.com/ekimiateam/libertix/releases/download/d140a15/Libertix-wpf.zip",
-      "sha256": "e7ae3f30d98aadb99d7f0edbaa0b985248a3209ff2828df474a09f81cc2e2b90",
-      "sizeBytes": 3586556,
+      "url": "https://github.com/ekimiateam/libertix/releases/download/065d789/Libertix-wpf.zip",
+      "sha256": "c9d2affe9fb836c596d55472444baea185a4ee516342075f89386011b780d24c",
+      "sizeBytes": 3586560,
       "fileName": "Libertix-wpf.zip"
     },
     "miniIso": {
       "bios": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/d140a15/libertix-installer-bios.iso",
-        "sha256": "87877f702407163c7b936dc0516c209c23b07b0f8eec3395c2914f5ba4438c3c",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/065d789/libertix-installer-bios.iso",
+        "sha256": "6d60948a7983ef5d3e867f81e84fce501d0ef1fa6e63ced31edd62ed2ba27ed3",
         "sizeBytes": 524288000,
         "fileName": "libertix-installer-bios.iso"
       },
       "uefi": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/d140a15/libertix-installer-uefi.iso",
-        "sha256": "673a64b8e1caa996820254b7852947afa91139341223675a31fa39420ffda43d",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/065d789/libertix-installer-uefi.iso",
+        "sha256": "ea8567d944435a1dc3da0321607bbb82e4538681fb69f610e211ec1c8bc21273",
         "sizeBytes": 558891008,
         "fileName": "libertix-installer-uefi.iso"
       }
