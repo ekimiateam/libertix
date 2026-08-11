@@ -1,0 +1,38 @@
+[
+  {
+    "id": "mint",
+    "name": "Linux Mint 22.3 Cinnamon",
+    "osReleaseId": "linuxmint",
+    "grubDisplayName": "Linux Mint 22.3 Cinnamon",
+    "grubIcon": "linuxmint",
+    "description": "Linux Mint is an operating system for desktop and laptop computers. It is designed to work out of the box and comes fully equipped with the apps most people need.",
+    "imageUrl": "https://www.linuxmint.com/web/img/screenshots/c1.jpg",
+    "isoInstaller": "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso",
+    "isoInstallerFileName": "mint.iso",
+    "isoInstallerSha256": "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4",
+    "isoInstallerSizeBytes": 3091660800,
+    "sizeInGB": 20,
+    "isoUrl": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-bios.iso",
+    "isoSha256": "fd3d7002a8d3e5814ab898107d3c54f2583bb7eacc687f5066728a440c53bc36",
+    "uefiIsoUrl": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-uefi.iso",
+    "uefiIsoSha256": "d952cdab9f6996220132111abf772596082e48263002ca19b7bf756768ea8589"
+  },
+  {
+    "id": "zorin",
+    "name": "Zorin OS 18.1 Core",
+    "osReleaseId": "zorin",
+    "grubDisplayName": "Zorin OS 18.1 Core",
+    "grubIcon": "zorin",
+    "description": "Zorin OS Core is a free Ubuntu-based desktop operating system with standard apps and four desktop layouts.",
+    "imageUrl": "https://assets.zorincdn.com/zorin.com/images/download/18/core.png",
+    "isoInstaller": "https://mirrors.univ-reims.fr/IMAGES/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso",
+    "isoInstallerFileName": "zorin.iso",
+    "isoInstallerSha256": "44649b97bd307fc4c8529205d098ebbf98575a1e1ba2ee7d7005b697af1721d5",
+    "isoInstallerSizeBytes": 3909091328,
+    "sizeInGB": 20,
+    "isoUrl": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-bios.iso",
+    "isoSha256": "fd3d7002a8d3e5814ab898107d3c54f2583bb7eacc687f5066728a440c53bc36",
+    "uefiIsoUrl": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-uefi.iso",
+    "uefiIsoSha256": "d952cdab9f6996220132111abf772596082e48263002ca19b7bf756768ea8589"
+  }
+]
