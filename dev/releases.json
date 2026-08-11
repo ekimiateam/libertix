@@ -2,27 +2,27 @@
   "schemaVersion": 1,
   "channel": "dev",
   "latest": {
-    "version": "dev_c84f235",
-    "tag": "c84f235",
-    "commit": "c84f23597011ec8af6fffd0370590832776d4e71",
-    "title": "Alpha c84f235",
-    "notes": "Automated Libertix alpha build for commit c84f235.",
-    "publishedAt": "2026-08-11T00:49:06.305961Z",
-    "releaseUrl": "https://github.com/ekimiateam/libertix/releases/tag/c84f235",
+    "version": "dev_34826b4",
+    "tag": "34826b4",
+    "commit": "34826b4c5f48a0b7d2ae7e99bd9fe805147985bc",
+    "title": "Alpha 34826b4",
+    "notes": "Automated Libertix alpha build for commit 34826b4.",
+    "publishedAt": "2026-08-11T06:45:58.642745Z",
+    "releaseUrl": "https://github.com/ekimiateam/libertix/releases/tag/34826b4",
     "wpf": {
-      "url": "https://github.com/ekimiateam/libertix/releases/download/c84f235/Libertix-wpf.zip",
-      "sha256": "8b657597244aacd738a9d7e490b35f7f74b18f0a025977839ee0b02f5ee70aad",
-      "sizeBytes": 3582843
+      "url": "https://github.com/ekimiateam/libertix/releases/download/34826b4/Libertix-wpf.zip",
+      "sha256": "95685e35bb1d2847682703644d6e11375dabf0be3844ebd994d2fc2813f6d93f",
+      "sizeBytes": 3583245
     },
     "miniIso": {
       "bios": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/c84f235/libertix-installer-bios.iso",
-        "sha256": "94d69a9e49a1530d7d79d7508129ecca970dfb8468f06ab1fed9701357449935",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/34826b4/libertix-installer-bios.iso",
+        "sha256": "423f67cda1366c6a4ffb942db09238b96b2263fad12a13c15e2d8b9824a06458",
         "sizeBytes": 524288000
       },
       "uefi": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/c84f235/libertix-installer-uefi.iso",
-        "sha256": "03044ab879491cedd5ef7dd29e4489a11b7a4f8ed122712389334027df51dc0e",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/34826b4/libertix-installer-uefi.iso",
+        "sha256": "f1572bdee85b20d26893117e5d3ea8659016bcd0e74a721a095f183b64119708",
         "sizeBytes": 558891008
       }
     }

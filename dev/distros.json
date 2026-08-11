@@ -12,10 +12,10 @@
     "isoInstallerSha256": "a081ab202cfda17f6924128dbd2de8b63518ac0531bcfe3f1a1b88097c459bd4",
     "isoInstallerSizeBytes": 3091660800,
     "sizeInGB": 20,
-    "isoUrl": "https://github.com/ekimiateam/libertix/releases/download/c84f235/libertix-installer-bios.iso",
-    "isoSha256": "94d69a9e49a1530d7d79d7508129ecca970dfb8468f06ab1fed9701357449935",
-    "uefiIsoUrl": "https://github.com/ekimiateam/libertix/releases/download/c84f235/libertix-installer-uefi.iso",
-    "uefiIsoSha256": "03044ab879491cedd5ef7dd29e4489a11b7a4f8ed122712389334027df51dc0e"
+    "isoUrl": "https://github.com/ekimiateam/libertix/releases/download/34826b4/libertix-installer-bios.iso",
+    "isoSha256": "423f67cda1366c6a4ffb942db09238b96b2263fad12a13c15e2d8b9824a06458",
+    "uefiIsoUrl": "https://github.com/ekimiateam/libertix/releases/download/34826b4/libertix-installer-uefi.iso",
+    "uefiIsoSha256": "f1572bdee85b20d26893117e5d3ea8659016bcd0e74a721a095f183b64119708"
   },
   {
     "id": "zorin",
@@ -30,9 +30,9 @@
     "isoInstallerSha256": "44649b97bd307fc4c8529205d098ebbf98575a1e1ba2ee7d7005b697af1721d5",
     "isoInstallerSizeBytes": 3909091328,
     "sizeInGB": 20,
-    "isoUrl": "https://github.com/ekimiateam/libertix/releases/download/c84f235/libertix-installer-bios.iso",
-    "isoSha256": "94d69a9e49a1530d7d79d7508129ecca970dfb8468f06ab1fed9701357449935",
-    "uefiIsoUrl": "https://github.com/ekimiateam/libertix/releases/download/c84f235/libertix-installer-uefi.iso",
-    "uefiIsoSha256": "03044ab879491cedd5ef7dd29e4489a11b7a4f8ed122712389334027df51dc0e"
+    "isoUrl": "https://github.com/ekimiateam/libertix/releases/download/34826b4/libertix-installer-bios.iso",
+    "isoSha256": "423f67cda1366c6a4ffb942db09238b96b2263fad12a13c15e2d8b9824a06458",
+    "uefiIsoUrl": "https://github.com/ekimiateam/libertix/releases/download/34826b4/libertix-installer-uefi.iso",
+    "uefiIsoSha256": "f1572bdee85b20d26893117e5d3ea8659016bcd0e74a721a095f183b64119708"
   }
 ]
