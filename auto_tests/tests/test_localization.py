@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 from types import ModuleType
 from xml.etree import ElementTree
@@ -101,6 +103,38 @@ def test_live_translation_catalogues_have_identical_keys() -> None:
     assert all(catalogue[language] for language in LANGUAGES)
 
 
+def test_post_install_result_catalogues_are_complete_and_parallel() -> None:
+    catalogues = json.loads(
+        (ROOT / "Scripts/config/Libertix.PostInstallTranslations.json").read_text(encoding="utf-8")
+    )
+
+    assert set(catalogues) == set(LANGUAGES)
+    expected = set(catalogues["en"])
+    assert expected == {
+        "successTitle",
+        "successMessage",
+        "failureTitle",
+        "failureMessage",
+        "details",
+        "statusLabel",
+        "planLabel",
+        "logLabel",
+        "checkPassedLabel",
+        "checkFailedLabel",
+        "errorLabel",
+        "close",
+        "rollback",
+        "rollbackConfirmTitle",
+        "rollbackConfirmMessage",
+        "rollbackRunning",
+        "rollbackComplete",
+        "rollbackFailed",
+    }
+    for language, values in catalogues.items():
+        assert set(values) == expected, language
+        assert all(isinstance(value, str) and value.strip() for value in values.values())
+
+
 def test_linux_extraction_labels_are_concise_in_every_language() -> None:
     catalogue = json.loads(
         (ROOT / "assets/live/libertix-translations.json").read_text(encoding="utf-8")
@@ -154,6 +188,55 @@ def test_live_translation_helper_loads_every_supported_language(language: str) -
 
     assert translations["stage_120_unsquashfs"]
     assert translations["installation_success"]
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_title"),
+    (
+        ("en", "Automatic installation"),
+        ("fr", "Installation automatique"),
+        ("es", "Instalación automática"),
+        ("ja", "自動インストール"),
+    ),
+)
+def test_live_context_retry_preserves_language_exports(
+    tmp_path: Path,
+    language: str,
+    expected_title: str,
+) -> None:
+    error_file = tmp_path / "context-load-error"
+    command = r"""
+set -eu
+. "$LIVE_CONTEXT"
+. "$LIVE_I18N"
+load_libertix_live_context() {
+    export LANGUAGE_CODE="$TEST_LANGUAGE"
+    export SYSTEM_LANG="${TEST_LANGUAGE}_TEST.UTF-8"
+}
+load_libertix_live_context_with_retry bios 1 "$ERROR_FILE"
+load_libertix_translations "$I18N_HELPER"
+printf '%s\n' "$LANGUAGE_CODE"
+printf '%s\n' "$LIBERTIX_I18N_AUTOMATIC_INSTALLATION"
+"""
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "LIVE_CONTEXT": str(ROOT / "assets/live/libertix-live-context.sh"),
+            "LIVE_I18N": str(ROOT / "assets/live/libertix-i18n.sh"),
+            "I18N_HELPER": str(ROOT / "assets/live/libertix-i18n.py"),
+            "ERROR_FILE": str(error_file),
+            "TEST_LANGUAGE": language,
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-c", command],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
+
+    assert result.stdout.splitlines() == [language, expected_title]
 
 
 def test_bios_and_uefi_project_the_language_code_to_the_live() -> None:
@@ -342,3 +425,63 @@ def test_apply_changes_progress_does_not_embed_french_fallbacks() -> None:
     )
 
     assert all(text not in sources for text in forbidden)
+
+
+def test_reported_wizard_layouts_keep_text_and_controls_inside_the_window() -> None:
+    welcome = (ROOT / "Pages/Welcome.xaml").read_text(encoding="utf-8-sig")
+    compatibility = (ROOT / "Pages/CompatibilityCheck.xaml").read_text(encoding="utf-8-sig")
+    warning = (ROOT / "Pages/WarningConfirmation.xaml").read_text(encoding="utf-8-sig")
+
+    about = welcome.split('Content="{DynamicResource AboutButton}"', 1)[1]
+    assert 'HorizontalAlignment="Right"' in about
+    assert 'VerticalAlignment="Bottom"' in about
+
+    description = compatibility.split('Text="{DynamicResource CompatibilityDescription}"', 1)[
+        1
+    ].split("/>", 1)[0]
+    assert 'TextWrapping="Wrap"' in description
+    assert 'TextAlignment="Center"' in description
+    assert 'MaxWidth="880"' in description
+    status = compatibility.split('x:Name="StatusText"', 1)[1].split("/>", 1)[0]
+    assert 'Grid.Row="3"' in status
+    assert 'FontWeight="SemiBold"' in status
+
+    assert '<ScrollViewer VerticalScrollBarVisibility="Auto"' in warning
+    checkbox = warning.split('x:Name="ConfirmCheckBox"', 1)[1].split(">", 1)[0]
+    assert 'MinHeight="34"' in checkbox
+    assert 'Padding="2"' in checkbox
+    assert 'AutomationProperties.AutomationId="WarningAcknowledgement"' in checkbox
+    confirm = warning.split('x:Name="ConfirmButton"', 1)[1].split("/>", 1)[0]
+    assert 'AutomationProperties.AutomationId="WarningConfirmButton"' in confirm
+
+
+def test_resize_labels_and_windows_sharing_are_generic_and_localized() -> None:
+    required_keys = {
+        "ResizeDiskWindowsFreeInside",
+        "ResizeDiskWindowsUsedLegend",
+        "ResizeDiskWindowsFreeLegend",
+        "ResizeDiskSizeValue",
+        "ResizeDiskLinuxLegend",
+        "ResizeDiskWindowsTotalLegend",
+        "ResizeDiskUsedDetail",
+        "ResizeDiskFreeDetail",
+        "ResizeDiskSizeUnit",
+        "SharingWindowsToLinuxTitle",
+    }
+    resize = (ROOT / "Pages/ResizeDisk.xaml").read_text(encoding="utf-8-sig")
+
+    assert all(required_keys <= resource_keys(language) for language in LANGUAGES)
+    assert "Windows used:" not in resize
+    assert "Windows free:" not in resize
+    assert "StringFormat=Used:" not in resize
+    assert "StringFormat=Free:" not in resize
+
+    for language in LANGUAGES:
+        path = ROOT / f"Resources/Lang/Strings.{language}.xaml"
+        values = {
+            element.attrib[XAML_KEY]: "".join(element.itertext())
+            for element in ElementTree.parse(path).getroot()
+            if XAML_KEY in element.attrib
+        }
+        assert "Mint" not in values["SharingWindowsToLinuxTitle"]
+        assert "Linux" in values["SharingWindowsToLinuxTitle"]

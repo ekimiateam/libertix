@@ -176,8 +176,13 @@ namespace Libertix.Installation
 
         public void BeginRollback()
         {
-            if (State.Status != InstallationStatus.Failed && State.Status != InstallationStatus.Running)
-                throw new InvalidOperationException("Rollback can only begin from a running or failed installation.");
+            if (State.Status != InstallationStatus.Failed &&
+                State.Status != InstallationStatus.Running &&
+                State.Status != InstallationStatus.Succeeded)
+            {
+                throw new InvalidOperationException(
+                    "Rollback can only begin from a running, failed, or successfully installed state.");
+            }
 
             State.Status = InstallationStatus.RollbackRunning;
             State.Phase = InstallationPhase.Rollback;

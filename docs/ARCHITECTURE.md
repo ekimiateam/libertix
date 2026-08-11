@@ -14,8 +14,12 @@ preparation, the live installer, the installed system, and rollback. The JSON sc
 3. The live installer validates both the plan and current hardware again. It expands or reformats
    only the transaction-owned staging partition, discovers and extracts the selected distribution,
    configures the target, installs the firmware-specific bootloader, and verifies the final system.
-4. The installed system boots through GRUB and applies the optional sharing policy recorded in the
-   plan.
+4. The installed system boots through GRUB, verifies its running kernel, root filesystem, account,
+   package state and firmware-specific boot chain, then publishes transaction-owned evidence into
+   the Windows recovery session before returning to Windows.
+5. A hidden Windows startup task cross-checks that Linux evidence against the plan, current disk
+   geometry, Windows health, Recovery, BCD and cleanup state. An interactive task displays the
+   translated terminal result after logon.
 
 ## Installation plan
 
@@ -114,6 +118,16 @@ Logging is diagnostic evidence, not a success signal. Failure to copy logs canno
 installation into a rollback request, and best-effort cleanup cannot be reported as verified
 rollback.
 
+Successful installation does not erase rollback authority. The plan, execution ledger, Linux boot
+evidence, firmware transaction data, recovery runtime and logs remain in the protected recovery
+session. Downloaded images and temporary boot files are removed. A later user-requested rollback
+must revalidate the retained ownership and geometry before removing Linux and restoring Windows.
+
+Post-install checks are atomically checkpointed. Their startup task runs late during shutdown and
+suppresses retry UI; if Windows terminates it before a terminal result is durable, the task remains
+registered and resumes the missing checks at the next boot. The interactive task does not create a
+window until the result is either successful or failed.
+
 ## Firmware boundaries
 
 The shared live runtime owns validation, extraction, target configuration, state transitions, and
@@ -125,6 +139,36 @@ rollback orchestration. Firmware adapters own only these differences:
 
 Both ISO entry points are intentionally thin wrappers that select a firmware mode and execute the
 same shared runtime.
+
+## Secure Boot and boot-package updates
+
+The catalogue records which Microsoft third-party UEFI authorities sign the installed-system shim
+provided by each distribution image. The Windows preflight records the 2011 and 2023 authorities
+actually present in the firmware trust database. When Secure Boot is enabled, Libertix requires an
+intersection before disk mutation and repeats that check immediately before Windows storage work.
+The dual-signed mini-ISO is not treated as proof that the distribution's final shim can boot.
+
+The installed EFI chain always comes from files owned by the distribution's `shim-signed` and
+`grub-efi-amd64-signed` packages. Libertix inspects their Authenticode signatures and selects a shim
+accepted by the current firmware, preferring the 2023 authority when both are available. It never
+replaces or downgrades a distribution kernel. If Secure Boot is disabled, it still requires signed
+distribution binaries but does not incorrectly require the disabled firmware policy to accept
+them.
+
+Package updates preserve the boot contract through three persistent guards:
+
+- `dpkg-divert` keeps the distribution's current GRUB generators available to the Libertix menu
+  renderer while package upgrades replace the diverted files normally;
+- the `update-grub` wrapper generates and validates a candidate configuration, then atomically
+  replaces the last known good `grub.cfg` only when the four-entry root menu, advanced submenu,
+  Windows entry, shutdown entry, distribution identity, and UEFI firmware entry remain valid;
+- an APT hook and a systemd path unit resynchronize the package-owned shim, signed GRUB, and
+  MokManager into `EFI/Libertix`. The previous chain is archived permanently before an atomic,
+  hash-checked replacement, with shim replaced last.
+
+These guards cover official kernel, GRUB, shim, and signed-loader package updates. Custom unsigned
+kernels or third-party modules remain subject to the distribution's normal Secure Boot and MOK
+rules.
 
 ## Validation layers
 

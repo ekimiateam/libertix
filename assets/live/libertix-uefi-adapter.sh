@@ -7,31 +7,17 @@
 # rollback, and UEFI final verification. These policies intentionally remain
 # outside the common orchestrator.
 
+readonly UEFI_BOOTENTRY_HELPER="/usr/local/lib/libertix/libertix-uefi-bootentries.py"
+readonly WINDOWS_BOOT_DESCRIPTION="Windows Boot Manager"
+readonly WINDOWS_BOOT_LOADER='\EFI\Microsoft\Boot\bootmgfw.efi'
+readonly LIBERTIX_BOOT_DESCRIPTION="Libertix"
+readonly LIBERTIX_BOOT_LOADER='\EFI\Libertix\shimx64.efi'
+
 
 firmware_retire_completed_transaction_best_effort() {
-    local mountpoint="/mnt/libertix-windows-success"
-    local transaction_state="$mountpoint/LibertixTools/uefi-transaction.json"
-
-    # Retire this only after the terminal ledger and install-success marker are
-    # durable. Until then the Windows agent still needs the original settings
-    # if the live environment reports a failure.
-    mkdir -p "$mountpoint"
-    mountpoint -q "$mountpoint" && umount "$mountpoint" 2>/dev/null || true
-    if ! mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint" 2>/dev/null; then
-        echo "WARNING: cannot mount Windows to retire the completed UEFI transaction state"
-        return 0
-    fi
-
-    if [ -e "$transaction_state" ]; then
-        if rm -f -- "$transaction_state"; then
-            sync || true
-            echo "Retired completed UEFI transaction state."
-        else
-            echo "WARNING: cannot retire the completed UEFI transaction state"
-        fi
-    fi
-    umount "$mountpoint" 2>/dev/null || \
-        echo "WARNING: cannot unmount Windows after retiring the UEFI transaction state"
+    # The Windows startup verifier archives this transaction document inside
+    # the permanent recovery session before removing C:\LibertixTools. Keeping
+    # it here is what makes a user-requested rollback possible after first boot.
     return 0
 }
 
@@ -45,7 +31,8 @@ write_windows_recovery_marker_best_effort() {
 final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
     local windows_verify="/mnt/libertix-windows-final-verify"
-    local fs uuid primary_slot_count part_table esp_part esp_verify esp_uuid dpkg_audit
+    local fs uuid primary_slot_count part_table esp_part esp_num esp_guid esp_verify esp_uuid
+    local dpkg_audit bootnumbers owner_bootnum current_order first_bootnum
 
     mark "150-final-verify"
     echo "FINAL VERIFY: checking installed system before success"
@@ -97,6 +84,8 @@ final_verify_or_die() {
 
     esp_part="$(find_esp_partition || true)"
     [ -n "$esp_part" ] && [ -b "$esp_part" ] || die "final verify: UEFI ESP missing"
+    esp_num="$(partition_number "$esp_part")"
+    esp_guid="$(blkid -s PARTUUID -o value "$esp_part" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
     esp_verify="/mnt/libertix-esp-final-verify"
     mkdir -p "$esp_verify"
     mount -t vfat -o ro "$esp_part" "$esp_verify"
@@ -107,9 +96,32 @@ final_verify_or_die() {
         die "final verify: Libertix EFI ownership marker missing"
     [ "$(sed -n '1p' "$esp_verify/EFI/Libertix/.libertix-owner" | tr -d '\r\n')" = "$RECOVERY_RUN_ID" ] || \
         die "final verify: Libertix EFI ownership marker mismatch"
+    owner_bootnum="$(sed -n '2p' "$esp_verify/EFI/Libertix/.libertix-owner" | tr -d '\r\n')"
+    [ "$(sed -n '3p' "$esp_verify/EFI/Libertix/.libertix-owner" | tr -d '\r\n')" = "$esp_num" ] || \
+        die "final verify: Libertix EFI ownership partition number mismatch"
+    [ "$(sed -n '4p' "$esp_verify/EFI/Libertix/.libertix-owner" | tr -d '\r\n')" = "$esp_guid" ] || \
+        die "final verify: Libertix EFI ownership partition identifier mismatch"
+    [ "$(sed -n '5p' "$esp_verify/EFI/Libertix/.libertix-owner" | tr -d '\r\n')" = "$LIBERTIX_BOOT_LOADER" ] || \
+        die "final verify: Libertix EFI ownership loader mismatch"
     [ ! -e "$esp_verify/EFI/LibertixInstaller" ] || \
         die "final verify: temporary EFI/LibertixInstaller directory was not removed"
     umount "$esp_verify"
+
+    if ! bootnumbers="$(find_exact_uefi_bootnumbers \
+        "$WINDOWS_BOOT_DESCRIPTION" "$WINDOWS_BOOT_LOADER" "$esp_num" "$esp_guid")"; then
+        die "final verify: cannot inspect Windows firmware boot entries"
+    fi
+    [ -n "$bootnumbers" ] || die "final verify: Windows Boot Manager entry is absent for the current ESP"
+    if ! bootnumbers="$(find_exact_uefi_bootnumbers \
+        "$LIBERTIX_BOOT_DESCRIPTION" "$LIBERTIX_BOOT_LOADER" "$esp_num" "$esp_guid")"; then
+        die "final verify: cannot inspect Libertix firmware boot entries"
+    fi
+    printf '%s\n' "$bootnumbers" | grep -Fxiq "$owner_bootnum" || \
+        die "final verify: owned Libertix entry does not target the current ESP"
+    current_order="$(efibootmgr 2>/dev/null | awk -F: '/^BootOrder:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
+    first_bootnum="${current_order%%,*}"
+    [ "${first_bootnum^^}" = "${owner_bootnum^^}" ] || \
+        die "final verify: firmware did not keep the owned Libertix entry first"
 
     mkdir -p "$windows_verify"
     mount -t ntfs-3g -o ro "$WINDOWS_PART" "$windows_verify"
@@ -397,40 +409,48 @@ write_target_fstab_or_die() {
     fi
 }
 
-copy_first_existing_file_or_die() {
-    local dest="$1"
-    shift
-    local candidate
+find_exact_uefi_bootnumbers() {
+    local description="$1" loader_path="$2" esp_num="$3" esp_guid="$4"
+    [ -x "$UEFI_BOOTENTRY_HELPER" ] || return 2
+    efibootmgr -v 2>/dev/null | python3 "$UEFI_BOOTENTRY_HELPER" \
+        --description "$description" \
+        --loader-path "$loader_path" \
+        --partition-number "$esp_num" \
+        --partition-guid "$esp_guid"
+}
 
-    for candidate in "$@"; do
-        if [ -f "$candidate" ]; then
-            install -m 0644 "$candidate" "$dest"
-            return 0
-        fi
-    done
+ensure_windows_bootentry_for_current_esp_or_die() {
+    local esp_num="$1" esp_guid="$2" bootnumbers
 
-    die "missing signed EFI file for $dest"
+    if ! bootnumbers="$(find_exact_uefi_bootnumbers \
+        "$WINDOWS_BOOT_DESCRIPTION" "$WINDOWS_BOOT_LOADER" "$esp_num" "$esp_guid")"; then
+        die "failed to inspect UEFI boot entries for the current Windows ESP"
+    fi
+    if [ -n "$bootnumbers" ]; then
+        echo "Verified Windows Boot Manager entry for ESP $esp_guid: Boot$(printf '%s\n' "$bootnumbers" | head -n1)"
+        return 0
+    fi
+
+    echo "Windows Boot Manager entry is absent for the current ESP; creating it"
+    run_logged efibootmgr -c -d "$DISK" -p "$esp_num" \
+        -L "$WINDOWS_BOOT_DESCRIPTION" -l "$WINDOWS_BOOT_LOADER"
+    if ! bootnumbers="$(find_exact_uefi_bootnumbers \
+        "$WINDOWS_BOOT_DESCRIPTION" "$WINDOWS_BOOT_LOADER" "$esp_num" "$esp_guid")"; then
+        die "failed to verify the repaired Windows Boot Manager entry"
+    fi
+    [ -n "$bootnumbers" ] || \
+        die "firmware did not retain the repaired Windows Boot Manager entry"
+    echo "Created Windows Boot Manager entry for ESP $esp_guid: Boot$(printf '%s\n' "$bootnumbers" | head -n1)"
 }
 
 set_libertix_bootentry_first_or_die() {
-    local bootnum current_order line lower_line rest new_order tab
+    local esp_num="$1" esp_guid="$2" bootnumbers bootnum current_order rest new_order verified_order
 
-    tab="$(printf '\t')"
-    bootnum="$(
-        efibootmgr -v 2>/dev/null | while IFS= read -r line; do
-            case "$line" in
-                Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]"* Libertix${tab}"*)
-                    lower_line="$(printf '%s\n' "$line" | tr '[:upper:]' '[:lower:]')"
-                    case "$lower_line" in
-                        *'file(\efi\libertix\shimx64.efi)'*)
-                            printf '%s\n' "${line#Boot}" | cut -c1-4
-                            break
-                            ;;
-                    esac
-                    ;;
-            esac
-        done
-    )"
+    if ! bootnumbers="$(find_exact_uefi_bootnumbers \
+        "$LIBERTIX_BOOT_DESCRIPTION" "$LIBERTIX_BOOT_LOADER" "$esp_num" "$esp_guid")"; then
+        die "failed to inspect UEFI boot entries for the current Libertix ESP"
+    fi
+    bootnum="$(printf '%s\n' "$bootnumbers" | head -n1)"
 
     if [ -z "$bootnum" ]; then
         return 1
@@ -445,17 +465,24 @@ set_libertix_bootentry_first_or_die() {
     fi
 
     run_logged efibootmgr -o "$new_order"
+    verified_order="$(efibootmgr 2>/dev/null | awk -F: '/^BootOrder:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}')"
+    [ "${verified_order%%,*}" = "$bootnum" ] || \
+        die "firmware did not retain the current ESP Libertix entry first in BootOrder"
     LIBERTIX_FINAL_BOOTNUM="$bootnum"
     return 0
 }
 
 install_signed_uefi_bootloader_or_die() {
-    local esp_part esp_num esp_mount efi_dir root_uuid loader_path
+    local esp_part esp_num esp_guid esp_mount efi_dir root_uuid
 
     esp_part="$(find_esp_partition || true)"
     [ -n "$esp_part" ] && [ -b "$esp_part" ] || die "UEFI ESP not found"
 
     esp_num="$(partition_number "$esp_part")"
+    esp_guid="$(blkid -s PARTUUID -o value "$esp_part" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    printf '%s\n' "$esp_guid" | grep -Eq \
+        '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' || \
+        die "UEFI ESP GPT partition identifier is missing or invalid"
     root_uuid="$(blkid -s UUID -o value "$NEW_PART" 2>/dev/null || true)"
     [ -n "$root_uuid" ] || die "Linux root UUID missing before EFI install"
 
@@ -473,20 +500,9 @@ install_signed_uefi_bootloader_or_die() {
     mkdir -p "$efi_dir"
     printf '%s\n' "$RECOVERY_RUN_ID" > "$efi_dir/.libertix-owner"
 
-    # Prefer the installed Ubuntu-family Secure Boot chain. The Debian live
-    # shim can boot the installer but may not trust the installed kernel.
-    copy_first_existing_file_or_die "$efi_dir/shimx64.efi" \
-        /mnt/target/usr/lib/shim/shimx64.efi.dualsigned \
-        /mnt/target/usr/lib/shim/shimx64.efi.signed.latest \
-        /mnt/target/usr/lib/shim/shimx64.efi.signed \
-        /mnt/target/usr/lib/shim/shimx64.efi
-    copy_first_existing_file_or_die "$efi_dir/grubx64.efi" \
-        /mnt/target/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed \
-        /mnt/target/usr/lib/grub/x86_64-efi-signed/grubx64.efi
-    copy_first_existing_file_or_die "$efi_dir/mmx64.efi" \
-        /mnt/target/usr/lib/shim/mmx64.efi.signed.latest \
-        /mnt/target/usr/lib/shim/mmx64.efi.signed \
-        /mnt/target/usr/lib/shim/mmx64.efi
+    # The target-owned synchronizer inspects the actual Microsoft signature,
+    # package ownership, and firmware trust before replacing any EFI binary.
+    chroot /mnt/target /usr/local/sbin/libertix-sync-efi
 
     cat > "$efi_dir/grub.cfg" <<EOF
 search --no-floppy --fs-uuid --set=root $root_uuid
@@ -502,14 +518,21 @@ EOF
 
     sync
 
-    loader_path='\EFI\Libertix\shimx64.efi'
+    ensure_windows_bootentry_for_current_esp_or_die "$esp_num" "$esp_guid"
     LIBERTIX_FINAL_BOOTNUM=""
-    if ! set_libertix_bootentry_first_or_die; then
-        run_logged efibootmgr -c -d "$DISK" -p "$esp_num" -L "Libertix" -l "$loader_path"
-        set_libertix_bootentry_first_or_die || die "failed to put Libertix first in UEFI BootOrder"
+    if ! set_libertix_bootentry_first_or_die "$esp_num" "$esp_guid"; then
+        run_logged efibootmgr -c -d "$DISK" -p "$esp_num" \
+            -L "$LIBERTIX_BOOT_DESCRIPTION" -l "$LIBERTIX_BOOT_LOADER"
+        set_libertix_bootentry_first_or_die "$esp_num" "$esp_guid" || \
+            die "failed to put the current ESP Libertix entry first in UEFI BootOrder"
     fi
     [ -n "$LIBERTIX_FINAL_BOOTNUM" ] || die "final Libertix UEFI boot number is missing"
-    printf '%s\n%s\n' "$RECOVERY_RUN_ID" "$LIBERTIX_FINAL_BOOTNUM" > "$efi_dir/.libertix-owner"
+    printf '%s\n%s\n%s\n%s\n%s\n' \
+        "$RECOVERY_RUN_ID" \
+        "$LIBERTIX_FINAL_BOOTNUM" \
+        "$esp_num" \
+        "$esp_guid" \
+        "$LIBERTIX_BOOT_LOADER" > "$efi_dir/.libertix-owner"
 
     # Windows stages this directory only to enter the live installer. Leaving
     # it on the ESP after success creates a second, stale boot surface.

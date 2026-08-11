@@ -50,14 +50,16 @@
                 </ComboBox>
             </StackPanel>
 
-            <Button Content="{DynamicResource AboutButton}"
-                    Style="{StaticResource ModernButton}"
-                    Width="160"
-                    Height="42"
-                    HorizontalAlignment="Center"
-                    Margin="0,24,0,0"
-                    TabIndex="2"
-                    Click="About_Click"/>
         </StackPanel>
+
+        <Button Content="{DynamicResource AboutButton}"
+                Style="{StaticResource ModernButton}"
+                Width="160"
+                Height="42"
+                HorizontalAlignment="Right"
+                VerticalAlignment="Bottom"
+                Margin="0,0,28,24"
+                TabIndex="2"
+                Click="About_Click"/>
     </Grid>
 </Page>

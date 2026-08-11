@@ -116,6 +116,9 @@ flowchart TB
   two distinct live images.
 - The recovery path reads the persisted state and compensates only operations that were completed;
   it then verifies the disk and boot state before reporting a successful rollback.
+- The first installed-Linux boot publishes durable GRUB, firmware, filesystem, account and package
+  evidence. Windows cross-checks it after reboot, removes only temporary artifacts, retains the
+  rollback history, and displays a translated success or recovery result.
 - `auto_tests/` builds and deploys the current working tree, controls the three authorized test VMs
   through SSH and VNC, and records visual and command-level evidence.
 

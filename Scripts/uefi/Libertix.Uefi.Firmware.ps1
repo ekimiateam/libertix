@@ -459,6 +459,33 @@ function Remove-LibertixTemporaryFirmwareEntries {
     }
 }
 
+function Remove-LibertixInstalledFirmwareEntries {
+    param([Parameter(Mandatory = $true)][string]$EspDrive)
+
+    $ownerPath = Join-Path (Join-Path $EspDrive $InstalledEspDirectory) $InstallerEspOwnershipFile
+    $ownerLines = @(Get-Content -LiteralPath $ownerPath -ErrorAction Stop)
+    if ($ownerLines.Count -ne 5 -or $ownerLines[0].Trim() -ne $RecoveryRunId) {
+        throw "Installed Libertix firmware ownership marker is invalid."
+    }
+    $bootNumberText = $ownerLines[1].Trim()
+    if ($bootNumberText -notmatch '^[0-9a-fA-F]{4}$') {
+        throw "Installed Libertix firmware ownership number is invalid."
+    }
+    [uint16]$bootNumber = [Convert]::ToUInt16($bootNumberText, 16)
+    $bootVariable = "Boot{0:X4}" -f $bootNumber
+    $bytes = Get-FirmwareVariableBytes -Name $bootVariable
+    if ($bytes) {
+        if ((Get-EfiLoadOptionDescription -Bytes $bytes) -ne $InstalledBootDescription) {
+            throw "$bootVariable exists but is not the installed Libertix entry owned by this recovery run."
+        }
+        Remove-FirmwareBootNumberFromOrder -BootNumber $bootNumber
+        Remove-FirmwareVariable -Name $bootVariable
+    }
+    if (Test-FirmwareVariableExists -Name $bootVariable) {
+        throw "Installed Libertix firmware entry $bootVariable remains after rollback."
+    }
+}
+
 function Set-NativeUefiBootOrderOnce {
     param(
         [Parameter(Mandatory = $true)][string]$InstallerDrive,
@@ -717,7 +744,27 @@ function Get-SecureBootDbCertificates {
     return $certificates
 }
 
+function Get-TrustedMicrosoftUefiAuthorities {
+    $subjects = @(Get-SecureBootDbCertificates | ForEach-Object { $_.Subject })
+    $authorities = @()
+    if (@($subjects | Where-Object {
+        $_ -match "CN=Microsoft Corporation UEFI CA 2011(?:,|$)"
+    }).Count -gt 0) {
+        $authorities += "2011"
+    }
+    if (@($subjects | Where-Object {
+        $_ -match "CN=Microsoft(?: Corporation)? UEFI CA 2023(?:,|$)"
+    }).Count -gt 0) {
+        $authorities += "2023"
+    }
+    return $authorities
+}
+
 function Test-LibertixSecureBootCompatibility {
+    param(
+        [Parameter(Mandatory = $true)][object]$InstallationPlan
+    )
+
     Write-LibertixProgress -Stage "secure-boot" -Percent 8
     Write-Log "Checking Secure Boot certificate compatibility..." "Cyan"
 
@@ -733,28 +780,37 @@ function Test-LibertixSecureBootCompatibility {
     }
 
     $subjects = @(Get-SecureBootDbCertificates | ForEach-Object { $_.Subject })
-    $has2011 = @($subjects | Where-Object { $_ -match "CN=Microsoft Corporation UEFI CA 2011(?:,|$)" }).Count -gt 0
-    $has2023 = @($subjects | Where-Object { $_ -match "CN=Microsoft(?: Corporation)? UEFI CA 2023(?:,|$)" }).Count -gt 0
+    $trustedAuthorities = @(Get-TrustedMicrosoftUefiAuthorities)
     $hasWindows2023 = @($subjects | Where-Object { $_ -match "CN=Windows UEFI CA 2023(?:,|$)" }).Count -gt 0
-
-    if ($has2011 -and $has2023) {
-        Write-Log "Secure Boot DB contains Microsoft UEFI CA 2011 and 2023; dual-signed installer chain is compatible." "Green"
-        return
+    if ($trustedAuthorities.Count -eq 0) {
+        if ($hasWindows2023) {
+            throw "Secure Boot DB contains Windows UEFI CA 2023, but not Microsoft UEFI CA 2023 for third-party bootloaders. Disable Secure Boot or enroll the Microsoft third-party UEFI CA before installing Libertix."
+        }
+        throw "Secure Boot is enabled but neither Microsoft Corporation UEFI CA 2011 nor Microsoft UEFI CA 2023 was detected in db. This looks like a custom/professional Secure Boot trust store. Disable Secure Boot or enroll the Microsoft third-party UEFI CA before installing Libertix."
     }
 
-    if ($has2023) {
-        Write-Log "Secure Boot DB contains Microsoft UEFI CA 2023; dual-signed installer chain is compatible." "Green"
-        return
+    $distributionAuthorities = @(
+        $InstallationPlan.distribution.secureBootMicrosoftAuthorities |
+            ForEach-Object { [string]$_ }
+    )
+    $compatibleAuthorities = @(
+        $trustedAuthorities | Where-Object { $_ -in $distributionAuthorities }
+    )
+    $trustedAuthoritiesText = $trustedAuthorities -join ", "
+    $distributionAuthoritiesText = $distributionAuthorities -join ", "
+    if ($compatibleAuthorities.Count -eq 0) {
+        $message = (
+            "Secure Boot trusts Microsoft UEFI CA [{0}], but the selected distribution " +
+            "provides an installed-system shim for [{1}]. The dual-signed Libertix mini-ISO " +
+            "would boot, but the installed system would not. Refusing before disk mutation."
+        ) -f $trustedAuthoritiesText, $distributionAuthoritiesText
+        throw $message
     }
 
-    if ($has2011) {
-        Write-Log "Secure Boot DB contains Microsoft UEFI CA 2011; dual-signed installer chain is compatible." "Green"
-        return
-    }
-
-    if ($hasWindows2023) {
-        throw "Secure Boot DB contains Windows UEFI CA 2023, but not Microsoft UEFI CA 2023 for third-party bootloaders. Disable Secure Boot or enroll the Microsoft third-party UEFI CA before installing Libertix."
-    }
-
-    throw "Secure Boot is enabled but neither Microsoft Corporation UEFI CA 2011 nor Microsoft UEFI CA 2023 was detected in db. This looks like a custom/professional Secure Boot trust store. Disable Secure Boot or enroll the Microsoft third-party UEFI CA before installing Libertix."
+    $compatibleAuthoritiesText = $compatibleAuthorities -join ", "
+    $message = (
+        "Secure Boot installed-system chain is compatible through Microsoft UEFI CA {0}. " +
+        "Firmware=[{1}], distribution=[{2}]."
+    ) -f $compatibleAuthoritiesText, $trustedAuthoritiesText, $distributionAuthoritiesText
+    Write-Log $message "Green"
 }

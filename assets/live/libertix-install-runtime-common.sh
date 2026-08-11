@@ -98,12 +98,24 @@ debug_disk_state() {
 }
 
 assert_recovery_unchanged_or_die() {
-    local recovery_partition recovery_size
+    local attempt recovery_partition="" recovery_size=0
 
-    recovery_partition=$(partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES" || true)
+    # Partition-table writes can temporarily remove a device from sysfs while
+    # the on-disk table is already correct. Retry the exact manifest lookup;
+    # never accept a different offset or size.
+    for attempt in $(seq 1 20); do
+        udevadm settle --timeout=10 2>/dev/null || true
+        recovery_partition=$(partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES" || true)
+        if [ -n "$recovery_partition" ] && [ -b "$recovery_partition" ]; then
+            recovery_size=$(blockdev --getsize64 "$recovery_partition" 2>/dev/null || echo 0)
+            [ "$recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES" ] && break
+        fi
+        recovery_partition=""
+        recovery_size=0
+        sleep 0.25
+    done
     [ -n "$recovery_partition" ] && [ -b "$recovery_partition" ] \
         || die "Windows recovery partition is missing at its recorded offset"
-    recovery_size=$(blockdev --getsize64 "$recovery_partition" 2>/dev/null || echo 0)
     [ "$recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES" ] \
         || die "Windows recovery partition size changed: expected $RECOVERY_PARTITION_SIZE_BYTES, got $recovery_size"
 

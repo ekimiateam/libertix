@@ -18,6 +18,34 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges
     {
+        private void AssertSelectedDistroSecureBootCompatibility()
+        {
+            CompatibilityInfo compatibility = _installationState.Compatibility ??
+                throw new InvalidOperationException("Compatibility preflight data is missing.");
+            if (!compatibility.SecureBootEnabled)
+                return;
+
+            DistroInfo distribution = _installationState.SelectedDistro ??
+                throw new InvalidOperationException("A distribution must be selected.");
+            string[] trusted = compatibility.TrustedMicrosoftUefiAuthorities ?? new string[0];
+            string[] supported = distribution.SecureBootMicrosoftAuthorities?.ToArray() ??
+                new string[0];
+            if (trusted.Intersect(supported, StringComparer.Ordinal).Any())
+                return;
+
+            string trustedText = trusted.Length == 0 ? "none" : string.Join(", ", trusted);
+            string supportedText = supported.Length == 0 ? "none" : string.Join(", ", supported);
+            throw new InvalidOperationException(
+                LocalizedFormat(
+                    "ApplyChangesSecureBootDistributionUnsupported",
+                    "Secure Boot is enabled, but {0} has no installed-system bootloader " +
+                    "compatible with this firmware. Firmware trusts Microsoft UEFI CA: {1}. " +
+                    "The selected distribution supports: {2}. No disk change was made.",
+                    distribution.Name,
+                    trustedText,
+                    supportedText));
+        }
+
         private async Task ExecuteUefiInstallationAsync()
         {
             if (!IsRunningAsAdministrator())

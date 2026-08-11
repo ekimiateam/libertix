@@ -7,6 +7,7 @@ using Libertix.Helpers;
 using Libertix.Models;
 using Libertix.Pages;
 using System.ComponentModel;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text;
@@ -191,6 +192,12 @@ namespace Libertix.Pages
                             !Regex.IsMatch(distroJson.OsReleaseId ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
                             !Regex.IsMatch(distroJson.GrubDisplayName ?? "", "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$") ||
                             !Regex.IsMatch(distroJson.GrubIcon ?? "", "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
+                            distroJson.SecureBootMicrosoftAuthorities == null ||
+                            distroJson.SecureBootMicrosoftAuthorities.Count == 0 ||
+                            distroJson.SecureBootMicrosoftAuthorities.Any(
+                                authority => authority != "2011" && authority != "2023") ||
+                            distroJson.SecureBootMicrosoftAuthorities.Distinct(StringComparer.Ordinal).Count() !=
+                                distroJson.SecureBootMicrosoftAuthorities.Count ||
                             string.IsNullOrWhiteSpace(distroJson.IsoInstaller) ||
                             string.IsNullOrWhiteSpace(distroJson.IsoInstallerFileName) ||
                             !Regex.IsMatch(distroJson.IsoInstallerSha256 ?? "", "^[0-9a-fA-F]{64}$") ||
@@ -210,6 +217,8 @@ namespace Libertix.Pages
                             OsReleaseId = distroJson.OsReleaseId,
                             GrubDisplayName = distroJson.GrubDisplayName,
                             GrubIcon = distroJson.GrubIcon,
+                            SecureBootMicrosoftAuthorities =
+                                distroJson.SecureBootMicrosoftAuthorities.ToList(),
                             Description = distroJson.Description ?? "No description available",
                             ImageUrl = distroJson.ImageUrl,
                             IsoUrl = _filepool.ResolveUrl(biosMiniIso.Url),

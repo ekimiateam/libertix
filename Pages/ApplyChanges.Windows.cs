@@ -2,8 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Libertix.Helpers;
 using Libertix.Installation;
@@ -23,7 +26,8 @@ namespace Libertix.Pages
                 "Default User",
                 "defaultuser0",
                 "Public",
-                "WDAGUtilityAccount"
+                "WDAGUtilityAccount",
+                "WsiAccount"
             };
             string usersRoot = Path.Combine(
                 Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.Windows)),
@@ -345,6 +349,16 @@ namespace Libertix.Pages
                         artifactCleanupModuleTarget,
                         true);
 
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
+                        "Libertix.PostInstallVerification.psm1");
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "libertix-post-install-result.ps1"),
+                        "libertix-post-install-result.ps1");
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "config", "Libertix.PostInstallTranslations.json"),
+                        Path.Combine("config", "Libertix.PostInstallTranslations.json"));
+
                     if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
                     {
                         Dispatcher.Invoke(() => Log("ERROR: BIOS storage preflight is missing."));
@@ -415,7 +429,11 @@ namespace Libertix.Pages
                     string args = $"-NoProfile -ExecutionPolicy Bypass -File " +
                         $"{QuoteArgument(registrationScript)} " +
                         $"-TaskName {QuoteArgument(RuntimeNames.BiosRecoveryTask)} " +
-                        $"-RecoveryScriptPath {QuoteArgument(targetScript)}";
+                        $"-RecoveryScriptPath {QuoteArgument(targetScript)} " +
+                        $"-PromptTaskName {QuoteArgument(RuntimeNames.BiosRecoveryPromptTask)} " +
+                        $"-ResultScriptPath {QuoteArgument(Path.Combine(RecoveryRoot, "libertix-post-install-result.ps1"))} " +
+                        $"-ResultStatePath {QuoteArgument(Path.Combine(RecoveryRoot, "post-install-verification.json"))} " +
+                        $"-PromptUser {QuoteArgument(WindowsIdentity.GetCurrent().Name)}";
                     var result = RunProcess(
                         powershell,
                         args,
@@ -439,6 +457,50 @@ namespace Libertix.Pages
                     return false;
                 }
             });
+        }
+
+        private static void CopyRequiredRecoveryFile(string sourceRelativePath, string targetRelativePath)
+        {
+            string source = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, sourceRelativePath);
+            if (!File.Exists(source))
+                throw new FileNotFoundException("Required recovery file is missing.", source);
+            string target = Path.Combine(RecoveryRoot, targetRelativePath);
+            Directory.CreateDirectory(Path.GetDirectoryName(target));
+            File.Copy(source, target, true);
+        }
+
+        private static void ArchivePreviousBiosRecoverySession()
+        {
+            if (!Directory.Exists(RecoveryRoot))
+                return;
+
+            string pendingPath = Path.Combine(RecoveryRoot, "pending.env");
+            string planId = File.Exists(pendingPath)
+                ? File.ReadLines(pendingPath)
+                    .Where(line => line.StartsWith("PLAN_ID=", StringComparison.Ordinal))
+                    .Select(line => line.Substring("PLAN_ID=".Length).Trim())
+                    .FirstOrDefault()
+                : null;
+            if (string.IsNullOrWhiteSpace(planId) ||
+                !Regex.IsMatch(planId, "^[0-9a-f]{32}$", RegexOptions.CultureInvariant))
+            {
+                planId = "unknown-" + DateTime.UtcNow.ToString(
+                    "yyyyMMddTHHmmssZ",
+                    CultureInfo.InvariantCulture);
+            }
+
+            string historyRoot = Path.Combine(
+                WindowsSystemDrive,
+                @"ProgramData\Libertix\RecoveryHistory\bios");
+            Directory.CreateDirectory(historyRoot);
+            string destination = Path.Combine(historyRoot, planId);
+            if (Directory.Exists(destination))
+            {
+                destination += "-" + DateTime.UtcNow.ToString(
+                    "yyyyMMddTHHmmssfffffffZ",
+                    CultureInfo.InvariantCulture);
+            }
+            Directory.Move(RecoveryRoot, destination);
         }
 
 

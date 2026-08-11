@@ -459,8 +459,8 @@ function Start-LibertixRollback {
     # ledger remains intact and determines which compensations are required.
     return Update-LibertixExecutionState -Path $Path -Transition {
         param($state)
-        if ([string]$state.status -notin @("running", "failed")) {
-            throw "Rollback can only begin from running or failed."
+        if ([string]$state.status -notin @("running", "failed", "succeeded")) {
+            throw "Rollback can only begin from running, failed, or succeeded."
         }
         $state.status = "rollback-running"
         $state.phase = "rollback"

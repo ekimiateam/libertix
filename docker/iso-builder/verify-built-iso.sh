@@ -50,6 +50,8 @@ compare_rootfs_file usr/local/lib/libertix/libertix-distribution-common.sh \
     /workspace/assets/live/libertix-distribution-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.py \
     /workspace/assets/live/libertix-installation-plan.py
+compare_rootfs_file usr/local/lib/libertix/libertix-uefi-bootentries.py \
+    /workspace/assets/live/libertix-uefi-bootentries.py
 compare_rootfs_file usr/local/lib/libertix/libertix_installation_policy.py \
     /workspace/assets/live/libertix_installation_policy.py
 compare_rootfs_file usr/local/lib/libertix/Libertix.InstallationPolicy.json \
@@ -119,11 +121,23 @@ compare_rootfs_file usr/local/lib/libertix/configure-target-main.sh \
     /workspace/assets/live/configure-target-main.sh
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.sh \
     /workspace/assets/live/first-boot-resize.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-first-boot-verify.py \
+    /workspace/assets/live/libertix-first-boot-verify.py
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.service \
     /workspace/assets/live/first-boot-resize.service
 compare_rootfs_file usr/local/lib/libertix/10_libertix /workspace/grub/10_libertix
 compare_rootfs_file usr/local/lib/libertix/render-libertix-menu.py \
     /workspace/grub/render-libertix-menu.py
+compare_rootfs_file usr/local/lib/libertix/libertix-validate-grub.sh \
+    /workspace/assets/live/libertix-validate-grub.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-update-grub.sh \
+    /workspace/assets/live/libertix-update-grub.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-sync-efi.sh \
+    /workspace/assets/live/libertix-sync-efi.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-efi-sync.service \
+    /workspace/assets/live/libertix-efi-sync.service
+compare_rootfs_file usr/local/lib/libertix/libertix-efi-sync.path \
+    /workspace/assets/live/libertix-efi-sync.path
 compare_rootfs_file etc/systemd/system/libertix-install.service \
     "$source_dir/systemd/libertix-install.service"
 compare_rootfs_file etc/systemd/system/getty@tty2.service.d/override.conf \

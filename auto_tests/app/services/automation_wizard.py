@@ -28,6 +28,8 @@ COMPATIBILITY_SUCCESS_MARKERS = (
     "el equipo es compatible",
     "互換性があります",
 )
+WARNING_TRANSITION_MAX_ATTEMPTS = 6
+WARNING_TRANSITION_RETRY_SECONDS = 5
 
 
 class WizardAutomationMixin:
@@ -123,8 +125,12 @@ class WizardAutomationMixin:
             options.linux_username,
             result,
         )
-        self._press_key(client, "enter", 10.0)
-        self._capture_from_client(client, vm, "06-apply-started", result)
+        self._start_installation_from_warning(
+            client,
+            vm,
+            options.linux_username,
+            result,
+        )
 
     def _navigate_to_account(
         self,
@@ -339,7 +345,7 @@ class WizardAutomationMixin:
         username: str,
         result: ResultBuilder,
     ) -> None:
-        for attempt in range(1, 4):
+        for attempt in range(1, WARNING_TRANSITION_MAX_ATTEMPTS + 1):
             capture, latest_capture = self._capture_wizard_pair(
                 client, vm, f"05-warning-{attempt:02d}", result
             )
@@ -371,17 +377,36 @@ class WizardAutomationMixin:
                     and exc.details.get("username_confirmed") is True
                     and exc.details.get("password_fields_confirmed") is True
                 )
-                if account_is_still_visible and attempt < 3:
+                if account_is_still_visible and attempt < WARNING_TRANSITION_MAX_ATTEMPTS:
                     self._press_key(client, "enter", 5.0)
                     continue
-                if not settings_is_obscuring or attempt == 3:
+                if exc.details.get("no_blocking_error") is not True:
                     raise
-                self._close_windows_interference(
-                    vm,
-                    kind="settings",
-                    step="automation.dismiss_windows_settings",
-                    result=result,
-                )
+                if settings_is_obscuring:
+                    if attempt == WARNING_TRANSITION_MAX_ATTEMPTS:
+                        raise
+                    self._close_windows_interference(
+                        vm,
+                        kind="settings",
+                        step="automation.dismiss_windows_settings",
+                        result=result,
+                    )
+                    continue
+                if (
+                    exc.details.get("detected_screen") == "other"
+                    and attempt < WARNING_TRANSITION_MAX_ATTEMPTS
+                ):
+                    result.ok(
+                        "automation.warning_transition_wait",
+                        "Warning page is still rendering; visual confirmation will retry",
+                        target=vm.vnc,
+                        vm=vm.name,
+                        attempt=attempt,
+                        maximum_attempts=WARNING_TRANSITION_MAX_ATTEMPTS,
+                    )
+                    time.sleep(WARNING_TRANSITION_RETRY_SECONDS)
+                    continue
+                raise
 
         raise AssertionError("Warning-page confirmation loop ended unexpectedly")
 
@@ -395,7 +420,8 @@ class WizardAutomationMixin:
         """Select and visually prove the destructive-action acknowledgement."""
 
         last_context: dict[str, object] = {}
-        for observation in range(1, 5):
+        for observation in range(1, 4):
+            self._set_warning_acknowledgement(vm, result, attempt=observation)
             capture, latest_capture = self._capture_wizard_pair(
                 client, vm, f"05-warning-acknowledgement-{observation:02d}", result
             )
@@ -437,18 +463,9 @@ class WizardAutomationMixin:
                     "Warning page was lost while selecting its acknowledgement",
                     details=context,
                 )
-            if observation == 4:
-                break
-
-            # Space toggles a WPF CheckBox. Observe first and press it only
-            # while the checkbox is proven unchecked; otherwise a delayed
-            # vision result could make a retry undo a successful selection.
-            # WarningConfirmation handles Ctrl+Home by focusing its checkbox.
-            self._press_chord(client, "ctrl", "home")
-            self._press_key(client, "space", 0.75)
             result.ok(
                 "automation.warning_acknowledgement_retry",
-                "Warning checkbox was visibly unchecked; selected it from deterministic focus",
+                "Warning checkbox was not yet visually confirmed; idempotent selection will retry",
                 attempt=observation,
                 **context,
             )
@@ -456,6 +473,121 @@ class WizardAutomationMixin:
         raise WorkflowError(
             "automation.warning_acknowledgement",
             "Warning checkbox could not be visibly selected after three attempts",
+            details=last_context or {"vm": vm.name, "target": vm.vnc},
+        )
+
+    def _set_warning_acknowledgement(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+        *,
+        attempt: int,
+    ) -> None:
+        """Set the warning checkbox to On without a coordinate or toggle action."""
+
+        with self.validation.ssh(
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
+        ) as ssh:
+            response = self.validation.run_windows_script(
+                ssh,
+                script_name="set_warning_acknowledgement.ps1",
+                config={},
+                step="automation.set_warning_acknowledgement",
+                timeout=45,
+            )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "ACKNOWLEDGED",
+                "CONFIRM_ENABLED",
+                "LIBERTIX_PROCESS_ID",
+                "CHECKBOX_SEARCH_SCOPE",
+                "BUTTON_SEARCH_SCOPE",
+            ),
+        )
+        if values.get("ACKNOWLEDGED") != "True" or values.get("CONFIRM_ENABLED") != "True":
+            raise WorkflowError(
+                "automation.set_warning_acknowledgement",
+                "Windows accessibility did not prove the warning acknowledgement",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "attempt": attempt,
+                    **values,
+                },
+            )
+        result.ok(
+            "automation.set_warning_acknowledgement",
+            "Warning acknowledgement set and read back through Windows accessibility",
+            vm=vm.name,
+            target=vm.host,
+            attempt=attempt,
+            libertix_process_id=int(values["LIBERTIX_PROCESS_ID"]),
+            checkbox_search_scope=values["CHECKBOX_SEARCH_SCOPE"],
+            button_search_scope=values["BUTTON_SEARCH_SCOPE"],
+        )
+
+    def _start_installation_from_warning(
+        self,
+        client: object,
+        vm: VMConfig,
+        username: str,
+        result: ResultBuilder,
+    ) -> None:
+        """Activate Apply by keyboard and prove that the warning page was left."""
+
+        last_context: dict[str, object] = {}
+        for attempt in range(1, 4):
+            # The accessibility worker leaves focus on the checkbox. With cyclic
+            # tab order, Shift+Tab selects the confirmation button regardless of
+            # screen resolution, then Enter invokes it.
+            self._press_chord(client, "shift", "tab")
+            self._press_key(client, "enter", 3.0)
+            capture, latest_capture = self._capture_wizard_pair(
+                client, vm, f"06-apply-started-{attempt:02d}", result
+            )
+            verdict = self.vision_llm.analyze_wizard_state(
+                capture,
+                vm.name,
+                vm.os,
+                expected_screen="warning",
+                expected_username=username,
+                second_image_path=latest_capture,
+            )
+            context = {
+                "target": vm.vnc,
+                "vm": vm.name,
+                "capture": str(capture),
+                "latest_capture": str(latest_capture),
+                "attempt": attempt,
+                **verdict.model_dump(),
+            }
+            last_context = context
+            if verdict.detected_screen == "apply" and verdict.no_blocking_error:
+                result.ok(
+                    "automation.apply_started",
+                    "Apply page visibly replaced the warning page",
+                    **context,
+                )
+                return
+            if (
+                verdict.detected_screen != "warning"
+                or not verdict.expected_screen_visible
+                or not verdict.no_blocking_error
+            ):
+                raise WorkflowError(
+                    "automation.apply_started",
+                    "The destructive transition did not reach a valid Apply page",
+                    details=context,
+                )
+            self._set_warning_acknowledgement(vm, result, attempt=attempt + 1)
+
+        raise WorkflowError(
+            "automation.apply_started",
+            "The warning page remained visible after three verified keyboard attempts",
             details=last_context or {"vm": vm.name, "target": vm.vnc},
         )
 

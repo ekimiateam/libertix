@@ -38,6 +38,15 @@
     <system:String x:Key="ResizeDiskIsoSize">Installer ISO: {0:N1} GB</system:String>
     <system:String x:Key="ResizeDiskLinuxMinimum">Minimum Linux space: {0:N1} GB</system:String>
     <system:String x:Key="ResizeDiskAdditionalSpace">Additional space needed: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeInside">{0:N0} GB free</system:String>
+    <system:String x:Key="ResizeDiskWindowsUsedLegend">Windows used: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeLegend">Windows free: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskSizeValue">{0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskLinuxLegend">Linux: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsTotalLegend">Windows: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskUsedDetail">Used: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskFreeDetail">Free: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskSizeUnit">GB</system:String>
     <system:String x:Key="ErrorTitle">Error</system:String>
     <system:String x:Key="DistroLoadError">Failed to load the list of distributions. Please check your internet connection and try again.</system:String>
 
@@ -83,7 +92,7 @@
 
     <system:String x:Key="SharingTitle">File sharing</system:String>
     <system:String x:Key="SharingDescription">Choose which files are accessible from each system.</system:String>
-    <system:String x:Key="SharingWindowsToLinuxTitle">Show Windows files in Mint</system:String>
+    <system:String x:Key="SharingWindowsToLinuxTitle">Show Windows files in Linux</system:String>
     <system:String x:Key="SharingWindowsToLinuxDescription">Each Windows profile will appear as User_name in the file manager.</system:String>
     <system:String x:Key="SharingLinuxToWindowsTitle">Show Linux files in Windows (read-only)</system:String>
     <system:String x:Key="SharingLinuxToWindowsDescription">Windows will be able to view Linux files without modifying the ext4 partition.</system:String>
@@ -145,6 +154,7 @@
     <system:String x:Key="WindowsShareShortcutDescription">Linux files (read-only)</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">Preparing UEFI installation...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Checking Secure Boot...</system:String>
+    <system:String x:Key="ApplyChangesSecureBootDistributionUnsupported">Secure Boot is enabled, but {0} has no installed-system bootloader compatible with this firmware. Firmware trusts Microsoft UEFI CA: {1}. The selected distribution supports: {2}. No disk change was made.</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Initializing Windows {0} decryption...</system:String>
     <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} decrypted</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Decrypting Windows {0}: {1}%</system:String>

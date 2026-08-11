@@ -154,6 +154,7 @@ namespace Libertix.Tests
             Assert.AreEqual("LibertixInstallLogs", RuntimeNames.InstallationLogDirectory);
             Assert.AreEqual("LibertixInstallRecovery", RuntimeNames.BiosRecoveryDirectory);
             Assert.AreEqual("LibertixInstallRecovery", RuntimeNames.BiosRecoveryTask);
+            Assert.AreEqual("LibertixInstallRecoveryPrompt", RuntimeNames.BiosRecoveryPromptTask);
             Assert.AreEqual("LibertixLinuxReadOnly", RuntimeNames.LinuxReadOnlyTask);
         }
 

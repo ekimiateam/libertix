@@ -4,12 +4,26 @@ param(
     [string]$TaskName,
 
     [Parameter(Mandatory = $true)]
-    [string]$RecoveryScriptPath
+    [string]$RecoveryScriptPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PromptTaskName,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ResultScriptPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ResultStatePath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PromptUser
 )
 
 $ErrorActionPreference = "Stop"
 
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false `
+    -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName $PromptTaskName -Confirm:$false `
     -ErrorAction SilentlyContinue
 
 try {
@@ -26,13 +40,35 @@ try {
         -StartWhenAvailable `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 15)
+        -DisallowHardTerminate `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
     Register-ScheduledTask `
         -TaskName $TaskName `
         -Action $action `
         -Trigger $trigger `
         -Principal $principal `
+        -Settings $settings `
+        -Force | Out-Null
+
+    $promptArguments = (
+        '-NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
+        '-StatePath "{1}" -RecoveryScriptPath "{2}" ' +
+        '-Firmware bios -PromptTaskName "{3}"'
+    ) -f $ResultScriptPath, $ResultStatePath, $RecoveryScriptPath, $PromptTaskName
+    $promptAction = New-ScheduledTaskAction `
+        -Execute $powerShell `
+        -Argument $promptArguments
+    $promptTrigger = New-ScheduledTaskTrigger -AtLogOn -User $PromptUser
+    $promptPrincipal = New-ScheduledTaskPrincipal `
+        -UserId $PromptUser `
+        -LogonType Interactive `
+        -RunLevel Highest
+    Register-ScheduledTask `
+        -TaskName $PromptTaskName `
+        -Action $promptAction `
+        -Trigger $promptTrigger `
+        -Principal $promptPrincipal `
         -Settings $settings `
         -Force | Out-Null
 
@@ -43,8 +79,11 @@ try {
 
     Write-Output "RECOVERY_TASK_REGISTERED=true"
     Write-Output "TASK=$TaskName"
+    Write-Output "PROMPT_TASK=$PromptTaskName"
 } catch {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false `
+        -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $PromptTaskName -Confirm:$false `
         -ErrorAction SilentlyContinue
     throw
 }

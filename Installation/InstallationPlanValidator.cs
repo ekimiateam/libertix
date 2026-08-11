@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace Libertix.Installation
@@ -171,6 +172,11 @@ namespace Libertix.Installation
                 distribution.GrubIcon,
                 "distribution.grubIcon",
                 errors);
+            ValidateMicrosoftUefiAuthorities(
+                distribution.SecureBootMicrosoftAuthorities,
+                "distribution.secureBootMicrosoftAuthorities",
+                requireAtLeastOne: true,
+                errors);
             RequireNotBlank(distribution.InstallerIsoFileName, "distribution.installerIsoFileName", errors);
             Require(
                 !string.IsNullOrEmpty(distribution.InstallerIsoFileName) &&
@@ -193,6 +199,27 @@ namespace Libertix.Installation
                 errors);
             RequireHttpUri(distribution.LiveIsoUrl, "distribution.liveIsoUrl", errors);
             RequireSha256(distribution.LiveIsoSha256, "distribution.liveIsoSha256", errors);
+        }
+
+        private static void ValidateMicrosoftUefiAuthorities(
+            IEnumerable<string> authorities,
+            string path,
+            bool requireAtLeastOne,
+            ICollection<string> errors)
+        {
+            if (authorities == null)
+            {
+                errors.Add($"{path} is required.");
+                return;
+            }
+
+            string[] values = authorities.ToArray();
+            Require(!requireAtLeastOne || values.Length > 0, errors,
+                $"{path} must contain at least one authority.");
+            Require(values.All(value => value == "2011" || value == "2023"), errors,
+                $"{path} may contain only 2011 and 2023.");
+            Require(values.Distinct(StringComparer.Ordinal).Count() == values.Length, errors,
+                $"{path} must not contain duplicates.");
         }
 
         private static void ValidateLocale(
@@ -538,6 +565,19 @@ namespace Libertix.Installation
                         StringComparison.Ordinal);
                 Require(isSupportedUefiStrategy, errors,
                     "A UEFI plan requires a supported UEFI boot strategy.");
+            }
+
+            ValidateMicrosoftUefiAuthorities(
+                runtime.TrustedMicrosoftUefiAuthorities,
+                "runtime.trustedMicrosoftUefiAuthorities",
+                requireAtLeastOne: false,
+                errors);
+            if (string.Equals(firmware, InstallationFirmware.Bios, StringComparison.Ordinal))
+            {
+                Require(!runtime.SecureBootEnabled, errors,
+                    "A BIOS plan must not enable Secure Boot.");
+                Require(runtime.TrustedMicrosoftUefiAuthorities?.Length == 0, errors,
+                    "A BIOS plan must not contain trusted Microsoft UEFI authorities.");
             }
 
             bool hasRecoveryRoot = runtime.RecoveryRootWindows != null;

@@ -1296,17 +1296,64 @@ def test_warning_confirmation_closes_windows_settings_and_retries(
     assert result.steps[-1].step == "automation.wizard_state"
 
 
-def test_warning_acknowledgement_uses_deterministic_focus_and_visual_proof(
+def test_warning_confirmation_waits_for_a_nonblocking_render_transition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
-    keys: list[tuple[str, str]] = []
-    client = SimpleNamespace(
-        keyDown=lambda key: keys.append(("down", key)),
-        keyPress=lambda key: keys.append(("press", key)),
-        keyUp=lambda key: keys.append(("up", key)),
+    client = SimpleNamespace()
+    sleeps: list[float] = []
+
+    def verdict(screen: str, visible: bool, summary: str) -> SimpleNamespace:
+        values = {
+            "detected_screen": screen,
+            "expected_screen_visible": visible,
+            "no_blocking_error": True,
+            "username_visible": False,
+            "password_fields_filled": False,
+            "summary": summary,
+            "visible_text": "Libertix DEVELOPMENT MODE" if screen == "other" else "Avertissement",
+        }
+        return SimpleNamespace(**values, model_dump=lambda: values)
+
+    verdicts = iter(
+        (
+            verdict("other", False, "Libertix window is transitioning"),
+            verdict("other", False, "Libertix warning page is still rendering"),
+            verdict("warning", True, "Final warning page"),
+        )
     )
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        service,
+        "_capture_wizard_pair",
+        lambda *_args, **_kwargs: (Path("warning-1.png"), Path("warning-2.png")),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: next(verdicts)  # type: ignore[method-assign]
+    result = ResultBuilder("automation")
+
+    service._confirm_warning_page(  # noqa: SLF001
+        client,
+        vm,
+        "test",
+        result,
+    )
+
+    assert sleeps == [
+        automation_wizard_module.WARNING_TRANSITION_RETRY_SECONDS,
+        automation_wizard_module.WARNING_TRANSITION_RETRY_SECONDS,
+    ]
+    assert sum(step.step == "automation.warning_transition_wait" for step in result.steps) == 2
+    assert result.steps[-1].step == "automation.wizard_state"
+
+
+def test_warning_acknowledgement_uses_idempotent_accessibility_and_visual_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    client = SimpleNamespace()
+    accessibility_attempts: list[int] = []
 
     def verdict(acknowledged: bool) -> SimpleNamespace:
         values = {
@@ -1328,6 +1375,11 @@ def test_warning_acknowledgement_uses_deterministic_focus_and_visual_proof(
         "_capture_wizard_pair",
         lambda *_args, **_kwargs: (Path("warning-1.png"), Path("warning-2.png")),
     )
+    monkeypatch.setattr(
+        service,
+        "_set_warning_acknowledgement",
+        lambda _vm, _result, *, attempt: accessibility_attempts.append(attempt),
+    )
     service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: next(verdicts)  # type: ignore[method-assign]
     result = ResultBuilder("automation")
 
@@ -1338,12 +1390,7 @@ def test_warning_acknowledgement_uses_deterministic_focus_and_visual_proof(
         result,
     )
 
-    assert keys == [
-        ("down", "ctrl"),
-        ("press", "home"),
-        ("up", "ctrl"),
-        ("press", "space"),
-    ]
+    assert accessibility_attempts == [1, 2]
     assert result.steps[-1].step == "automation.warning_acknowledged"
 
 
@@ -1352,12 +1399,8 @@ def test_warning_acknowledgement_does_not_toggle_an_already_checked_box(
 ) -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
-    keys: list[tuple[str, str]] = []
-    client = SimpleNamespace(
-        keyDown=lambda key: keys.append(("down", key)),
-        keyPress=lambda key: keys.append(("press", key)),
-        keyUp=lambda key: keys.append(("up", key)),
-    )
+    client = SimpleNamespace()
+    accessibility_attempts: list[int] = []
     values = {
         "detected_screen": "warning",
         "expected_screen_visible": True,
@@ -1373,6 +1416,11 @@ def test_warning_acknowledgement_does_not_toggle_an_already_checked_box(
         "_capture_wizard_pair",
         lambda *_args, **_kwargs: (Path("warning-1.png"), Path("warning-2.png")),
     )
+    monkeypatch.setattr(
+        service,
+        "_set_warning_acknowledgement",
+        lambda _vm, _result, *, attempt: accessibility_attempts.append(attempt),
+    )
     service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
         **values, model_dump=lambda: values
     )
@@ -1385,8 +1433,56 @@ def test_warning_acknowledgement_does_not_toggle_an_already_checked_box(
         result,
     )
 
-    assert keys == []
+    assert accessibility_attempts == [1]
     assert result.steps[-1].step == "automation.warning_acknowledged"
+
+
+def test_warning_apply_uses_keyboard_and_requires_visible_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    keys: list[tuple[str, str]] = []
+    client = SimpleNamespace(
+        keyDown=lambda key: keys.append(("down", key)),
+        keyPress=lambda key: keys.append(("press", key)),
+        keyUp=lambda key: keys.append(("up", key)),
+    )
+    values = {
+        "detected_screen": "apply",
+        "expected_screen_visible": False,
+        "no_blocking_error": True,
+        "username_visible": False,
+        "password_fields_filled": False,
+        "warning_acknowledged": False,
+        "summary": "Installation started",
+        "visible_text": "Appliquer les modifications",
+    }
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_wizard_pair",
+        lambda *_args, **_kwargs: (Path("apply-1.png"), Path("apply-2.png")),
+    )
+    service.vision_llm.analyze_wizard_state = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+        **values, model_dump=lambda: values
+    )
+    result = ResultBuilder("automation")
+
+    service._start_installation_from_warning(  # noqa: SLF001
+        client,
+        vm,
+        "test",
+        result,
+    )
+
+    assert keys == [
+        ("down", "shift"),
+        ("press", "tab"),
+        ("up", "shift"),
+        ("press", "enter"),
+    ]
+    assert result.steps[-1].step == "automation.apply_started"
 
 
 def test_validation_source_defaults_to_local() -> None:

@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch signed bootloader packages used by Libertix
+
+[Path]
+PathChanged=/usr/lib/shim
+PathChanged=/usr/lib/grub/x86_64-efi-signed
+Unit=libertix-efi-sync.service
+
+[Install]
+WantedBy=multi-user.target

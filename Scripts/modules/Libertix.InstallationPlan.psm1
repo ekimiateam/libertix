@@ -13,6 +13,7 @@ $script:InstallationPlanPropertySets = [ordered]@{
     )
     distribution = @(
         "id", "name", "osReleaseId", "grubDisplayName", "grubIcon",
+        "secureBootMicrosoftAuthorities",
         "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath",
         "installerIsoSha256", "liveIsoUrl", "liveIsoSha256"
     )
@@ -31,7 +32,10 @@ $script:InstallationPlanPropertySets = [ordered]@{
         "shareWindowsFilesInLinux", "shareLinuxFilesInWindows",
         "windowsProfilesJsonBase64"
     )
-    runtime = @("lowMemoryMode", "bootStrategy", "recoveryRootWindows", "recoveryRunId")
+    runtime = @(
+        "lowMemoryMode", "bootStrategy", "secureBootEnabled", "trustedMicrosoftUefiAuthorities",
+        "recoveryRootWindows", "recoveryRunId"
+    )
     development = @(
         "enableSsh", "staticIpv4Address", "staticIpv4PrefixLength",
         "staticIpv4Gateway", "dnsServers"
@@ -87,6 +91,30 @@ function Assert-LibertixPlanProperty {
     }
 
     return $Object.$Name
+}
+
+function Assert-LibertixMicrosoftUefiAuthorities {
+    param(
+        [AllowNull()][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [switch]$AllowEmpty
+    )
+
+    if ($null -eq $Value) {
+        throw "Installation plan field $Path must be an array."
+    }
+    $values = @($Value)
+    if (-not $AllowEmpty -and $values.Count -eq 0) {
+        throw "Installation plan field $Path must contain at least one authority."
+    }
+    $normalized = @($values | ForEach-Object { [string]$_ })
+    if (@($normalized | Where-Object { $_ -notin @("2011", "2023") }).Count -gt 0) {
+        throw "Installation plan field $Path may contain only 2011 and 2023."
+    }
+    if (@($normalized | Select-Object -Unique).Count -ne $normalized.Count) {
+        throw "Installation plan field $Path must not contain duplicates."
+    }
+    return $normalized
 }
 
 function Assert-LibertixPositiveInteger {
@@ -297,6 +325,12 @@ function Assert-LibertixInstallationPlan {
     if ([string]$distribution.grubDisplayName -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$') {
         throw "Installation plan field distribution.grubDisplayName contains unsupported GRUB label characters."
     }
+    $null = Assert-LibertixMicrosoftUefiAuthorities `
+        -Value (Assert-LibertixPlanProperty `
+            -Object $distribution `
+            -Name "secureBootMicrosoftAuthorities" `
+            -Path "distribution.secureBootMicrosoftAuthorities") `
+        -Path "distribution.secureBootMicrosoftAuthorities"
     foreach ($name in @("installerIsoUrl", "liveIsoUrl")) {
         [Uri]$uri = $null
         $value = [string]$distribution.$name
@@ -550,6 +584,13 @@ function Assert-LibertixInstallationPlan {
         throw "Installation plan field runtime.lowMemoryMode must be a boolean."
     }
     $bootStrategy = [string](Assert-LibertixPlanProperty -Object $runtime -Name "bootStrategy" -Path "runtime.bootStrategy")
+    $secureBootEnabled = Assert-LibertixPlanProperty `
+        -Object $runtime `
+        -Name "secureBootEnabled" `
+        -Path "runtime.secureBootEnabled"
+    if ($secureBootEnabled -isnot [bool]) {
+        throw "Installation plan field runtime.secureBootEnabled must be a boolean."
+    }
     $allowedStrategies = if ($firmware -eq "bios") {
         @("bios-grub4dos")
     } else {
@@ -557,6 +598,19 @@ function Assert-LibertixInstallationPlan {
     }
     if ($bootStrategy -notin $allowedStrategies) {
         throw "Installation plan bootStrategy '$bootStrategy' is incompatible with firmware '$firmware'."
+    }
+    $trustedMicrosoftUefiAuthorities = @(Assert-LibertixMicrosoftUefiAuthorities `
+        -Value (Assert-LibertixPlanProperty `
+            -Object $runtime `
+            -Name "trustedMicrosoftUefiAuthorities" `
+            -Path "runtime.trustedMicrosoftUefiAuthorities") `
+        -Path "runtime.trustedMicrosoftUefiAuthorities" `
+        -AllowEmpty)
+    if ($firmware -eq "bios" -and $trustedMicrosoftUefiAuthorities.Count -ne 0) {
+        throw "A BIOS installation plan must not contain trusted Microsoft UEFI authorities."
+    }
+    if ($firmware -eq "bios" -and $secureBootEnabled) {
+        throw "A BIOS installation plan must not enable Secure Boot."
     }
 
     $recoveryRoot = Assert-LibertixPlanProperty -Object $runtime -Name "recoveryRootWindows" -Path "runtime.recoveryRootWindows"

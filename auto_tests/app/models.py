@@ -69,3 +69,7 @@ class AutomationRequest(ValidationRequest):
     monitor_iso: bool = Field(default=True)
     share_windows_files_in_linux: bool = Field(default=True)
     share_linux_files_in_windows: bool = Field(default=True)
+    simulate_fog_clone_boot_entries: bool = Field(
+        default=False,
+        description="Inject one stale UEFI Libertix entry before launch for clone regression tests",
+    )

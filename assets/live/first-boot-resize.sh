@@ -11,6 +11,9 @@ ROOT_DEV="$(findmnt -n -o SOURCE /)"
 resize2fs "$ROOT_DEV" >> "$LOG" 2>&1
 resize2fs -P "$ROOT_DEV" >> "$LOG" 2>&1
 df -hT / >> "$LOG" 2>&1
+/usr/local/lib/libertix/libertix-first-boot-verify.py >> "$LOG" 2>&1
 
 systemctl disable first-boot-resize.service >> "$LOG" 2>&1
-rm -f /etc/systemd/system/first-boot-resize.service /usr/local/bin/first-boot-resize.sh
+rm -f /etc/systemd/system/first-boot-resize.service \
+    /usr/local/bin/first-boot-resize.sh \
+    /usr/local/lib/libertix/libertix-first-boot-verify.py

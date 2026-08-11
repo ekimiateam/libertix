@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import re
@@ -215,6 +216,7 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             "osReleaseId": "linuxmint",
             "grubDisplayName": "Linux Mint 22.3 Cinnamon",
             "grubIcon": "linuxmint",
+            "secureBootMicrosoftAuthorities": ["2011"],
             "installerIsoFileName": "mint.iso",
             "installerIsoUrl": "https://example.test/mint.iso",
             "installerIsoWindowsPath": (
@@ -269,6 +271,8 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
         "runtime": {
             "lowMemoryMode": False,
             "bootStrategy": "bios-grub4dos" if is_bios else "uefi-boot-next",
+            "secureBootEnabled": not is_bios,
+            "trustedMicrosoftUefiAuthorities": [] if is_bios else ["2011"],
             "recoveryRootWindows": "C:\\ProgramData\\Libertix\\Recovery",
             "recoveryRunId": "d" * 32,
         },
@@ -322,6 +326,45 @@ def test_bios_and_uefi_use_the_same_size_policy(
     assert exported["WINDOWS_PARTITION_SIZE_BYTES"] == str(200 * GIB)
     assert exported["INSTALLER_FINAL_SIZE_BYTES"] == str(final_size_gib * GIB)
     assert exported["INSTALLER_STAGING_SIZE_BYTES"] == str(staging_size_gib * GIB)
+    assert exported["DISTRIBUTION_SECURE_BOOT_MICROSOFT_AUTHORITIES"] == "2011"
+    assert exported["TRUSTED_MICROSOFT_UEFI_AUTHORITIES"] == ("" if firmware == "bios" else "2011")
+    assert exported["SECURE_BOOT_ENABLED"] == ("false" if firmware == "bios" else "true")
+
+
+def test_plan_rejects_unknown_secure_boot_authority(plan_module: ModuleType) -> None:
+    plan = make_plan("uefi", 40)
+    plan["distribution"]["secureBootMicrosoftAuthorities"] = ["2040"]  # type: ignore[index]
+
+    with pytest.raises(
+        plan_module.PlanValidationError,
+        match="secureBootMicrosoftAuthorities",
+    ):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_bios_plan_rejects_trusted_uefi_authority(plan_module: ModuleType) -> None:
+    plan = make_plan("bios", 40)
+    plan["runtime"]["trustedMicrosoftUefiAuthorities"] = ["2011"]  # type: ignore[index]
+
+    with pytest.raises(plan_module.PlanValidationError, match="BIOS plan"):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_live_plan_export_excludes_noninteractive_windows_profiles(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 40)
+    plan["features"]["windowsProfilesJsonBase64"] = base64.b64encode(  # type: ignore[index]
+        json.dumps(["Alice", "WsiAccount", "wsiaccount", "WDAGUtilityAccount"]).encode("utf-8")
+    ).decode("ascii")
+
+    validated = plan_module.validate_plan(plan, require_installer=True)
+    exported = plan_module.shell_values(validated)
+    projected = json.loads(
+        base64.b64decode(exported["WINDOWS_PROFILES_JSON_BASE64"], validate=True).decode("utf-8")
+    )
+
+    assert projected == ["Alice"]
 
 
 @pytest.mark.parametrize(
@@ -620,6 +663,28 @@ def test_failure_and_rollback_preserve_the_completed_step_ledger(
         "windows.system-volume-shrunk",
         "windows.recovery-armed",
     ]
+
+
+def test_successful_live_state_can_begin_explicit_rollback(
+    state_module: ModuleType,
+) -> None:
+    state = {
+        "schemaVersion": 1,
+        "planId": "a" * 32,
+        "revision": 0,
+        "status": "succeeded",
+        "phase": "complete",
+        "activeStep": None,
+        "completedSteps": list(state_module.ORDERED_STEPS),
+        "compensatedSteps": [],
+        "failure": None,
+        "updatedAtUtc": "2026-07-15T12:00:00Z",
+    }
+
+    state_module.begin_rollback(state)
+
+    assert state["status"] == "rollback-running"
+    assert state["phase"] == "rollback"
 
 
 def test_live_state_rejects_out_of_order_and_incomplete_success(
@@ -964,6 +1029,7 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
         "InstallationLogDirectory": "LibertixInstallLogs",
         "BiosRecoveryDirectory": "LibertixInstallRecovery",
         "BiosRecoveryTask": "LibertixInstallRecovery",
+        "BiosRecoveryPromptTask": "LibertixInstallRecoveryPrompt",
         "LinuxReadOnlyTask": "LibertixLinuxReadOnly",
     }
 
@@ -976,6 +1042,7 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
     live_logs = (ROOT / "assets/live/libertix-copy-logs.sh").read_text(encoding="utf-8-sig")
 
     assert f'$TaskName = "{names["BiosRecoveryTask"]}"' in recovery
+    assert f'$PromptTaskName = "{names["BiosRecoveryPromptTask"]}"' in recovery
     assert f'Join-Path $SystemDrive "{names["BiosRecoveryDirectory"]}"' in recovery
     assert f'Join-Path $SystemDrive "{names["InstallationLogDirectory"]}"' in recovery
     assert f'$script:LinuxReadOnlyTaskName = "{names["LinuxReadOnlyTask"]}"' in windows_share

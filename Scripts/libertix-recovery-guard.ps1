@@ -1,4 +1,8 @@
-param()
+[CmdletBinding()]
+param(
+    [ValidateSet("Check", "Revert")]
+    [string]$Action = "Check"
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -10,6 +14,7 @@ $SystemDriveLetter = $SystemDrive.Substring(0, 1)
 $ProgramDataRoot = Join-Path $SystemDrive "ProgramData"
 $Root = Join-Path $SystemDrive "LibertixInstallRecovery"
 $TaskName = "LibertixInstallRecovery"
+$PromptTaskName = "LibertixInstallRecoveryPrompt"
 $Log = Join-Path $Root "recovery.log"
 $Pending = Join-Path $Root "pending.env"
 $ArchiveRoot = Join-Path $SystemDrive "LibertixInstallLogs"
@@ -19,10 +24,13 @@ $LiveFailedMarker = Join-Path $Root "live-failed.env"
 $InstallSuccessMarker = Join-Path $Root "install-success.env"
 $ArchiveLog = Join-Path $ArchiveRoot "windows-recovery.log"
 $BcdBackup = Join-Path $Root "bcd-backup"
+$MbrBackup = Join-Path $Root "mbr-backup\mbr-before-grub.bin"
+$MbrBackupHash = Join-Path $Root "mbr-backup\mbr-before-grub.sha256"
 $ExecutionStatePath = Join-Path $Root "installation-state.json"
 $ExecutionStateModulePath = Join-Path $Root "Libertix.InstallationState.psm1"
 $InstallationPolicyPath = Join-Path $Root "Libertix.InstallationPolicy.json"
 $TemporaryArtifactsModulePath = Join-Path $Root "Libertix.TemporaryArtifacts.psm1"
+$PostInstallVerificationModulePath = Join-Path $Root "Libertix.PostInstallVerification.psm1"
 $TemporaryBootFiles = @(
     (Join-Path $SystemDrive "grldr"),
     (Join-Path $SystemDrive "grldr.mbr"),
@@ -79,23 +87,31 @@ function Read-EnvValue {
 function Remove-RecoveryTask {
     param([switch]$Required)
 
-    $deleteOutput = & schtasks.exe /Delete /TN $TaskName /F 2>&1
+    $null = & schtasks.exe /Delete /TN $TaskName /F 2>&1
     $deleteExitCode = $LASTEXITCODE
-    if ($deleteExitCode -ne 0) {
-        $message = "Recovery task cleanup failed with rc=$deleteExitCode output=$($deleteOutput -join ' ')"
-        if ($Required) {
-            throw $message
-        }
-        Write-RecoveryLog $message
+    $null = & schtasks.exe /Query /TN $TaskName 2>&1
+    $taskStillExists = $LASTEXITCODE -eq 0
+    if (-not $taskStillExists) {
         return
     }
+    $message = "Recovery task still exists after deletion attempt (rc=$deleteExitCode)."
+    if ($Required) { throw $message }
+    Write-RecoveryLog $message
+}
 
-    if ($Required) {
-        $null = & schtasks.exe /Query /TN $TaskName 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            throw "Recovery task still exists after deletion."
-        }
+function Remove-RecoveryPromptTask {
+    param([switch]$Required)
+
+    $null = & schtasks.exe /Delete /TN $PromptTaskName /F 2>&1
+    $deleteExitCode = $LASTEXITCODE
+    $null = & schtasks.exe /Query /TN $PromptTaskName 2>&1
+    $taskStillExists = $LASTEXITCODE -eq 0
+    if (-not $taskStillExists) {
+        return
     }
+    $message = "Recovery prompt task still exists after deletion attempt (rc=$deleteExitCode)."
+    if ($Required) { throw $message }
+    Write-RecoveryLog $message
 }
 
 function Read-RecoveryExecutionState {
@@ -122,7 +138,7 @@ function Initialize-RecoveryExecutionState {
     param([Parameter(Mandatory = $true)]$State)
 
     $state = $State
-    if ([string]$state.status -in @("running", "failed")) {
+    if ([string]$state.status -in @("running", "failed", "succeeded")) {
         $null = Start-LibertixRollback -Path $ExecutionStatePath
     } elseif ([string]$state.status -ne "rollback-running") {
         throw "Recovery execution state cannot begin rollback from status '$($state.status)'."
@@ -198,6 +214,63 @@ function Restore-BcdState {
     Write-RecoveryLog "BCD state restored from the pre-install backup."
 }
 
+function Restore-BiosMbrBootCode {
+    param(
+        [Parameter(Mandatory = $true)][int]$DiskNumber,
+        [switch]$Required
+    )
+
+    if (
+        -not (Test-Path -LiteralPath $MbrBackup -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $MbrBackupHash -PathType Leaf)
+    ) {
+        if ($Required) { throw "Required pre-GRUB MBR backup is missing." }
+        Write-RecoveryLog "No pre-GRUB MBR backup exists; boot-code restore skipped."
+        return
+    }
+    [byte[]]$backup = [IO.File]::ReadAllBytes($MbrBackup)
+    if ($backup.Length -ne 512) {
+        throw "Pre-GRUB MBR backup must contain exactly 512 bytes."
+    }
+    $expectedHash = ((Get-Content -LiteralPath $MbrBackupHash -Raw).Trim() -split '\s+')[0]
+    $actualHash = (Get-FileHash -LiteralPath $MbrBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$' -or $actualHash -ne $expectedHash.ToLowerInvariant()) {
+        throw "Pre-GRUB MBR backup checksum verification failed."
+    }
+
+    $devicePath = "\\.\PhysicalDrive$DiskNumber"
+    $stream = New-Object IO.FileStream(
+        $devicePath,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::ReadWrite
+    )
+    try {
+        [byte[]]$current = New-Object byte[] 512
+        if ($stream.Read($current, 0, $current.Length) -ne 512) {
+            throw "Cannot read the current BIOS MBR."
+        }
+        $currentBootCode = [Convert]::ToBase64String($current, 0, 440)
+        $backupBootCode = [Convert]::ToBase64String($backup, 0, 440)
+        if ($currentBootCode -ne $backupBootCode) {
+            $stream.Position = 0
+            $stream.Write($backup, 0, 440)
+            $stream.Flush($true)
+        }
+        $stream.Position = 0
+        [byte[]]$verified = New-Object byte[] 512
+        if ($stream.Read($verified, 0, $verified.Length) -ne 512) {
+            throw "Cannot verify the restored BIOS MBR."
+        }
+        if ([Convert]::ToBase64String($verified, 0, 440) -ne $backupBootCode) {
+            throw "BIOS MBR boot-code restoration could not be verified."
+        }
+    } finally {
+        $stream.Dispose()
+    }
+    Write-RecoveryLog "BIOS MBR boot code restored from the durable pre-GRUB backup."
+}
+
 function Remove-TemporaryBootPayload {
     foreach ($temporaryBootFile in $TemporaryBootFiles) {
         if (Test-Path -LiteralPath $temporaryBootFile -PathType Leaf) {
@@ -221,11 +294,70 @@ function Invoke-WindowsShareFinalize {
     Write-RecoveryLog "Windows read-only Linux sharing finalized."
 }
 
+function Invoke-VerifiedInstallationSuccess {
+    Write-RecoveryLog "Successful install marker found; starting cross-runtime verification."
+    Restore-BcdState -Required
+    Remove-TemporaryBootPayload
+    Remove-TransactionArtifacts
+    Invoke-WindowsShareFinalize
+    try {
+        if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
+            throw "Post-install verification module is missing from the recovery payload."
+        }
+        Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
+        $writeLog = { param($Message) Write-RecoveryLog -Message $Message }
+        $null = Invoke-LibertixPostInstallVerification `
+            -RecoveryRoot $Root `
+            -LogPath $Log `
+            -WriteLog $writeLog
+    } finally {
+        $verificationResultPath = Join-Path $Root "post-install-verification.json"
+        $verificationStatus = if (Test-Path -LiteralPath $verificationResultPath -PathType Leaf) {
+            try {
+                [string](Get-Content `
+                    -LiteralPath $verificationResultPath `
+                    -Raw `
+                    -Encoding UTF8 `
+                    -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).status
+            } catch { "unreadable" }
+        } else { "missing" }
+        if ($verificationStatus -in @("succeeded", "failed")) {
+            # The prompt task remains until the interactive result window is
+            # acknowledged. Only a terminal durable result retires the startup task.
+            Remove-RecoveryTask -Required
+        } else {
+            Write-RecoveryLog (
+                "Post-install verification was interrupted with status=" +
+                "$verificationStatus; startup recovery remains armed."
+            )
+        }
+        Save-RecoveryLog
+    }
+}
+
 function Remove-PendingWindowsSharePayload {
     if (Test-Path -LiteralPath (Join-Path $WindowsShareRoot "pending.marker") -PathType Leaf) {
         Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction SilentlyContinue
         Write-RecoveryLog "Removed pending Windows sharing payload."
     }
+}
+
+function Remove-WindowsShareAfterRollback {
+    if (-not (Test-Path -LiteralPath $WindowsShareRoot -PathType Container)) { return }
+    $shareLog = Join-Path $WindowsShareRoot "windows-share.log"
+    if (Test-Path -LiteralPath $shareLog -PathType Leaf) {
+        Copy-Item `
+            -LiteralPath $shareLog `
+            -Destination (Join-Path $Root "windows-share.log") `
+            -Force `
+            -ErrorAction Stop
+    }
+    Unregister-ScheduledTask `
+        -TaskName "LibertixLinuxReadOnly" `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    Write-RecoveryLog "Removed Windows read-only Linux sharing after rollback."
 }
 
 function Wait-SystemDriveResizeCapacity {
@@ -339,8 +471,14 @@ function Remove-EmptyTransactionExtendedContainer {
 
 try {
     Write-RecoveryLog "Recovery guard started."
+    if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
+        throw "Post-install verification module is missing from the recovery payload."
+    }
+    Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
+    Set-LibertixShutdownVerificationPriority
     $script:TrackRecoveryExecutionState = $false
     $recoveryExecutionState = Read-RecoveryExecutionState
+    $rollbackFromSucceeded = [string]$recoveryExecutionState.status -eq "succeeded"
 
     $expectedRecoveryRunId = Read-EnvValue -Path $Pending -Name "RECOVERY_RUN_ID"
     $successRecoveryRunId = Read-EnvValue `
@@ -350,19 +488,13 @@ try {
         -Path $InstallSuccessMarker `
         -Name "LIBERTIX_BIOS_RECOVERY_STATE"
     if (
+        $Action -eq "Check" -and
         -not [string]::IsNullOrWhiteSpace($expectedRecoveryRunId) -and
         $successRecoveryRunId -eq $expectedRecoveryRunId -and
         $successRecoveryState -eq "install-success" -and
         [string]$recoveryExecutionState.status -eq "succeeded"
     ) {
-        Write-RecoveryLog "Dedicated successful install marker found; no disk rollback needed."
-        Restore-BcdState -Required
-        Remove-TemporaryBootPayload
-        Remove-TransactionArtifacts
-        Invoke-WindowsShareFinalize
-        Remove-RecoveryTask
-        Save-RecoveryLog
-        Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
+        Invoke-VerifiedInstallationSuccess
         exit 0
     }
 
@@ -386,18 +518,12 @@ try {
         ((Get-Item -LiteralPath $Result).LastWriteTimeUtc -gt (Get-Item -LiteralPath $Pending).LastWriteTimeUtc)
     )
     if (
+        $Action -eq "Check" -and
         $success -eq "true" -and
         $resultIsFresh -and
         [string]$recoveryExecutionState.status -eq "succeeded"
     ) {
-        Write-RecoveryLog "Successful install marker found; no disk rollback needed."
-        Restore-BcdState -Required
-        Remove-TemporaryBootPayload
-        Remove-TransactionArtifacts
-        Invoke-WindowsShareFinalize
-        Remove-RecoveryTask
-        Save-RecoveryLog
-        Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
+        Invoke-VerifiedInstallationSuccess
         exit 0
     }
 
@@ -428,7 +554,7 @@ try {
         $liveFailedState -eq "live-failed" -and
         [string]$recoveryExecutionState.status -eq "rolled-back"
     )
-    if ($liveRollbackCompleted) {
+    if ($Action -eq "Check" -and $liveRollbackCompleted) {
         Write-RecoveryLog (
             "The live installer reported failure after a verified rollback; " +
             "restoring Windows settings and retiring the recovery task."
@@ -439,11 +565,11 @@ try {
         Remove-TemporaryBootPayload
         Remove-TransactionArtifacts
         Remove-RecoveryTask -Required
+        Remove-RecoveryPromptTask -Required
         Save-RecoveryLog
-        Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
         exit 0
     }
-    if ($liveStartedWithoutFailure) {
+    if ($Action -eq "Check" -and $liveStartedWithoutFailure) {
         Write-RecoveryLog (
             "The live installer started but produced neither a success nor a failure marker. " +
             "Refusing automatic disk rollback without positive failure evidence."
@@ -627,7 +753,12 @@ try {
     }
 
     Restore-BcdState
-    Remove-PendingWindowsSharePayload
+    Restore-BiosMbrBootCode -DiskNumber $diskNumber -Required:$rollbackFromSucceeded
+    if ($rollbackFromSucceeded) {
+        Remove-WindowsShareAfterRollback
+    } else {
+        Remove-PendingWindowsSharePayload
+    }
 
     # A rollback removes the installation that required Fast Startup to be
     # disabled, so restore the captured Windows setting before retiring guard.
@@ -648,12 +779,12 @@ try {
 
     Write-RecoveryLog "Recovery completed and verified."
     Remove-RecoveryTask -Required
+    Remove-RecoveryPromptTask -Required
     Complete-RecoveryCompensation -Step "windows.recovery-armed"
     if ($script:TrackRecoveryExecutionState) {
         $null = Complete-LibertixRollback -Path $ExecutionStatePath
     }
     Save-RecoveryLog
-    Remove-Item -Path $Root -Recurse -Force -ErrorAction SilentlyContinue
     exit 0
 } catch {
     Write-RecoveryLog "Recovery failed: $($_.Exception.Message)"

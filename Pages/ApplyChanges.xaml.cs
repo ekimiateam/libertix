@@ -129,6 +129,8 @@ namespace Libertix.Pages
 
                 FirmwareType firmware = DetectFirmwareTypeOrThrow();
                 _activeFirmware = firmware;
+                if (firmware == FirmwareType.Uefi)
+                    AssertSelectedDistroSecureBootCompatibility();
                 ThrowIfCancellationRequested();
                 // The wizard preflight prevents an invalid topology from being selected.
                 // Re-run it immediately before mutation because disk layout and BitLocker
@@ -151,6 +153,7 @@ namespace Libertix.Pages
                 else if (firmware == FirmwareType.Bios)
                 {
                     Log("BIOS firmware detected. Using existing BIOS workflow.");
+                    ArchivePreviousBiosRecoverySession();
                     string biosRecoveryRunId = Guid.NewGuid().ToString("N");
                     InitializeInstallationContext(
                         firmware,

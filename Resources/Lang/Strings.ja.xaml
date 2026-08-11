@@ -38,6 +38,15 @@
     <system:String x:Key="ResizeDiskIsoSize">インストーラー ISO: {0:N1} GB</system:String>
     <system:String x:Key="ResizeDiskLinuxMinimum">Linux の最小領域: {0:N1} GB</system:String>
     <system:String x:Key="ResizeDiskAdditionalSpace">追加で必要な領域: {0:N1} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeInside">空き {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsUsedLegend">Windows 使用: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeLegend">Windows 空き: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskSizeValue">{0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskLinuxLegend">Linux: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskWindowsTotalLegend">Windows: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskUsedDetail">使用済み: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskFreeDetail">空き: {0:N0} GB</system:String>
+    <system:String x:Key="ResizeDiskSizeUnit">GB</system:String>
     <system:String x:Key="ErrorTitle">エラー</system:String>
     <system:String x:Key="DistroLoadError">ディストリビューションのリストを読み込めませんでした。インターネット接続を確認して、もう一度お試しください。</system:String>
 
@@ -83,7 +92,7 @@
 
     <system:String x:Key="SharingTitle">ファイル共有</system:String>
     <system:String x:Key="SharingDescription">各システムからアクセスできるファイルを選択してください。</system:String>
-    <system:String x:Key="SharingWindowsToLinuxTitle">Windows のファイルを Mint に表示</system:String>
+    <system:String x:Key="SharingWindowsToLinuxTitle">Windows のファイルを Linux に表示</system:String>
     <system:String x:Key="SharingWindowsToLinuxDescription">各 Windows プロファイルはファイルマネージャーに User_名前として表示されます。</system:String>
     <system:String x:Key="SharingLinuxToWindowsTitle">Linux のファイルを Windows に表示（読み取り専用）</system:String>
     <system:String x:Key="SharingLinuxToWindowsDescription">Windows は ext4 パーティションを変更せずに Linux のファイルを参照できます。</system:String>
@@ -145,6 +154,7 @@
     <system:String x:Key="WindowsShareShortcutDescription">Linux ファイル（読み取り専用）</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">UEFI インストールを準備しています...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Secure Boot を確認しています...</system:String>
+    <system:String x:Key="ApplyChangesSecureBootDistributionUnsupported">Secure Boot は有効ですが、{0} にはこのファームウェアと互換性のあるインストール済みシステム用ブートローダーがありません。ファームウェアが信頼する Microsoft UEFI CA: {1}。選択したディストリビューションの対応 CA: {2}。ディスクは変更されていません。</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Windows {0} の暗号化解除を初期化しています...</system:String>
     <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} の暗号化を解除しました</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Windows {0} の暗号化を解除しています... {1}%</system:String>

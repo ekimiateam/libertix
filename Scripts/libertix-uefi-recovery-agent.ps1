@@ -195,12 +195,8 @@ function Test-LinuxPartitionPresent {
     return $installerPartitions.Count -eq 1
 }
 
-function Remove-RecoveryArtifacts {
-    param(
-        [Parameter(Mandatory = $true)]$State,
-        [switch]$DeferRootRemoval,
-        [ValidateRange(0, 2147483647)][int]$WaitForProcessId = 0
-    )
+function Remove-RecoveryTasks {
+    param([Parameter(Mandatory = $true)]$State)
 
     $taskNames = @([string]$State.TaskName, [string]$State.PromptTaskName) |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -210,6 +206,21 @@ function Remove-RecoveryArtifacts {
             throw "Recovery task still exists after removal: $taskName"
         }
     }
+}
+
+function Remove-StartupRecoveryTask {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $taskName = [string]$State.TaskName
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        throw "Recovery startup task still exists after removal: $taskName"
+    }
+}
+
+function Remove-TemporaryRecoveryArtifacts {
+    param([Parameter(Mandatory = $true)]$State)
+
     $temporaryArtifactsModule = Join-Path `
         $State.PayloadRoot `
         "Scripts\modules\Libertix.TemporaryArtifacts.psm1"
@@ -218,54 +229,71 @@ function Remove-RecoveryArtifacts {
         -SystemDrive $SystemDrive `
         -PlanId ([string]$State.PlanId)
     Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
-    $root = [IO.Path]::GetFullPath([string]$State.RecoveryRoot)
-    $sessionsRoot = Split-Path -Parent $root
-    if ($DeferRootRemoval) {
-        $escapedRoot = $root.Replace("'", "''")
-        $escapedSessionsRoot = $sessionsRoot.Replace("'", "''")
-        $escapedProductRoot = (Split-Path -Parent $sessionsRoot).Replace("'", "''")
-        $waitCommand = if ($WaitForProcessId -gt 0) {
-            "try { Wait-Process -Id $WaitForProcessId -Timeout 3600 -ErrorAction SilentlyContinue } catch {}"
+}
+
+function Save-UefiTransactionArchive {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $source = Join-Path $SystemDrive "LibertixTools\uefi-transaction.json"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "UEFI transaction state is missing before permanent archival."
+    }
+    $transaction = Get-Content -LiteralPath $source -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
+        throw "UEFI transaction state belongs to another recovery session."
+    }
+    $destination = Join-Path $State.RecoveryRoot "uefi-transaction.json"
+    $temporary = Join-Path $State.RecoveryRoot ".uefi-transaction.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        Copy-Item -LiteralPath $source -Destination $temporary -Force -ErrorAction Stop
+        if ([IO.File]::Exists($destination)) {
+            [IO.File]::Replace($temporary, $destination, $null)
         } else {
-            "Start-Sleep -Seconds 2"
+            [IO.File]::Move($temporary, $destination)
         }
-        $cleanupCommand = @"
-$waitCommand
-Remove-Item -LiteralPath '$escapedRoot' -Recurse -Force -ErrorAction SilentlyContinue
-if ((Test-Path -LiteralPath '$escapedSessionsRoot' -PathType Container) -and `
-    @((Get-ChildItem -LiteralPath '$escapedSessionsRoot' -Force -ErrorAction SilentlyContinue)).Count -eq 0) {
-    Remove-Item -LiteralPath '$escapedSessionsRoot' -Force -ErrorAction SilentlyContinue
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+    Write-AgentLog "UEFI transaction state archived permanently."
 }
-if ((Test-Path -LiteralPath '$escapedProductRoot' -PathType Container) -and `
-    @((Get-ChildItem -LiteralPath '$escapedProductRoot' -Force -ErrorAction SilentlyContinue)).Count -eq 0) {
-    Remove-Item -LiteralPath '$escapedProductRoot' -Force -ErrorAction SilentlyContinue
-}
-"@
-        $encodedCommand = [Convert]::ToBase64String(
-            [Text.Encoding]::Unicode.GetBytes($cleanupCommand)
-        )
-        Start-Process `
-            -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-            -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $encodedCommand" `
-            -WindowStyle Hidden
+
+function Restore-UefiTransactionArchive {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $destination = Join-Path $SystemDrive "LibertixTools\uefi-transaction.json"
+    if (Test-Path -LiteralPath $destination -PathType Leaf) {
+        $activeTransaction = Get-Content `
+            -LiteralPath $destination `
+            -Raw `
+            -Encoding UTF8 `
+            -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if ([string]$activeTransaction.RecoveryRunId -ne [string]$State.RunId) {
+            throw "Active UEFI transaction state belongs to another recovery session."
+        }
         return
     }
-    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
-    if (Test-Path -LiteralPath $root) {
-        throw "Recovery root still exists after removal: $root"
+    $source = Join-Path $State.RecoveryRoot "uefi-transaction.json"
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+        throw "Permanent UEFI transaction archive is missing."
     }
-    if (
-        (Test-Path -LiteralPath $sessionsRoot -PathType Container) -and
-        @((Get-ChildItem -LiteralPath $sessionsRoot -Force -ErrorAction Stop)).Count -eq 0
-    ) {
-        Remove-Item -LiteralPath $sessionsRoot -Force -ErrorAction Stop
+    $transaction = Get-Content -LiteralPath $source -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
+        throw "Permanent UEFI transaction archive belongs to another recovery session."
     }
-    $productRoot = Split-Path -Parent $sessionsRoot
-    if (
-        (Test-Path -LiteralPath $productRoot -PathType Container) -and
-        @((Get-ChildItem -LiteralPath $productRoot -Force -ErrorAction Stop)).Count -eq 0
-    ) {
-        Remove-Item -LiteralPath $productRoot -Force -ErrorAction Stop
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
+    $temporary = "$destination.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        Copy-Item -LiteralPath $source -Destination $temporary -Force -ErrorAction Stop
+        if ([IO.File]::Exists($destination)) {
+            [IO.File]::Replace($temporary, $destination, $null)
+        } else {
+            [IO.File]::Move($temporary, $destination)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
     }
 }
 
@@ -306,6 +334,26 @@ function Remove-PendingWindowsSharePayload {
     }
 }
 
+function Remove-WindowsShareAfterRollback {
+    param([Parameter(Mandatory = $true)]$State)
+
+    if (-not (Test-Path -LiteralPath $WindowsShareRoot -PathType Container)) { return }
+    $shareLog = Join-Path $WindowsShareRoot "windows-share.log"
+    if (Test-Path -LiteralPath $shareLog -PathType Leaf) {
+        Copy-Item `
+            -LiteralPath $shareLog `
+            -Destination (Join-Path $State.RecoveryRoot "windows-share.log") `
+            -Force `
+            -ErrorAction Stop
+    }
+    Unregister-ScheduledTask `
+        -TaskName "LibertixLinuxReadOnly" `
+        -Confirm:$false `
+        -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    Write-AgentLog "Removed Windows read-only Linux sharing after rollback."
+}
+
 function Start-FallbackUi {
     param([Parameter(Mandatory = $true)]$State)
 
@@ -323,15 +371,118 @@ function Start-FallbackUi {
     )
 }
 
+function Start-PostInstallResultUi {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $resultScript = Join-Path $State.PayloadRoot "Scripts\libertix-post-install-result.ps1"
+    $agentPath = Join-Path $State.PayloadRoot "Scripts\libertix-uefi-recovery-agent.ps1"
+    if (-not (Test-Path -LiteralPath $resultScript -PathType Leaf)) {
+        throw "Post-install result UI is missing from the recovery payload."
+    }
+    & $resultScript `
+        -StatePath (Join-Path $State.RecoveryRoot "post-install-verification.json") `
+        -RecoveryScriptPath $agentPath `
+        -Firmware uefi `
+        -PromptTaskName ([string]$State.PromptTaskName)
+}
+
+function Invoke-VerifiedInstallationSuccess {
+    param([Parameter(Mandatory = $true)]$State)
+
+    if (-not (Test-LinuxPartitionPresent -State $State)) {
+        throw "Live success marker exists but the expected Linux partition is absent."
+    }
+    Save-UefiTransactionArchive -State $State
+    Invoke-WindowsShareFinalize
+    Remove-TemporaryRecoveryArtifacts -State $State
+    $modulePath = Join-Path `
+        $State.PayloadRoot `
+        "Scripts\modules\Libertix.PostInstallVerification.psm1"
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        throw "Post-install verification module is missing from the recovery payload."
+    }
+    Import-Module -Name $modulePath -Force -ErrorAction Stop
+    $writeLog = { param($Message) Write-AgentLog -Message $Message }
+    try {
+        $null = Invoke-LibertixPostInstallVerification `
+            -RecoveryRoot ([string]$State.RecoveryRoot) `
+            -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
+            -WriteLog $writeLog
+        $State.Phase = "Verified"
+        Save-State -State $State
+    } catch {
+        $State.Phase = "VerificationFailed"
+        Save-State -State $State
+        throw
+    } finally {
+        $verificationResultPath = Join-Path $State.RecoveryRoot "post-install-verification.json"
+        $verificationStatus = if (Test-Path -LiteralPath $verificationResultPath -PathType Leaf) {
+            try {
+                [string](Get-Content `
+                    -LiteralPath $verificationResultPath `
+                    -Raw `
+                    -Encoding UTF8 `
+                    -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).status
+            } catch { "unreadable" }
+        } else { "missing" }
+        if ($verificationStatus -in @("succeeded", "failed")) {
+            Remove-StartupRecoveryTask -State $State
+        } else {
+            Write-AgentLog (
+                "Post-install verification was interrupted with status=" +
+                "$verificationStatus; startup recovery remains armed."
+            )
+        }
+        Save-RecoveryLogs -State $State
+    }
+}
+
 try {
     $state = Get-Content -LiteralPath $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Assert-RecoveryState -State $state
     Test-RecoveryPayload -State $state
+    $postInstallModulePath = Join-Path `
+        $state.PayloadRoot `
+        "Scripts\modules\Libertix.PostInstallVerification.psm1"
+    if (-not (Test-Path -LiteralPath $postInstallModulePath -PathType Leaf)) {
+        throw "Post-install verification module is missing from the recovery payload."
+    }
+    Import-Module -Name $postInstallModulePath -Force -ErrorAction Stop
+    Set-LibertixShutdownVerificationPriority
     $executionState = Read-ValidatedExecutionState -RecoveryState $state
     Write-AgentLog "Recovery agent started. action=$Action phase=$($state.Phase)"
 
+    $liveStarted = Join-Path $state.RecoveryRoot "live-started.env"
+    $installSuccess = Join-Path $state.RecoveryRoot "install-success.env"
+    $liveFailed = Join-Path $state.RecoveryRoot "live-failed.env"
+
+    if ($Action -eq "Prompt") {
+        $postInstallResult = Join-Path $state.RecoveryRoot "post-install-verification.json"
+        $successRunIdForPrompt = Read-EnvValue `
+            -Path $installSuccess `
+            -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
+        if (
+            (Test-Path -LiteralPath $postInstallResult -PathType Leaf) -or
+            $successRunIdForPrompt -eq [string]$state.RunId
+        ) {
+            Start-PostInstallResultUi -State $state
+            exit 0
+        }
+        $startedRunIdForPrompt = Read-EnvValue `
+            -Path $liveStarted `
+            -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
+        if ($startedRunIdForPrompt -eq [string]$state.RunId) {
+            Write-AgentLog "The live installer ran; no firmware fallback prompt is applicable."
+            exit 0
+        }
+        Start-FallbackUi -State $state
+        exit 0
+    }
+
     if ($Action -eq "Cancel") {
+        $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded"
         if ([string]$executionState.status -ne "rolled-back") {
+            Restore-UefiTransactionArchive -State $state
             $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
                 -Revert `
@@ -343,18 +494,17 @@ try {
         } else {
             Write-AgentLog "UEFI transaction was already rolled back; cleanup is continuing."
         }
-        Remove-PendingWindowsSharePayload
+        if ($rollbackFromSucceeded) {
+            Remove-WindowsShareAfterRollback -State $state
+        } else {
+            Remove-PendingWindowsSharePayload
+        }
         Save-RecoveryLogs -State $state
-        Remove-RecoveryArtifacts `
-            -State $state `
-            -DeferRootRemoval `
-            -WaitForProcessId $WaitForProcessId
+        Remove-TemporaryRecoveryArtifacts -State $state
+        Remove-RecoveryTasks -State $state
         exit 0
     }
 
-    $liveStarted = Join-Path $state.RecoveryRoot "live-started.env"
-    $installSuccess = Join-Path $state.RecoveryRoot "install-success.env"
-    $liveFailed = Join-Path $state.RecoveryRoot "live-failed.env"
     $successRunId = Read-EnvValue -Path $installSuccess -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
     $successState = Read-EnvValue -Path $installSuccess -Name "LIBERTIX_UEFI_RECOVERY_STATE"
 
@@ -363,15 +513,8 @@ try {
         $successState -eq "install-success" -and
         [string]$executionState.status -eq "succeeded"
     ) {
-        if (-not (Test-LinuxPartitionPresent -State $state)) {
-            throw "Live success marker exists but the expected Linux partition is absent."
-        }
-        $state.Phase = "Completed"
-        Save-State -State $state
-        Write-AgentLog "Live success and Linux partition verified; removing temporary recovery payload."
-        Invoke-WindowsShareFinalize
-        Save-RecoveryLogs -State $state
-        Remove-RecoveryArtifacts -State $state
+        Write-AgentLog "Live success found; starting cross-runtime post-install verification."
+        Invoke-VerifiedInstallationSuccess -State $state
         exit 0
     }
 
@@ -392,7 +535,8 @@ try {
         Save-State -State $state
         Write-AgentLog "The live installer failed; Windows settings were restored and logs were archived."
         Save-RecoveryLogs -State $state
-        Remove-RecoveryArtifacts -State $state
+        Remove-TemporaryRecoveryArtifacts -State $state
+        Remove-RecoveryTasks -State $state
         exit 2
     }
 
@@ -406,11 +550,6 @@ try {
 
     if ([string]$state.Phase -eq "FallbackPrompted" -or [string]$state.Phase -eq "FallbackRunning" -or [string]$state.Phase -eq "AwaitingFallbackReboot") {
         Write-AgentLog "Fallback was already offered or is running; no duplicate prompt is started."
-        exit 0
-    }
-
-    if ($Action -eq "Prompt") {
-        Start-FallbackUi -State $state
         exit 0
     }
 

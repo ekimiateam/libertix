@@ -10,6 +10,7 @@ namespace Libertix.Installation
         public const string InstallationLogDirectory = "LibertixInstallLogs";
         public const string BiosRecoveryDirectory = "LibertixInstallRecovery";
         public const string BiosRecoveryTask = "LibertixInstallRecovery";
+        public const string BiosRecoveryPromptTask = "LibertixInstallRecoveryPrompt";
         public const string LinuxReadOnlyTask = "LibertixLinuxReadOnly";
     }
 }

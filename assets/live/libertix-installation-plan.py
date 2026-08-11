@@ -20,6 +20,18 @@ from libertix_json_schema import validate_json_schema
 
 GIB = 1024**3
 INSTALLATION_POLICY = load_installation_policy()
+NON_INTERACTIVE_WINDOWS_PROFILES = frozenset(
+    name.casefold()
+    for name in (
+        "All Users",
+        "Default",
+        "Default User",
+        "defaultuser0",
+        "Public",
+        "WDAGUtilityAccount",
+        "WsiAccount",
+    )
+)
 HEX_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 USERNAME_PATTERN = re.compile(r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$")
@@ -30,6 +42,24 @@ SAFE_GRUB_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$")
 
 class PlanValidationError(ValueError):
     """Raised when a plan cannot safely drive an installation."""
+
+
+def project_windows_profiles(encoded_profiles: str) -> str:
+    try:
+        decoded = base64.b64decode(encoded_profiles, validate=True).decode("utf-8")
+        profiles = json.loads(decoded)
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+        raise PlanValidationError("windowsProfilesJsonBase64 must be valid Base64 JSON") from error
+    if not isinstance(profiles, list) or not all(isinstance(item, str) for item in profiles):
+        raise PlanValidationError("windowsProfilesJsonBase64 must contain a string array")
+    projected = [
+        profile
+        for profile in profiles
+        if profile.casefold() not in NON_INTERACTIVE_WINDOWS_PROFILES
+    ]
+    return base64.b64encode(
+        json.dumps(projected, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
 
 
 def require_mapping(value: Any, path: str) -> dict[str, Any]:
@@ -55,6 +85,18 @@ def require_text(value: Any, path: str) -> str:
 def require_positive_integer(value: Any, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise PlanValidationError(f"{path} must be a positive integer")
+    return value
+
+
+def require_microsoft_uefi_authorities(value: Any, path: str, *, allow_empty: bool) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise PlanValidationError(f"{path} must be a string array")
+    if not allow_empty and not value:
+        raise PlanValidationError(f"{path} must contain at least one authority")
+    if any(item not in {"2011", "2023"} for item in value):
+        raise PlanValidationError(f"{path} may contain only 2011 and 2023")
+    if len(value) != len(set(value)):
+        raise PlanValidationError(f"{path} must not contain duplicates")
     return value
 
 
@@ -116,6 +158,11 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError(
             "distribution.grubDisplayName contains unsupported GRUB label characters"
         )
+    require_microsoft_uefi_authorities(
+        distribution.get("secureBootMicrosoftAuthorities"),
+        "distribution.secureBootMicrosoftAuthorities",
+        allow_empty=False,
+    )
     if "/" in distribution["installerIsoFileName"] or "\\" in distribution["installerIsoFileName"]:
         raise PlanValidationError("distribution.installerIsoFileName must not contain a path")
     if not re.match(r"^[A-Za-z]:[\\/]", distribution["installerIsoWindowsPath"]):
@@ -281,12 +328,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         features.get("windowsProfilesJsonBase64"),
         "features.windowsProfilesJsonBase64",
     )
-    try:
-        decoded_profiles = base64.b64decode(profiles, validate=True)
-    except ValueError as error:
-        raise PlanValidationError("windowsProfilesJsonBase64 must be valid Base64") from error
-    if not decoded_profiles:
-        raise PlanValidationError("windowsProfilesJsonBase64 must not decode to an empty value")
+    project_windows_profiles(profiles)
 
     runtime = require_mapping(root.get("runtime"), "runtime")
     if not isinstance(runtime.get("lowMemoryMode"), bool):
@@ -297,6 +339,17 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     }
     if runtime.get("bootStrategy") not in supported_strategies[firmware]:
         raise PlanValidationError("runtime.bootStrategy is incompatible with firmware")
+    if not isinstance(runtime.get("secureBootEnabled"), bool):
+        raise PlanValidationError("runtime.secureBootEnabled must be a boolean")
+    trusted_authorities = require_microsoft_uefi_authorities(
+        runtime.get("trustedMicrosoftUefiAuthorities"),
+        "runtime.trustedMicrosoftUefiAuthorities",
+        allow_empty=True,
+    )
+    if firmware == "bios" and trusted_authorities:
+        raise PlanValidationError("a BIOS plan must not contain trusted Microsoft UEFI authorities")
+    if firmware == "bios" and runtime["secureBootEnabled"]:
+        raise PlanValidationError("a BIOS plan must not enable Secure Boot")
     recovery_root = require_property(runtime, "recoveryRootWindows", "runtime")
     recovery_id = require_property(runtime, "recoveryRunId", "runtime")
     if (recovery_root is None) != (recovery_id is None):
@@ -449,6 +502,9 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "DISTRIBUTION_OS_RELEASE_ID": distribution["osReleaseId"],
         "DISTRIBUTION_GRUB_DISPLAY_NAME": distribution["grubDisplayName"],
         "DISTRIBUTION_GRUB_ICON": distribution["grubIcon"],
+        "DISTRIBUTION_SECURE_BOOT_MICROSOFT_AUTHORITIES": ";".join(
+            distribution["secureBootMicrosoftAuthorities"]
+        ),
         "LANGUAGE_CODE": locale["languageCode"],
         "SYSTEM_LANG": locale["systemLanguage"],
         "KEYBOARD_LAYOUT": locale["keyboardLayout"],
@@ -484,11 +540,15 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "RECOVERY_ROOT_WINDOWS": runtime["recoveryRootWindows"] or "",
         "RECOVERY_RUN_ID": runtime["recoveryRunId"] or "",
         "LOW_MEMORY_MODE": str(runtime["lowMemoryMode"]).lower(),
+        "SECURE_BOOT_ENABLED": str(runtime["secureBootEnabled"]).lower(),
+        "TRUSTED_MICROSOFT_UEFI_AUTHORITIES": ";".join(runtime["trustedMicrosoftUefiAuthorities"]),
         "LIVE_MINIMUM_MEMORY_MIB": str(INSTALLATION_POLICY.memory.live_minimum_mib),
         "INSTALLER_ALIGNMENT_BYTES": str(INSTALLATION_POLICY.storage.partition_alignment_bytes),
         "SHARE_WINDOWS_FILES_IN_LINUX": str(features["shareWindowsFilesInLinux"]).lower(),
         "SHARE_LINUX_FILES_IN_WINDOWS": str(features["shareLinuxFilesInWindows"]).lower(),
-        "WINDOWS_PROFILES_JSON_BASE64": features["windowsProfilesJsonBase64"],
+        "WINDOWS_PROFILES_JSON_BASE64": project_windows_profiles(
+            features["windowsProfilesJsonBase64"]
+        ),
         "DEVELOPMENT_SSH_ENABLED": str(development is not None).lower(),
         "DEVELOPMENT_STATIC_IPV4_ADDRESS": (
             development["staticIpv4Address"] if development else ""

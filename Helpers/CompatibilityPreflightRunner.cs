@@ -23,9 +23,19 @@ namespace Libertix.Helpers
     public static class CompatibilityPreflightRunner
     {
         public static async Task<CompatibilityInfo> RunAsync(
+            string connectivityUrl,
             Action<string> onOutput,
             bool skipNvramWriteProbe = false)
         {
+            if (!Uri.TryCreate(connectivityUrl, UriKind.Absolute, out Uri connectivityUri) ||
+                (connectivityUri.Scheme != Uri.UriSchemeHttp &&
+                 connectivityUri.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new ArgumentException(
+                    "The compatibility connectivity URL must be an absolute HTTP(S) URL.",
+                    nameof(connectivityUrl));
+            }
+
             string scriptPath = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
                 "Scripts",
@@ -44,6 +54,7 @@ namespace Libertix.Helpers
                 CompatibilityInfo result = await Task.Run(() => RunProcess(
                     scriptPath,
                     languageCode,
+                    connectivityUri.AbsoluteUri,
                     skipNvramWriteProbe,
                     onOutput));
                 ApplicationLogger.Write("COMPATIBILITY: preflight completed successfully.");
@@ -59,6 +70,7 @@ namespace Libertix.Helpers
         private static CompatibilityInfo RunProcess(
             string scriptPath,
             string languageCode,
+            string connectivityUrl,
             bool skipNvramWriteProbe,
             Action<string> onOutput)
         {
@@ -68,7 +80,8 @@ namespace Libertix.Helpers
 
             string arguments = "-NoProfile -ExecutionPolicy Bypass -File " +
                 WindowsProcessRunner.QuoteArgument(scriptPath) + " -LanguageCode " +
-                WindowsProcessRunner.QuoteArgument(languageCode);
+                WindowsProcessRunner.QuoteArgument(languageCode) + " -ConnectivityUrl " +
+                WindowsProcessRunner.QuoteArgument(connectivityUrl);
             if (skipNvramWriteProbe)
                 arguments += " -SkipNvramWriteProbe";
 
@@ -176,6 +189,8 @@ namespace Libertix.Helpers
                     BitLockerSafe = values.GetBoolean("bitLockerSafe"),
                     BitLockerState = values.GetString("bitLockerState"),
                     SecureBootEnabled = values.GetBoolean("secureBootEnabled"),
+                    TrustedMicrosoftUefiAuthorities =
+                        values.GetStringArray("trustedMicrosoftUefiAuthorities"),
                     NvramProbePassed = values.GetBoolean("nvramProbePassed"),
                     NvramProbeSkipped = values.GetBoolean("nvramProbeSkipped"),
                     Warnings = values.GetStringArray("warnings")

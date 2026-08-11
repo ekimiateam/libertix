@@ -258,6 +258,21 @@ function New-Aria2DownloadArguments {
     )
 }
 
+function Get-Aria2DownloadPercent {
+    param([AllowEmptyString()][string]$Line)
+
+    $match = [regex]::Match($Line, '\((?<percent>[0-9]{1,3})%\)')
+    if (-not $match.Success) {
+        return $null
+    }
+
+    $percent = [int]$match.Groups["percent"].Value
+    if ($percent -lt 0 -or $percent -gt 100) {
+        return $null
+    }
+    return $percent
+}
+
 function Start-Aria2Download {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
@@ -304,12 +319,23 @@ function Start-Aria2Download {
     $nativeArguments = ($aria2Arguments | ForEach-Object {
         ConvertTo-LibertixNativeArgument -Value ([string]$_)
     }) -join " "
+    $progressLogger = {
+        param([string]$Line)
+
+        $percent = Get-Aria2DownloadPercent -Line $Line
+        if ($null -eq $percent) {
+            return
+        }
+        Write-Log "Download progress for ${destinationName}: ${percent}%" "Cyan"
+    }
     $aria2Result = Invoke-LibertixNativeProcess `
         -FilePath $aria2 `
         -Arguments $nativeArguments `
         -TimeoutSeconds 14400 `
         -MonitoredFilePath $downloadPath `
-        -MaximumFileBytes $MaxBytes
+        -MaximumFileBytes $MaxBytes `
+        -OnStandardOutputLine $progressLogger `
+        -OnStandardErrorLine $progressLogger
     if ($aria2Result.ExitCode -ne 0) {
         $diagnostic = ($aria2Result.StandardOutput + [Environment]::NewLine +
             $aria2Result.StandardError).Trim()

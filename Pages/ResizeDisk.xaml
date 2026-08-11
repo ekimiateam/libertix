@@ -108,7 +108,7 @@
                                        Foreground="{DynamicResource TextPrimary}"
                                        FontWeight="SemiBold"
                                        HorizontalAlignment="Center"/>
-                            <TextBlock Text="{Binding WindowsFreeSpace, StringFormat={}{0:N0} GB free}"
+                            <TextBlock Text="{Binding WindowsFreeInsideLabel}"
                                        Foreground="{DynamicResource TextPrimary}"
                                        FontSize="12"
                                        Opacity="0.8"
@@ -124,7 +124,7 @@
                                    Foreground="{DynamicResource PrimaryBackground}"
                                    FontWeight="SemiBold"
                                    HorizontalAlignment="Center"/>
-                        <TextBlock Text="{Binding LinuxSize, StringFormat={}{0:N0} GB}"
+                        <TextBlock Text="{Binding LinuxSizeLabel}"
                                    Foreground="{DynamicResource PrimaryBackground}"
                                    FontSize="12"
                                    HorizontalAlignment="Center"/>
@@ -140,17 +140,17 @@
                     Margin="0,0,0,-5">
             <StackPanel Orientation="Horizontal" Margin="10,0">
                 <Rectangle Width="16" Height="16" Fill="{DynamicResource WindowsPartitionColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
-                <TextBlock Text="{Binding WindowsUsedSpace, StringFormat=Windows used: {0:N0} GB}"
+                <TextBlock Text="{Binding WindowsUsedLegend}"
                            Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="10,0">
                 <Rectangle Width="16" Height="16" Fill="{DynamicResource AccentColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
-                <TextBlock Text="{Binding WindowsFreeSpace, StringFormat=Windows free: {0:N0} GB}"
+                <TextBlock Text="{Binding WindowsFreeLegend}"
                            Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="10,0">
                 <Rectangle Width="16" Height="16" Fill="{DynamicResource ErrorColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
-                <TextBlock Text="{Binding LinuxSize, StringFormat=Linux: {0:N0} GB}"
+                <TextBlock Text="{Binding LinuxLegend}"
                            Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
             </StackPanel>
         </StackPanel>
@@ -192,7 +192,7 @@
                 <TextBlock Grid.Column="2"
                           VerticalAlignment="Center"
                           Foreground="{DynamicResource TextPrimary}"
-                          Text="GB"/>
+                          Text="{DynamicResource ResizeDiskSizeUnit}"/>
             </Grid>
 
             <TextBlock Margin="0,5,0,0"
@@ -208,16 +208,16 @@
 
                 <StackPanel Grid.Column="0">
                     <TextBlock Foreground="{DynamicResource AccentColor}" FontWeight="SemiBold"
-                               Text="{Binding WindowsTotalSpace, StringFormat=Windows: {0:N0} GB}"/>
+                               Text="{Binding WindowsTotalLegend}"/>
                     <TextBlock Foreground="{DynamicResource TextSecondary}" FontSize="12" Margin="10,2,0,0"
-                               Text="{Binding WindowsUsedSpace, StringFormat=Used: {0:N0} GB}"/>
+                               Text="{Binding WindowsUsedDetail}"/>
                     <TextBlock Foreground="{DynamicResource TextSecondary}" FontSize="12" Margin="10,2,0,0"
-                               Text="{Binding WindowsFreeSpace, StringFormat=Free: {0:N0} GB}"/>
+                               Text="{Binding WindowsFreeDetail}"/>
                 </StackPanel>
 
                 <StackPanel Grid.Column="1">
                     <TextBlock Foreground="{DynamicResource ErrorColor}" FontWeight="SemiBold"
-                               Text="{Binding LinuxSize, StringFormat=Linux: {0:N0} GB}"/>
+                               Text="{Binding LinuxLegend}"/>
                 </StackPanel>
             </Grid>
         </StackPanel>

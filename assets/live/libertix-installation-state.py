@@ -241,8 +241,8 @@ def fail(state: dict[str, Any], code: str, component: str, message: str) -> None
 
 
 def begin_rollback(state: dict[str, Any]) -> None:
-    if state["status"] not in {"running", "failed"}:
-        raise StateTransitionError("rollback can only begin from running or failed")
+    if state["status"] not in {"running", "failed", "succeeded"}:
+        raise StateTransitionError("rollback can only begin from running, failed, or succeeded")
     state.update(status="rollback-running", phase="rollback", activeStep=None)
     touch(state)
 

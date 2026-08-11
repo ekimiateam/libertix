@@ -49,6 +49,7 @@ namespace Libertix.Pages
                 bool skipNvramWriteProbe =
                     ((App)Application.Current).RuntimeOptions.SkipNvramWriteProbe;
                 CompatibilityInfo info = await CompatibilityPreflightRunner.RunAsync(
+                    ((App)Application.Current).Filepool.CatalogUrl,
                     AppendDetail,
                     skipNvramWriteProbe);
                 _installationState.Compatibility = info;

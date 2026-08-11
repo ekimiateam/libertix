@@ -2,6 +2,42 @@
 
 # Installer partition preparation, ISO deployment, and temporary UEFI boot.
 
+function ConvertTo-LibertixBootOrderArray {
+    param([AllowNull()][object]$Order)
+
+    [uint16[]]$normalized = @(
+        @($Order) |
+            Where-Object { $null -ne $_ } |
+            ForEach-Object { [uint16]$_ }
+    )
+    return ,$normalized
+}
+
+function Format-LibertixBootOrderEntries {
+    param([AllowNull()][object]$Order)
+
+    [uint16[]]$normalized = ConvertTo-LibertixBootOrderArray -Order $Order
+    if ($normalized.Count -eq 0) {
+        return "absent"
+    }
+    return (($normalized | ForEach-Object { "Boot{0:X4}" -f $_ }) -join ",")
+}
+
+function Get-LibertixFirmwareBootVariableSummary {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    try {
+        if (-not (Test-FirmwareVariableExists -Name $Name)) {
+            return "absent"
+        }
+        $bytes = Get-FirmwareVariableBytes -Name $Name
+        return Format-LibertixBootOrderEntries `
+            -Order (ConvertFrom-BootOrderBytes -Bytes $bytes)
+    } catch {
+        return "unavailable($($_.Exception.GetType().Name))"
+    }
+}
+
 function New-OrReuseInstallerPartition {
     param([Parameter(Mandatory = $true)][int]$SizeGB)
 
@@ -491,13 +527,40 @@ function Set-LibertixUefiBootEntry {
     }
 
     $transactionState = Get-TransactionPartitionState
-    $originalBootOrder = if (
+    $originalBootOrderRawBytes = $null
+    $bootOrderSourceName = "firmware"
+    $originalBootOrderSource = if (
         $ReusePreparedInstaller -and $transactionState -and $transactionState.OriginalBootOrder
     ) {
-        @($transactionState.OriginalBootOrder | ForEach-Object { [uint16]$_ })
+        $bootOrderSourceName = "transaction"
+        $transactionState.OriginalBootOrder
     } else {
-        @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder"))
+        [byte[]]$originalBootOrderRawBytes = @(
+            Get-FirmwareVariableBytes -Name "BootOrder"
+        )
+        ConvertFrom-BootOrderBytes -Bytes $originalBootOrderRawBytes
     }
+    $sourceRuntimeType = if ($null -eq $originalBootOrderSource) {
+        "null"
+    } else {
+        $originalBootOrderSource.GetType().FullName
+    }
+    [uint16[]]$originalBootOrder = ConvertTo-LibertixBootOrderArray `
+        -Order $originalBootOrderSource
+    $rawLength = if ($null -eq $originalBootOrderRawBytes) {
+        "not-read"
+    } else {
+        $originalBootOrderRawBytes.Count
+    }
+    $bootOrderEntries = Format-LibertixBootOrderEntries -Order $originalBootOrder
+    $bootCurrent = Get-LibertixFirmwareBootVariableSummary -Name "BootCurrent"
+    $bootNext = Get-LibertixFirmwareBootVariableSummary -Name "BootNext"
+    Write-Log (
+        "UEFI BootOrder context: source=$bootOrderSourceName; " +
+        "rawLength=$rawLength; sourceType=$sourceRuntimeType; " +
+        "normalizedType=$($originalBootOrder.GetType().FullName); " +
+        "entries=$bootOrderEntries; BootCurrent=$bootCurrent; BootNext=$bootNext"
+    ) "Cyan"
     if ($originalBootOrder.Count -eq 0) {
         throw "UEFI BootOrder is empty; refusing to prepare a temporary boot entry."
     }

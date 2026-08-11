@@ -51,6 +51,14 @@ namespace Libertix.Pages
         public GridLength LinuxPartitionPercentage => new GridLength(_linuxSize * 100 / _totalSpace, GridUnitType.Star);
         public GridLength WindowsUsedPercentage => new GridLength(_windowsUsedSpace, GridUnitType.Star);
         public GridLength WindowsFreeInPartitionPercentage => new GridLength(_windowsFreeSpace > 0 ? _windowsFreeSpace : 0.001, GridUnitType.Star);
+        public string WindowsFreeInsideLabel => FormatSize("ResizeDiskWindowsFreeInside", WindowsFreeSpace);
+        public string WindowsUsedLegend => FormatSize("ResizeDiskWindowsUsedLegend", WindowsUsedSpace);
+        public string WindowsFreeLegend => FormatSize("ResizeDiskWindowsFreeLegend", WindowsFreeSpace);
+        public string LinuxSizeLabel => FormatSize("ResizeDiskSizeValue", LinuxSize);
+        public string LinuxLegend => FormatSize("ResizeDiskLinuxLegend", LinuxSize);
+        public string WindowsTotalLegend => FormatSize("ResizeDiskWindowsTotalLegend", WindowsTotalSpace);
+        public string WindowsUsedDetail => FormatSize("ResizeDiskUsedDetail", WindowsUsedSpace);
+        public string WindowsFreeDetail => FormatSize("ResizeDiskFreeDetail", WindowsFreeSpace);
 
         public double WindowsUsedSpace
         {
@@ -60,6 +68,9 @@ namespace Libertix.Pages
                 _windowsUsedSpace = value;
                 NotifyPropertyChanged(nameof(WindowsUsedSpace));
                 NotifyPropertyChanged(nameof(WindowsUsedPercentage));
+                NotifyPropertyChanged(nameof(WindowsUsedLegend));
+                NotifyPropertyChanged(nameof(WindowsTotalLegend));
+                NotifyPropertyChanged(nameof(WindowsUsedDetail));
                 NotifyPropertyChanged(nameof(SystemRequirements));
             }
         }
@@ -74,6 +85,10 @@ namespace Libertix.Pages
                 NotifyPropertyChanged(nameof(WindowsTotalSpace));
                 NotifyPropertyChanged(nameof(WindowsPartitionPercentage));
                 NotifyPropertyChanged(nameof(WindowsFreeInPartitionPercentage));
+                NotifyPropertyChanged(nameof(WindowsFreeInsideLabel));
+                NotifyPropertyChanged(nameof(WindowsFreeLegend));
+                NotifyPropertyChanged(nameof(WindowsTotalLegend));
+                NotifyPropertyChanged(nameof(WindowsFreeDetail));
                 NotifyPropertyChanged(nameof(SystemRequirements));
                 NotifyPropertyChanged(nameof(AdditionalSpaceNeeded));
             }
@@ -97,6 +112,8 @@ namespace Libertix.Pages
             {
                 _linuxSize = value;
                 NotifyPropertyChanged(nameof(LinuxSize));
+                NotifyPropertyChanged(nameof(LinuxSizeLabel));
+                NotifyPropertyChanged(nameof(LinuxLegend));
             }
         }
 
@@ -203,6 +220,14 @@ namespace Libertix.Pages
                 Localization.GetString("ResizeDiskAdditionalSpace"),
                 Math.Max(0, MinimumSize - AvailableLinuxSize))
             : null;
+
+        private static string FormatSize(string resourceKey, double value)
+        {
+            return string.Format(
+                CultureInfo.CurrentCulture,
+                Localization.GetString(resourceKey),
+                value);
+        }
 
         public ResizeDisk() : this(((App)Application.Current).InstallationState)
         {

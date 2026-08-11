@@ -9,10 +9,6 @@ esac
 
 . /tmp/libertix-storage-common.sh
 
-# The root menu intentionally contains Linux, Windows, Shutdown, and the
-# Advanced options submenu. Kernel, firmware, and diagnostic entries are nested.
-readonly EXPECTED_GRUB_ROOT_ENTRY_COUNT=4
-
 configure_user() {
     local group available_groups=""
 
@@ -337,7 +333,7 @@ write_windows_grub_entry() {
     mkdir -p /etc/libertix
     if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
         cat > /etc/libertix/grub-windows.cfg <<EOF
-menuentry "Windows" --class windows --class os {
+menuentry "Windows" --class windows --class os --id libertix-windows {
     insmod part_msdos
     insmod ntfs
     insmod ntldr
@@ -349,7 +345,7 @@ EOF
     fi
 
     cat > /etc/libertix/grub-windows.cfg <<EOF
-menuentry "Windows Boot Manager" --class windows --class os {
+menuentry "Windows Boot Manager" --class windows --class os --id libertix-windows {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $windows_boot_uuid
@@ -359,34 +355,46 @@ EOF
 }
 
 assert_grub_configuration() {
-    local grub_config=/boot/grub/grub.cfg root_entry_count
+    /usr/local/lib/libertix/libertix-validate-grub \
+        /boot/grub/grub.cfg \
+        /etc/libertix/installation-plan.json
+}
 
-    grub-script-check "$grub_config" || {
-        echo "Generated GRUB configuration has invalid syntax" >&2
-        return 1
-    }
-    grep -Fq -- "--class $DISTRIBUTION_GRUB_ICON" "$grub_config" || {
-        echo "Generated GRUB configuration is missing the distribution icon class" >&2
-        return 1
-    }
-    grep -Fq "menuentry '$DISTRIBUTION_GRUB_DISPLAY_NAME'" "$grub_config" || {
-        echo "Generated GRUB configuration is missing the distribution root entry" >&2
-        return 1
-    }
-    grep -Fq -- "--class efi --id libertix-advanced" "$grub_config" || {
-        echo "Generated GRUB configuration is missing the Advanced options submenu" >&2
-        return 1
-    }
-    grep -Fq -- "--class shutdown --id libertix-shutdown" "$grub_config" || {
-        echo "Generated GRUB configuration is missing the Shutdown entry" >&2
-        return 1
-    }
+configure_boot_update_guards() {
+    local update_grub=/usr/sbin/update-grub
+    local diverted=/usr/local/lib/libertix/update-grub.distrib
+    local owner true_name
 
-    root_entry_count="$(grep -Ec '^(menuentry|submenu) ' "$grub_config" || true)"
-    [ "$root_entry_count" -eq "$EXPECTED_GRUB_ROOT_ENTRY_COUNT" ] || {
-        echo "Generated GRUB configuration has $root_entry_count root entries; expected $EXPECTED_GRUB_ROOT_ENTRY_COUNT" >&2
-        return 1
-    }
+    owner="$(dpkg-divert --listpackage "$update_grub")"
+    if [ -n "$owner" ]; then
+        [ "$owner" = LOCAL ] || {
+            echo "update-grub has a foreign diversion: $owner" >&2
+            return 1
+        }
+        true_name="$(dpkg-divert --truename "$update_grub")"
+        [ "$true_name" = "$diverted" ] || {
+            echo "update-grub diversion target mismatch: $true_name" >&2
+            return 1
+        }
+    else
+        [ -x "$update_grub" ] || {
+            echo "Required update-grub command is missing" >&2
+            return 1
+        }
+        [ ! -e "$diverted" ] || {
+            echo "update-grub diversion target already exists: $diverted" >&2
+            return 1
+        }
+        dpkg-divert --local --add --rename --divert "$diverted" "$update_grub"
+    fi
+    install -m 0755 /usr/local/lib/libertix/libertix-update-grub.sh "$update_grub"
+
+    if [ "$LIBERTIX_FIRMWARE_MODE" = uefi ]; then
+        cat > /etc/apt/apt.conf.d/99-libertix-boot-maintenance <<'EOF'
+DPkg::Post-Invoke { "if test -x /usr/local/sbin/libertix-sync-efi; then /usr/local/sbin/libertix-sync-efi --if-present; fi"; };
+EOF
+        systemctl enable libertix-efi-sync.path
+    fi
 }
 
 configure_grub() {
@@ -439,6 +447,7 @@ EOF
         /usr/local/lib/libertix/render-libertix-menu.py
     chmod -x /etc/grub.d/40_custom 2>/dev/null || true
 
+    configure_boot_update_guards
     update-grub
     assert_grub_configuration
 }

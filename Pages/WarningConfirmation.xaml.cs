@@ -2,6 +2,7 @@ using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
 using Libertix.Helpers;
 using Libertix.Models;
 
@@ -31,7 +32,9 @@ namespace Libertix.Pages
 
         private void WarningConfirmation_Loaded(object sender, RoutedEventArgs e)
         {
-            ConfirmCheckBox.Focus();
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.ApplicationIdle,
+                new Action(() => Keyboard.Focus(ConfirmCheckBox)));
         }
 
         private void WarningConfirmation_PreviewKeyDown(object sender, KeyEventArgs e)

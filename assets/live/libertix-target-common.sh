@@ -45,8 +45,11 @@ unmount_target_windows_partitions() {
 
 install_target_configuration_payload() {
     install -d -m 0755 /mnt/target/etc/libertix
+    install -d -m 0755 /mnt/target/usr/local/lib/libertix
     install -m 0644 "$INSTALLATION_PLAN_PATH" \
         /mnt/target/etc/libertix/installation-plan.json
+    install -m 0644 /usr/local/lib/libertix/Libertix.InstallationPolicy.json \
+        /mnt/target/etc/libertix/Libertix.InstallationPolicy.json
     install -m 0755 /usr/local/lib/libertix/configure-target.sh \
         /mnt/target/tmp/libertix-configure-target.sh
     install -m 0755 /usr/local/lib/libertix/configure-target-main.sh \
@@ -57,6 +60,16 @@ install_target_configuration_payload() {
         /mnt/target/tmp/10_libertix
     install -m 0755 /usr/local/lib/libertix/render-libertix-menu.py \
         /mnt/target/tmp/render-libertix-menu.py
+    install -m 0755 /usr/local/lib/libertix/libertix-validate-grub.sh \
+        /mnt/target/usr/local/lib/libertix/libertix-validate-grub
+    install -m 0755 /usr/local/lib/libertix/libertix-update-grub.sh \
+        /mnt/target/usr/local/lib/libertix/libertix-update-grub.sh
+    install -m 0755 /usr/local/lib/libertix/libertix-sync-efi.sh \
+        /mnt/target/usr/local/sbin/libertix-sync-efi
+    install -m 0644 /usr/local/lib/libertix/libertix-efi-sync.service \
+        /mnt/target/etc/systemd/system/libertix-efi-sync.service
+    install -m 0644 /usr/local/lib/libertix/libertix-efi-sync.path \
+        /mnt/target/etc/systemd/system/libertix-efi-sync.path
 
     GRUB_RESOLUTION="$(detect_grub_resolution)"
     rm -rf /mnt/target/boot/grub/themes/Libertix
@@ -65,6 +78,8 @@ install_target_configuration_payload() {
 
     install -m 0755 /usr/local/lib/libertix/first-boot-resize.sh \
         /mnt/target/usr/local/bin/first-boot-resize.sh
+    install -m 0755 /usr/local/lib/libertix/libertix-first-boot-verify.py \
+        /mnt/target/usr/local/lib/libertix/libertix-first-boot-verify.py
     install -m 0644 /usr/local/lib/libertix/first-boot-resize.service \
         /mnt/target/etc/systemd/system/first-boot-resize.service
     install -m 0755 /usr/local/lib/libertix/libertix-apply-keyboard-once.sh \

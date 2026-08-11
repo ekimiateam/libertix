@@ -83,6 +83,9 @@ namespace Libertix.Models
         [JsonPropertyName("grubIcon")]
         public string GrubIcon { get; set; }
 
+        [JsonPropertyName("secureBootMicrosoftAuthorities")]
+        public List<string> SecureBootMicrosoftAuthorities { get; set; }
+
         [JsonPropertyName("description")]
         public string Description { get; set; }
 

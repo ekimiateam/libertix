@@ -35,12 +35,125 @@ function Get-LibertixRecoveryTasks {
     $tasks = @()
     foreach ($pattern in @(
         "LibertixInstallRecovery",
+        "LibertixInstallRecoveryPrompt",
         "LibertixUefiRecovery_*",
         "LibertixUefiRecoveryPrompt_*"
     )) {
         $tasks += @(Get-ScheduledTask -TaskName $pattern -ErrorAction SilentlyContinue)
     }
     return @($tasks | Sort-Object TaskName -Unique)
+}
+
+function Get-LibertixRecoverySession {
+    param([Parameter(Mandatory = $true)][string]$ExpectedFirmware)
+
+    $archivedPlanPath = "C:\LibertixInstallLogs\latest\installation-plan.json"
+    Assert-Condition (Test-Path -LiteralPath $archivedPlanPath -PathType Leaf) `
+        "The archived installation plan is missing for recovery verification."
+    $archivedPlan = Get-Content -LiteralPath $archivedPlanPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    $candidateRoots = if ($ExpectedFirmware -eq "bios") {
+        @("C:\LibertixInstallRecovery")
+    } else {
+        @(
+            Get-ChildItem `
+                -LiteralPath "C:\ProgramData\Libertix\UefiRecovery" `
+                -Directory `
+                -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName }
+        )
+    }
+    $matchingSessions = @()
+    foreach ($root in $candidateRoots) {
+        $planPath = Join-Path $root "installation-plan.json"
+        if (-not (Test-Path -LiteralPath $planPath -PathType Leaf)) { continue }
+        $plan = Get-Content -LiteralPath $planPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -ErrorAction Stop
+        if ([string]$plan.planId -eq [string]$archivedPlan.planId) {
+            $matchingSessions += [pscustomobject]@{ Root = $root; Plan = $plan }
+        }
+    }
+    Assert-Condition ($matchingSessions.Count -eq 1) `
+        "The permanent recovery session for the current installation is absent or ambiguous."
+    return $matchingSessions[0]
+}
+
+function Assert-LibertixPostInstallResult {
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [Parameter(Mandatory = $true)][string]$ExpectedFirmware
+    )
+
+    $root = [string]$Session.Root
+    $resultPath = Join-Path $root "post-install-verification.json"
+    Assert-Condition (Test-Path -LiteralPath $resultPath -PathType Leaf) `
+        "The post-install verification result is missing."
+    $result = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    Assert-Condition ([string]$result.status -eq "succeeded") `
+        "The post-install verification did not succeed: $($result.error)"
+    Assert-Condition ([string]$result.planId -eq [string]$Session.Plan.planId) `
+        "The post-install verification belongs to another plan."
+    $expectedChecks = @(
+        "execution-ledger",
+        "installed-linux-boot",
+        "disk-geometry",
+        "windows-health",
+        "boot-configuration",
+        "temporary-boot-cleanup",
+        "permanent-recovery-archive"
+    )
+    $actualChecks = @($result.checks | ForEach-Object { [string]$_.name })
+    Assert-Condition ($actualChecks.Count -eq $expectedChecks.Count) `
+        "The post-install verification check count is incomplete."
+    Assert-Condition (@($result.checks | Where-Object { -not [bool]$_.passed }).Count -eq 0) `
+        "At least one post-install verification check failed."
+    foreach ($expectedCheck in $expectedChecks) {
+        Assert-Condition ($actualChecks -contains $expectedCheck) `
+            "The post-install verification omitted '$expectedCheck'."
+    }
+    foreach ($relativePath in @(
+        "installation-plan.json",
+        "installation-state.json",
+        "installed-linux-boot.json",
+        "post-install-verification.json"
+    )) {
+        Assert-Condition (Test-Path -LiteralPath (Join-Path $root $relativePath) -PathType Leaf) `
+            "Permanent recovery evidence is missing: $relativePath"
+    }
+    $evidence = Get-Content `
+        -LiteralPath (Join-Path $root "installed-linux-boot.json") `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    Assert-Condition ([bool]$evidence.grub.bootChain.verified) `
+        "The installed boot chain was not proven by the first Linux boot."
+    Assert-Condition ([bool]$evidence.system.rootReadWrite) `
+        "The first Linux boot did not prove a read-write root filesystem."
+    Assert-Condition (
+        [string]$evidence.system.fstabRootUuid -eq [string]$evidence.root.uuid
+    ) "The first Linux boot did not prove the root UUID in fstab."
+    Assert-Condition (
+        [string]$evidence.system.username -eq [string]$Session.Plan.account.username
+    ) "The first Linux boot did not prove the planned user account."
+    Assert-Condition (
+        [bool]$evidence.system.sudoMember -and
+        [bool]$evidence.system.passwordActive -and
+        [bool]$evidence.system.dpkgAuditClean -and
+        [int]$evidence.system.failedSystemdUnits -eq 0
+    ) "The first Linux boot did not prove a healthy installed system."
+    if ($ExpectedFirmware -eq "uefi") {
+        Assert-Condition ([string]$evidence.grub.bootChain.type -eq "uefi-boot-current") `
+            "The UEFI BootCurrent proof is missing."
+        Assert-Condition (Test-Path -LiteralPath (Join-Path $root "uefi-transaction.json") -PathType Leaf) `
+            "The permanent UEFI rollback transaction is missing."
+    } else {
+        Assert-Condition ([string]$evidence.grub.bootChain.type -eq "bios-mbr") `
+            "The BIOS MBR boot proof is missing."
+        Assert-Condition (Test-Path -LiteralPath (Join-Path $root "bcd-backup") -PathType Leaf) `
+            "The permanent BIOS BCD backup is missing."
+    }
+    return $result
 }
 
 function Get-ExpectedLinuxMountIdentity {
@@ -114,23 +227,127 @@ function Test-CommandLineOptionValue {
     return $optionValues.Count -eq 1 -and $optionValues[0] -ieq $Value
 }
 
+function ConvertFrom-NativeOutputBytes {
+    param([byte[]]$Bytes)
+
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) {
+        return ""
+    }
+
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    $strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
+    if ($Bytes.Length -ge 4 -and
+        $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE -and
+        $Bytes[2] -eq 0x00 -and $Bytes[3] -eq 0x00) {
+        return [Text.Encoding]::UTF32.GetString($Bytes, 4, $Bytes.Length - 4)
+    }
+    if ($Bytes.Length -ge 4 -and
+        $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x00 -and
+        $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF) {
+        $utf32BigEndian = New-Object Text.UTF32Encoding($true, $false, $true)
+        return $utf32BigEndian.GetString($Bytes, 4, $Bytes.Length - 4)
+    }
+    if ($Bytes.Length -ge 3 -and
+        $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        return $utf8NoBom.GetString($Bytes, 3, $Bytes.Length - 3)
+    }
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+        return [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    }
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+        return [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
+    }
+
+    $sampleLength = [Math]::Min($Bytes.Length, 4096)
+    $pairCount = [Math]::Floor($sampleLength / 2)
+    if ($pairCount -gt 0) {
+        $evenNulls = 0
+        $oddNulls = 0
+        for ($index = 0; $index -lt ($pairCount * 2); $index += 2) {
+            if ($Bytes[$index] -eq 0) { $evenNulls++ }
+            if ($Bytes[$index + 1] -eq 0) { $oddNulls++ }
+        }
+        $nullThreshold = [Math]::Max(2, [Math]::Floor($pairCount / 4))
+        if ($oddNulls -ge $nullThreshold -and $oddNulls -gt ($evenNulls * 2)) {
+            return [Text.Encoding]::Unicode.GetString($Bytes)
+        }
+        if ($evenNulls -ge $nullThreshold -and $evenNulls -gt ($oddNulls * 2)) {
+            return [Text.Encoding]::BigEndianUnicode.GetString($Bytes)
+        }
+    }
+
+    try {
+        return $strictUtf8.GetString($Bytes)
+    } catch [Text.DecoderFallbackException] {
+        $oemCodePage = [Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
+        return [Text.Encoding]::GetEncoding($oemCodePage).GetString($Bytes)
+    }
+}
+
+function Read-NativeOutputText {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {
+        return ""
+    }
+    return (ConvertFrom-NativeOutputBytes ([IO.File]::ReadAllBytes($LiteralPath))).Replace(
+        ([string][char]0),
+        ""
+    )
+}
+
+function Invoke-NativeCommandDecoded {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+
+    $temporaryPrefix = Join-Path $env:TEMP ("libertix-native-" + [Guid]::NewGuid().ToString("N"))
+    $stdoutPath = "$temporaryPrefix.out"
+    $stderrPath = "$temporaryPrefix.err"
+    try {
+        $process = Start-Process `
+            -FilePath $FilePath `
+            -ArgumentList $Arguments `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath `
+            -ErrorAction Stop
+        $stdout = Read-NativeOutputText -LiteralPath $stdoutPath
+        $stderr = Read-NativeOutputText -LiteralPath $stderrPath
+        $combinedOutput = @($stdout, $stderr) |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_.TrimEnd("`r", "`n") } |
+            Out-String
+        [PSCustomObject]@{
+            ExitCode = [int]$process.ExitCode
+            StdOut = $stdout
+            StdErr = $stderr
+            CombinedOutput = $combinedOutput.TrimEnd("`r", "`n")
+        }
+    } finally {
+        Remove-Item -LiteralPath @($stdoutPath, $stderrPath) -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-NativeCheck {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
-    $output = @(& $FilePath @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
-        $diagnostic = (($output | ForEach-Object { [string]$_ }) -join " | ").Replace([char]0, "").Trim()
+    $result = Invoke-NativeCommandDecoded -FilePath $FilePath -Arguments $Arguments
+    if ($result.ExitCode -ne 0) {
+        $diagnostic = $result.CombinedOutput.Replace("`r", "").Replace("`n", " | ").Trim()
         if ($diagnostic.Length -gt 2000) {
             $diagnostic = $diagnostic.Substring($diagnostic.Length - 2000)
         }
         $suffix = if ([string]::IsNullOrWhiteSpace($diagnostic)) { "" } else { " Output: $diagnostic" }
-        throw "$FilePath exited with code $exitCode.$suffix"
+        throw "$FilePath exited with code $($result.ExitCode).$suffix"
     }
-    Write-Output "NATIVE_COMMAND=$FilePath EXIT_CODE=$exitCode"
+    Write-Output "NATIVE_COMMAND=$FilePath EXIT_CODE=$($result.ExitCode)"
 }
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -142,18 +359,30 @@ try {
         "finalization" {
             $deadline = [DateTime]::UtcNow.AddMinutes(5)
             do {
-                $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
+                $session = Get-LibertixRecoverySession `
+                    -ExpectedFirmware ([string]$config.expected_firmware)
+                $resultPath = Join-Path $session.Root "post-install-verification.json"
+                $resultStatus = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+                    [string](Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
+                        ConvertFrom-Json -ErrorAction Stop).status
+                } else { "missing" }
                 $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
-                $recoveryTasks = @(Get-LibertixRecoveryTasks)
-                if (-not $biosPending -and -not $uefiTransaction -and $recoveryTasks.Count -eq 0) {
+                $startupTasks = @(Get-LibertixRecoveryTasks | Where-Object {
+                    $_.TaskName -eq "LibertixInstallRecovery" -or
+                    $_.TaskName -like "LibertixUefiRecovery_*"
+                })
+                if ($resultStatus -eq "succeeded" -and -not $uefiTransaction -and $startupTasks.Count -eq 0) {
+                    $null = Assert-LibertixPostInstallResult `
+                        -Session $session `
+                        -ExpectedFirmware ([string]$config.expected_firmware)
                     Write-Output "LIBERTIX_FINALIZATION=ready"
                     break
                 }
                 if ([DateTime]::UtcNow -ge $deadline) {
                     throw (
                         "Libertix Windows finalization timed out: " +
-                        "biosPending=$biosPending, uefiTransaction=$uefiTransaction, " +
-                        "recoveryTasks=$($recoveryTasks.Count)."
+                        "resultStatus=$resultStatus, uefiTransaction=$uefiTransaction, " +
+                        "startupTasks=$($startupTasks.Count)."
                     )
                 }
                 Start-Sleep -Seconds 2
@@ -171,21 +400,26 @@ try {
                 -ErrorAction Stop)
             $sshService = Get-Service -Name "sshd" -ErrorAction Stop
             $coreServices = @(Get-Service -Name @("EventLog", "RpcSs", "Schedule") -ErrorAction Stop)
-            $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
+            $session = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $postInstallResult = Assert-LibertixPostInstallResult `
+                -Session $session `
+                -ExpectedFirmware ([string]$config.expected_firmware)
             $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
             $uefiToolsRoot = Test-Path -LiteralPath "C:\LibertixTools"
-            $biosRecoveryRoot = Test-Path -LiteralPath "C:\LibertixInstallRecovery"
-            $uefiRecoveryRoot = Test-Path -LiteralPath "C:\ProgramData\Libertix\UefiRecovery"
             $transactionDownloads = @(
                 Get-ChildItem `
                     -LiteralPath "C:\ProgramData\Libertix\Downloads" `
                     -Force `
                     -ErrorAction SilentlyContinue
             )
-            $recoveryTasks = @(Get-LibertixRecoveryTasks)
-            $bcdEntries = @(& bcdedit.exe /enum all 2>&1)
-            Assert-Condition ($LASTEXITCODE -eq 0) "bcdedit failed during the final Windows check."
-            $bcdText = $bcdEntries -join "`n"
+            $startupRecoveryTasks = @(Get-LibertixRecoveryTasks | Where-Object {
+                $_.TaskName -eq "LibertixInstallRecovery" -or
+                $_.TaskName -like "LibertixUefiRecovery_*"
+            })
+            $bcdResult = Invoke-NativeCommandDecoded -FilePath "bcdedit.exe" -Arguments @("/enum", "all")
+            Assert-Condition ($bcdResult.ExitCode -eq 0) "bcdedit failed during the final Windows check."
+            $bcdText = $bcdResult.CombinedOutput
 
             Write-Output ("WINDOWS={0} BUILD={1}" -f $os.Caption, $os.BuildNumber)
             Write-Output ("FIRMWARE={0}" -f $firmware)
@@ -207,14 +441,14 @@ try {
             Assert-Condition ($sshService.Status -eq "Running") "The SSH service stopped after the final boot."
             Assert-Condition (@($coreServices | Where-Object { $_.Status -ne "Running" }).Count -eq 0) `
                 "A core Windows service stopped after the final boot."
-            Assert-Condition (-not $biosPending) "The BIOS transaction is pending after the final boot."
             Assert-Condition (-not $uefiTransaction) "The UEFI transaction remains after the final boot."
             Assert-Condition (-not $uefiToolsRoot) "The temporary UEFI tools directory remains after the final boot."
-            Assert-Condition (-not $biosRecoveryRoot) "The BIOS recovery payload remains after the final boot."
-            Assert-Condition (-not $uefiRecoveryRoot) "The UEFI recovery payload remains after the final boot."
+            Assert-Condition ([string]$postInstallResult.status -eq "succeeded") `
+                "The permanent post-install verification result is not successful."
             Assert-Condition ($transactionDownloads.Count -eq 0) `
                 "Transaction downloads remain after the final boot."
-            Assert-Condition ($recoveryTasks.Count -eq 0) "The recovery task remains after the final boot."
+            Assert-Condition ($startupRecoveryTasks.Count -eq 0) `
+                "A recovery startup task remains after the final boot."
             Assert-Condition ($bcdText -match "(?i)winload[.]e(?:xe|fi)") `
                 "The Windows loader is absent after the final boot."
             Assert-Condition ($bcdText -notmatch "(?i)Libertix Installer|$installerIsoPattern|grldr") `
@@ -280,6 +514,15 @@ try {
             $partitions = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop)
             $installerOffset = [int64]$plan.disk.installer.offsetBytes
             $finalLinuxSize = [int64]$plan.disk.installer.finalSizeBytes
+            $recoverySession = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $linuxEvidence = Get-Content `
+                -LiteralPath (Join-Path $recoverySession.Root "installed-linux-boot.json") `
+                -Raw `
+                -Encoding UTF8 |
+                ConvertFrom-Json -ErrorAction Stop
+            $observedLinuxSize = [int64]$linuxEvidence.root.sizeBytes
+            $alignmentTolerance = [int64]$linuxEvidence.root.alignmentToleranceBytes
             $originalWindowsOffset = [int64]$plan.disk.windows.offsetBytes
             $originalWindowsSize = [int64]$plan.disk.windows.sizeBytes
             $windowsEnd = [int64]$systemPartition.Offset + [int64]$systemPartition.Size
@@ -287,7 +530,7 @@ try {
             $actualWindowsShrink = $originalWindowsSize - [int64]$systemPartition.Size
             $linuxMatches = @($partitions | Where-Object {
                 [int64]$_.Offset -eq $installerOffset -and
-                [int64]$_.Size -eq $finalLinuxSize
+                [int64]$_.Size -eq $observedLinuxSize
             })
             $recoveryMatches = @($partitions | Where-Object {
                 [int64]$_.Offset -eq [int64]$plan.disk.recovery.offsetBytes -and
@@ -296,7 +539,7 @@ try {
             Write-Output ("WINDOWS_OFFSET={0} WINDOWS_SIZE={1}" -f `
                 $systemPartition.Offset, $systemPartition.Size)
             Write-Output ("LINUX_OFFSET={0} LINUX_SIZE={1}" -f `
-                $installerOffset, $finalLinuxSize)
+                $installerOffset, $observedLinuxSize)
             Write-Output ("RECOVERY_OFFSET={0} RECOVERY_SIZE={1}" -f `
                 $plan.disk.recovery.offsetBytes, $plan.disk.recovery.sizeBytes)
             Assert-Condition ([int]$systemDisk.Number -eq [int]$plan.disk.number) `
@@ -313,6 +556,9 @@ try {
                 "The Windows partition shrink differs from the requested Linux allocation."
             Assert-Condition ($linuxMatches.Count -eq 1) `
                 "The final Linux partition offset or size differs from the installation plan."
+            Assert-Condition ($observedLinuxSize -le $finalLinuxSize -and `
+                $observedLinuxSize -ge ($finalLinuxSize - $alignmentTolerance)) `
+                "The final Linux partition exceeds the policy alignment tolerance."
             Assert-Condition ($recoveryMatches.Count -eq 1) `
                 "The Windows Recovery partition geometry changed during installation."
         }
@@ -332,10 +578,10 @@ try {
             $bootPartitions | Format-Table PartitionNumber, Type, GptType, MbrType, IsActive, Size -AutoSize
         }
         "boot_configuration" {
-            $entries = @(& bcdedit.exe /enum all 2>&1)
-            $entries | ForEach-Object { Write-Output $_ }
-            Assert-Condition ($LASTEXITCODE -eq 0) "bcdedit failed to enumerate the boot configuration."
-            $text = $entries -join "`n"
+            $bcdResult = Invoke-NativeCommandDecoded -FilePath "bcdedit.exe" -Arguments @("/enum", "all")
+            Write-Output $bcdResult.CombinedOutput
+            Assert-Condition ($bcdResult.ExitCode -eq 0) "bcdedit failed to enumerate the boot configuration."
+            $text = $bcdResult.CombinedOutput
             Assert-Condition ($text -match "(?i)winload[.]e(?:xe|fi)") "The Windows loader is absent from BCD."
             Assert-Condition ($text -notmatch "(?i)Libertix Installer|$installerIsoPattern|grldr") "A temporary Libertix boot entry remains in BCD."
         }
@@ -347,11 +593,11 @@ try {
             })
             $recoveryPartitions | Format-Table DiskNumber, PartitionNumber, Type, GptType, MbrType, Size -AutoSize
             Assert-Condition ($recoveryPartitions.Count -ge 1) "No Windows recovery partition was found."
-            $reagentOutput = @(& reagentc.exe /info 2>&1)
-            $reagentOutput | ForEach-Object { Write-Output $_ }
-            Assert-Condition ($LASTEXITCODE -eq 0) `
+            $reagentResult = Invoke-NativeCommandDecoded -FilePath "reagentc.exe" -Arguments @("/info")
+            Write-Output $reagentResult.CombinedOutput
+            Assert-Condition ($reagentResult.ExitCode -eq 0) `
                 "reagentc.exe failed to report Windows Recovery Environment status."
-            $reagentText = $reagentOutput -join "`n"
+            $reagentText = $reagentResult.CombinedOutput
             Assert-Condition ($reagentText -match `
                 "(?i)(enabled|activ[eé]|habilitado|有効)") `
                 "Windows Recovery Environment is not reported as enabled."
@@ -370,14 +616,30 @@ try {
             $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
             $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
             $recoveryTasks = @(Get-LibertixRecoveryTasks)
+            $startupRecoveryTasks = @($recoveryTasks | Where-Object {
+                $_.TaskName -notmatch "Prompt"
+            })
+            $promptTasks = @($recoveryTasks | Where-Object {
+                $_.TaskName -match "Prompt"
+            })
             Write-Output ("INSTALLER_VOLUMES={0}" -f $installerVolumes.Count)
             Write-Output ("UEFI_TRANSACTION={0}" -f $uefiTransaction)
             Write-Output ("BIOS_PENDING={0}" -f $biosPending)
-            Write-Output ("RECOVERY_TASKS={0}" -f $recoveryTasks.Count)
+            Write-Output ("STARTUP_RECOVERY_TASKS={0}" -f $startupRecoveryTasks.Count)
+            Write-Output ("RESULT_PROMPT_TASKS={0}" -f $promptTasks.Count)
             Assert-Condition ($installerVolumes.Count -eq 0) "The temporary installer volume still exists."
             Assert-Condition (-not $uefiTransaction) "The UEFI transaction file still exists."
-            Assert-Condition (-not $biosPending) "The BIOS recovery transaction is still pending."
-            Assert-Condition ($recoveryTasks.Count -eq 0) "The temporary recovery task still exists."
+            if ([string]$config.expected_firmware -eq "bios") {
+                Assert-Condition $biosPending `
+                    "The durable BIOS rollback metadata is missing."
+            } else {
+                Assert-Condition (-not $biosPending) `
+                    "Unexpected BIOS rollback metadata exists on a UEFI system."
+            }
+            Assert-Condition ($startupRecoveryTasks.Count -eq 0) `
+                "The startup recovery task still exists."
+            Assert-Condition ($promptTasks.Count -le 1) `
+                "Multiple post-install result prompt tasks exist."
         }
         "network" {
             $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |

@@ -32,7 +32,9 @@ try {
     $settings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
         -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries
+        -DontStopIfGoingOnBatteries `
+        -DisallowHardTerminate `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
     $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $baseArguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -StatePath "{1}"' -f `

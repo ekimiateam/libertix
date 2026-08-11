@@ -16,6 +16,7 @@ BeforeAll {
     "osReleaseId": "linuxmint",
     "grubDisplayName": "Linux Mint 22.3 Cinnamon",
     "grubIcon": "linuxmint",
+    "secureBootMicrosoftAuthorities": ["2011"],
     "installerIsoFileName": "mint.iso",
     "installerIsoUrl": "https://example.test/mint.iso",
     "installerIsoWindowsPath": "C:\\ProgramData\\Libertix\\Downloads\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\mint.iso",
@@ -62,6 +63,8 @@ BeforeAll {
   "runtime": {
     "lowMemoryMode": false,
     "bootStrategy": "uefi-boot-next",
+    "secureBootEnabled": true,
+    "trustedMicrosoftUefiAuthorities": ["2011"],
     "recoveryRootWindows": "C:\\ProgramData\\Libertix\\Recovery",
     "recoveryRunId": "dddddddddddddddddddddddddddddddd"
   }
@@ -152,6 +155,24 @@ Describe "Installation plan contract" {
             Should -Throw "*contains unsupported field 'unexpected'*"
     }
 
+    It "rejects an unknown distribution Secure Boot authority" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution.secureBootMicrosoftAuthorities = @("2040")
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*secureBootMicrosoftAuthorities may contain only 2011 and 2023*"
+    }
+
+    It "rejects trusted UEFI authorities in a BIOS plan" {
+        $plan = New-ValidInstallationPlan
+        $plan.firmware = "bios"
+        $plan.disk.partitionStyle = "MBR"
+        $plan.disk.partitionTableId = "mbr:12345678"
+        $plan.runtime.bootStrategy = "bios-grub4dos"
+        $plan.runtime.secureBootEnabled = $false
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*BIOS installation plan must not contain trusted Microsoft UEFI authorities*"
+    }
+
     It "rejects Windows paths on another drive" {
         $plan = New-ValidInstallationPlan
         $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\account-secret.env"
@@ -219,6 +240,36 @@ Describe "Installation state ordering" {
         }
         { Assert-LibertixExecutionState -State $rolledBack } |
             Should -Throw "*every applicable compensation*"
+    }
+
+    It "allows an explicit rollback after successful installation" {
+        $state = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
+        $state.status = "succeeded"
+        $state.phase = "complete"
+        $state.completedSteps = @(
+            "windows.preflight-verified",
+            "windows.artifacts-verified",
+            "windows.recovery-armed",
+            "windows.system-volume-shrunk",
+            "windows.installer-partition-created",
+            "windows.live-media-prepared",
+            "windows.temporary-boot-prepared",
+            "live.preflight-verified",
+            "live.installer-partition-expanded",
+            "live.target-filesystem-created",
+            "live.distribution-extracted",
+            "target.system-configured",
+            "target.bootloader-installed",
+            "target.installation-verified"
+        )
+        $state | ConvertTo-Json -Depth 8 | Set-Content `
+            -LiteralPath $script:StatePath `
+            -Encoding UTF8
+
+        $rolledBack = Start-LibertixRollback -Path $script:StatePath
+
+        $rolledBack.status | Should -Be "rollback-running"
+        $rolledBack.phase | Should -Be "rollback"
     }
 
     It "rejects an unknown persisted state property" {

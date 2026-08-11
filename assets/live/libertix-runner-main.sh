@@ -43,18 +43,10 @@ LIBERTIX_FIRMWARE_MODE="${LIBERTIX_FIRMWARE_MODE:?LIBERTIX_FIRMWARE_MODE is requ
 . /usr/local/lib/libertix/libertix-i18n.sh
 mkdir -p "$LOG_DIR"
 touch "$DEBUG_LOG" "$FAIL_FILE"
-_context_loaded=false
-_context_error=""
-for _plan_attempt in $(seq 1 30); do
-    if _context_error="$(
-        load_libertix_live_context "$LIBERTIX_FIRMWARE_MODE" 2>&1
-    )"; then
-        _context_loaded=true
-        break
-    fi
-    sleep 1
-done
-if [ "$_context_loaded" != true ]; then
+_context_error_file="$LOG_DIR/context-load-error"
+if ! load_libertix_live_context_with_retry \
+    "$LIBERTIX_FIRMWARE_MODE" 30 "$_context_error_file"; then
+    _context_error="$(cat "$_context_error_file" 2>/dev/null || true)"
     printf 'Live installation context was not available after 30 attempts: %s\n' \
         "${_context_error:-no diagnostic was returned}" |
         tee -a "$DEBUG_LOG" "$FAIL_FILE" >&2

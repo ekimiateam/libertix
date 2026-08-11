@@ -537,6 +537,39 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void SuccessfulInstallationCanBeginExplicitRollback()
+        {
+            InstallationStateMachine machine = InstallationStateMachine.Create(PlanId);
+            foreach (string step in new[]
+            {
+                InstallationStep.WindowsPreflightVerified,
+                InstallationStep.WindowsArtifactsVerified,
+                InstallationStep.WindowsRecoveryArmed,
+                InstallationStep.WindowsSystemVolumeShrunk,
+                InstallationStep.WindowsInstallerPartitionCreated,
+                InstallationStep.WindowsLiveMediaPrepared,
+                InstallationStep.WindowsTemporaryBootPrepared,
+                InstallationStep.LivePreflightVerified,
+                InstallationStep.LiveInstallerPartitionExpanded,
+                InstallationStep.LiveTargetFilesystemCreated,
+                InstallationStep.LiveDistributionExtracted,
+                InstallationStep.TargetSystemConfigured,
+                InstallationStep.TargetBootloaderInstalled,
+                InstallationStep.TargetInstallationVerified
+            })
+            {
+                machine.StartStep(step);
+                machine.CompleteStep(step);
+            }
+            machine.CompleteInstallation();
+
+            machine.BeginRollback();
+
+            Assert.AreEqual(InstallationStatus.RollbackRunning, machine.State.Status);
+            Assert.AreEqual(InstallationPhase.Rollback, machine.State.Phase);
+        }
+
+        [TestMethod]
         public void ExecutionLedgerPersistsPrimaryAndMirroredTransitions()
         {
             string directory = Path.Combine(
@@ -626,6 +659,8 @@ namespace Libertix.Tests
                         OsReleaseId = "linuxmint",
                         GrubDisplayName = "Linux Mint 22.3 Cinnamon",
                         GrubIcon = "linuxmint",
+                        SecureBootMicrosoftAuthorities =
+                            new System.Collections.Generic.List<string> { "2011" },
                         IsoInstallerFileName = "mint.iso",
                         IsoInstaller = "https://example.test/mint.iso",
                         IsoInstallerSha256 = new string('a', 64),
@@ -640,7 +675,11 @@ namespace Libertix.Tests
                         ComputerName = "libertix-test"
                     },
                     Sharing = new SharingOptions(),
-                    Compatibility = new CompatibilityInfo(),
+                    Compatibility = new CompatibilityInfo
+                    {
+                        SecureBootEnabled = true,
+                        TrustedMicrosoftUefiAuthorities = new[] { "2011" }
+                    },
                     Storage = new StoragePreflightInfo
                     {
                         SystemDiskNumber = 0,
@@ -674,6 +713,13 @@ namespace Libertix.Tests
                 });
 
             Assert.AreEqual(InstallationFirmware.Uefi, plan.Firmware);
+            CollectionAssert.AreEqual(
+                new[] { "2011" },
+                plan.Distribution.SecureBootMicrosoftAuthorities);
+            CollectionAssert.AreEqual(
+                new[] { "2011" },
+                plan.Runtime.TrustedMicrosoftUefiAuthorities);
+            Assert.IsTrue(plan.Runtime.SecureBootEnabled);
             Assert.AreEqual(40L * GiB, plan.Disk.Installer.FinalSizeBytes);
             Assert.AreEqual(8L * GiB, plan.Disk.Installer.StagingSizeBytes);
             Assert.IsNull(plan.Development);
@@ -789,6 +835,8 @@ namespace Libertix.Tests
             plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
             plan.Disk.PartitionTableId = "mbr:12345678";
             plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+            plan.Runtime.SecureBootEnabled = false;
+            plan.Runtime.TrustedMicrosoftUefiAuthorities = new string[0];
             plan.Disk.Installer.OffsetBytes -= 1024L * 1024L;
 
             InstallationPlanValidator.Validate(plan);
@@ -824,6 +872,39 @@ namespace Libertix.Tests
                 () => InstallationPlanValidator.Validate(plan));
         }
 
+        [TestMethod]
+        public void InstallationPlanRejectsUnknownSecureBootAuthority()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Distribution.SecureBootMicrosoftAuthorities = new[] { "2040" };
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(
+                exception.Message,
+                "distribution.secureBootMicrosoftAuthorities");
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsTrustedUefiAuthorityInBiosPlan()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Firmware = InstallationFirmware.Bios;
+            plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+            plan.Disk.PartitionTableId = "mbr:12345678";
+            plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(
+                exception.Message,
+                "BIOS plan must not contain trusted Microsoft UEFI authorities");
+        }
+
         private static InstallationPlan CreateValidPlan()
         {
             const long GiB = InstallationSizePolicy.BytesPerGiB;
@@ -839,6 +920,7 @@ namespace Libertix.Tests
                     OsReleaseId = "linuxmint",
                     GrubDisplayName = "Linux Mint 22.3 Cinnamon",
                     GrubIcon = "linuxmint",
+                    SecureBootMicrosoftAuthorities = new[] { "2011" },
                     InstallerIsoFileName = "mint.iso",
                     InstallerIsoUrl = "https://example.test/mint.iso",
                     InstallerIsoWindowsPath =
@@ -903,6 +985,8 @@ namespace Libertix.Tests
                 Runtime = new InstallationRuntime
                 {
                     BootStrategy = InstallationBootStrategy.UefiBootNext,
+                    SecureBootEnabled = true,
+                    TrustedMicrosoftUefiAuthorities = new[] { "2011" },
                     RecoveryRootWindows = @"C:\ProgramData\Libertix\Recovery",
                     RecoveryRunId = new string('d', 32)
                 }

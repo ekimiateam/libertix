@@ -38,6 +38,15 @@
     <system:String x:Key="ResizeDiskIsoSize">ISO d'installation : {0:N1} Go</system:String>
     <system:String x:Key="ResizeDiskLinuxMinimum">Espace Linux minimal : {0:N1} Go</system:String>
     <system:String x:Key="ResizeDiskAdditionalSpace">Espace supplémentaire requis : {0:N1} Go</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeInside">{0:N0} Go libres</system:String>
+    <system:String x:Key="ResizeDiskWindowsUsedLegend">Utilisé par Windows : {0:N0} Go</system:String>
+    <system:String x:Key="ResizeDiskWindowsFreeLegend">Libre pour Windows : {0:N0} Go</system:String>
+    <system:String x:Key="ResizeDiskSizeValue">{0:N0} Go</system:String>
+    <system:String x:Key="ResizeDiskLinuxLegend">Linux : {0:N0} Go</system:String>
+    <system:String x:Key="ResizeDiskWindowsTotalLegend">Windows : {0:N0} Go</system:String>
+    <system:String x:Key="ResizeDiskUsedDetail">Utilisé : {0:N0} Go</system:String>
+    <system:String x:Key="ResizeDiskFreeDetail">Libre : {0:N0} Go</system:String>
+    <system:String x:Key="ResizeDiskSizeUnit">Go</system:String>
     <system:String x:Key="ErrorTitle">Erreur</system:String>
     <system:String x:Key="DistroLoadError">Impossible de charger la liste des distributions. Veuillez vérifier votre connexion Internet et réessayer.</system:String>
 
@@ -83,7 +92,7 @@
 
     <system:String x:Key="SharingTitle">Partage des fichiers</system:String>
     <system:String x:Key="SharingDescription">Choisissez les fichiers accessibles depuis chaque système.</system:String>
-    <system:String x:Key="SharingWindowsToLinuxTitle">Afficher les fichiers Windows dans Mint</system:String>
+    <system:String x:Key="SharingWindowsToLinuxTitle">Afficher les fichiers Windows dans Linux</system:String>
     <system:String x:Key="SharingWindowsToLinuxDescription">Chaque profil Windows apparaîtra sous le nom User_nom dans le gestionnaire de fichiers.</system:String>
     <system:String x:Key="SharingLinuxToWindowsTitle">Afficher les fichiers Linux dans Windows (lecture seule)</system:String>
     <system:String x:Key="SharingLinuxToWindowsDescription">Windows pourra consulter les fichiers Linux sans pouvoir modifier la partition ext4.</system:String>
@@ -145,6 +154,7 @@
     <system:String x:Key="WindowsShareShortcutDescription">Fichiers Linux en lecture seule</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">Préparation de l'installation UEFI...</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Vérification de Secure Boot...</system:String>
+    <system:String x:Key="ApplyChangesSecureBootDistributionUnsupported">Secure Boot est activé, mais {0} ne fournit pas de chargeur du système installé compatible avec ce firmware. Le firmware approuve Microsoft UEFI CA : {1}. La distribution sélectionnée prend en charge : {2}. Aucune modification du disque n'a été effectuée.</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Initialisation du déchiffrement de Windows {0}...</system:String>
     <system:String x:Key="ApplyChangesWindowsDecrypted">Windows {0} déchiffré</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsPercent">Déchiffrement de Windows {0} : {1}%</system:String>

@@ -4,6 +4,9 @@
 param(
     [ValidateSet("en", "fr", "es", "ja")]
     [string]$LanguageCode = "en",
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$ConnectivityUrl,
     [switch]$SkipNvramWriteProbe
 )
 
@@ -71,6 +74,43 @@ function Write-LocalizedWarning {
     $localized = $message -f $FormatArguments
     $warnings.Add($localized)
     Write-Output ("WARNING: {0}" -f $localized)
+}
+
+function Test-DownloadServiceAccess {
+    param([string]$Url)
+
+    try {
+        $uri = New-Object Uri $Url
+        if ($uri.Scheme -notin @("http", "https")) {
+            Stop-Compatibility "COMPAT_E_NETWORK_UNAVAILABLE" @("unsupported URL scheme")
+        }
+
+        $request = [Net.HttpWebRequest]::Create($uri)
+        $request.Method = "GET"
+        $request.Timeout = 15000
+        $request.ReadWriteTimeout = 15000
+        $request.AllowAutoRedirect = $true
+        $request.UserAgent = "Libertix-Compatibility"
+        $request.AddRange(0, 0)
+
+        $response = $request.GetResponse()
+        try {
+            $statusCode = [int]$response.StatusCode
+            if ($statusCode -lt 200 -or $statusCode -ge 400) {
+                Stop-Compatibility "COMPAT_E_NETWORK_UNAVAILABLE" @("HTTP $statusCode")
+            }
+            $stream = $response.GetResponseStream()
+            if ($null -ne $stream) {
+                try { $null = $stream.ReadByte() }
+                finally { $stream.Dispose() }
+            }
+        } finally {
+            $response.Dispose()
+        }
+    } catch {
+        if ($_.Exception.Message -match "^\[COMPAT_") { throw }
+        Stop-Compatibility "COMPAT_E_NETWORK_UNAVAILABLE" @($_.Exception.Message)
+    }
 }
 
 function Get-FirmwareMode {
@@ -285,6 +325,9 @@ try {
         Stop-Compatibility "COMPAT_E_ADMIN_REQUIRED"
     }
 
+    Write-Check "COMPAT_015_NETWORK"
+    Test-DownloadServiceAccess -Url $ConnectivityUrl
+
     Write-Check "COMPAT_020_PLATFORM"
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
     if ([int]$os.ProductType -ne 1) {
@@ -307,20 +350,32 @@ try {
     Write-Check "COMPAT_030_FIRMWARE"
     $firmware = Get-FirmwareMode
     $secureBootEnabled = $false
+    $trustedMicrosoftUefiAuthorities = @()
     $nvramPassed = $false
     $nvramSkipped = $false
     if ($firmware -eq "UEFI") {
         try { $secureBootEnabled = [bool](Confirm-SecureBootUEFI -ErrorAction Stop) }
         catch { Stop-Compatibility "COMPAT_E_SECURE_BOOT_STATE" @($_.Exception.Message) }
-        if ($secureBootEnabled) {
+        try {
             $subjects = @(Get-SecureBootDbCertificates | ForEach-Object { $_.Subject })
-            $thirdPartyCa = @($subjects | Where-Object {
-                $_ -match "CN=Microsoft Corporation UEFI CA 2011(?:,|$)" -or
-                $_ -match "CN=Microsoft(?: Corporation)? UEFI CA 2023(?:,|$)"
-            }).Count -gt 0
-            if (-not $thirdPartyCa) {
-                Stop-Compatibility "COMPAT_E_SECURE_BOOT_THIRD_PARTY_CA"
+            if (@($subjects | Where-Object {
+                $_ -match "CN=Microsoft Corporation UEFI CA 2011(?:,|$)"
+            }).Count -gt 0) {
+                $trustedMicrosoftUefiAuthorities += "2011"
             }
+            if (@($subjects | Where-Object {
+                $_ -match "CN=Microsoft(?: Corporation)? UEFI CA 2023(?:,|$)"
+            }).Count -gt 0) {
+                $trustedMicrosoftUefiAuthorities += "2023"
+            }
+        }
+        catch {
+            if ($secureBootEnabled) {
+                Stop-Compatibility "COMPAT_E_SECURE_BOOT_STATE" @($_.Exception.Message)
+            }
+        }
+        if ($secureBootEnabled -and $trustedMicrosoftUefiAuthorities.Count -eq 0) {
+            Stop-Compatibility "COMPAT_E_SECURE_BOOT_THIRD_PARTY_CA"
         }
         if ($SkipNvramWriteProbe) {
             $nvramSkipped = $true
@@ -335,6 +390,22 @@ try {
     }
 
     Write-Check "COMPAT_040_STORAGE"
+    try {
+        $visibleDisks = @(
+            Get-Disk -ErrorAction Stop |
+                Where-Object { [long]$_.Size -gt 0 }
+        )
+    } catch {
+        Stop-Compatibility "COMPAT_E_DISK_INVENTORY" @($_.Exception.Message)
+    }
+    $usbDisks = @($visibleDisks | Where-Object { [string]$_.BusType -eq "USB" })
+    if ($usbDisks.Count -ne 0) {
+        Stop-Compatibility "COMPAT_E_USB_STORAGE" @($usbDisks.Count)
+    }
+    if ($visibleDisks.Count -ne 1) {
+        Stop-Compatibility "COMPAT_E_DISK_COUNT" @($visibleDisks.Count)
+    }
+
     $systemDrive = [Environment]::GetEnvironmentVariable("SystemDrive").TrimEnd("\")
     if ($systemDrive -notmatch "^[A-Za-z]:$") {
         Stop-Compatibility "COMPAT_E_SYSTEM_DRIVE"
@@ -446,11 +517,6 @@ try {
     if (-not $bitLocker.Safe) {
         Write-LocalizedWarning "BITLOCKER"
     }
-    $fixedDisks = @(Get-Disk | Where-Object { $_.BusType -notin @("USB", "File Backed Virtual") })
-    if ($fixedDisks.Count -gt 1) {
-        Write-LocalizedWarning "MULTIPLE_DISKS" @($fixedDisks.Count)
-    }
-
     [ordered]@{
         preflightOk = $true
         firmware = $firmware
@@ -468,6 +534,7 @@ try {
         bitLockerSafe = [bool]$bitLocker.Safe
         bitLockerState = [string]$bitLocker.State
         secureBootEnabled = [bool]$secureBootEnabled
+        trustedMicrosoftUefiAuthorities = @($trustedMicrosoftUefiAuthorities)
         nvramProbePassed = [bool]$nvramPassed
         nvramProbeSkipped = [bool]$nvramSkipped
         warnings = @($warnings)

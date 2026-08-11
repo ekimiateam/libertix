@@ -47,6 +47,37 @@ function Invoke-Native {
     return $output
 }
 
+function Assert-PowerShellSyntax {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceRoot
+    )
+
+    $scripts = @(
+        Get-ChildItem -LiteralPath $SourceRoot -Recurse -File -ErrorAction Stop |
+            Where-Object { $_.Extension -in @(".ps1", ".psm1") }
+    )
+    foreach ($script in $scripts) {
+        $tokens = $null
+        $parseErrors = $null
+        $null = [Management.Automation.Language.Parser]::ParseFile(
+            $script.FullName,
+            [ref]$tokens,
+            [ref]$parseErrors
+        )
+        if (@($parseErrors).Count -gt 0) {
+            $first = @($parseErrors)[0]
+            throw (
+                "PowerShell syntax error in {0} at line {1}, column {2}: {3}" -f
+                $script.FullName,
+                $first.Extent.StartLineNumber,
+                $first.Extent.StartColumnNumber,
+                $first.Message
+            )
+        }
+    }
+}
+
 function Find-VisualStudioMSBuild {
     # This legacy .NET Framework WPF project requires the Visual Studio MSBuild.
     # The .NET SDK and Framework-directory MSBuild cannot resolve its toolchain.
@@ -243,6 +274,7 @@ try {
     # Build a local disposable copy because compiling on Samba causes file-lock
     # races and would leave intermediate artifacts in the source tree.
     Copy-WithRobocopy -Source $sourcePath -Destination $srcLocal -ExtraArgs @("/XD", ".git", "bin", "obj")
+    Assert-PowerShellSyntax -SourceRoot $srcLocal
 
     $solution = Join-Path $srcLocal "Libertix.sln"
     if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {

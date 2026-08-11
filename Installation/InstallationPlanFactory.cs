@@ -38,7 +38,8 @@ namespace Libertix.Installation
             if (options == null)
                 throw new ArgumentNullException(nameof(options));
             if (options.Distribution == null || options.Account == null ||
-                options.Sharing == null || options.Storage == null ||
+                options.Sharing == null || options.Compatibility == null ||
+                options.Storage == null ||
                 options.Sizes == null || options.Keyboard == null ||
                 options.StartupOptions == null)
             {
@@ -64,6 +65,8 @@ namespace Libertix.Installation
                     OsReleaseId = options.Distribution.OsReleaseId,
                     GrubDisplayName = options.Distribution.GrubDisplayName,
                     GrubIcon = options.Distribution.GrubIcon,
+                    SecureBootMicrosoftAuthorities =
+                        options.Distribution.SecureBootMicrosoftAuthorities.ToArray(),
                     InstallerIsoFileName = options.Distribution.IsoInstallerFileName,
                     InstallerIsoUrl = options.Distribution.IsoInstaller,
                     InstallerIsoWindowsPath = installerIsoWindowsPath,
@@ -120,6 +123,10 @@ namespace Libertix.Installation
                     BootStrategy = isUefi
                         ? InstallationBootStrategy.UefiBootNext
                         : InstallationBootStrategy.BiosGrub4Dos,
+                    SecureBootEnabled = isUefi && options.Compatibility.SecureBootEnabled,
+                    TrustedMicrosoftUefiAuthorities = isUefi
+                        ? options.Compatibility.TrustedMicrosoftUefiAuthorities.ToArray()
+                        : new string[0],
                     RecoveryRootWindows = options.RecoveryRootWindows,
                     RecoveryRunId = options.RecoveryRunId
                 },

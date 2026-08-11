@@ -516,6 +516,15 @@ class PostInstallValidationMixin:
             'test "$(dpkg-divert --listpackage "$source")" = LOCAL; '
             'test "$(dpkg-divert --truename "$source")" = "$diverted"; '
             "done; "
+            'test "$(dpkg-divert --listpackage /usr/sbin/update-grub)" = LOCAL; '
+            'test "$(dpkg-divert --truename /usr/sbin/update-grub)" '
+            "= /usr/local/lib/libertix/update-grub.distrib; "
+            "test -x /usr/sbin/update-grub; "
+            "test -x /usr/local/lib/libertix/update-grub.distrib; "
+            "before=$(sha256sum /boot/grub/grub.cfg | cut -d' ' -f1); "
+            "if LIBERTIX_GRUB_MKCONFIG=/bin/false update-grub; then exit 1; fi; "
+            "after=$(sha256sum /boot/grub/grub.cfg | cut -d' ' -f1); "
+            'test "$before" = "$after"; '
             "update-grub; grub-script-check /boot/grub/grub.cfg; "
             f"test \"$(grep -Ec '^(menuentry|submenu) ' /boot/grub/grub.cfg)\" "
             f"= {EXPECTED_GRUB_ROOT_ENTRY_COUNT}; "
@@ -525,7 +534,15 @@ class PostInstallValidationMixin:
             f"grep -Fq -- {expected_grub_entry} /boot/grub/grub.cfg; "
             'grep -Fq -- "$(uname -r)" /boot/grub/grub.cfg'
             + (
-                "; grep -Fq 'UEFI Firmware Settings' /boot/grub/grub.cfg"
+                "; grep -Fq 'UEFI Firmware Settings' /boot/grub/grub.cfg; "
+                "test -x /usr/local/sbin/libertix-sync-efi; "
+                "test -s /etc/apt/apt.conf.d/99-libertix-boot-maintenance; "
+                "systemctl is-enabled libertix-efi-sync.path; "
+                "/usr/local/sbin/libertix-sync-efi --if-present; "
+                "signatures=$(LC_ALL=C sbverify --list "
+                "/boot/efi/EFI/Libertix/shimx64.efi 2>&1); "
+                "printf '%s\\n' \"$signatures\" | grep -Eq "
+                "'CN=Microsoft Corporation UEFI CA 2011|CN=Microsoft( Corporation)? UEFI CA 2023'"
                 if vm.firmware == "uefi"
                 else ""
             )

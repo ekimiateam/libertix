@@ -86,6 +86,9 @@ namespace Libertix.Installation
         [JsonPropertyName("grubIcon")]
         public string GrubIcon { get; set; }
 
+        [JsonPropertyName("secureBootMicrosoftAuthorities")]
+        public string[] SecureBootMicrosoftAuthorities { get; set; }
+
         [JsonPropertyName("installerIsoFileName")]
         public string InstallerIsoFileName { get; set; }
 
@@ -220,6 +223,12 @@ namespace Libertix.Installation
 
         [JsonPropertyName("bootStrategy")]
         public string BootStrategy { get; set; }
+
+        [JsonPropertyName("secureBootEnabled")]
+        public bool SecureBootEnabled { get; set; }
+
+        [JsonPropertyName("trustedMicrosoftUefiAuthorities")]
+        public string[] TrustedMicrosoftUefiAuthorities { get; set; }
 
         [JsonPropertyName("recoveryRootWindows")]
         public string RecoveryRootWindows { get; set; }

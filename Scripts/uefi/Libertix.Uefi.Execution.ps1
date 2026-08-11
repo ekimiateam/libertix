@@ -289,17 +289,131 @@ function Publish-LibertixInstallationContext {
     }
 }
 
-function Write-ExceptionDiagnostics {
-    param([Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord)
+function ConvertTo-LibertixDiagnosticText {
+    param([AllowNull()][object]$Value)
 
-    Write-Log "Exception type: $($ErrorRecord.Exception.GetType().FullName)" "Red"
-    if ($ErrorRecord.FullyQualifiedErrorId) {
-        Write-Log "Error id: $($ErrorRecord.FullyQualifiedErrorId)" "Red"
+    if ($null -eq $Value) {
+        return ""
     }
-    if ($ErrorRecord.InvocationInfo.PositionMessage) {
-        Write-Log "Error position: $($ErrorRecord.InvocationInfo.PositionMessage.Trim())" "Red"
+
+    $text = [string]$Value
+    $secretAssignment = '(?i)(password(?:[-_]?hash)?|token|secret|api[-_]?key)(\s*[:=]\s*)("[^"]*"|''[^'']*''|[^\s,;]+)'
+    return [regex]::Replace($text, $secretAssignment, '$1$2[REDACTED]')
+}
+
+function Write-LibertixDiagnosticField {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()][object]$Value
+    )
+
+    $text = ConvertTo-LibertixDiagnosticText -Value $Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return
     }
-    if ($ErrorRecord.ScriptStackTrace) {
-        Write-Log "PowerShell stack: $($ErrorRecord.ScriptStackTrace)" "Red"
+
+    $lines = @($text -split "`r?`n")
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        $fieldName = if ($index -eq 0) { $Name } else { "$Name+" }
+        Write-Log "${fieldName}: $($lines[$index])" "Red"
     }
+}
+
+function Get-LibertixDiagnosticStage {
+    try {
+        if (Test-LibertixTrackedExecution) {
+            $state = Read-LibertixExecutionState -Path $ExecutionStatePath
+            if (-not [string]::IsNullOrWhiteSpace([string]$state.activeStep)) {
+                return [string]$state.activeStep
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$state.phase)) {
+                return [string]$state.phase
+            }
+        }
+    } catch {
+        return "diagnostic-stage-unavailable"
+    }
+    return "unknown"
+}
+
+function Write-ExceptionDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [ValidateSet("Primary", "Rollback", "Cancellation")]
+        [string]$Kind = "Primary",
+        [string]$CorrelationId = "",
+        [string]$Stage = ""
+    )
+
+    $heading = $Kind.ToUpperInvariant()
+    Write-Log "===== $heading ERROR BEGIN =====" "Red"
+    Write-LibertixDiagnosticField -Name "ErrorKind" -Value $Kind
+    Write-LibertixDiagnosticField -Name "CorrelationId" -Value $CorrelationId
+    Write-LibertixDiagnosticField -Name "Stage" -Value $Stage
+    Write-LibertixDiagnosticField -Name "Message" -Value $ErrorRecord.Exception.Message
+    Write-LibertixDiagnosticField `
+        -Name "ExceptionType" `
+        -Value $ErrorRecord.Exception.GetType().FullName
+    Write-LibertixDiagnosticField `
+        -Name "FullyQualifiedErrorId" `
+        -Value $ErrorRecord.FullyQualifiedErrorId
+
+    if ($ErrorRecord.CategoryInfo) {
+        Write-LibertixDiagnosticField -Name "Category" -Value $ErrorRecord.CategoryInfo.Category
+        Write-LibertixDiagnosticField -Name "Reason" -Value $ErrorRecord.CategoryInfo.Reason
+        Write-LibertixDiagnosticField -Name "Activity" -Value $ErrorRecord.CategoryInfo.Activity
+        Write-LibertixDiagnosticField -Name "TargetName" -Value $ErrorRecord.CategoryInfo.TargetName
+        Write-LibertixDiagnosticField -Name "TargetType" -Value $ErrorRecord.CategoryInfo.TargetType
+    }
+
+    if ($ErrorRecord.InvocationInfo) {
+        $commandName = if ($ErrorRecord.InvocationInfo.MyCommand) {
+            [string]$ErrorRecord.InvocationInfo.MyCommand.Name
+        } else {
+            ""
+        }
+        Write-LibertixDiagnosticField `
+            -Name "Command" `
+            -Value $commandName
+        Write-LibertixDiagnosticField `
+            -Name "InvocationName" `
+            -Value $ErrorRecord.InvocationInfo.InvocationName
+        Write-LibertixDiagnosticField `
+            -Name "Script" `
+            -Value $ErrorRecord.InvocationInfo.ScriptName
+        Write-LibertixDiagnosticField `
+            -Name "Line" `
+            -Value $ErrorRecord.InvocationInfo.ScriptLineNumber
+        Write-LibertixDiagnosticField `
+            -Name "Offset" `
+            -Value $ErrorRecord.InvocationInfo.OffsetInLine
+        Write-LibertixDiagnosticField `
+            -Name "SourceLine" `
+            -Value ([string]$ErrorRecord.InvocationInfo.Line).Trim()
+        Write-LibertixDiagnosticField `
+            -Name "Position" `
+            -Value ([string]$ErrorRecord.InvocationInfo.PositionMessage).Trim()
+    }
+
+    Write-LibertixDiagnosticField `
+        -Name "PowerShellStack" `
+        -Value $ErrorRecord.ScriptStackTrace
+
+    $innerException = $ErrorRecord.Exception.InnerException
+    $innerIndex = 0
+    while ($null -ne $innerException -and $innerIndex -lt 8) {
+        Write-LibertixDiagnosticField `
+            -Name "InnerException[$innerIndex].Type" `
+            -Value $innerException.GetType().FullName
+        Write-LibertixDiagnosticField `
+            -Name "InnerException[$innerIndex].Message" `
+            -Value $innerException.Message
+        $innerException = $innerException.InnerException
+        $innerIndex++
+    }
+
+    Write-LibertixDiagnosticField `
+        -Name "DotNetException" `
+        -Value $ErrorRecord.Exception.ToString()
+    Write-Log "===== $heading ERROR END =====" "Red"
 }

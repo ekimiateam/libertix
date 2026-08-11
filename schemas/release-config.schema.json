@@ -49,6 +49,7 @@
         "osReleaseId",
         "grubDisplayName",
         "grubIcon",
+        "secureBootMicrosoftAuthorities",
         "description",
         "imageUrl",
         "isoInstaller",
@@ -78,6 +79,14 @@
         "grubIcon": {
           "type": "string",
           "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
+        "secureBootMicrosoftAuthorities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["2011", "2023"]
+          }
         },
         "description": {
           "type": "string",

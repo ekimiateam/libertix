@@ -1,5 +1,5 @@
 [Unit]
-Description=Resize root filesystem on first boot
+Description=Verify Libertix installation and resize root filesystem on first boot
 After=local-fs.target
 
 [Service]

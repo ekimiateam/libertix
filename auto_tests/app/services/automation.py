@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -69,6 +70,7 @@ class AutomationService(
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
+        simulate_fog_clone_boot_entries: bool = False,
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
@@ -107,6 +109,7 @@ class AutomationService(
                 share_windows_files_in_linux=share_windows_files_in_linux,
                 share_linux_files_in_windows=share_linux_files_in_windows,
                 use_default_filepool=source == "published",
+                simulate_fog_clone_boot_entries=simulate_fog_clone_boot_entries,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
                 futures = {
@@ -248,6 +251,8 @@ class AutomationService(
                 vm=vm.name,
                 executable=str(local_executable),
             )
+            if options.simulate_fog_clone_boot_entries:
+                self._inject_fog_clone_boot_entry(vm, local_executable, result)
             launch = self._launch_elevated(
                 vm,
                 local_executable,
@@ -332,6 +337,55 @@ class AutomationService(
             toast_notifications_disabled=True,
             windows_backup_notifications_disabled=True,
             windows_notification_services_disabled=True,
+        )
+
+    def _inject_fog_clone_boot_entry(
+        self,
+        vm: VMConfig,
+        executable: PureWindowsPath,
+        result: ResultBuilder,
+    ) -> None:
+        if vm.firmware != "uefi":
+            raise WorkflowError(
+                "automation.fog_clone_fixture",
+                "The FOG clone boot-entry fixture is valid only for UEFI VMs",
+                details={"vm": vm.name, "firmware": vm.firmware},
+            )
+        with self.validation.ssh(
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
+        ) as ssh:
+            response = self.validation.run_windows_script(
+                ssh,
+                script_name="inject_fog_clone_boot_entry.ps1",
+                config={"release_root": str(executable.parent)},
+                step="automation.fog_clone_fixture",
+                timeout=60,
+            )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=("STALE_BOOT_VARIABLE", "STALE_PARTITION_GUID"),
+        )
+        if not re.fullmatch(
+            r"Boot[0-9A-F]{4}", values.get("STALE_BOOT_VARIABLE", "")
+        ) or not re.fullmatch(
+            r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+            values.get("STALE_PARTITION_GUID", ""),
+        ):
+            raise WorkflowError(
+                "automation.fog_clone_fixture",
+                "The VM did not confirm the stale cloned UEFI entry",
+                details={"vm": vm.name, "host": vm.host},
+            )
+        result.ok(
+            "automation.fog_clone_fixture",
+            "A stale cloned UEFI Libertix entry was injected before installation",
+            vm=vm.name,
+            target=vm.host,
+            boot_variable=values["STALE_BOOT_VARIABLE"],
+            stale_partition_guid=values["STALE_PARTITION_GUID"],
         )
 
     def _launch_elevated(

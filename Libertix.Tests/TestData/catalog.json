@@ -55,6 +55,9 @@
       "osReleaseId": "linuxmint",
       "grubDisplayName": "Linux Mint 22.3 Cinnamon",
       "grubIcon": "linuxmint",
+      "secureBootMicrosoftAuthorities": [
+        "2011"
+      ],
       "description": "Linux Mint is an operating system for desktop and laptop computers. It is designed to work out of the box and comes fully equipped with the apps most people need.",
       "imageUrl": "https://www.linuxmint.com/web/img/screenshots/c1.jpg",
       "isoInstaller": "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso",
@@ -69,6 +72,9 @@
       "osReleaseId": "zorin",
       "grubDisplayName": "Zorin OS 18.1 Core",
       "grubIcon": "zorin",
+      "secureBootMicrosoftAuthorities": [
+        "2011"
+      ],
       "description": "Zorin OS Core is a free Ubuntu-based desktop operating system with standard apps and four desktop layouts.",
       "imageUrl": "https://assets.zorincdn.com/zorin.com/images/download/18/core.png",
       "isoInstaller": "https://mirrors.univ-reims.fr/IMAGES/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso",

@@ -1,0 +1,8 @@
+[Unit]
+Description=Synchronize the verified Libertix UEFI boot chain
+After=boot-efi.mount
+ConditionPathExists=/etc/libertix/installation-plan.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/libertix-sync-efi --if-present

@@ -72,6 +72,7 @@ def load_config(path: Path) -> dict[str, object]:
         "osReleaseId",
         "grubDisplayName",
         "grubIcon",
+        "secureBootMicrosoftAuthorities",
         "description",
         "imageUrl",
         "isoInstaller",
@@ -109,6 +110,16 @@ def load_config(path: Path) -> dict[str, object]:
         )
         if not GRUB_NAME_PATTERN.fullmatch(grub_name):
             raise ValueError(f"{prefix}.grubDisplayName is invalid")
+        authorities = distribution["secureBootMicrosoftAuthorities"]
+        if (
+            not isinstance(authorities, list)
+            or not authorities
+            or len(authorities) != len(set(authorities))
+            or any(authority not in {"2011", "2023"} for authority in authorities)
+        ):
+            raise ValueError(
+                f"{prefix}.secureBootMicrosoftAuthorities must contain unique 2011/2023 values"
+            )
         filename = _require_string(
             distribution["isoInstallerFileName"],
             f"{prefix}.isoInstallerFileName",

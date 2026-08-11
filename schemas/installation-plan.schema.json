@@ -67,6 +67,7 @@
         "osReleaseId",
         "grubDisplayName",
         "grubIcon",
+        "secureBootMicrosoftAuthorities",
         "installerIsoFileName",
         "installerIsoUrl",
         "installerIsoWindowsPath",
@@ -94,6 +95,9 @@
         "grubIcon": {
           "type": "string",
           "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
+        "secureBootMicrosoftAuthorities": {
+          "$ref": "#/$defs/microsoftUefiAuthorities"
         },
         "installerIsoFileName": {
           "type": "string",
@@ -333,6 +337,8 @@
       "required": [
         "lowMemoryMode",
         "bootStrategy",
+        "secureBootEnabled",
+        "trustedMicrosoftUefiAuthorities",
         "recoveryRootWindows",
         "recoveryRunId"
       ],
@@ -346,6 +352,16 @@
             "uefi-boot-next",
             "uefi-firmware-boot-order"
           ]
+        },
+        "secureBootEnabled": {
+          "type": "boolean"
+        },
+        "trustedMicrosoftUefiAuthorities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": ["2011", "2023"]
+          }
         },
         "recoveryRootWindows": {
           "type": [
@@ -361,6 +377,14 @@
           ],
           "pattern": "^[0-9a-f]{32}$"
         }
+      }
+    },
+    "microsoftUefiAuthorities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["2011", "2023"]
       }
     },
     "development": {

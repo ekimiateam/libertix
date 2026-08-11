@@ -9,9 +9,10 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="0,10,0,24">
+        <StackPanel Grid.Row="0" Margin="0,4,0,18">
             <TextBlock Text="{DynamicResource CompatibilityTitle}"
                        HorizontalAlignment="Center"
                        Foreground="{DynamicResource TextPrimary}"
@@ -21,16 +22,13 @@
                        HorizontalAlignment="Center"
                        Foreground="{DynamicResource TextSecondary}"
                        FontSize="15"
+                       MaxWidth="880"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
                        Margin="0,8,0,0"/>
         </StackPanel>
 
-        <StackPanel Grid.Row="1" Margin="40,0,40,20">
-            <TextBlock x:Name="StatusText"
-                       Text="{DynamicResource CompatibilityStarting}"
-                       Foreground="{DynamicResource TextPrimary}"
-                       FontSize="18"
-                       TextWrapping="Wrap"
-                       Margin="0,0,0,10"/>
+        <StackPanel Grid.Row="1" Margin="40,0,40,16">
             <ProgressBar x:Name="CheckProgress"
                          Height="14"
                          Minimum="0"
@@ -54,7 +52,19 @@
             </ScrollViewer>
         </Border>
 
-        <Grid Grid.Row="3" Margin="40,20,40,0">
+        <TextBlock x:Name="StatusText"
+                   Grid.Row="3"
+                   Text="{DynamicResource CompatibilityStarting}"
+                   HorizontalAlignment="Center"
+                   Foreground="{DynamicResource TextPrimary}"
+                   FontSize="20"
+                   FontWeight="SemiBold"
+                   TextAlignment="Center"
+                   TextWrapping="Wrap"
+                   MaxWidth="880"
+                   Margin="40,14,40,0"/>
+
+        <Grid Grid.Row="4" Margin="40,14,40,0">
             <Button x:Name="RetryButton"
                     Content="{DynamicResource CompatibilityRetry}"
                     Style="{StaticResource ModernButton}"

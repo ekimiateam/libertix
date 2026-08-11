@@ -71,13 +71,17 @@ def test_process_operation_lock_can_be_reused_without_network(tmp_path: Path) ->
 
 
 def test_spawn_worker_arguments_and_target_are_serializable() -> None:
-    request = AutomationRequest(linux_password="test-passphrase")
+    request = AutomationRequest(
+        linux_password="test-passphrase",
+        simulate_fog_clone_boot_entries=True,
+    )
 
     assert pickle.loads(pickle.dumps(main_module._stream_operation_worker)) is (  # noqa: SLF001
         main_module._stream_operation_worker  # noqa: SLF001
     )
     restored_settings, restored_request = pickle.loads(pickle.dumps((settings(), request)))
     assert restored_request.linux_password == "test-passphrase"
+    assert restored_request.simulate_fog_clone_boot_entries is True
 
 
 def test_process_operation_lock_refuses_a_symlink(tmp_path: Path) -> None:

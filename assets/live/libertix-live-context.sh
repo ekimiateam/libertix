@@ -98,6 +98,27 @@ load_libertix_live_context() {
     export INSTALLATION_PLAN_PATH INSTALLATION_STATE_PATH
 }
 
+load_libertix_live_context_with_retry() {
+    local expected_firmware="$1" maximum_attempts="$2" error_file="$3" attempt
+
+    case "$maximum_attempts" in
+        ''|*[!0-9]*|0) return 2 ;;
+    esac
+    [ -n "$error_file" ] || return 2
+
+    for attempt in $(seq 1 "$maximum_attempts"); do
+        : > "$error_file"
+        # Keep this call in the current shell. A command substitution would
+        # discard the plan variables exported by load_libertix_live_context.
+        if load_libertix_live_context "$expected_firmware" \
+            >/dev/null 2> "$error_file"; then
+            return 0
+        fi
+        [ "$attempt" -eq "$maximum_attempts" ] || sleep 1
+    done
+    return 1
+}
+
 durable_bios_mbr_backup_directory() {
     local windows_root="$1" relative
 

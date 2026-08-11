@@ -216,6 +216,8 @@ if (-not $RecoveryRunId -and $firmwareOwnerRunId) {
 }
 $InstallerEspDirectory = "EFI\LibertixInstaller"
 $InstallerEspOwnershipFile = ".libertix-owner"
+$InstalledEspDirectory = "EFI\Libertix"
+$InstalledBootDescription = "Libertix"
 $TransactionStatePath = "$SystemDrive\LibertixTools\uefi-transaction.json"
 
 if ($BootStrategy -notin @("BootNext", "FirmwareBootOrder")) {
@@ -287,7 +289,7 @@ try {
     }
 
     Assert-LibertixPlanMatchesCurrentStorage
-    Test-LibertixSecureBootCompatibility
+    Test-LibertixSecureBootCompatibility -InstallationPlan $installationPlan
     Set-WindowsVolumeReadableFromLinux
     Start-LibertixTrackedStep -Step "windows.artifacts-verified"
     Write-LibertixProgress -Stage "installer-iso-download" -Percent 30
@@ -330,7 +332,19 @@ try {
 } catch {
     $preparationError = $_
     Write-Log $preparationError.Exception.Message "Red"
-    Write-ExceptionDiagnostics -ErrorRecord $preparationError
+    $diagnosticCorrelationId = if ($RecoveryRunId) {
+        $RecoveryRunId
+    } elseif ($installationPlan) {
+        [string]$installationPlan.planId
+    } else {
+        ""
+    }
+    $diagnosticStage = Get-LibertixDiagnosticStage
+    Write-ExceptionDiagnostics `
+        -ErrorRecord $preparationError `
+        -Kind "Primary" `
+        -CorrelationId $diagnosticCorrelationId `
+        -Stage $diagnosticStage
     Write-Log "Error during preparation; running automatic revert..." "Yellow"
     try {
         Set-LibertixTrackedFailure `
@@ -346,7 +360,11 @@ try {
     } catch {
         $revertError = $_
         Write-Log "Automatic revert failed: $($revertError.Exception.Message)" "Red"
-        Write-ExceptionDiagnostics -ErrorRecord $revertError
+        Write-ExceptionDiagnostics `
+            -ErrorRecord $revertError `
+            -Kind "Rollback" `
+            -CorrelationId $diagnosticCorrelationId `
+            -Stage "rollback"
         Write-Log "Tip: you can run with -Revert to restore Windows boot." "Yellow"
     }
     exit 1

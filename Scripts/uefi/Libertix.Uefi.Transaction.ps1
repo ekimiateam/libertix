@@ -299,6 +299,13 @@ function Invoke-Revert {
 
         Remove-LibertixTemporaryEspFiles -EspDrive $esp
 
+        # A post-install rollback also owns the final loader, but only when its
+        # durable ESP marker matches this exact recovery run.
+        if (Assert-LibertixInstalledEspOwnership -EspDrive $esp) {
+            Remove-LibertixInstalledFirmwareEntries -EspDrive $esp
+            Remove-LibertixInstalledEspFiles -EspDrive $esp
+        }
+
         Remove-LibertixTemporaryFirmwareEntries
         Restore-OriginalFirmwareBootOrder
         Complete-LibertixTrackedCompensation -Step "windows.temporary-boot-prepared"

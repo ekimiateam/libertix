@@ -41,6 +41,39 @@ def test_compatibility_preflight_is_before_distro_selection() -> None:
     assert "App.Current.Properties" not in page
 
 
+def test_compatibility_preflight_checks_download_access_and_one_disk_before_layout() -> None:
+    script = read("Scripts/libertix-compatibility-preflight.ps1")
+    runner = read("Helpers/CompatibilityPreflightRunner.cs")
+    page = read("Pages/CompatibilityCheck.xaml.cs")
+
+    assert "[string]$ConnectivityUrl" in script
+    assert 'Write-Check "COMPAT_015_NETWORK"' in script
+    assert "Test-DownloadServiceAccess -Url $ConnectivityUrl" in script
+    assert "$request.Timeout = 15000" in script
+    assert "$request.ReadWriteTimeout = 15000" in script
+    assert "$request.AddRange(0, 0)" in script
+    assert script.index('Write-Check "COMPAT_015_NETWORK"') < script.index(
+        'Write-Check "COMPAT_020_PLATFORM"'
+    )
+
+    storage = script.split('Write-Check "COMPAT_040_STORAGE"', 1)[1]
+    usb_check = "$usbDisks = @($visibleDisks | Where-Object"
+    disk_count_check = "if ($visibleDisks.Count -ne 1)"
+    system_drive_check = "$systemDrive = [Environment]::GetEnvironmentVariable"
+    assert "Get-Disk -ErrorAction Stop" in storage
+    assert usb_check in storage
+    assert 'Stop-Compatibility "COMPAT_E_USB_STORAGE"' in storage
+    assert disk_count_check in storage
+    assert 'Stop-Compatibility "COMPAT_E_DISK_COUNT"' in storage
+    assert storage.index(usb_check) < storage.index(disk_count_check)
+    assert storage.index(disk_count_check) < storage.index(system_drive_check)
+    assert 'Write-LocalizedWarning "MULTIPLE_DISKS"' not in script
+
+    assert '" -ConnectivityUrl " +' in runner
+    assert "WindowsProcessRunner.QuoteArgument(connectivityUrl)" in runner
+    assert "Filepool.CatalogUrl" in page
+
+
 def test_live_boot_mode_function_is_fail_closed(
     run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
@@ -367,6 +400,25 @@ def test_bios_mbr_normalization_writes_exact_sectors_under_a_disk_lock() -> None
     assert '"$new_end" = "$logical_end"' in normalization
     assert '"$new_size" = "$original_size"' in normalization
     assert normalization.count("assert_recovery_unchanged_or_die") >= 2
+
+
+def test_recovery_identity_check_retries_only_the_exact_manifest_geometry() -> None:
+    runtime = read("assets/live/libertix-install-runtime-common.sh")
+
+    assert "for attempt in $(seq 1 20); do" in runtime
+    assert "udevadm settle --timeout=10" in runtime
+    assert '"$RECOVERY_PARTITION_OFFSET_BYTES"' in runtime
+    assert '"$recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES"' in runtime
+
+
+def test_installed_windows_grub_entry_has_a_stable_verification_id() -> None:
+    target = read("assets/live/configure-target-main.sh")
+    validator = read("assets/live/libertix-validate-grub.sh")
+    verifier = read("assets/live/libertix-first-boot-verify.py")
+
+    assert target.count("--id libertix-windows") == 2
+    assert "--id libertix-windows" in validator
+    assert '"--id libertix-windows"' in verifier
 
 
 def test_bios_mbr_removal_verifies_the_table_instead_of_trusting_parted_rc() -> None:
@@ -793,7 +845,9 @@ def test_windows_download_and_bios_boot_temporary_state_is_transaction_scoped() 
     assert "finally" in downloads
     assert "DeleteDownloadDirectoryBestEffort(downloadDir, label);" in downloads
     assert "Directory.Delete(path, recursive: true);" in downloads
-    assert recovery.count("Restore-BcdState -Required") == 3
+    assert "function Invoke-VerifiedInstallationSuccess" in recovery
+    assert "Restore-BcdState -Required" in recovery
+    assert "Restore-BiosMbrBootCode" in recovery
     assert '[string]$recoveryExecutionState.status -eq "succeeded"' in recovery
     assert '[string]$recoveryExecutionState.status -eq "rolled-back"' in recovery
     assert "Restore-OriginalHibernationSetting" in recovery
@@ -866,7 +920,7 @@ def test_final_verification_counts_mbr_slots_instead_of_lsblk_children() -> None
     assert "final verify: MBR partition count is" not in uefi
 
 
-def test_success_retires_stale_uefi_transaction_state_after_final_verification() -> None:
+def test_success_preserves_uefi_transaction_until_windows_archives_it() -> None:
     installer = read("assets/live/libertix-install-main.sh")
     bios = read("assets/live/libertix-bios-adapter.sh")
     uefi = read("assets/live/libertix-uefi-adapter.sh")
@@ -883,9 +937,12 @@ def test_success_retires_stale_uefi_transaction_state_after_final_verification()
 
     assert verify_position < terminal_state_position < success_marker_position < retire_position
     assert "firmware_retire_completed_transaction_best_effort()" in bios
-    assert "uefi-transaction.json" in uefi
-    assert 'mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint"' in uefi
-    assert 'rm -f -- "$transaction_state"' in uefi
+    assert "Windows startup verifier archives this transaction" in uefi
+    assert "uefi-transaction.json" not in uefi
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    assert "function Save-UefiTransactionArchive" in agent
+    assert 'Join-Path $State.RecoveryRoot "uefi-transaction.json"' in agent
+    assert "Save-UefiTransactionArchive -State $State" in agent
 
 
 def test_uefi_live_failure_restores_windows_settings_for_the_same_run() -> None:
@@ -910,17 +967,54 @@ def test_uefi_live_failure_restores_windows_settings_for_the_same_run() -> None:
     assert "OriginalHibernateEnabled" in transaction
 
 
-def test_uefi_recovery_cleanup_verifies_tasks_and_success_root_removal() -> None:
+def test_uefi_recovery_cleanup_preserves_the_recovery_root() -> None:
     agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
-    cleanup = agent.split("function Remove-RecoveryArtifacts", 1)[1].split(
-        "function Invoke-WindowsShareFinalize", 1
+    tasks = agent.split("function Remove-RecoveryTasks", 1)[1].split(
+        "function Remove-StartupRecoveryTask", 1
+    )[0]
+    cleanup = agent.split("function Remove-TemporaryRecoveryArtifacts", 1)[1].split(
+        "function Save-UefiTransactionArchive", 1
     )[0]
 
-    assert "Unregister-ScheduledTask" in cleanup
-    assert "Get-ScheduledTask" in cleanup
-    assert "Recovery task still exists after removal" in cleanup
-    assert "Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop" in cleanup
-    assert "Recovery root still exists after removal" in cleanup
+    assert "Unregister-ScheduledTask" in tasks
+    assert "Get-ScheduledTask" in tasks
+    assert "Recovery task still exists after removal" in tasks
+    assert "Remove-LibertixTransactionDownloads" in cleanup
+    assert "Remove-LibertixUefiToolArtifacts" in cleanup
+    assert "Remove-Item -LiteralPath $root -Recurse" not in agent
+
+
+def test_interrupted_post_install_verification_keeps_startup_recovery_armed() -> None:
+    bios = read("Scripts/libertix-recovery-guard.ps1")
+    uefi = read("Scripts/libertix-uefi-recovery-agent.ps1")
+
+    for script in (bios, uefi):
+        assert 'verificationStatus -in @("succeeded", "failed")' in script
+        assert "startup recovery remains armed" in script
+    assert "Remove-RecoveryTask -Required" in bios
+    assert "Remove-StartupRecoveryTask -State $State" in uefi
+
+
+def test_completed_bios_recovery_proves_task_absence_after_schtasks_delete() -> None:
+    bios = read("Scripts/libertix-recovery-guard.ps1")
+    removal = bios.split("function Remove-RecoveryTask", 1)[1].split(
+        "function Remove-RecoveryPromptTask", 1
+    )[0]
+
+    assert "schtasks.exe /Delete" in removal
+    assert "schtasks.exe /Query" in removal
+    assert "if (-not $taskStillExists)" in removal
+    assert "deleteExitCode -ne 0" not in removal
+
+
+def test_temporary_artifact_check_preserves_permanent_rollback_metadata() -> None:
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    temporary = checks.split('"temporary_artifacts" {', 1)[1].split('"network" {', 1)[0]
+
+    assert "The durable BIOS rollback metadata is missing." in temporary
+    assert "The BIOS recovery transaction is still pending." not in temporary
+    assert "$startupRecoveryTasks.Count -eq 0" in temporary
+    assert "$promptTasks.Count -le 1" in temporary
 
 
 def test_low_memory_mode_reaches_bios_and_uefi_configuration() -> None:
@@ -1137,8 +1231,9 @@ def test_uefi_firmware_fallback_is_blocked_by_secure_boot_after_verified_restore
     )
     assert "-Action Cancel" in fallback
     assert "-WaitForProcessId {processId}" in fallback
-    assert "Wait-Process -Id $WaitForProcessId" in recovery_agent
-    assert "-WaitForProcessId $WaitForProcessId" in recovery_agent
+    assert "Remove-TemporaryRecoveryArtifacts" in recovery_agent
+    assert "Remove-RecoveryTasks" in recovery_agent
+    assert "Remove-Item -LiteralPath $root -Recurse" not in recovery_agent
     assert (
         "https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/"
         "disabling-secure-boot?view=windows-11" in fallback_xaml
@@ -1211,6 +1306,15 @@ def test_uefi_temporary_artifacts_are_owned_by_the_recovery_run() -> None:
     assert "EFI/LibertixInstaller/.libertix-owner" in live
     assert "EFI/Libertix/.libertix-owner" in live
     assert 'LIBERTIX_FINAL_BOOTNUM="$bootnum"' in live
+    assert '"$esp_guid"' in live
+    assert '"$LIBERTIX_BOOT_LOADER" > "$efi_dir/.libertix-owner"' in live
+    assert "find_exact_uefi_bootnumbers" in live
+    assert "ensure_windows_bootentry_for_current_esp_or_die" in live
+    installed_removal = firmware.split("function Remove-LibertixInstalledFirmwareEntries", 1)[
+        1
+    ].split("function Set-NativeUefiBootOrderOnce", 1)[0]
+    assert "$bootNumberText" in installed_removal
+    assert "Remove-NativeFirmwareEntriesByDescription" not in installed_removal
     assert 'efibootmgr -b "$bootnum" -B' in live
 
 
@@ -1220,6 +1324,9 @@ def test_release_restore_dismount_and_latest_logs_fail_closed() -> None:
     log_copy = read("assets/live/libertix-copy-logs.sh")
 
     restore = build.split("if ($releaseBackup -and (Test-Path -LiteralPath $releaseBackup))", 1)[1]
+    assert "function Assert-PowerShellSyntax" in build
+    assert "Assert-PowerShellSyntax -SourceRoot $srcLocal" in build
+    assert "Management.Automation.Language.Parser" in build
     assert "Failed to restore the previous Libertix release" in restore
     assert (
         "Move-Item -LiteralPath $releaseBackup -Destination $releasePath -ErrorAction Stop"
@@ -1238,6 +1345,22 @@ def test_release_restore_dismount_and_latest_logs_fail_closed() -> None:
     assert 'cp -a "$log_dir/." "$latest_staging/"' in log_copy
     assert 'mv -- "$latest_staging" "$latest_dir"' in log_copy
     assert 'cp -a "$LOG_DIR/." "$log_root/latest/"' not in log_copy
+
+
+def test_warning_accessibility_worker_stays_within_task_scheduler_command_limit() -> None:
+    script = read("auto_tests/app/scripts/set_warning_acknowledgement.ps1")
+
+    task_command = script.split("$taskCommand =", 1)[1].split("\n", 2)[0]
+    assert "-ConfigPath" not in task_command
+    assert "$taskCommand.Length -gt 261" in script
+    assert "ACKNOWLEDGED=True" in script
+    assert "CONFIRM_ENABLED=True" in script
+    assert "function Find-LibertixAutomationControl" in script
+    assert "AutomationElement]::RootElement.FindFirst" in script
+    assert "AutomationElement]::ProcessIdProperty" in script
+    assert 'Scope = "process"' in script
+    assert "did not become visible within 15 seconds" in script
+    assert "Start-Sleep -Milliseconds 200" in script
 
 
 def test_windows_process_tree_must_be_proven_stopped_before_rollback() -> None:
@@ -1366,7 +1489,7 @@ def test_uefi_recovery_retires_only_the_exact_transaction_partition() -> None:
         assert field in creation
         assert field in agent
     partition_check = agent.split("function Test-LinuxPartitionPresent", 1)[1].split(
-        "function Remove-RecoveryArtifacts", 1
+        "function Remove-RecoveryTasks", 1
     )[0]
     assert "[int64]$_.Offset -eq $expectedOffset" in partition_check
     assert "[int64]$_.Size -eq $expectedSize" in partition_check
@@ -1528,6 +1651,7 @@ def test_live_manifest_survives_detached_toram_medium_and_fat_name_case() -> Non
 def test_sharing_options_reach_both_live_installers() -> None:
     apply_changes = read_apply_changes()
     plan_loader = read("assets/live/libertix-installation-plan.sh")
+    plan_exporter = read("assets/live/libertix-installation-plan.py")
     target = read("assets/live/libertix-target-common.sh")
     for variable in (
         "SHARE_WINDOWS_FILES_IN_LINUX",
@@ -1542,7 +1666,11 @@ def test_sharing_options_reach_both_live_installers() -> None:
     assert "WindowsProfilesJsonBase64" in apply_changes
     assert '"Default"' in apply_changes
     assert '"Default User"' in apply_changes
+    assert '"WsiAccount"' in apply_changes
     assert "excludedProfiles.Contains(profileName)" in apply_changes
+
+    assert '"WsiAccount"' in plan_exporter
+    assert "project_windows_profiles" in plan_exporter
 
 
 def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
@@ -2982,6 +3110,7 @@ def test_windows_storage_waits_only_for_small_transient_free_space_deficits() ->
 
 def test_grub_generators_remain_nested_after_package_updates() -> None:
     target = read("assets/live/configure-target-main.sh")
+    validator = read("assets/live/libertix-validate-grub.sh")
     postinstall = read("auto_tests/app/services/automation_postinstall.py")
 
     assert "dpkg-divert --local --add --rename --divert" in target
@@ -2998,7 +3127,8 @@ def test_grub_generators_remain_nested_after_package_updates() -> None:
     assert 'parser.add_argument("--extra"' in read("grub/render-libertix-menu.py")
     assert "chmod -x /etc/grub.d/10_linux" not in target
     root_entry_pattern = "grep -Ec '^(menuentry|submenu) '"
-    assert root_entry_pattern in target
+    assert "/usr/local/lib/libertix/libertix-validate-grub" in target
+    assert root_entry_pattern in validator
     assert root_entry_pattern in postinstall
     assert 'RemoteCheck(\n                "linux.grub_regeneration"' in postinstall
     assert "update-grub; grub-script-check /boot/grub/grub.cfg" in postinstall
@@ -3171,6 +3301,16 @@ def test_live_context_exports_the_validated_plan_for_target_configuration() -> N
     assert 'INSTALLATION_PLAN_PATH="$plan_path"' in context
     assert "export INSTALLATION_PLAN_PATH INSTALLATION_STATE_PATH" in context
     assert 'install -m 0644 "$INSTALLATION_PLAN_PATH"' in target
+
+
+def test_target_configuration_creates_the_first_boot_verifier_directory() -> None:
+    target = read("assets/live/libertix-target-common.sh")
+    directory_creation = "install -d -m 0755 /mnt/target/usr/local/lib/libertix"
+    verifier_destination = "/mnt/target/usr/local/lib/libertix/libertix-first-boot-verify.py"
+
+    assert directory_creation in target
+    assert verifier_destination in target
+    assert target.index(directory_creation) < target.index(verifier_destination)
 
 
 def test_nvram_write_probe_opt_out_is_explicit_and_never_reported_as_passed() -> None:
@@ -3367,15 +3507,28 @@ def test_navigation_falls_back_to_immediate_navigation_without_ui_content() -> N
 
 def test_long_windows_native_checks_emit_structured_utf8_safe_summaries() -> None:
     checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    decoded_native = checks.split("function Invoke-NativeCommandDecoded", 1)[1].split(
+        "function Invoke-NativeCheck", 1
+    )[0]
     native_check = checks.split("function Invoke-NativeCheck", 1)[1].split(
         "$config = Get-Content", 1
     )[0]
 
-    assert "$exitCode = $LASTEXITCODE" in native_check
-    assert '.Replace([char]0, "")' in native_check
+    assert "ConvertFrom-NativeOutputBytes" in checks
+    assert "Text.DecoderFallbackException" in checks
+    assert "CurrentCulture.TextInfo.OEMCodePage" in checks
+    assert "RedirectStandardOutput $stdoutPath" in decoded_native
+    assert "RedirectStandardError $stderrPath" in decoded_native
+    assert "Read-NativeOutputText -LiteralPath $stdoutPath" in decoded_native
+    assert "Read-NativeOutputText -LiteralPath $stderrPath" in decoded_native
+    assert "$result = Invoke-NativeCommandDecoded" in native_check
     assert "$diagnostic.Length -gt 2000" in native_check
-    assert 'Write-Output "NATIVE_COMMAND=$FilePath EXIT_CODE=$exitCode"' in native_check
-    assert "$output | ForEach-Object { Write-Output $_ }" not in native_check
+    assert 'Write-Output "NATIVE_COMMAND=$FilePath EXIT_CODE=$($result.ExitCode)"' in native_check
+    assert "@(& $FilePath @Arguments 2>&1)" not in native_check
+    assert 'Invoke-NativeCommandDecoded -FilePath "reagentc.exe"' in checks
+    assert 'Invoke-NativeCommandDecoded -FilePath "bcdedit.exe"' in checks
+    assert "@(& reagentc.exe /info 2>&1)" not in checks
+    assert "@(& bcdedit.exe /enum all 2>&1)" not in checks
 
 
 def test_live_failure_and_cleanup_guards_cover_confirmed_audit_paths() -> None:
@@ -3384,12 +3537,19 @@ def test_live_failure_and_cleanup_guards_cover_confirmed_audit_paths() -> None:
     install = read("assets/live/libertix-install-main.sh")
     runtime = read("assets/live/libertix-install-runtime-common.sh")
 
-    assert "_context_loaded=false" in runner
+    assert "load_libertix_live_context_with_retry" in runner
+    assert '_context_error_file="$LOG_DIR/context-load-error"' in runner
+    assert 'load_libertix_live_context "$LIBERTIX_FIRMWARE_MODE" 2>&1' not in runner
     assert "Live installation context was not available after 30 attempts" in runner
     assert "terminal_hide_cursor" in runner
     assert "terminal_clear" not in runner
     assert "find_libertix_installation_plan() (" in live_context
     assert "trap cleanup_plan_probe EXIT" in live_context
+    assert "load_libertix_live_context_with_retry()" in live_context
+    retry = live_context.split("load_libertix_live_context_with_retry()", 1)[1].split(
+        "durable_bios_mbr_backup_directory()", 1
+    )[0]
+    assert 'if load_libertix_live_context "$expected_firmware"' in retry
     assert 'STAGE_CATALOG="/usr/local/lib/libertix/libertix-stages.tsv"' in install
     assert "unknown installation stage requested:" in install
     assert "emit_install_result" in runtime
@@ -3456,17 +3616,17 @@ def test_grub_renderer_localizes_root_labels(
 
 
 def test_grub_contract_is_named_and_reports_specific_failures() -> None:
-    target = read("assets/live/configure-target-main.sh")
+    validator = read("assets/live/libertix-validate-grub.sh")
     postinstall = read("auto_tests/app/services/automation_postinstall.py")
 
-    assert "readonly EXPECTED_GRUB_ROOT_ENTRY_COUNT=4" in target
+    assert "readonly expected_root_entries=4" in validator
     assert "EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4" in postinstall
-    assert "Generated GRUB configuration has invalid syntax" in target
-    assert "missing the distribution icon class" in target
-    assert "missing the distribution root entry" in target
-    assert "missing the Advanced options submenu" in target
-    assert "missing the Shutdown entry" in target
-    assert "root entries; expected $EXPECTED_GRUB_ROOT_ENTRY_COUNT" in target
+    assert "Generated GRUB configuration has invalid syntax" in validator
+    assert "missing the distribution icon class" in validator
+    assert "missing the distribution root entry" in validator
+    assert "missing the Advanced options submenu" in validator
+    assert "missing the Shutdown entry" in validator
+    assert "root entries; expected $expected_root_entries" in validator
 
 
 def test_aria2_connection_limit_comes_from_the_shared_policy() -> None:

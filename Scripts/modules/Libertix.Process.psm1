@@ -49,7 +49,9 @@ function Invoke-LibertixNativeProcess {
         [string]$Arguments = "",
         [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
         [string]$MonitoredFilePath = "",
-        [int64]$MaximumFileBytes = 0
+        [int64]$MaximumFileBytes = 0,
+        [scriptblock]$OnStandardOutputLine = $null,
+        [scriptblock]$OnStandardErrorLine = $null
     )
 
     if ($MaximumFileBytes -lt 0) {
@@ -73,42 +75,78 @@ function Invoke-LibertixNativeProcess {
         if (-not $process.Start()) {
             throw "Failed to start $FilePath."
         }
-        $outputTask = $process.StandardOutput.ReadToEndAsync()
-        $errorTask = $process.StandardError.ReadToEndAsync()
+        $output = New-Object Text.StringBuilder
+        $errorOutput = New-Object Text.StringBuilder
+        $outputTask = $process.StandardOutput.ReadLineAsync()
+        $errorTask = $process.StandardError.ReadLineAsync()
+        $outputClosed = $false
+        $errorClosed = $false
         $timer = [Diagnostics.Stopwatch]::StartNew()
-        while (-not $process.WaitForExit(250)) {
-            if ($MaximumFileBytes -gt 0) {
-                [int64]$length = 0
-                try {
-                    if (Test-Path -LiteralPath $MonitoredFilePath) {
-                        $length = [int64](Get-Item `
-                            -LiteralPath $MonitoredFilePath `
-                            -ErrorAction Stop).Length
-                    }
-                } catch {
-                    $length = 0
+        $processExited = $false
+        while (-not $processExited -or -not $outputClosed -or -not $errorClosed) {
+            while (-not $outputClosed -and $outputTask.IsCompleted) {
+                $line = $outputTask.GetAwaiter().GetResult()
+                if ($null -eq $line) {
+                    $outputClosed = $true
+                    break
                 }
-                if ($length -gt $MaximumFileBytes) {
+                [void]$output.AppendLine($line)
+                if ($null -ne $OnStandardOutputLine) {
+                    $null = & $OnStandardOutputLine $line
+                }
+                $outputTask = $process.StandardOutput.ReadLineAsync()
+            }
+
+            while (-not $errorClosed -and $errorTask.IsCompleted) {
+                $line = $errorTask.GetAwaiter().GetResult()
+                if ($null -eq $line) {
+                    $errorClosed = $true
+                    break
+                }
+                [void]$errorOutput.AppendLine($line)
+                if ($null -ne $OnStandardErrorLine) {
+                    $null = & $OnStandardErrorLine $line
+                }
+                $errorTask = $process.StandardError.ReadLineAsync()
+            }
+
+            if (-not $processExited) {
+                $processExited = $process.WaitForExit(100)
+                if (-not $processExited -and $MaximumFileBytes -gt 0) {
+                    [int64]$length = 0
+                    try {
+                        if (Test-Path -LiteralPath $MonitoredFilePath) {
+                            $length = [int64](Get-Item `
+                                -LiteralPath $MonitoredFilePath `
+                                -ErrorAction Stop).Length
+                        }
+                    } catch {
+                        $length = 0
+                    }
+                    if ($length -gt $MaximumFileBytes) {
+                        $treeStopped = Stop-LibertixNativeProcessTree -Process $process
+                        if (-not $treeStopped) {
+                            throw "PROCESS_TREE_NOT_STOPPED: $FilePath exceeded its file size limit and its process tree could not be proven stopped."
+                        }
+                        throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $MonitoredFilePath exceeds $MaximumFileBytes bytes."
+                    }
+                }
+                if (-not $processExited -and $timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
                     $treeStopped = Stop-LibertixNativeProcessTree -Process $process
                     if (-not $treeStopped) {
-                        throw "PROCESS_TREE_NOT_STOPPED: $FilePath exceeded its file size limit and its process tree could not be proven stopped."
+                        throw "PROCESS_TREE_NOT_STOPPED: $FilePath timed out and its process tree could not be proven stopped."
                     }
-                    throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $MonitoredFilePath exceeds $MaximumFileBytes bytes."
+                    throw "$FilePath timed out after $TimeoutSeconds seconds."
                 }
-            }
-            if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
-                $treeStopped = Stop-LibertixNativeProcessTree -Process $process
-                if (-not $treeStopped) {
-                    throw "PROCESS_TREE_NOT_STOPPED: $FilePath timed out and its process tree could not be proven stopped."
-                }
-                throw "$FilePath timed out after $TimeoutSeconds seconds."
+            } elseif (-not $outputClosed -or -not $errorClosed) {
+                Start-Sleep -Milliseconds 10
             }
         }
         $process.WaitForExit()
         return [pscustomobject]@{
             ExitCode = $process.ExitCode
-            StandardOutput = $outputTask.GetAwaiter().GetResult()
-            StandardError = $errorTask.GetAwaiter().GetResult()
+            StandardOutput = $output.ToString()
+            StandardError = $errorOutput.ToString()
         }
     } finally {
         $process.Dispose()

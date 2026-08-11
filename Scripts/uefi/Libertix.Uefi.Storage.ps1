@@ -183,6 +183,39 @@ function Remove-LibertixTemporaryEspFiles {
     }
 }
 
+function Assert-LibertixInstalledEspOwnership {
+    param([Parameter(Mandatory = $true)][string]$EspDrive)
+
+    $directory = Join-Path $EspDrive $InstalledEspDirectory
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        return $false
+    }
+    $ownerPath = Join-Path $directory $InstallerEspOwnershipFile
+    if (-not (Test-Path -LiteralPath $ownerPath -PathType Leaf)) {
+        throw "Installed Libertix ESP directory has no ownership marker; refusing removal."
+    }
+    $ownerLines = @(Get-Content -LiteralPath $ownerPath -ErrorAction Stop)
+    if ($ownerLines.Count -eq 0) {
+        throw "Installed Libertix ESP ownership marker is empty; refusing removal."
+    }
+    $owner = $ownerLines[0].Trim()
+    if ($owner -ne $RecoveryRunId) {
+        throw "Installed Libertix ESP directory belongs to another recovery run; refusing removal."
+    }
+    return $true
+}
+
+function Remove-LibertixInstalledEspFiles {
+    param([Parameter(Mandatory = $true)][string]$EspDrive)
+
+    if (-not (Assert-LibertixInstalledEspOwnership -EspDrive $EspDrive)) { return }
+    $path = Join-Path $EspDrive $InstalledEspDirectory
+    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $path) {
+        throw "Installed Libertix ESP directory still exists after rollback."
+    }
+}
+
 function Assert-LibertixTemporaryEspOwnership {
     param([Parameter(Mandatory = $true)][string]$Directory)
 
