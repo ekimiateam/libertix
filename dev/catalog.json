@@ -2,21 +2,21 @@
   "schemaVersion": 1,
   "artifacts": {
     "wpf": {
-      "url": "https://github.com/ekimiateam/libertix/releases/download/065d789/Libertix-wpf.zip",
-      "sha256": "c9d2affe9fb836c596d55472444baea185a4ee516342075f89386011b780d24c",
-      "sizeBytes": 3586560,
+      "url": "https://github.com/ekimiateam/libertix/releases/download/b53245d/Libertix-wpf.zip",
+      "sha256": "e4204ba5e1e2f9d83a81c5437d6d0939e0673af74375afcaa35370d027588cdf",
+      "sizeBytes": 3610564,
       "fileName": "Libertix-wpf.zip"
     },
     "miniIso": {
       "bios": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/065d789/libertix-installer-bios.iso",
-        "sha256": "6d60948a7983ef5d3e867f81e84fce501d0ef1fa6e63ced31edd62ed2ba27ed3",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/b53245d/libertix-installer-bios.iso",
+        "sha256": "6afb178aa8a722b74f65a2d200c29741a077b28e85e572d7dd038619de21bbcc",
         "sizeBytes": 524288000,
         "fileName": "libertix-installer-bios.iso"
       },
       "uefi": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/065d789/libertix-installer-uefi.iso",
-        "sha256": "ea8567d944435a1dc3da0321607bbb82e4538681fb69f610e211ec1c8bc21273",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/b53245d/libertix-installer-uefi.iso",
+        "sha256": "367d12006cae59fbcc551d3a170f664495783a6d31b2b7ed9b00e32fea951402",
         "sizeBytes": 558891008,
         "fileName": "libertix-installer-uefi.iso"
       }
@@ -55,6 +55,9 @@
       "osReleaseId": "linuxmint",
       "grubDisplayName": "Linux Mint 22.3 Cinnamon",
       "grubIcon": "linuxmint",
+      "secureBootMicrosoftAuthorities": [
+        "2011"
+      ],
       "description": "Linux Mint is an operating system for desktop and laptop computers. It is designed to work out of the box and comes fully equipped with the apps most people need.",
       "imageUrl": "https://www.linuxmint.com/web/img/screenshots/c1.jpg",
       "isoInstaller": "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso",
@@ -69,6 +72,9 @@
       "osReleaseId": "zorin",
       "grubDisplayName": "Zorin OS 18.1 Core",
       "grubIcon": "zorin",
+      "secureBootMicrosoftAuthorities": [
+        "2011"
+      ],
       "description": "Zorin OS Core is a free Ubuntu-based desktop operating system with standard apps and four desktop layouts.",
       "imageUrl": "https://assets.zorincdn.com/zorin.com/images/download/18/core.png",
       "isoInstaller": "https://mirrors.univ-reims.fr/IMAGES/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso",
