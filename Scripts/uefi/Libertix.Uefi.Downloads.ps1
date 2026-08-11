@@ -245,8 +245,13 @@ function New-Aria2DownloadArguments {
         "--max-connection-per-server=$Aria2Connections",
         "--split=$Aria2Connections",
         "--min-split-size=1M",
+        "--max-tries=5",
+        "--retry-wait=10",
+        "--connect-timeout=30",
+        "--timeout=60",
         "--summary-interval=5",
         "--console-log-level=warn",
+        "--enable-color=false",
         "--dir=$DownloadDir",
         "--out=$DestinationName",
         $Url
@@ -280,52 +285,49 @@ function Start-Aria2Download {
         $downloadDir = $Aria2DownloadDir
         $downloadPath = Join-Path $downloadDir $destinationName
     }
-    try {
-        New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
-        if (Test-Path -LiteralPath $downloadPath) {
+    New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    if (Test-Path -LiteralPath $downloadPath -PathType Leaf) {
+        $existingLength = [int64](Get-Item -LiteralPath $downloadPath -ErrorAction Stop).Length
+        if ($existingLength -gt $MaxBytes) {
             Remove-Item -LiteralPath $downloadPath -Force
-        }
-
-        Write-Log "Downloading with aria2: $destinationName" "Cyan"
-        $aria2Arguments = New-Aria2DownloadArguments `
-            -Url $Url `
-            -DownloadDir $downloadDir `
-            -DestinationName $destinationName
-        $nativeArguments = ($aria2Arguments | ForEach-Object {
-            ConvertTo-LibertixNativeArgument -Value ([string]$_)
-        }) -join " "
-        $aria2Result = Invoke-LibertixNativeProcess `
-            -FilePath $aria2 `
-            -Arguments $nativeArguments `
-            -TimeoutSeconds 14400 `
-            -MonitoredFilePath $downloadPath `
-            -MaximumFileBytes $MaxBytes
-        if ($aria2Result.ExitCode -ne 0) {
-            $diagnostic = ($aria2Result.StandardOutput + [Environment]::NewLine +
-                $aria2Result.StandardError).Trim()
-            throw "aria2 failed with exit code $($aria2Result.ExitCode): $diagnostic"
-        }
-
-        if (-not (Test-Path -LiteralPath $downloadPath)) {
-            throw "aria2 completed but downloaded file is missing: $downloadPath"
-        }
-        if ([int64](Get-Item -LiteralPath $downloadPath -ErrorAction Stop).Length -gt $MaxBytes) {
+            Remove-Item -LiteralPath "$downloadPath.aria2" -Force -ErrorAction SilentlyContinue
             throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $Url exceeds $MaxBytes bytes."
         }
+        Write-Log "Resuming the partial aria2 download at $existingLength bytes." "Yellow"
+    }
 
-        if ($downloadPath -ne $destinationFullPath) {
-            if (Test-Path -LiteralPath $destinationFullPath) {
-                Remove-Item -LiteralPath $destinationFullPath -Force
-            }
-            Move-Item -LiteralPath $downloadPath -Destination $destinationFullPath -Force
+    Write-Log "Downloading with aria2: $destinationName" "Cyan"
+    $aria2Arguments = New-Aria2DownloadArguments `
+        -Url $Url `
+        -DownloadDir $downloadDir `
+        -DestinationName $destinationName
+    $nativeArguments = ($aria2Arguments | ForEach-Object {
+        ConvertTo-LibertixNativeArgument -Value ([string]$_)
+    }) -join " "
+    $aria2Result = Invoke-LibertixNativeProcess `
+        -FilePath $aria2 `
+        -Arguments $nativeArguments `
+        -TimeoutSeconds 14400 `
+        -MonitoredFilePath $downloadPath `
+        -MaximumFileBytes $MaxBytes
+    if ($aria2Result.ExitCode -ne 0) {
+        $diagnostic = ($aria2Result.StandardOutput + [Environment]::NewLine +
+            $aria2Result.StandardError).Trim()
+        throw "aria2 failed with exit code $($aria2Result.ExitCode): $diagnostic"
+    }
+
+    if (-not (Test-Path -LiteralPath $downloadPath)) {
+        throw "aria2 completed but downloaded file is missing: $downloadPath"
+    }
+    if ([int64](Get-Item -LiteralPath $downloadPath -ErrorAction Stop).Length -gt $MaxBytes) {
+        throw "DOWNLOAD_SIZE_LIMIT_EXCEEDED: $Url exceeds $MaxBytes bytes."
+    }
+
+    if ($downloadPath -ne $destinationFullPath) {
+        if (Test-Path -LiteralPath $destinationFullPath) {
+            Remove-Item -LiteralPath $destinationFullPath -Force
         }
-    } catch {
-        # A failed transport must not leave a second ISO beside a later BITS
-        # fallback. Only the dedicated aria2 staging path is owned here.
-        if ($downloadPath -ne $destinationFullPath -and (Test-Path -LiteralPath $downloadPath)) {
-            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
-        }
-        throw
+        Move-Item -LiteralPath $downloadPath -Destination $destinationFullPath -Force
     }
 }
 
@@ -339,18 +341,35 @@ function Start-RobustDownload {
 
     if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
 
-    try {
-        Start-Aria2Download -Url $Url -Destination $Destination -MaxBytes $MaxBytes
-        return
-    } catch {
-        if (
-            $_.Exception.Message -like "PROCESS_TREE_NOT_STOPPED:*" -or
-            $_.Exception.Message -like "DOWNLOAD_SIZE_LIMIT_EXCEEDED:*"
-        ) {
-            throw
+    $maximumAria2Attempts = 3
+    for ($attempt = 1; $attempt -le $maximumAria2Attempts; $attempt++) {
+        try {
+            Start-Aria2Download -Url $Url -Destination $Destination -MaxBytes $MaxBytes
+            return
+        } catch {
+            if (
+                $_.Exception.Message -like "PROCESS_TREE_NOT_STOPPED:*" -or
+                $_.Exception.Message -like "DOWNLOAD_SIZE_LIMIT_EXCEEDED:*"
+            ) {
+                throw
+            }
+            if ($attempt -lt $maximumAria2Attempts) {
+                Write-Log (
+                    "aria2 attempt $attempt/$maximumAria2Attempts failed for $Label; " +
+                    "retaining the partial download and retrying: $($_.Exception.Message)"
+                ) "Yellow"
+                Start-Sleep -Seconds (10 * $attempt)
+                continue
+            }
+            Write-Log (
+                "aria2 failed after $maximumAria2Attempts attempts for $Label; " +
+                "using BITS fallback: $($_.Exception.Message)"
+            ) "Yellow"
         }
-        Write-Log "aria2 failed for $Label; using BITS fallback: $($_.Exception.Message)" "Yellow"
     }
+
+    Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "$Destination.aria2" -Force -ErrorAction SilentlyContinue
 
     try {
         Start-BitsDownload -Url $Url -Destination $Destination -MaxBytes $MaxBytes

@@ -274,6 +274,7 @@ namespace Libertix.Pages
 
         private void Log(string message)
         {
+            message = WindowsProcessRunner.NormalizeTerminalText(message);
             string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
             Dispatcher.Invoke(() =>
             {

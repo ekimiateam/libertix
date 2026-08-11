@@ -22,6 +22,7 @@ from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
 from app.models import OperationResult, SourceMode, StepResult
+from app.published_release import download_published_dev_release
 from app.services.common import ResultBuilder
 from app.services.source_tree import LocalSourceTree
 
@@ -65,7 +66,13 @@ class ValidationService:
             result.ok("release.path", "Executable path resolved", path=str(windows_path))
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
                 futures = {
-                    executor.submit(self._validate_vm_isolated, vm, windows_path, on_step): vm
+                    executor.submit(
+                        self._validate_vm_isolated,
+                        vm,
+                        windows_path,
+                        on_step,
+                        use_default_filepool=source == "published",
+                    ): vm
                     for vm in selected_vms
                 }
                 failures: list[OperationResult] = []
@@ -246,6 +253,7 @@ class ValidationService:
         s = self.settings
         password = s.main_ssh_password.get_secret_value()
         source_path = f"{s.smb_root}/{s.source_dir_name}"
+        published_executable: PurePosixPath | None = None
         with self.ssh(s.main_ssh_host, s.main_ssh_user, password) as ssh:
             ssh.run(
                 "set -eu; "
@@ -263,7 +271,9 @@ class ValidationService:
                 target=s.main_ssh_host,
             )
 
-            if source == "remote":
+            if source == "published":
+                published_executable = self._deploy_published_release_to_server(ssh, result)
+            elif source == "remote":
                 # Remote mode is the production-like path: clone the configured
                 # branch on the Samba host before compiling on the Windows build VM.
                 ssh.run(
@@ -324,7 +334,73 @@ class ValidationService:
                 # working tree and expands it directly into the Samba source folder.
                 self._copy_local_source_to_server(ssh, result, source_path)
 
+        if published_executable is not None:
+            return published_executable
         return self._compile_release_on_build_vm(result)
+
+    def _deploy_published_release_to_server(
+        self,
+        ssh: SSHClient,
+        result: ResultBuilder,
+    ) -> PurePosixPath:
+        s = self.settings
+        work_root = s.runtime_dir / "published-release"
+        work_root.mkdir(parents=True, exist_ok=True)
+        remote_archive: str | None = None
+        with tempfile.TemporaryDirectory(prefix="dev-", dir=work_root) as temporary:
+            temporary_path = Path(temporary)
+            release = download_published_dev_release(
+                metadata_base_url=s.published_dev_metadata_base_url,
+                public_key_path=self._local_repository_root()
+                / "Scripts/config/Libertix.CatalogPublicKey.xml",
+                work_directory=temporary_path,
+                timeout_seconds=max(s.command_timeout_seconds, 180),
+            )
+            archive = temporary_path / f"Libertix-wpf-{release.tag}.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                for path in sorted(release.directory.rglob("*")):
+                    tar.add(path, arcname=path.relative_to(release.directory), recursive=False)
+
+            remote_archive = str(PurePosixPath(s.smb_root) / f".{archive.name}")
+            ssh.upload_file(archive, remote_archive, step="published_release.upload")
+            release_path = f"{s.smb_root}/{s.release_dir_name}"
+            install_script = (
+                "set -eu; "
+                f"dest={shlex.quote(release_path)}; archive={shlex.quote(remote_archive)}; "
+                f"root={shlex.quote(s.smb_root)}; "
+                'root=$(realpath -m -- "$root"); dest=$(realpath -m -- "$dest"); '
+                'case "$dest" in "$root"/*) ;; *) '
+                'echo "Destination refusee: $dest" >&2; exit 22;; esac; '
+                'rm -rf "$dest"; mkdir -p "$dest"; '
+                'tar -xzf "$archive" -C "$dest"; rm -f "$archive"; '
+                'test -s "$dest/Libertix.exe"'
+            )
+            try:
+                ssh.run(
+                    install_script,
+                    step="published_release.publish",
+                    timeout=max(s.command_timeout_seconds, 300),
+                )
+                remote_archive = None
+            finally:
+                if remote_archive is not None:
+                    ssh.run(
+                        f"rm -f -- {shlex.quote(remote_archive)}",
+                        step="published_release.cleanup_archive",
+                        timeout=30,
+                        check=False,
+                    )
+
+        result.ok(
+            "published_release.publish",
+            "Latest signed dev WPF release downloaded, verified and published to Samba",
+            target=s.main_ssh_host,
+            source="published",
+            tag=release.tag,
+            commit=release.commit,
+            executable_sha256=release.sha256,
+        )
+        return PurePosixPath(f"{s.smb_root}/{s.release_dir_name}/Libertix.exe")
 
     def _copy_local_source_to_server(
         self, ssh: SSHClient, result: ResultBuilder, source_path: str
@@ -483,7 +559,12 @@ class ValidationService:
         return PureWindowsPath("Z:/") / PureWindowsPath(*relative.parts)
 
     def _validate_vm(
-        self, vm: VMConfig, executable: PureWindowsPath, result: ResultBuilder
+        self,
+        vm: VMConfig,
+        executable: PureWindowsPath,
+        result: ResultBuilder,
+        *,
+        use_default_filepool: bool = False,
     ) -> None:
         local_executable = self.deploy_to_documents(vm, executable)
         result.ok(
@@ -493,7 +574,12 @@ class ValidationService:
             vm=vm.name,
             executable=str(local_executable),
         )
-        launch = self._launch_interactive(vm, local_executable, result)
+        launch = self._launch_interactive(
+            vm,
+            local_executable,
+            result,
+            use_default_filepool=use_default_filepool,
+        )
         result.ok(
             "vm.launch",
             "Libertix launched in the graphical session and process confirmed",
@@ -557,10 +643,17 @@ class ValidationService:
         vm: VMConfig,
         executable: PureWindowsPath,
         on_step: Callable[[StepResult], None] | None = None,
+        *,
+        use_default_filepool: bool = False,
     ) -> OperationResult:
         result = ResultBuilder("validation", on_step=on_step)
         try:
-            self._validate_vm(vm, executable, result)
+            self._validate_vm(
+                vm,
+                executable,
+                result,
+                use_default_filepool=use_default_filepool,
+            )
             return result.success(f"Validation completed successfully on {vm.name}")
         except WorkflowError as exc:
             return result.failure(exc)
@@ -626,7 +719,12 @@ class ValidationService:
         return PureWindowsPath(values["LOCAL_EXE"])
 
     def _launch_interactive(
-        self, vm: VMConfig, executable: PureWindowsPath, result: ResultBuilder
+        self,
+        vm: VMConfig,
+        executable: PureWindowsPath,
+        result: ResultBuilder,
+        *,
+        use_default_filepool: bool = False,
     ) -> dict[str, object]:
         del result
         task_name = f"LibertixValidation_{vm.name}"
@@ -635,6 +733,7 @@ class ValidationService:
             executable,
             task_name=task_name,
             step="vm.launch_elevated",
+            use_default_filepool=use_default_filepool,
         )
         return {
             "pid": int(values["PID"]),
@@ -652,6 +751,7 @@ class ValidationService:
         *,
         task_name: str,
         step: str,
+        use_default_filepool: bool = False,
     ) -> dict[str, str]:
         with self.ssh(
             vm.host,
@@ -665,7 +765,9 @@ class ValidationService:
                 config={
                     "executable": str(executable),
                     "task_name": task_name,
-                    "filepool_base_url": self.settings.filepool_base_url,
+                    "filepool_base_url": (
+                        None if use_default_filepool else self.settings.filepool_base_url
+                    ),
                     "development_static_ipv4": vm.host,
                     "development_static_ipv4_prefix_length": (
                         self.settings.development_static_ipv4_prefix_length

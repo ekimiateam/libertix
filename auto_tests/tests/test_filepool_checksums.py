@@ -16,122 +16,86 @@ def load_checksum_module():
     return module
 
 
+def catalog(*, bios_hash: str = "0" * 64, uefi_hash: str = "1" * 64) -> dict:
+    return {
+        "schemaVersion": 1,
+        "artifacts": {
+            "miniIso": {
+                "bios": {
+                    "fileName": "libertix-installer-bios.iso",
+                    "url": "libertix-installer-bios.iso",
+                    "sha256": bios_hash,
+                    "sizeBytes": 1,
+                },
+                "uefi": {
+                    "fileName": "libertix-installer-uefi.iso",
+                    "url": "libertix-installer-uefi.iso",
+                    "sha256": uefi_hash,
+                    "sizeBytes": 1,
+                },
+            }
+        },
+        "distributions": [{"id": "mint"}, {"id": "zorin"}],
+    }
+
+
 def test_checksum_sync_updates_only_supplied_artifact(tmp_path: Path) -> None:
     module = load_checksum_module()
-    metadata = tmp_path / "distros.json"
+    metadata = tmp_path / "catalog.json"
     bios_iso = tmp_path / "libertix-installer-bios.iso"
     bios_iso.write_bytes(b"verified BIOS image")
-    metadata.write_text(
-        json.dumps(
-            [
-                {
-                    "isoUrl": bios_iso.name,
-                    "isoSha256": "0" * 64,
-                    "uefiIsoUrl": "libertix-installer-uefi.iso",
-                    "uefiIsoSha256": "1" * 64,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
+    metadata.write_text(json.dumps(catalog()), encoding="utf-8")
 
     module.update_metadata(metadata, bios_iso, None)
 
-    distribution = json.loads(metadata.read_text(encoding="utf-8"))[0]
-    assert distribution["isoSha256"] == module.sha256(bios_iso)
-    assert distribution["uefiIsoSha256"] == "1" * 64
-
-
-def test_checksum_sync_updates_every_distribution_sharing_a_generic_iso(
-    tmp_path: Path,
-) -> None:
-    module = load_checksum_module()
-    metadata = tmp_path / "distros.json"
-    bios_iso = tmp_path / "libertix-installer-bios.iso"
-    bios_iso.write_bytes(b"one generic BIOS image")
-    metadata.write_text(
-        json.dumps(
-            [
-                {"id": "mint", "isoUrl": bios_iso.name, "isoSha256": "0" * 64},
-                {"id": "zorin", "isoUrl": bios_iso.name, "isoSha256": "1" * 64},
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    module.update_metadata(metadata, bios_iso, None)
-
-    distributions = json.loads(metadata.read_text(encoding="utf-8"))
-    assert {entry["isoSha256"] for entry in distributions} == {module.sha256(bios_iso)}
+    updated = json.loads(metadata.read_text(encoding="utf-8"))["artifacts"]["miniIso"]
+    assert updated["bios"]["sha256"] == module.sha256(bios_iso)
+    assert updated["bios"]["sizeBytes"] == bios_iso.stat().st_size
+    assert updated["uefi"]["sha256"] == "1" * 64
 
 
 def test_checksum_sync_generates_metadata_without_mutating_template(tmp_path: Path) -> None:
     module = load_checksum_module()
     template = tmp_path / "template.json"
-    metadata = tmp_path / "runtime" / "distros.json"
+    metadata = tmp_path / "runtime" / "catalog.json"
     uefi_iso = tmp_path / "libertix-installer-uefi.iso"
     uefi_iso.write_bytes(b"verified UEFI image")
-    original = json.dumps(
-        {
-            "schemaVersion": 1,
-            "mainRelease": {"version": "0.1", "title": "Test", "notes": "Test"},
-            "distributions": [{"id": "mint"}],
-        }
-    )
+    original = json.dumps(catalog())
     template.write_text(original, encoding="utf-8")
 
     module.update_metadata(metadata, None, uefi_iso, template_path=template)
 
     assert template.read_text(encoding="utf-8") == original
-    distribution = json.loads(metadata.read_text(encoding="utf-8"))[0]
-    assert distribution["isoSha256"] == "0" * 64
-    assert distribution["uefiIsoSha256"] == module.sha256(uefi_iso)
+    mini_iso = json.loads(metadata.read_text(encoding="utf-8"))["artifacts"]["miniIso"]
+    assert mini_iso["bios"]["sha256"] == "0" * 64
+    assert mini_iso["uefi"]["sha256"] == module.sha256(uefi_iso)
 
 
 def test_partial_checksum_sync_preserves_other_runtime_firmware_hash(tmp_path: Path) -> None:
     module = load_checksum_module()
     template = tmp_path / "template.json"
-    metadata = tmp_path / "runtime" / "distros.json"
+    metadata = tmp_path / "runtime" / "catalog.json"
     bios_iso = tmp_path / "libertix-installer-bios.iso"
     bios_iso.write_bytes(b"new BIOS image")
-    template.write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "mainRelease": {"version": "0.1", "title": "Test", "notes": "Test"},
-                "distributions": [{"id": "mint"}],
-            }
-        ),
-        encoding="utf-8",
-    )
+    template.write_text(json.dumps(catalog()), encoding="utf-8")
     metadata.parent.mkdir(parents=True)
     metadata.write_text(
-        json.dumps(
-            [
-                {
-                    "isoUrl": bios_iso.name,
-                    "isoSha256": "2" * 64,
-                    "uefiIsoUrl": "libertix-installer-uefi.iso",
-                    "uefiIsoSha256": "f" * 64,
-                }
-            ]
-        ),
-        encoding="utf-8",
+        json.dumps(catalog(bios_hash="2" * 64, uefi_hash="f" * 64)), encoding="utf-8"
     )
 
     module.update_metadata(metadata, bios_iso, None, template_path=template)
 
-    distribution = json.loads(metadata.read_text(encoding="utf-8"))[0]
-    assert distribution["isoSha256"] == module.sha256(bios_iso)
-    assert distribution["uefiIsoSha256"] == "f" * 64
+    mini_iso = json.loads(metadata.read_text(encoding="utf-8"))["artifacts"]["miniIso"]
+    assert mini_iso["bios"]["sha256"] == module.sha256(bios_iso)
+    assert mini_iso["uefi"]["sha256"] == "f" * 64
 
 
 def test_signed_catalog_fixture_matches_the_served_catalog() -> None:
     fixture = REPO_ROOT / "Libertix.Tests" / "TestData"
     served = REPO_ROOT / "auto_tests" / "app" / "filepool"
 
-    assert (fixture / "distros.json").read_bytes() == (served / "distros.json").read_bytes()
-    assert (fixture / "distros.json.sig").read_bytes() == (served / "distros.json.sig").read_bytes()
+    assert (fixture / "catalog.json").read_bytes() == (served / "catalog.json").read_bytes()
+    assert (fixture / "catalog.json.sig").read_bytes() == (served / "catalog.json.sig").read_bytes()
 
 
 def test_every_catalog_grub_icon_is_packaged_in_the_shared_theme() -> None:

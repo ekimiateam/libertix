@@ -1,3 +1,3 @@
 # Detached signatures cover the exact LF bytes, including on Windows runners.
-Libertix.Tests/TestData/distros.json text eol=lf
-auto_tests/app/filepool/distros.json text eol=lf
+Libertix.Tests/TestData/catalog.json text eol=lf
+auto_tests/app/filepool/catalog.json text eol=lf

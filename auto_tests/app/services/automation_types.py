@@ -16,6 +16,7 @@ class AutomationOptions:
     )
     share_windows_files_in_linux: bool = True
     share_linux_files_in_windows: bool = True
+    use_default_filepool: bool = False
 
 
 @dataclass(frozen=True)

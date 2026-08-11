@@ -41,12 +41,20 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
     bios = tmp_path / "libertix-installer-bios.iso"
     uefi = tmp_path / "libertix-installer-uefi.iso"
     wpf = tmp_path / "Libertix-wpf.zip"
+    aria2 = tmp_path / "aria2-64.zip"
+    ext4 = tmp_path / "ext4-win-driver.exe"
+    grldr = tmp_path / "grldr"
+    grldr_mbr = tmp_path / "grldr.mbr"
     bios.write_bytes(b"bios")
     uefi.write_bytes(b"uefi")
     wpf.write_bytes(b"wpf")
+    aria2.write_bytes(b"aria2")
+    ext4.write_bytes(b"ext4")
+    grldr.write_bytes(b"grldr")
+    grldr_mbr.write_bytes(b"grldr.mbr")
     commit = "a881918" + "0" * 33
 
-    dev_distros, dev_releases = module.generate_metadata(
+    dev_catalog, dev_releases = module.generate_metadata(
         config,
         channel="dev",
         tag="a881918",
@@ -54,9 +62,13 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
         bios_iso=bios,
         uefi_iso=uefi,
         wpf_zip=wpf,
+        aria2_archive=aria2,
+        ext4_driver=ext4,
+        grub4dos_loader=grldr,
+        grub4dos_mbr=grldr_mbr,
         published_at="2026-08-10T00:00:00Z",
     )
-    main_distros, main_releases = module.generate_metadata(
+    main_catalog, main_releases = module.generate_metadata(
         config,
         channel="main",
         tag="0.1",
@@ -64,6 +76,10 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
         bios_iso=bios,
         uefi_iso=uefi,
         wpf_zip=wpf,
+        aria2_archive=aria2,
+        ext4_driver=ext4,
+        grub4dos_loader=grldr,
+        grub4dos_mbr=grldr_mbr,
         published_at="2026-08-10T00:00:00Z",
     )
 
@@ -71,10 +87,18 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
     assert dev_releases["latest"]["notes"] == ("Automated Libertix alpha build for commit a881918.")
     assert main_releases["latest"]["version"] == "0.1"
     assert main_releases["latest"]["notes"] == config["mainRelease"]["notes"]
-    assert "/a881918/" in dev_distros[0]["isoUrl"]
-    assert "/0.1/" in main_distros[0]["isoUrl"]
-    assert dev_distros[0]["isoSha256"] == main_distros[0]["isoSha256"]
-    assert dev_distros[0]["isoInstallerSha256"] == config["distributions"][0]["isoInstallerSha256"]
+    assert "/a881918/" in dev_catalog["artifacts"]["miniIso"]["bios"]["url"]
+    assert "/0.1/" in main_catalog["artifacts"]["miniIso"]["bios"]["url"]
+    assert (
+        dev_catalog["artifacts"]["miniIso"]["bios"]["sha256"]
+        == main_catalog["artifacts"]["miniIso"]["bios"]["sha256"]
+    )
+    assert (
+        dev_catalog["distributions"][0]["isoInstallerSha256"]
+        == config["distributions"][0]["isoInstallerSha256"]
+    )
+    assert "isoUrl" not in dev_catalog["distributions"][0]
+    assert dev_catalog["artifacts"]["support"]["aria2Archive"]["url"] == "aria2-64.zip"
 
 
 def test_versioned_support_artifacts_match_the_shared_catalog() -> None:
@@ -105,8 +129,8 @@ def test_signer_rejects_a_key_that_is_not_the_application_key(tmp_path: Path) ->
             serialization.NoEncryption(),
         )
     )
-    manifest = tmp_path / "distros.json"
-    manifest.write_text("[]\n", encoding="utf-8")
+    manifest = tmp_path / "catalog.json"
+    manifest.write_text('{"schemaVersion":1}\n', encoding="utf-8")
 
     try:
         module.sign_files(
@@ -122,9 +146,9 @@ def test_signer_rejects_a_key_that_is_not_the_application_key(tmp_path: Path) ->
 
 def test_versioned_catalog_signature_is_pkcs1_sha256() -> None:
     module = load_script("sign_release_metadata_fixture", "sign-release-metadata.py")
-    manifest = REPO_ROOT / "auto_tests/app/filepool/distros.json"
+    manifest = REPO_ROOT / "auto_tests/app/filepool/catalog.json"
     signature = base64.b64decode(
-        (REPO_ROOT / "auto_tests/app/filepool/distros.json.sig")
+        (REPO_ROOT / "auto_tests/app/filepool/catalog.json.sig")
         .read_text(encoding="ascii")
         .strip(),
         validate=True,

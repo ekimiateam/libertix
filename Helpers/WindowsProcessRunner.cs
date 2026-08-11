@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace Libertix.Helpers
@@ -37,6 +38,16 @@ namespace Libertix.Helpers
     public static class WindowsProcessRunner
     {
         private const int ProcessTreeTerminationWaitMilliseconds = 10000;
+        private static readonly Regex TerminalEscapeSequence = new Regex(
+            @"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        public static string NormalizeTerminalText(string value)
+        {
+            return string.IsNullOrEmpty(value)
+                ? value
+                : TerminalEscapeSequence.Replace(value, string.Empty);
+        }
 
         public static string ResolvePowerShell()
         {

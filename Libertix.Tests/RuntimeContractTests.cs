@@ -19,16 +19,16 @@ namespace Libertix.Tests
             FilepoolConfig filepool = FilepoolConfig.ForBuild(build);
 
             Assert.AreEqual(
-                "https://ekimiateam.github.io/libertix/main/distros.json",
-                filepool.DistrosUrl);
+                "https://ekimiateam.github.io/libertix/main/catalog.json",
+                filepool.CatalogUrl);
             Assert.AreEqual(
                 "https://ekimiateam.github.io/libertix/main/releases.json",
                 filepool.ReleasesUrl);
             Assert.IsTrue(filepool.RequiresCatalogSignature);
             Assert.IsFalse(filepool.IsDevelopmentMode);
             Assert.AreEqual(
-                "https://ekimiateam.github.io/libertix/main/distros.json.sig",
-                filepool.DistrosSignatureUrl);
+                "https://ekimiateam.github.io/libertix/main/catalog.json.sig",
+                filepool.CatalogSignatureUrl);
             Assert.IsTrue(build.RequiresPublishedVersionCheck);
         }
 
@@ -41,8 +41,8 @@ namespace Libertix.Tests
             Assert.AreEqual("dev", build.Channel);
             Assert.AreEqual("a881918", build.ReleaseTag);
             Assert.AreEqual(
-                "https://ekimiateam.github.io/libertix/dev/distros.json",
-                filepool.DistrosUrl);
+                "https://ekimiateam.github.io/libertix/dev/catalog.json",
+                filepool.CatalogUrl);
             Assert.IsTrue(filepool.RequiresCatalogSignature);
             Assert.IsFalse(filepool.IsDevelopmentMode);
             Assert.IsFalse(build.RequiresPublishedVersionCheck);
@@ -67,8 +67,8 @@ namespace Libertix.Tests
         public void VersionedDistributionManifestHasAValidDetachedSignature()
         {
             string testData = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "TestData");
-            byte[] manifest = File.ReadAllBytes(Path.Combine(testData, "distros.json"));
-            string signature = File.ReadAllText(Path.Combine(testData, "distros.json.sig"));
+            byte[] manifest = File.ReadAllBytes(Path.Combine(testData, "catalog.json"));
+            string signature = File.ReadAllText(Path.Combine(testData, "catalog.json.sig"));
             string publicKey = Path.Combine(testData, "Libertix.CatalogPublicKey.xml");
 
             DistributionCatalogTrust.Verify(manifest, signature, publicKey);
@@ -82,17 +82,22 @@ namespace Libertix.Tests
         public void VersionedDistributionManifestIncludesTheInstallerByteSize()
         {
             string testData = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "TestData");
-            string manifest = File.ReadAllText(Path.Combine(testData, "distros.json"));
-            var distributions = JsonSerializer.Deserialize<List<DistroInfoJson>>(manifest);
+            string manifest = File.ReadAllText(Path.Combine(testData, "catalog.json"));
+            var catalog = JsonSerializer.Deserialize<DistributionCatalogJson>(manifest);
 
-            Assert.IsNotNull(distributions);
-            Assert.AreEqual(2, distributions.Count);
-            Assert.AreEqual("mint", distributions[0].Id);
-            Assert.AreEqual(3091660800L, distributions[0].IsoInstallerSizeBytes);
-            Assert.AreEqual(20d, distributions[0].SizeInGB);
-            Assert.AreEqual("zorin", distributions[1].Id);
-            Assert.AreEqual(3909091328L, distributions[1].IsoInstallerSizeBytes);
-            Assert.AreEqual(20d, distributions[1].SizeInGB);
+            Assert.IsNotNull(catalog);
+            Assert.AreEqual(1, catalog.SchemaVersion);
+            Assert.AreEqual(2, catalog.Distributions.Count);
+            Assert.AreEqual("mint", catalog.Distributions[0].Id);
+            Assert.AreEqual(3091660800L, catalog.Distributions[0].IsoInstallerSizeBytes);
+            Assert.AreEqual(20d, catalog.Distributions[0].SizeInGB);
+            Assert.AreEqual("zorin", catalog.Distributions[1].Id);
+            Assert.AreEqual(3909091328L, catalog.Distributions[1].IsoInstallerSizeBytes);
+            Assert.AreEqual(20d, catalog.Distributions[1].SizeInGB);
+            Assert.AreEqual(
+                "libertix-installer-bios.iso",
+                catalog.Artifacts.MiniIso.Bios.FileName);
+            Assert.AreEqual("aria2-64.zip", catalog.Artifacts.Support.Aria2Archive.FileName);
         }
 
         [TestMethod]

@@ -19,9 +19,9 @@ namespace Libertix.Helpers
 
         public string BaseUrl { get; }
 
-        public string DistrosUrl => BaseUrl + "/distros.json";
+        public string CatalogUrl => BaseUrl + "/catalog.json";
 
-        public string DistrosSignatureUrl => DistrosUrl + ".sig";
+        public string CatalogSignatureUrl => CatalogUrl + ".sig";
 
         public string ReleasesUrl => BaseUrl + "/releases.json";
 

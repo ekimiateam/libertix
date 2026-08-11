@@ -18,6 +18,16 @@ namespace Libertix.Tests
         private const string PlanId = "0123456789abcdef0123456789abcdef";
 
         [TestMethod]
+        public void TerminalDiagnosticsRemoveAnsiFormattingWithoutDamagingUnicode()
+        {
+            string diagnostic = "[\u001b[1;31mERROR\u001b[0m] Problème réseau";
+
+            Assert.AreEqual(
+                "[ERROR] Problème réseau",
+                WindowsProcessRunner.NormalizeTerminalText(diagnostic));
+        }
+
+        [TestMethod]
         public void UefiRecoveryPayloadIncludesOnlyRequiredRuntimeFiles()
         {
             string root = Path.Combine(
@@ -47,7 +57,7 @@ namespace Libertix.Tests
                 {
                     "libertix-installer-uefi.iso",
                     "Libertix.pdb",
-                    "distros.json",
+                    "catalog.json",
                     Path.Combine("Unrelated", "debug.log")
                 })
                 {

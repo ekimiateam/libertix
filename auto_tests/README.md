@@ -5,7 +5,8 @@ Local FastAPI service for validating Libertix on Windows test VMs.
 ## Responsibilities
 
 - serve the filepool under `/filepool`;
-- copy the local working tree or the remote `dev` branch to Samba;
+- copy the local working tree, build the remote `dev` branch, or deploy the latest signed GitHub
+  `dev` build to Samba;
 - compile `Libertix.sln` on the configured Windows build VM;
 - deploy `Libertix.exe` to the selected test VMs;
 - run VNC and vision-model validation;
@@ -60,7 +61,7 @@ addresses and contains no working credentials.
 | Linux orchestration host | `MAIN_SSH_HOST`, `MAIN_SSH_USER`, `MAIN_SSH_PASSWORD`, `SMB_ROOT` |
 | Samba and Windows SSH | `SAMBA_UNC`, `SAMBA_USERNAME`, `SAMBA_PASSWORD`, `WINDOWS_SSH_PASSWORD`, `SSH_KNOWN_HOSTS` |
 | Windows build VM | `BUILD_VM_HOST`, `BUILD_VM_USER`, `BUILD_VM_PASSWORD` |
-| Source and release | `REPOSITORY_URL`, `REPOSITORY_BRANCH`, `SOURCE_DIR_NAME`, `RELEASE_DIR_NAME`, `FILEPOOL_BASE_URL` |
+| Source and release | `REPOSITORY_URL`, `REPOSITORY_BRANCH`, `SOURCE_DIR_NAME`, `RELEASE_DIR_NAME`, `FILEPOOL_BASE_URL`, `PUBLISHED_DEV_METADATA_BASE_URL` |
 | Destructive-operation boundaries | `ALLOWED_SMB_ROOTS`, `ALLOWED_PROXMOX_VMIDS`, `RESET_SNAPSHOT`, `PROXMOX_STORAGE` |
 | Proxmox API | `PROXMOX_URL`, `PROXMOX_TOKEN_ID`, `PROXMOX_TOKEN_SECRET`, `PROXMOX_VERIFY_TLS`, optional `PROXMOX_CA_BUNDLE` |
 | Vision service | `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL`, reasoning, timeout, and retry variables |
@@ -123,8 +124,12 @@ explicitly.
 ### Request models
 
 `ValidationRequest` accepts `vms` (a selector list), `vm` (one selector), and `source`. `source` is
-`local` to copy the current working tree or `remote` to clone `REPOSITORY_URL` and
-`REPOSITORY_BRANCH`.
+`local` to copy and compile the current working tree, `remote` to clone and compile
+`REPOSITORY_URL` at `REPOSITORY_BRANCH`, or `published` to download the latest RSA-signed `dev`
+metadata from `PUBLISHED_DEV_METADATA_BASE_URL`, verify the advertised WPF archive hash and size,
+and deploy that archive without rebuilding it. In `published` mode Libertix is deliberately
+launched without `--filepool-base-url`; its embedded `dev_<sha7>` version selects the published
+GitHub Pages `dev` channel.
 
 `AutomationRequest` additionally accepts:
 
@@ -173,6 +178,15 @@ curl -fsS -N -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/v1/automation/stream
 ```
 
+Run the complete Mint workflow with the latest signed GitHub `dev` build and its published
+catalogue instead of the local filepool:
+
+```bash
+curl -fsS -N -H 'Content-Type: application/json' \
+  -d '{"vms":["vm1","vm2","vm3"],"apply":true,"distribution":"mint","linux_username":"test","linux_password":"replace-me","monitor_iso":true,"source":"published"}' \
+  http://127.0.0.1:8000/api/v1/automation/stream
+```
+
 Force-stop only the active streamed operation, leaving FastAPI running:
 
 ```bash
@@ -197,8 +211,8 @@ text and accept `?format=ndjson` for structured `step` and `result` events.
 Files served by the current workflows:
 
 ```text
-/filepool/distros.json
-/filepool/distros.json.sig
+/filepool/catalog.json
+/filepool/catalog.json.sig
 /filepool/libertix-installer-bios.iso
 /filepool/libertix-installer-uefi.iso
 /filepool/aria2-64.zip
@@ -282,7 +296,7 @@ uv run --frozen python -m ruff format --check app tests tools ../assets/live/*.p
 uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 ```
 
-After changing `distros.json`, sign and synchronize its two versioned copies and detached
+After changing `catalog.json`, sign and synchronize its two versioned copies and detached
 signatures with the interactive tool:
 
 ```bash
@@ -292,7 +306,7 @@ signatures with the interactive tool:
 Or select the served catalogue explicitly:
 
 ```bash
-./iso-tools/sign-distribution-catalog.sh auto_tests/app/filepool/distros.json
+./iso-tools/sign-distribution-catalog.sh auto_tests/app/filepool/catalog.json
 ```
 
 The private key remains at the ignored local path printed by the tool. Only the public RSA key is

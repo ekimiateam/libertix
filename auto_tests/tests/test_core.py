@@ -1397,6 +1397,10 @@ def test_validation_source_accepts_local() -> None:
     assert ValidationRequest(source="local").source == "local"
 
 
+def test_validation_source_accepts_latest_published_dev_build() -> None:
+    assert ValidationRequest(source="published").source == "published"
+
+
 def test_validation_vm_selector_accepts_aliases() -> None:
     service = ValidationService(settings())
 
@@ -1486,7 +1490,11 @@ def test_validation_retries_capture_when_libertix_is_not_visible_yet(
         "deploy_to_documents",
         lambda *_args: PureWindowsPath("C:/Libertix.exe"),
     )
-    monkeypatch.setattr(service, "_launch_interactive", lambda *_args: {"pid": 1234})
+    monkeypatch.setattr(
+        service,
+        "_launch_interactive",
+        lambda *_args, **_kwargs: {"pid": 1234},
+    )
     monkeypatch.setattr(service.vnc, "capture", lambda _address, path: captures.append(path))
     monkeypatch.setattr(service.vision_llm, "analyze", lambda *_args: next(verdicts))
     monkeypatch.setattr("app.services.validation.time.sleep", lambda _seconds: None)
@@ -1598,6 +1606,49 @@ def test_automation_launch_passes_the_windows_address_to_the_dev_ssh_option(
     launch = service._launch_elevated(  # noqa: SLF001
         vm,
         PureWindowsPath("Z:/Libertix-release/Libertix.exe"),
+    )
+
+    assert launch["pid"] == 1234
+    assert launch["session_id"] == 2
+
+
+def test_published_automation_launch_uses_the_embedded_filepool_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSshContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+
+    def fake_run_windows_script(
+        *_args: object,
+        script_name: str,
+        config: dict[str, object],
+        step: str,
+        **_kwargs: object,
+    ) -> object:
+        assert script_name == "launch_libertix_elevated.ps1"
+        assert step == "automation.launch_elevated"
+        assert config["filepool_base_url"] is None
+        return SimpleNamespace(
+            stdout=(
+                "PID=1234\nSESSION_ID=2\nTASK_NAME=LibertixAutoInstall_vm1\n"
+                "EXECUTABLE=Z:\\Libertix-release\\Libertix.exe\n"
+            )
+        )
+
+    monkeypatch.setattr(service.validation, "ssh", lambda *_args, **_kwargs: FakeSshContext())
+    monkeypatch.setattr(service.validation, "run_windows_script", fake_run_windows_script)
+
+    launch = service._launch_elevated(  # noqa: SLF001
+        vm,
+        PureWindowsPath("Z:/Libertix-release/Libertix.exe"),
+        use_default_filepool=True,
     )
 
     assert launch["pid"] == 1234

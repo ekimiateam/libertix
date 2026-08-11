@@ -90,7 +90,7 @@ def test_health_endpoint() -> None:
 
 
 def test_filepool_prefers_generated_runtime_metadata(tmp_path: Path) -> None:
-    runtime_metadata = tmp_path / "filepool" / "distros.json"
+    runtime_metadata = tmp_path / "filepool" / "catalog.json"
     runtime_metadata.parent.mkdir(parents=True)
     expected = [{"name": "generated-runtime-catalogue"}]
     runtime_metadata.write_text(json.dumps(expected), encoding="utf-8")
@@ -101,7 +101,7 @@ def test_filepool_prefers_generated_runtime_metadata(tmp_path: Path) -> None:
         operation_log_dir=tmp_path / "logs",
     )
     with TestClient(create_app(configured)) as client:
-        response = client.get("/filepool/distros.json")
+        response = client.get("/filepool/catalog.json")
 
     assert response.status_code == 200
     assert response.json() == expected
@@ -139,7 +139,7 @@ def test_web_ui_is_served() -> None:
     assert "/api/v1/automation/stream" in response.text
     assert "/api/v1/reset" in response.text
     assert "/api/v1/reset/stream" in response.text
-    assert "/filepool/distros.json" in response.text
+    assert "/filepool/catalog.json" in response.text
     assert "/filepool/libertix-installer-bios.iso" in response.text
     assert "/filepool/libertix-installer-uefi.iso" in response.text
     assert "/filepool/mint.iso" not in response.text

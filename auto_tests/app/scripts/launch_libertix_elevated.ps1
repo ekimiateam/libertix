@@ -16,6 +16,7 @@ $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $exe = [string]$config.executable
 $taskName = [string]$config.task_name
 $filepoolBaseUrl = [string]$config.filepool_base_url
+$useDefaultFilepool = [string]::IsNullOrWhiteSpace($filepoolBaseUrl)
 $developmentStaticIpv4 = if (
     $config.PSObject.Properties.Name -contains "development_static_ipv4"
 ) {
@@ -50,17 +51,18 @@ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 }
 
 $parsedFilepoolUri = $null
-if (
-    [string]::IsNullOrWhiteSpace($filepoolBaseUrl) -or
-    -not [Uri]::TryCreate($filepoolBaseUrl, [UriKind]::Absolute, [ref]$parsedFilepoolUri) -or
-    $parsedFilepoolUri.Scheme -notin @("http", "https") -or
-    -not [string]::IsNullOrEmpty($parsedFilepoolUri.UserInfo) -or
-    -not [string]::IsNullOrEmpty($parsedFilepoolUri.Query) -or
-    -not [string]::IsNullOrEmpty($parsedFilepoolUri.Fragment)
-) {
-    throw "filepool_base_url must be an absolute HTTP(S) URL without credentials, a query or a fragment"
+if (-not $useDefaultFilepool) {
+    if (
+        -not [Uri]::TryCreate($filepoolBaseUrl, [UriKind]::Absolute, [ref]$parsedFilepoolUri) -or
+        $parsedFilepoolUri.Scheme -notin @("http", "https") -or
+        -not [string]::IsNullOrEmpty($parsedFilepoolUri.UserInfo) -or
+        -not [string]::IsNullOrEmpty($parsedFilepoolUri.Query) -or
+        -not [string]::IsNullOrEmpty($parsedFilepoolUri.Fragment)
+    ) {
+        throw "filepool_base_url must be an absolute HTTP(S) URL without credentials, a query or a fragment"
+    }
+    $filepoolBaseUrl = $parsedFilepoolUri.AbsoluteUri.TrimEnd("/")
 }
-$filepoolBaseUrl = $parsedFilepoolUri.AbsoluteUri.TrimEnd("/")
 
 if (-not [string]::IsNullOrWhiteSpace($developmentStaticIpv4)) {
     [System.Net.IPAddress]$parsedDevelopmentAddress = $null
@@ -129,7 +131,10 @@ finally {
 }
 
 $time = (Get-Date).AddMinutes(1).ToString("HH:mm")
-$taskCommand = '"{0}" --filepool-base-url "{1}"' -f $exe, $filepoolBaseUrl
+$taskCommand = '"{0}"' -f $exe
+if (-not $useDefaultFilepool) {
+    $taskCommand += ' --filepool-base-url "{0}"' -f $filepoolBaseUrl
+}
 if (-not [string]::IsNullOrEmpty($developmentStaticIpv4)) {
     $taskCommand += ' --dev-ssh-static-ip "{0}"' -f $developmentStaticIpv4
     $taskCommand += ' --dev-ssh-prefix-length "{0}"' -f $developmentPrefixLength

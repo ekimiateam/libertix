@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     source_dir_name: str = "Libertix-source"
     release_dir_name: str = "Libertix-release"
     filepool_base_url: str
+    published_dev_metadata_base_url: str = "https://ekimiateam.github.io/libertix/dev"
     development_static_ipv4_prefix_length: int = Field(ge=1, le=30)
     development_static_ipv4_gateway: str
     development_dns_servers: tuple[str, ...] = Field(min_length=1)
@@ -123,7 +124,7 @@ class Settings(BaseSettings):
             raise ValueError("allowed_proxmox_vmids must not contain duplicates")
         return values
 
-    @field_validator("filepool_base_url")
+    @field_validator("filepool_base_url", "published_dev_metadata_base_url")
     @classmethod
     def validate_filepool_base_url(cls, value: str) -> str:
         parsed = urlsplit(value)
@@ -136,7 +137,7 @@ class Settings(BaseSettings):
             or parsed.fragment
         ):
             raise ValueError(
-                "filepool_base_url must be an absolute HTTP(S) URL without credentials, "
+                "metadata URLs must be absolute HTTP(S) URLs without credentials, "
                 "a query or a fragment"
             )
         return value.rstrip("/")
