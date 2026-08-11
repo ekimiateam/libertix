@@ -2633,7 +2633,8 @@ def test_published_artifacts_are_traceable_and_include_notices() -> None:
     ):
         assert f"release-assets/{support_file}" in workflow
         assert f"release-metadata/{support_file}" in workflow
-    assert "SHA256SUMS" not in workflow
+    assert "release-assets/SHA256SUMS" not in workflow
+    assert "release-metadata/SHA256SUMS" not in workflow
 
 
 def test_release_metadata_is_generated_signed_and_isolated_by_channel() -> None:
@@ -2652,6 +2653,10 @@ def test_release_metadata_is_generated_signed_and_isolated_by_channel() -> None:
     assert 'gh api --method POST "repos/$GH_REPO/pages/builds"' in workflow
     assert "https://ekimiateam.github.io/libertix/$RELEASE_CHANNEL/$filename" in workflow
     assert 'cmp -- "generated-metadata/$filename"' in workflow
+    assert "legacy_channel_files=(" in workflow
+    assert "distros.json.sig" in workflow
+    assert 'git -C pages-branch rm --ignore-unmatch -- "$RELEASE_CHANNEL/$filename"' in workflow
+    assert 'test "$status_code" = 404' in workflow
     assert 'if channel == "dev":' in generator
     assert 'build_version = f"dev_{tag}"' in generator
     assert "private_key.public_key().public_numbers()" in signer

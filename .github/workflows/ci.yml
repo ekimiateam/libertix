@@ -611,6 +611,14 @@ jobs:
             install -m 0644 "generated-metadata/$filename" \
               "pages-branch/$RELEASE_CHANNEL/$filename"
           done
+          legacy_channel_files=(
+            SHA256SUMS
+            distros.json
+            distros.json.sig
+          )
+          for filename in "${legacy_channel_files[@]}"; do
+            git -C pages-branch rm --ignore-unmatch -- "$RELEASE_CHANNEL/$filename"
+          done
           touch pages-branch/.nojekyll
           git -C pages-branch config user.name "felix068"
           git -C pages-branch config user.email "77407722+felix068@users.noreply.github.com"
@@ -680,4 +688,15 @@ jobs:
               "https://ekimiateam.github.io/libertix/$RELEASE_CHANNEL/$filename?commit=$pages_commit" \
               --output ".work/pages-verification/$filename"
             cmp -- "generated-metadata/$filename" ".work/pages-verification/$filename"
+          done
+          legacy_channel_files=(
+            SHA256SUMS
+            distros.json
+            distros.json.sig
+          )
+          for filename in "${legacy_channel_files[@]}"; do
+            status_code="$(curl --silent --show-error --location \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://ekimiateam.github.io/libertix/$RELEASE_CHANNEL/$filename?commit=$pages_commit")"
+            test "$status_code" = 404
           done
