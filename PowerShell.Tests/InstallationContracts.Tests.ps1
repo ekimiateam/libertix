@@ -1,7 +1,7 @@
 BeforeAll {
-    Import-Module "$PSScriptRoot/../Scripts/modules/Libertix.AtomicFile.psm1" -Force
     Import-Module "$PSScriptRoot/../Scripts/modules/Libertix.InstallationPlan.psm1" -Force
     Import-Module "$PSScriptRoot/../Scripts/modules/Libertix.InstallationState.psm1" -Force
+    Import-Module "$PSScriptRoot/../Scripts/modules/Libertix.AtomicFile.psm1" -Force
 
     function New-ValidInstallationPlan {
         return @'
