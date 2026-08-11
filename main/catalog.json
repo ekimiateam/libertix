@@ -3,20 +3,20 @@
   "artifacts": {
     "wpf": {
       "url": "https://github.com/ekimiateam/libertix/releases/download/0.1/Libertix-wpf.zip",
-      "sha256": "7712fe12c8142a90c862a83b877d954ec938b5340a12c32ad7adf971445637af",
-      "sizeBytes": 3586525,
+      "sha256": "c856c537747dc45efdeb91de480c663f030b3ee8c5734ef3367c5efb07c7999b",
+      "sizeBytes": 3610545,
       "fileName": "Libertix-wpf.zip"
     },
     "miniIso": {
       "bios": {
         "url": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-bios.iso",
-        "sha256": "d8bfd8daae3834abdc50b604f8933481c538cc72e0209b4d5980d7586f2f67b9",
+        "sha256": "db6d6819227fb8de256c1de8ea4315d27da23baa67202254f4e7390fa5571ee0",
         "sizeBytes": 524288000,
         "fileName": "libertix-installer-bios.iso"
       },
       "uefi": {
         "url": "https://github.com/ekimiateam/libertix/releases/download/0.1/libertix-installer-uefi.iso",
-        "sha256": "c301c5d554bb49f21b6b6560a12cd9f5d3f5d8506e9e082e3470bc2609606399",
+        "sha256": "2bb23038f14e1940145e5ece5db372b5f0132e6af937f9dae21e730d1c4a71d4",
         "sizeBytes": 558891008,
         "fileName": "libertix-installer-uefi.iso"
       }
@@ -55,6 +55,9 @@
       "osReleaseId": "linuxmint",
       "grubDisplayName": "Linux Mint 22.3 Cinnamon",
       "grubIcon": "linuxmint",
+      "secureBootMicrosoftAuthorities": [
+        "2011"
+      ],
       "description": "Linux Mint is an operating system for desktop and laptop computers. It is designed to work out of the box and comes fully equipped with the apps most people need.",
       "imageUrl": "https://www.linuxmint.com/web/img/screenshots/c1.jpg",
       "isoInstaller": "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso",
@@ -69,6 +72,9 @@
       "osReleaseId": "zorin",
       "grubDisplayName": "Zorin OS 18.1 Core",
       "grubIcon": "zorin",
+      "secureBootMicrosoftAuthorities": [
+        "2011"
+      ],
       "description": "Zorin OS Core is a free Ubuntu-based desktop operating system with standard apps and four desktop layouts.",
       "imageUrl": "https://assets.zorincdn.com/zorin.com/images/download/18/core.png",
       "isoInstaller": "https://mirrors.univ-reims.fr/IMAGES/zorinos/18/Zorin-OS-18.1-Core-64-bit.iso",
