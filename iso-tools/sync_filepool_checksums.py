@@ -72,9 +72,7 @@ def update_metadata(
                     else None
                 )
                 existing_entry = (
-                    existing_mini_iso.get(key)
-                    if isinstance(existing_mini_iso, dict)
-                    else None
+                    existing_mini_iso.get(key) if isinstance(existing_mini_iso, dict) else None
                 )
                 if isinstance(existing_entry, dict):
                     mini_iso[key] = existing_entry
