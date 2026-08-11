@@ -332,11 +332,15 @@ namespace Libertix.Pages
             Log($"Step 7: Downloading GRUB4DOS files to {_storagePreflight.SystemDrive}\\...");
             StartExecutionStep(InstallationStep.WindowsTemporaryBootPrepared);
 
-            string[] grubFiles = { "grldr", "grldr.mbr" };
+            string[] grubFiles =
+            {
+                Artifacts.Grub4Dos.LoaderFileName,
+                Artifacts.Grub4Dos.MbrLoaderFileName
+            };
             var grubHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["grldr"] = Artifacts.Grub4Dos.LoaderSha256,
-                ["grldr.mbr"] = Artifacts.Grub4Dos.MbrLoaderSha256
+                [Artifacts.Grub4Dos.LoaderFileName] = Artifacts.Grub4Dos.LoaderSha256,
+                [Artifacts.Grub4Dos.MbrLoaderFileName] = Artifacts.Grub4Dos.MbrLoaderSha256
             };
             foreach (string file in grubFiles)
             {

@@ -77,6 +77,23 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
     assert dev_distros[0]["isoInstallerSha256"] == config["distributions"][0]["isoInstallerSha256"]
 
 
+def test_versioned_support_artifacts_match_the_shared_catalog() -> None:
+    module = load_script("prepare_support_artifacts", "prepare-support-artifacts.py")
+    catalog_path = REPO_ROOT / "Scripts/config/Libertix.Artifacts.json"
+    artifacts = module.load_support_artifacts(catalog_path)
+
+    assert {artifact.file_name for artifact in artifacts} == {
+        "aria2-64.zip",
+        "ext4-win-driver.exe",
+        "grldr",
+        "grldr.mbr",
+    }
+    for artifact in artifacts:
+        path = REPO_ROOT / "auto_tests/app/filepool" / artifact.file_name
+        assert path.is_file()
+        assert module.file_sha256(path) == artifact.sha256
+
+
 def test_signer_rejects_a_key_that_is_not_the_application_key(tmp_path: Path) -> None:
     module = load_script("sign_release_metadata", "sign-release-metadata.py")
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

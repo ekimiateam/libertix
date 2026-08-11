@@ -29,13 +29,15 @@ For a push to `dev` or `main`, [the CI workflow](../.github/workflows/ci.yml) pe
 1. Resolve the channel, release tag and WPF informational version.
 2. Run source-quality, Python, PowerShell and C# tests and build `Libertix.exe`.
 3. Rebuild and verify the generic BIOS and UEFI mini-ISO images.
-4. Package the WPF output and calculate every release-asset SHA-256.
+4. Package the WPF output, verify the pinned aria2, ext4 and GRUB4DOS support files against
+   `Scripts/config/Libertix.Artifacts.json`, and calculate every release-asset SHA-256.
 5. Generate `distros.json` and `releases.json` from the one configuration and the built artifacts.
 6. Sign both JSON files with RSA/SHA-256 and verify that the private key matches the public key
    embedded in Libertix.
-7. Publish `Libertix-wpf.zip`, both mini-ISO files and `SHA256SUMS` in a GitHub Release.
-8. Commit the four JSON/signature files to only the selected channel on `gh-pages` and request a
-   GitHub Pages build.
+7. Publish `Libertix-wpf.zip`, both mini-ISO files, the four runtime support files and
+   `SHA256SUMS` in a GitHub Release.
+8. Commit the JSON/signature files, `SHA256SUMS` and the four runtime support files to only the
+   selected channel on `gh-pages`, then request a GitHub Pages build.
 
 Dev release creation is safe to rerun for the same commit. A main run fails before publication if
 its stable tag already exists; update `mainRelease.version` before publishing another stable release.
@@ -56,6 +58,10 @@ Repository workflow permissions must allow the workflow token to write repositor
 A stamped dev executable reads `https://ekimiateam.github.io/libertix/dev/distros.json`, verifies
 its signature and downloads its mini-ISO from the release tagged with its SHA. It does not fetch
 `releases.json` and never blocks because a newer dev commit exists.
+
+Both Pages channels also contain `aria2-64.zip`, `ext4-win-driver.exe`, `grldr` and `grldr.mbr`.
+Libertix verifies each support file against the SHA-256 embedded in its versioned artifact catalogue
+before using it. The same files are attached to the corresponding GitHub Release for traceability.
 
 A stable executable first downloads and verifies `/main/releases.json` and its signature. It starts
 only when `latest.version` exactly matches its embedded version. Otherwise it shows a translated

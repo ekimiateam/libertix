@@ -44,7 +44,9 @@ namespace Libertix.Installation
             ValidateHash(Aria2.ExecutableSha256, "aria2.executableSha256");
             ValidateFileName(Ext4Driver.FileName, "ext4Driver.fileName");
             ValidateHash(Ext4Driver.Sha256, "ext4Driver.sha256");
+            ValidateFileName(Grub4Dos.LoaderFileName, "grub4Dos.loaderFileName");
             ValidateHash(Grub4Dos.LoaderSha256, "grub4Dos.loaderSha256");
+            ValidateFileName(Grub4Dos.MbrLoaderFileName, "grub4Dos.mbrLoaderFileName");
             ValidateHash(Grub4Dos.MbrLoaderSha256, "grub4Dos.mbrLoaderSha256");
         }
 
@@ -92,8 +94,14 @@ namespace Libertix.Installation
 
     public sealed class Grub4DosArtifact
     {
+        [JsonPropertyName("loaderFileName")]
+        public string LoaderFileName { get; set; }
+
         [JsonPropertyName("loaderSha256")]
         public string LoaderSha256 { get; set; }
+
+        [JsonPropertyName("mbrLoaderFileName")]
+        public string MbrLoaderFileName { get; set; }
 
         [JsonPropertyName("mbrLoaderSha256")]
         public string MbrLoaderSha256 { get; set; }

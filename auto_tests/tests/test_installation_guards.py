@@ -2617,6 +2617,15 @@ def test_published_artifacts_are_traceable_and_include_notices() -> None:
     assert "Copy-Item -LiteralPath LICENSE, THIRD_PARTY.md" in workflow
     assert "BUILD-INFO.txt" in workflow
     assert "informational-version=$env:LIBERTIX_BUILD_VERSION" in workflow
+    assert "iso-tools/prepare-support-artifacts.py" in workflow
+    for support_file in (
+        "aria2-64.zip",
+        "ext4-win-driver.exe",
+        "grldr",
+        "grldr.mbr",
+    ):
+        assert f"release-assets/{support_file}" in workflow
+        assert f"release-metadata/{support_file}" in workflow
     assert "> SHA256SUMS" in workflow
     assert "release-assets/SHA256SUMS" in workflow
 
@@ -2635,6 +2644,8 @@ def test_release_metadata_is_generated_signed_and_isolated_by_channel() -> None:
     assert "group: libertix-pages-publication" in workflow
     assert 'install -d -m 0755 "pages-branch/$RELEASE_CHANNEL"' in workflow
     assert 'gh api --method POST "repos/$GH_REPO/pages/builds"' in workflow
+    assert "https://ekimiateam.github.io/libertix/$RELEASE_CHANNEL/$filename" in workflow
+    assert 'cmp -- "generated-metadata/$filename"' in workflow
     assert 'if channel == "dev":' in generator
     assert 'build_version = f"dev_{tag}"' in generator
     assert "private_key.public_key().public_numbers()" in signer
