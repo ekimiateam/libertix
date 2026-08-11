@@ -1,4 +1,5 @@
 BeforeAll {
+    . "$PSScriptRoot/../Scripts/uefi/Libertix.Uefi.Execution.ps1"
     . "$PSScriptRoot/../Scripts/uefi/Libertix.Uefi.Firmware.ps1"
 }
 
