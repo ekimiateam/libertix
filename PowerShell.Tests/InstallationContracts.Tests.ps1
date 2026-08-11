@@ -1,4 +1,5 @@
 BeforeAll {
+    Import-Module "$PSScriptRoot/../Scripts/modules/Libertix.AtomicFile.psm1" -Force
     Import-Module "$PSScriptRoot/../Scripts/modules/Libertix.InstallationPlan.psm1" -Force
     Import-Module "$PSScriptRoot/../Scripts/modules/Libertix.InstallationState.psm1" -Force
 
@@ -65,7 +66,68 @@ BeforeAll {
     "recoveryRunId": "dddddddddddddddddddddddddddddddd"
   }
 }
+
 '@ | ConvertFrom-Json
+    }
+}
+
+Describe "Atomic file publication" {
+    It "replaces a complete document without temporary residue" {
+        $destination = Join-Path $TestDrive "atomic.json"
+        $temporary = Join-Path $TestDrive ".atomic.json.tmp"
+        $backup = Join-Path $TestDrive ".atomic.json.bak"
+        Set-Content -LiteralPath $destination -Value '{"revision":1}' -NoNewline
+        Set-Content -LiteralPath $temporary -Value '{"revision":2}' -NoNewline
+
+        Publish-LibertixFileAtomic `
+            -TemporaryPath $temporary `
+            -DestinationPath $destination `
+            -BackupPath $backup
+
+        Get-Content -LiteralPath $destination -Raw | Should -Be '{"revision":2}'
+        Test-Path -LiteralPath $temporary | Should -BeFalse
+        Test-Path -LiteralPath $backup | Should -BeTrue
+    }
+
+    It "retries while another Windows process briefly locks the destination" {
+        $destination = Join-Path $TestDrive "locked.json"
+        $temporary = Join-Path $TestDrive ".locked.json.tmp"
+        $backup = Join-Path $TestDrive ".locked.json.bak"
+        $ready = Join-Path $TestDrive ".locked.ready"
+        Set-Content -LiteralPath $destination -Value '{"revision":1}' -NoNewline
+        Set-Content -LiteralPath $temporary -Value '{"revision":2}' -NoNewline
+        $lockJob = Start-Job -ArgumentList $destination, $ready -ScriptBlock {
+            param($Path, $ReadyPath)
+            $stream = [IO.File]::Open(
+                $Path,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::None
+            )
+            try {
+                [IO.File]::WriteAllText($ReadyPath, "ready")
+                Start-Sleep -Milliseconds 150
+            } finally {
+                $stream.Dispose()
+            }
+        }
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            while (-not (Test-Path -LiteralPath $ready) -and [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 25
+            }
+            Test-Path -LiteralPath $ready | Should -BeTrue
+
+            Publish-LibertixFileAtomic `
+                -TemporaryPath $temporary `
+                -DestinationPath $destination `
+                -BackupPath $backup
+
+            Get-Content -LiteralPath $destination -Raw | Should -Be '{"revision":2}'
+        } finally {
+            Wait-Job -Job $lockJob -Timeout 10 | Out-Null
+            Remove-Job -Job $lockJob -Force
+        }
     }
 }
 

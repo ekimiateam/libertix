@@ -144,18 +144,21 @@ are mounted read-only on Windows. Both directions are optional and selected befo
 
 ## Runtime configuration
 
-The production executable uses this filepool by default:
+Without a command-line override, the executable selects a signed GitHub Pages channel from its
+embedded build version:
 
 ```text
-https://ekimia.fr/libertix
+dev_<sha7>  -> https://ekimiateam.github.io/libertix/dev
+0.1        -> https://ekimiateam.github.io/libertix/main
 ```
 
-Reusing local ISO files does not remove the catalogue requirement. With the production filepool,
-Libertix first downloads `distros.json` and its detached signature, verifies that signature, and
-only then looks beside `Libertix.exe` for the exact filenames selected by the catalogue. A matching
-local file is used after its SHA-256 is verified; otherwise Libertix downloads the artifact from the
-configured URL. A laboratory machine without Internet access therefore needs an accessible local
-HTTP filepool containing the catalogue and every artifact that is not beside the executable.
+Reusing local ISO files does not remove the catalogue requirement. Libertix first downloads
+`distros.json` and its detached signature, verifies that signature, and only then looks beside
+`Libertix.exe` for the exact filenames selected by the catalogue. A matching local file is used
+after its SHA-256 is verified; otherwise Libertix downloads the artifact from the configured URL.
+Stable builds also verify signed `releases.json` metadata and refuse to start when a newer stable
+version has been published. Development builds deliberately skip only this freshness check; their
+distribution catalogue remains signed.
 
 Development and test runs can override it for one process without changing the production default:
 
@@ -164,8 +167,9 @@ Development and test runs can override it for one process without changing the p
 ```
 
 The override must be an absolute HTTP or HTTPS URL without embedded credentials, query parameters or
-fragments. It is an explicit development mode and does not require the production catalogue
-signature; it must not be used to trust an unverified third-party server.
+fragments. It is an explicit laboratory mode, displays a permanent warning, and disables catalogue
+signature verification for that process; it must not be used to trust an unverified third-party
+server.
 
 Automated development installations also use an explicit static-address option:
 
@@ -244,10 +248,13 @@ uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-
 
 The GitHub Actions workflow also validates Shell syntax, runs ShellCheck, analyzes PowerShell with
 PSScriptAnalyzer, runs the Pester contract suite, builds `Libertix.exe` on Windows and builds both
-ISO images on trusted `dev` branch runs. Successful workflow runs publish the WPF build and the
-verified ISO images as GitHub Actions artifacts. Dev prereleases include the WPF archive, both ISO
-images and a `SHA256SUMS` file. The WPF archive contains `BUILD-INFO.txt`, `LICENSE` and
-`THIRD_PARTY.md`; the executable informational version records the complete source revision.
+ISO images on trusted `dev` and `main` branch runs. Successful runs publish the WPF archive, both ISO
+images and `SHA256SUMS` in a GitHub Release. The CI then generates and signs the channel metadata and
+publishes only the corresponding `dev/` or `main/` directory on GitHub Pages. The WPF archive
+contains `BUILD-INFO.txt`, `LICENSE` and `THIRD_PARTY.md`.
+
+The complete versioning, signing, release and Pages workflow is documented in
+[`docs/RELEASES.md`](docs/RELEASES.md).
 
 ## Source layout
 

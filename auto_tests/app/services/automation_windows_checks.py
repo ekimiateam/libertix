@@ -23,6 +23,16 @@ class WindowsValidationPlan:
     base_config: dict[str, Any]
 
 
+def windows_validation_timeout_seconds(check_name: str) -> int:
+    if check_name in {"sfc_verify_only", "chkdsk_scan"}:
+        return 1800
+    if check_name == "finalization":
+        # The guest-side check owns a five-minute deadline. Transport must
+        # leave enough time for that diagnostic and script cleanup to return.
+        return 420
+    return 300
+
+
 def build_windows_validation_plan(
     vm: VMConfig,
     options: AutomationOptions,

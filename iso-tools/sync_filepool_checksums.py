@@ -11,8 +11,40 @@ import tempfile
 from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TEMPLATE = REPOSITORY_ROOT / "auto_tests" / "app" / "filepool" / "distros.json"
+DEFAULT_TEMPLATE = REPOSITORY_ROOT / "release-config.json"
 DEFAULT_METADATA = REPOSITORY_ROOT / "auto_tests" / "runtime" / "filepool" / "distros.json"
+
+
+def load_distribution_template(path: Path) -> list[dict[str, object]]:
+    source = json.loads(path.read_text(encoding="utf-8"))
+    from_release_config = isinstance(source, dict)
+    if isinstance(source, dict):
+        if set(source) != {"schemaVersion", "mainRelease", "distributions"}:
+            raise ValueError("Release configuration has missing or unknown top-level properties.")
+        source = source.get("distributions")
+    if (
+        not isinstance(source, list)
+        or not source
+        or not all(isinstance(item, dict) for item in source)
+    ):
+        raise ValueError("Distribution metadata must contain at least one entry.")
+
+    distributions: list[dict[str, object]] = []
+    for configured in source:
+        entry = dict(configured)
+        defaults = {
+            "isoUrl": "libertix-installer-bios.iso",
+            "isoSha256": "0" * 64,
+            "uefiIsoUrl": "libertix-installer-uefi.iso",
+            "uefiIsoSha256": "0" * 64,
+        }
+        if from_release_config:
+            entry.update(defaults)
+        else:
+            for key, value in defaults.items():
+                entry.setdefault(key, value)
+        distributions.append(entry)
+    return distributions
 
 
 def sha256(path: Path) -> str:
@@ -31,9 +63,7 @@ def update_metadata(
     template_path: Path | None = None,
 ) -> None:
     source_path = template_path or metadata_path
-    distributions = json.loads(source_path.read_text(encoding="utf-8"))
-    if not isinstance(distributions, list) or not distributions:
-        raise ValueError("Distribution metadata must contain at least one entry.")
+    distributions = load_distribution_template(source_path)
 
     existing_distributions: list[dict[str, object]] = []
     if template_path is not None and metadata_path.is_file():

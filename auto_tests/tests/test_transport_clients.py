@@ -303,6 +303,8 @@ def test_ssh_remote_timeouts_are_enforced_on_linux_and_windows() -> None:
     assert '"`r`necho %ERRORLEVEL% > `"$statusPath`"`r`n"' in wrapper
     assert "[int]::TryParse($statusText, [ref]$reportedExitCode)" in wrapper
     assert "$exitCode = 126" in wrapper
+    assert "System32\\taskkill.exe" in wrapper
+    assert "System32\taskkill.exe" not in wrapper
 
 
 def test_ssh_command_output_is_bounded_in_memory() -> None:

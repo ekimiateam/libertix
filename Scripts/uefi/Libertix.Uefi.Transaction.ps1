@@ -40,11 +40,10 @@ function Save-LibertixTransactionStateAtomic {
             $stream.Dispose()
         }
 
-        if ([IO.File]::Exists($fullPath)) {
-            [IO.File]::Replace($temporaryPath, $fullPath, $backupPath)
-        } else {
-            [IO.File]::Move($temporaryPath, $fullPath)
-        }
+        Publish-LibertixFileAtomic `
+            -TemporaryPath $temporaryPath `
+            -DestinationPath $fullPath `
+            -BackupPath $backupPath
     } finally {
         if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
         if ([IO.File]::Exists($backupPath)) { [IO.File]::Delete($backupPath) }
@@ -329,7 +328,7 @@ function Invoke-Revert {
         Write-Log "No transaction state found; $SystemDrive was not resized by this run." "Gray"
         Remove-LibertixTransactionDownloads `
             -SystemDrive $SystemDrive `
-            -PlanId $ExpectedRecoveryRunId
+            -PlanId $RecoveryRunId
         Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
         Write-Log "Revert complete." "Green"
         return
@@ -353,7 +352,7 @@ function Invoke-Revert {
     Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction SilentlyContinue
     Remove-LibertixTransactionDownloads `
         -SystemDrive $SystemDrive `
-        -PlanId $ExpectedRecoveryRunId
+        -PlanId $RecoveryRunId
     Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
     Complete-LibertixTrackedCompensation -Step "windows.recovery-armed"
 

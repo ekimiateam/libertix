@@ -39,7 +39,9 @@ $requiredModules = @(
     "Libertix.Download.psm1",
     "Libertix.TemporaryArtifacts.psm1",
     "Libertix.Transaction.psm1",
-    "Libertix.Rollback.psm1"
+    "Libertix.Rollback.psm1",
+    # Import this last so dot-sourced UEFI components see its exported command.
+    "Libertix.AtomicFile.psm1"
 )
 foreach ($moduleName in $requiredModules) {
     $modulePath = Join-Path $PSScriptRoot "modules\$moduleName"

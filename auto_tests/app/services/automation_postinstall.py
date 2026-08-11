@@ -19,6 +19,7 @@ from app.services.automation_types import AutomationOptions
 from app.services.automation_windows_checks import (
     CrossOsArtifacts,
     build_windows_validation_plan,
+    windows_validation_timeout_seconds,
 )
 from app.services.common import ResultBuilder
 
@@ -1057,7 +1058,7 @@ class PostInstallValidationMixin:
                     script_name="post_install_windows_check.ps1",
                     config={**plan.base_config, "check": name},
                     step="automation.test.windows",
-                    timeout=1800 if name in {"sfc_verify_only", "chkdsk_scan"} else 300,
+                    timeout=windows_validation_timeout_seconds(name),
                 )
                 result.ok(
                     "automation.test.windows",

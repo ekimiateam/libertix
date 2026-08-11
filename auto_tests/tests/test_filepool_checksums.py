@@ -72,14 +72,11 @@ def test_checksum_sync_generates_metadata_without_mutating_template(tmp_path: Pa
     uefi_iso = tmp_path / "libertix-installer-uefi.iso"
     uefi_iso.write_bytes(b"verified UEFI image")
     original = json.dumps(
-        [
-            {
-                "isoUrl": "libertix-installer-bios.iso",
-                "isoSha256": "0" * 64,
-                "uefiIsoUrl": uefi_iso.name,
-                "uefiIsoSha256": "1" * 64,
-            }
-        ]
+        {
+            "schemaVersion": 1,
+            "mainRelease": {"version": "0.1", "title": "Test", "notes": "Test"},
+            "distributions": [{"id": "mint"}],
+        }
     )
     template.write_text(original, encoding="utf-8")
 
@@ -99,14 +96,11 @@ def test_partial_checksum_sync_preserves_other_runtime_firmware_hash(tmp_path: P
     bios_iso.write_bytes(b"new BIOS image")
     template.write_text(
         json.dumps(
-            [
-                {
-                    "isoUrl": bios_iso.name,
-                    "isoSha256": "0" * 64,
-                    "uefiIsoUrl": "libertix-installer-uefi.iso",
-                    "uefiIsoSha256": "1" * 64,
-                }
-            ]
+            {
+                "schemaVersion": 1,
+                "mainRelease": {"version": "0.1", "title": "Test", "notes": "Test"},
+                "distributions": [{"id": "mint"}],
+            }
         ),
         encoding="utf-8",
     )
@@ -141,9 +135,9 @@ def test_signed_catalog_fixture_matches_the_served_catalog() -> None:
 
 
 def test_every_catalog_grub_icon_is_packaged_in_the_shared_theme() -> None:
-    catalog = json.loads(
-        (REPO_ROOT / "auto_tests/app/filepool/distros.json").read_text(encoding="utf-8")
-    )
+    catalog = json.loads((REPO_ROOT / "release-config.json").read_text(encoding="utf-8"))[
+        "distributions"
+    ]
 
     assert {entry["id"] for entry in catalog} == {"mint", "zorin"}
     for entry in catalog:

@@ -5,9 +5,11 @@ on:
   push:
     branches:
       - dev
+      - main
   pull_request:
     branches:
       - dev
+      - main
   workflow_dispatch:
 
 # Read access is the workflow default. Only the release job receives write access.
@@ -19,6 +21,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  identity:
+    name: Resolve release identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      channel: ${{ steps.identity.outputs.channel }}
+      tag: ${{ steps.identity.outputs.tag }}
+      build_version: ${{ steps.identity.outputs.build_version }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve branch identity
+        id: identity
+        shell: bash
+        env:
+          TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          case "$TARGET_BRANCH" in
+            dev)
+              channel=dev
+              tag="${GITHUB_SHA:0:7}"
+              build_version="dev_$tag"
+              ;;
+            main)
+              channel=main
+              tag="$(python3 -c 'import json; print(json.load(open("release-config.json", encoding="utf-8"))["mainRelease"]["version"])')"
+              build_version="$tag"
+              ;;
+            *)
+              printf 'Unsupported release branch: %s\n' "$TARGET_BRANCH" >&2
+              exit 1
+              ;;
+          esac
+          {
+            printf 'channel=%s\n' "$channel"
+            printf 'tag=%s\n' "$tag"
+            printf 'build_version=%s\n' "$build_version"
+          } >> "$GITHUB_OUTPUT"
+          printf 'Channel: %s; tag: %s; WPF version: %s\n' \
+            "$channel" "$tag" "$build_version" >> "$GITHUB_STEP_SUMMARY"
+
   quality:
     name: Python tests and source quality
     runs-on: ubuntu-24.04
@@ -78,9 +126,13 @@ jobs:
           set -Eeuo pipefail
           uv run --project auto_tests --frozen python -m json.tool schemas/installation-plan.schema.json >/dev/null
           uv run --project auto_tests --frozen python -m json.tool schemas/installation-state.schema.json >/dev/null
+          uv run --project auto_tests --frozen python -m json.tool schemas/release-config.schema.json >/dev/null
+          uv run --project auto_tests --frozen python -m json.tool release-config.json >/dev/null
 
   wpf:
     name: Build WPF (.NET Framework 4.8)
+    needs:
+      - identity
     runs-on: windows-2022
     timeout-minutes: 30
 
@@ -167,13 +219,14 @@ jobs:
 
       - name: Stamp source revision in the executable
         shell: pwsh
+        env:
+          LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
         run: |
           $path = 'Properties\AssemblyInfo.cs'
-          $revision = $env:GITHUB_SHA.ToLowerInvariant()
           $content = [IO.File]::ReadAllText($path)
           $stamped = $content.Replace(
-            'AssemblyInformationalVersion("1.0.0+local")',
-            "AssemblyInformationalVersion(`"1.0.0+$revision`")"
+            'AssemblyInformationalVersion("dev_0000000")',
+            "AssemblyInformationalVersion(`"$env:LIBERTIX_BUILD_VERSION`")"
           )
           if ($stamped -eq $content) {
             throw 'Assembly informational version placeholder was not found.'
@@ -206,6 +259,8 @@ jobs:
 
       - name: Verify WPF output
         shell: pwsh
+        env:
+          LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
         run: |
           $outputDirectory = 'bin\Release'
           $executable = Join-Path $outputDirectory 'Libertix.exe'
@@ -217,7 +272,7 @@ jobs:
             "source-revision=$env:GITHUB_SHA"
             "source-ref=$env:GITHUB_REF"
             "workflow-run=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-            "informational-version=1.0.0+$env:GITHUB_SHA"
+            "informational-version=$env:LIBERTIX_BUILD_VERSION"
           ) | Set-Content -LiteralPath (Join-Path $outputDirectory 'BUILD-INFO.txt') -Encoding utf8
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $executable
           "Libertix.exe SHA-256: $($hash.Hash.ToLowerInvariant())" |
@@ -239,7 +294,9 @@ jobs:
       - wpf
     # The ISO builder requires a privileged Docker container. Do not execute
     # untrusted pull-request code with that privilege.
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 150
 
@@ -292,13 +349,14 @@ jobs:
           compression-level: 0
 
   release:
-    name: Publish dev alpha prerelease
+    name: Publish channel release and signed metadata
     needs:
+      - identity
       - quality
       - wpf
       - iso
     if: >-
-      github.ref == 'refs/heads/dev' &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -306,6 +364,23 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          python-version: "3.13"
+          version: "0.9.8"
+          enable-cache: true
+          cache-dependency-glob: auto_tests/uv.lock
+
+      - name: Synchronize locked metadata environment
+        working-directory: auto_tests
+        run: uv sync --frozen --extra dev
+
       - name: Download WPF build
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -345,39 +420,100 @@ jobs:
           )
           test -s release-assets/SHA256SUMS
 
-      - name: Publish alpha prerelease
+      - name: Generate and sign channel metadata
+        shell: bash
+        env:
+          LIBERTIX_SIGNING_PRIVATE_KEY: ${{ secrets.LIBERTIX_SIGNING_PRIVATE_KEY }}
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel }}
+          RELEASE_TAG: ${{ needs.identity.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$LIBERTIX_SIGNING_PRIVATE_KEY" || {
+            printf 'Required Actions secret LIBERTIX_SIGNING_PRIVATE_KEY is missing.\n' >&2
+            exit 1
+          }
+          install -d -m 0700 release-work
+          printf '%s\n' "$LIBERTIX_SIGNING_PRIVATE_KEY" > release-work/signing-private.pem
+          chmod 0600 release-work/signing-private.pem
+          uv run --project auto_tests --frozen python iso-tools/generate-release-metadata.py \
+            --channel "$RELEASE_CHANNEL" \
+            --tag "$RELEASE_TAG" \
+            --commit "$GITHUB_SHA" \
+            --bios-iso release-assets/libertix-installer-bios.iso \
+            --uefi-iso release-assets/libertix-installer-uefi.iso \
+            --wpf-zip release-assets/Libertix-wpf.zip \
+            --output-dir release-metadata
+          uv run --project auto_tests --frozen python iso-tools/sign-release-metadata.py \
+            --private-key release-work/signing-private.pem \
+            release-metadata/distros.json \
+            release-metadata/releases.json
+          test -s release-metadata/distros.json.sig
+          test -s release-metadata/releases.json.sig
+
+      - name: Validate an existing stable version
+        if: needs.identity.outputs.channel == 'main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.identity.outputs.tag }}
         run: |
           set -Eeuo pipefail
-          tag="${GITHUB_SHA:0:7}"
-          title="Alpha $tag"
-          commit_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA"
-          notes="Automated Libertix alpha build for commit [$tag]($commit_url)."
+          if tag_sha="$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha' 2>/dev/null)"; then
+            if [ "$tag_sha" != "$GITHUB_SHA" ]; then
+              printf 'Stable version %s already points to a different commit. Update mainRelease.version in release-config.json.\n' \
+                "$RELEASE_TAG" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel }}
+          RELEASE_TAG: ${{ needs.identity.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          title="$(jq -r '.latest.title' release-metadata/releases.json)"
+          notes="$(jq -r '.latest.notes' release-metadata/releases.json)"
           assets=(
             release-assets/Libertix-wpf.zip
             release-assets/libertix-installer-bios.iso
             release-assets/libertix-installer-uefi.iso
             release-assets/SHA256SUMS
           )
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" \
+          if [ "$RELEASE_CHANNEL" = dev ] && gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
               --target "$GITHUB_SHA" \
               --title "$title" \
               --notes "$notes" \
               --prerelease
-            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          elif [ "$RELEASE_CHANNEL" = dev ]; then
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes" \
+              --prerelease
+          elif gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$title" \
+              --notes "$notes" \
+              --latest
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
           else
-            gh release create "$tag" "${assets[@]}" \
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
               --target "$GITHUB_SHA" \
               --title "$title" \
               --notes "$notes" \
-              --prerelease
+              --latest
           fi
 
       - name: Keep the three newest dev alpha prereleases
+        if: needs.identity.outputs.channel == 'dev'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -393,3 +529,102 @@ jobs:
           for stale_tag in "${stale_tags[@]}"; do
             gh release delete "$stale_tag" --cleanup-tag --yes
           done
+
+      - name: Upload signed Pages metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Libertix-pages-${{ needs.identity.outputs.channel }}-${{ github.sha }}
+          path: |
+            release-metadata/distros.json
+            release-metadata/distros.json.sig
+            release-metadata/releases.json
+            release-metadata/releases.json.sig
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 9
+
+  pages:
+    name: Publish ${{ needs.identity.outputs.channel }} metadata to GitHub Pages
+    needs:
+      - identity
+      - release
+    if: >-
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: libertix-pages-publication
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pages: write
+
+    steps:
+      - name: Check out Pages branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+          path: pages-branch
+
+      - name: Download signed channel metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: Libertix-pages-${{ needs.identity.outputs.channel }}-${{ github.sha }}
+          path: generated-metadata
+
+      - name: Commit only the selected channel
+        shell: bash
+        env:
+          RELEASE_CHANNEL: ${{ needs.identity.outputs.channel }}
+          RELEASE_TAG: ${{ needs.identity.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          case "$RELEASE_CHANNEL" in
+            dev|main) ;;
+            *) printf 'Invalid Pages channel: %s\n' "$RELEASE_CHANNEL" >&2; exit 1 ;;
+          esac
+          for filename in distros.json distros.json.sig releases.json releases.json.sig; do
+            test -s "generated-metadata/$filename"
+          done
+          install -d -m 0755 "pages-branch/$RELEASE_CHANNEL"
+          install -m 0644 generated-metadata/distros.json \
+            "pages-branch/$RELEASE_CHANNEL/distros.json"
+          install -m 0644 generated-metadata/distros.json.sig \
+            "pages-branch/$RELEASE_CHANNEL/distros.json.sig"
+          install -m 0644 generated-metadata/releases.json \
+            "pages-branch/$RELEASE_CHANNEL/releases.json"
+          install -m 0644 generated-metadata/releases.json.sig \
+            "pages-branch/$RELEASE_CHANNEL/releases.json.sig"
+          touch pages-branch/.nojekyll
+          git -C pages-branch config user.name "felix068"
+          git -C pages-branch config user.email "77407722+felix068@users.noreply.github.com"
+          git -C pages-branch add -- .nojekyll "$RELEASE_CHANNEL"
+          if ! git -C pages-branch diff --cached --quiet; then
+            git -C pages-branch commit \
+              -m "Publish $RELEASE_CHANNEL metadata for $RELEASE_TAG"
+          fi
+
+      - name: Push Pages branch with conflict retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for attempt in 1 2 3; do
+            git -C pages-branch pull --rebase origin gh-pages
+            if git -C pages-branch push origin HEAD:gh-pages; then
+              exit 0
+            fi
+            printf 'Pages push attempt %s failed; retrying after synchronization.\n' "$attempt" >&2
+          done
+          printf 'Pages branch could not be published after three attempts.\n' >&2
+          exit 1
+
+      - name: Request GitHub Pages deployment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          gh api --method POST "repos/$GH_REPO/pages/builds" >/dev/null

@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ekimia.fr/libertix/schemas/release-config.schema.json",
+  "title": "Libertix release configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mainRelease", "distributions"],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "mainRelease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "title", "notes"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*)){1,2}(?:-[0-9A-Za-z.-]+)?$",
+          "maxLength": 64
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "notes": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 10000
+        }
+      }
+    },
+    "distributions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/distribution"
+      }
+    }
+  },
+  "$defs": {
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "osReleaseId",
+        "grubDisplayName",
+        "grubIcon",
+        "description",
+        "imageUrl",
+        "isoInstaller",
+        "isoInstallerFileName",
+        "isoInstallerSha256",
+        "isoInstallerSizeBytes",
+        "sizeInGB"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "osReleaseId": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
+        "grubDisplayName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$"
+        },
+        "grubIcon": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "imageUrl": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "isoInstaller": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "isoInstallerFileName": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.iso$"
+        },
+        "isoInstallerSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "isoInstallerSizeBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sizeInGB": {
+          "type": "number",
+          "minimum": 20
+        }
+      }
+    }
+  }
+}

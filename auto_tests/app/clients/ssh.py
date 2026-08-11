@@ -444,7 +444,8 @@ try {{
     }}
     $process = Start-Process @startArguments
     if (-not $process.WaitForExit({timeout_seconds * 1000})) {{
-        & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $process.Id /T /F 2>&1 | Out-Null
+        $taskkill = Join-Path $env:SystemRoot 'System32\\taskkill.exe'
+        & $taskkill /PID $process.Id /T /F 2>&1 | Out-Null
         $taskkillExitCode = $LASTEXITCODE
         $process.WaitForExit(10000) | Out-Null
         if ($taskkillExitCode -ne 0 -or -not $process.HasExited) {{

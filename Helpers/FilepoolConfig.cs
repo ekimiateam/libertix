@@ -4,11 +4,17 @@ namespace Libertix.Helpers
 {
     public sealed class FilepoolConfig
     {
-        public const string ProductionBaseUrl = "https://ekimia.fr/libertix";
+        private readonly bool _requiresCatalogSignature;
+        private readonly bool _isDevelopmentOverride;
 
-        private FilepoolConfig(string baseUrl)
+        private FilepoolConfig(
+            string baseUrl,
+            bool requiresCatalogSignature,
+            bool isDevelopmentOverride)
         {
             BaseUrl = baseUrl;
+            _requiresCatalogSignature = requiresCatalogSignature;
+            _isDevelopmentOverride = isDevelopmentOverride;
         }
 
         public string BaseUrl { get; }
@@ -17,15 +23,23 @@ namespace Libertix.Helpers
 
         public string DistrosSignatureUrl => DistrosUrl + ".sig";
 
-        public bool RequiresCatalogSignature => string.Equals(
-            BaseUrl,
-            ProductionBaseUrl,
-            StringComparison.OrdinalIgnoreCase);
+        public string ReleasesUrl => BaseUrl + "/releases.json";
 
-        public bool IsDevelopmentMode => !RequiresCatalogSignature;
+        public string ReleasesSignatureUrl => ReleasesUrl + ".sig";
 
-        public static FilepoolConfig Production { get; } =
-            new FilepoolConfig(ProductionBaseUrl);
+        public bool RequiresCatalogSignature => _requiresCatalogSignature;
+
+        public bool IsDevelopmentMode => _isDevelopmentOverride;
+
+        public static FilepoolConfig ForBuild(ApplicationBuild build)
+        {
+            if (build == null)
+                throw new ArgumentNullException(nameof(build));
+            return new FilepoolConfig(
+                build.MetadataBaseUrl,
+                requiresCatalogSignature: true,
+                isDevelopmentOverride: false);
+        }
 
         public static bool TryCreate(string value, out FilepoolConfig config, out string error)
         {
@@ -50,7 +64,10 @@ namespace Libertix.Helpers
                 return false;
             }
 
-            config = new FilepoolConfig(uri.AbsoluteUri.TrimEnd('/'));
+            config = new FilepoolConfig(
+                uri.AbsoluteUri.TrimEnd('/'),
+                requiresCatalogSignature: false,
+                isDevelopmentOverride: true);
             return true;
         }
 

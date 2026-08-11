@@ -293,6 +293,22 @@ namespace Libertix.Pages
                     }
                     File.Copy(stateModuleSource, stateModuleTarget, true);
 
+                    string atomicFileModuleSource = Path.Combine(
+                        AppDomain.CurrentDomain.BaseDirectory,
+                        "Scripts",
+                        "modules",
+                        "Libertix.AtomicFile.psm1");
+                    string atomicFileModuleTarget = Path.Combine(
+                        RecoveryRoot,
+                        "Libertix.AtomicFile.psm1");
+                    if (!File.Exists(atomicFileModuleSource))
+                    {
+                        Dispatcher.Invoke(() => Log(
+                            $"ERROR: Atomic-file module missing: {atomicFileModuleSource}"));
+                        return false;
+                    }
+                    File.Copy(atomicFileModuleSource, atomicFileModuleTarget, true);
+
                     string policySource = Path.Combine(
                         AppDomain.CurrentDomain.BaseDirectory,
                         "Scripts",

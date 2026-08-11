@@ -25,7 +25,10 @@ from app.models import ValidationRequest
 from app.services.automation import AutomationService
 from app.services.automation_postinstall import CrossOsArtifacts
 from app.services.automation_types import AutomationOptions, Point
-from app.services.automation_windows_checks import build_windows_validation_plan
+from app.services.automation_windows_checks import (
+    build_windows_validation_plan,
+    windows_validation_timeout_seconds,
+)
 from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
 from app.services.reset import ResetService
@@ -2659,6 +2662,16 @@ def test_recovery_is_armed_before_any_bitlocker_mutation() -> None:
     assert "-ExpectedRecoveryRunId" in installer
 
 
+def test_bios_recovery_payload_includes_atomic_state_dependency() -> None:
+    source = read_repo("Pages/ApplyChanges.Windows.cs")
+    method_start = source.index("private async Task<bool> InstallWindowsRecoveryGuardAsync")
+    method_end = source.index("private async Task<double> QueryShrinkSpaceAsync", method_start)
+    method = source[method_start:method_end]
+
+    assert '"Libertix.InstallationState.psm1"' in method
+    assert method.count('"Libertix.AtomicFile.psm1"') == 2
+
+
 def test_bios_live_ledger_is_detached_before_drive_letter_removal() -> None:
     bios = read_repo("Pages/ApplyChanges.Bios.cs")
     method = bios.split("private async Task<bool> PrepareBiosTemporaryBootAsync()", 1)[1].split(
@@ -2686,6 +2699,13 @@ def test_bios_recovery_task_is_not_clock_boundary_dependent() -> None:
     method = source[method_start:method_end]
     assert '"schtasks.exe"' not in method
     assert '"/SC ONSTART' not in method
+
+
+def test_windows_finalization_transport_outlives_its_guest_deadline() -> None:
+    assert windows_validation_timeout_seconds("finalization") == 420
+    assert windows_validation_timeout_seconds("sfc_verify_only") == 1800
+    assert windows_validation_timeout_seconds("chkdsk_scan") == 1800
+    assert windows_validation_timeout_seconds("identity") == 300
 
 
 def test_wpf_storage_preflight_fails_closed() -> None:

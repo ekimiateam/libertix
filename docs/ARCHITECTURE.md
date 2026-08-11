@@ -53,21 +53,24 @@ that validated drive to the Windows partition identified by disk geometry; it ne
 Windows is installed as `C:`. Plan and state handoff files are staged, flushed, hash-checked, and
 replaced in their destination directory before the staging volume is hidden from Windows.
 
-## Distribution catalogue trust
+## Distribution catalogue and release trust
 
-The production distribution catalogue is authenticated independently of the filepool. Libertix
-verifies `distros.json.sig` with the RSA public key bundled in the executable before trusting any
-download URL or checksum. The private signing key is excluded from Git and must be supplied in the
-local ignored path expected by `iso-tools/sign-distribution-catalog.sh`; it is not embedded in the
-application or CI artifacts. Maintainers publish the catalogue and detached signature atomically.
-An explicit development filepool override skips this production trust check so isolated auto-tests
-can publish per-build ISO hashes.
+CI generates the distribution catalogue from `release-config.json` after both mini-ISO images have
+been built. It combines maintainer-supplied hashes for external distribution images with hashes it
+calculates for the built BIOS and UEFI images. CI signs both `distros.json` and `releases.json` with
+the RSA private key stored in the `LIBERTIX_SIGNING_PRIVATE_KEY` Actions secret. The matching public
+key is bundled in the executable; the private key is never embedded in an application or artifact.
 
-The catalogue is always fetched from the configured HTTP filepool before local ISO reuse is
-considered. Local ISO files reduce artifact downloads but do not provide a standalone disconnected
-mode. An isolated laboratory must expose a local HTTP filepool for the catalogue and any artifact
-that is not already beside the executable; only the production filepool requires the detached
-signature.
+The `dev` and `main` channels are physically separated under GitHub Pages. Both channels require a
+valid catalogue signature. Stable builds additionally verify the signed main release metadata and
+block an obsolete executable before the installer UI starts. Development builds skip the version
+freshness check so an older commit-specific build remains usable. An explicit command-line filepool
+override is reserved for isolated laboratory runs and is the only mode that disables signature
+verification.
+
+The catalogue is fetched before local ISO reuse is considered. Local ISO files reduce artifact
+downloads but do not provide a standalone disconnected mode. An isolated laboratory must expose a
+local HTTP filepool for the catalogue and any artifact that is not already beside the executable.
 
 ## Installation state
 

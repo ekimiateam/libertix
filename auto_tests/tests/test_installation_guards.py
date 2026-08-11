@@ -1886,13 +1886,15 @@ def test_windows_preparation_log_is_persisted_for_every_gui_line() -> None:
     assert "AppendPersistentLog(line);" in apply_changes
 
 
-def test_filepool_defaults_to_production_and_supports_an_explicit_override() -> None:
+def test_filepool_defaults_to_a_signed_build_channel_and_supports_an_override() -> None:
     filepool = read("Helpers/FilepoolConfig.cs")
+    build = read("Helpers/ApplicationBuild.cs")
     startup = read("Helpers/StartupOptions.cs")
     app = read("App.xaml.cs")
     launch = read("auto_tests/app/scripts/launch_libertix_elevated.ps1")
 
-    assert 'ProductionBaseUrl = "https://ekimia.fr/libertix"' in filepool
+    assert 'GitHubPagesBaseUrl = "https://ekimiateam.github.io/libertix"' in build
+    assert "return new FilepoolConfig(\n                build.MetadataBaseUrl," in filepool
     assert 'FilepoolOption = "--filepool-base-url"' in startup
     assert 'DevelopmentSshStaticIpOption = "--dev-ssh-static-ip"' in startup
     assert 'DevelopmentSshPrefixLengthOption = "--dev-ssh-prefix-length"' in startup
@@ -1901,7 +1903,8 @@ def test_filepool_defaults_to_production_and_supports_an_explicit_override() -> 
     assert "FilepoolConfig.TryCreate(" in app
     assert "public sealed class FilepoolConfig" in filepool
     assert "public string BaseUrl { get; }" in filepool
-    assert "public bool IsDevelopmentMode => !RequiresCatalogSignature;" in filepool
+    assert "public bool RequiresCatalogSignature => _requiresCatalogSignature;" in filepool
+    assert "public bool IsDevelopmentMode => _isDevelopmentOverride;" in filepool
     assert "public static string BaseUrl" not in filepool
     assert "DEVELOPMENT MODE - catalog signature verification is disabled." in read(
         "MainWindow.xaml"
@@ -1998,6 +2001,11 @@ def test_uefi_configuration_requires_the_versioned_installation_plan() -> None:
 
 
 def test_powershell_atomic_writers_use_real_same_directory_backups() -> None:
+    atomic_module = read("Scripts/modules/Libertix.AtomicFile.psm1")
+    assert "$script:AtomicPublishAttempts = 8" in atomic_module
+    assert "Test-LibertixTransientAtomicPublishFailure" in atomic_module
+    assert "Start-Sleep -Milliseconds (25 * $attempt)" in atomic_module
+
     for module_path in (
         "Scripts/modules/Libertix.InstallationPlan.psm1",
         "Scripts/modules/Libertix.InstallationState.psm1",
@@ -2010,9 +2018,17 @@ def test_powershell_atomic_writers_use_real_same_directory_backups() -> None:
         assert "$backupPath = Join-Path" in atomic_writer
         assert "$directory" in atomic_writer
         assert "ToString('N')).bak\"" in atomic_writer
-        assert "[IO.File]::Replace($temporaryPath, $fullPath, $backupPath)" in atomic_writer
+        assert "Publish-LibertixFileAtomic" in atomic_writer
         assert "[IO.File]::Replace($temporaryPath, $fullPath, $null)" not in atomic_writer
         assert "[IO.File]::Delete($backupPath)" in atomic_writer
+
+
+def test_uefi_rollback_uses_the_validated_runtime_owner_for_download_cleanup() -> None:
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    rollback = transaction.split("function Invoke-Revert", 1)[1]
+
+    assert rollback.count("-PlanId $RecoveryRunId") == 2
+    assert "-PlanId $ExpectedRecoveryRunId" not in rollback
 
 
 def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:
@@ -2462,7 +2478,7 @@ def test_uefi_iso_download_uses_the_canonical_url_without_cache_busting() -> Non
 
 def test_mint_installer_uses_the_official_mirror_in_every_download_contract() -> None:
     official_url = "https://pub.linuxmint.io/stable/22.3/linuxmint-22.3-cinnamon-64bit.iso"
-    distributions = json.loads(read("auto_tests/app/filepool/distros.json"))
+    distributions = json.loads(read("release-config.json"))["distributions"]
     download_module = read("Scripts/modules/Libertix.Download.psm1")
 
     assert distributions[0]["isoInstaller"] == official_url
@@ -2544,7 +2560,7 @@ def test_live_handoff_is_published_atomically_and_hidden_before_reboot() -> None
     assert "RemoveBiosInstallerAccessPathAsync" in bios
     assert "Remove-PartitionAccessPath -InputObject $p" in bios
     assert "Installer partition drive letter remains assigned" in bios
-    assert "[IO.File]::Replace($temporary, $destination, $backup)" in uefi
+    assert "Publish-LibertixFileAtomic" in uefi
     assert "$outputStream.Flush($true)" in uefi
     assert "Installation context publication hash mismatch" in uefi
     assert 'Dismount-Letter -Letter ($drive.TrimEnd(":"))' in orchestrator
@@ -2596,13 +2612,32 @@ def test_published_artifacts_are_traceable_and_include_notices() -> None:
     workflow = read(".github/workflows/ci.yml")
     assembly = read("Properties/AssemblyInfo.cs")
 
-    assert 'AssemblyInformationalVersion("1.0.0+local")' in assembly
+    assert 'AssemblyInformationalVersion("dev_0000000")' in assembly
     assert "Stamp source revision in the executable" in workflow
     assert "Copy-Item -LiteralPath LICENSE, THIRD_PARTY.md" in workflow
     assert "BUILD-INFO.txt" in workflow
-    assert "informational-version=1.0.0+$env:GITHUB_SHA" in workflow
+    assert "informational-version=$env:LIBERTIX_BUILD_VERSION" in workflow
     assert "> SHA256SUMS" in workflow
     assert "release-assets/SHA256SUMS" in workflow
+
+
+def test_release_metadata_is_generated_signed_and_isolated_by_channel() -> None:
+    workflow = read(".github/workflows/ci.yml")
+    generator = read("iso-tools/generate-release-metadata.py")
+    signer = read("iso-tools/sign-release-metadata.py")
+    config = json.loads(read("release-config.json"))
+
+    assert set(config) == {"schemaVersion", "mainRelease", "distributions"}
+    assert '--channel "$RELEASE_CHANNEL"' in workflow
+    assert "LIBERTIX_SIGNING_PRIVATE_KEY" in workflow
+    assert "release-metadata/distros.json" in workflow
+    assert "release-metadata/releases.json" in workflow
+    assert "group: libertix-pages-publication" in workflow
+    assert 'install -d -m 0755 "pages-branch/$RELEASE_CHANNEL"' in workflow
+    assert 'gh api --method POST "repos/$GH_REPO/pages/builds"' in workflow
+    assert 'if channel == "dev":' in generator
+    assert 'build_version = f"dev_{tag}"' in generator
+    assert "private_key.public_key().public_numbers()" in signer
 
 
 def test_offline_documentation_preserves_the_catalogue_requirement() -> None:
@@ -2610,10 +2645,11 @@ def test_offline_documentation_preserves_the_catalogue_requirement() -> None:
     architecture = read("docs/ARCHITECTURE.md")
 
     assert "Reusing local ISO files does not remove the catalogue requirement" in readme
-    assert "downloads `distros.json` and its detached signature" in readme
-    assert "Local ISO files reduce artifact downloads" in architecture
+    assert "`distros.json` and its detached signature" in readme
+    assert "Local ISO files reduce artifact" in architecture
     assert "do not provide a standalone" in architecture
-    assert "An isolated laboratory must expose a local HTTP filepool" in architecture
+    assert "An isolated laboratory must expose a" in architecture
+    assert "local HTTP filepool" in architecture
 
 
 def test_recovery_documentation_does_not_promise_reversible_decryption() -> None:

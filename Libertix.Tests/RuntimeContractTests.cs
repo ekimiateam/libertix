@@ -13,16 +13,39 @@ namespace Libertix.Tests
     public sealed class RuntimeContractTests
     {
         [TestMethod]
-        public void ProductionFilepoolUsesThePublishedEkimiaEndpoint()
+        public void StableBuildUsesTheSignedMainPagesChannel()
         {
+            ApplicationBuild build = ApplicationBuild.Parse("0.1");
+            FilepoolConfig filepool = FilepoolConfig.ForBuild(build);
+
             Assert.AreEqual(
-                "https://ekimia.fr/libertix/distros.json",
-                FilepoolConfig.Production.DistrosUrl);
-            Assert.IsTrue(FilepoolConfig.Production.RequiresCatalogSignature);
-            Assert.IsFalse(FilepoolConfig.Production.IsDevelopmentMode);
+                "https://ekimiateam.github.io/libertix/main/distros.json",
+                filepool.DistrosUrl);
             Assert.AreEqual(
-                "https://ekimia.fr/libertix/distros.json.sig",
-                FilepoolConfig.Production.DistrosSignatureUrl);
+                "https://ekimiateam.github.io/libertix/main/releases.json",
+                filepool.ReleasesUrl);
+            Assert.IsTrue(filepool.RequiresCatalogSignature);
+            Assert.IsFalse(filepool.IsDevelopmentMode);
+            Assert.AreEqual(
+                "https://ekimiateam.github.io/libertix/main/distros.json.sig",
+                filepool.DistrosSignatureUrl);
+            Assert.IsTrue(build.RequiresPublishedVersionCheck);
+        }
+
+        [TestMethod]
+        public void DevelopmentBuildUsesItsSignedDevPagesChannelWithoutFreshnessCheck()
+        {
+            ApplicationBuild build = ApplicationBuild.Parse("dev_a881918");
+            FilepoolConfig filepool = FilepoolConfig.ForBuild(build);
+
+            Assert.AreEqual("dev", build.Channel);
+            Assert.AreEqual("a881918", build.ReleaseTag);
+            Assert.AreEqual(
+                "https://ekimiateam.github.io/libertix/dev/distros.json",
+                filepool.DistrosUrl);
+            Assert.IsTrue(filepool.RequiresCatalogSignature);
+            Assert.IsFalse(filepool.IsDevelopmentMode);
+            Assert.IsFalse(build.RequiresPublishedVersionCheck);
         }
 
         [TestMethod]
@@ -77,7 +100,7 @@ namespace Libertix.Tests
         {
             Assert.AreEqual(
                 "https://pub.linuxmint.io/stable/mint.iso",
-                FilepoolConfig.Production.ResolveUrl(
+                FilepoolConfig.ForBuild(ApplicationBuild.Parse("0.1")).ResolveUrl(
                     "https://pub.linuxmint.io/stable/mint.iso"));
         }
 
@@ -90,7 +113,33 @@ namespace Libertix.Tests
         public void UnsafeAbsoluteArtifactUrlIsRejected(string value)
         {
             Assert.ThrowsException<ArgumentException>(
-                () => FilepoolConfig.Production.ResolveUrl(value));
+                () => FilepoolConfig.ForBuild(ApplicationBuild.Parse("0.1")).ResolveUrl(value));
+        }
+
+        [TestMethod]
+        public void PublishedStableMetadataRejectsAnUntrustedDownloadPage()
+        {
+            string json = "{\"schemaVersion\":1,\"channel\":\"main\",\"latest\":{" +
+                "\"version\":\"0.1\",\"tag\":\"0.1\"," +
+                "\"commit\":\"" + new string('a', 40) + "\"," +
+                "\"releaseUrl\":\"https://example.test/fake\"}}";
+
+            Assert.ThrowsException<InvalidDataException>(() =>
+                ReleaseMetadataClient.ParseAndValidate(System.Text.Encoding.UTF8.GetBytes(json)));
+        }
+
+        [TestMethod]
+        public void PublishedStableMetadataAcceptsTheMatchingGitHubRelease()
+        {
+            string json = "{\"schemaVersion\":1,\"channel\":\"main\",\"latest\":{" +
+                "\"version\":\"0.1\",\"tag\":\"0.1\"," +
+                "\"commit\":\"" + new string('a', 40) + "\"," +
+                "\"releaseUrl\":\"https://github.com/ekimiateam/libertix/releases/tag/0.1\"}}";
+
+            ReleaseMetadata metadata = ReleaseMetadataClient.ParseAndValidate(
+                System.Text.Encoding.UTF8.GetBytes(json));
+
+            Assert.AreEqual("0.1", metadata.Latest.Version);
         }
 
         [TestMethod]

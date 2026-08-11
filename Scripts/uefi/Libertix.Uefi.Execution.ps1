@@ -274,11 +274,10 @@ function Publish-LibertixInstallationContext {
             if ($sourceHash -ne $temporaryHash) {
                 throw "Installation context staging hash mismatch for $([IO.Path]::GetFileName($destination))."
             }
-            if ([IO.File]::Exists($destination)) {
-                [IO.File]::Replace($temporary, $destination, $backup)
-            } else {
-                [IO.File]::Move($temporary, $destination)
-            }
+            Publish-LibertixFileAtomic `
+                -TemporaryPath $temporary `
+                -DestinationPath $destination `
+                -BackupPath $backup
             $publishedHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
             if ($sourceHash -ne $publishedHash) {
                 throw "Installation context publication hash mismatch for $([IO.Path]::GetFileName($destination))."

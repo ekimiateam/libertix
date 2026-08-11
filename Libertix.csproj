@@ -80,6 +80,7 @@
       <SubType>Designer</SubType>
     </ApplicationDefinition>
     <Compile Include="Helpers\FilepoolConfig.cs" />
+    <Compile Include="Helpers\ApplicationBuild.cs" />
     <Compile Include="Helpers\PowerShellJsonResult.cs" />
     <Compile Include="Helpers\StartupOptions.cs" />
     <Compile Include="Helpers\CompatibilityPreflightRunner.cs" />
@@ -95,6 +96,7 @@
     <Compile Include="Installation\AtomicJsonFile.cs" />
     <Compile Include="Installation\ArtifactCatalog.cs" />
     <Compile Include="Installation\DistributionCatalogTrust.cs" />
+    <Compile Include="Installation\ReleaseMetadata.cs" />
     <Compile Include="Installation\InstallationExecutionState.cs" />
     <Compile Include="Installation\InstallationExecutionLedger.cs" />
     <Compile Include="Installation\InstallationPlan.cs" />
@@ -302,6 +304,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\libertix-disk-image.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.AtomicFile.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.Process.psm1">

@@ -1,10 +1,12 @@
 ﻿using System;
 using System.IO;
+using System.Diagnostics;
 using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using Libertix.Helpers;
+using Libertix.Installation;
 using Libertix.Models;
 
 namespace Libertix
@@ -15,9 +17,11 @@ namespace Libertix
         private bool _ownsSingleInstanceMutex;
         public InstallationState InstallationState { get; } = new InstallationState();
         public StartupOptions RuntimeOptions { get; private set; } = new StartupOptions();
-        public FilepoolConfig Filepool { get; private set; } = FilepoolConfig.Production;
+        public ApplicationBuild Build { get; } = ApplicationBuild.Current;
+        public FilepoolConfig Filepool { get; private set; } =
+            FilepoolConfig.ForBuild(ApplicationBuild.Current);
 
-        protected override void OnStartup(StartupEventArgs e)
+        protected override async void OnStartup(StartupEventArgs e)
         {
             _singleInstanceMutex = new Mutex(
                 initiallyOwned: true,
@@ -64,6 +68,9 @@ namespace Libertix
             if (!string.IsNullOrWhiteSpace(recoveryStatePath))
                 InstallationState.UefiRecoveryStatePath = recoveryStatePath;
 
+            if (!await ValidatePublishedVersionAsync())
+                return;
+
             base.OnStartup(e);
         }
 
@@ -75,7 +82,7 @@ namespace Libertix
                 return false;
             }
 
-            FilepoolConfig filepool = FilepoolConfig.Production;
+            FilepoolConfig filepool = FilepoolConfig.ForBuild(Build);
             if (!string.IsNullOrWhiteSpace(options.FilepoolBaseUrlOverride) &&
                 !FilepoolConfig.TryCreate(
                     options.FilepoolBaseUrlOverride,
@@ -90,6 +97,7 @@ namespace Libertix
 
             RuntimeOptions = options;
             ApplicationLogger.Write($"Filepool base URL: {Filepool.BaseUrl}");
+            ApplicationLogger.Write($"Build version: {Build.Version}; channel={Build.Channel}.");
             if (!string.IsNullOrEmpty(options.DevelopmentSshStaticIpv4Address))
             {
                 ApplicationLogger.Write(
@@ -98,6 +106,64 @@ namespace Libertix
                     options.DevelopmentSshStaticIpv4PrefixLength + ".");
             }
             return true;
+        }
+
+        private async Task<bool> ValidatePublishedVersionAsync()
+        {
+            ReleaseCheckResult result = await ReleaseMetadataClient.CheckAsync(Build, Filepool);
+            if (result.IsCurrent)
+                return true;
+
+            if (!string.IsNullOrWhiteSpace(result.Error))
+            {
+                ApplicationLogger.Write("Published version check failed: " + result.Error);
+                MessageBox.Show(
+                    string.Format(
+                        Localization.GetBootstrapString(
+                            "ReleaseCheckFailedMessage",
+                            "Libertix could not verify the current published version: {0}"),
+                        result.Error),
+                    Localization.GetBootstrapString(
+                        "ReleaseCheckFailedTitle",
+                        "Libertix - version verification failed"),
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                Shutdown(4);
+                return false;
+            }
+
+            ApplicationLogger.Write(
+                $"Startup refused: build {Build.Version} is older than {result.LatestVersion}.");
+            MessageBoxResult response = MessageBox.Show(
+                string.Format(
+                    Localization.GetBootstrapString(
+                        "ReleaseUpdateRequiredMessage",
+                        "This Libertix version ({0}) is no longer current. The latest version is {1}. " +
+                        "Download the current release before continuing. Open the download page now?"),
+                    Build.Version,
+                    result.LatestVersion),
+                Localization.GetBootstrapString(
+                    "ReleaseUpdateRequiredTitle",
+                    "Libertix - update required"),
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+            if (response == MessageBoxResult.Yes)
+            {
+                try
+                {
+                    Process.Start(result.ReleaseUrl);
+                }
+                catch (Exception exception) when (
+                    exception is InvalidOperationException ||
+                    exception is System.ComponentModel.Win32Exception)
+                {
+                    ApplicationLogger.WriteException(
+                        "The current release URL could not be opened.",
+                        exception);
+                }
+            }
+            Shutdown(5);
+            return false;
         }
 
         private static void RejectInvalidStartupOptions(string error)

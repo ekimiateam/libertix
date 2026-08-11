@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+Import-Module (Join-Path $PSScriptRoot "Libertix.AtomicFile.psm1") -Force -ErrorAction Stop
+
 $script:ValidStatuses = @(
     "pending", "running", "failed", "rollback-running", "rolled-back", "succeeded"
 )
@@ -263,13 +265,10 @@ function Write-LibertixExecutionStateAtomic {
             $stream.Dispose()
         }
 
-        if ([IO.File]::Exists($fullPath)) {
-            # Windows PowerShell 5.1 can bind a null backup path incorrectly
-            # on .NET Framework. A same-directory backup keeps Replace atomic.
-            [IO.File]::Replace($temporaryPath, $fullPath, $backupPath)
-        } else {
-            [IO.File]::Move($temporaryPath, $fullPath)
-        }
+        Publish-LibertixFileAtomic `
+            -TemporaryPath $temporaryPath `
+            -DestinationPath $fullPath `
+            -BackupPath $backupPath
     } finally {
         if ([IO.File]::Exists($temporaryPath)) {
             [IO.File]::Delete($temporaryPath)
