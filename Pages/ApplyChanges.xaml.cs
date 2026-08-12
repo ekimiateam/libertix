@@ -141,6 +141,17 @@ namespace Libertix.Pages
                     firmware,
                     decryptBitLocker: false);
                 ThrowIfCancellationRequested();
+                if (firmware == FirmwareType.Uefi)
+                {
+                    if (!await RecoverPreviousUefiTransactionAsync())
+                        return;
+                    // Recovery may have restored the Windows partition and power
+                    // settings. Re-read the topology before creating a new plan.
+                    _storagePreflight = await RunStoragePreflightAsync(
+                        firmware,
+                        decryptBitLocker: false);
+                    ThrowIfCancellationRequested();
+                }
                 if (!await PrepareWindowsSharePayloadAsync())
                     throw new InvalidOperationException("Windows read-only Linux sharing payload preparation failed.");
                 ThrowIfCancellationRequested();

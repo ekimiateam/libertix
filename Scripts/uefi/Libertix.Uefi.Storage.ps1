@@ -3,7 +3,7 @@
 # Windows storage, ESP mounting, volume letters, and installer cleanup.
 
 function Remove-LibertixInstallerPartitionIfPresent {
-    $partition = Get-VerifiedTransactionPartition
+    $partition = Get-VerifiedTransactionPartition -AllowMissing
     if (-not $partition) {
         if (Test-LibertixInstallerPartitionPresent) {
             throw "$InstallerLabel exists without a matching transaction state; refusing removal."

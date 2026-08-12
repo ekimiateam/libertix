@@ -52,18 +52,24 @@ function Remove-LibertixTransactionDownloads {
 }
 
 function Remove-LibertixUefiToolArtifacts {
-    param([Parameter(Mandatory = $true)][string]$SystemDrive)
+    param(
+        [Parameter(Mandatory = $true)][string]$SystemDrive,
+        [switch]$PreserveTransactionState
+    )
 
     if ($SystemDrive -notmatch '^[A-Za-z]:$') {
         throw "SystemDrive must be a valid Windows drive designator."
     }
 
     $toolRoot = Join-Path $SystemDrive "LibertixTools"
-    foreach ($ownedPath in @(
+    $ownedPaths = @(
         (Join-Path $toolRoot "aria2"),
-        (Join-Path $toolRoot "downloads"),
-        (Join-Path $toolRoot "uefi-transaction.json")
-    )) {
+        (Join-Path $toolRoot "downloads")
+    )
+    if (-not $PreserveTransactionState) {
+        $ownedPaths += (Join-Path $toolRoot "uefi-transaction.json")
+    }
+    foreach ($ownedPath in $ownedPaths) {
         if (Test-Path -LiteralPath $ownedPath) {
             Remove-Item -LiteralPath $ownedPath -Recurse -Force -ErrorAction Stop
         }

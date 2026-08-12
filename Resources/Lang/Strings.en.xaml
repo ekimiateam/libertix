@@ -153,6 +153,8 @@
     <system:String x:Key="ApplyChangesPreparingWindowsShare">Preparing Windows file sharing...</system:String>
     <system:String x:Key="WindowsShareShortcutDescription">Linux files (read-only)</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">Preparing UEFI installation...</system:String>
+    <system:String x:Key="ApplyChangesRecoveringPreviousUefi">Checking a previous UEFI installation...</system:String>
+    <system:String x:Key="ApplyChangesPreviousUefiRecoveryFailedDetails">A previous unfinished installation could not be restored safely. No new installation was started. Do not restart; review {0}.</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Checking Secure Boot...</system:String>
     <system:String x:Key="ApplyChangesSecureBootDistributionUnsupported">Secure Boot is enabled, but {0} has no installed-system bootloader compatible with this firmware. Firmware trusts Microsoft UEFI CA: {1}. The selected distribution supports: {2}. No disk change was made.</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Initializing Windows {0} decryption...</system:String>

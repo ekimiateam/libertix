@@ -8,6 +8,7 @@ param(
     [switch]$Force = $false,
     [switch]$Revert = $false,
     [switch]$RestoreWindowsSettings = $false,
+    [switch]$RecoverPreviousTransaction = $false,
     [string]$ExpectedRecoveryRunId = "",
     [string]$FilepoolBaseUrl = "",
     [string]$Aria2ExePath = "",
@@ -139,7 +140,12 @@ if (-not [string]::IsNullOrWhiteSpace($InstallationPlanPath)) {
     }
 }
 
-if (-not $Revert -and -not $RestoreWindowsSettings -and $null -eq $installationPlan) {
+if (
+    -not $Revert -and
+    -not $RestoreWindowsSettings -and
+    -not $RecoverPreviousTransaction -and
+    $null -eq $installationPlan
+) {
     throw "InstallationPlanPath is required for every UEFI preparation workflow."
 }
 
@@ -156,7 +162,7 @@ $SystemDriveLetter = $SystemDrive.TrimEnd(":")
 
 # A rollback only consumes the transaction state stored on disk. It must remain
 # available even when no download configuration is supplied by the caller.
-if (-not $Revert -and -not $RestoreWindowsSettings) {
+if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction) {
     $parsedFilepoolUri = $null
     if (
         [string]::IsNullOrWhiteSpace($FilepoolBaseUrl) -or
@@ -178,7 +184,7 @@ $artifactCatalog = Get-Content -LiteralPath $artifactCatalogPath -Raw -ErrorActi
     ConvertFrom-Json -ErrorAction Stop
 $Aria2ZipName = [string]$artifactCatalog.aria2.archiveFileName
 $downloadUrls = $null
-if (-not $Revert -and -not $RestoreWindowsSettings) {
+if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction) {
     $downloadUrls = New-LibertixDownloadUrls `
         -FilepoolBaseUrl $FilepoolBaseUrl `
         -Aria2ZipName $Aria2ZipName
@@ -229,15 +235,145 @@ if (-not (Test-Administrator)) {
     exit 1
 }
 
-if ($Revert -and $RestoreWindowsSettings) {
-    throw "Revert and RestoreWindowsSettings are mutually exclusive."
+$exclusiveModes = @(
+    @($Revert, $RestoreWindowsSettings, $RecoverPreviousTransaction) |
+        Where-Object { $_ }
+)
+if ($exclusiveModes.Count -gt 1) {
+    throw "Revert, RestoreWindowsSettings, and RecoverPreviousTransaction are mutually exclusive."
+}
+
+function Get-LibertixDurableRecoveryContext {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{32}$')]
+        [string]$RunId
+    )
+
+    $root = [IO.Path]::GetFullPath(
+        (Join-Path $env:ProgramData "Libertix\UefiRecovery\$RunId")
+    ).TrimEnd('\')
+    $planPath = Join-Path $root "installation-plan.json"
+    $statePath = Join-Path $root "installation-state.json"
+    if (
+        -not (Test-Path -LiteralPath $planPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $statePath -PathType Leaf)
+    ) {
+        throw "UEFI recovery metadata is incomplete; refusing rollback."
+    }
+
+    $plan = Read-LibertixInstallationPlan -Path $planPath
+    $executionState = Read-LibertixExecutionState -Path $statePath
+    if (
+        [string]$plan.planId -ne $RunId -or
+        [string]$plan.runtime.recoveryRunId -ne $RunId -or
+        [string]$executionState.planId -ne $RunId
+    ) {
+        throw "UEFI recovery plan, execution state, and transaction identity do not match."
+    }
+    $planRecoveryRoot = [IO.Path]::GetFullPath(
+        [string]$plan.runtime.recoveryRootWindows
+    ).TrimEnd('\')
+    if (-not $planRecoveryRoot.Equals($root, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "UEFI recovery plan root does not match its durable transaction directory."
+    }
+    if (-not ([string]$plan.disk.systemDrive).Equals(
+        $SystemDrive,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "UEFI recovery plan system drive does not match the running Windows installation."
+    }
+
+    return [pscustomobject]@{
+        Root = $root
+        PlanPath = $planPath
+        StatePath = $statePath
+        Plan = $plan
+        ExecutionState = $executionState
+    }
+}
+
+if ($RecoverPreviousTransaction) {
+    $previousState = $null
+    try {
+        $previousState = Get-ValidatedLibertixTransactionState
+        if (-not $previousState) {
+            Write-Log "LIBERTIX_PREVIOUS_TRANSACTION=none" "Gray"
+            exit 0
+        }
+
+        $RecoveryRunId = [string]$previousState.RecoveryRunId
+        $RecoveryRoot = [string]$previousState.RecoveryRoot
+        $InstallerBootDescription = "Libertix UEFI Installer $RecoveryRunId"
+        if (
+            $previousState.PSObject.Properties.Name -contains "BootStrategy" -and
+            [string]$previousState.BootStrategy -in @("BootNext", "FirmwareBootOrder")
+        ) {
+            $BootStrategy = [string]$previousState.BootStrategy
+        }
+        $previousContext = Get-LibertixDurableRecoveryContext -RunId $RecoveryRunId
+        $installationPlan = $previousContext.Plan
+        $previousExecutionState = $previousContext.ExecutionState
+        if ([string]$previousExecutionState.status -eq "succeeded") {
+            throw "A completed UEFI installation still owns the active transaction; refusing automatic rollback."
+        }
+        if ([string]$previousExecutionState.status -eq "pending") {
+            throw "Previous UEFI execution state is inconsistent with an active transaction."
+        }
+        if ([string]$previousExecutionState.status -eq "rolled-back") {
+            # The durable ledger already proves every compensation. Run the
+            # idempotent physical checks without attempting a second state
+            # transition, then remove only the leftover active transaction.
+            $installationPlan = $null
+            $InstallationPlanPath = ""
+            $ExecutionStatePath = ""
+        } else {
+            $InstallationPlanPath = $previousContext.PlanPath
+            $ExecutionStatePath = $previousContext.StatePath
+        }
+
+        Write-Log "Recovering unfinished UEFI transaction $RecoveryRunId before a new installation..." "Yellow"
+        Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
+        Start-LibertixTrackedRollback
+        Invoke-Revert
+        Write-Log "LIBERTIX_PREVIOUS_TRANSACTION=recovered" "Green"
+        exit 0
+    } catch {
+        $previousRecoveryError = $_
+        Write-Log "Previous UEFI transaction recovery failed: $($previousRecoveryError.Exception.Message)" "Red"
+        $previousRecoveryCorrelationId = if ($previousState) {
+            [string]$previousState.RecoveryRunId
+        } else {
+            ""
+        }
+        Write-ExceptionDiagnostics `
+            -ErrorRecord $previousRecoveryError `
+            -Kind "Primary" `
+            -CorrelationId $previousRecoveryCorrelationId `
+            -Stage "previous-transaction-recovery"
+        exit 1
+    }
 }
 
 if ($Revert) {
     Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $ExpectedRecoveryRunId
+    $rollbackContext = Get-LibertixDurableRecoveryContext -RunId $ExpectedRecoveryRunId
+    if ([string]$rollbackContext.ExecutionState.status -eq "pending") {
+        throw "UEFI recovery execution state is pending; no rollback is active."
+    }
+    if ([string]$rollbackContext.ExecutionState.status -eq "rolled-back") {
+        # The ledger is already terminal. Keep the physical cleanup idempotent
+        # without trying to record a second rollback transition.
+        $installationPlan = $null
+        $InstallationPlanPath = ""
+        $ExecutionStatePath = ""
+    } else {
+        $installationPlan = $rollbackContext.Plan
+        $InstallationPlanPath = $rollbackContext.PlanPath
+        $ExecutionStatePath = $rollbackContext.StatePath
+    }
     Start-LibertixTrackedRollback
     Invoke-Revert
-    Complete-LibertixTrackedRollback
     exit 0
 }
 
@@ -356,7 +492,6 @@ try {
     }
     try {
         Invoke-Revert
-        Complete-LibertixTrackedRollback
     } catch {
         $revertError = $_
         Write-Log "Automatic revert failed: $($revertError.Exception.Message)" "Red"

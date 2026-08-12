@@ -11,6 +11,18 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+$MainWindowTimeoutSeconds = 15
+$WarningControlTimeoutSeconds = 15
+$ToggleVerificationTimeoutSeconds = 5
+$ConfirmationButtonTimeoutSeconds = 5
+$InteractiveTaskStartupAllowanceSeconds = 30
+$InteractiveResultTimeoutSeconds = `
+    $MainWindowTimeoutSeconds + `
+    $WarningControlTimeoutSeconds + `
+    $ToggleVerificationTimeoutSeconds + `
+    $ConfirmationButtonTimeoutSeconds + `
+    $InteractiveTaskStartupAllowanceSeconds
+
 function Find-LibertixAutomationControl {
     param(
         [System.Windows.Automation.AutomationElement]$WindowRoot,
@@ -57,7 +69,7 @@ function Invoke-InteractiveWorker {
     Add-Type -AssemblyName UIAutomationTypes
 
     $process = Get-Process -Id $ProcessId -ErrorAction Stop
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $deadline = [DateTime]::UtcNow.AddSeconds($MainWindowTimeoutSeconds)
     while ($process.MainWindowHandle -eq [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 200
         $process.Refresh()
@@ -69,7 +81,7 @@ function Invoke-InteractiveWorker {
     $checkbox = $null
     $checkboxScope = "none"
     $root = $null
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $deadline = [DateTime]::UtcNow.AddSeconds($WarningControlTimeoutSeconds)
     do {
         $process.Refresh()
         if ($process.MainWindowHandle -ne [IntPtr]::Zero) {
@@ -90,7 +102,7 @@ function Invoke-InteractiveWorker {
         }
     } while (-not $checkbox -and [DateTime]::UtcNow -lt $deadline)
     if (-not $checkbox) {
-        throw "The warning acknowledgement control did not become visible within 15 seconds."
+        throw "The warning acknowledgement control did not become visible within $WarningControlTimeoutSeconds seconds."
     }
 
     $toggle = [System.Windows.Automation.TogglePattern]$checkbox.GetCurrentPattern(
@@ -100,7 +112,7 @@ function Invoke-InteractiveWorker {
         $toggle.Toggle()
     }
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    $deadline = [DateTime]::UtcNow.AddSeconds($ToggleVerificationTimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 100
         $toggle = [System.Windows.Automation.TogglePattern]$checkbox.GetCurrentPattern(
@@ -116,7 +128,7 @@ function Invoke-InteractiveWorker {
 
     $button = $null
     $buttonScope = "none"
-    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    $deadline = [DateTime]::UtcNow.AddSeconds($ConfirmationButtonTimeoutSeconds)
     do {
         $buttonResult = Find-LibertixAutomationControl `
             -WindowRoot $root `
@@ -199,7 +211,7 @@ try {
         throw "Failed to run the interactive accessibility task: $($runOutput -join ' | ')"
     }
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(25)
+    $deadline = [DateTime]::UtcNow.AddSeconds($InteractiveResultTimeoutSeconds)
     while (-not (Test-Path -LiteralPath $ResultPath -PathType Leaf)) {
         if ([DateTime]::UtcNow -ge $deadline) {
             throw "Timed out waiting for the interactive accessibility result."

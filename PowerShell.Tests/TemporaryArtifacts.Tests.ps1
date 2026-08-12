@@ -51,4 +51,20 @@ Describe "Libertix temporary artifact ownership" {
             Should -BeFalse
         Test-Path -LiteralPath (Join-Path $toolRoot "keep.txt") | Should -BeTrue
     }
+
+    It "can remove helper tools while preserving the active transaction owner" {
+        $toolRoot = "T:\LibertixTools"
+        New-Item -ItemType Directory -Path (Join-Path $toolRoot "aria2") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $toolRoot "downloads") -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $toolRoot "uefi-transaction.json") -Value "{}"
+
+        Remove-LibertixUefiToolArtifacts `
+            -SystemDrive "T:" `
+            -PreserveTransactionState
+
+        Test-Path -LiteralPath (Join-Path $toolRoot "aria2") | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $toolRoot "downloads") | Should -BeFalse
+        Test-Path -LiteralPath (Join-Path $toolRoot "uefi-transaction.json") |
+            Should -BeTrue
+    }
 }

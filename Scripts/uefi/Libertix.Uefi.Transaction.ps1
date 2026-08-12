@@ -257,7 +257,91 @@ function Update-TransactionFirmwareState {
     Save-LibertixTransactionStateAtomic -State $state
 }
 
+function Get-ValidatedLibertixTransactionState {
+    $state = Get-TransactionPartitionState
+    if (-not $state) {
+        return $null
+    }
+    if (
+        -not ($state.PSObject.Properties.Name -contains "RecoveryRunId") -or
+        [string]$state.RecoveryRunId -notmatch '^[0-9a-f]{32}$'
+    ) {
+        throw "UEFI transaction recovery identity is invalid."
+    }
+    if (-not ($state.PSObject.Properties.Name -contains "RecoveryRoot")) {
+        throw "UEFI transaction recovery root is missing."
+    }
+
+    $expectedRoot = [IO.Path]::GetFullPath(
+        (Join-Path $env:ProgramData "Libertix\UefiRecovery\$($state.RecoveryRunId)")
+    ).TrimEnd('\')
+    $actualRoot = [IO.Path]::GetFullPath([string]$state.RecoveryRoot).TrimEnd('\')
+    if (-not $actualRoot.Equals($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "UEFI transaction recovery root does not match its recovery identity."
+    }
+    return $state
+}
+
+function Save-LibertixRollbackTransactionArchive {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{32}$')]
+        [string]$ExpectedRecoveryRunId
+    )
+
+    $state = Get-ValidatedLibertixTransactionState
+    if (-not $state -or [string]$state.RecoveryRunId -ne $ExpectedRecoveryRunId) {
+        throw "UEFI transaction changed before rollback archival."
+    }
+    $state | Add-Member -NotePropertyName Status -NotePropertyValue "rolled-back" -Force
+    $state | Add-Member `
+        -NotePropertyName RolledBackUtc `
+        -NotePropertyValue ([DateTime]::UtcNow.ToString("o")) `
+        -Force
+    Save-LibertixTransactionStateAtomic -State $state
+
+    [IO.Directory]::CreateDirectory([string]$state.RecoveryRoot) | Out-Null
+    $destination = Join-Path ([string]$state.RecoveryRoot) "uefi-transaction.json"
+    $temporary = Join-Path `
+        ([string]$state.RecoveryRoot) `
+        ".uefi-transaction.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        Copy-Item -LiteralPath $TransactionStatePath -Destination $temporary -Force -ErrorAction Stop
+        if ([IO.File]::Exists($destination)) {
+            [IO.File]::Replace($temporary, $destination, $null)
+        } else {
+            [IO.File]::Move($temporary, $destination)
+        }
+    } finally {
+        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+    }
+    Write-Log "UEFI rollback transaction state archived permanently." "Green"
+}
+
+function Remove-LibertixRecoveryTasksForRunId {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{32}$')]
+        [string]$RunId
+    )
+
+    foreach ($taskName in @(
+        "LibertixUefiRecovery_$RunId",
+        "LibertixUefiRecoveryPrompt_$RunId"
+    )) {
+        Unregister-ScheduledTask `
+            -TaskName $taskName `
+            -Confirm:$false `
+            -ErrorAction SilentlyContinue
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            throw "Recovery task still exists after removal: $taskName"
+        }
+    }
+}
+
 function Get-VerifiedTransactionPartition {
+    param([switch]$AllowMissing)
+
     $state = Get-TransactionPartitionState
     if (-not $state) {
         return $null
@@ -278,8 +362,19 @@ function Get-VerifiedTransactionPartition {
                 [int64]$_.Size -eq [int64]$state.PartitionSize
             }
     )
+    if ($partitionMatches.Count -eq 0 -and $AllowMissing) {
+        Write-Log (
+            "The saved UEFI transaction partition is already absent: " +
+            "disk=$diskNumber offset=$($state.PartitionOffset) size=$($state.PartitionSize)."
+        ) "Yellow"
+        return $null
+    }
     if ($partitionMatches.Count -ne 1) {
-        throw "UEFI transaction partition geometry does not resolve to exactly one partition."
+        throw (
+            "UEFI transaction partition geometry is ambiguous: disk=$diskNumber " +
+            "offset=$($state.PartitionOffset) size=$($state.PartitionSize) " +
+            "matches=$($partitionMatches.Count)."
+        )
     }
     $partition = $partitionMatches[0]
     if ([int]$state.PartitionNumber -ne [int]$partition.PartitionNumber) {
@@ -292,6 +387,33 @@ function Get-VerifiedTransactionPartition {
 
 function Invoke-Revert {
     Write-Log "Reverting Libertix UEFI installer changes..." "Cyan"
+
+    $rollbackState = Get-TransactionPartitionState
+    if (-not $rollbackState -and (Test-LibertixTrackedExecution)) {
+        $executionState = Read-LibertixExecutionState -Path $ExecutionStatePath
+        $stateDependentSteps = @(
+            "windows.system-volume-shrunk",
+            "windows.installer-partition-created",
+            "windows.live-media-prepared",
+            "windows.temporary-boot-prepared"
+        )
+        $uncompensatedStateDependentSteps = @(
+            $executionState.completedSteps |
+                Where-Object {
+                    $_ -in $stateDependentSteps -and
+                    $_ -notin @($executionState.compensatedSteps)
+                }
+        )
+        if ($uncompensatedStateDependentSteps.Count -gt 0) {
+            throw (
+                "UEFI transaction state is missing while rollback still requires " +
+                "'$($uncompensatedStateDependentSteps[0])'; refusing unverified recovery."
+            )
+        }
+    }
+    if ($rollbackState) {
+        Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
+    }
 
     $esp = $null
     try {
@@ -314,7 +436,6 @@ function Invoke-Revert {
         if ($esp) { Dismount-Letter -Letter $EspLetter }
     }
 
-    $rollbackState = Get-TransactionPartitionState
     Remove-LibertixInstallerPartitionIfPresent
     $transactionUsedLowMemory = (
         $rollbackState -and
@@ -336,7 +457,10 @@ function Invoke-Revert {
         Remove-LibertixTransactionDownloads `
             -SystemDrive $SystemDrive `
             -PlanId $RecoveryRunId
+        Remove-LibertixRecoveryTasksForRunId -RunId $RecoveryRunId
         Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
+        Complete-LibertixTrackedCompensation -Step "windows.recovery-armed"
+        Complete-LibertixTrackedRollback
         Write-Log "Revert complete." "Green"
         return
     }
@@ -356,12 +480,22 @@ function Invoke-Revert {
         }
     }
 
-    Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction SilentlyContinue
+    Remove-LibertixRecoveryTasksForRunId -RunId $RecoveryRunId
     Remove-LibertixTransactionDownloads `
         -SystemDrive $SystemDrive `
         -PlanId $RecoveryRunId
-    Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
+    Remove-LibertixUefiToolArtifacts `
+        -SystemDrive $SystemDrive `
+        -PreserveTransactionState
     Complete-LibertixTrackedCompensation -Step "windows.recovery-armed"
+    Complete-LibertixTrackedRollback
+
+    # Keep the active owner document until every physical compensation and the
+    # execution ledger are terminal. A later retry can then finish archival if
+    # power is lost at any preceding boundary.
+    Save-LibertixRollbackTransactionArchive -ExpectedRecoveryRunId $RecoveryRunId
+    Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction Stop
+    Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
 
     Write-Log "Revert complete." "Green"
 }

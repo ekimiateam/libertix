@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using Libertix.Helpers;
@@ -18,6 +19,71 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges
     {
+        private async Task<bool> RecoverPreviousUefiTransactionAsync()
+        {
+            string scriptPath = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Scripts",
+                "libertix-uefi-install.ps1");
+            if (!File.Exists(scriptPath))
+                throw new FileNotFoundException("UEFI installer script is missing.", scriptPath);
+
+            UpdateProgress(
+                3,
+                Localized(
+                    "ApplyChangesRecoveringPreviousUefi",
+                    "Checking a previous UEFI installation..."));
+            int recoveryDispositionSeen = 0;
+            StreamingProcessResult result = await RunStreamingProcessAsync(
+                WindowsProcessRunner.ResolvePowerShell(),
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                "-RecoverPreviousTransaction",
+                WindowsProcessTimeouts.DiskImageOperation,
+                line =>
+                {
+                    Log($"PREVIOUS RECOVERY: {line}");
+                    if (
+                        line.IndexOf(
+                            "LIBERTIX_PREVIOUS_TRANSACTION=none",
+                            StringComparison.Ordinal) >= 0 ||
+                        line.IndexOf(
+                            "LIBERTIX_PREVIOUS_TRANSACTION=recovered",
+                            StringComparison.Ordinal) >= 0
+                    )
+                        Interlocked.Exchange(ref recoveryDispositionSeen, 1);
+                },
+                observeCancellation: false);
+            if (
+                result.Completion == StreamingProcessCompletion.Exited &&
+                result.ExitCode == 0 &&
+                Volatile.Read(ref recoveryDispositionSeen) == 1
+            )
+                return true;
+
+            string reason =
+                $"Previous UEFI transaction recovery failed with rc={result.ExitCode} " +
+                $"({result.Completion}).";
+            Log($"CRITICAL: {reason} Do not restart the machine.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesRollbackIncomplete",
+                    "Rollback incomplete. Manual intervention is required."));
+            FinishInstallation(enableBackButton: false);
+            MessageBox.Show(
+                LocalizedFormat(
+                    "ApplyChangesPreviousUefiRecoveryFailedDetails",
+                    "A previous unfinished installation could not be restored safely. " +
+                    "No new installation was started. Do not restart; review {0}.",
+                    Path.Combine(WindowsSystemDrive, RuntimeNames.InstallationLogDirectory)),
+                Localized(
+                    "ApplyChangesRollbackIncompleteTitle",
+                    "Libertix - Incomplete rollback"),
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return false;
+        }
+
         private void AssertSelectedDistroSecureBootCompatibility()
         {
             CompatibilityInfo compatibility = _installationState.Compatibility ??

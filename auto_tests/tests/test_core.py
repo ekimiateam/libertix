@@ -2602,8 +2602,8 @@ def test_automation_monitor_waits_for_the_final_rollback_verdict(
                 reboot_prompt_visible=False,
                 still_in_progress=True,
                 error_visible=True,
-                summary="Preparation failed; rollback is running.",
-                visible_text="Error detected. Restoring Windows... 0%",
+                summary="Installation is active but automatic rollback is starting.",
+                visible_text=("Error during preparation; running automatic revert..."),
             ),
             InstallProgressVerdict(
                 iso_download_finished=False,
@@ -2801,7 +2801,8 @@ def test_recovery_is_armed_before_any_bitlocker_mutation() -> None:
     assert bios.index("CompleteExecutionStep(InstallationStep.WindowsRecoveryArmed)") < (
         bios.index("decryptBitLocker: true")
     )
-    assert uefi.index("ArmUefiRecoveryAgent(recovery, powershell)") < uefi.index(
+    preparation = uefi.split("private async Task ExecuteUefiInstallationAsync()", 1)[1]
+    assert preparation.index("ArmUefiRecoveryAgent(recovery, powershell)") < preparation.index(
         "RunStreamingProcessAsync"
     )
     assert "SkipInstaller" not in installer

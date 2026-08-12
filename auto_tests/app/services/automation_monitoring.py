@@ -164,6 +164,7 @@ class InstallationMonitoringMixin:
             marker in text
             for marker in (
                 "restoring windows",
+                "running automatic revert",
                 "restauration de windows",
                 "restaurando windows",
                 "windows を復元しています",

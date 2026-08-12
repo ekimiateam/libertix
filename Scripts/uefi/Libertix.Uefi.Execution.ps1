@@ -166,7 +166,7 @@ function Start-LibertixTrackedRollback {
     if ([string]$state.status -eq "rollback-running") {
         return
     }
-    if ([string]$state.status -in @("running", "failed")) {
+    if ([string]$state.status -in @("running", "failed", "succeeded")) {
         $null = Start-LibertixRollback -Path $ExecutionStatePath
     }
 }

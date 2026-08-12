@@ -1359,8 +1359,17 @@ def test_warning_accessibility_worker_stays_within_task_scheduler_command_limit(
     assert "AutomationElement]::RootElement.FindFirst" in script
     assert "AutomationElement]::ProcessIdProperty" in script
     assert 'Scope = "process"' in script
-    assert "did not become visible within 15 seconds" in script
+    assert "$InteractiveResultTimeoutSeconds" in script
+    assert "$InteractiveTaskStartupAllowanceSeconds = 30" in script
+    assert "$InteractiveResultTimeoutSeconds = `" in script
+    assert "AddSeconds($InteractiveResultTimeoutSeconds)" in script
     assert "Start-Sleep -Milliseconds 200" in script
+
+    wizard = read("auto_tests/app/services/automation_wizard.py")
+    acknowledgement = wizard.split("def _set_warning_acknowledgement", 1)[1].split(
+        "def _start_installation_from_warning", 1
+    )[0]
+    assert "timeout=90" in acknowledgement
 
 
 def test_windows_process_tree_must_be_proven_stopped_before_rollback() -> None:
@@ -2116,9 +2125,13 @@ def test_uefi_revert_does_not_require_download_configuration() -> None:
     )[1]
     downloads = script.split("# Download hashes and names", 1)[1].split("# Defaults", 1)[0]
 
-    assert "if (-not $Revert -and -not $RestoreWindowsSettings)" in validation
+    assert (
+        "if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction)"
+    ) in validation
     assert "FilepoolBaseUrl is required" in validation
-    assert "if (-not $Revert -and -not $RestoreWindowsSettings)" in downloads
+    assert (
+        "if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction)"
+    ) in downloads
     assert "New-LibertixDownloadUrls" in downloads
 
 
@@ -2163,6 +2176,94 @@ def test_uefi_rollback_uses_the_validated_runtime_owner_for_download_cleanup() -
 
     assert rollback.count("-PlanId $RecoveryRunId") == 2
     assert "-PlanId $ExpectedRecoveryRunId" not in rollback
+
+
+def test_uefi_previous_transaction_is_recovered_before_a_new_plan_or_payload() -> None:
+    apply = read("Pages/ApplyChanges.xaml.cs")
+    uefi = read("Pages/ApplyChanges.Uefi.cs")
+    installer = read("Scripts/libertix-uefi-install.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    storage = read("Scripts/uefi/Libertix.Uefi.Storage.ps1")
+
+    recovery_call = apply.index("RecoverPreviousUefiTransactionAsync()")
+    share_payload = apply.index("PrepareWindowsSharePayloadAsync()")
+    new_session = uefi.index("CreateUefiRecoverySession()")
+    recovery_method = uefi.index("private async Task<bool> RecoverPreviousUefiTransactionAsync()")
+
+    assert recovery_call < share_payload
+    assert recovery_method < new_session
+    assert '"-RecoverPreviousTransaction"' in uefi
+    assert "[switch]$RecoverPreviousTransaction" in installer
+    assert "Get-ValidatedLibertixTransactionState" in installer
+    assert "A completed UEFI installation still owns the active transaction" in installer
+    assert "LIBERTIX_PREVIOUS_TRANSACTION=none" in uefi
+    assert "LIBERTIX_PREVIOUS_TRANSACTION=recovered" in uefi
+    assert "Volatile.Read(ref recoveryDispositionSeen) == 1" in uefi
+    assert "Assert-LibertixTransactionRecoveryRunId" in installer
+    assert "Remove-LibertixRecoveryTasksForRunId" in transaction
+    assert "Save-LibertixRollbackTransactionArchive" in transaction
+    assert "Get-VerifiedTransactionPartition -AllowMissing" in storage
+
+
+def test_uefi_rollback_validates_owner_before_touching_firmware_or_storage() -> None:
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    rollback = transaction.split("function Invoke-Revert", 1)[1]
+
+    identity_check = rollback.index("Assert-LibertixTransactionRecoveryRunId")
+    mount_esp = rollback.index("Mount-Esp")
+    remove_partition = rollback.index("Remove-LibertixInstallerPartitionIfPresent")
+    archive = rollback.index("Save-LibertixRollbackTransactionArchive")
+    complete_ledger = rollback.index("Complete-LibertixTrackedRollback")
+    remove_active_state = rollback.index("Remove-Item -LiteralPath $TransactionStatePath")
+
+    assert identity_check < mount_esp < remove_partition
+    assert complete_ledger < archive < remove_active_state
+
+
+def test_uefi_rollback_archive_reloads_the_latest_validated_transaction_state() -> None:
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    archive = transaction.split("function Save-LibertixRollbackTransactionArchive", 1)[1].split(
+        "function Remove-LibertixRecoveryTasksForRunId", 1
+    )[0]
+
+    assert "$state = Get-ValidatedLibertixTransactionState" in archive
+    assert "Save-LibertixTransactionStateAtomic -State $state" in archive
+    assert "param([Parameter(Mandatory = $true)]$State)" not in archive
+
+
+def test_uefi_rollback_preserves_active_owner_until_the_ledger_is_terminal() -> None:
+    installer = read("Scripts/libertix-uefi-install.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    artifacts = read("Scripts/modules/Libertix.TemporaryArtifacts.psm1")
+    rollback = transaction.split("function Invoke-Revert", 1)[1]
+
+    assert "[switch]$PreserveTransactionState" in artifacts
+    assert "-PreserveTransactionState" in rollback
+    assert rollback.index("Complete-LibertixTrackedRollback") < rollback.index(
+        "Save-LibertixRollbackTransactionArchive"
+    )
+    assert rollback.index("Save-LibertixRollbackTransactionArchive") < rollback.index(
+        "Remove-Item -LiteralPath $TransactionStatePath"
+    )
+    assert installer.count("Complete-LibertixTrackedRollback") == 0
+
+
+def test_uefi_explicit_rollback_reloads_and_tracks_its_durable_context() -> None:
+    installer = read("Scripts/libertix-uefi-install.ps1")
+    execution = read("Scripts/uefi/Libertix.Uefi.Execution.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    revert = installer.split("if ($Revert) {", 1)[1].split("if ($RestoreWindowsSettings)", 1)[0]
+
+    assert "function Get-LibertixDurableRecoveryContext" in installer
+    assert "Get-LibertixDurableRecoveryContext -RunId $ExpectedRecoveryRunId" in revert
+    assert "$installationPlan = $rollbackContext.Plan" in revert
+    assert "$ExecutionStatePath = $rollbackContext.StatePath" in revert
+    assert "UEFI recovery execution state is pending" in revert
+    assert '@("running", "failed", "succeeded")' in execution
+    rollback = transaction.split("function Invoke-Revert", 1)[1]
+    assert rollback.index("UEFI transaction state is missing while rollback still requires") < (
+        rollback.index("Mount-Esp")
+    )
 
 
 def test_uefi_installer_partition_paths_use_available_drive_letters() -> None:

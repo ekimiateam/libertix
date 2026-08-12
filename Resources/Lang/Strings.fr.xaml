@@ -153,6 +153,8 @@
     <system:String x:Key="ApplyChangesPreparingWindowsShare">Préparation du partage de fichiers Windows...</system:String>
     <system:String x:Key="WindowsShareShortcutDescription">Fichiers Linux en lecture seule</system:String>
     <system:String x:Key="ApplyChangesPreparingUefi">Préparation de l'installation UEFI...</system:String>
+    <system:String x:Key="ApplyChangesRecoveringPreviousUefi">Vérification d'une installation UEFI précédente...</system:String>
+    <system:String x:Key="ApplyChangesPreviousUefiRecoveryFailedDetails">Une installation précédente inachevée n'a pas pu être restaurée en toute sécurité. Aucune nouvelle installation n'a été lancée. Ne redémarrez pas et consultez {0}.</system:String>
     <system:String x:Key="ApplyChangesCheckingSecureBoot">Vérification de Secure Boot...</system:String>
     <system:String x:Key="ApplyChangesSecureBootDistributionUnsupported">Secure Boot est activé, mais {0} ne fournit pas de chargeur du système installé compatible avec ce firmware. Le firmware approuve Microsoft UEFI CA : {1}. La distribution sélectionnée prend en charge : {2}. Aucune modification du disque n'a été effectuée.</system:String>
     <system:String x:Key="ApplyChangesDecryptingWindowsInit">Initialisation du déchiffrement de Windows {0}...</system:String>

@@ -496,7 +496,7 @@ class WizardAutomationMixin:
                 script_name="set_warning_acknowledgement.ps1",
                 config={},
                 step="automation.set_warning_acknowledgement",
-                timeout=45,
+                timeout=90,
             )
         values = self.validation.parse_powershell_results(
             response.stdout,
