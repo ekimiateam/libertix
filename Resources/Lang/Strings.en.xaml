@@ -51,10 +51,11 @@
     <system:String x:Key="DistroLoadError">Failed to load the list of distributions. Please check your internet connection and try again.</system:String>
 
     <system:String x:Key="PasswordRequired">Password is required</system:String>
-    <system:String x:Key="PasswordTooShort">Password must be at least 8 characters</system:String>
+    <system:String x:Key="PasswordTooShort">Password must be at least 4 characters</system:String>
     <system:String x:Key="PasswordTooLong">Password must not exceed 128 characters</system:String>
     <system:String x:Key="UsernameRequired">Username is required</system:String>
     <system:String x:Key="UsernameInvalid">Username must start with a letter and contain only lowercase letters, numbers, or hyphens</system:String>
+    <system:String x:Key="UsernameReserved">The username “{0}” is reserved for a Debian/Ubuntu system account or group. Choose another name.</system:String>
     <system:String x:Key="ConfirmPasswordRequired">Please confirm your password</system:String>
     <system:String x:Key="PasswordsDoNotMatch">Passwords do not match</system:String>
     <system:String x:Key="ComputerNameRequired">Computer name is required</system:String>

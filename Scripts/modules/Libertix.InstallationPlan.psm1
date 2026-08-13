@@ -391,6 +391,9 @@ function Assert-LibertixInstallationPlan {
     if ($username -notmatch '^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$') {
         throw "Installation plan account.username is invalid."
     }
+    if (@($script:InstallationPolicy.account.reservedUsernames) -icontains $username) {
+        throw "Installation plan account.username is reserved by the operating system."
+    }
     if ($passwordHashWindowsPath -notmatch '^[A-Za-z]:\\' -or $passwordHashWindowsPath -match '(^|\\)\.\.(\\|$)') {
         throw "Installation plan account.passwordHashWindowsPath must be an absolute safe Windows path."
     }

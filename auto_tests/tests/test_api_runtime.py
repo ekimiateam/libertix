@@ -7,6 +7,7 @@ import pickle
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from starlette.testclient import TestClient as StarletteTestClient
 
 import app.main as main_module
@@ -82,6 +83,13 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
     restored_settings, restored_request = pickle.loads(pickle.dumps((settings(), request)))
     assert restored_request.linux_password == "test-passphrase"
     assert restored_request.simulate_fog_clone_boot_entries is True
+
+
+def test_automation_password_accepts_four_characters_and_rejects_three() -> None:
+    assert AutomationRequest(linux_password="test").linux_password == "test"
+
+    with pytest.raises(ValidationError):
+        AutomationRequest(linux_password="bad")
 
 
 def test_process_operation_lock_refuses_a_symlink(tmp_path: Path) -> None:

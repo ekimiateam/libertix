@@ -53,6 +53,7 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
     grldr.write_bytes(b"grldr")
     grldr_mbr.write_bytes(b"grldr.mbr")
     commit = "a881918" + "0" * 33
+    main_version = config["mainRelease"]["version"]
 
     dev_catalog, dev_releases = module.generate_metadata(
         config,
@@ -71,7 +72,7 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
     main_catalog, main_releases = module.generate_metadata(
         config,
         channel="main",
-        tag="0.1",
+        tag=main_version,
         commit=commit,
         bios_iso=bios,
         uefi_iso=uefi,
@@ -85,10 +86,10 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
 
     assert dev_releases["latest"]["version"] == "dev_a881918"
     assert dev_releases["latest"]["notes"] == ("Automated Libertix alpha build for commit a881918.")
-    assert main_releases["latest"]["version"] == "0.1"
+    assert main_releases["latest"]["version"] == main_version
     assert main_releases["latest"]["notes"] == config["mainRelease"]["notes"]
     assert "/a881918/" in dev_catalog["artifacts"]["miniIso"]["bios"]["url"]
-    assert "/0.1/" in main_catalog["artifacts"]["miniIso"]["bios"]["url"]
+    assert f"/{main_version}/" in main_catalog["artifacts"]["miniIso"]["bios"]["url"]
     assert (
         dev_catalog["artifacts"]["miniIso"]["bios"]["sha256"]
         == main_catalog["artifacts"]["miniIso"]["bios"]["sha256"]

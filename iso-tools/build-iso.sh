@@ -205,6 +205,8 @@ install_live_installer_assets() {
         "0644|$ROOT_DIR/assets/live/libertix-efi-sync.path|/usr/local/lib/libertix/libertix-efi-sync.path"
         "0755|$ROOT_DIR/assets/live/first-boot-resize.sh|/usr/local/lib/libertix/first-boot-resize.sh"
         "0755|$ROOT_DIR/assets/live/libertix-first-boot-verify.py|/usr/local/lib/libertix/libertix-first-boot-verify.py"
+        "0755|$ROOT_DIR/assets/live/libertix-first-boot-result.py|/usr/local/lib/libertix/libertix-first-boot-result.py"
+        "0644|$ROOT_DIR/assets/live/libertix-first-boot-result.desktop|/usr/local/lib/libertix/libertix-first-boot-result.desktop"
         "0644|$ROOT_DIR/assets/live/first-boot-resize.service|/usr/local/lib/libertix/first-boot-resize.service"
         "0644|$ISO_DIR/systemd/libertix-install.service|/etc/systemd/system/libertix-install.service"
         "0644|$ROOT_DIR/assets/live/getty-tty2-override.conf|/etc/systemd/system/getty@tty2.service.d/override.conf"

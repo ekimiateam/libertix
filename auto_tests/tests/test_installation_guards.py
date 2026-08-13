@@ -421,6 +421,30 @@ def test_installed_windows_grub_entry_has_a_stable_verification_id() -> None:
     assert '"--id libertix-windows"' in verifier
 
 
+def test_installed_linux_persists_and_displays_its_first_boot_verification() -> None:
+    target_common = read("assets/live/libertix-target-common.sh")
+    resize = read("assets/live/first-boot-resize.sh")
+    verifier = read("assets/live/libertix-first-boot-verify.py")
+    result_ui = read("assets/live/libertix-first-boot-result.py")
+    desktop = read("assets/live/libertix-first-boot-result.desktop")
+
+    assert "--record-service-failure" in resize
+    assert "trap record_failure ERR" in resize
+    assert '"succeeded"' in verifier
+    assert '"failed"' in verifier
+    assert "/var/lib/libertix/first-boot-verification.json" in verifier
+    assert "TRANSLATIONS" in result_ui
+    assert set(re.findall(r'^    "(en|fr|es|ja)": \{', result_ui, re.MULTILINE)) == {
+        "en",
+        "fr",
+        "es",
+        "ja",
+    }
+    assert "status_fingerprint" in result_ui
+    assert "libertix-first-boot-result.desktop" in target_common
+    assert "Exec=/usr/local/lib/libertix/libertix-first-boot-result.py" in desktop
+
+
 def test_bios_mbr_removal_verifies_the_table_instead_of_trusting_parted_rc() -> None:
     bios = read("assets/live/libertix-bios-adapter.sh")
     removal = bios.split("remove_mbr_partition_entry_verified()", 1)[1].split(
@@ -766,6 +790,24 @@ def test_bios_downloader_verifies_bundled_aria2_before_execution() -> None:
     assert "bundled aria2 hash mismatch, using HTTP downloader" in downloader
 
 
+def test_downloaders_disable_split_and_resume_when_byte_ranges_are_not_proven() -> None:
+    bios = read("Pages/ApplyChanges.Downloads.cs")
+    uefi = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
+
+    assert "TestHttpByteRangeSupportAsync(url)" in bios
+    assert "supportsByteRanges ? Aria2MaxConnections : 1" in bios
+    assert 'supportsByteRanges ? "true" : "false"' in bios
+    assert 'DeleteDownloadArtifactBestEffort(aria2OutputPath + ".aria2"' in bios
+    assert "if (!byteRangeSupport.HasValue)" in bios
+    assert "the partial download is retained for retry" in bios
+    assert "Get-HttpByteRangeSupport -Url $Url" in uefi
+    assert '$byteRangeSupport -eq "unknown"' in uefi
+    assert "the partial download is retained for retry" in uefi
+    assert "$connections = if ($supportsByteRanges) { $Aria2Connections } else { 1 }" in uefi
+    assert "-ContinueDownload $supportsByteRanges" in uefi
+    assert 'Remove-Item -LiteralPath "$downloadPath.aria2"' in uefi
+
+
 def test_bios_mbr_backup_is_atomic_durable_and_reusable(tmp_path: Path) -> None:
     source_backup = tmp_path / "source.bin"
     restored_backup = tmp_path / "restored.bin"
@@ -993,6 +1035,24 @@ def test_interrupted_post_install_verification_keeps_startup_recovery_armed() ->
         assert "startup recovery remains armed" in script
     assert "Remove-RecoveryTask -Required" in bios
     assert "Remove-StartupRecoveryTask -State $State" in uefi
+
+
+def test_windows_recovery_waits_durably_for_the_first_installed_linux_boot() -> None:
+    bios = read("Scripts/libertix-recovery-guard.ps1")
+    uefi = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    result_ui = read("Scripts/libertix-post-install-result.ps1")
+    module = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+
+    assert 'status = "waiting-linux-boot"' in module
+    assert 'waitingFor "installed-linux-boot.json"' not in module
+    assert '"installed-linux-boot.json"' in module
+    assert "Set-LibertixPostInstallWaitingForLinux" in bios
+    assert "Set-LibertixPostInstallWaitingForLinux" in uefi
+    assert 'Phase = "AwaitingInstalledLinuxBoot"' in uefi
+    assert 'status -notin @("succeeded", "failed", "rolled-back")' in result_ui
+    assert "installed-linux-boot.json" in result_ui
+    assert result_ui.index("installed-linux-boot.json") < result_ui.index("AddMinutes(15)")
+    assert "the two tasks raced each other" in result_ui
 
 
 def test_completed_bios_recovery_proves_task_absence_after_schtasks_delete() -> None:
@@ -1360,6 +1420,8 @@ def test_warning_accessibility_worker_stays_within_task_scheduler_command_limit(
     assert "AutomationElement]::ProcessIdProperty" in script
     assert 'Scope = "process"' in script
     assert "$InteractiveResultTimeoutSeconds" in script
+    assert "$MainWindowTimeoutSeconds = 30" in script
+    assert "$WarningControlTimeoutSeconds = 45" in script
     assert "$InteractiveTaskStartupAllowanceSeconds = 30" in script
     assert "$InteractiveResultTimeoutSeconds = `" in script
     assert "AddSeconds($InteractiveResultTimeoutSeconds)" in script
@@ -1369,7 +1431,7 @@ def test_warning_accessibility_worker_stays_within_task_scheduler_command_limit(
     acknowledgement = wizard.split("def _set_warning_acknowledgement", 1)[1].split(
         "def _start_installation_from_warning", 1
     )[0]
-    assert "timeout=90" in acknowledgement
+    assert "timeout=150" in acknowledgement
 
 
 def test_windows_process_tree_must_be_proven_stopped_before_rollback() -> None:
@@ -1415,7 +1477,7 @@ def test_uefi_aria2_and_ext4_installer_timeouts_stop_their_processes() -> None:
     assert "ConvertTo-LibertixNativeArgument" in aria
     assert "& $aria2 @aria2Arguments" not in aria
     assert '"--dir=$DownloadDir"' in aria_arguments
-    assert '"--continue=true"' in aria_arguments
+    assert '"--continue=$continueValue"' in aria_arguments
     assert '"--max-tries=5"' in aria_arguments
     assert '"--retry-wait=10"' in aria_arguments
     assert '"--enable-color=false"' in aria_arguments
@@ -1534,6 +1596,82 @@ def test_windows_share_and_postinstall_checks_bind_ext4_to_the_planned_partition
     assert "$ownedProcesses.Count -eq 1" in readonly_check
     assert "PhysicalDrive$($identity.DiskNumber)" in readonly_check
     assert "$identity.PartitionNumber" in readonly_check
+    assert "mount-status.json" in readonly_check
+    assert "$mountStatus.processId" in readonly_check
+    assert "$mountStatus.processId -gt 0" in readonly_check
+
+
+def test_auto_test_exercises_windows_before_linux_and_both_result_dialogs() -> None:
+    postinstall = read("auto_tests/app/services/automation_postinstall.py")
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    assert '"check": "waiting_for_linux"' in postinstall
+    assert 'grub_entry="windows"' in postinstall
+    assert 'grub_entry="linux"' in postinstall
+    assert postinstall.index('"check": "waiting_for_linux"') < postinstall.index(
+        '"linux.first_boot_verification_ready"'
+    )
+    assert postinstall.count("self._verify_post_install_success_dialog(") == 2
+    assert '"waiting_for_linux" {' in checks
+    assert '"explorer_integration" {' in checks
+    assert '"post_install_result_ui" {' in checks
+    result_ui = checks.split('"post_install_result_ui" {', 1)[1].split('"sharing_tasks" {', 1)[0]
+    assert "libertix-post-install-result\\.ps1" in result_ui
+    assert "libertix-uefi-recovery-agent\\.ps1" in result_ui
+    assert "-Action\\s+Prompt" in result_ui
+    assert 'Join-Path $session.Root "state.json"' in result_ui
+    assert "AwaitingInstalledLinuxBoot" in checks
+
+
+def test_bios_post_install_prompt_hides_its_powershell_console() -> None:
+    registration = read("Scripts/libertix-register-bios-recovery-task.ps1")
+    prompt_arguments = registration.split("$promptArguments =", 1)[1].split("$promptAction =", 1)[0]
+
+    assert "-WindowStyle Hidden" in prompt_arguments
+
+
+def test_local_build_runs_the_same_powershell_quality_gates_as_ci() -> None:
+    build = read("auto_tests/app/scripts/build_libertix.ps1")
+    validation = read("auto_tests/app/services/validation.py")
+
+    assert "Assert-PowerShellSyntax -SourceRoot $srcLocal" in build
+    assert 'RequiredVersion "1.25.0"' in build
+    assert "Invoke-ScriptAnalyzer" in build
+    assert 'RequiredVersion "6.0.1"' in build
+    assert "New-PesterConfiguration" in build
+    assert "Invoke-Pester" in build
+    assert 'Write-Result -Name "PSSCRIPTANALYZER"' in build
+    assert 'Write-Result -Name "PESTER"' in build
+    assert '"PSSCRIPTANALYZER"' in validation
+    assert '"PESTER"' in validation
+
+
+def test_windows_result_ui_waits_only_after_linux_evidence_and_verifies_explorer() -> None:
+    result_ui = read("Scripts/libertix-post-install-result.ps1")
+    share = read("Scripts/libertix-configure-windows-share.ps1")
+    module = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+
+    guard_start = result_ui.index(
+        'if ([string]$result.status -notin @("succeeded", "failed", "rolled-back"))'
+    )
+    guard_end = result_ui.index("Complete-InteractiveWindowsShareVerification", guard_start)
+    evidence_guard = result_ui[guard_start:guard_end]
+    assert "installed-linux-boot.json" in evidence_guard
+    assert "AddMinutes(15)" in evidence_guard
+    assert evidence_guard.index("installed-linux-boot.json") < evidence_guard.index(
+        "AddMinutes(15)"
+    )
+    assert 'Name "explorer-integration"' in result_ui
+    assert "$closeButton.IsDefault = $true" in result_ui
+    assert "$closeButton.Focus()" in result_ui
+    assert "MountBroadcastDriveChange" in share
+    assert 'Value "LocalSystem"' in share
+    assert "Value 1" in share
+    assert "mount-status.json" in share
+    assert "pintohome" in share
+    assert "Quick Access pin verified" in share
+    assert "windows-read-only-linux-share" in module
+    assert "SECURITY ERROR: the Windows ext4 mount accepted a write" in module
 
 
 def test_windows_postinstall_checks_all_libertix_recovery_tasks() -> None:
@@ -1704,9 +1842,14 @@ def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
     assert "Install-ExplorerPinTasks" in windows_share
     assert "[switch]$Pin" in windows_share
     assert "cmd.exe /d /c mklink /J" in windows_share
-    assert (
-        '$shellApplication.Namespace($junctionPath).Self.InvokeVerb("pintohome")' in windows_share
-    )
+    assert '$junctionShellItem.Self.InvokeVerb("pintohome")' in windows_share
+    assert "$quickAccess.Items()" in windows_share
+    assert "Linux shortcut was not visible in Explorer Home/Quick Access" in windows_share
+    assert "Start-ReadOnlyMount -Config $config" in windows_share
+    assert "MountBroadcastDriveChange" in windows_share
+    assert "-Name Recovery" in windows_share
+    assert "status = [ordered]@{" in windows_share
+    assert "readOnly = $true" in windows_share
     assert "Refusing to replace a non-junction path" in windows_share
     assert "Get-CimInstance Win32_UserProfile" in windows_share
     assert "Install-ExplorerShortcuts" in windows_share
@@ -2917,8 +3060,19 @@ def test_wpf_and_automation_require_the_same_minimum_password_length() -> None:
     api_models = (ROOT / "auto_tests" / "app" / "models.py").read_text(encoding="utf-8")
 
     assert "PasswordBox.Password.Length < AccountPolicy.MinimumPasswordLength" in account_page
-    assert "public const int MinimumPasswordLength = 8;" in account_policy
-    assert "linux_password: str = Field(min_length=8" in api_models
+    assert "public const int MinimumPasswordLength = 4;" in account_policy
+    assert "linux_password: str = Field(min_length=4" in api_models
+
+
+def test_account_page_distinguishes_reserved_usernames_from_invalid_syntax() -> None:
+    account_page = read("Pages/AccountCreation.xaml.cs")
+    account_policy = read("Installation/AccountPolicy.cs")
+
+    assert "AccountPolicy.CreateDefaultUsername(Environment.UserName)" in account_page
+    assert "AccountPolicy.IsValidUsernameSyntax" in account_page
+    assert "AccountPolicy.IsReservedUsername" in account_page
+    assert 'Localization.GetString("UsernameReserved")' in account_page
+    assert 'private const string DefaultUsernameSuffix = "-linux";' in account_policy
 
 
 def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
@@ -2947,7 +3101,7 @@ def test_windows_downloads_resume_and_present_clean_utf8_diagnostics() -> None:
     apply_page = read("Pages/ApplyChanges.xaml.cs")
     uefi = read("Scripts/libertix-uefi-install.ps1")
 
-    assert '"--continue=true"' in downloads
+    assert '$"--continue={continueDownload}"' in downloads
     assert '"--max-tries=5"' in downloads
     assert '"--retry-wait=10"' in downloads
     assert '"--enable-color=false"' in downloads

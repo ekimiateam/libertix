@@ -26,12 +26,7 @@ namespace Libertix.Pages
 
         private void UpdateDefaultValues()
         {
-            string windowsUsername = Environment.UserName.ToLowerInvariant();
-            string sanitizedUsername = Regex.Replace(windowsUsername, "[^a-z0-9-]", "");
-            if (!string.IsNullOrEmpty(sanitizedUsername) && char.IsLetter(sanitizedUsername[0]))
-            {
-                UsernameBox.Text = sanitizedUsername;
-            }
+            UsernameBox.Text = AccountPolicy.CreateDefaultUsername(Environment.UserName);
 
             string windowsHostname = Environment.MachineName.ToLowerInvariant();
             string sanitizedHostname = Regex.Replace(windowsHostname, "[^a-z0-9-]", "");
@@ -91,9 +86,16 @@ namespace Libertix.Pages
                 UsernameError.Text = Localization.GetString("UsernameRequired");
                 isValid = false;
             }
-            else if (!AccountPolicy.IsValidUsername(UsernameBox.Text) || UsernameBox.Text == "root")
+            else if (!AccountPolicy.IsValidUsernameSyntax(UsernameBox.Text))
             {
                 UsernameError.Text = Localization.GetString("UsernameInvalid");
+                isValid = false;
+            }
+            else if (AccountPolicy.IsReservedUsername(UsernameBox.Text))
+            {
+                UsernameError.Text = string.Format(
+                    Localization.GetString("UsernameReserved"),
+                    UsernameBox.Text);
                 isValid = false;
             }
             else
@@ -110,7 +112,7 @@ namespace Libertix.Pages
             {
                 PasswordError.Text = Localization.GetString(
                     "PasswordTooShort",
-                    "Password must be at least 8 characters");
+                    "Password must be at least 4 characters");
                 isValid = false;
             }
             else if (PasswordBox.Password.Length > AccountPolicy.MaximumPasswordLength)

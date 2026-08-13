@@ -40,6 +40,7 @@ def build_windows_validation_plan(
 ) -> WindowsValidationPlan:
     check_names = [
         "finalization",
+        "post_install_result_ui",
         "identity",
         "firmware",
         "system_volume",
@@ -69,6 +70,7 @@ def build_windows_validation_plan(
             "linux_home_hash",
             "ext4_write_denied",
             "explorer_shortcut",
+            "explorer_integration",
             "sharing_tasks",
         ]
         expensive_checks_index = check_names.index("dism_check_health")

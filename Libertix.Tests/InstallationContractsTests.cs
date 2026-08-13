@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +18,35 @@ namespace Libertix.Tests
     public sealed class InstallationContractsTests
     {
         private const string PlanId = "0123456789abcdef0123456789abcdef";
+
+        [TestMethod]
+        public void Aria2UsesOneNonResumableConnectionWithoutByteRangeSupport()
+        {
+            string[] arguments = ApplyChanges.CreateAria2DownloadArguments(
+                "https://example.test/live.iso",
+                @"C:\LibertixTools\downloads",
+                "live.iso",
+                supportsByteRanges: false,
+                maximumConnections: 5);
+
+            CollectionAssert.Contains(arguments, "--continue=false");
+            CollectionAssert.Contains(arguments, "--max-connection-per-server=1");
+            CollectionAssert.Contains(arguments, "--split=1");
+        }
+
+        [TestMethod]
+        public void RangeProbeRequiresAnExactOneBytePartialResponse()
+        {
+            Assert.IsTrue(ApplyChanges.IsExactSingleByteRangeResponse(
+                HttpStatusCode.PartialContent,
+                ContentRangeHeaderValue.Parse("bytes 0-0/524288000")));
+            Assert.IsFalse(ApplyChanges.IsExactSingleByteRangeResponse(
+                HttpStatusCode.OK,
+                null));
+            Assert.IsFalse(ApplyChanges.IsExactSingleByteRangeResponse(
+                HttpStatusCode.PartialContent,
+                ContentRangeHeaderValue.Parse("bytes 0-524287999/524288000")));
+        }
 
         [TestMethod]
         public void TerminalDiagnosticsRemoveAnsiFormattingWithoutDamagingUnicode()
@@ -237,6 +268,77 @@ namespace Libertix.Tests
         public void SharedInstallationPolicyDefinesTheAria2ConnectionLimit()
         {
             Assert.AreEqual(5, InstallationPolicy.Current.Download.Aria2MaximumConnections);
+        }
+
+        [TestMethod]
+        public void SharedInstallationPolicyDefinesDebianReservedAccountNames()
+        {
+            string[] names = InstallationPolicy.Current.Account.ReservedUsernames;
+
+            Assert.AreEqual(108, names.Length);
+            CollectionAssert.Contains(names, "root");
+            CollectionAssert.Contains(names, "admin");
+            CollectionAssert.Contains(names, "Debian-exim");
+            CollectionAssert.Contains(names, "input");
+            CollectionAssert.Contains(names, "kvm");
+            CollectionAssert.Contains(names, "render");
+            Assert.AreEqual(
+                "https://sources.debian.org/src/user-setup/1.107/reserved-usernames",
+                InstallationPolicy.Current.Account.ReservedUsernamesSource);
+        }
+
+        [DataTestMethod]
+        [DataRow("root")]
+        [DataRow("admin")]
+        [DataRow("debian-exim")]
+        public void AccountPolicyRejectsReservedLinuxUsernames(string username)
+        {
+            Assert.IsTrue(AccountPolicy.IsValidUsernameSyntax(username));
+            Assert.IsTrue(AccountPolicy.IsReservedUsername(username));
+            Assert.IsFalse(AccountPolicy.IsValidUsername(username));
+        }
+
+        [DataTestMethod]
+        [DataRow("admin", "admin-linux")]
+        [DataRow("root", "root-linux")]
+        [DataRow("Alice Smith", "alicesmith")]
+        [DataRow("123", "user")]
+        public void AccountPolicyCreatesAValidDefaultUsername(
+            string windowsUsername,
+            string expected)
+        {
+            string result = AccountPolicy.CreateDefaultUsername(windowsUsername);
+
+            Assert.AreEqual(expected, result);
+            Assert.IsTrue(AccountPolicy.IsValidUsername(result));
+        }
+
+        [TestMethod]
+        public void AccountPolicyUsesFourCharacterMinimumPassword()
+        {
+            Assert.AreEqual(4, AccountPolicy.MinimumPasswordLength);
+        }
+
+        [TestMethod]
+        public void AccountPolicyTruncatesTheDefaultUsernameSafely()
+        {
+            string result = AccountPolicy.CreateDefaultUsername(new string('a', 40));
+
+            Assert.AreEqual(32, result.Length);
+            Assert.IsTrue(AccountPolicy.IsValidUsername(result));
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorRejectsReservedLinuxUsername()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Account.Username = "admin";
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "not a valid Linux username");
         }
 
         [TestMethod]

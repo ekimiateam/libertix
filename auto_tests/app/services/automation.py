@@ -303,6 +303,7 @@ class AutomationService(
                         "TOAST_NOTIFICATIONS_DISABLED",
                         "WINDOWS_BACKUP_NOTIFICATIONS_DISABLED",
                         "WINDOWS_NOTIFICATION_SERVICES_DISABLED",
+                        "WINDOWS_SETUP_REMINDER_DISABLED",
                     ),
                 )
                 if (
@@ -311,6 +312,7 @@ class AutomationService(
                     or values.get("TOAST_NOTIFICATIONS_DISABLED") != "True"
                     or values.get("WINDOWS_BACKUP_NOTIFICATIONS_DISABLED") != "True"
                     or values.get("WINDOWS_NOTIFICATION_SERVICES_DISABLED") != "True"
+                    or values.get("WINDOWS_SETUP_REMINDER_DISABLED") != "True"
                 ):
                     raise WorkflowError(
                         "automation.prepare_vm",
@@ -337,6 +339,7 @@ class AutomationService(
             toast_notifications_disabled=True,
             windows_backup_notifications_disabled=True,
             windows_notification_services_disabled=True,
+            windows_setup_reminder_disabled=True,
         )
 
     def _inject_fog_clone_boot_entry(

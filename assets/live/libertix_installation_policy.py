@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,9 +30,16 @@ class MemoryPolicy:
 
 
 @dataclass(frozen=True)
+class AccountPolicy:
+    reserved_usernames_source: str
+    reserved_usernames: frozenset[str]
+
+
+@dataclass(frozen=True)
 class InstallationPolicy:
     storage: StoragePolicy
     memory: MemoryPolicy
+    account: AccountPolicy
 
 
 def _require_integer(mapping: dict[str, Any], name: str) -> int:
@@ -58,7 +66,12 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         raise ValueError("installation policy schemaVersion is unsupported")
     storage_raw = raw.get("storage")
     memory_raw = raw.get("memory")
-    if not isinstance(storage_raw, dict) or not isinstance(memory_raw, dict):
+    account_raw = raw.get("account")
+    if (
+        not isinstance(storage_raw, dict)
+        or not isinstance(memory_raw, dict)
+        or not isinstance(account_raw, dict)
+    ):
         raise ValueError("installation policy is incomplete")
 
     storage = StoragePolicy(
@@ -82,6 +95,27 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         low_memory_threshold_mib=_require_integer(memory_raw, "lowMemoryThresholdMiB"),
         live_minimum_mib=_require_integer(memory_raw, "liveMinimumMiB"),
     )
+    reserved_source = account_raw.get("reservedUsernamesSource")
+    reserved_raw = account_raw.get("reservedUsernames")
+    if (
+        not isinstance(reserved_source, str)
+        or not reserved_source.startswith("https://")
+        or not isinstance(reserved_raw, list)
+        or not reserved_raw
+        or not all(
+            isinstance(name, str)
+            and re.fullmatch(r"[A-Za-z](?:[A-Za-z0-9-]{0,30}[A-Za-z0-9])?", name)
+            for name in reserved_raw
+        )
+    ):
+        raise ValueError("installation account policy contains invalid values")
+    normalized_reserved = [name.casefold() for name in reserved_raw]
+    if len(normalized_reserved) != len(set(normalized_reserved)):
+        raise ValueError("installation account policy contains duplicate usernames")
+    account = AccountPolicy(
+        reserved_usernames_source=reserved_source,
+        reserved_usernames=frozenset(normalized_reserved),
+    )
     if (
         storage.minimum_final_size_gib <= 0
         or storage.target_windows_free_space_gib <= 0
@@ -99,4 +133,4 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         or memory.low_memory_threshold_mib <= memory.windows_minimum_mib
     ):
         raise ValueError("installation policy contains invalid values")
-    return InstallationPolicy(storage=storage, memory=memory)
+    return InstallationPolicy(storage=storage, memory=memory, account=account)

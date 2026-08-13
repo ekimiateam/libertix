@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $script:LinuxReadOnlyTaskName = "LibertixLinuxReadOnly"
 $script:LinuxReadOnlyPinTaskPrefix = "LibertixLinuxReadOnlyPin_"
+$script:QuickAccessNamespace = "shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}"
 
 function Write-ShareLog {
     param([string]$Message)
@@ -88,8 +89,121 @@ function Get-LinuxPartition {
     return $linuxPartitions[0]
 }
 
+function Get-RealWindowsProfiles {
+    $excludedNames = @(
+        "DefaultAccount",
+        "defaultuser0",
+        "WDAGUtilityAccount",
+        "WsiAccount"
+    )
+    return @(
+        Get-CimInstance Win32_UserProfile -ErrorAction Stop |
+            Where-Object {
+                $profileName = Split-Path -Leaf ([string]$_.LocalPath)
+                -not $_.Special -and
+                [string]$_.SID -match '^S-1-5-21-(?:\d+-){3}\d+$' -and
+                $_.LocalPath -like "$env:SystemDrive\Users\*" -and
+                $profileName -notin $excludedNames -and
+                (Test-Path -LiteralPath $_.LocalPath -PathType Container)
+            }
+    )
+}
+
+function Write-MountStatus {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$Partition,
+        [Parameter(Mandatory = $true)][string]$Drive,
+        [Parameter(Mandatory = $true)]$Process
+    )
+
+    $root = Split-Path -Parent $ConfigPath
+    $path = Join-Path $root "mount-status.json"
+    $temporary = Join-Path $root ".$([IO.Path]::GetFileName($path)).$([Guid]::NewGuid().ToString('N')).tmp"
+    $status = [ordered]@{
+        schemaVersion = 1
+        verifiedAtUtc = [DateTime]::UtcNow.ToString("o")
+        diskNumber = [int]$Config.SystemDiskNumber
+        diskUniqueId = [string]$Config.SystemDiskUniqueId
+        partitionNumber = [int]$Partition.PartitionNumber
+        partitionOffset = [int64]$Partition.Offset
+        partitionSize = [int64]$Partition.Size
+        drive = $Drive
+        linuxHome = "$Drive\home\$($Config.LinuxUsername)"
+        readOnly = $true
+        processId = [int]$Process.ProcessId
+    }
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText(
+            $temporary,
+            (($status | ConvertTo-Json -Depth 4) + "`n"),
+            $encoding
+        )
+        if ([IO.File]::Exists($path)) {
+            $backup = Join-Path $root ".$([IO.Path]::GetFileName($path)).$([Guid]::NewGuid().ToString('N')).bak"
+            try {
+                [IO.File]::Replace($temporary, $path, $backup)
+            } finally {
+                if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
+            }
+        } else {
+            [IO.File]::Move($temporary, $path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) {
+            Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-ExpectedExt4MountProcesses {
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$Partition,
+        [Parameter(Mandatory = $true)][string]$Drive
+    )
+
+    $ext4Exe = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+    $device = "\\.\PhysicalDrive$($Config.SystemDiskNumber)"
+    $devicePattern = [regex]::Escape($device)
+    $drivePattern = [regex]::Escape($Drive)
+    $partitionPattern = [regex]::Escape([string]$Partition.PartitionNumber)
+    return @(
+        Get-CimInstance Win32_Process -Filter "Name='ext4.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                $commandLine = [string]$_.CommandLine
+                [string]$_.ExecutablePath -ieq $ext4Exe -and
+                $commandLine -match '(?i)(?:^|\s)mount(?:\s|$)' -and
+                $commandLine -match ('(?i)(?:^|\s)"?{0}"?(?:\s|$)' -f $devicePattern) -and
+                $commandLine -match ('(?i)(?:^|\s)--drive\s+"?{0}"?(?:\s|$)' -f $drivePattern) -and
+                $commandLine -match ('(?i)(?:^|\s)--part\s+"?{0}"?(?:\s|$)' -f $partitionPattern) -and
+                $commandLine -match '(?i)(?:^|\s)--ro(?:\s|$)'
+            }
+    )
+}
+
+function Test-DriveLetterReserved {
+    param([Parameter(Mandatory = $true)][string]$Letter)
+
+    if (Test-Path -LiteralPath "${Letter}:\") {
+        return $true
+    }
+    $mappedByAnyUser = @(
+        Get-ChildItem -LiteralPath Registry::HKEY_USERS -ErrorAction SilentlyContinue |
+            Where-Object {
+                Test-Path -LiteralPath ("Registry::{0}\Network\{1}" -f $_.Name, $Letter)
+            }
+    ).Count -ne 0
+    return $mappedByAnyUser
+}
+
 function Set-ReadOnlyDriverPolicy {
+    $winFspKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
     $launcherKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp\Services\ext4-mount"
+    if (-not (Test-Path -LiteralPath $winFspKey)) {
+        throw "WinFsp runtime registration is missing."
+    }
     if (-not (Test-Path -LiteralPath $launcherKey)) {
         throw "WinFsp ext4 launcher registration is missing."
     }
@@ -97,8 +211,34 @@ function Set-ReadOnlyDriverPolicy {
     if ($commandLine -notmatch '(?i)(?:^|\s)--ro(?:\s|$)') {
         Set-ItemProperty -LiteralPath $launcherKey -Name CommandLine -Value ($commandLine.Trim() + " --ro")
     }
+    New-ItemProperty `
+        -LiteralPath $winFspKey `
+        -Name MountBroadcastDriveChange `
+        -PropertyType DWord `
+        -Value 1 `
+        -Force | Out-Null
+    New-ItemProperty `
+        -LiteralPath $launcherKey `
+        -Name RunAs `
+        -PropertyType String `
+        -Value "LocalSystem" `
+        -Force | Out-Null
+    New-ItemProperty `
+        -LiteralPath $launcherKey `
+        -Name Recovery `
+        -PropertyType DWord `
+        -Value 1 `
+        -Force | Out-Null
+    Set-Service -Name WinFsp.Launcher -StartupType Automatic -ErrorAction Stop
+    Start-Service -Name WinFsp.Launcher -ErrorAction Stop
     Stop-Service -Name ExtFsWatcher -Force -ErrorAction SilentlyContinue
     Set-Service -Name ExtFsWatcher -StartupType Disabled -ErrorAction Stop
+    $verifiedCommandLine = [string](
+        Get-ItemPropertyValue -LiteralPath $launcherKey -Name CommandLine -ErrorAction Stop
+    )
+    if ($verifiedCommandLine -notmatch '(?i)(?:^|\s)--ro(?:\s|$)') {
+        throw "WinFsp ext4 launcher registration is not read-only."
+    }
 }
 
 function Install-WinFspRuntimeForExt4 {
@@ -157,8 +297,6 @@ function Install-MountTask {
         -Principal $principal `
         -Settings $settings `
         -Force | Out-Null
-    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-
     Remove-ItemProperty `
         -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" `
         -Name $taskName `
@@ -176,14 +314,7 @@ function Install-ExplorerPinTasks {
     $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Pin' -f `
         $mountScript, $ConfigPath
-    $profiles = @(
-        Get-CimInstance Win32_UserProfile -ErrorAction Stop |
-            Where-Object {
-                -not $_.Special -and
-                $_.LocalPath -like "$env:SystemDrive\Users\*" -and
-                (Test-Path -LiteralPath $_.LocalPath -PathType Container)
-            }
-    )
+    $profiles = @(Get-RealWindowsProfiles)
     if ($profiles.Count -eq 0) {
         throw "No real Windows profile is available for Explorer pin task registration."
     }
@@ -223,13 +354,7 @@ function Install-ExplorerShortcuts {
     )
 
     $profileRoots = @(
-        Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue |
-            Where-Object {
-                -not $_.Special -and
-                $_.LocalPath -like "$env:SystemDrive\Users\*" -and
-                (Test-Path -LiteralPath $_.LocalPath -PathType Container)
-            } |
-            ForEach-Object { [string]$_.LocalPath }
+        Get-RealWindowsProfiles | ForEach-Object { [string]$_.LocalPath }
     )
     if ($env:USERPROFILE -like "$env:SystemDrive\Users\*" -and
         (Test-Path -LiteralPath $env:USERPROFILE -PathType Container)) {
@@ -249,30 +374,53 @@ function Install-ExplorerShortcuts {
         $shortcut.TargetPath = $LinuxHome
         $shortcut.Description = [string]$Config.ShortcutDescription
         $shortcut.Save()
+        $savedShortcut = $shell.CreateShortcut($shortcutPath)
+        if ([string]$savedShortcut.TargetPath -ne $LinuxHome) {
+            throw "Explorer shortcut target verification failed: $shortcutPath"
+        }
         Write-ShareLog "Explorer shortcut created: $shortcutPath"
     }
 
     if ($env:USERPROFILE -like "$env:SystemDrive\Users\*") {
-        try {
-            $shellApplication = New-Object -ComObject Shell.Application
-            $shellApplication.Namespace($LinuxHome).Self.InvokeVerb("unpinfromhome")
-
-            $junctionPath = Join-Path $env:USERPROFILE "Linux_$($Config.LinuxUsername)_read-only"
-            if (Test-Path -LiteralPath $junctionPath) {
-                $junction = Get-Item -LiteralPath $junctionPath -Force
-                if (-not ($junction.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                    throw "Refusing to replace a non-junction path: $junctionPath"
-                }
-            } else {
-                $junctionOutput = @(& cmd.exe /d /c mklink /J $junctionPath $LinuxHome 2>&1)
-                if ($LASTEXITCODE -ne 0) {
-                    throw "Explorer junction creation failed with rc=$LASTEXITCODE`: $($junctionOutput -join ' ')"
-                }
+        $shellApplication = New-Object -ComObject Shell.Application
+        $junctionPath = Join-Path $env:USERPROFILE "Linux_$($Config.LinuxUsername)_read-only"
+        if (Test-Path -LiteralPath $junctionPath) {
+            $junction = Get-Item -LiteralPath $junctionPath -Force
+            if (-not ($junction.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Refusing to replace a non-junction path: $junctionPath"
             }
-            $shellApplication.Namespace($junctionPath).Self.InvokeVerb("pintohome")
-        } catch {
-            Write-ShareLog "Quick Access pin was unavailable; Links shortcuts remain present: $($_.Exception.Message)"
+        } else {
+            $junctionOutput = @(& cmd.exe /d /c mklink /J $junctionPath $LinuxHome 2>&1)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Explorer junction creation failed with rc=$LASTEXITCODE`: $($junctionOutput -join ' ')"
+            }
         }
+
+        $pinFound = $false
+        for ($attempt = 1; $attempt -le 5 -and -not $pinFound; $attempt++) {
+            $quickAccess = $shellApplication.Namespace($script:QuickAccessNamespace)
+            if ($null -eq $quickAccess) {
+                throw "Explorer Home/Quick Access namespace is unavailable."
+            }
+            $pinFound = @(
+                $quickAccess.Items() | Where-Object {
+                    [string]$_.Path -ieq $junctionPath -or
+                    [string]$_.Path -ieq $LinuxHome
+                }
+            ).Count -ge 1
+            if (-not $pinFound) {
+                $junctionShellItem = $shellApplication.Namespace($junctionPath)
+                if ($null -eq $junctionShellItem -or $null -eq $junctionShellItem.Self) {
+                    throw "Explorer cannot resolve the Linux shortcut junction."
+                }
+                $junctionShellItem.Self.InvokeVerb("pintohome")
+                Start-Sleep -Seconds 2
+            }
+        }
+        if (-not $pinFound) {
+            throw "Linux shortcut was not visible in Explorer Home/Quick Access after pinning."
+        }
+        Write-ShareLog "Explorer Home/Quick Access pin verified: $junctionPath"
     }
 }
 
@@ -290,14 +438,30 @@ function Start-ReadOnlyMount {
     }
 
     $driveLetters = @("L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")
-    $existingDrive = $driveLetters |
-        Where-Object { Test-Path -LiteralPath "${_}:\home\$($Config.LinuxUsername)" -PathType Container } |
-        Select-Object -First 1
+    $matchingMounts = @(
+        foreach ($letter in $driveLetters) {
+            $drive = "${letter}:"
+            foreach ($process in @(Get-ExpectedExt4MountProcesses `
+                -Config $Config `
+                -Partition $partition `
+                -Drive $drive)) {
+                [pscustomobject]@{ Drive = $drive; Process = $process }
+            }
+        }
+    )
+    if ($matchingMounts.Count -gt 1) {
+        throw "Multiple ext4 processes match the configured Linux partition."
+    }
+    $existingDrive = if ($matchingMounts.Count -eq 1) {
+        [string]$matchingMounts[0].Drive
+    } else {
+        $null
+    }
     $driveLetter = if ($existingDrive) {
-        $existingDrive
+        $existingDrive.Substring(0, 1)
     } else {
         $driveLetters |
-            Where-Object { -not (Test-Path -LiteralPath "${_}:\") } |
+            Where-Object { -not (Test-DriveLetterReserved -Letter $_) } |
             Select-Object -First 1
     }
     if (-not $driveLetter) {
@@ -321,11 +485,23 @@ function Start-ReadOnlyMount {
             Write-ShareLog "WinFsp launcher started ext4-mount instance $instance on $drive."
         }
 
-        for ($attempt = 0; $attempt -lt 30 -and -not (Test-Path "$drive\"); $attempt++) {
+        $mountProcess = $null
+        for ($attempt = 0; $attempt -lt 60; $attempt++) {
+            $expectedProcesses = @(Get-ExpectedExt4MountProcesses `
+                -Config $Config `
+                -Partition $partition `
+                -Drive $drive)
+            if ($expectedProcesses.Count -gt 1) {
+                throw "Multiple ext4 processes match the configured Linux mount."
+            }
+            if ($expectedProcesses.Count -eq 1 -and (Test-Path "$drive\")) {
+                $mountProcess = $expectedProcesses[0]
+                break
+            }
             Start-Sleep -Seconds 1
         }
-        if (-not (Test-Path "$drive\")) {
-            throw "The ext4 read-only mount did not appear as $drive."
+        if ($null -eq $mountProcess) {
+            throw "The verified ext4 read-only mount did not appear as $drive."
         }
         $linuxHome = "$drive\home\$($Config.LinuxUsername)"
         if (-not (Test-Path -LiteralPath $linuxHome -PathType Container)) {
@@ -347,6 +523,11 @@ function Start-ReadOnlyMount {
         }
 
         Install-ExplorerShortcuts -Config $Config -LinuxHome $linuxHome
+        Write-MountStatus `
+            -Config $Config `
+            -Partition $partition `
+            -Drive $drive `
+            -Process $mountProcess
         Write-ShareLog "Linux mounted read-only on $drive."
     } catch {
         if ($launched) {
@@ -376,17 +557,30 @@ try {
     }
     if ($Finalize) {
         $setup = [string]$config.SetupPath
-        if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw "ext4 setup payload is missing." }
-        $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($hash -ne [string]$config.SetupSha256) { throw "ext4 setup SHA-256 mismatch." }
-        $installerExitCode = Invoke-ProcessWithTimeout `
-            -FilePath $setup `
-            -ArgumentList @("/quiet", "/norestart") `
-            -TimeoutSeconds 1800
-        if ($installerExitCode -notin @(0, 3010, 1641)) { throw "ext4 setup failed with rc=$installerExitCode." }
+        $ext4Exe = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+        $winFspKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
+        if (Test-Path -LiteralPath $setup -PathType Leaf) {
+            $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne [string]$config.SetupSha256) { throw "ext4 setup SHA-256 mismatch." }
+            $installerExitCode = Invoke-ProcessWithTimeout `
+                -FilePath $setup `
+                -ArgumentList @("/quiet", "/norestart") `
+                -TimeoutSeconds 1800
+            if ($installerExitCode -notin @(0, 3010, 1641)) {
+                throw "ext4 setup failed with rc=$installerExitCode."
+            }
+        } elseif (
+            -not (Test-Path -LiteralPath $ext4Exe -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $winFspKey)
+        ) {
+            throw "ext4 setup payload is missing and the installed runtime is incomplete."
+        } else {
+            Write-ShareLog "Existing ext4 and WinFsp runtime detected; setup does not need to rerun."
+        }
         Install-WinFspRuntimeForExt4
         Set-ReadOnlyDriverPolicy
         Install-MountTask -Config $config
+        Start-ReadOnlyMount -Config $config
         Install-ExplorerPinTasks
         Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $ConfigPath) "pending.marker") -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $setup -Force -ErrorAction SilentlyContinue

@@ -195,8 +195,11 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError("locale.keyboardVariant is not a valid XKB variant name")
 
     account = require_mapping(root.get("account"), "account")
-    if not USERNAME_PATTERN.fullmatch(str(account.get("username", ""))):
+    username = str(account.get("username", ""))
+    if not USERNAME_PATTERN.fullmatch(username):
         raise PlanValidationError("account.username is invalid")
+    if username.casefold() in INSTALLATION_POLICY.account.reserved_usernames:
+        raise PlanValidationError("account.username is reserved by the operating system")
     password_hash_windows_path = str(account.get("passwordHashWindowsPath", ""))
     if not re.fullmatch(r"[A-Za-z]:\\.+", password_hash_windows_path) or any(
         part == ".." for part in password_hash_windows_path[3:].split("\\")

@@ -53,6 +53,26 @@ function Read-LibertixJsonObject {
     return $value
 }
 
+function Get-LibertixScheduledTaskPrincipalSid {
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    [xml]$taskDefinition = Export-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    $principalId = [string]$taskDefinition.Task.Principals.Principal.UserId
+    if ([string]::IsNullOrWhiteSpace($principalId)) {
+        throw "Scheduled task principal is missing: $TaskName"
+    }
+    if ($principalId -match '^S-\d-(?:\d+-)+\d+$') {
+        return $principalId
+    }
+    try {
+        return ([Security.Principal.NTAccount]::new($principalId)).Translate(
+            [Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        throw "Cannot resolve scheduled task principal '$principalId' to a SID: $TaskName"
+    }
+}
+
 function Get-LibertixPartitionAlignmentBytes {
     param([Parameter(Mandatory = $true)][string]$RecoveryRoot)
 
@@ -136,6 +156,100 @@ function New-LibertixPostInstallResult {
         logPath = $LogPath
         rollbackAvailable = $true
     }
+}
+
+function Set-LibertixPostInstallWaitingForLinux {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RecoveryRoot,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    $plan = Read-LibertixJsonObject `
+        -Path (Join-Path $RecoveryRoot "installation-plan.json") `
+        -Description "installation plan"
+    if ([string]$plan.planId -notmatch '^[0-9a-f]{32}$') {
+        throw "Installation plan identifier is invalid."
+    }
+    $resultPath = Join-Path $RecoveryRoot "post-install-verification.json"
+    $result = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        $saved = Read-LibertixJsonObject `
+            -Path $resultPath `
+            -Description "post-install verification result"
+        if (
+            [int]$saved.schemaVersion -ne 1 -or
+            [string]$saved.planId -ne [string]$plan.planId -or
+            [string]$saved.firmware -ne [string]$plan.firmware
+        ) {
+            throw "Post-install verification result belongs to another contract."
+        }
+        if ([string]$saved.status -in @("succeeded", "failed", "rolled-back")) {
+            return $saved
+        }
+        $saved
+    } else {
+        New-LibertixPostInstallResult `
+            -PlanId ([string]$plan.planId) `
+            -Firmware ([string]$plan.firmware) `
+            -LogPath $LogPath
+    }
+    $result.status = "waiting-linux-boot"
+    $result.error = $null
+    $result.logPath = $LogPath
+    $result.rollbackAvailable = $true
+    $result | Add-Member `
+        -NotePropertyName waitingFor `
+        -NotePropertyValue "installed-linux-boot.json" `
+        -Force
+    Write-LibertixPostInstallResult -Path $resultPath -Result $result
+    return $result
+}
+
+function Set-LibertixPostInstallFailure {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RecoveryRoot,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [Parameter(Mandatory = $true)][string]$CheckName,
+        [Parameter(Mandatory = $true)][string]$ErrorMessage
+    )
+
+    $plan = Read-LibertixJsonObject `
+        -Path (Join-Path $RecoveryRoot "installation-plan.json") `
+        -Description "installation plan"
+    $resultPath = Join-Path $RecoveryRoot "post-install-verification.json"
+    $result = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        $saved = Read-LibertixJsonObject `
+            -Path $resultPath `
+            -Description "post-install verification result"
+        if (
+            [int]$saved.schemaVersion -ne 1 -or
+            [string]$saved.planId -ne [string]$plan.planId -or
+            [string]$saved.firmware -ne [string]$plan.firmware
+        ) {
+            throw "Post-install verification result belongs to another contract."
+        }
+        $saved
+    } else {
+        New-LibertixPostInstallResult `
+            -PlanId ([string]$plan.planId) `
+            -Firmware ([string]$plan.firmware) `
+            -LogPath $LogPath
+    }
+    $result.checks = @($result.checks | Where-Object { [string]$_.name -ne $CheckName }) + @(
+        [pscustomobject][ordered]@{
+            name = $CheckName
+            passed = $false
+            detail = $ErrorMessage
+            checkedAtUtc = [DateTime]::UtcNow.ToString("o")
+        }
+    )
+    $result.status = "failed"
+    $result.error = $ErrorMessage
+    $result.logPath = $LogPath
+    $result.rollbackAvailable = $true
+    Write-LibertixPostInstallResult -Path $resultPath -Result $result
+    return $result
 }
 
 function Add-LibertixPostInstallCheck {
@@ -462,6 +576,161 @@ function Test-LibertixRecoveryArchive {
     return "rollback archive retained"
 }
 
+function Test-LibertixWindowsReadOnlyShare {
+    param(
+        [Parameter(Mandatory = $true)]$Plan
+    )
+
+    if (-not [bool]$Plan.features.shareLinuxFilesInWindows) {
+        return "Linux-to-Windows sharing was not requested"
+    }
+    $shareRoot = Join-Path $env:ProgramData "Libertix\WindowsShare"
+    $config = Read-LibertixJsonObject `
+        -Path (Join-Path $shareRoot "config.json") `
+        -Description "Windows read-only Linux sharing configuration"
+    if (-not [bool]$config.Enabled) {
+        throw "Windows read-only Linux sharing is disabled despite the installation plan."
+    }
+    if (
+        [int]$config.SystemDiskNumber -ne [int]$Plan.disk.number -or
+        ([string]$config.SystemDiskUniqueId).Trim() -ne ([string]$Plan.disk.uniqueId).Trim() -or
+        [int64]$config.ExpectedLinuxPartitionOffset -ne [int64]$Plan.disk.installer.offsetBytes -or
+        [int64]$config.ExpectedLinuxPartitionSize -ne [int64]$Plan.disk.installer.finalSizeBytes
+    ) {
+        throw "Windows sharing configuration does not match the installation plan partition."
+    }
+    $disk = Get-Disk -Number ([int]$config.SystemDiskNumber) -ErrorAction Stop
+    if (([string]$disk.UniqueId).Trim() -ne ([string]$config.SystemDiskUniqueId).Trim()) {
+        throw "Windows sharing disk identity does not match the current disk."
+    }
+    $partitions = @(
+        Get-Partition -DiskNumber ([int]$config.SystemDiskNumber) -ErrorAction Stop |
+            Where-Object {
+                [int64]$_.Offset -eq [int64]$config.ExpectedLinuxPartitionOffset -and
+                [int64]$_.Size -eq [int64]$config.ExpectedLinuxPartitionSize
+            }
+    )
+    if ($partitions.Count -ne 1) {
+        throw "Windows sharing partition identity does not resolve to exactly one partition."
+    }
+
+    $winFspKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
+    $launcherKey = Join-Path $winFspKey "Services\ext4-mount"
+    $commandLine = [string](
+        Get-ItemPropertyValue -LiteralPath $launcherKey -Name CommandLine -ErrorAction Stop
+    )
+    $runAs = [string](
+        Get-ItemPropertyValue -LiteralPath $launcherKey -Name RunAs -ErrorAction Stop
+    )
+    [int]$recovery = [int](
+        Get-ItemPropertyValue -LiteralPath $launcherKey -Name Recovery -ErrorAction Stop
+    )
+    [int]$broadcast = [int](
+        Get-ItemPropertyValue `
+            -LiteralPath $winFspKey `
+            -Name MountBroadcastDriveChange `
+            -ErrorAction Stop
+    )
+    if (
+        $commandLine -notmatch '(?i)(?:^|\s)--ro(?:\s|$)' -or
+        $runAs -ne "LocalSystem" -or
+        $recovery -ne 1 -or
+        $broadcast -ne 1
+    ) {
+        throw "WinFsp is not configured as a recoverable global read-only mount."
+    }
+
+    $mountTasks = @(Get-ScheduledTask -TaskName "LibertixLinuxReadOnly" -ErrorAction Stop)
+    $mountTaskPrincipalSid = if ($mountTasks.Count -eq 1) {
+        Get-LibertixScheduledTaskPrincipalSid -TaskName "LibertixLinuxReadOnly"
+    } else {
+        $null
+    }
+    if (
+        $mountTasks.Count -ne 1 -or
+        $mountTaskPrincipalSid -ne "S-1-5-18" -or
+        [string]$mountTasks[0].State -eq "Disabled"
+    ) {
+        throw "Windows read-only Linux mount task is missing, disabled or not owned by SYSTEM."
+    }
+
+    $mountStatus = Read-LibertixJsonObject `
+        -Path (Join-Path $shareRoot "mount-status.json") `
+        -Description "Windows read-only Linux mount status"
+    if (
+        [int]$mountStatus.schemaVersion -ne 1 -or
+        [int]$mountStatus.diskNumber -ne [int]$config.SystemDiskNumber -or
+        ([string]$mountStatus.diskUniqueId).Trim() -ne ([string]$config.SystemDiskUniqueId).Trim() -or
+        [int]$mountStatus.partitionNumber -ne [int]$partitions[0].PartitionNumber -or
+        [int64]$mountStatus.partitionOffset -ne [int64]$partitions[0].Offset -or
+        [int64]$mountStatus.partitionSize -ne [int64]$partitions[0].Size -or
+        -not [bool]$mountStatus.readOnly -or
+        [string]$mountStatus.drive -notmatch '^[L-Z]:$'
+    ) {
+        throw "Windows read-only Linux mount status does not match the proven partition."
+    }
+    $drive = [string]$mountStatus.drive
+    $linuxHome = "$drive\home\$($config.LinuxUsername)"
+    if (-not (Test-Path -LiteralPath $linuxHome -PathType Container)) {
+        throw "Linux home is not readable from the verified Windows drive."
+    }
+
+    $ext4Exe = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+    $devicePattern = [regex]::Escape("\\.\PhysicalDrive$($config.SystemDiskNumber)")
+    $drivePattern = [regex]::Escape($drive)
+    $partitionPattern = [regex]::Escape([string]$partitions[0].PartitionNumber)
+    $processes = @(
+        Get-CimInstance Win32_Process -Filter "Name='ext4.exe'" -ErrorAction Stop |
+            Where-Object {
+                $processCommandLine = [string]$_.CommandLine
+                [string]$_.ExecutablePath -ieq $ext4Exe -and
+                $processCommandLine -match '(?i)(?:^|\s)mount(?:\s|$)' -and
+                $processCommandLine -match ('(?i)(?:^|\s)"?{0}"?(?:\s|$)' -f $devicePattern) -and
+                $processCommandLine -match ('(?i)(?:^|\s)--drive\s+"?{0}"?(?:\s|$)' -f $drivePattern) -and
+                $processCommandLine -match ('(?i)(?:^|\s)--part\s+"?{0}"?(?:\s|$)' -f $partitionPattern) -and
+                $processCommandLine -match '(?i)(?:^|\s)--ro(?:\s|$)'
+            }
+    )
+    if ($processes.Count -ne 1) {
+        throw "Exactly one ext4 process must own the verified read-only Linux drive."
+    }
+
+    $writeProbe = Join-Path $drive ".libertix-postinstall-write-probe-$([Guid]::NewGuid().ToString('N'))"
+    $writeAccepted = $false
+    try {
+        Set-Content -LiteralPath $writeProbe -Value "write must be refused" -ErrorAction Stop
+        $writeAccepted = $true
+    } catch {
+        # A denied probe is the expected proof for this security boundary.
+        $writeAccepted = $false
+    } finally {
+        if ($writeAccepted) {
+            Remove-Item -LiteralPath $writeProbe -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($writeAccepted) {
+        throw "SECURITY ERROR: the Windows ext4 mount accepted a write."
+    }
+
+    $shortcutPaths = @(
+        Get-ChildItem `
+            -Path "$env:SystemDrive\Users\*\Links\Linux_$($config.LinuxUsername)_read-only.lnk" `
+            -File `
+            -ErrorAction SilentlyContinue
+    )
+    if ($shortcutPaths.Count -eq 0) {
+        throw "No Windows user profile contains the Linux read-only shortcut."
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($shortcutPath in $shortcutPaths) {
+        $shortcut = $shell.CreateShortcut([string]$shortcutPath.FullName)
+        if ([string]$shortcut.TargetPath -ne $linuxHome) {
+            throw "Windows Linux shortcut target does not match the verified Linux home."
+        }
+    }
+    return "drive=$drive partition=$($partitions[0].PartitionNumber) readOnly=true shortcuts=$($shortcutPaths.Count)"
+}
+
 function Invoke-LibertixPostInstallVerification {
     [CmdletBinding()]
     param(
@@ -534,6 +803,10 @@ function Invoke-LibertixPostInstallVerification {
                 Test-LibertixDiskGeometry -Plan $plan -AlignmentBytes $alignmentBytes
             }
         Add-LibertixPostInstallCheck -Result $result -ResultPath $resultPath `
+            -Name "windows-read-only-linux-share" -WriteLog $WriteLog -Test {
+                Test-LibertixWindowsReadOnlyShare -Plan $plan
+            }
+        Add-LibertixPostInstallCheck -Result $result -ResultPath $resultPath `
             -Name "windows-health" -WriteLog $WriteLog -Test {
                 Test-LibertixWindowsHealth -Plan $plan
             }
@@ -567,7 +840,10 @@ function Invoke-LibertixPostInstallVerification {
 Export-ModuleMember -Function `
     Assert-LibertixLinuxBootEvidence, `
     Invoke-LibertixPostInstallVerification, `
+    Set-LibertixPostInstallFailure, `
+    Set-LibertixPostInstallWaitingForLinux, `
     Set-LibertixShutdownVerificationPriority, `
     Test-LibertixDiskGeometry, `
     Test-LibertixRecoveryArchive, `
-    Test-LibertixTemporaryBootFilesAbsent
+    Test-LibertixTemporaryBootFilesAbsent, `
+    Test-LibertixWindowsReadOnlyShare

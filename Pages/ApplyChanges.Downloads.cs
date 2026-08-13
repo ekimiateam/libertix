@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -200,30 +202,36 @@ namespace Libertix.Pages
                 Directory.CreateDirectory(downloadDir);
                 Directory.CreateDirectory(destinationDir);
 
-                var args = new[]
+                bool? byteRangeSupport = await TestHttpByteRangeSupportAsync(url);
+                if (!byteRangeSupport.HasValue)
                 {
-                "--allow-overwrite=true",
-                "--auto-file-renaming=false",
-                "--continue=true",
-                $"--max-connection-per-server={Aria2MaxConnections}",
-                $"--split={Aria2MaxConnections}",
-                "--min-split-size=1M",
-                "--max-tries=5",
-                "--retry-wait=10",
-                "--connect-timeout=30",
-                "--timeout=60",
-                "--summary-interval=2",
-                "--console-log-level=warn",
-                "--enable-color=false",
-                "--check-certificate=true",
-                $"--dir={downloadDir}",
-                $"--out={fileName}",
-                url
-                };
+                    throw new IOException(
+                        $"{label}: byte-range support could not be checked because the server " +
+                        "was unreachable; the partial download is retained for retry.");
+                }
+                bool supportsByteRanges = byteRangeSupport.Value;
+                if (!supportsByteRanges)
+                {
+                    DeleteDownloadArtifactBestEffort(aria2OutputPath, label);
+                    DeleteDownloadArtifactBestEffort(aria2OutputPath + ".aria2", label);
+                    Dispatcher.Invoke(() => Log(
+                        $"{label}: the server does not provide valid byte ranges; " +
+                        "using one connection without resume"));
+                }
+
+                string[] args = CreateAria2DownloadArguments(
+                    url,
+                    downloadDir,
+                    fileName,
+                    supportsByteRanges,
+                    Aria2MaxConnections);
+                int connectionCount = supportsByteRanges ? Aria2MaxConnections : 1;
 
                 Dispatcher.Invoke(() =>
                 {
-                    Log($"{label}: downloading with bundled aria2 ({Aria2MaxConnections} connections, attempt {attempt}/{attempts})");
+                    Log($"{label}: downloading with bundled aria2 ({connectionCount} " +
+                        $"connection{(connectionCount == 1 ? string.Empty : "s")}, " +
+                        $"attempt {attempt}/{attempts})");
                     UpdateProgress(progressStart, progressMessage);
                 });
 
@@ -290,6 +298,85 @@ namespace Libertix.Pages
                 if (removeDownloadDirectory)
                     DeleteDownloadDirectoryBestEffort(downloadDir, label);
             }
+        }
+
+        private async Task<bool?> TestHttpByteRangeSupportAsync(string url)
+        {
+            using (var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                _installationCancellation.Token))
+            using (var request = new HttpRequestMessage(HttpMethod.Get, url))
+            {
+                timeoutCancellation.CancelAfter(TimeSpan.FromSeconds(15));
+                request.Headers.Range = new RangeHeaderValue(0, 0);
+                try
+                {
+                    using (var response = await SharedHttpClient.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        timeoutCancellation.Token))
+                    {
+                        return IsExactSingleByteRangeResponse(
+                            response.StatusCode,
+                            response.Content.Headers.ContentRange);
+                    }
+                }
+                catch (OperationCanceledException)
+                    when (!_installationCancellation.IsCancellationRequested)
+                {
+                    return null;
+                }
+                catch (HttpRequestException)
+                {
+                    return null;
+                }
+            }
+        }
+
+        internal static bool IsExactSingleByteRangeResponse(
+            HttpStatusCode statusCode,
+            ContentRangeHeaderValue contentRange)
+        {
+            return statusCode == HttpStatusCode.PartialContent &&
+                contentRange != null &&
+                contentRange.HasRange &&
+                contentRange.From == 0 &&
+                contentRange.To == 0 &&
+                contentRange.Length.HasValue &&
+                contentRange.Length.Value > 0;
+        }
+
+        internal static string[] CreateAria2DownloadArguments(
+            string url,
+            string downloadDir,
+            string fileName,
+            bool supportsByteRanges,
+            int maximumConnections)
+        {
+            if (maximumConnections < 1)
+                throw new ArgumentOutOfRangeException(nameof(maximumConnections));
+
+            int connections = supportsByteRanges ? maximumConnections : 1;
+            string continueDownload = supportsByteRanges ? "true" : "false";
+            return new[]
+            {
+                "--allow-overwrite=true",
+                "--auto-file-renaming=false",
+                $"--continue={continueDownload}",
+                $"--max-connection-per-server={connections}",
+                $"--split={connections}",
+                "--min-split-size=1M",
+                "--max-tries=5",
+                "--retry-wait=10",
+                "--connect-timeout=30",
+                "--timeout=60",
+                "--summary-interval=2",
+                "--console-log-level=warn",
+                "--enable-color=false",
+                "--check-certificate=true",
+                $"--dir={downloadDir}",
+                $"--out={fileName}",
+                url
+            };
         }
 
         private void DeleteDownloadArtifactBestEffort(string path, string label)

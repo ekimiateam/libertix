@@ -11,10 +11,10 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$MainWindowTimeoutSeconds = 15
-$WarningControlTimeoutSeconds = 15
-$ToggleVerificationTimeoutSeconds = 5
-$ConfirmationButtonTimeoutSeconds = 5
+$MainWindowTimeoutSeconds = 30
+$WarningControlTimeoutSeconds = 45
+$ToggleVerificationTimeoutSeconds = 10
+$ConfirmationButtonTimeoutSeconds = 10
 $InteractiveTaskStartupAllowanceSeconds = 30
 $InteractiveResultTimeoutSeconds = `
     $MainWindowTimeoutSeconds + `

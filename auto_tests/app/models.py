@@ -65,7 +65,7 @@ class AutomationRequest(ValidationRequest):
         max_length=32,
         pattern=r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$",
     )
-    linux_password: str = Field(min_length=8, max_length=128)
+    linux_password: str = Field(min_length=4, max_length=128)
     monitor_iso: bool = Field(default=True)
     share_windows_files_in_linux: bool = Field(default=True)
     share_linux_files_in_windows: bool = Field(default=True)

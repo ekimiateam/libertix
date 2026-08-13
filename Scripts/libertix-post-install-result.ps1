@@ -51,22 +51,111 @@ function Remove-PromptTask {
         -ErrorAction SilentlyContinue
 }
 
-$deadline = [DateTime]::UtcNow.AddMinutes(15)
-do {
-    if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
-        $result = Read-JsonFile -Path $StatePath
-        if ([string]$result.status -in @("succeeded", "failed", "rolled-back")) {
-            break
+function Add-InteractiveShareCheck {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][bool]$Passed,
+        [Parameter(Mandatory = $true)][string]$Detail
+    )
+
+    $Result.checks = @($Result.checks | Where-Object { [string]$_.name -ne $Name }) + @(
+        [pscustomobject][ordered]@{
+            name = $Name
+            passed = $Passed
+            detail = $Detail
+            checkedAtUtc = [DateTime]::UtcNow.ToString("o")
         }
+    )
+}
+
+function Complete-InteractiveWindowsShareVerification {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)]$Plan
+    )
+
+    if (
+        [string]$Result.status -ne "succeeded" -or
+        -not [bool]$Plan.features.shareLinuxFilesInWindows
+    ) {
+        return
     }
-    if ([DateTime]::UtcNow -ge $deadline) {
+    $shareRoot = Join-Path $env:ProgramData "Libertix\WindowsShare"
+    $configPath = Join-Path $shareRoot "config.json"
+    $shareScript = Join-Path $shareRoot "mount-linux-readonly.ps1"
+    try {
+        if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+            throw "Windows read-only Linux sharing configuration is missing."
+        }
+        if (-not (Test-Path -LiteralPath $shareScript -PathType Leaf)) {
+            throw "Windows read-only Linux sharing script is missing."
+        }
+        $shareArguments = (
+            '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Pin'
+        ) -f $shareScript, $configPath
+        $process = Start-Process `
+            -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+            -ArgumentList $shareArguments `
+            -Wait `
+            -PassThru `
+            -WindowStyle Hidden
+        if ($process.ExitCode -ne 0) {
+            throw "Explorer integration verification failed with rc=$($process.ExitCode)."
+        }
+        Add-InteractiveShareCheck `
+            -Result $Result `
+            -Name "explorer-integration" `
+            -Passed $true `
+            -Detail "Linux read-only shortcut is accessible in Explorer Home/Quick Access."
+        Write-JsonFileAtomic -Path $StatePath -Value $Result
+    } catch {
+        Add-InteractiveShareCheck `
+            -Result $Result `
+            -Name "explorer-integration" `
+            -Passed $false `
+            -Detail $_.Exception.Message
+        $Result.status = "failed"
+        $Result.error = $_.Exception.Message
+        $Result.rollbackAvailable = $true
+        Write-JsonFileAtomic -Path $StatePath -Value $Result
+    }
+}
+
+if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) {
+    exit 0
+}
+$result = Read-JsonFile -Path $StatePath
+if ([string]$result.status -notin @("succeeded", "failed", "rolled-back")) {
+    $recoveryRoot = Split-Path -Parent $StatePath
+    $linuxEvidencePath = Join-Path $recoveryRoot "installed-linux-boot.json"
+    if (-not (Test-Path -LiteralPath $linuxEvidencePath -PathType Leaf)) {
         exit 0
     }
-    Start-Sleep -Seconds 2
-} while ($true)
+
+    # At logon the interactive trigger can run a few seconds before the SYSTEM
+    # startup verifier. Once Linux evidence exists, keep this instance alive so
+    # the result cannot be lost merely because the two tasks raced each other.
+    $deadline = [DateTime]::UtcNow.AddMinutes(15)
+    do {
+        Start-Sleep -Seconds 2
+        if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+            $result = Read-JsonFile -Path $StatePath
+        }
+    } while (
+        [string]$result.status -notin @("succeeded", "failed", "rolled-back") -and
+        [DateTime]::UtcNow -lt $deadline
+    )
+    if ([string]$result.status -notin @("succeeded", "failed", "rolled-back")) {
+        exit 0
+    }
+}
 
 $recoveryRoot = Split-Path -Parent $StatePath
 $plan = Read-JsonFile -Path (Join-Path $recoveryRoot "installation-plan.json")
+Complete-InteractiveWindowsShareVerification `
+    -Result $result `
+    -Plan $plan
 $language = [string]$plan.locale.languageCode
 $translationsPath = Join-Path $PSScriptRoot "config\Libertix.PostInstallTranslations.json"
 $translations = Read-JsonFile -Path $translationsPath
@@ -157,6 +246,7 @@ $closeButton.Content = [string]$text.close
 $closeButton.MinWidth = 150
 $closeButton.Height = 46
 $closeButton.Padding = New-Object Windows.Thickness(18, 8, 18, 8)
+$closeButton.IsDefault = $true
 $closeButton.Add_Click({ $window.Close() })
 
 if ([string]$result.status -eq "failed" -and [bool]$result.rollbackAvailable) {
@@ -215,4 +305,5 @@ $buttons.Children.Add($closeButton) | Out-Null
 $root.Children.Add($buttons) | Out-Null
 $window.Content = $root
 $window.Add_Closed({ Remove-PromptTask })
+$window.Add_ContentRendered({ $null = $closeButton.Focus() })
 $null = $window.ShowDialog()

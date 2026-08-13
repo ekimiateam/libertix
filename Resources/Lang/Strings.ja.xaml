@@ -51,10 +51,11 @@
     <system:String x:Key="DistroLoadError">ディストリビューションのリストを読み込めませんでした。インターネット接続を確認して、もう一度お試しください。</system:String>
 
     <system:String x:Key="PasswordRequired">パスワードは必須です</system:String>
-    <system:String x:Key="PasswordTooShort">パスワードは8文字以上必要です</system:String>
+    <system:String x:Key="PasswordTooShort">パスワードは4文字以上必要です</system:String>
     <system:String x:Key="PasswordTooLong">パスワードは128文字以内にしてください</system:String>
     <system:String x:Key="UsernameRequired">ユーザー名は必須です</system:String>
     <system:String x:Key="UsernameInvalid">ユーザー名は英字で始まり、小文字、数字、ハイフンのみを使用してください</system:String>
+    <system:String x:Key="UsernameReserved">ユーザー名「{0}」は Debian/Ubuntu のシステムアカウントまたはグループ用に予約されています。別の名前を選択してください。</system:String>
     <system:String x:Key="ConfirmPasswordRequired">パスワードを確認してください</system:String>
     <system:String x:Key="PasswordsDoNotMatch">パスワードが一致しません</system:String>
     <system:String x:Key="ComputerNameRequired">コンピューター名は必須です</system:String>

@@ -20,6 +20,8 @@ POLICY_PATH = Path("/etc/libertix/Libertix.InstallationPolicy.json")
 GRUB_CONFIG_PATH = Path("/boot/grub/grub.cfg")
 WINDOWS_MOUNT_PATH = Path("/run/libertix-first-boot-windows")
 EVIDENCE_FILE_NAME = "installed-linux-boot.json"
+LOCAL_STATUS_PATH = Path("/var/lib/libertix/first-boot-verification.json")
+VERIFICATION_LOG_PATH = Path("/var/log/libertix/first-boot-resize.log")
 HEX_ID = re.compile(r"^[0-9a-f]{32}$")
 EFI_GLOBAL_VARIABLE_GUID = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 
@@ -211,10 +213,15 @@ def verify_installed_system(
     }
 
 
-def write_json_atomic(path: Path, value: dict[str, object]) -> None:
+def write_json_atomic(
+    path: Path,
+    value: dict[str, object],
+    *,
+    mode: int = 0o600,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             json.dump(value, stream, ensure_ascii=False, sort_keys=True, indent=2)
@@ -222,6 +229,7 @@ def write_json_atomic(path: Path, value: dict[str, object]) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        os.chmod(path, mode)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -575,6 +583,52 @@ def publish_evidence(plan: dict[str, object], evidence: dict[str, object], devic
             run("umount", str(WINDOWS_MOUNT_PATH))
 
 
+def write_local_status(
+    status: str,
+    *,
+    plan: dict[str, object] | None,
+    error: str | None = None,
+    evidence: dict[str, object] | None = None,
+    windows_evidence_path: Path | None = None,
+    service_stage: str | None = None,
+) -> dict[str, object]:
+    plan_id = plan.get("planId") if isinstance(plan, dict) else None
+    value: dict[str, object] = {
+        "schemaVersion": 1,
+        "status": status,
+        "planId": plan_id if isinstance(plan_id, str) else "",
+        "updatedAtUtc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "logPath": str(VERIFICATION_LOG_PATH),
+        "error": error,
+    }
+    if service_stage:
+        value["serviceStage"] = service_stage
+    if evidence is not None:
+        value["distribution"] = evidence.get("distribution", {})
+        value["root"] = evidence.get("root", {})
+        value["system"] = evidence.get("system", {})
+        value["grub"] = evidence.get("grub", {})
+    if windows_evidence_path is not None:
+        value["windowsEvidencePath"] = str(windows_evidence_path)
+    write_json_atomic(LOCAL_STATUS_PATH, value, mode=0o644)
+    return value
+
+
+def record_service_failure(message: str) -> int:
+    plan: dict[str, object] | None
+    try:
+        plan = read_json(PLAN_PATH)
+    except VerificationError:
+        plan = None
+    write_local_status(
+        "failed",
+        plan=plan,
+        error=message,
+        service_stage="first-boot-resize",
+    )
+    return 0
+
+
 def main() -> int:
     plan = read_json(PLAN_PATH)
     root_source = Path(run("findmnt", "-n", "-o", "SOURCE", "/"))
@@ -584,13 +638,38 @@ def main() -> int:
         raise VerificationError("root filesystem is not ext4")
     evidence, windows_device = build_evidence(plan, root_source)
     destination = publish_evidence(plan, evidence, windows_device)
+    write_local_status(
+        "succeeded",
+        plan=plan,
+        evidence=evidence,
+        windows_evidence_path=destination,
+    )
     print(f"FIRST_BOOT_EVIDENCE={destination}")
     return 0
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--record-service-failure":
+        raise SystemExit(record_service_failure(sys.argv[2]))
     try:
         raise SystemExit(main())
     except VerificationError as error:
+        try:
+            failed_plan = read_json(PLAN_PATH)
+        except VerificationError:
+            failed_plan = None
+        write_local_status("failed", plan=failed_plan, error=str(error))
+        print(f"FIRST_BOOT_VERIFICATION_ERROR={error}", file=sys.stderr)
+        raise SystemExit(1) from error
+    except Exception as error:
+        try:
+            failed_plan = read_json(PLAN_PATH)
+        except VerificationError:
+            failed_plan = None
+        write_local_status(
+            "failed",
+            plan=failed_plan,
+            error=f"unexpected verification error: {error}",
+        )
         print(f"FIRST_BOOT_VERIFICATION_ERROR={error}", file=sys.stderr)
         raise SystemExit(1) from error

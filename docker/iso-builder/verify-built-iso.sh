@@ -123,6 +123,10 @@ compare_rootfs_file usr/local/lib/libertix/first-boot-resize.sh \
     /workspace/assets/live/first-boot-resize.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-first-boot-verify.py \
     /workspace/assets/live/libertix-first-boot-verify.py
+compare_rootfs_file usr/local/lib/libertix/libertix-first-boot-result.py \
+    /workspace/assets/live/libertix-first-boot-result.py
+compare_rootfs_file usr/local/lib/libertix/libertix-first-boot-result.desktop \
+    /workspace/assets/live/libertix-first-boot-result.desktop
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.service \
     /workspace/assets/live/first-boot-resize.service
 compare_rootfs_file usr/local/lib/libertix/10_libertix /workspace/grub/10_libertix

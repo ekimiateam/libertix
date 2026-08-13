@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import uuid
 from pathlib import Path
 from types import ModuleType
@@ -210,3 +211,44 @@ def test_installed_system_proof_rejects_failed_units(
             fstab_path=fstab,
             machine_id_path=machine_id,
         )
+
+
+def test_local_success_status_retains_detailed_proofs(
+    verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_path = tmp_path / "first-boot-verification.json"
+    monkeypatch.setattr(verifier, "LOCAL_STATUS_PATH", status_path)
+    evidence = {
+        "distribution": {"id": "zorin"},
+        "root": {"filesystem": "ext4"},
+        "system": {"dpkgAuditClean": True},
+        "grub": {"syntaxValid": True},
+    }
+
+    verifier.write_local_status(
+        "succeeded",
+        plan={"planId": "a" * 32},
+        evidence=evidence,
+        windows_evidence_path=Path("/windows/installed-linux-boot.json"),
+    )
+
+    status = verifier.read_json(status_path)
+    assert status["status"] == "succeeded"
+    assert status["root"]["filesystem"] == "ext4"
+    assert status["system"]["dpkgAuditClean"] is True
+    assert status["grub"]["syntaxValid"] is True
+    assert status_path.stat().st_mode & 0o777 == 0o644
+
+
+def test_service_failure_is_durable_for_the_desktop_session(
+    verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status_path = tmp_path / "first-boot-verification.json"
+    monkeypatch.setattr(verifier, "LOCAL_STATUS_PATH", status_path)
+    monkeypatch.setattr(verifier, "read_json", lambda _path: {"planId": "b" * 32})
+
+    assert verifier.record_service_failure("resize failed") == 0
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["status"] == "failed"
+    assert status["error"] == "resize failed"
+    assert status["serviceStage"] == "first-boot-resize"

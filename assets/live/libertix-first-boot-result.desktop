@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Libertix installation verification result
+Exec=/usr/local/lib/libertix/libertix-first-boot-result.py
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

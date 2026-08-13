@@ -9,6 +9,8 @@ from vncdotool import api
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
+CAPTURE_MAX_ATTEMPTS = 3
+CAPTURE_RETRY_SECONDS = 2
 
 
 class VNCClient:
@@ -32,30 +34,46 @@ class VNCClient:
     def capture(self, address: str, destination: Path) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         logger.info("VNC capture started", extra={"step": "vnc.capture", "target": address})
-        client = None
-        try:
-            client = self.connect(address)
-            # Long downloads can let Windows blank the virtual display. A pointer move wakes
-            # it without changing focus, clicking a control, or sending keyboard input.
-            client.mouseMove(1, 1)
-            time.sleep(0.25)
-            client.captureScreen(str(destination))
-        except Exception as exc:
-            destination.unlink(missing_ok=True)
+        last_error: Exception | None = None
+        for attempt in range(1, CAPTURE_MAX_ATTEMPTS + 1):
+            client = None
+            try:
+                client = self.connect(address)
+                # Long downloads can let Windows blank the virtual display. A pointer move wakes
+                # it without changing focus, clicking a control, or sending keyboard input.
+                client.mouseMove(1, 1)
+                time.sleep(0.25)
+                client.captureScreen(str(destination))
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                destination.unlink(missing_ok=True)
+                if attempt < CAPTURE_MAX_ATTEMPTS:
+                    logger.warning(
+                        "Transient VNC capture failure; retrying",
+                        extra={"step": "vnc.capture_retry", "target": address},
+                    )
+                    time.sleep(CAPTURE_RETRY_SECONDS)
+            finally:
+                if client is not None:
+                    try:
+                        client.disconnect()
+                    except Exception:
+                        logger.warning(
+                            "VNC connection did not close cleanly",
+                            extra={"step": "vnc.close", "target": address},
+                        )
+        if last_error is not None:
             raise WorkflowError(
                 "vnc.capture",
                 "VNC capture failed",
-                details={"address": address, "error": str(exc)},
-            ) from exc
-        finally:
-            if client is not None:
-                try:
-                    client.disconnect()
-                except Exception:
-                    logger.warning(
-                        "VNC connection did not close cleanly",
-                        extra={"step": "vnc.close", "target": address},
-                    )
+                details={
+                    "address": address,
+                    "attempts": CAPTURE_MAX_ATTEMPTS,
+                    "error": str(last_error),
+                },
+            ) from last_error
         if not destination.is_file() or destination.stat().st_size == 0:
             raise WorkflowError(
                 "vnc.capture", "The VNC capture is missing or empty", details={"address": address}

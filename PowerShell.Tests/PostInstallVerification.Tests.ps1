@@ -151,6 +151,22 @@ Describe "Permanent recovery archive" {
     }
 }
 
+Describe "Scheduled task principal identity" {
+    InModuleScope Libertix.PostInstallVerification {
+        It "uses the invariant SID from task XML instead of a localized account name" {
+            Mock Export-ScheduledTask {
+                @'
+<?xml version="1.0" encoding="UTF-16"?>
+<Task><Principals><Principal><UserId>S-1-5-18</UserId></Principal></Principals></Task>
+'@
+            }
+
+            Get-LibertixScheduledTaskPrincipalSid -TaskName "LibertixLinuxReadOnly" |
+                Should -Be "S-1-5-18"
+        }
+    }
+}
+
 Describe "Durable post-install checkpoints" {
     InModuleScope Libertix.PostInstallVerification {
         It "does not rerun a check already persisted as successful" {
@@ -208,5 +224,110 @@ Describe "Durable post-install checkpoints" {
             $result.checks[0].detail | Should -Be "healthy"
             Should -Invoke Write-LibertixPostInstallResult -Times 1
         }
+    }
+}
+
+Describe "Waiting for the first installed Linux boot" {
+    It "persists a resumable non-terminal state without inventing a failed check" {
+        $root = Join-Path $TestDrive "waiting-recovery"
+        New-Item -ItemType Directory -Path $root | Out-Null
+        @{
+            planId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            firmware = "uefi"
+        } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $root "installation-plan.json") `
+            -Encoding UTF8
+
+        $result = Set-LibertixPostInstallWaitingForLinux `
+            -RecoveryRoot $root `
+            -LogPath (Join-Path $root "recovery.log")
+
+        $result.status | Should -Be "waiting-linux-boot"
+        $result.waitingFor | Should -Be "installed-linux-boot.json"
+        @($result.checks).Count | Should -Be 0
+        $persisted = Get-Content `
+            -LiteralPath (Join-Path $root "post-install-verification.json") `
+            -Raw `
+            -Encoding UTF8 | ConvertFrom-Json
+        $persisted.status | Should -Be "waiting-linux-boot"
+    }
+
+    It "does not overwrite a terminal result" {
+        $root = Join-Path $TestDrive "terminal-recovery"
+        New-Item -ItemType Directory -Path $root | Out-Null
+        @{
+            planId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            firmware = "bios"
+        } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $root "installation-plan.json") `
+            -Encoding UTF8
+        @{
+            schemaVersion = 1
+            planId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            firmware = "bios"
+            status = "succeeded"
+            checks = @()
+        } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $root "post-install-verification.json") `
+            -Encoding UTF8
+
+        $result = Set-LibertixPostInstallWaitingForLinux `
+            -RecoveryRoot $root `
+            -LogPath (Join-Path $root "recovery.log")
+
+        $result.status | Should -Be "succeeded"
+    }
+
+    It "turns a resumed waiting state into a durable controller failure" {
+        $root = Join-Path $TestDrive "failed-recovery"
+        New-Item -ItemType Directory -Path $root | Out-Null
+        @{
+            planId = "cccccccccccccccccccccccccccccccc"
+            firmware = "uefi"
+        } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $root "installation-plan.json") `
+            -Encoding UTF8
+        $null = Set-LibertixPostInstallWaitingForLinux `
+            -RecoveryRoot $root `
+            -LogPath (Join-Path $root "recovery.log")
+
+        $result = Set-LibertixPostInstallFailure `
+            -RecoveryRoot $root `
+            -LogPath (Join-Path $root "recovery.log") `
+            -CheckName "post-install-controller" `
+            -ErrorMessage "share finalization failed"
+
+        $result.status | Should -Be "failed"
+        $result.rollbackAvailable | Should -BeTrue
+        @($result.checks).Count | Should -Be 1
+        $result.checks[0].name | Should -Be "post-install-controller"
+        $result.checks[0].passed | Should -BeFalse
+        $result.checks[0].detail | Should -Be "share finalization failed"
+    }
+
+    It "rejects a persisted waiting result owned by another plan" {
+        $root = Join-Path $TestDrive "foreign-waiting-recovery"
+        New-Item -ItemType Directory -Path $root | Out-Null
+        @{
+            planId = "dddddddddddddddddddddddddddddddd"
+            firmware = "bios"
+        } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $root "installation-plan.json") `
+            -Encoding UTF8
+        @{
+            schemaVersion = 1
+            planId = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            firmware = "bios"
+            status = "waiting-linux-boot"
+            checks = @()
+        } | ConvertTo-Json | Set-Content `
+            -LiteralPath (Join-Path $root "post-install-verification.json") `
+            -Encoding UTF8
+
+        {
+            Set-LibertixPostInstallWaitingForLinux `
+                -RecoveryRoot $root `
+                -LogPath (Join-Path $root "recovery.log")
+        } | Should -Throw "*belongs to another contract*"
     }
 }

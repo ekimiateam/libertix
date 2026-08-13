@@ -792,6 +792,13 @@ def test_contract_implementations_share_the_same_policy_constants() -> None:
         "lowMemoryThresholdMiB": 4096,
         "liveMinimumMiB": 1536,
     }
+    assert policy["account"]["reservedUsernamesSource"] == (
+        "https://sources.debian.org/src/user-setup/1.107/reserved-usernames"
+    )
+    assert len(policy["account"]["reservedUsernames"]) == 108
+    assert {"root", "admin", "Debian-exim", "input", "kvm", "render"} <= set(
+        policy["account"]["reservedUsernames"]
+    )
     assert "InstallationPolicy.Current.Storage" in csharp
     assert "Get-LibertixInstallationPolicy" in powershell
     assert "INSTALLATION_POLICY.storage" in python
@@ -801,6 +808,18 @@ def test_contract_implementations_share_the_same_policy_constants() -> None:
         "MINIMUM_FINAL_SIZE_GIB = 20",
     ):
         assert obsolete_literal not in csharp + powershell + python
+
+
+@pytest.mark.parametrize("username", ["root", "admin", "debian-exim"])
+def test_live_plan_rejects_reserved_linux_usernames(
+    plan_module: ModuleType,
+    username: str,
+) -> None:
+    plan = make_plan("uefi", 40)
+    plan["account"]["username"] = username  # type: ignore[index]
+
+    with pytest.raises(plan_module.PlanValidationError, match="username is reserved"):
+        plan_module.validate_plan(plan, require_installer=True)
 
 
 @pytest.mark.parametrize(

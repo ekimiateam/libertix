@@ -98,14 +98,20 @@ function Assert-LibertixPostInstallResult {
         "execution-ledger",
         "installed-linux-boot",
         "disk-geometry",
+        "windows-read-only-linux-share",
         "windows-health",
         "boot-configuration",
         "temporary-boot-cleanup",
         "permanent-recovery-archive"
     )
+    if ([bool]$Session.Plan.features.shareLinuxFilesInWindows) {
+        $expectedChecks += "explorer-integration"
+    }
     $actualChecks = @($result.checks | ForEach-Object { [string]$_.name })
-    Assert-Condition ($actualChecks.Count -eq $expectedChecks.Count) `
+    Assert-Condition ($actualChecks.Count -ge $expectedChecks.Count) `
         "The post-install verification check count is incomplete."
+    Assert-Condition (@($actualChecks | Select-Object -Unique).Count -eq $actualChecks.Count) `
+        "The post-install verification contains duplicate check names."
     Assert-Condition (@($result.checks | Where-Object { -not [bool]$_.passed }).Count -eq 0) `
         "At least one post-install verification check failed."
     foreach ($expectedCheck in $expectedChecks) {
@@ -177,6 +183,8 @@ function Get-ExpectedLinuxMountIdentity {
     return [pscustomobject]@{
         DiskNumber = [int]$disk.Number
         PartitionNumber = [int]$partitions[0].PartitionNumber
+        PartitionOffset = [int64]$partitions[0].Offset
+        PartitionSize = [int64]$partitions[0].Size
     }
 }
 
@@ -356,6 +364,77 @@ $installerIsoPattern = [regex]::Escape([string]$config.installer_iso_file_name)
 
 try {
     switch ($check) {
+        "waiting_for_linux" {
+            $deadline = [DateTime]::UtcNow.AddMinutes(3)
+            do {
+                $session = Get-LibertixRecoverySession `
+                    -ExpectedFirmware ([string]$config.expected_firmware)
+                $evidencePath = Join-Path $session.Root "installed-linux-boot.json"
+                $resultPath = Join-Path $session.Root "post-install-verification.json"
+                $waitingResult = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+                    Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
+                        ConvertFrom-Json -ErrorAction Stop
+                } else { $null }
+                $startupTasks = @(Get-LibertixRecoveryTasks | Where-Object {
+                    $_.TaskName -eq "LibertixInstallRecovery" -or
+                    $_.TaskName -like "LibertixUefiRecovery_*"
+                })
+                $promptTasks = @(Get-LibertixRecoveryTasks | Where-Object {
+                    $_.TaskName -eq "LibertixInstallRecoveryPrompt" -or
+                    $_.TaskName -like "LibertixUefiRecoveryPrompt_*"
+                })
+                $waitingReady = (
+                    -not (Test-Path -LiteralPath $evidencePath -PathType Leaf) -and
+                    $null -ne $waitingResult -and
+                    [string]$waitingResult.status -eq "waiting-linux-boot" -and
+                    [string]$waitingResult.waitingFor -eq "installed-linux-boot.json" -and
+                    $startupTasks.Count -eq 1 -and
+                    $promptTasks.Count -eq 1
+                )
+                if ($waitingReady) { break }
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    $waitingStatus = if ($null -eq $waitingResult) {
+                        "missing"
+                    } else {
+                        [string]$waitingResult.status
+                    }
+                    throw (
+                        "Windows did not enter the durable first-Linux-boot wait state: " +
+                        "resultStatus=$waitingStatus, " +
+                        "startupTasks=$($startupTasks.Count), promptTasks=$($promptTasks.Count), " +
+                        "evidencePresent=$(Test-Path -LiteralPath $evidencePath -PathType Leaf)."
+                    )
+                }
+                Start-Sleep -Seconds 2
+            } while ($true)
+            Assert-Condition ([string]$waitingResult.status -notin @("succeeded", "failed", "rolled-back")) `
+                "Windows reached a terminal post-install result before Linux first boot."
+            Assert-Condition ([string]::IsNullOrWhiteSpace([string]$waitingResult.error)) `
+                "Windows recorded an error while it should only wait for Linux first boot."
+            Assert-Condition (@($waitingResult.checks | Where-Object { -not [bool]$_.passed }).Count -eq 0) `
+                "Windows recorded a failed check before Linux first boot."
+            Assert-Condition (@($startupTasks | Where-Object { $_.State -eq "Disabled" }).Count -eq 0) `
+                "The startup recovery task is disabled while waiting for Linux first boot."
+            Assert-Condition (@($promptTasks | Where-Object { $_.State -eq "Disabled" }).Count -eq 0) `
+                "The result prompt task is disabled while waiting for Linux first boot."
+            if ([string]$config.expected_firmware -eq "uefi") {
+                $recoveryState = Get-Content `
+                    -LiteralPath (Join-Path $session.Root "state.json") `
+                    -Raw `
+                    -Encoding UTF8 |
+                    ConvertFrom-Json -ErrorAction Stop
+                Assert-Condition ([string]$recoveryState.Phase -eq "AwaitingInstalledLinuxBoot") `
+                    "The UEFI agent did not persist AwaitingInstalledLinuxBoot."
+            }
+            Start-Sleep -Seconds 5
+            $unexpectedResultUi = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+                Where-Object {
+                    [string]$_.CommandLine -match '(?i)libertix-post-install-result\.ps1'
+                })
+            Assert-Condition ($unexpectedResultUi.Count -eq 0) `
+                "The Windows result window started before Linux first-boot evidence existed."
+            Write-Output "LIBERTIX_WAITING_FOR_LINUX=verified"
+        }
         "finalization" {
             $deadline = [DateTime]::UtcNow.AddMinutes(5)
             do {
@@ -371,7 +450,23 @@ try {
                     $_.TaskName -eq "LibertixInstallRecovery" -or
                     $_.TaskName -like "LibertixUefiRecovery_*"
                 })
-                if ($resultStatus -eq "succeeded" -and -not $uefiTransaction -and $startupTasks.Count -eq 0) {
+                $interactiveCheckPassed = -not [bool]$config.share_linux_files_in_windows
+                if ($resultStatus -in @("failed", "rolled-back")) {
+                    throw "Libertix Windows finalization reached terminal status '$resultStatus'."
+                }
+                if ($resultStatus -eq "succeeded" -and [bool]$config.share_linux_files_in_windows) {
+                    $savedResult = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
+                        ConvertFrom-Json -ErrorAction Stop
+                    $interactiveCheckPassed = @($savedResult.checks | Where-Object {
+                        [string]$_.name -eq "explorer-integration" -and [bool]$_.passed
+                    }).Count -eq 1
+                }
+                if (
+                    $resultStatus -eq "succeeded" -and
+                    $interactiveCheckPassed -and
+                    -not $uefiTransaction -and
+                    $startupTasks.Count -eq 0
+                ) {
                     $null = Assert-LibertixPostInstallResult `
                         -Session $session `
                         -ExpectedFirmware ([string]$config.expected_firmware)
@@ -382,7 +477,8 @@ try {
                     throw (
                         "Libertix Windows finalization timed out: " +
                         "resultStatus=$resultStatus, uefiTransaction=$uefiTransaction, " +
-                        "startupTasks=$($startupTasks.Count)."
+                        "startupTasks=$($startupTasks.Count), " +
+                        "explorerIntegration=$interactiveCheckPassed."
                     )
                 }
                 Start-Sleep -Seconds 2
@@ -744,8 +840,16 @@ try {
             Assert-Condition (Test-Path -LiteralPath $ext4 -PathType Leaf) "ext4.exe is missing."
             Assert-Condition (Test-Path -LiteralPath $launcher) "The WinFsp ext4 launcher is missing."
             $command = [string](Get-ItemPropertyValue -LiteralPath $launcher -Name CommandLine)
+            $runAs = [string](Get-ItemPropertyValue -LiteralPath $launcher -Name RunAs)
+            [int]$recovery = Get-ItemPropertyValue -LiteralPath $launcher -Name Recovery
+            [int]$broadcast = Get-ItemPropertyValue `
+                -LiteralPath "HKLM:\SOFTWARE\WOW6432Node\WinFsp" `
+                -Name MountBroadcastDriveChange
             Write-Output ("COMMAND={0}" -f $command)
             Assert-Condition ($command -match "(?i)(?:^|\s)--ro(?:\s|$)") "The ext4 launcher is not read-only."
+            Assert-Condition ($runAs -eq "LocalSystem") "The ext4 launcher is not global to Windows sessions."
+            Assert-Condition ($recovery -eq 1) "WinFsp mount recovery is disabled."
+            Assert-Condition ($broadcast -eq 1) "WinFsp drive notifications are disabled."
         }
         "ext4_readonly_mount" {
             $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)
@@ -813,6 +917,21 @@ try {
             })
             Assert-Condition ($ownedProcesses.Count -eq 1) `
                 "The active ext4 mount is not uniquely tied to the planned disk and partition."
+            $mountStatusPath = Join-Path $env:ProgramData "Libertix\WindowsShare\mount-status.json"
+            Assert-Condition (Test-Path -LiteralPath $mountStatusPath -PathType Leaf) `
+                "The durable ext4 mount status is missing."
+            $mountStatus = Get-Content -LiteralPath $mountStatusPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json -ErrorAction Stop
+            Assert-Condition (
+                [int]$mountStatus.schemaVersion -eq 1 -and
+                [int]$mountStatus.diskNumber -eq [int]$identity.DiskNumber -and
+                [int]$mountStatus.partitionNumber -eq [int]$identity.PartitionNumber -and
+                [int64]$mountStatus.partitionOffset -eq [int64]$identity.PartitionOffset -and
+                [int64]$mountStatus.partitionSize -eq [int64]$identity.PartitionSize -and
+                [string]$mountStatus.drive -eq $driveRoot -and
+                [bool]$mountStatus.readOnly -and
+                [int]$mountStatus.processId -gt 0
+            ) "The durable ext4 mount status does not describe the active planned mount."
         }
         "linux_home" {
             $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)
@@ -849,6 +968,61 @@ try {
             $shortcuts = @(Get-ChildItem -Path "C:\Users\*\Links\Linux_*_read-only.lnk" -File -ErrorAction SilentlyContinue)
             $shortcuts | Format-Table FullName, Length, LastWriteTime -AutoSize
             Assert-Condition ($shortcuts.Count -ge 1) "No Linux read-only Explorer shortcut exists."
+            $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)
+            $expectedTarget = Join-Path $drive "home\$($config.linux_username)"
+            $shell = New-Object -ComObject WScript.Shell
+            foreach ($shortcutPath in $shortcuts) {
+                $shortcut = $shell.CreateShortcut([string]$shortcutPath.FullName)
+                Assert-Condition ([string]$shortcut.TargetPath -eq $expectedTarget) `
+                    "A Linux Explorer shortcut targets another path."
+            }
+        }
+        "explorer_integration" {
+            $session = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $resultPath = Join-Path $session.Root "post-install-verification.json"
+            $savedResult = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json -ErrorAction Stop
+            $checks = @($savedResult.checks | Where-Object {
+                [string]$_.name -eq "explorer-integration"
+            })
+            Assert-Condition ($checks.Count -eq 1) `
+                "Explorer integration was not verified in the interactive user session."
+            Assert-Condition ([bool]$checks[0].passed) `
+                "Explorer Home/Quick Access integration failed: $($checks[0].detail)"
+        }
+        "post_install_result_ui" {
+            $session = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $resultStatePath = Join-Path $session.Root "post-install-verification.json"
+            $resultStatePattern = [regex]::Escape($resultStatePath)
+            $recoveryStatePath = Join-Path $session.Root "state.json"
+            $recoveryStatePattern = [regex]::Escape($recoveryStatePath)
+            $expectedFirmware = [string]$config.expected_firmware
+            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            do {
+                $uiProcesses = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+                    Where-Object {
+                        $commandLine = [string]$_.CommandLine
+                        if ($expectedFirmware -eq "uefi") {
+                            return (
+                                $commandLine -match '(?i)libertix-uefi-recovery-agent\.ps1' -and
+                                $commandLine -match '(?i)-Action\s+Prompt(?:\s|$)' -and
+                                $commandLine -match $recoveryStatePattern
+                            )
+                        }
+                        return (
+                            $commandLine -match '(?i)libertix-post-install-result\.ps1' -and
+                            $commandLine -match $resultStatePattern
+                        )
+                    })
+                if ($uiProcesses.Count -eq 1) { break }
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    throw "The interactive Windows post-install result window is not running."
+                }
+                Start-Sleep -Seconds 2
+            } while ($true)
+            $uiProcesses | Format-List ProcessId, CommandLine
         }
         "sharing_tasks" {
             $mountTasks = @(Get-ScheduledTask -TaskName "LibertixLinuxReadOnly" -ErrorAction SilentlyContinue)

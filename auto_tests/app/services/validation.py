@@ -523,6 +523,8 @@ class ValidationService:
             prefixes=(
                 "MSBUILD",
                 "VSTEST",
+                "PSSCRIPTANALYZER",
+                "PESTER",
                 "TEMP_BUILD_DIR",
                 "FINAL_EXE",
                 "FINAL_EXE_SHA256",
@@ -541,6 +543,8 @@ class ValidationService:
             target=s.build_vm_host,
             msbuild=values.get("MSBUILD"),
             vstest=values.get("VSTEST"),
+            psscriptanalyzer=values.get("PSSCRIPTANALYZER"),
+            pester=values.get("PESTER"),
             executable_sha256=values.get("FINAL_EXE_SHA256"),
             temp_build_dir=values.get("TEMP_BUILD_DIR"),
             cleanup="temporary directory, script, and config removed after the command",

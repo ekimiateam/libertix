@@ -138,7 +138,7 @@ GitHub Pages `dev` channel.
 | `apply` | boolean, `false` | Click Apply and authorize a real installation. |
 | `distribution` | `mint` or `zorin`, default `mint` | Select the catalogue entry; both use the same generic mini-ISOs. |
 | `linux_username` | string, default `test` | Account created in the installed Linux system. |
-| `linux_password` | string, required, 8-128 characters | Linux account and sudo password. |
+| `linux_password` | string, required, 4-128 characters | Linux account and sudo password. |
 | `monitor_iso` | boolean, `true` | Continue through installation and post-install operating-system checks. |
 | `share_windows_files_in_linux` | boolean, `true` | Validate the Windows-to-Linux sharing path. |
 | `share_linux_files_in_windows` | boolean, `true` | Validate the read-only Linux-to-Windows sharing path. |

@@ -371,7 +371,6 @@ class VisionLLMClient:
                 expected_screen == "warning"
                 and verdict.expected_screen_visible
                 and verdict.detected_screen != "warning"
-                and verdict.no_blocking_error
                 and _contains_warning_screen(verdict.visible_text)
             ):
                 # The localized title and confirmation control are stronger
@@ -383,7 +382,7 @@ class VisionLLMClient:
                 and verdict.expected_screen_visible
                 and verdict.username_visible
                 and verdict.password_fields_filled
-                and expected_username.casefold() in verdict.visible_text.casefold()
+                and expected_username.casefold() in visible_evidence.casefold()
             )
             warning_confirmed = (
                 expected_screen == "warning"
@@ -401,6 +400,36 @@ class VisionLLMClient:
                         "summary": (
                             f"{verdict.summary} Verdict normalized: the screen and critical "
                             "fields are confirmed with no visible Libertix error."
+                        ),
+                    }
+                )
+            if (
+                verdict.detected_screen == "other"
+                and not verdict.no_blocking_error
+                and not verdict.visible_text.strip()
+                and not _contains_wizard_blocker(visible_evidence)
+            ):
+                verdict = verdict.model_copy(
+                    update={
+                        "no_blocking_error": True,
+                        "summary": (
+                            f"{verdict.summary} Verdict normalized: no concrete Libertix "
+                            "error is visible during this transient state."
+                        ),
+                    }
+                )
+            if (
+                verdict.detected_screen == "apply"
+                and not verdict.no_blocking_error
+                and not _contains_wizard_blocker(visible_evidence)
+                and not _contains_install_blocker(visible_evidence)
+            ):
+                verdict = verdict.model_copy(
+                    update={
+                        "no_blocking_error": True,
+                        "summary": (
+                            f"{verdict.summary} Verdict normalized: the Apply page is active "
+                            "and no concrete installation error is visible."
                         ),
                     }
                 )

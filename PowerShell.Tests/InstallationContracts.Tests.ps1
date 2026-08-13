@@ -162,6 +162,13 @@ Describe "Installation plan contract" {
             Should -Throw "*secureBootMicrosoftAuthorities may contain only 2011 and 2023*"
     }
 
+    It "rejects a Debian or Ubuntu reserved Linux username" {
+        $plan = New-ValidInstallationPlan
+        $plan.account.username = "admin"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*account.username is reserved by the operating system*"
+    }
+
     It "rejects trusted UEFI authorities in a BIOS plan" {
         $plan = New-ValidInstallationPlan
         $plan.firmware = "bios"

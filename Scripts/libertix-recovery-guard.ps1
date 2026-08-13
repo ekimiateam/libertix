@@ -27,6 +27,7 @@ $BcdBackup = Join-Path $Root "bcd-backup"
 $MbrBackup = Join-Path $Root "mbr-backup\mbr-before-grub.bin"
 $MbrBackupHash = Join-Path $Root "mbr-backup\mbr-before-grub.sha256"
 $ExecutionStatePath = Join-Path $Root "installation-state.json"
+$InstalledLinuxBootEvidencePath = Join-Path $Root "installed-linux-boot.json"
 $ExecutionStateModulePath = Join-Path $Root "Libertix.InstallationState.psm1"
 $InstallationPolicyPath = Join-Path $Root "Libertix.InstallationPolicy.json"
 $TemporaryArtifactsModulePath = Join-Path $Root "Libertix.TemporaryArtifacts.psm1"
@@ -112,6 +113,20 @@ function Remove-RecoveryPromptTask {
     $message = "Recovery prompt task still exists after deletion attempt (rc=$deleteExitCode)."
     if ($Required) { throw $message }
     Write-RecoveryLog $message
+}
+
+function Start-RecoveryPromptTask {
+    try {
+        Start-ScheduledTask -TaskName $PromptTaskName -ErrorAction Stop
+        Write-RecoveryLog "Post-install result task was started for the interactive user."
+    } catch {
+        # InteractiveToken tasks cannot run before their user has logged on.
+        # The persistent logon trigger will start it when a session exists.
+        Write-RecoveryLog (
+            "Post-install result task remains armed for the next user logon: " +
+            $_.Exception.Message
+        )
+    }
 }
 
 function Read-RecoveryExecutionState {
@@ -296,11 +311,11 @@ function Invoke-WindowsShareFinalize {
 
 function Invoke-VerifiedInstallationSuccess {
     Write-RecoveryLog "Successful install marker found; starting cross-runtime verification."
-    Restore-BcdState -Required
-    Remove-TemporaryBootPayload
-    Remove-TransactionArtifacts
-    Invoke-WindowsShareFinalize
     try {
+        Restore-BcdState -Required
+        Remove-TemporaryBootPayload
+        Remove-TransactionArtifacts
+        Invoke-WindowsShareFinalize
         if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
             throw "Post-install verification module is missing from the recovery payload."
         }
@@ -310,6 +325,21 @@ function Invoke-VerifiedInstallationSuccess {
             -RecoveryRoot $Root `
             -LogPath $Log `
             -WriteLog $writeLog
+    } catch {
+        $verificationFailure = $_
+        try {
+            $null = Set-LibertixPostInstallFailure `
+                -RecoveryRoot $Root `
+                -LogPath $Log `
+                -CheckName "post-install-controller" `
+                -ErrorMessage $verificationFailure.Exception.Message
+        } catch {
+            Write-RecoveryLog (
+                "Could not persist the post-install controller failure: " +
+                $_.Exception.Message
+            )
+        }
+        throw $verificationFailure
     } finally {
         $verificationResultPath = Join-Path $Root "post-install-verification.json"
         $verificationStatus = if (Test-Path -LiteralPath $verificationResultPath -PathType Leaf) {
@@ -325,6 +355,7 @@ function Invoke-VerifiedInstallationSuccess {
             # The prompt task remains until the interactive result window is
             # acknowledged. Only a terminal durable result retires the startup task.
             Remove-RecoveryTask -Required
+            Start-RecoveryPromptTask
         } else {
             Write-RecoveryLog (
                 "Post-install verification was interrupted with status=" +
@@ -494,6 +525,17 @@ try {
         $successRecoveryState -eq "install-success" -and
         [string]$recoveryExecutionState.status -eq "succeeded"
     ) {
+        if (-not (Test-Path -LiteralPath $InstalledLinuxBootEvidencePath -PathType Leaf)) {
+            $null = Set-LibertixPostInstallWaitingForLinux `
+                -RecoveryRoot $Root `
+                -LogPath $Log
+            Write-RecoveryLog (
+                "The live installation succeeded. Waiting for the installed Linux system " +
+                "to boot and publish installed-linux-boot.json."
+            )
+            Save-RecoveryLog
+            exit 0
+        }
         Invoke-VerifiedInstallationSuccess
         exit 0
     }
@@ -523,6 +565,17 @@ try {
         $resultIsFresh -and
         [string]$recoveryExecutionState.status -eq "succeeded"
     ) {
+        if (-not (Test-Path -LiteralPath $InstalledLinuxBootEvidencePath -PathType Leaf)) {
+            $null = Set-LibertixPostInstallWaitingForLinux `
+                -RecoveryRoot $Root `
+                -LogPath $Log
+            Write-RecoveryLog (
+                "The live installation succeeded. Waiting for the installed Linux system " +
+                "to boot and publish installed-linux-boot.json."
+            )
+            Save-RecoveryLog
+            exit 0
+        }
         Invoke-VerifiedInstallationSuccess
         exit 0
     }

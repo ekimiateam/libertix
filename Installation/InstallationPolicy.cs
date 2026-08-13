@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Libertix.Installation
 {
@@ -18,6 +20,7 @@ namespace Libertix.Installation
         public InstallationStoragePolicy Storage { get; set; }
         public InstallationMemoryPolicy Memory { get; set; }
         public InstallationDownloadPolicy Download { get; set; }
+        public InstallationAccountPolicy Account { get; set; }
 
         public static InstallationPolicy Current => LazyCurrent.Value;
 
@@ -34,7 +37,7 @@ namespace Libertix.Installation
         private static void Validate(InstallationPolicy policy, string path)
         {
             if (policy == null || policy.Storage == null || policy.Memory == null ||
-                policy.Download == null)
+                policy.Download == null || policy.Account == null)
                 throw new InvalidDataException($"Installation policy is incomplete: {path}");
             if (policy.SchemaVersion != CurrentSchemaVersion)
                 throw new InvalidDataException(
@@ -67,6 +70,20 @@ namespace Libertix.Installation
             {
                 throw new InvalidDataException("Installation download policy is invalid.");
             }
+
+            InstallationAccountPolicy account = policy.Account;
+            string[] reservedUsernames = account.ReservedUsernames;
+            if (!Uri.TryCreate(account.ReservedUsernamesSource, UriKind.Absolute, out Uri source) ||
+                source.Scheme != Uri.UriSchemeHttps ||
+                reservedUsernames == null || reservedUsernames.Length == 0 ||
+                reservedUsernames.Any(name =>
+                    string.IsNullOrWhiteSpace(name) ||
+                    !Regex.IsMatch(name, "^[A-Za-z](?:[A-Za-z0-9-]{0,30}[A-Za-z0-9])?$")) ||
+                reservedUsernames.Distinct(StringComparer.OrdinalIgnoreCase).Count() !=
+                    reservedUsernames.Length)
+            {
+                throw new InvalidDataException("Installation account policy is invalid.");
+            }
         }
     }
 
@@ -92,5 +109,11 @@ namespace Libertix.Installation
     public sealed class InstallationDownloadPolicy
     {
         public int Aria2MaximumConnections { get; set; }
+    }
+
+    public sealed class InstallationAccountPolicy
+    {
+        public string ReservedUsernamesSource { get; set; }
+        public string[] ReservedUsernames { get; set; }
     }
 }

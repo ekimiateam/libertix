@@ -235,15 +235,18 @@ function New-Aria2DownloadArguments {
     param(
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$DownloadDir,
-        [Parameter(Mandatory = $true)][string]$DestinationName
+        [Parameter(Mandatory = $true)][string]$DestinationName,
+        [ValidateRange(1, 16)][int]$Connections = $Aria2Connections,
+        [bool]$ContinueDownload = $true
     )
 
+    $continueValue = if ($ContinueDownload) { "true" } else { "false" }
     return @(
         "--allow-overwrite=true",
         "--auto-file-renaming=false",
-        "--continue=true",
-        "--max-connection-per-server=$Aria2Connections",
-        "--split=$Aria2Connections",
+        "--continue=$continueValue",
+        "--max-connection-per-server=$Connections",
+        "--split=$Connections",
         "--min-split-size=1M",
         "--max-tries=5",
         "--retry-wait=10",
@@ -256,6 +259,46 @@ function New-Aria2DownloadArguments {
         "--out=$DestinationName",
         $Url
     )
+}
+
+function Test-ExactSingleByteContentRange {
+    param(
+        [int]$StatusCode,
+        [AllowEmptyString()][string]$ContentRange
+    )
+
+    return $StatusCode -eq 206 -and $ContentRange -match '^bytes 0-0/[1-9][0-9]*$'
+}
+
+function Get-HttpByteRangeSupport {
+    param([Parameter(Mandatory = $true)][string]$Url)
+
+    $request = [Net.HttpWebRequest]::Create($Url)
+    $request.Method = "GET"
+    $request.AllowAutoRedirect = $true
+    $request.Timeout = 15000
+    $request.ReadWriteTimeout = 15000
+    $request.UserAgent = "Libertix-Range-Probe"
+    $request.AddRange(0, 0)
+    $response = $null
+    try {
+        $response = $request.GetResponse()
+        $supported = Test-ExactSingleByteContentRange `
+            -StatusCode ([int]$response.StatusCode) `
+            -ContentRange ([string]$response.Headers["Content-Range"])
+        if ($supported) { return "supported" }
+        return "unsupported"
+    } catch [Net.WebException] {
+        if ($null -ne $_.Exception.Response) {
+            $_.Exception.Response.Dispose()
+            return "unsupported"
+        }
+        return "unknown"
+    } catch {
+        return "unknown"
+    } finally {
+        if ($null -ne $response) { $response.Dispose() }
+    }
 }
 
 function Get-Aria2DownloadPercent {
@@ -301,6 +344,23 @@ function Start-Aria2Download {
         $downloadPath = Join-Path $downloadDir $destinationName
     }
     New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+    $byteRangeSupport = Get-HttpByteRangeSupport -Url $Url
+    if ($byteRangeSupport -eq "unknown") {
+        throw (
+            "Byte-range support could not be checked because the server was unreachable; " +
+            "the partial download is retained for retry."
+        )
+    }
+    $supportsByteRanges = $byteRangeSupport -eq "supported"
+    $connections = if ($supportsByteRanges) { $Aria2Connections } else { 1 }
+    if (-not $supportsByteRanges) {
+        Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath "$downloadPath.aria2" -Force -ErrorAction SilentlyContinue
+        Write-Log (
+            "The server does not provide valid byte ranges for $destinationName; " +
+            "using one connection without resume."
+        ) "Yellow"
+    }
     if (Test-Path -LiteralPath $downloadPath -PathType Leaf) {
         $existingLength = [int64](Get-Item -LiteralPath $downloadPath -ErrorAction Stop).Length
         if ($existingLength -gt $MaxBytes) {
@@ -315,7 +375,9 @@ function Start-Aria2Download {
     $aria2Arguments = New-Aria2DownloadArguments `
         -Url $Url `
         -DownloadDir $downloadDir `
-        -DestinationName $destinationName
+        -DestinationName $destinationName `
+        -Connections $connections `
+        -ContinueDownload $supportsByteRanges
     $nativeArguments = ($aria2Arguments | ForEach-Object {
         ConvertTo-LibertixNativeArgument -Value ([string]$_)
     }) -join " "

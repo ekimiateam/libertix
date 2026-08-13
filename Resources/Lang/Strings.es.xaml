@@ -51,10 +51,11 @@
     <system:String x:Key="DistroLoadError">No se pudo cargar la lista de distribuciones. Por favor, compruebe su conexión a Internet e inténtelo de nuevo.</system:String>
 
     <system:String x:Key="PasswordRequired">La contraseña es obligatoria</system:String>
-    <system:String x:Key="PasswordTooShort">La contraseña debe tener al menos 8 caracteres</system:String>
+    <system:String x:Key="PasswordTooShort">La contraseña debe tener al menos 4 caracteres</system:String>
     <system:String x:Key="PasswordTooLong">La contraseña no debe superar los 128 caracteres</system:String>
     <system:String x:Key="UsernameRequired">El nombre de usuario es obligatorio</system:String>
     <system:String x:Key="UsernameInvalid">El nombre de usuario debe comenzar por una letra y contener solo letras minúsculas, números o guiones</system:String>
+    <system:String x:Key="UsernameReserved">El nombre de usuario «{0}» está reservado para una cuenta o un grupo del sistema Debian/Ubuntu. Elija otro nombre.</system:String>
     <system:String x:Key="ConfirmPasswordRequired">Confirme su contraseña</system:String>
     <system:String x:Key="PasswordsDoNotMatch">Las contraseñas no coinciden</system:String>
     <system:String x:Key="ComputerNameRequired">El nombre del equipo es obligatorio</system:String>

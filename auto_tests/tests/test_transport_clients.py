@@ -561,6 +561,40 @@ def test_vnc_capture_failure_removes_only_its_incomplete_output(
     assert connection.disconnected is True
 
 
+def test_vnc_capture_retries_transient_network_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    class TransientConnection(FakeVncConnection):
+        def captureScreen(self, destination: str) -> None:  # noqa: N802
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                raise OSError(101, "Network is unreachable")
+            Path(destination).write_bytes(b"png")
+
+    connections: list[TransientConnection] = []
+
+    def connect(_address: str, *, timeout: float) -> TransientConnection:
+        assert timeout == 15
+        connection = TransientConnection()
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(vnc_module.api, "connect", connect)
+    monkeypatch.setattr(vnc_module.time, "sleep", sleeps.append)
+    destination = tmp_path / "capture.png"
+
+    assert VNCClient().capture("192.0.2.10:12", destination) == destination
+    assert attempts == 3
+    assert destination.read_bytes() == b"png"
+    assert all(connection.disconnected for connection in connections)
+    assert sleeps.count(vnc_module.CAPTURE_RETRY_SECONDS) == 2
+
+
 @pytest.mark.parametrize("address", ["", "host", ":10", "host:not-a-display"])
 def test_vnc_rejects_invalid_addresses_before_connecting(address: str) -> None:
     with pytest.raises(WorkflowError) as caught:

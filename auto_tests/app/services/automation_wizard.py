@@ -30,6 +30,23 @@ COMPATIBILITY_SUCCESS_MARKERS = (
 )
 WARNING_TRANSITION_MAX_ATTEMPTS = 6
 WARNING_TRANSITION_RETRY_SECONDS = 5
+WARNING_ACKNOWLEDGEMENT_MAX_ATTEMPTS = 3
+WARNING_ACKNOWLEDGEMENT_RETRY_SECONDS = 5
+APPLY_TRANSITION_MAX_OBSERVATIONS = 4
+APPLY_TRANSITION_RETRY_SECONDS = 3
+
+
+def _is_retryable_wizard_vision_error(exc: WorkflowError) -> bool:
+    """Return whether the critical-screen proof failed for a transient network reason."""
+
+    return exc.step == "llm.wizard_state" and exc.details.get("http_status") in (
+        None,
+        429,
+        500,
+        502,
+        503,
+        504,
+    )
 
 
 class WizardAutomationMixin:
@@ -360,6 +377,21 @@ class WizardAutomationMixin:
                 )
                 return
             except WorkflowError as exc:
+                if (
+                    _is_retryable_wizard_vision_error(exc)
+                    and attempt < WARNING_TRANSITION_MAX_ATTEMPTS
+                ):
+                    result.ok(
+                        "automation.warning_vision_wait",
+                        "Warning-page visual proof is temporarily unavailable; retrying",
+                        target=vm.vnc,
+                        vm=vm.name,
+                        attempt=attempt,
+                        maximum_attempts=WARNING_TRANSITION_MAX_ATTEMPTS,
+                        vision_error=exc.details,
+                    )
+                    time.sleep(WARNING_TRANSITION_RETRY_SECONDS)
+                    continue
                 diagnostic = " ".join(
                     str(exc.details.get(name, "")) for name in ("summary", "visible_text")
                 ).lower()
@@ -420,19 +452,57 @@ class WizardAutomationMixin:
         """Select and visually prove the destructive-action acknowledgement."""
 
         last_context: dict[str, object] = {}
-        for observation in range(1, 4):
-            self._set_warning_acknowledgement(vm, result, attempt=observation)
+        for observation in range(1, WARNING_ACKNOWLEDGEMENT_MAX_ATTEMPTS + 1):
+            try:
+                self._set_warning_acknowledgement(vm, result, attempt=observation)
+            except WorkflowError as exc:
+                diagnostic = "\n".join(
+                    str(exc.details.get(name, "")) for name in ("stdout", "stderr")
+                ).casefold()
+                control_not_ready = (
+                    "warning acknowledgement control did not become visible" in diagnostic
+                )
+                if control_not_ready and observation < WARNING_ACKNOWLEDGEMENT_MAX_ATTEMPTS:
+                    result.ok(
+                        "automation.warning_acknowledgement_wait",
+                        "Warning accessibility tree is still rendering; selection will retry",
+                        vm=vm.name,
+                        target=vm.host,
+                        attempt=observation,
+                        maximum_attempts=WARNING_ACKNOWLEDGEMENT_MAX_ATTEMPTS,
+                    )
+                    time.sleep(WARNING_ACKNOWLEDGEMENT_RETRY_SECONDS)
+                    continue
+                raise
             capture, latest_capture = self._capture_wizard_pair(
                 client, vm, f"05-warning-acknowledgement-{observation:02d}", result
             )
-            verdict = self.vision_llm.analyze_wizard_state(
-                capture,
-                vm.name,
-                vm.os,
-                expected_screen="warning",
-                expected_username=username,
-                second_image_path=latest_capture,
-            )
+            try:
+                verdict = self.vision_llm.analyze_wizard_state(
+                    capture,
+                    vm.name,
+                    vm.os,
+                    expected_screen="warning",
+                    expected_username=username,
+                    second_image_path=latest_capture,
+                )
+            except WorkflowError as exc:
+                if (
+                    _is_retryable_wizard_vision_error(exc)
+                    and observation < WARNING_ACKNOWLEDGEMENT_MAX_ATTEMPTS
+                ):
+                    result.ok(
+                        "automation.warning_acknowledgement_vision_wait",
+                        "Checkbox visual proof is temporarily unavailable; retrying",
+                        target=vm.vnc,
+                        vm=vm.name,
+                        attempt=observation,
+                        maximum_attempts=WARNING_ACKNOWLEDGEMENT_MAX_ATTEMPTS,
+                        vision_error=exc.details,
+                    )
+                    time.sleep(WARNING_ACKNOWLEDGEMENT_RETRY_SECONDS)
+                    continue
+                raise
             context = {
                 "target": vm.vnc,
                 "vm": vm.name,
@@ -465,10 +535,19 @@ class WizardAutomationMixin:
                 )
             result.ok(
                 "automation.warning_acknowledgement_retry",
-                "Warning checkbox was not yet visually confirmed; idempotent selection will retry",
+                (
+                    "Warning checkbox was not visibly selected; "
+                    "Space and accessibility selection will retry"
+                ),
                 attempt=observation,
                 **context,
             )
+            if observation < WARNING_ACKNOWLEDGEMENT_MAX_ATTEMPTS:
+                # The accessibility worker leaves keyboard focus on the checkbox.
+                # Space provides an independent fallback when UI Automation reports
+                # On but the rendered control is still visibly unchecked. The next
+                # iteration restores On idempotently before taking new screenshots.
+                self._press_key(client, "space", 0.5)
 
         raise WorkflowError(
             "automation.warning_acknowledgement",
@@ -496,7 +575,7 @@ class WizardAutomationMixin:
                 script_name="set_warning_acknowledgement.ps1",
                 config={},
                 step="automation.set_warning_acknowledgement",
-                timeout=90,
+                timeout=150,
             )
         values = self.validation.parse_powershell_results(
             response.stdout,
@@ -546,43 +625,77 @@ class WizardAutomationMixin:
             # screen resolution, then Enter invokes it.
             self._press_chord(client, "shift", "tab")
             self._press_key(client, "enter", 3.0)
-            capture, latest_capture = self._capture_wizard_pair(
-                client, vm, f"06-apply-started-{attempt:02d}", result
-            )
-            verdict = self.vision_llm.analyze_wizard_state(
-                capture,
-                vm.name,
-                vm.os,
-                expected_screen="warning",
-                expected_username=username,
-                second_image_path=latest_capture,
-            )
-            context = {
-                "target": vm.vnc,
-                "vm": vm.name,
-                "capture": str(capture),
-                "latest_capture": str(latest_capture),
-                "attempt": attempt,
-                **verdict.model_dump(),
-            }
-            last_context = context
-            if verdict.detected_screen == "apply" and verdict.no_blocking_error:
-                result.ok(
-                    "automation.apply_started",
-                    "Apply page visibly replaced the warning page",
-                    **context,
+            for observation in range(1, APPLY_TRANSITION_MAX_OBSERVATIONS + 1):
+                capture, latest_capture = self._capture_wizard_pair(
+                    client,
+                    vm,
+                    f"06-apply-started-{attempt:02d}-{observation:02d}",
+                    result,
                 )
-                return
-            if (
-                verdict.detected_screen != "warning"
-                or not verdict.expected_screen_visible
-                or not verdict.no_blocking_error
-            ):
-                raise WorkflowError(
-                    "automation.apply_started",
-                    "The destructive transition did not reach a valid Apply page",
-                    details=context,
-                )
+                try:
+                    verdict = self.vision_llm.analyze_wizard_state(
+                        capture,
+                        vm.name,
+                        vm.os,
+                        expected_screen="warning",
+                        expected_username=username,
+                        second_image_path=latest_capture,
+                    )
+                except WorkflowError as exc:
+                    if (
+                        _is_retryable_wizard_vision_error(exc)
+                        and observation < APPLY_TRANSITION_MAX_OBSERVATIONS
+                    ):
+                        result.ok(
+                            "automation.apply_vision_wait",
+                            "Apply-page visual proof is temporarily unavailable; retrying",
+                            target=vm.vnc,
+                            vm=vm.name,
+                            attempt=attempt,
+                            observation=observation,
+                            maximum_observations=APPLY_TRANSITION_MAX_OBSERVATIONS,
+                            vision_error=exc.details,
+                        )
+                        time.sleep(APPLY_TRANSITION_RETRY_SECONDS)
+                        continue
+                    raise
+                context = {
+                    "target": vm.vnc,
+                    "vm": vm.name,
+                    "capture": str(capture),
+                    "latest_capture": str(latest_capture),
+                    "attempt": attempt,
+                    "observation": observation,
+                    **verdict.model_dump(),
+                }
+                last_context = context
+                if verdict.detected_screen == "apply" and verdict.no_blocking_error:
+                    result.ok(
+                        "automation.apply_started",
+                        "Apply page visibly replaced the warning page",
+                        **context,
+                    )
+                    return
+                if verdict.detected_screen == "other" and verdict.no_blocking_error:
+                    if observation < APPLY_TRANSITION_MAX_OBSERVATIONS:
+                        time.sleep(APPLY_TRANSITION_RETRY_SECONDS)
+                        continue
+                    raise WorkflowError(
+                        "automation.apply_started",
+                        "The Apply page did not finish rendering within the observation window",
+                        details=context,
+                    )
+                if (
+                    verdict.detected_screen != "warning"
+                    or not verdict.expected_screen_visible
+                    or not verdict.no_blocking_error
+                ):
+                    raise WorkflowError(
+                        "automation.apply_started",
+                        "The destructive transition did not reach a valid Apply page",
+                        details=context,
+                    )
+                break
             self._set_warning_acknowledgement(vm, result, attempt=attempt + 1)
 
         raise WorkflowError(

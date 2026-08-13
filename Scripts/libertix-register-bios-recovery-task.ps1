@@ -52,7 +52,7 @@ try {
         -Force | Out-Null
 
     $promptArguments = (
-        '-NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
+        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" ' +
         '-StatePath "{1}" -RecoveryScriptPath "{2}" ' +
         '-Firmware bios -PromptTaskName "{3}"'
     ) -f $ResultScriptPath, $ResultStatePath, $RecoveryScriptPath, $PromptTaskName

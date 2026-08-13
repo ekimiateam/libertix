@@ -78,6 +78,87 @@ function Assert-PowerShellSyntax {
     }
 }
 
+function Import-DisposablePowerShellModule {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$RequiredVersion,
+        [Parameter(Mandatory = $true)][string]$ModuleRoot
+    )
+
+    $installed = Get-Module -ListAvailable -Name $Name |
+        Where-Object { $_.Version -eq [version]$RequiredVersion } |
+        Select-Object -First 1
+    if ($installed) {
+        Import-Module -Name $installed.Path -Force -ErrorAction Stop
+        return
+    }
+
+    New-Item -ItemType Directory -Path $ModuleRoot -Force | Out-Null
+    Save-Module `
+        -Name $Name `
+        -RequiredVersion $RequiredVersion `
+        -Path $ModuleRoot `
+        -Repository PSGallery `
+        -Force `
+        -ErrorAction Stop
+    $manifest = Join-Path $ModuleRoot "$Name\$RequiredVersion\$Name.psd1"
+    if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) {
+        throw "$Name $RequiredVersion was not downloaded into the disposable module cache."
+    }
+    Import-Module -Name $manifest -Force -ErrorAction Stop
+}
+
+function Invoke-PowerShellQualityChecks {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceRoot,
+        [Parameter(Mandatory = $true)][string]$ModuleRoot
+    )
+
+    Import-DisposablePowerShellModule `
+        -Name "PSScriptAnalyzer" `
+        -RequiredVersion "1.25.0" `
+        -ModuleRoot $ModuleRoot
+    $settingsPath = Join-Path $SourceRoot "PSScriptAnalyzerSettings.psd1"
+    $findings = @()
+    foreach ($relativePath in @("Scripts", "auto_tests\app\scripts", "PowerShell.Tests")) {
+        $path = Join-Path $SourceRoot $relativePath
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            $findings += @(
+                Invoke-ScriptAnalyzer `
+                    -Path $path `
+                    -Recurse `
+                    -Settings $settingsPath `
+                    -Severity Error, Warning
+            )
+        }
+    }
+    if ($findings.Count -gt 0) {
+        $diagnostic = $findings |
+            Select-Object RuleName, Severity, ScriptName, Line, Message |
+            Format-Table -AutoSize |
+            Out-String
+        throw "PSScriptAnalyzer reported $($findings.Count) finding(s): $diagnostic"
+    }
+
+    Import-DisposablePowerShellModule `
+        -Name "Pester" `
+        -RequiredVersion "6.0.1" `
+        -ModuleRoot $ModuleRoot
+    $configuration = New-PesterConfiguration
+    $configuration.Run.Path = Join-Path $SourceRoot "PowerShell.Tests"
+    $configuration.Run.Exit = $false
+    $configuration.Run.PassThru = $true
+    $configuration.Output.Verbosity = "Normal"
+    $pesterResult = Invoke-Pester -Configuration $configuration
+    if ($pesterResult.FailedCount -ne 0 -or $pesterResult.Result -ne "Passed") {
+        throw (
+            "Pester failed: result=$($pesterResult.Result), " +
+            "failed=$($pesterResult.FailedCount), total=$($pesterResult.TotalCount)."
+        )
+    }
+    return $pesterResult
+}
+
 function Find-VisualStudioMSBuild {
     # This legacy .NET Framework WPF project requires the Visual Studio MSBuild.
     # The .NET SDK and Framework-directory MSBuild cannot resolve its toolchain.
@@ -275,6 +356,10 @@ try {
     # races and would leave intermediate artifacts in the source tree.
     Copy-WithRobocopy -Source $sourcePath -Destination $srcLocal -ExtraArgs @("/XD", ".git", "bin", "obj")
     Assert-PowerShellSyntax -SourceRoot $srcLocal
+    $powerShellModuleRoot = Join-Path $temp "powershell-modules"
+    $pesterResult = Invoke-PowerShellQualityChecks `
+        -SourceRoot $srcLocal `
+        -ModuleRoot $powerShellModuleRoot
 
     $solution = Join-Path $srcLocal "Libertix.sln"
     if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
@@ -390,6 +475,10 @@ try {
 
     Write-Result -Name "MSBUILD" -Value $msbuild
     Write-Result -Name "VSTEST" -Value $testRunner
+    Write-Result -Name "PSSCRIPTANALYZER" -Value "1.25.0"
+    Write-Result -Name "PESTER" -Value (
+        "6.0.1:{0}/{1}" -f $pesterResult.PassedCount, $pesterResult.TotalCount
+    )
     Write-Result -Name "TEMP_BUILD_DIR" -Value $temp
     Write-Result -Name "FINAL_EXE" -Value $finalExe
     Write-Result -Name "FINAL_EXE_SHA256" -Value $publishedHash

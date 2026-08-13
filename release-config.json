@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "mainRelease": {
-    "version": "0.1",
-    "title": "Libertix 0.1",
-    "notes": "First stable Libertix release."
+    "version": "0.2",
+    "title": "Libertix 0.2",
+    "notes": "Improves account validation, installation recovery, post-install verification, file sharing, downloads, and automated testing."
   },
   "distributions": [
     {

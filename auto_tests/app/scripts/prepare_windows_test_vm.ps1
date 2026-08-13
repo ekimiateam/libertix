@@ -65,6 +65,9 @@ $accountNotificationPath = "Registry::HKEY_USERS\$($owner.Sid)\Software\Policies
 $windowsBackupPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsBackup"
 $windowsSecurityNotificationPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows Defender Security Center\Notifications"
 $senderSettingsRoot = "Registry::HKEY_USERS\$($owner.Sid)\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings"
+$cloudContentPolicyPath = "Registry::HKEY_USERS\$($owner.Sid)\Software\Policies\Microsoft\Windows\CloudContent"
+$machineCloudContentPolicyPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+$profileEngagementPath = "Registry::HKEY_USERS\$($owner.Sid)\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement"
 
 Set-RegistryDwordValue -Path $notificationPolicyPath -Name NoToastApplicationNotification -Value 1
 Set-RegistryDwordValue -Path $notificationPreferencePath -Name ToastEnabled -Value 0
@@ -73,6 +76,18 @@ Set-RegistryDwordValue -Path $taskbarPolicyPath -Name TaskbarNoNotification -Val
 Set-RegistryDwordValue -Path $accountNotificationPath -Name DisableAccountNotifications -Value 1
 Set-RegistryDwordValue -Path $windowsBackupPath -Name DisableMonitoring -Value 1
 Set-RegistryDwordValue -Path $windowsSecurityNotificationPath -Name DisableNotifications -Value 1
+Set-RegistryDwordValue `
+    -Path $cloudContentPolicyPath `
+    -Name DisableWindowsSpotlightWindowsWelcomeExperience `
+    -Value 1
+Set-RegistryDwordValue `
+    -Path $machineCloudContentPolicyPath `
+    -Name DisableSoftLanding `
+    -Value 1
+Set-RegistryDwordValue `
+    -Path $profileEngagementPath `
+    -Name ScoobeSystemSettingEnabled `
+    -Value 0
 
 foreach ($notificationSenderId in @(
     "Microsoft.SkyDrive.Desktop",
@@ -130,3 +145,4 @@ Write-Output "CLOCK_SKEW_SECONDS=$([math]::Round($afterSkew))"
 Write-Output "TOAST_NOTIFICATIONS_DISABLED=True"
 Write-Output "WINDOWS_BACKUP_NOTIFICATIONS_DISABLED=True"
 Write-Output "WINDOWS_NOTIFICATION_SERVICES_DISABLED=True"
+Write-Output "WINDOWS_SETUP_REMINDER_DISABLED=True"

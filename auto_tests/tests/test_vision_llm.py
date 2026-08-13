@@ -502,6 +502,43 @@ def test_wizard_normalizes_bare_false_when_account_evidence_is_complete(
     assert verdict.no_blocking_error is True
 
 
+def test_wizard_normalizes_account_false_when_username_is_in_summary(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "detected_screen": "account",
+            "expected_screen_visible": True,
+            "no_blocking_error": False,
+            "username_visible": True,
+            "password_fields_filled": True,
+            "summary": "The account page contains username test and both passwords.",
+            "visible_text": "Créez votre compte Linux Mot de passe Confirmer le mot de passe",
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze_wizard_state(
+        image,
+        "vm2",
+        "Windows 10 UEFI",
+        expected_screen="account",
+        expected_username="test",
+    )
+
+    assert verdict.detected_screen == "account"
+    assert verdict.no_blocking_error is True
+
+
 def test_wizard_normalizes_contradictory_warning_enum_from_visible_controls(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -537,4 +574,121 @@ def test_wizard_normalizes_contradictory_warning_enum_from_visible_controls(
 
     assert verdict.detected_screen == "warning"
     assert verdict.expected_screen_visible is True
+    assert verdict.no_blocking_error is True
+
+
+def test_wizard_normalizes_contradictory_warning_enum_and_false_blocker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "detected_screen": "sharing",
+            "expected_screen_visible": True,
+            "no_blocking_error": False,
+            "username_visible": False,
+            "password_fields_filled": False,
+            "summary": "Warning page before installation.",
+            "visible_text": (
+                "Avertissement Risques de perte de données Je comprends les risques "
+                "et j'ai sauvegardé mes données importantes Je comprends"
+            ),
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze_wizard_state(
+        image,
+        "vm1",
+        "Windows 10 BIOS",
+        expected_screen="warning",
+        expected_username="test",
+    )
+
+    assert verdict.detected_screen == "warning"
+    assert verdict.no_blocking_error is True
+
+
+def test_wizard_normalizes_empty_transient_screen_without_invented_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "detected_screen": "other",
+            "expected_screen_visible": False,
+            "no_blocking_error": False,
+            "username_visible": False,
+            "password_fields_filled": False,
+            "summary": "Windows desktop; no Libertix wizard is visible.",
+            "visible_text": "",
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze_wizard_state(
+        image,
+        "vm3",
+        "Windows 11 UEFI",
+        expected_screen="account",
+        expected_username="test",
+    )
+
+    assert verdict.detected_screen == "other"
+    assert verdict.no_blocking_error is True
+
+
+def test_wizard_normalizes_active_apply_page_without_concrete_error(
+    monkeypatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    content = json.dumps(
+        {
+            "detected_screen": "apply",
+            "expected_screen_visible": False,
+            "no_blocking_error": False,
+            "username_visible": False,
+            "password_fields_filled": False,
+            "summary": "The Apply page is downloading the Linux installer.",
+            "visible_text": (
+                "Appliquer les modifications Téléchargement de l'ISO "
+                "d'installation Linux 2% Annuler l'installation"
+            ),
+        }
+    )
+
+    def fake_post(*_args, **_kwargs):
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    verdict = VisionLLMClient("key", "https://example.test/v1", "model", 1).analyze_wizard_state(
+        image,
+        "vm1",
+        "Windows 10 BIOS",
+        expected_screen="warning",
+        expected_username="test",
+    )
+
+    assert verdict.detected_screen == "apply"
     assert verdict.no_blocking_error is True

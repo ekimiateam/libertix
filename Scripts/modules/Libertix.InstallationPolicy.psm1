@@ -20,13 +20,19 @@ function Get-LibertixInstallationPolicy {
         [int]$policy.schemaVersion -ne 1 -or
         $null -eq $policy.storage -or
         $null -eq $policy.memory -or
-        $null -eq $policy.download
+        $null -eq $policy.download -or
+        $null -eq $policy.account
     ) {
         throw "Libertix installation policy is incomplete or unsupported."
     }
 
     $storage = $policy.storage
     $memory = $policy.memory
+    $account = $policy.account
+    $reservedUsernames = @($account.reservedUsernames)
+    $normalizedReservedUsernames = @(
+        $reservedUsernames | ForEach-Object { ([string]$_).ToLowerInvariant() }
+    )
     [int64]$alignmentBytes = [int64]$storage.partitionAlignmentBytes
     if (
         [int]$storage.minimumFinalSizeGiB -le 0 -or
@@ -47,7 +53,14 @@ function Get-LibertixInstallationPolicy {
         [int]$memory.windowsMinimumMiB -lt [int]$memory.liveMinimumMiB -or
         [int]$memory.lowMemoryThresholdMiB -le [int]$memory.windowsMinimumMiB -or
         [int]$policy.download.aria2MaximumConnections -le 0 -or
-        [int]$policy.download.aria2MaximumConnections -gt 16
+        [int]$policy.download.aria2MaximumConnections -gt 16 -or
+        [string]::IsNullOrWhiteSpace([string]$account.reservedUsernamesSource) -or
+        $reservedUsernames.Count -eq 0 -or
+        @($reservedUsernames | Where-Object {
+                [string]$_ -cnotmatch '^[A-Za-z](?:[A-Za-z0-9-]{0,30}[A-Za-z0-9])?$'
+            }).Count -ne 0 -or
+        @($normalizedReservedUsernames | Sort-Object -Unique).Count -ne `
+            $normalizedReservedUsernames.Count
     ) {
         throw "Libertix installation policy contains invalid values."
     }

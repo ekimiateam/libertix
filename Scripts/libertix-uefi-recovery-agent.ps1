@@ -386,15 +386,28 @@ function Start-PostInstallResultUi {
         -PromptTaskName ([string]$State.PromptTaskName)
 }
 
+function Start-PostInstallPromptTask {
+    param([Parameter(Mandatory = $true)]$State)
+
+    try {
+        Start-ScheduledTask -TaskName ([string]$State.PromptTaskName) -ErrorAction Stop
+        Write-AgentLog "Post-install result task was started for the interactive user."
+    } catch {
+        # InteractiveToken tasks cannot run before their user has logged on.
+        # The persistent logon trigger will start it when a session exists.
+        Write-AgentLog (
+            "Post-install result task remains armed for the next user logon: " +
+            $_.Exception.Message
+        )
+    }
+}
+
 function Invoke-VerifiedInstallationSuccess {
     param([Parameter(Mandatory = $true)]$State)
 
     if (-not (Test-LinuxPartitionPresent -State $State)) {
         throw "Live success marker exists but the expected Linux partition is absent."
     }
-    Save-UefiTransactionArchive -State $State
-    Invoke-WindowsShareFinalize
-    Remove-TemporaryRecoveryArtifacts -State $State
     $modulePath = Join-Path `
         $State.PayloadRoot `
         "Scripts\modules\Libertix.PostInstallVerification.psm1"
@@ -404,6 +417,9 @@ function Invoke-VerifiedInstallationSuccess {
     Import-Module -Name $modulePath -Force -ErrorAction Stop
     $writeLog = { param($Message) Write-AgentLog -Message $Message }
     try {
+        Save-UefiTransactionArchive -State $State
+        Invoke-WindowsShareFinalize
+        Remove-TemporaryRecoveryArtifacts -State $State
         $null = Invoke-LibertixPostInstallVerification `
             -RecoveryRoot ([string]$State.RecoveryRoot) `
             -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
@@ -411,9 +427,22 @@ function Invoke-VerifiedInstallationSuccess {
         $State.Phase = "Verified"
         Save-State -State $State
     } catch {
+        $verificationFailure = $_
         $State.Phase = "VerificationFailed"
         Save-State -State $State
-        throw
+        try {
+            $null = Set-LibertixPostInstallFailure `
+                -RecoveryRoot ([string]$State.RecoveryRoot) `
+                -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
+                -CheckName "post-install-controller" `
+                -ErrorMessage $verificationFailure.Exception.Message
+        } catch {
+            Write-AgentLog (
+                "Could not persist the post-install controller failure: " +
+                $_.Exception.Message
+            )
+        }
+        throw $verificationFailure
     } finally {
         $verificationResultPath = Join-Path $State.RecoveryRoot "post-install-verification.json"
         $verificationStatus = if (Test-Path -LiteralPath $verificationResultPath -PathType Leaf) {
@@ -427,6 +456,7 @@ function Invoke-VerifiedInstallationSuccess {
         } else { "missing" }
         if ($verificationStatus -in @("succeeded", "failed")) {
             Remove-StartupRecoveryTask -State $State
+            Start-PostInstallPromptTask -State $State
         } else {
             Write-AgentLog (
                 "Post-install verification was interrupted with status=" +
@@ -458,14 +488,25 @@ try {
 
     if ($Action -eq "Prompt") {
         $postInstallResult = Join-Path $state.RecoveryRoot "post-install-verification.json"
+        $linuxBootEvidence = Join-Path $state.RecoveryRoot "installed-linux-boot.json"
         $successRunIdForPrompt = Read-EnvValue `
             -Path $installSuccess `
             -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
         if (
             (Test-Path -LiteralPath $postInstallResult -PathType Leaf) -or
-            $successRunIdForPrompt -eq [string]$state.RunId
+            (
+                $successRunIdForPrompt -eq [string]$state.RunId -and
+                (Test-Path -LiteralPath $linuxBootEvidence -PathType Leaf)
+            )
         ) {
             Start-PostInstallResultUi -State $state
+            exit 0
+        }
+        if ($successRunIdForPrompt -eq [string]$state.RunId) {
+            Write-AgentLog (
+                "The live installation succeeded, but installed Linux has not published " +
+                "its first-boot evidence yet; no result window is shown."
+            )
             exit 0
         }
         $startedRunIdForPrompt = Read-EnvValue `
@@ -513,6 +554,19 @@ try {
         $successState -eq "install-success" -and
         [string]$executionState.status -eq "succeeded"
     ) {
+        $linuxBootEvidence = Join-Path $state.RecoveryRoot "installed-linux-boot.json"
+        if (-not (Test-Path -LiteralPath $linuxBootEvidence -PathType Leaf)) {
+            $null = Set-LibertixPostInstallWaitingForLinux `
+                -RecoveryRoot ([string]$state.RecoveryRoot) `
+                -LogPath (Join-Path $state.RecoveryRoot "recovery-agent.log")
+            $state.Phase = "AwaitingInstalledLinuxBoot"
+            Save-State -State $state
+            Write-AgentLog (
+                "The live installation succeeded. Waiting for the installed Linux system " +
+                "to boot and publish installed-linux-boot.json."
+            )
+            exit 0
+        }
         Write-AgentLog "Live success found; starting cross-runtime post-install verification."
         Invoke-VerifiedInstallationSuccess -State $state
         exit 0
