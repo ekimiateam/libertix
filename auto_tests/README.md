@@ -364,5 +364,10 @@ reported stage in that workspace, including deterministic keyboard/contract tran
 installation monitoring. Retention keeps the three most recent completed runs of each operation
 type; an active workspace is never selected for cleanup.
 
+Windows preparation and live installation monitoring also enforce a visual-stall timeout configured
+by `AUTOMATION_STALL_TIMEOUT_SECONDS`. Any real screen change rearms the watchdog. If the display
+remains unchanged for the complete interval, the exact timeout capture is retained and the terminal
+error identifies the VM, phase and observed duration.
+
 The compact API stream is the normal operator view. Read a complete log only to diagnose a failed
 terminal `RESULT`, and keep generated runtime files out of commits.

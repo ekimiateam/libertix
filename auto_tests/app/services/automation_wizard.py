@@ -205,6 +205,8 @@ class WizardAutomationMixin:
         observed: dict[str, object] | None = None
         next_progress_observation = time.monotonic()
         progress_observation = 0
+        previous_progress_signature: tuple[int, ...] | None = None
+        last_visual_change_at = time.monotonic()
         vision_disabled = False
         while time.monotonic() < deadline:
             response = self._run_unattended_control_command(
@@ -260,6 +262,27 @@ class WizardAutomationMixin:
                     vm,
                     f"windows-preparation-progress-{progress_observation:03d}",
                 )
+                signature = self._capture_signature(capture)
+                if signature is not None and signature == previous_progress_signature:
+                    stalled_seconds = time.monotonic() - last_visual_change_at
+                    if stalled_seconds >= self.settings.automation_stall_timeout_seconds:
+                        raise WorkflowError(
+                            "automation.progress_stalled",
+                            "No visible progress during Windows installation preparation",
+                            details={
+                                "vm": vm.name,
+                                "target": vm.vnc,
+                                "phase": "windows-preparation",
+                                "capture": str(capture),
+                                "stalled_seconds": round(stalled_seconds, 3),
+                                "stall_timeout_seconds": (
+                                    self.settings.automation_stall_timeout_seconds
+                                ),
+                            },
+                        )
+                else:
+                    previous_progress_signature = signature
+                    last_visual_change_at = time.monotonic()
                 next_progress_observation = (
                     time.monotonic() + self.settings.automation_monitor_interval_seconds
                 )

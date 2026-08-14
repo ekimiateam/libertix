@@ -387,6 +387,7 @@ def test_local_filepool_sync_reuses_matching_remote_artifacts(
         ("llm_max_attempts", 0),
         ("proxmox_task_timeout_seconds", 0),
         ("automation_monitor_interval_seconds", 0),
+        ("automation_stall_timeout_seconds", 0),
         ("post_install_boot_timeout_seconds", -5),
         ("vms", ()),
     ],
@@ -1459,6 +1460,76 @@ def test_unattended_windows_preparation_stops_on_a_visible_error(
     assert raised.value.details["error_visible"] is True
 
 
+def test_unattended_windows_preparation_reports_a_visual_stall(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = AutomationService(
+        settings(
+            automation_monitor_interval_seconds=0.2,
+            automation_stall_timeout_seconds=0.5,
+        )
+    )
+    vm = service.validation.select_vms(["vm1"])[0]
+    capture = tmp_path / "unchanged-windows-preparation.png"
+    Image.new("RGB", (320, 200), (15, 25, 35)).save(capture)
+    clock = {"now": 0.0}
+
+    class FakeSsh:
+        def run(self, _command: str, **_kwargs: object) -> CommandResult:
+            return CommandResult(
+                stdout="SEQUENCE=10\nSTAGE=installation-started\n",
+                stderr="",
+                exit_code=0,
+            )
+
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda *_args: capture,
+    )
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda *_args: InstallProgressVerdict(
+            iso_download_finished=False,
+            installation_finished=False,
+            reboot_prompt_visible=False,
+            still_in_progress=True,
+            error_visible=False,
+            summary="Windows preparation remains active.",
+            visible_text="Downloading the distribution ISO",
+        ),
+    )
+    monkeypatch.setattr(
+        automation_wizard_module.time,
+        "monotonic",
+        lambda: clock["now"],
+    )
+    monkeypatch.setattr(
+        automation_wizard_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    with pytest.raises(WorkflowError) as raised:
+        service._wait_for_unattended_stage(  # noqa: SLF001
+            FakeSsh(),
+            vm,
+            r"C:\ProgramData\Libertix\Automation\run.status.json",
+            10,
+            ("reboot-ready",),
+            timeout_seconds=10,
+            observe_installation_progress=True,
+            result=ResultBuilder("automation"),
+        )
+
+    assert raised.value.step == "automation.progress_stalled"
+    assert raised.value.details["phase"] == "windows-preparation"
+    assert raised.value.details["capture"] == str(capture)
+    assert raised.value.details["stalled_seconds"] >= 0.5
+
+
 def test_unattended_windows_preparation_survives_vision_payment_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2363,6 +2434,68 @@ def test_installation_monitor_skips_three_identical_ai_analyses_then_rechecks(
     assert capture_count["value"] == 5
     assert analyses["value"] == 2
     assert len([step for step in result.steps if step.step == "automation.monitor_unchanged"]) == 3
+
+
+def test_installation_monitor_reports_a_visual_stall_with_its_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = AutomationService(
+        settings(
+            automation_monitor_interval_seconds=0.2,
+            automation_monitor_timeout_seconds=10,
+            automation_stall_timeout_seconds=0.5,
+        )
+    )
+    vm = service.validation.select_vms(["vm1"])[0]
+    capture = tmp_path / "unchanged-live-installation.png"
+    Image.new("RGB", (320, 200), (15, 25, 35)).save(capture)
+    clock = {"now": 0.0}
+    labels: list[str] = []
+
+    def capture_screen(_vm: object, label: str) -> Path:
+        labels.append(label)
+        return capture
+
+    monkeypatch.setattr(service, "_capture_with_name", capture_screen)
+    monkeypatch.setattr(service, "_installed_grub_theme_visible", lambda _capture: False)
+    monkeypatch.setattr(
+        service.vision_llm,
+        "analyze_install_progress",
+        lambda *_args: InstallProgressVerdict(
+            iso_download_finished=True,
+            installation_finished=False,
+            reboot_prompt_visible=False,
+            still_in_progress=True,
+            error_visible=False,
+            summary="Live installation remains active.",
+            visible_text="Extracting Linux system",
+        ),
+    )
+    monkeypatch.setattr(
+        automation_monitoring_module.time,
+        "monotonic",
+        lambda: clock["now"],
+    )
+    monkeypatch.setattr(
+        automation_monitoring_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    with pytest.raises(WorkflowError) as raised:
+        service._monitor_until_live_boot(  # noqa: SLF001
+            vm,
+            ResultBuilder("automation"),
+            "bios",
+            reboot_requested=True,
+        )
+
+    assert raised.value.step == "automation.progress_stalled"
+    assert raised.value.details["phase"] == "bios-installation"
+    assert raised.value.details["capture"] == str(capture)
+    assert raised.value.details["stalled_seconds"] >= 0.5
+    assert labels[-1] == "bios-monitor-004"
 
 
 def test_reboot_request_uses_focused_default_controls_without_mouse_coordinates(
@@ -3872,6 +4005,7 @@ def test_windows_validation_plan_keeps_conditional_sharing_checks_declarative() 
     assert plan.check_names[-3:] == ("dism_check_health", "sfc_verify_only", "chkdsk_scan")
     assert plan.base_config["installer_iso_file_name"] == "zorin.iso"
     assert plan.base_config["expected_firmware"] == vm.firmware
+    assert plan.base_config["partition_alignment_bytes"] == 1024 * 1024
 
 
 def test_cross_os_artifacts_are_removed_after_their_checks() -> None:

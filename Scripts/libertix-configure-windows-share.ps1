@@ -55,7 +55,10 @@ function Get-Config {
         [int]$config.SystemDiskNumber -lt 0 -or
         [string]::IsNullOrWhiteSpace([string]$config.SystemDiskUniqueId) -or
         [int64]$config.ExpectedLinuxPartitionOffset -le 0 -or
-        [int64]$config.ExpectedLinuxPartitionSize -le 0
+        [int64]$config.ExpectedLinuxPartitionSize -le 0 -or
+        [int64]$config.PartitionSizeToleranceBytes -le 0 -or
+        [int64]$config.PartitionSizeToleranceBytes -gt
+            [int64]$config.ExpectedLinuxPartitionSize
     ) {
         throw "Windows share configuration has invalid disk metadata."
     }
@@ -76,12 +79,14 @@ function Get-LinuxPartition {
     }
     $expectedOffset = [int64]$Config.ExpectedLinuxPartitionOffset
     $expected = [int64]$Config.ExpectedLinuxPartitionSize
+    $minimum = $expected - [int64]$Config.PartitionSizeToleranceBytes
     $linuxGptType = "{0fc63daf-8483-4772-8e79-3d69d8477de4}"
     $linuxPartitions = @(
         Get-Partition -DiskNumber ([int]$Config.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
                 [int64]$_.Offset -eq $expectedOffset -and
-                [int64]$_.Size -eq $expected -and
+                [int64]$_.Size -le $expected -and
+                [int64]$_.Size -ge $minimum -and
                 ($_.GptType -eq $linuxGptType -or [int]$_.MbrType -eq 131 -or $_.Type -match "Linux")
             }
     )

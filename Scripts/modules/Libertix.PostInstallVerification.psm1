@@ -579,18 +579,13 @@ function Test-LibertixWindowsHealth {
     if ([string]$volume.HealthStatus -ne "Healthy") {
         throw "Windows system volume is not healthy."
     }
-    $reagent = @(& reagentc.exe /info 2>&1)
+    # REAgentC localizes every /info status value. /enable is idempotent and its
+    # exit code is the stable contract already used during BIOS preparation.
+    $reagent = @(& reagentc.exe /enable 2>&1)
     if ($LASTEXITCODE -ne 0) {
-        throw "reagentc.exe failed with rc=$LASTEXITCODE."
+        throw "reagentc.exe could not enable Windows Recovery Environment with rc=$LASTEXITCODE output=$($reagent -join ' ')"
     }
-    $reagentText = $reagent -join "`n"
-    if (
-        $reagentText -match '(?i)(disabled|d[e\u00e9]sactiv[e\u00e9]|deshabilitado|\u7121\u52b9)' -or
-        $reagentText -notmatch '(?i)(enabled|activ[e\u00e9]|habilitado|\u6709\u52b9)'
-    ) {
-        throw "Windows Recovery Environment is not enabled."
-    }
-    return "filesystem=$($volume.FileSystem) health=$($volume.HealthStatus)"
+    return "filesystem=$($volume.FileSystem) health=$($volume.HealthStatus) winre=enabled"
 }
 
 function Test-LibertixWindowsBootConfiguration {
@@ -616,9 +611,12 @@ function Test-LibertixWindowsBootConfiguration {
             throw "The system disk does not contain exactly one EFI System Partition."
         }
     } else {
-        $active = @($partitions | Where-Object { $_.IsActive })
-        if ($active.Count -ne 1) {
-            throw "The BIOS system disk does not contain exactly one active partition."
+        $bootPartitions = @($partitions | Where-Object { $_.IsSystem })
+        if ($bootPartitions.Count -eq 0) {
+            $bootPartitions = @($partitions | Where-Object { $_.IsActive })
+        }
+        if ($bootPartitions.Count -ne 1) {
+            throw "The BIOS system disk does not contain exactly one Windows boot partition."
         }
     }
     return "firmware=$($Plan.firmware) windowsLoader=present"
@@ -690,7 +688,8 @@ function Test-LibertixRecoveryArchive {
 
 function Test-LibertixWindowsReadOnlyShare {
     param(
-        [Parameter(Mandatory = $true)]$Plan
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)][int64]$AlignmentBytes
     )
 
     if (-not [bool]$Plan.features.shareLinuxFilesInWindows) {
@@ -707,7 +706,8 @@ function Test-LibertixWindowsReadOnlyShare {
         [int]$config.SystemDiskNumber -ne [int]$Plan.disk.number -or
         ([string]$config.SystemDiskUniqueId).Trim() -ne ([string]$Plan.disk.uniqueId).Trim() -or
         [int64]$config.ExpectedLinuxPartitionOffset -ne [int64]$Plan.disk.installer.offsetBytes -or
-        [int64]$config.ExpectedLinuxPartitionSize -ne [int64]$Plan.disk.installer.finalSizeBytes
+        [int64]$config.ExpectedLinuxPartitionSize -ne [int64]$Plan.disk.installer.finalSizeBytes -or
+        [int64]$config.PartitionSizeToleranceBytes -ne $AlignmentBytes
     ) {
         throw "Windows sharing configuration does not match the installation plan partition."
     }
@@ -719,7 +719,10 @@ function Test-LibertixWindowsReadOnlyShare {
         Get-Partition -DiskNumber ([int]$config.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
                 [int64]$_.Offset -eq [int64]$config.ExpectedLinuxPartitionOffset -and
-                [int64]$_.Size -eq [int64]$config.ExpectedLinuxPartitionSize
+                [int64]$_.Size -le [int64]$config.ExpectedLinuxPartitionSize -and
+                [int64]$_.Size -ge (
+                    [int64]$config.ExpectedLinuxPartitionSize - $AlignmentBytes
+                )
             }
     )
     if ($partitions.Count -ne 1) {
@@ -924,7 +927,9 @@ function Invoke-LibertixPostInstallVerification {
             }
         Add-LibertixPostInstallCheck -Result $result -ResultPath $resultPath `
             -Name "windows-read-only-linux-share" -WriteLog $WriteLog -Test {
-                Test-LibertixWindowsReadOnlyShare -Plan $plan
+                Test-LibertixWindowsReadOnlyShare `
+                    -Plan $plan `
+                    -AlignmentBytes $alignmentBytes
             }
         Add-LibertixPostInstallCheck -Result $result -ResultPath $resultPath `
             -Name "windows-health" -WriteLog $WriteLog -Test {

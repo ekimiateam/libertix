@@ -1742,6 +1742,7 @@ def test_windows_share_and_postinstall_checks_bind_ext4_to_the_planned_partition
         "SystemDiskUniqueId",
         "ExpectedLinuxPartitionOffset",
         "ExpectedLinuxPartitionSize",
+        "PartitionSizeToleranceBytes",
     ):
         assert field in apply_changes
         assert field in share
@@ -1751,10 +1752,18 @@ def test_windows_share_and_postinstall_checks_bind_ext4_to_the_planned_partition
     assert "Get-Disk -Number" in partition_lookup
     assert ".UniqueId" in partition_lookup
     assert "[int64]$_.Offset -eq $expectedOffset" in partition_lookup
-    assert "[int64]$_.Size -eq $expected" in partition_lookup
+    assert "$minimum = $expected - [int64]$Config.PartitionSizeToleranceBytes" in partition_lookup
+    assert "[int64]$_.Size -le $expected" in partition_lookup
+    assert "[int64]$_.Size -ge $minimum" in partition_lookup
     assert "256MB" not in partition_lookup
 
     assert "function Get-ExpectedLinuxMountIdentity" in checks
+    mount_identity = checks.split("function Get-ExpectedLinuxMountIdentity", 1)[1].split(
+        "function Get-LibertixPostInstallControllerStatus", 1
+    )[0]
+    assert "[int64]$config.partition_alignment_bytes" in mount_identity
+    assert "[int64]$_.Size -le $plannedSize" in mount_identity
+    assert "[int64]$_.Size -ge ($plannedSize - $alignmentBytes)" in mount_identity
     readonly_check = checks.split('"ext4_readonly_mount"', 1)[1].split('"linux_home"', 1)[0]
     assert "$writableProcesses.Count -eq 0" in readonly_check
     assert "$ownedProcesses.Count -eq 1" in readonly_check
@@ -4313,6 +4322,34 @@ def test_long_windows_native_checks_emit_structured_utf8_safe_summaries() -> Non
     assert 'Invoke-NativeCommandDecoded -FilePath "bcdedit.exe"' in checks
     assert "@(& reagentc.exe /info 2>&1)" not in checks
     assert "@(& bcdedit.exe /enum all 2>&1)" not in checks
+
+
+def test_postinstall_winre_and_bios_boot_checks_are_locale_independent() -> None:
+    module = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    windows_health = module.split("function Test-LibertixWindowsHealth", 1)[1].split(
+        "function Test-LibertixWindowsBootConfiguration", 1
+    )[0]
+    assert "reagentc.exe /enable" in windows_health
+    assert "reagentc.exe /info" not in windows_health
+    assert "deshabilitado" not in windows_health
+
+    product_boot = module.split("function Test-LibertixWindowsBootConfiguration", 1)[1].split(
+        "function Test-LibertixWindowsTemporaryArtifacts", 1
+    )[0]
+    automation_boot = checks.split('"boot_partition"', 1)[1].split('"boot_configuration"', 1)[0]
+    for boot_check in (product_boot, automation_boot):
+        assert "Where-Object { $_.IsSystem }" in boot_check
+        assert "Where-Object { $_.IsActive }" in boot_check
+        assert boot_check.index("Where-Object { $_.IsSystem }") < boot_check.index(
+            "Where-Object { $_.IsActive }"
+        )
+
+    recovery_check = checks.split('"recovery"', 1)[1].split('"bitlocker"', 1)[0]
+    assert '-Arguments @("/enable")' in recovery_check
+    assert '-Arguments @("/info")' not in recovery_check
+    assert "deshabilitado" not in recovery_check
 
 
 def test_live_failure_and_cleanup_guards_cover_confirmed_audit_paths() -> None:

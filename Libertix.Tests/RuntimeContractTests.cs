@@ -177,6 +177,7 @@ namespace Libertix.Tests
                         SystemDiskUniqueId = "disk-id",
                         ExpectedLinuxPartitionOffset = 1024,
                         ExpectedLinuxPartitionSize = 2048,
+                        PartitionSizeToleranceBytes = 512,
                         LinuxUsername = "test",
                         ShortcutDescription = "Linux files",
                         SetupPath = @"C:\setup.exe",
@@ -191,7 +192,35 @@ namespace Libertix.Tests
                 WindowsShareConfiguration observed = WindowsShareConfigurationStore.Read(path);
                 Assert.AreEqual(4096L, observed.ExpectedLinuxPartitionOffset);
                 Assert.AreEqual(2048L, observed.ExpectedLinuxPartitionSize);
+                Assert.AreEqual(512L, observed.PartitionSizeToleranceBytes);
                 Assert.IsFalse(File.Exists(Path.Combine(root, ".config.json.tmp")));
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
+        [TestMethod]
+        public void WindowsShareConfigurationRejectsMissingPartitionTolerance()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "Libertix-tests", Guid.NewGuid().ToString("N"));
+            string path = Path.Combine(root, "config.json");
+            try
+            {
+                Assert.ThrowsException<InvalidOperationException>(() =>
+                    WindowsShareConfigurationStore.WriteAtomic(
+                        path,
+                        new WindowsShareConfiguration
+                        {
+                            SystemDiskNumber = 0,
+                            SystemDiskUniqueId = "disk-id",
+                            ExpectedLinuxPartitionOffset = 1024,
+                            ExpectedLinuxPartitionSize = 2048,
+                            PartitionSizeToleranceBytes = 0
+                        }));
+                Assert.IsFalse(File.Exists(path));
             }
             finally
             {

@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     launch_wait_seconds: float = Field(default=2, gt=0)
     automation_monitor_interval_seconds: float = Field(default=30, gt=0)
     automation_monitor_timeout_seconds: float = Field(default=23400, gt=0)
+    automation_stall_timeout_seconds: float = Field(default=900, gt=0)
     post_install_boot_timeout_seconds: float = Field(default=1200, gt=0)
     post_install_poll_interval_seconds: float = Field(default=10, gt=0)
     post_install_grub_detection_timeout_seconds: float = Field(default=20, gt=0)

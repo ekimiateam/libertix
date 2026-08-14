@@ -148,6 +148,8 @@ namespace Libertix.Pages
                         SystemDiskUniqueId = _storagePreflight.SystemDiskUniqueId,
                         ExpectedLinuxPartitionOffset = expectedLinuxOffset,
                         ExpectedLinuxPartitionSize = expectedLinuxSize,
+                        PartitionSizeToleranceBytes =
+                            InstallationSizePolicy.PartitionAlignmentBytes,
                         LinuxUsername = account.Username,
                         ShortcutDescription = Localized(
                             "WindowsShareShortcutDescription",
@@ -184,11 +186,14 @@ namespace Libertix.Pages
                 _installationPlan.Disk.Installer.OffsetBytes.Value;
             configuration.ExpectedLinuxPartitionSize =
                 _installationPlan.Disk.Installer.FinalSizeBytes;
+            configuration.PartitionSizeToleranceBytes =
+                InstallationSizePolicy.PartitionAlignmentBytes;
             WindowsShareConfigurationStore.WriteAtomic(configPath, configuration);
             Log(
                 "Windows sharing partition identity refreshed from the observed " +
                 $"installation plan: offset={configuration.ExpectedLinuxPartitionOffset}, " +
-                $"size={configuration.ExpectedLinuxPartitionSize}.");
+                $"size={configuration.ExpectedLinuxPartitionSize}, " +
+                $"tolerance={configuration.PartitionSizeToleranceBytes}.");
         }
 
         private static void CleanupPendingWindowsSharePayload()

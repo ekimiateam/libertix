@@ -15,6 +15,7 @@ _INSTALLATION_POLICY = json.loads(
     ).read_text(encoding="utf-8")
 )
 _MINIMUM_LINUX_SIZE_GIB = int(_INSTALLATION_POLICY["storage"]["minimumFinalSizeGiB"])
+PARTITION_ALIGNMENT_BYTES = int(_INSTALLATION_POLICY["storage"]["partitionAlignmentBytes"])
 _RESERVED_LINUX_USERNAMES = frozenset(
     str(value).casefold() for value in _INSTALLATION_POLICY["account"]["reservedUsernames"]
 )

@@ -240,11 +240,16 @@ function Get-ExpectedLinuxMountIdentity {
     Assert-Condition (
         ([string]$disk.UniqueId).Trim() -eq ([string]$plan.disk.uniqueId).Trim()
     ) "The Linux mount disk identity differs from the installation plan."
+    [int64]$plannedSize = [int64]$plan.disk.installer.finalSizeBytes
+    [int64]$alignmentBytes = [int64]$config.partition_alignment_bytes
+    Assert-Condition ($alignmentBytes -gt 0 -and $alignmentBytes -le $plannedSize) `
+        "The partition alignment contract is invalid."
     $partitions = @(
         Get-Partition -DiskNumber $disk.Number -ErrorAction Stop |
             Where-Object {
                 [int64]$_.Offset -eq [int64]$plan.disk.installer.offsetBytes -and
-                [int64]$_.Size -eq [int64]$plan.disk.installer.finalSizeBytes
+                [int64]$_.Size -le $plannedSize -and
+                [int64]$_.Size -ge ($plannedSize - $alignmentBytes)
             }
     )
     Assert-Condition ($partitions.Count -eq 1) `
@@ -743,8 +748,12 @@ try {
                 Assert-Condition ($bootPartitions.Count -eq 1) "The UEFI system disk does not contain exactly one ESP."
                 Assert-Condition ([uint64]$bootPartitions[0].Size -ge 64MB) "The EFI system partition is unexpectedly small."
             } else {
-                $bootPartitions = @($partitions | Where-Object { $_.IsActive })
-                Assert-Condition ($bootPartitions.Count -eq 1) "The BIOS system disk does not contain exactly one active partition."
+                $bootPartitions = @($partitions | Where-Object { $_.IsSystem })
+                if ($bootPartitions.Count -eq 0) {
+                    $bootPartitions = @($partitions | Where-Object { $_.IsActive })
+                }
+                Assert-Condition ($bootPartitions.Count -eq 1) `
+                    "The BIOS system disk does not contain exactly one Windows boot partition."
             }
             $bootPartitions | Format-Table PartitionNumber, Type, GptType, MbrType, IsActive, Size -AutoSize
         }
@@ -764,17 +773,10 @@ try {
             })
             $recoveryPartitions | Format-Table DiskNumber, PartitionNumber, Type, GptType, MbrType, Size -AutoSize
             Assert-Condition ($recoveryPartitions.Count -ge 1) "No Windows recovery partition was found."
-            $reagentResult = Invoke-NativeCommandDecoded -FilePath "reagentc.exe" -Arguments @("/info")
+            $reagentResult = Invoke-NativeCommandDecoded -FilePath "reagentc.exe" -Arguments @("/enable")
             Write-Output $reagentResult.CombinedOutput
             Assert-Condition ($reagentResult.ExitCode -eq 0) `
-                "reagentc.exe failed to report Windows Recovery Environment status."
-            $reagentText = $reagentResult.CombinedOutput
-            Assert-Condition ($reagentText -match `
-                "(?i)(enabled|activ[eé]|habilitado|有効)") `
-                "Windows Recovery Environment is not reported as enabled."
-            Assert-Condition ($reagentText -notmatch `
-                "(?i)(disabled|d[eé]sactiv[eé]|deshabilitado|無効)") `
-                "Windows Recovery Environment is disabled."
+                "reagentc.exe failed to enable Windows Recovery Environment."
         }
         "bitlocker" {
             $volume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop

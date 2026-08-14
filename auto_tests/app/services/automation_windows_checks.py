@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import VMConfig
-from app.models import STAGING_VOLUME_LABELS
+from app.models import PARTITION_ALIGNMENT_BYTES, STAGING_VOLUME_LABELS
 from app.services.automation_types import AutomationOptions
 
 
@@ -93,5 +93,6 @@ def build_windows_validation_plan(
             "share_windows_files_in_linux": options.share_windows_files_in_linux,
             "share_linux_files_in_windows": options.share_linux_files_in_windows,
             "staging_volume_labels": list(STAGING_VOLUME_LABELS),
+            "partition_alignment_bytes": PARTITION_ALIGNMENT_BYTES,
         },
     )

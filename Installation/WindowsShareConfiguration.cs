@@ -15,6 +15,7 @@ namespace Libertix.Installation
         public string SystemDiskUniqueId { get; set; }
         public long ExpectedLinuxPartitionOffset { get; set; }
         public long ExpectedLinuxPartitionSize { get; set; }
+        public long PartitionSizeToleranceBytes { get; set; }
         public string LinuxUsername { get; set; }
         public string ShortcutDescription { get; set; }
         public string SetupPath { get; set; }
@@ -42,7 +43,10 @@ namespace Libertix.Installation
             if (configuration.SystemDiskNumber < 0 ||
                 string.IsNullOrWhiteSpace(configuration.SystemDiskUniqueId) ||
                 configuration.ExpectedLinuxPartitionOffset <= 0 ||
-                configuration.ExpectedLinuxPartitionSize <= 0)
+                configuration.ExpectedLinuxPartitionSize <= 0 ||
+                configuration.PartitionSizeToleranceBytes <= 0 ||
+                configuration.PartitionSizeToleranceBytes >
+                    configuration.ExpectedLinuxPartitionSize)
             {
                 throw new InvalidOperationException(
                     "Windows share configuration has invalid partition identity.");
