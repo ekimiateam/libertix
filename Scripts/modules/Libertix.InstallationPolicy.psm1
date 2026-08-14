@@ -21,6 +21,7 @@ function Get-LibertixInstallationPolicy {
         $null -eq $policy.storage -or
         $null -eq $policy.memory -or
         $null -eq $policy.download -or
+        $null -eq $policy.volumeLabels -or
         $null -eq $policy.account
     ) {
         throw "Libertix installation policy is incomplete or unsupported."
@@ -29,11 +30,17 @@ function Get-LibertixInstallationPolicy {
     $storage = $policy.storage
     $memory = $policy.memory
     $account = $policy.account
+    $volumeLabels = $policy.volumeLabels
     $reservedUsernames = @($account.reservedUsernames)
     $normalizedReservedUsernames = @(
         $reservedUsernames | ForEach-Object { ([string]$_).ToLowerInvariant() }
     )
     [int64]$alignmentBytes = [int64]$storage.partitionAlignmentBytes
+    $allVolumeLabels = @(
+        [string]$volumeLabels.installationMedia
+        [string]$volumeLabels.staging
+        @($volumeLabels.legacyStagingForRecovery | ForEach-Object { [string]$_ })
+    )
     if (
         [int]$storage.minimumFinalSizeGiB -le 0 -or
         [int]$storage.targetWindowsFreeSpaceGiB -le 0 -or
@@ -62,6 +69,8 @@ function Get-LibertixInstallationPolicy {
         [int]$policy.download.maximumAttempts -gt 20 -or
         [int]$policy.download.retryBaseDelaySeconds -le 0 -or
         [int]$policy.download.retryBaseDelaySeconds -gt 300 -or
+        @($allVolumeLabels | Where-Object { $_ -cnotmatch '^[A-Z0-9]{1,11}$' }).Count -ne 0 -or
+        @($allVolumeLabels | Sort-Object -Unique).Count -ne $allVolumeLabels.Count -or
         [string]::IsNullOrWhiteSpace([string]$account.reservedUsernamesSource) -or
         $reservedUsernames.Count -eq 0 -or
         @($reservedUsernames | Where-Object {

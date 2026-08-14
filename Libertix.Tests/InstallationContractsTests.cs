@@ -350,6 +350,18 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void SharedInstallationPolicyDefinesDistinctMediaAndStagingLabels()
+        {
+            InstallationVolumeLabelPolicy labels = InstallationPolicy.Current.VolumeLabels;
+
+            Assert.AreEqual("LIBERTIXISO", labels.InstallationMedia);
+            Assert.AreEqual("LIBERTIXSTG", labels.Staging);
+            CollectionAssert.AreEqual(
+                new[] { "LIBERTIX", "LIBERTIXEFI" },
+                labels.LegacyStagingForRecovery);
+        }
+
+        [TestMethod]
         public void SharedInstallationPolicyDefinesTheRecommendedLinuxSize()
         {
             Assert.AreEqual(

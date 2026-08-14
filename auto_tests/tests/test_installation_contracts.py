@@ -836,6 +836,12 @@ def test_live_plan_rejects_reserved_linux_usernames(
         ("Libertix BIOS Installer invalid", r"\grldr.mbr", False),
         ("Libertix UEFI Installer", r"\EFI\BOOT\BOOTX64.EFI", True),
         ("Libertix UEFI Installer " + "b" * 32, r"\EFI\BOOT\BOOTX64.EFI", True),
+        (
+            "Libertix UEFI Installer " + "c" * 32,
+            r"\EFI\LibertixInstaller\BOOTX64.EFI",
+            True,
+        ),
+        ("Libertix UEFI Installer " + "d" * 32, r"\EFI\ubuntu\shimx64.efi", False),
         ("Libertix UEFI Installer invalid", r"\EFI\BOOT\BOOTX64.EFI", False),
         ("Windows Boot Manager", r"\EFI\Microsoft\Boot\bootmgfw.efi", False),
         ("Firmware utility", r"\EFI\BOOT\BOOTX64.EFI", False),
@@ -1049,8 +1055,6 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
     csharp = (ROOT / "Installation/RuntimeNames.cs").read_text(encoding="utf-8")
     names = dict(re.findall(r'public const string (\w+) = "([A-Za-z0-9_]+)";', csharp))
     assert names == {
-        "InstallerVolumeLabel": "LIBERTIXEFI",
-        "BiosInstallerVolumeLabel": "LIBERTIX",
         "InstallationLogDirectory": "LibertixInstallLogs",
         "WindowsLogDirectory": "Windows",
         "LinuxLogDirectory": "Linux",
@@ -1059,6 +1063,17 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
         "BiosRecoveryPromptTask": "LibertixInstallRecoveryPrompt",
         "LinuxReadOnlyTask": "LibertixLinuxReadOnly",
     }
+    policy = json.loads(
+        (ROOT / "Scripts/config/Libertix.InstallationPolicy.json").read_text(encoding="utf-8")
+    )
+    labels = policy["volumeLabels"]
+    assert labels == {
+        "installationMedia": "LIBERTIXISO",
+        "staging": "LIBERTIXSTG",
+        "legacyStagingForRecovery": ["LIBERTIX", "LIBERTIXEFI"],
+    }
+    assert "InstallationPolicy.Current.VolumeLabels.InstallationMedia" in csharp
+    assert "InstallationPolicy.Current.VolumeLabels.Staging" in csharp
 
     recovery = (ROOT / "Scripts/libertix-recovery-guard.ps1").read_text(encoding="utf-8-sig")
     bios_storage = (ROOT / "Scripts/libertix-bios-storage.ps1").read_text(encoding="utf-8-sig")
@@ -1077,11 +1092,13 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
         f'{names["WindowsLogDirectory"]}"'
     ) in recovery
     assert f'$script:LinuxReadOnlyTaskName = "{names["LinuxReadOnlyTask"]}"' in windows_share
-    assert f'$InstallerLabel = "{names["InstallerVolumeLabel"]}"' in uefi
-    assert names["InstallerVolumeLabel"] in live_context
-    assert names["BiosInstallerVolumeLabel"] in bios_storage
-    assert names["BiosInstallerVolumeLabel"] in recovery
-    assert names["BiosInstallerVolumeLabel"] in live_context
+    assert "$InstallerLabel = [string]$installationPolicy.volumeLabels.staging" in uefi
+    assert (
+        "$installerLabel = [string](Get-LibertixInstallationPolicy).volumeLabels.staging"
+        in bios_storage
+    )
+    assert "$StagingVolumeLabel = [string]$InstallationPolicy.volumeLabels.staging" in recovery
+    assert "$LIBERTIX_STAGING_VOLUME_LABEL" in live_context
     assert names["InstallationLogDirectory"] in live_logs
     assert f'/{names["LinuxLogDirectory"]}"' in live_logs
 

@@ -20,6 +20,7 @@ namespace Libertix.Installation
         public InstallationStoragePolicy Storage { get; set; }
         public InstallationMemoryPolicy Memory { get; set; }
         public InstallationDownloadPolicy Download { get; set; }
+        public InstallationVolumeLabelPolicy VolumeLabels { get; set; }
         public InstallationAccountPolicy Account { get; set; }
 
         public static InstallationPolicy Current => LazyCurrent.Value;
@@ -37,7 +38,7 @@ namespace Libertix.Installation
         private static void Validate(InstallationPolicy policy, string path)
         {
             if (policy == null || policy.Storage == null || policy.Memory == null ||
-                policy.Download == null || policy.Account == null)
+                policy.Download == null || policy.VolumeLabels == null || policy.Account == null)
                 throw new InvalidDataException($"Installation policy is incomplete: {path}");
             if (policy.SchemaVersion != CurrentSchemaVersion)
                 throw new InvalidDataException(
@@ -76,6 +77,18 @@ namespace Libertix.Installation
                 policy.Download.RetryBaseDelaySeconds > 300)
             {
                 throw new InvalidDataException("Installation download policy is invalid.");
+            }
+
+            InstallationVolumeLabelPolicy labels = policy.VolumeLabels;
+            string[] allLabels = new[] { labels.InstallationMedia, labels.Staging }
+                .Concat(labels.LegacyStagingForRecovery ?? Array.Empty<string>())
+                .ToArray();
+            if (allLabels.Any(label =>
+                    string.IsNullOrWhiteSpace(label) ||
+                    !Regex.IsMatch(label, "^[A-Z0-9]{1,11}$")) ||
+                allLabels.Distinct(StringComparer.Ordinal).Count() != allLabels.Length)
+            {
+                throw new InvalidDataException("Installation volume-label policy is invalid.");
             }
 
             InstallationAccountPolicy account = policy.Account;
@@ -120,6 +133,13 @@ namespace Libertix.Installation
         public int Aria2MaximumConnections { get; set; }
         public int MaximumAttempts { get; set; }
         public int RetryBaseDelaySeconds { get; set; }
+    }
+
+    public sealed class InstallationVolumeLabelPolicy
+    {
+        public string InstallationMedia { get; set; }
+        public string Staging { get; set; }
+        public string[] LegacyStagingForRecovery { get; set; }
     }
 
     public sealed class InstallationAccountPolicy

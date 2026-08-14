@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from typing import Literal
@@ -15,6 +17,7 @@ from app.api_runtime import (
     mark_capture_workspace_complete,
 )
 from app.clients.proxmox import ProxmoxClient
+from app.clients.proxmox_serial import ProxmoxSerialCapture, SerialCaptureReport
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
@@ -30,6 +33,16 @@ from app.services.common import ResultBuilder
 from app.services.validation import ValidationService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _SerialCaptureSession:
+    destination: Path
+    stop_event: threading.Event
+    ready_event: threading.Event
+    thread: threading.Thread
+    report: SerialCaptureReport | None = None
+    error: Exception | None = None
 
 
 class AutomationService(
@@ -70,7 +83,7 @@ class AutomationService(
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
-        simulate_fog_clone_boot_entries: bool = False,
+        simulate_stale_firmware_entries: bool = False,
         first_boot: Literal["windows", "linux"] = "windows",
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
@@ -116,7 +129,7 @@ class AutomationService(
                 share_windows_files_in_linux=share_windows_files_in_linux,
                 share_linux_files_in_windows=share_linux_files_in_windows,
                 use_default_filepool=source == "published",
-                simulate_fog_clone_boot_entries=simulate_fog_clone_boot_entries,
+                simulate_stale_firmware_entries=simulate_stale_firmware_entries,
                 first_boot=first_boot,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
@@ -226,9 +239,6 @@ class AutomationService(
             ca_bundle=s.proxmox_ca_bundle,
         )
 
-    def _restore_clean_snapshot(self, result: ResultBuilder, profile: WizardProfile) -> None:
-        self.preflight.restore_clean_snapshot(result, profile)
-
     def _restore_clean_snapshots(
         self, result: ResultBuilder, profiles: Sequence[WizardProfile]
     ) -> None:
@@ -242,6 +252,8 @@ class AutomationService(
         on_step: Callable[[StepResult], None] | None,
     ) -> OperationResult:
         result = ResultBuilder("automation", on_step=on_step)
+        serial_session: _SerialCaptureSession | None = None
+        failure: WorkflowError | None = None
         try:
             self._prepare_windows_test_vm(vm, result)
             local_executable = self.validation.deploy_to_documents(vm, executable)
@@ -252,8 +264,9 @@ class AutomationService(
                 vm=vm.name,
                 executable=str(local_executable),
             )
-            if options.simulate_fog_clone_boot_entries:
-                self._inject_fog_clone_boot_entry(vm, local_executable, result)
+            if options.simulate_stale_firmware_entries:
+                self._inject_stale_firmware_entry(vm, local_executable, result)
+            serial_session = self._start_serial_capture(vm, result)
             launch = self._launch_elevated(
                 vm,
                 local_executable,
@@ -269,26 +282,162 @@ class AutomationService(
             )
             monitor_outcome = self._run_unattended_wizard(vm, options, result, launch)
             self._run_post_install_validation(vm, options, result, monitor_outcome)
-            return result.success(f"Automation completed on {vm.name}")
         except WorkflowError as exc:
-            return result.failure(exc)
+            failure = exc
         except Exception as exc:
             logger.exception(
                 "Unexpected internal error during automation on %s",
                 vm.name,
                 extra={"step": "automation.internal", "target": vm.host},
             )
-            return result.failure(
-                WorkflowError(
-                    "automation.internal",
-                    f"Unexpected internal error during automation on {vm.name}",
-                    details={
-                        "vm": vm.name,
-                        "target": vm.host,
-                        "type": type(exc).__name__,
-                    },
-                )
+            failure = WorkflowError(
+                "automation.internal",
+                f"Unexpected internal error during automation on {vm.name}",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "type": type(exc).__name__,
+                },
             )
+        finally:
+            if serial_session is not None:
+                try:
+                    self._stop_serial_capture(vm, serial_session, result)
+                except WorkflowError as serial_error:
+                    if failure is None:
+                        failure = serial_error
+                    else:
+                        serial_context = dict(serial_error.details)
+                        serial_context.setdefault("vm", vm.name)
+                        serial_context.setdefault("target", vm.host)
+                        result.error(
+                            serial_error.step,
+                            serial_error.message,
+                            **serial_context,
+                        )
+        if failure is not None:
+            return result.failure(failure)
+        return result.success(f"Automation completed on {vm.name}")
+
+    def _start_serial_capture(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> _SerialCaptureSession:
+        serial_dir = self._capture_dir.parent / "serial"
+        destination = serial_dir / f"{vm.name}-serial-console.log"
+        stop_event = threading.Event()
+        ready_event = threading.Event()
+        session: _SerialCaptureSession
+
+        def collect() -> None:
+            try:
+                with self._proxmox() as proxmox:
+                    node = proxmox.locate_vm(vm.vmid)
+                    session.report = ProxmoxSerialCapture(proxmox).run(
+                        node,
+                        vm.vmid,
+                        destination,
+                        stop_event,
+                        ready_event,
+                    )
+            except Exception as exc:
+                session.error = exc
+                ready_event.set()
+
+        thread = threading.Thread(
+            target=collect,
+            name=f"libertix-serial-{vm.name}",
+            daemon=True,
+        )
+        session = _SerialCaptureSession(
+            destination=destination,
+            stop_event=stop_event,
+            ready_event=ready_event,
+            thread=thread,
+        )
+        thread.start()
+        if not ready_event.wait(self.settings.proxmox_timeout_seconds):
+            stop_event.set()
+            thread.join(timeout=3)
+            raise WorkflowError(
+                "automation.serial_capture",
+                "Timed out while opening the Proxmox serial console",
+                details={"vm": vm.name, "target": vm.host, "vmid": vm.vmid},
+            )
+        if session.error is not None:
+            if isinstance(session.error, WorkflowError):
+                raise session.error
+            raise WorkflowError(
+                "automation.serial_capture",
+                "The Proxmox serial console could not be started",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "vmid": vm.vmid,
+                    "error_type": type(session.error).__name__,
+                },
+            ) from session.error
+        result.ok(
+            "automation.serial_capture_started",
+            "Deterministic Proxmox serial-console capture started",
+            vm=vm.name,
+            target=vm.host,
+            vmid=vm.vmid,
+            path=str(destination),
+        )
+        return session
+
+    def _stop_serial_capture(
+        self,
+        vm: VMConfig,
+        session: _SerialCaptureSession,
+        result: ResultBuilder,
+    ) -> None:
+        session.stop_event.set()
+        session.thread.join(timeout=5)
+        if session.thread.is_alive():
+            raise WorkflowError(
+                "automation.serial_capture",
+                "The Proxmox serial-console capture did not stop cleanly",
+                details={"vm": vm.name, "target": vm.host, "vmid": vm.vmid},
+            )
+        if session.error is not None:
+            if isinstance(session.error, WorkflowError):
+                raise session.error
+            raise WorkflowError(
+                "automation.serial_capture",
+                "The Proxmox serial-console capture failed",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "vmid": vm.vmid,
+                    "error_type": type(session.error).__name__,
+                },
+            ) from session.error
+        report = session.report
+        if report is None or report.payload_bytes == 0:
+            raise WorkflowError(
+                "automation.serial_capture",
+                "The Proxmox serial console contained no guest output",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "vmid": vm.vmid,
+                    "path": str(session.destination),
+                },
+            )
+        result.ok(
+            "automation.serial_capture_complete",
+            "Proxmox serial-console evidence saved",
+            vm=vm.name,
+            target=vm.host,
+            vmid=vm.vmid,
+            path=str(report.path),
+            payload_bytes=report.payload_bytes,
+            connections=report.connections,
+            disconnects=report.disconnects,
+        )
 
     def _prepare_windows_test_vm(self, vm: VMConfig, result: ResultBuilder) -> None:
         values: dict[str, str] = {}
@@ -354,7 +503,7 @@ class AutomationService(
             windows_setup_reminder_disabled=True,
         )
 
-    def _inject_fog_clone_boot_entry(
+    def _inject_stale_firmware_entry(
         self,
         vm: VMConfig,
         executable: PureWindowsPath,
@@ -362,8 +511,8 @@ class AutomationService(
     ) -> None:
         if vm.firmware != "uefi":
             raise WorkflowError(
-                "automation.fog_clone_fixture",
-                "The FOG clone boot-entry fixture is valid only for UEFI VMs",
+                "automation.stale_firmware_fixture",
+                "The stale firmware-entry fixture is valid only for UEFI VMs",
                 details={"vm": vm.name, "firmware": vm.firmware},
             )
         with self.validation.ssh(
@@ -374,9 +523,9 @@ class AutomationService(
         ) as ssh:
             response = self.validation.run_windows_script(
                 ssh,
-                script_name="inject_fog_clone_boot_entry.ps1",
+                script_name="inject_stale_firmware_entry.ps1",
                 config={"release_root": str(executable.parent)},
-                step="automation.fog_clone_fixture",
+                step="automation.stale_firmware_fixture",
                 timeout=60,
             )
         values = self.validation.parse_powershell_results(
@@ -390,13 +539,13 @@ class AutomationService(
             values.get("STALE_PARTITION_GUID", ""),
         ):
             raise WorkflowError(
-                "automation.fog_clone_fixture",
-                "The VM did not confirm the stale cloned UEFI entry",
+                "automation.stale_firmware_fixture",
+                "The VM did not confirm the stale UEFI entry",
                 details={"vm": vm.name, "host": vm.host},
             )
         result.ok(
-            "automation.fog_clone_fixture",
-            "A stale cloned UEFI Libertix entry was injected before installation",
+            "automation.stale_firmware_fixture",
+            "A stale UEFI Libertix entry was injected before installation",
             vm=vm.name,
             target=vm.host,
             boot_variable=values["STALE_BOOT_VARIABLE"],

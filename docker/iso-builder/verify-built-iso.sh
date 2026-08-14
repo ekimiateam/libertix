@@ -112,7 +112,6 @@ if unsquashfs -ll "$squashfs" "usr/local/lib/libertix/$unexpected_adapter" 2>/de
     echo "Built $mode rootfs contains unexpected adapter $unexpected_adapter" >&2
     exit 1
 fi
-compare_rootfs_file usr/local/lib/libertix/cleanup-bcd.py /workspace/assets/live/cleanup-bcd.py
 compare_rootfs_file usr/local/lib/libertix/cleanup-bcd-main.py \
     /workspace/assets/live/cleanup-bcd-main.py
 compare_rootfs_file usr/local/lib/libertix/configure-target.sh \

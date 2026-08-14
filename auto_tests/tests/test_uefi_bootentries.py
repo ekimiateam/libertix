@@ -24,7 +24,7 @@ def bootentries_module() -> ModuleType:
     return module
 
 
-def test_fog_clone_entries_match_only_the_current_esp(bootentries_module: ModuleType) -> None:
+def test_stale_entries_match_only_the_current_esp(bootentries_module: ModuleType) -> None:
     current_guid = "11111111-2222-3333-4444-555555555555"
     stale_guid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     entries = "\n".join(

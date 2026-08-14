@@ -22,6 +22,7 @@ LAST_RENDER_KEY=""
 DEV_TERMINAL_ACTIVE=false
 GUI_PID=""
 XORG_PID=""
+INSTALLER_PID=""
 SUCCESS_REBOOT_DELAY=5
 XORG_START_TIMEOUT=30
 GUI_READY_TIMEOUT=30
@@ -605,6 +606,42 @@ failure_screen_loop() {
     done
 }
 
+request_graceful_stop() {
+    local signal_name="$1"
+    local child_rc=143
+
+    # systemd sends TERM only to this supervisor with KillMode=mixed. Keep the
+    # supervisor alive until the transactional child has persisted rollback,
+    # copied diagnostics to Windows, and flushed storage.
+    trap '' TERM INT
+    {
+        echo "===== runner stop requested $(date -Is 2>/dev/null || date) ====="
+        echo "signal=$signal_name"
+        echo "stage=$(current_stage)"
+        echo "installer_pid=${INSTALLER_PID:-none}"
+    } >> "$DEBUG_LOG" 2>&1
+
+    if [ -n "$INSTALLER_PID" ]; then
+        if kill -0 "$INSTALLER_PID" 2>/dev/null; then
+            kill -TERM "$INSTALLER_PID" 2>/dev/null || true
+        fi
+        wait "$INSTALLER_PID"
+        child_rc="$?"
+        INSTALLER_PID=""
+        if [ "$child_rc" -eq 0 ]; then
+            write_success_result
+        else
+            write_failure_result "$child_rc"
+        fi
+    fi
+
+    collect_debug
+    copy_logs_to_windows_best_effort
+    stop_graphical_ui
+    sync
+    exit "$child_rc"
+}
+
 render_boot_logo
 sleep 1
 
@@ -615,11 +652,13 @@ fi
 (
     echo "===== libertix installer started $(date -Is 2>/dev/null || date) ====="
     echo "build=$(build_id)"
-    /libertix-install.sh
+    exec /libertix-install.sh
 ) >> "$LOG" 2>&1 &
-pid="$!"
+INSTALLER_PID="$!"
+trap 'request_graceful_stop TERM' TERM
+trap 'request_graceful_stop INT' INT
 
-while kill -0 "$pid" 2>/dev/null; do
+while kill -0 "$INSTALLER_PID" 2>/dev/null; do
     if switch_to_terminal_ui_if_requested; then
         sleep 1
     elif gui_running; then
@@ -636,8 +675,9 @@ while kill -0 "$pid" 2>/dev/null; do
     sleep 1
 done
 
-wait "$pid"
+wait "$INSTALLER_PID"
 rc="$?"
+INSTALLER_PID=""
 
 if [ "$rc" -eq 0 ]; then
     write_success_result

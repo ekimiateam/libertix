@@ -112,7 +112,7 @@ def _run_operation(
             monitor_iso=request.monitor_iso,
             share_windows_files_in_linux=request.share_windows_files_in_linux,
             share_linux_files_in_windows=request.share_linux_files_in_windows,
-            simulate_fog_clone_boot_entries=request.simulate_fog_clone_boot_entries,
+            simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
             first_boot=request.first_boot,
             source=request.source,
             on_step=on_step,

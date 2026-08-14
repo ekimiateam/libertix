@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 from dataclasses import dataclass
@@ -38,9 +39,17 @@ class AccountPolicy:
 
 
 @dataclass(frozen=True)
+class VolumeLabelPolicy:
+    installation_media: str
+    staging: str
+    legacy_staging_for_recovery: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class InstallationPolicy:
     storage: StoragePolicy
     memory: MemoryPolicy
+    volume_labels: VolumeLabelPolicy
     account: AccountPolicy
 
 
@@ -76,9 +85,11 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
     storage_raw = raw.get("storage")
     memory_raw = raw.get("memory")
     account_raw = raw.get("account")
+    volume_labels_raw = raw.get("volumeLabels")
     if (
         not isinstance(storage_raw, dict)
         or not isinstance(memory_raw, dict)
+        or not isinstance(volume_labels_raw, dict)
         or not isinstance(account_raw, dict)
     ):
         raise ValueError("installation policy is incomplete")
@@ -109,6 +120,26 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         windows_minimum_mib=_require_integer(memory_raw, "windowsMinimumMiB"),
         low_memory_threshold_mib=_require_integer(memory_raw, "lowMemoryThresholdMiB"),
         live_minimum_mib=_require_integer(memory_raw, "liveMinimumMiB"),
+    )
+    installation_media_label = volume_labels_raw.get("installationMedia")
+    staging_label = volume_labels_raw.get("staging")
+    legacy_staging_labels = volume_labels_raw.get("legacyStagingForRecovery")
+    all_volume_labels = [installation_media_label, staging_label]
+    if isinstance(legacy_staging_labels, list):
+        all_volume_labels.extend(legacy_staging_labels)
+    if (
+        not isinstance(installation_media_label, str)
+        or not isinstance(staging_label, str)
+        or not isinstance(legacy_staging_labels, list)
+        or not all(isinstance(label, str) for label in all_volume_labels)
+        or not all(re.fullmatch(r"[A-Z0-9]{1,11}", label) for label in all_volume_labels)
+        or len(all_volume_labels) != len(set(all_volume_labels))
+    ):
+        raise ValueError("installation volume-label policy contains invalid values")
+    volume_labels = VolumeLabelPolicy(
+        installation_media=installation_media_label,
+        staging=staging_label,
+        legacy_staging_for_recovery=tuple(legacy_staging_labels),
     )
     reserved_source = account_raw.get("reservedUsernamesSource")
     reserved_raw = account_raw.get("reservedUsernames")
@@ -151,4 +182,29 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         or memory.low_memory_threshold_mib <= memory.windows_minimum_mib
     ):
         raise ValueError("installation policy contains invalid values")
-    return InstallationPolicy(storage=storage, memory=memory, account=account)
+    return InstallationPolicy(
+        storage=storage,
+        memory=memory,
+        volume_labels=volume_labels,
+        account=account,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--policy", type=Path)
+    parser.add_argument(
+        "field",
+        choices=("installation-media-volume-label", "staging-volume-label"),
+    )
+    args = parser.parse_args()
+    policy = load_installation_policy(args.policy)
+    if args.field == "installation-media-volume-label":
+        print(policy.volume_labels.installation_media)
+    else:
+        print(policy.volume_labels.staging)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

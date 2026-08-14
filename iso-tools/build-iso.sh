@@ -10,6 +10,9 @@ case "$FIRMWARE_MODE" in
 esac
 
 source "$ISO_DIR/config/defaults.env"
+VOLUME_ID="$(python3 "$ROOT_DIR/assets/live/libertix_installation_policy.py" \
+    --policy "$ROOT_DIR/Scripts/config/Libertix.InstallationPolicy.json" \
+    installation-media-volume-label)"
 
 # Downloaded .deb files survive between builds when the caller mounts a cache
 # directory. snapshot.debian.org is the slowest stage of the build by far.
@@ -192,7 +195,6 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-rollback-common.sh|/usr/local/lib/libertix/libertix-rollback-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-runner-stage-common.sh|/usr/local/lib/libertix/libertix-runner-stage-common.sh"
         "0644|$ROOT_DIR/assets/live/libertix-stages.tsv|/usr/local/lib/libertix/libertix-stages.tsv"
-        "0755|$ROOT_DIR/assets/live/cleanup-bcd.py|/usr/local/lib/libertix/cleanup-bcd.py"
         "0755|$ROOT_DIR/assets/live/cleanup-bcd-main.py|/usr/local/lib/libertix/cleanup-bcd-main.py"
         "0755|$ISO_DIR/target/configure-target.sh|/usr/local/lib/libertix/configure-target.sh"
         "0755|$ROOT_DIR/assets/live/configure-target-main.sh|/usr/local/lib/libertix/configure-target-main.sh"

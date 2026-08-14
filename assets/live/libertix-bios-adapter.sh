@@ -449,9 +449,11 @@ wait_for_prereqs() {
         if [ "$config_ready" -eq 0 ]; then
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
-                case "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" in
-                    LIBERTIX|LIBERTIX_INSTALLER) config_ready=1; break ;;
-                esac
+                [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = \
+                    "$LIBERTIX_STAGING_VOLUME_LABEL" ] && {
+                    config_ready=1
+                    break
+                }
             done < <(blkid -o device 2>/dev/null || true)
         fi
 

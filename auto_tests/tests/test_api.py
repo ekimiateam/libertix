@@ -151,6 +151,14 @@ def test_web_ui_is_served() -> None:
     assert "/filepool/aria2-64.zip" in response.text
     assert "monitor_iso" in response.text
     assert "linux_password" in response.text
+    assert 'id="linuxSizeGib"' in response.text
+    assert "linux_size_gib" in response.text
+    assert 'id="firstBoot"' in response.text
+    assert "first_boot" in response.text
+    assert "share_windows_files_in_linux" in response.text
+    assert "share_linux_files_in_windows" in response.text
+    assert 'id="simulateStaleFirmwareEntries"' in response.text
+    assert "simulate_stale_firmware_entries" in response.text
     assert "distribution" in response.text
     assert "Zorin OS 18.1 Core" in response.text
     assert "source" in response.text
@@ -158,6 +166,10 @@ def test_web_ui_is_served() -> None:
     assert "Le partage SMB sera conservé" in response.text
     assert "Automation unattended" in response.text
     assert "apply: true" in response.text
+    assert 'id="requestPreview"' in response.text
+    assert 'linux_password: "<masqué>"' in response.text
+    assert 'sessionStorage.setItem("libertix_linux_password"' not in response.text
+    assert 'localStorage.setItem("libertix_linux_password"' not in response.text
     assert "automationDry" not in response.text
     assert "launch-only" not in response.text
 

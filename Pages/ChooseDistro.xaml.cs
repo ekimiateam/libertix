@@ -18,6 +18,7 @@ namespace Libertix.Pages
         private ObservableCollection<DistroInfo> _distros;
         private DistroInfo _selectedDistro;
         private bool _isDistroSelected;
+        private bool _isCatalogLoading;
         private bool _partitionConfigValid = false;
         public bool IsDistroSelected
         {
@@ -49,6 +50,7 @@ namespace Libertix.Pages
             _partitionConfigValid = _installationState.Compatibility != null;
             InitializeComponent();
             _distros = new ObservableCollection<DistroInfo>();
+            DistrosListBox.ItemsSource = _distros;
             DataContext = this;
             IsDistroSelected = false;
             Loaded += ChooseDistro_Loaded;
@@ -57,9 +59,14 @@ namespace Libertix.Pages
         private async void ChooseDistro_Loaded(object sender, RoutedEventArgs e)
         {
             Loaded -= ChooseDistro_Loaded;
-            await LoadDistrosAsync();
-            LoadState();
-            DistrosListBox.Focus();
+            if (await LoadDistrosAsync())
+            {
+                DistrosListBox.Focus();
+            }
+            else
+            {
+                RetryCatalogButton.Focus();
+            }
         }
 
         private void ChooseDistro_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -104,43 +111,82 @@ namespace Libertix.Pages
             e.Handled = true;
         }
 
-        private async Task LoadDistrosAsync()
+        private async Task<bool> LoadDistrosAsync()
         {
+            if (_isCatalogLoading)
+            {
+                return false;
+            }
+
+            _isCatalogLoading = true;
+            RetryCatalogButton.IsEnabled = false;
+            CatalogErrorPanel.Visibility = Visibility.Collapsed;
             try
             {
                 var validatedDistros = await DistributionCatalogLoader.LoadAsync(_filepool);
-                _distros.Clear();
-                foreach (DistroInfo distro in validatedDistros)
-                {
-                    _distros.Add(distro);
-                }
+                string selectedDistroId = _selectedDistro?.Id ??
+                    _installationState.SelectedDistro?.Id;
+                var publishedDistros = new ObservableCollection<DistroInfo>(validatedDistros);
+
+                ClearSelection();
+                _distros = publishedDistros;
                 DistrosListBox.ItemsSource = _distros;
+                RestoreSelection(selectedDistroId);
+                return true;
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
-                    Localization.GetString("DistroLoadError", "Failed to load distributions") +
-                    Environment.NewLine + ex.Message,
-                    Localization.GetString("ErrorTitle"),
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                CatalogErrorDetailsText.Text = ex.Message;
+                CatalogErrorPanel.Visibility = Visibility.Visible;
+                return false;
+            }
+            finally
+            {
+                _isCatalogLoading = false;
+                RetryCatalogButton.IsEnabled = true;
             }
         }
 
-        private void LoadState()
+        private async void RetryCatalogButton_Click(object sender, RoutedEventArgs e)
         {
-            string selectedDistroId = _installationState.SelectedDistro?.Id;
+            if (await LoadDistrosAsync())
+            {
+                DistrosListBox.Focus();
+            }
+            else
+            {
+                RetryCatalogButton.Focus();
+            }
+        }
+
+        private void RestoreSelection(string selectedDistroId)
+        {
             if (!string.IsNullOrWhiteSpace(selectedDistroId))
             {
-                foreach (var distro in _distros)
+                foreach (DistroInfo distro in _distros)
                 {
-                    if (distro.Id == selectedDistroId)
+                    if (string.Equals(distro.Id, selectedDistroId, StringComparison.Ordinal))
                     {
                         SelectDistro(distro);
-                        break;
+                        return;
                     }
                 }
             }
+
+            _installationState.SelectedDistro = null;
+            _installationState.SelectedLinuxSizeGiB = null;
+            UpdateNextButtonState();
+        }
+
+        private void ClearSelection()
+        {
+            if (_selectedDistro != null)
+            {
+                _selectedDistro.IsSelected = false;
+            }
+            _selectedDistro = null;
+            DistrosListBox.SelectedItem = null;
+            IsDistroSelected = false;
         }
 
         private void SelectDistro(DistroInfo distro)
@@ -152,6 +198,7 @@ namespace Libertix.Pages
 
             _selectedDistro = distro;
             _selectedDistro.IsSelected = true;
+            IsDistroSelected = true;
             if (!ReferenceEquals(DistrosListBox.SelectedItem, distro))
             {
                 DistrosListBox.SelectedItem = distro;

@@ -55,8 +55,8 @@ if ([string]::IsNullOrWhiteSpace([string]$owner.Sid)) {
     throw "The interactive Windows user SID could not be resolved."
 }
 
-# The VNC wizard is coordinate-driven. Disable toast notifications for the
-# exact interactive profile so a transient banner cannot intercept a click.
+# Disable toast notifications for the exact interactive profile so a transient
+# banner cannot take focus from deterministic unattended keyboard actions.
 $notificationPolicyPath = "Registry::HKEY_USERS\$($owner.Sid)\Software\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"
 $notificationPreferencePath = "Registry::HKEY_USERS\$($owner.Sid)\Software\Microsoft\Windows\CurrentVersion\PushNotifications"
 $machineNotificationPolicyPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\CurrentVersion\PushNotifications"

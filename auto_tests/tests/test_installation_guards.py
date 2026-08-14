@@ -766,8 +766,10 @@ def test_windows_rollbacks_require_the_exact_original_system_partition_size() ->
     assert "$finalSystemPartition.Size -ne $initialSystemSize" in bios_guard
     assert "$supported.SizeMin -gt $initialSystemSize" in bios_guard
     assert "$expectedTransactionOffset" in bios_guard
-    assert "$candidateOffsets" in bios_guard
-    assert "[int64]$partition.Offset -notin $candidateOffsets" in bios_guard
+    assert "$initialSystemEnd = $initialSystemOffset + $initialSystemSize" in bios_guard
+    assert "$partitionStart -lt $systemPartitionEnd" in bios_guard
+    assert "$partitionEnd -gt $initialSystemEnd" in bios_guard
+    assert "$candidateOffsets" not in bios_guard
     assert "[int]$partition.MbrType -in @(5, 15, 133)" in bios_guard
     assert "$isRawTransaction" in bios_guard
     assert "[int64]$partitionSizeTolerance = $PartitionAlignmentBytes" in bios_guard
@@ -1073,6 +1075,22 @@ def test_windows_recovery_waits_durably_for_the_first_installed_linux_boot() -> 
     assert "the two tasks raced each other" in result_ui
 
 
+def test_windows_post_install_checks_retry_transient_result_file_contention() -> None:
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    retry_reader = checks.split("function Read-JsonFileWithRetry", 1)[1].split(
+        "function Get-LinuxDrive", 1
+    )[0]
+    finalization = checks.split('        "finalization" {', 1)[1].split(
+        '        "final_state" {', 1
+    )[0]
+
+    assert "TimeoutMilliseconds = 10000" in retry_reader
+    assert "Start-Sleep -Milliseconds 200" in retry_reader
+    assert "throw" in retry_reader
+    assert finalization.count("Read-JsonFileWithRetry -LiteralPath $resultPath") >= 2
+    assert "Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8" not in finalization
+
+
 def test_completed_bios_recovery_proves_task_absence_after_schtasks_delete() -> None:
     bios = read("Scripts/libertix-recovery-guard.ps1")
     removal = bios.split("function Remove-RecoveryTask", 1)[1].split(
@@ -1351,8 +1369,8 @@ def test_uefi_firmware_ownership_is_persisted_before_bootnext_or_bcd_followup() 
 
     assert "function Remove-TrackedLibertixFirmwareEntry" in firmware
     assert "Transaction state" in firmware
-    assert "$null -eq $state.InstallerBootNumber" in firmware
-    assert "[string]::IsNullOrWhiteSpace([string]$state.InstallerBootVariable)" in firmware
+    assert "$null -eq $State.InstallerBootNumber" in firmware
+    assert "[string]::IsNullOrWhiteSpace([string]$State.InstallerBootVariable)" in firmware
     boot_next = staging.split('if ($BootStrategy -eq "BootNext")', 1)[1].split(
         "$fallbackEspDrive = $null", 1
     )[0]
@@ -1360,9 +1378,18 @@ def test_uefi_firmware_ownership_is_persisted_before_bootnext_or_bcd_followup() 
         'Set-FirmwareVariable -Name "BootNext"'
     )
     bcd_create = firmware.split("function New-LibertixBcdFirmwareEntry", 1)[1]
+    assert bcd_create.index("Update-TransactionBcdEntryState") < bcd_create.index(
+        'Invoke-BcdeditCommand -Arguments @("/set", $entryId, "device"'
+    )
     assert bcd_create.index("Update-TransactionFirmwareState") < bcd_create.index(
         "Get-EfiLoadOptionOptionalDataLength"
     )
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+    bcd_owner = transaction.split("function Update-TransactionBcdEntryState", 1)[1].split(
+        "function Get-ValidatedLibertixTransactionState", 1
+    )[0]
+    assert "RecoveryRunId -ne $RecoveryRunId" in bcd_owner
+    assert "Save-LibertixTransactionStateAtomic" in bcd_owner
 
 
 def test_uefi_temporary_artifacts_are_owned_by_the_recovery_run() -> None:
@@ -2736,13 +2763,72 @@ def test_bios_recovery_guard_removes_only_the_empty_transaction_extended_contain
     )
     assert recovery_offset_read in recovery
 
-    remove_transaction = rollback.index(
-        "Remove-Partition -DiskNumber $diskNumber -PartitionNumber $number"
+    remove_transaction_match = re.search(
+        r"Remove-Partition\s+`?\s*"
+        r"-DiskNumber \$diskNumber\s+`?\s*"
+        r"-PartitionNumber \$number",
+        rollback,
     )
+    assert remove_transaction_match is not None
+    remove_transaction = remove_transaction_match.start()
     remove_container = rollback.index("Remove-EmptyTransactionExtendedContainer")
     wait_for_capacity = rollback.index("Wait-SystemDriveResizeCapacity")
-    resize_windows = rollback.index("Resize-Partition -DriveLetter $SystemDriveLetter")
+    resize_windows_match = re.search(
+        r"Resize-Partition\s+`?\s*-DriveLetter \$SystemDriveLetter",
+        rollback,
+    )
+    assert resize_windows_match is not None
+    resize_windows = resize_windows_match.start()
     assert remove_transaction < remove_container < wait_for_capacity < resize_windows
+
+
+def test_bios_recovery_guard_persists_and_aggregates_independent_compensations() -> None:
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+
+    assert 'status = "running"' in recovery
+    assert "attempts = @($script:RecoveryPriorAttempts) + @($currentAttempt)" in recovery
+    assert "Publish-LibertixFileAtomic" in recovery
+    assert 'operation = "state.persistence"' in recovery
+    assert "Invoke-MinimumRecoveryFallback" in recovery
+    assert "The recovery tasks and durable rollback payload remain armed." in recovery
+
+    rollback = recovery.split(
+        '$diskLayoutRestored = Invoke-RecoveryOperation -Name "disk-layout.restore"',
+        1,
+    )[1]
+    independent_operations = [
+        'Invoke-RecoveryOperation -Name "bcd.restore"',
+        'Invoke-RecoveryOperation -Name "mbr.restore"',
+        'Invoke-RecoveryOperation -Name "windows-share.cleanup"',
+        'Invoke-RecoveryOperation -Name "hibernation.restore"',
+        'Invoke-RecoveryOperation -Name "boot-payload.cleanup"',
+        'Invoke-RecoveryOperation -Name "downloads.cleanup"',
+    ]
+    positions = [rollback.index(operation) for operation in independent_operations]
+    first_aggregate_check = rollback.index("Assert-RecoveryOperationsSucceeded")
+    assert positions == sorted(positions)
+    assert all(position < first_aggregate_check for position in positions)
+
+    ledger_complete = rollback.index('-Name "ledger.rollback.complete"')
+    startup_task_remove = rollback.index('Invoke-RecoveryOperation -Name "startup-task.remove"')
+    assert ledger_complete < startup_task_remove
+    assert "Existing recovery operation history is unreadable" in recovery
+    assert '$script:RecoveryAttemptStatus = "failed"' in recovery
+
+
+def test_bios_recovery_cleanup_verifies_files_share_tasks_bcd_and_hibernation() -> None:
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+
+    assert "Temporary boot payload remains:" in recovery
+    assert "Pending Windows sharing payload still exists after removal." in recovery
+    assert "Windows read-only Linux sharing cleanup could not be verified." in recovery
+    assert 'bcdedit.exe /enum "{bootmgr}" /v' in recovery
+    assert '"BCD restore completed but Windows Boot Manager could not be "' in recovery
+    assert "\"verified (rc=$LASTEXITCODE output=$($verification -join ' ')).\"" in recovery
+    assert 'powercfg.exe" /hibernate on' in recovery
+    assert 'powercfg.exe" /hibernate off' in recovery
+    assert "Hibernation restore did not enable HibernateEnabled." in recovery
+    assert "Hibernation restore did not disable HibernateEnabled." in recovery
 
 
 def test_uefi_raw_staging_partition_is_owned_before_fat32_format() -> None:
@@ -2979,6 +3065,20 @@ def test_temporary_windows_boot_cleanup_fails_closed_for_both_firmwares() -> Non
     assert "delete_live_bcd_entry_or_die" in uefi_cleanup
     assert "UEFI BCD cleanup failed; continuing" not in uefi_cleanup
     assert "temporary UEFI installer entry remains after cleanup" in uefi
+
+
+def test_live_invokes_the_bcd_cleanup_implementation_without_a_wrapper() -> None:
+    runtime = read("assets/live/libertix-install-runtime-common.sh")
+    builder = read("iso-tools/build-iso.sh")
+    verifier = read("docker/iso-builder/verify-built-iso.sh")
+
+    assert 'python3 /usr/local/lib/libertix/cleanup-bcd-main.py "$bcd_file"' in runtime
+    assert "assets/live/cleanup-bcd-main.py" in builder
+    assert "cleanup-bcd-main.py" in verifier
+    assert "cleanup-bcd.py" not in runtime
+    assert "cleanup-bcd.py" not in builder
+    assert "cleanup-bcd.py" not in verifier
+    assert not (ROOT / "assets/live/cleanup-bcd.py").exists()
 
 
 def test_recovery_geometry_uses_manifest_offset_for_both_firmwares() -> None:
@@ -3338,6 +3438,32 @@ def test_live_rootfs_masks_unused_serial_login_prompt() -> None:
     rootfs = read("assets/live/setup-live-rootfs.sh")
 
     assert "ln -sf /dev/null /etc/systemd/system/serial-getty@ttyS0.service" in rootfs
+
+
+def test_live_installer_shutdown_contract_is_identical_and_rollback_safe() -> None:
+    bios_unit = read("iso/systemd/libertix-install.service")
+    uefi_unit = read("iso-uefi/systemd/libertix-install.service")
+    runner = read("assets/live/libertix-runner-main.sh")
+    installer = read("assets/live/libertix-install-main.sh")
+    rollback = read("assets/live/libertix-rollback-common.sh")
+
+    assert bios_unit == uefi_unit
+    assert "Conflicts=getty@tty1.service" in bios_unit
+    assert "Before=getty@tty1.service" in bios_unit
+    assert "TimeoutStopSec=30min" in bios_unit
+    assert "KillMode=mixed" in bios_unit
+    assert "function request_graceful_stop" not in runner
+    assert "request_graceful_stop()" in runner
+    assert 'kill -TERM "$INSTALLER_PID"' in runner
+    assert 'wait "$INSTALLER_PID"' in runner
+    assert runner.index('kill -TERM "$INSTALLER_PID"') < runner.index(
+        "copy_logs_to_windows_best_effort", runner.index("request_graceful_stop()")
+    )
+    assert "trap 'on_termination_signal TERM 143' TERM" in installer
+    assert "trap 'on_termination_signal INT 130' INT" in installer
+    signal_handler = installer.split("on_termination_signal()", 1)[1].split("on_exit()", 1)[0]
+    assert "fail_and_exit" in signal_handler
+    assert 'sync || true\n    exit "$rc"' in rollback
 
 
 def test_live_rootfs_does_not_ship_an_unused_passworded_sudo_account() -> None:
@@ -3963,7 +4089,7 @@ def test_uefi_rollback_proves_firmware_and_esp_cleanup() -> None:
     restore = live.split("firmware_restore_boot_state_best_effort()", 1)[1].split(
         "firmware_write_failure_marker_best_effort()", 1
     )[0]
-    powershell_cleanup = firmware.split("function Remove-LibertixTemporaryFirmwareEntries", 1)[
+    powershell_cleanup = firmware.split("function Get-ValidatedTemporaryFirmwareCleanupState", 1)[
         1
     ].split("function Set-NativeUefiBootOrderOnce", 1)[0]
 
@@ -3973,6 +4099,12 @@ def test_uefi_rollback_proves_firmware_and_esp_cleanup() -> None:
     assert 'umount "$esp_mount" || return 1' in cleanup
     assert 'parted -s "$DISK" set "$esp_num" esp on 2>/dev/null || return 1' in restore
     assert "Temporary Libertix BCD firmware entries remain after cleanup" in powershell_cleanup
+    assert "Get-ValidatedTemporaryFirmwareCleanupState" in powershell_cleanup
+    assert "Test-BcdFirmwareEntryLoaderPath" in powershell_cleanup
+    assert "Test-EfiLoadOptionLoaderPath" in powershell_cleanup
+    assert "Assert-FirmwareBootNumberAbsent" in powershell_cleanup
+    assert "Remove-BcdFirmwareEntriesByDescription" not in powershell_cleanup
+    assert "Remove-NativeFirmwareEntriesByDescription" not in powershell_cleanup
     assert (
         "Temporary Libertix firmware entry Boot{0:X4} remains after cleanup" in powershell_cleanup
     )
@@ -4006,6 +4138,7 @@ def test_wpf_runtime_failure_paths_are_bounded_and_recoverable() -> None:
 
 def test_distribution_selection_reuses_compatibility_and_publishes_catalog_atomically() -> None:
     chooser = read("Pages/ChooseDistro.xaml.cs")
+    chooser_xaml = read("Pages/ChooseDistro.xaml")
     catalog_loader = read("Installation/DistributionCatalogLoader.cs")
 
     assert "_partitionConfigValid = _installationState.Compatibility != null;" in chooser
@@ -4017,8 +4150,20 @@ def test_distribution_selection_reuses_compatibility_and_publishes_catalog_atomi
     assert "distributions.Add(new DistroInfo" in catalog_loader
     assert "return distributions;" in catalog_loader
     catalog_loaded = chooser.index("DistributionCatalogLoader.LoadAsync(_filepool)")
-    catalog_published = chooser.index("_distros.Clear();", catalog_loaded)
-    assert chooser.index("_distros.Add(distro);", catalog_published) > catalog_published
+    catalog_built = chooser.index(
+        "new ObservableCollection<DistroInfo>(validatedDistros)", catalog_loaded
+    )
+    catalog_published = chooser.index("_distros = publishedDistros;", catalog_built)
+    assert (
+        chooser.index("DistrosListBox.ItemsSource = _distros;", catalog_published)
+        > catalog_published
+    )
+    assert "_distros.Clear();" not in chooser
+    assert "MessageBox.Show(" not in chooser
+    assert "RetryCatalogButton_Click" in chooser
+    assert 'AutomationProperties.AutomationId="DistroCatalogRetryButton"' in chooser_xaml
+    assert "ClearSelection();" in chooser[catalog_loaded:catalog_published]
+    assert "RestoreSelection(selectedDistroId);" in chooser[catalog_published:]
 
 
 def test_dead_command_and_error_panel_action_plumbing_are_removed() -> None:

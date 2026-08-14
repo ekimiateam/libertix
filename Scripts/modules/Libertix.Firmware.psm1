@@ -94,6 +94,77 @@ function Get-EfiLoadOptionDescription {
     return [Text.Encoding]::Unicode.GetString($Bytes, $offset, $end - $offset)
 }
 
+function Get-EfiLoadOptionFilePaths {
+    param([byte[]]$Bytes)
+
+    $paths = New-Object System.Collections.Generic.List[string]
+    if (-not $Bytes -or $Bytes.Length -lt 8) {
+        return @($paths)
+    }
+
+    $filePathListLength = [BitConverter]::ToUInt16($Bytes, 4)
+    $offset = 6
+    $descriptionTerminated = $false
+    while ($offset + 1 -lt $Bytes.Length) {
+        if ($Bytes[$offset] -eq 0 -and $Bytes[$offset + 1] -eq 0) {
+            $offset += 2
+            $descriptionTerminated = $true
+            break
+        }
+        $offset += 2
+    }
+    if (-not $descriptionTerminated) {
+        return @($paths)
+    }
+
+    $filePathListEnd = $offset + $filePathListLength
+    if ($filePathListEnd -gt $Bytes.Length) {
+        return @($paths)
+    }
+    while ($offset + 4 -le $filePathListEnd) {
+        $nodeType = $Bytes[$offset]
+        $nodeSubType = $Bytes[$offset + 1]
+        $nodeLength = [BitConverter]::ToUInt16($Bytes, $offset + 2)
+        if ($nodeLength -lt 4 -or $offset + $nodeLength -gt $filePathListEnd) {
+            return @()
+        }
+        if ($nodeType -eq 0x04 -and $nodeSubType -eq 0x04) {
+            $pathByteLength = [int]$nodeLength - 4
+            if ($pathByteLength -lt 2 -or ($pathByteLength % 2) -ne 0) {
+                return @()
+            }
+            $path = [Text.Encoding]::Unicode.GetString(
+                $Bytes,
+                $offset + 4,
+                $pathByteLength
+            ).TrimEnd([char]0)
+            if (-not [string]::IsNullOrWhiteSpace($path)) {
+                $paths.Add($path)
+            }
+        }
+        $offset += $nodeLength
+    }
+    if ($offset -ne $filePathListEnd) {
+        return @()
+    }
+    return @($paths)
+}
+
+function Test-EfiLoadOptionLoaderPath {
+    param(
+        [byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][string]$ExpectedPath
+    )
+
+    $matchingPaths = @(
+        Get-EfiLoadOptionFilePaths -Bytes $Bytes |
+            Where-Object {
+                $_.Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase)
+            }
+    )
+    return $matchingPaths.Count -eq 1
+}
+
 function Get-EfiLoadOptionOptionalDataLength {
     param([byte[]]$Bytes)
     if (-not $Bytes -or $Bytes.Length -lt 8) { return -1 }
@@ -135,5 +206,6 @@ function Remove-EfiLoadOptionOptionalData {
 Export-ModuleMember -Function `
     New-EfiFilePathNode, New-EfiHardDriveNode, New-EfiEndNode, New-EfiLoadOption, `
     ConvertFrom-BootOrderBytes, ConvertTo-BootOrderBytes, `
-    Get-EfiLoadOptionDescription, Get-EfiLoadOptionOptionalDataLength, `
+    Get-EfiLoadOptionDescription, Get-EfiLoadOptionFilePaths, `
+    Test-EfiLoadOptionLoaderPath, Get-EfiLoadOptionOptionalDataLength, `
     Remove-EfiLoadOptionOptionalData

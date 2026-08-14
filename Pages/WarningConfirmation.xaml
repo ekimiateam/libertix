@@ -10,7 +10,7 @@
       Loaded="WarningConfirmation_Loaded"
       PreviewKeyDown="WarningConfirmation_PreviewKeyDown">
 
-    <Grid Background="{DynamicResource PrimaryBackground}" Margin="20,8,20,12">
+    <Grid Background="{DynamicResource PrimaryBackground}" Margin="20,6,20,12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -20,79 +20,63 @@
         <Label Grid.Row="0"
                Content="{DynamicResource WarningTitle}"
                HorizontalAlignment="Center"
-               Margin="10,0,10,8"
-               FontSize="44"
+               Margin="10,0,10,6"
+               FontSize="42"
                FontWeight="Light"
                Foreground="{DynamicResource ErrorColor}"/>
 
-        <Grid Grid.Row="1"
-              Width="620">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-
-            <Border Grid.Row="0"
-                    Background="{DynamicResource SecondaryBackground}"
-                    CornerRadius="8"
-                    Padding="18"
-                    BorderBrush="{DynamicResource ErrorColor}"
-                    BorderThickness="2">
-                <ScrollViewer VerticalScrollBarVisibility="Auto"
-                              HorizontalScrollBarVisibility="Disabled">
-                    <StackPanel>
-                        <TextBlock Text="{DynamicResource WarningMessage}"
-                                   Foreground="{DynamicResource TextPrimary}"
-                                   FontSize="16"
-                                   TextWrapping="Wrap"
-                                   TextAlignment="Center"
-                                   Margin="0,0,0,15"/>
-
-                        <TextBlock Text="{DynamicResource WarningRisks}"
-                                   Foreground="{DynamicResource WarningColor}"
-                                   FontSize="14"
-                                   TextWrapping="Wrap"
-                                   TextAlignment="Left"
-                                   Margin="0,0,0,15"/>
-
-                        <TextBlock Text="{DynamicResource WarningRecommendations}"
-                                   Foreground="{DynamicResource AccentColor}"
-                                   FontSize="14"
-                                   TextWrapping="Wrap"
-                                   TextAlignment="Left"
-                                   Margin="0,0,0,15"/>
-
-                        <TextBlock x:Name="HibernationNotice"
-                                   Text="{DynamicResource WarningHibernationNotice}"
-                                   Foreground="{DynamicResource WarningColor}"
-                                   FontSize="14"
-                                   TextWrapping="Wrap"
-                                   TextAlignment="Left"/>
-                    </StackPanel>
-                </ScrollViewer>
-            </Border>
-
-            <CheckBox x:Name="ConfirmCheckBox"
-                      AutomationProperties.AutomationId="WarningAcknowledgement"
-                      Grid.Row="1"
-                      MinHeight="34"
-                      Margin="0,12,0,0"
-                      Padding="2"
-                      TabIndex="0"
-                      Foreground="{DynamicResource TextPrimary}"
-                      FontSize="14"
-                      Checked="ConfirmCheckBox_Changed"
-                      Unchecked="ConfirmCheckBox_Changed">
-                <TextBlock Text="{DynamicResource WarningConfirmCheckbox}"
+        <Border Grid.Row="1"
+                Width="640"
+                VerticalAlignment="Center"
+                Background="{DynamicResource SecondaryBackground}"
+                CornerRadius="8"
+                Padding="12"
+                BorderBrush="{DynamicResource ErrorColor}"
+                BorderThickness="2">
+            <StackPanel>
+                <TextBlock Text="{DynamicResource WarningMessage}"
+                           Foreground="{DynamicResource TextPrimary}"
+                           FontSize="15"
+                           LineHeight="21"
+                           LineStackingStrategy="BlockLineHeight"
                            TextWrapping="Wrap"
-                           Foreground="{DynamicResource TextPrimary}"/>
-            </CheckBox>
-        </Grid>
+                           TextAlignment="Left"
+                           Margin="0,0,0,12"/>
+
+                <TextBlock Text="{DynamicResource WarningRisks}"
+                           Foreground="{DynamicResource WarningColor}"
+                           FontSize="13"
+                           LineHeight="20"
+                           LineStackingStrategy="BlockLineHeight"
+                           TextWrapping="Wrap"
+                           TextAlignment="Left"
+                           Margin="0,0,0,12"/>
+
+                <TextBlock Text="{DynamicResource WarningRecommendations}"
+                           Foreground="{DynamicResource AccentColor}"
+                           FontSize="13"
+                           LineHeight="20"
+                           LineStackingStrategy="BlockLineHeight"
+                           TextWrapping="Wrap"
+                           TextAlignment="Left"
+                           Margin="0,0,0,12"/>
+
+                <TextBlock x:Name="HibernationNotice"
+                           Text="{DynamicResource WarningHibernationNotice}"
+                           Foreground="{DynamicResource WarningColor}"
+                           FontSize="13"
+                           LineHeight="20"
+                           LineStackingStrategy="BlockLineHeight"
+                           TextWrapping="Wrap"
+                           TextAlignment="Left"/>
+            </StackPanel>
+        </Border>
 
         <Grid Grid.Row="2" Margin="0,10,0,0">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="200"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="200"/>
             </Grid.ColumnDefinitions>
 
             <Button Content="{DynamicResource Back}"
@@ -100,12 +84,34 @@
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Left"
-                    TabIndex="1"
+                    TabIndex="0"
                     Click="BackButton_Click"/>
+
+            <CheckBox x:Name="ConfirmCheckBox"
+                      AutomationProperties.AutomationId="WarningAcknowledgement"
+                      Grid.Column="1"
+                      MinHeight="40"
+                      Margin="14,0"
+                      Padding="0"
+                      HorizontalAlignment="Center"
+                      HorizontalContentAlignment="Center"
+                      VerticalAlignment="Center"
+                      VerticalContentAlignment="Center"
+                      TabIndex="1"
+                      Foreground="{DynamicResource TextPrimary}"
+                      FontSize="13"
+                      Checked="ConfirmCheckBox_Changed"
+                      Unchecked="ConfirmCheckBox_Changed">
+                <TextBlock Text="{DynamicResource WarningConfirmCheckbox}"
+                           TextWrapping="NoWrap"
+                           TextAlignment="Center"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextPrimary}"/>
+            </CheckBox>
 
             <Button x:Name="ConfirmButton"
                     AutomationProperties.AutomationId="WarningConfirmButton"
-                    Grid.Column="1"
+                    Grid.Column="2"
                     Content="{DynamicResource WarningConfirmButton}"
                     Style="{StaticResource ModernButton}"
                     Width="200"

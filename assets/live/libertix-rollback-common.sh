@@ -245,5 +245,8 @@ fail_and_exit() {
         emit_install_result false "$rc" "skipped-or-failed"
     fi
     firmware_write_failure_marker_best_effort "$rc"
+    # A shutdown may continue as soon as the transactional child exits. Flush
+    # the durable ledger, rollback markers, filesystem metadata, and logs first.
+    sync || true
     exit "$rc"
 }

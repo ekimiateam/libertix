@@ -332,11 +332,24 @@ function Remove-FirmwareBootNumberFromOrder {
     }
 }
 
-function Get-BcdFirmwareEntryIdsByDescription {
+function Write-LibertixFirmwareOwnershipLog {
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [string]$Color = "Gray"
+    )
+
+    if (Get-Command Write-Log -ErrorAction SilentlyContinue) {
+        Write-Log $Message $Color
+    } else {
+        Write-Verbose $Message
+    }
+}
+
+function Get-BcdFirmwareEntriesByDescription {
     param([Parameter(Mandatory = $true)][string[]]$Descriptions)
 
     $firmwareText = Invoke-BcdeditCommand -Arguments @("/enum", "firmware", "/v")
-    $identifiers = New-Object System.Collections.Generic.List[string]
+    $entries = New-Object System.Collections.Generic.List[object]
     foreach ($entryBlock in ($firmwareText -split "(?:`r?`n){2,}")) {
         foreach ($description in $Descriptions) {
             $descriptionAtLineEnd = "(?m)^[^`r`n]+\s+$([regex]::Escape($description))\s*$"
@@ -353,32 +366,212 @@ function Get-BcdFirmwareEntryIdsByDescription {
             if ($identifierMatches.Count -ne 1) {
                 throw "A BCD firmware entry named '$description' does not contain exactly one canonical object identifier."
             }
-            $identifiers.Add($identifierMatches[0].Value)
+            $entries.Add([pscustomobject]@{
+                Identifier = $identifierMatches[0].Value
+                Description = $description
+                Block = $entryBlock
+            })
             break
         }
     }
 
-    return @($identifiers)
+    return $entries.ToArray()
 }
 
-function Remove-BcdFirmwareEntriesByDescription {
+function Get-BcdFirmwareEntryIdsByDescription {
     param([Parameter(Mandatory = $true)][string[]]$Descriptions)
 
-    $identifiers = @(Get-BcdFirmwareEntryIdsByDescription -Descriptions $Descriptions)
+    return @(
+        Get-BcdFirmwareEntriesByDescription -Descriptions $Descriptions |
+            ForEach-Object { $_.Identifier }
+    )
+}
 
-    foreach ($identifier in $identifiers) {
-        Invoke-BcdeditCommand -Arguments @("/delete", $identifier, "/f") | Out-Null
+function Test-BcdFirmwareEntryLoaderPath {
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)][string]$ExpectedLoaderPath
+    )
+
+    $pathAtLineEnd = "(?im)^[^`r`n]+\s+$([regex]::Escape($ExpectedLoaderPath))\s*$"
+    return [regex]::IsMatch([string]$Entry.Block, $pathAtLineEnd)
+}
+
+function Get-ValidatedTemporaryFirmwareCleanupState {
+    $state = Get-TransactionPartitionState
+    if (-not $state) {
+        Write-LibertixFirmwareOwnershipLog `
+            -Message "UEFI cleanup skipped: no transaction ownership state exists." `
+            -Color "Yellow"
+        return $null
+    }
+    if (
+        $RecoveryRunId -notmatch '^[0-9a-f]{32}$' -or
+        -not ($state.PSObject.Properties.Name -contains "RecoveryRunId") -or
+        [string]$state.RecoveryRunId -ne $RecoveryRunId -or
+        $InstallerBootDescription -ne "Libertix UEFI Installer $RecoveryRunId"
+    ) {
+        throw "Temporary UEFI cleanup ownership does not match the active recovery run."
+    }
+    if (
+        $state.PSObject.Properties.Name -contains "FirmwareEntryId" -and
+        -not [string]::IsNullOrWhiteSpace([string]$state.FirmwareEntryId) -and
+        [string]$state.FirmwareEntryId -notmatch '^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$'
+    ) {
+        throw "Saved BCD firmware ownership identifier is invalid."
+    }
+    return $state
+}
+
+function Remove-OwnedBcdFirmwareEntries {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$ExpectedLoaderPath
+    )
+
+    $trackedIdentifier = if (
+        $State.PSObject.Properties.Name -contains "FirmwareEntryId"
+    ) {
+        [string]$State.FirmwareEntryId
+    } else {
+        ""
+    }
+    $entries = @(
+        Get-BcdFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
+    )
+    foreach ($entry in $entries) {
+        $tracked = (
+            -not [string]::IsNullOrWhiteSpace($trackedIdentifier) -and
+            $entry.Identifier.Equals($trackedIdentifier, [StringComparison]::OrdinalIgnoreCase)
+        )
+        $pathMatches = Test-BcdFirmwareEntryLoaderPath `
+            -Entry $entry `
+            -ExpectedLoaderPath $ExpectedLoaderPath
+        if (-not $tracked -and -not $pathMatches) {
+            throw (
+                "BCD entry $($entry.Identifier) uses this recovery description but has " +
+                "neither the tracked identifier nor the expected loader path; refusing deletion."
+            )
+        }
+        $proof = if ($tracked -and $pathMatches) {
+            "transaction identifier and loader path"
+        } elseif ($tracked) {
+            "transaction identifier and recovery-specific description"
+        } else {
+            "recovery-specific description and loader path"
+        }
+        Write-LibertixFirmwareOwnershipLog `
+            -Message "Deleting owned BCD firmware entry $($entry.Identifier); proof=$proof." `
+            -Color "Cyan"
+        Invoke-BcdeditCommand -Arguments @("/delete", $entry.Identifier, "/f") | Out-Null
+    }
+
+    $remaining = @(
+        Get-BcdFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
+    )
+    if ($remaining.Count -ne 0) {
+        throw "Temporary Libertix BCD firmware entries remain after cleanup."
     }
 }
 
-function Remove-NativeFirmwareEntriesByDescription {
-    param([Parameter(Mandatory = $true)][string[]]$Descriptions)
+function Remove-FirmwareBootReferenceAndVariable {
+    param(
+        [Parameter(Mandatory = $true)][uint16]$BootNumber,
+        [Parameter(Mandatory = $true)][string]$BootVariable
+    )
+
+    $bootNext = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext"))
+    if ($bootNext.Count -eq 1 -and [uint16]$bootNext[0] -eq $BootNumber) {
+        Remove-FirmwareVariable -Name "BootNext"
+    }
+    Remove-FirmwareBootNumberFromOrder -BootNumber $BootNumber
+    Remove-FirmwareVariable -Name $BootVariable
+}
+
+function Assert-FirmwareBootNumberAbsent {
+    param([Parameter(Mandatory = $true)][uint16]$BootNumber)
+
+    $bootVariable = "Boot{0:X4}" -f $BootNumber
+    if (Test-FirmwareVariableExists -Name $bootVariable) {
+        throw "Owned UEFI firmware entry $bootVariable remains after cleanup."
+    }
+    foreach ($referenceName in @("BootNext", "BootOrder")) {
+        $references = @(
+            ConvertFrom-BootOrderBytes -Bytes (
+                Get-FirmwareVariableBytes -Name $referenceName
+            )
+        )
+        if (@($references | Where-Object { [uint16]$_ -eq $BootNumber }).Count -ne 0) {
+            throw "$referenceName still references removed UEFI entry $bootVariable."
+        }
+    }
+}
+
+function Remove-TrackedLibertixFirmwareEntry {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$ExpectedLoaderPath
+    )
+
+    if (
+        -not ($State.PSObject.Properties.Name -contains "InstallerBootNumber") -or
+        -not ($State.PSObject.Properties.Name -contains "InstallerBootVariable") -or
+        $null -eq $State.InstallerBootNumber -or
+        [string]::IsNullOrWhiteSpace([string]$State.InstallerBootVariable)
+    ) {
+        return $null
+    }
+
+    [int]$savedNumber = [int]$State.InstallerBootNumber
+    [string]$savedVariable = [string]$State.InstallerBootVariable
+    if ($savedNumber -lt 0 -or $savedNumber -gt 0xFFFF) {
+        throw "Saved UEFI firmware ownership number is invalid."
+    }
+    [uint16]$bootNumber = [uint16]$savedNumber
+    $expectedVariable = "Boot{0:X4}" -f $bootNumber
+    if ($savedVariable -ne $expectedVariable) {
+        throw "Saved UEFI firmware ownership variable is invalid."
+    }
+
+    $bytes = Get-FirmwareVariableBytes -Name $savedVariable
+    if ($bytes) {
+        if ((Get-EfiLoadOptionDescription -Bytes $bytes) -ne $InstallerBootDescription) {
+            throw "$savedVariable exists but its description is not owned by this recovery run."
+        }
+        if (-not (Test-EfiLoadOptionLoaderPath -Bytes $bytes -ExpectedPath $ExpectedLoaderPath)) {
+            throw "$savedVariable exists but its loader path is not owned by this recovery run."
+        }
+        $proof = "transaction, description, loader path"
+    } else {
+        $proof = "transaction; firmware variable already absent"
+    }
+    Write-LibertixFirmwareOwnershipLog `
+        -Message "Cleaning tracked UEFI entry $savedVariable; proof=$proof." `
+        -Color "Cyan"
+    Remove-FirmwareBootReferenceAndVariable `
+        -BootNumber $bootNumber `
+        -BootVariable $savedVariable
+    Assert-FirmwareBootNumberAbsent -BootNumber $bootNumber
+    return $bootNumber
+}
+
+function Remove-OtherOwnedNativeFirmwareEntries {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedLoaderPath,
+        $ExcludedBootNumber = $null
+    )
 
     $knownNumbers = @(
         ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder")
         ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext")
     ) | Sort-Object -Unique
     foreach ($candidate in $knownNumbers) {
+        if (
+            $null -ne $ExcludedBootNumber -and
+            [uint16]$candidate -eq [uint16]$ExcludedBootNumber
+        ) {
+            continue
+        }
         $name = "Boot{0:X4}" -f $candidate
         $bytes = Get-FirmwareVariableBytes -Name $name
         if (-not $bytes) {
@@ -386,77 +579,50 @@ function Remove-NativeFirmwareEntriesByDescription {
         }
 
         $description = Get-EfiLoadOptionDescription -Bytes $bytes
-        if ($Descriptions -contains $description) {
-            Remove-FirmwareBootNumberFromOrder -BootNumber ([uint16]$candidate)
-            Remove-FirmwareVariable -Name $name
+        if ($description -ne $InstallerBootDescription) {
+            continue
         }
+        if (-not (Test-EfiLoadOptionLoaderPath -Bytes $bytes -ExpectedPath $ExpectedLoaderPath)) {
+            throw "$name has this recovery description but an unexpected loader path; refusing deletion."
+        }
+        Write-LibertixFirmwareOwnershipLog `
+            -Message "Deleting owned UEFI entry $name; proof=recovery-specific description and loader path." `
+            -Color "Cyan"
+        Remove-FirmwareBootReferenceAndVariable `
+            -BootNumber ([uint16]$candidate) `
+            -BootVariable $name
+        Assert-FirmwareBootNumberAbsent -BootNumber ([uint16]$candidate)
     }
-}
-
-function Remove-TrackedLibertixFirmwareEntry {
-    $state = Get-TransactionPartitionState
-    if (
-        -not $state -or
-        -not ($state.PSObject.Properties.Name -contains "InstallerBootNumber") -or
-        -not ($state.PSObject.Properties.Name -contains "InstallerBootVariable") -or
-        $null -eq $state.InstallerBootNumber -or
-        [string]::IsNullOrWhiteSpace([string]$state.InstallerBootVariable)
-    ) {
-        return
-    }
-
-    [int]$savedNumber = [int]$state.InstallerBootNumber
-    [string]$savedVariable = [string]$state.InstallerBootVariable
-    $expectedVariable = "Boot{0:X4}" -f [uint16]$savedNumber
-    if ($savedNumber -lt 0 -or $savedNumber -gt 0xFFFF -or $savedVariable -ne $expectedVariable) {
-        throw "Saved UEFI firmware ownership is invalid."
-    }
-
-    $bytes = Get-FirmwareVariableBytes -Name $savedVariable
-    if (-not $bytes) {
-        return
-    }
-    if ((Get-EfiLoadOptionDescription -Bytes $bytes) -ne $InstallerBootDescription) {
-        throw "$savedVariable exists but is not owned by this Libertix recovery run."
-    }
-
-    $bootNext = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext"))
-    if ($bootNext.Count -eq 1 -and [uint16]$bootNext[0] -eq [uint16]$savedNumber) {
-        Remove-FirmwareVariable -Name "BootNext"
-    }
-    Remove-FirmwareBootNumberFromOrder -BootNumber ([uint16]$savedNumber)
-    Remove-FirmwareVariable -Name $savedVariable
 }
 
 function Remove-LibertixTemporaryFirmwareEntries {
+    param([Parameter(Mandatory = $true)][string]$ExpectedLoaderPath)
+
     # A Boot#### variable can exist without appearing in BootOrder or BootNext
     # if firmware setup was interrupted between those writes. Transaction state
     # is the authoritative ownership proof for that orphaned entry.
-    Remove-TrackedLibertixFirmwareEntry
-    Remove-BcdFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
-    Remove-NativeFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
+    $state = Get-ValidatedTemporaryFirmwareCleanupState
+    if (-not $state) { return }
 
-    $bootNext = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootNext"))
-    if ($bootNext.Count -eq 1) {
-        $bootVariable = "Boot{0:X4}" -f [uint16]$bootNext[0]
-        $bytes = Get-FirmwareVariableBytes -Name $bootVariable
-        if ($bytes -and (Get-EfiLoadOptionDescription -Bytes $bytes) -eq $InstallerBootDescription) {
-            Remove-FirmwareVariable -Name "BootNext"
-        }
-    }
+    Remove-OwnedBcdFirmwareEntries `
+        -State $state `
+        -ExpectedLoaderPath $ExpectedLoaderPath
+    $trackedBootNumber = Remove-TrackedLibertixFirmwareEntry `
+        -State $state `
+        -ExpectedLoaderPath $ExpectedLoaderPath
+    Remove-OtherOwnedNativeFirmwareEntries `
+        -ExpectedLoaderPath $ExpectedLoaderPath `
+        -ExcludedBootNumber $trackedBootNumber
 
-    $remainingBcdEntries = @(
-        Get-BcdFirmwareEntryIdsByDescription -Descriptions @($InstallerBootDescription)
-    )
-    if ($remainingBcdEntries.Count -ne 0) {
-        throw "Temporary Libertix BCD firmware entries remain after cleanup."
-    }
     $remainingNativeEntry = Get-FirmwareBootNumberByDescription `
         -Description $InstallerBootDescription
     if ($null -ne $remainingNativeEntry) {
         throw ("Temporary Libertix firmware entry Boot{0:X4} remains after cleanup." -f `
             [uint16]$remainingNativeEntry)
     }
+    Write-LibertixFirmwareOwnershipLog `
+        -Message "Temporary UEFI and BCD ownership cleanup verified; no owned entry remains." `
+        -Color "Green"
 }
 
 function Remove-LibertixInstalledFirmwareEntries {
@@ -464,7 +630,11 @@ function Remove-LibertixInstalledFirmwareEntries {
 
     $ownerPath = Join-Path (Join-Path $EspDrive $InstalledEspDirectory) $InstallerEspOwnershipFile
     $ownerLines = @(Get-Content -LiteralPath $ownerPath -ErrorAction Stop)
-    if ($ownerLines.Count -ne 5 -or $ownerLines[0].Trim() -ne $RecoveryRunId) {
+    if (
+        $ownerLines.Count -ne 5 -or
+        $ownerLines[0].Trim() -ne $RecoveryRunId -or
+        $ownerLines[4].Trim() -ne $InstalledBootLoaderPath
+    ) {
         throw "Installed Libertix firmware ownership marker is invalid."
     }
     $bootNumberText = $ownerLines[1].Trim()
@@ -478,12 +648,23 @@ function Remove-LibertixInstalledFirmwareEntries {
         if ((Get-EfiLoadOptionDescription -Bytes $bytes) -ne $InstalledBootDescription) {
             throw "$bootVariable exists but is not the installed Libertix entry owned by this recovery run."
         }
-        Remove-FirmwareBootNumberFromOrder -BootNumber $bootNumber
-        Remove-FirmwareVariable -Name $bootVariable
+        if (-not (Test-EfiLoadOptionLoaderPath -Bytes $bytes -ExpectedPath $InstalledBootLoaderPath)) {
+            throw "$bootVariable exists but its loader path does not match the owned installed entry."
+        }
+        $proof = "ESP owner, description, loader path"
+    } else {
+        $proof = "ESP owner; firmware variable already absent"
     }
-    if (Test-FirmwareVariableExists -Name $bootVariable) {
-        throw "Installed Libertix firmware entry $bootVariable remains after rollback."
-    }
+    Write-LibertixFirmwareOwnershipLog `
+        -Message "Cleaning installed UEFI entry $bootVariable; proof=$proof." `
+        -Color "Cyan"
+    Remove-FirmwareBootReferenceAndVariable `
+        -BootNumber $bootNumber `
+        -BootVariable $bootVariable
+    Assert-FirmwareBootNumberAbsent -BootNumber $bootNumber
+    Write-LibertixFirmwareOwnershipLog `
+        -Message "Installed UEFI ownership cleanup verified for $bootVariable." `
+        -Color "Green"
 }
 
 function Set-NativeUefiBootOrderOnce {
@@ -618,8 +799,7 @@ function Assert-LibertixFirmwareEntry {
         throw "$bootVariable description does not match '$InstallerBootDescription'."
     }
 
-    $decoded = [Text.Encoding]::Unicode.GetString($bytes)
-    if ($decoded -notmatch [regex]::Escape($LoaderPath)) {
+    if (-not (Test-EfiLoadOptionLoaderPath -Bytes $bytes -ExpectedPath $LoaderPath)) {
         throw "$bootVariable does not contain the expected loader path $LoaderPath."
     }
 }
@@ -641,6 +821,9 @@ function New-LibertixBcdFirmwareEntry {
         throw "Could not parse exactly one canonical firmware entry identifier from bcdedit output: $copyText"
     }
     $entryId = $entryIdMatches[0].Value
+    # Persist the exact BCD owner before any follow-up mutation. If Windows is
+    # interrupted here, rollback can still remove only this copied object.
+    Update-TransactionBcdEntryState -FirmwareEntryId $entryId
 
     Invoke-BcdeditCommand -Arguments @("/set", $entryId, "device", "partition=$EspDrive") | Out-Null
     Invoke-BcdeditCommand -Arguments @("/set", $entryId, "path", $LoaderPath) | Out-Null
@@ -689,15 +872,21 @@ function New-LibertixBcdFirmwareEntry {
     # visible as a duplicate. Remove only the source and require one surviving
     # firmware entry with the expected description.
     Invoke-BcdeditCommand -Arguments @("/delete", $entryId, "/f") | Out-Null
-    $survivingIds = @(
-        Get-BcdFirmwareEntryIdsByDescription -Descriptions @($InstallerBootDescription)
+    $survivingEntries = @(
+        Get-BcdFirmwareEntriesByDescription -Descriptions @($InstallerBootDescription)
     )
-    if ($survivingIds.Count -ne 1) {
-        throw "Expected one materialized Libertix firmware entry after BCD source cleanup; found $($survivingIds.Count)."
+    if ($survivingEntries.Count -ne 1) {
+        throw "Expected one materialized Libertix firmware entry after BCD source cleanup; found $($survivingEntries.Count)."
+    }
+    if (-not (Test-BcdFirmwareEntryLoaderPath `
+        -Entry $survivingEntries[0] `
+        -ExpectedLoaderPath $LoaderPath
+    )) {
+        throw "The materialized Libertix BCD firmware entry does not contain the expected loader path."
     }
 
     return [pscustomobject]@{
-        EntryId = $survivingIds[0]
+        EntryId = $survivingEntries[0].Identifier
         BootNumber = [uint16]$bootNumber
         BootVariable = $bootVariable
     }

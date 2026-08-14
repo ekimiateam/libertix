@@ -29,9 +29,11 @@ $MbrBackupHash = Join-Path $Root "mbr-backup\mbr-before-grub.sha256"
 $ExecutionStatePath = Join-Path $Root "installation-state.json"
 $InstalledLinuxBootEvidencePath = Join-Path $Root "installed-linux-boot.json"
 $ExecutionStateModulePath = Join-Path $Root "Libertix.InstallationState.psm1"
+$AtomicFileModulePath = Join-Path $Root "Libertix.AtomicFile.psm1"
 $InstallationPolicyPath = Join-Path $Root "Libertix.InstallationPolicy.json"
 $TemporaryArtifactsModulePath = Join-Path $Root "Libertix.TemporaryArtifacts.psm1"
 $PostInstallVerificationModulePath = Join-Path $Root "Libertix.PostInstallVerification.psm1"
+$RecoveryOperationsPath = Join-Path $Root "recovery-operations.json"
 $TemporaryBootFiles = @(
     (Join-Path $SystemDrive "grldr"),
     (Join-Path $SystemDrive "grldr.mbr"),
@@ -48,8 +50,27 @@ $InstallationPolicy = Get-Content `
     -Raw `
     -Encoding UTF8 |
     ConvertFrom-Json -ErrorAction Stop
-if ([int]$InstallationPolicy.schemaVersion -ne 1 -or $null -eq $InstallationPolicy.storage) {
+if (
+    [int]$InstallationPolicy.schemaVersion -ne 1 -or
+    $null -eq $InstallationPolicy.storage -or
+    $null -eq $InstallationPolicy.volumeLabels
+) {
     throw "Installation policy is incomplete or unsupported."
+}
+$StagingVolumeLabel = [string]$InstallationPolicy.volumeLabels.staging
+$LegacyStagingVolumeLabels = @(
+    $InstallationPolicy.volumeLabels.legacyStagingForRecovery |
+        ForEach-Object { [string]$_ }
+)
+if (
+    $StagingVolumeLabel -notmatch '^[A-Z0-9]{1,11}$' -or
+    @($LegacyStagingVolumeLabels).Count -eq 0 -or
+    @(
+        $LegacyStagingVolumeLabels |
+            Where-Object { $_ -notmatch '^[A-Z0-9]{1,11}$' }
+    ).Count -ne 0
+) {
+    throw "Installation policy volume labels are invalid."
 }
 [int64]$PartitionAlignmentBytes =
     [int64]$InstallationPolicy.storage.partitionAlignmentBytes
@@ -60,11 +81,222 @@ if (-not (Test-Path -LiteralPath $TemporaryArtifactsModulePath -PathType Leaf)) 
     throw "Temporary-artifact cleanup module is missing from the recovery payload."
 }
 Import-Module -Name $TemporaryArtifactsModulePath -Force -ErrorAction Stop
+if (-not (Test-Path -LiteralPath $AtomicFileModulePath -PathType Leaf)) {
+    throw "Atomic-file module is missing from the recovery payload."
+}
+Import-Module -Name $AtomicFileModulePath -Force -ErrorAction Stop
+
+$script:RecoveryCorrelationId = "unknown"
+$script:RecoveryAttemptId = [Guid]::NewGuid().ToString("N")
+$script:RecoveryOperationRecords = New-Object 'System.Collections.Generic.List[object]'
+$script:RecoveryErrors = New-Object 'System.Collections.Generic.List[object]'
+$script:RecoveryPriorAttempts = @()
+$script:RecoveryAttemptStatus = "running"
+$script:RecoveryRollbackRequested = $false
+$script:RecoveryCompensationSequenceStarted = $false
 
 function Write-RecoveryLog {
     param([string]$Message)
-    New-Item -ItemType Directory -Force -Path $Root | Out-Null
-    Add-Content -Path $Log -Value ("[{0}] {1}" -f (Get-Date -Format o), $Message)
+    $line = "[{0}] correlation={1} attempt={2} {3}" -f `
+        (Get-Date -Format o), `
+        $script:RecoveryCorrelationId, `
+        $script:RecoveryAttemptId, `
+        $Message
+    [Console]::Out.WriteLine($line)
+    try {
+        New-Item -ItemType Directory -Force -Path $Root -ErrorAction Stop | Out-Null
+        Add-Content -LiteralPath $Log -Value $line -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Warning "Recovery log persistence failed: $($_.Exception.Message)"
+    }
+}
+
+function Save-RecoveryOperationState {
+    $currentAttempt = [pscustomobject][ordered]@{
+        attemptId = $script:RecoveryAttemptId
+        action = $Action
+        status = $script:RecoveryAttemptStatus
+        updatedAtUtc = [DateTime]::UtcNow.ToString("o")
+        operations = @($script:RecoveryOperationRecords)
+        errors = @($script:RecoveryErrors)
+    }
+    $state = [ordered]@{
+        schemaVersion = 1
+        correlationId = $script:RecoveryCorrelationId
+        updatedAtUtc = [DateTime]::UtcNow.ToString("o")
+        attempts = @($script:RecoveryPriorAttempts) + @($currentAttempt)
+    }
+    $directory = Split-Path -Parent $RecoveryOperationsPath
+    New-Item -ItemType Directory -Force -Path $directory -ErrorAction Stop | Out-Null
+    $temporaryPath = Join-Path $directory ".recovery-operations.$([Guid]::NewGuid().ToString('N')).tmp"
+    $backupPath = Join-Path $directory ".recovery-operations.$([Guid]::NewGuid().ToString('N')).bak"
+    try {
+        $encoding = New-Object Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText(
+            $temporaryPath,
+            (($state | ConvertTo-Json -Depth 8) + "`n"),
+            $encoding
+        )
+        Publish-LibertixFileAtomic `
+            -TemporaryPath $temporaryPath `
+            -DestinationPath $RecoveryOperationsPath `
+            -BackupPath $backupPath
+    } finally {
+        if ([IO.File]::Exists($temporaryPath)) {
+            [IO.File]::Delete($temporaryPath)
+        }
+        if ([IO.File]::Exists($backupPath)) {
+            [IO.File]::Delete($backupPath)
+        }
+    }
+}
+
+function Initialize-RecoveryOperationHistory {
+    if (-not (Test-Path -LiteralPath $RecoveryOperationsPath -PathType Leaf)) {
+        return
+    }
+    try {
+        $existing = Get-Content `
+            -LiteralPath $RecoveryOperationsPath `
+            -Raw `
+            -Encoding UTF8 `
+            -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if (
+            [int]$existing.schemaVersion -ne 1 -or
+            [string]$existing.correlationId -ne $script:RecoveryCorrelationId
+        ) {
+            Write-RecoveryLog (
+                "Existing recovery operation history belongs to another " +
+                "schema or transaction and will not be reused."
+            )
+            return
+        }
+        $script:RecoveryPriorAttempts = @($existing.attempts)
+        Write-RecoveryLog (
+            "Loaded $($script:RecoveryPriorAttempts.Count) prior recovery attempt(s)."
+        )
+    } catch {
+        # Diagnostic history must never prevent the actual rollback. The durable
+        # recovery log keeps this read failure and the next atomic save repairs it.
+        Write-RecoveryLog (
+            "Existing recovery operation history is unreadable; starting a new " +
+            "history: $($_.Exception.Message)"
+        )
+    }
+}
+
+function Save-RecoveryOperationStateSafely {
+    param([Parameter(Mandatory = $true)][string]$Context)
+
+    try {
+        Save-RecoveryOperationState
+        return $true
+    } catch {
+        $message = $_.Exception.Message
+        $alreadyRecorded = @(
+            $script:RecoveryErrors |
+                Where-Object {
+                    $_.operation -eq "state.persistence" -and
+                    $_.message -eq $message
+                }
+        ).Count -gt 0
+        if (-not $alreadyRecorded) {
+            $script:RecoveryErrors.Add([pscustomobject][ordered]@{
+                operation = "state.persistence"
+                message = $message
+                exceptionType = $_.Exception.GetType().FullName
+            })
+        }
+        Write-RecoveryLog (
+            "operation=state.persistence status=ERROR context=$Context message=$message"
+        )
+        return $false
+    }
+}
+
+function Complete-RecoveryAttemptState {
+    $script:RecoveryAttemptStatus = "succeeded"
+    if (-not (Save-RecoveryOperationStateSafely -Context "attempt.complete")) {
+        throw "Recovery succeeded but its durable operation state could not be published."
+    }
+}
+
+function Invoke-RecoveryOperation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][scriptblock]$Operation
+    )
+
+    $startedAt = [DateTime]::UtcNow
+    Write-RecoveryLog "operation=$Name status=BEGIN"
+    $record = [pscustomobject][ordered]@{
+        name = $Name
+        status = "running"
+        startedAtUtc = $startedAt.ToString("o")
+        completedAtUtc = ""
+        message = ""
+    }
+    $script:RecoveryOperationRecords.Add($record)
+    $beginStatePersisted = Save-RecoveryOperationStateSafely -Context "$Name.begin"
+    $operationSucceeded = $false
+    try {
+        $null = & $Operation
+        $record.status = "success"
+        $record.completedAtUtc = [DateTime]::UtcNow.ToString("o")
+        Write-RecoveryLog "operation=$Name status=SUCCESS"
+        $operationSucceeded = $true
+    } catch {
+        $message = $_.Exception.Message
+        $record.status = "error"
+        $record.completedAtUtc = [DateTime]::UtcNow.ToString("o")
+        $record.message = $message
+        $script:RecoveryErrors.Add([pscustomobject][ordered]@{
+            operation = $Name
+            message = $message
+            exceptionType = $_.Exception.GetType().FullName
+        })
+        Write-RecoveryLog "operation=$Name status=ERROR message=$message"
+    }
+    $endStatePersisted = Save-RecoveryOperationStateSafely -Context "$Name.end"
+    return ($operationSucceeded -and $beginStatePersisted -and $endStatePersisted)
+}
+
+function Assert-RecoveryOperationsSucceeded {
+    if ($script:RecoveryErrors.Count -eq 0) {
+        return
+    }
+    $summary = @(
+        $script:RecoveryErrors |
+            ForEach-Object { "$($_.operation): $($_.message)" }
+    ) -join " | "
+    throw "Recovery completed with $($script:RecoveryErrors.Count) error(s): $summary"
+}
+
+function Invoke-MinimumRecoveryFallback {
+    if ($script:RecoveryCompensationSequenceStarted) {
+        return
+    }
+    $script:RecoveryCompensationSequenceStarted = $true
+    Write-RecoveryLog (
+        "Primary rollback preparation failed before disk identity was proven; " +
+        "running only transaction-scoped compensations that do not select a disk partition."
+    )
+    $null = Invoke-RecoveryOperation -Name "fallback.bcd.restore" -Operation {
+        Restore-BcdState
+    }
+    $null = Invoke-RecoveryOperation -Name "fallback.windows-share.pending-cleanup" -Operation {
+        Remove-PendingWindowsSharePayload
+    }
+    $null = Invoke-RecoveryOperation -Name "fallback.hibernation.restore" -Operation {
+        Restore-OriginalHibernationSetting
+    }
+    $null = Invoke-RecoveryOperation -Name "fallback.boot-payload.cleanup" -Operation {
+        Remove-TemporaryBootPayload
+    }
+    $null = Invoke-RecoveryOperation -Name "fallback.downloads.cleanup" -Operation {
+        Remove-TransactionArtifacts
+    }
 }
 
 function Read-EnvValue {
@@ -73,11 +305,14 @@ function Read-EnvValue {
         [string]$Name
     )
 
-    if (-not (Test-Path $Path)) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
 
-    $line = Get-Content $Path | Where-Object { $_ -match "^$([regex]::Escape($Name))=" } | Select-Object -First 1
+    $line = @(
+        Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop |
+            Where-Object { $_ -match "^$([regex]::Escape($Name))=" }
+    ) | Select-Object -First 1
     if (-not $line) {
         return $null
     }
@@ -155,6 +390,10 @@ function Initialize-RecoveryExecutionState {
     $state = $State
     if ([string]$state.status -in @("running", "failed", "succeeded")) {
         $null = Start-LibertixRollback -Path $ExecutionStatePath
+    } elseif ([string]$state.status -eq "rolled-back") {
+        # A previous attempt may have restored the ledger but failed while
+        # retiring a task. Replaying the idempotent cleanup completes that run.
+        return $false
     } elseif ([string]$state.status -ne "rollback-running") {
         throw "Recovery execution state cannot begin rollback from status '$($state.status)'."
     }
@@ -187,6 +426,13 @@ function Save-RecoveryLog {
             -Force `
             -ErrorAction Stop
     }
+    if (Test-Path -LiteralPath $RecoveryOperationsPath -PathType Leaf) {
+        Copy-Item `
+            -LiteralPath $RecoveryOperationsPath `
+            -Destination (Join-Path $sessionArchive "recovery-operations.json") `
+            -Force `
+            -ErrorAction Stop
+    }
 }
 
 function Remove-TransactionArtifacts {
@@ -213,7 +459,20 @@ function Restore-OriginalHibernationSetting {
             throw "Hibernation restore did not enable HibernateEnabled."
         }
     } elseif ($originalHibernate -eq "false") {
-        Write-RecoveryLog "Hibernation was already disabled before installation; left off."
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
+        $hibernateOutput = & "$env:SystemRoot\System32\powercfg.exe" /hibernate off 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Hibernation disable failed with rc=$LASTEXITCODE output=$($hibernateOutput -join ' ')"
+        }
+        $hibernateEnabled = (
+            Get-ItemProperty `
+                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
+                -Name "HibernateEnabled" `
+                -ErrorAction Stop
+        ).HibernateEnabled
+        if ($hibernateEnabled -ne 0) {
+            throw "Hibernation restore did not disable HibernateEnabled."
+        }
     } else {
         Write-RecoveryLog "Original hibernation state unknown; left unchanged."
     }
@@ -233,6 +492,13 @@ function Restore-BcdState {
     $output = & bcdedit.exe /import $BcdBackup /clean 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "BCD restore failed with rc=$LASTEXITCODE output=$($output -join ' ')"
+    }
+    $verification = & bcdedit.exe /enum "{bootmgr}" /v 2>&1
+    if ($LASTEXITCODE -ne 0 -or @($verification).Count -eq 0) {
+        throw (
+            "BCD restore completed but Windows Boot Manager could not be " +
+            "verified (rc=$LASTEXITCODE output=$($verification -join ' '))."
+        )
     }
     Write-RecoveryLog "BCD state restored from the pre-install backup."
 }
@@ -300,6 +566,13 @@ function Remove-TemporaryBootPayload {
             Remove-Item -LiteralPath $temporaryBootFile -Force -ErrorAction Stop
             Write-RecoveryLog "Removed temporary boot file: $temporaryBootFile"
         }
+    }
+    $remainingFiles = @(
+        $TemporaryBootFiles |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    )
+    if ($remainingFiles.Count -ne 0) {
+        throw "Temporary boot payload remains: $($remainingFiles -join ', ')"
     }
 }
 
@@ -379,26 +652,46 @@ function Invoke-VerifiedInstallationSuccess {
 
 function Remove-PendingWindowsSharePayload {
     if (Test-Path -LiteralPath (Join-Path $WindowsShareRoot "pending.marker") -PathType Leaf) {
-        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $WindowsShareRoot) {
+            throw "Pending Windows sharing payload still exists after removal."
+        }
         Write-RecoveryLog "Removed pending Windows sharing payload."
     }
 }
 
 function Remove-WindowsShareAfterRollback {
-    if (-not (Test-Path -LiteralPath $WindowsShareRoot -PathType Container)) { return }
-    $shareLog = Join-Path $WindowsShareRoot "windows-share.log"
-    if (Test-Path -LiteralPath $shareLog -PathType Leaf) {
-        Copy-Item `
-            -LiteralPath $shareLog `
-            -Destination (Join-Path $Root "windows-share.log") `
-            -Force `
+    if (Test-Path -LiteralPath $WindowsShareRoot -PathType Container) {
+        $shareLog = Join-Path $WindowsShareRoot "windows-share.log"
+        if (Test-Path -LiteralPath $shareLog -PathType Leaf) {
+            Copy-Item `
+                -LiteralPath $shareLog `
+                -Destination (Join-Path $Root "windows-share.log") `
+                -Force `
+                -ErrorAction Stop
+        }
+    }
+
+    $shareTask = Get-ScheduledTask `
+        -TaskName "LibertixLinuxReadOnly" `
+        -ErrorAction SilentlyContinue
+    if ($null -ne $shareTask) {
+        Unregister-ScheduledTask `
+            -TaskName "LibertixLinuxReadOnly" `
+            -Confirm:$false `
             -ErrorAction Stop
     }
-    Unregister-ScheduledTask `
-        -TaskName "LibertixLinuxReadOnly" `
-        -Confirm:$false `
-        -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $WindowsShareRoot) {
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    }
+    if (
+        (Test-Path -LiteralPath $WindowsShareRoot) -or
+        $null -ne (Get-ScheduledTask `
+            -TaskName "LibertixLinuxReadOnly" `
+            -ErrorAction SilentlyContinue)
+    ) {
+        throw "Windows read-only Linux sharing cleanup could not be verified."
+    }
     Write-RecoveryLog "Removed Windows read-only Linux sharing after rollback."
 }
 
@@ -434,6 +727,7 @@ function Remove-EmptyTransactionExtendedContainer {
         [Parameter(Mandatory = $true)][int64]$TransactionOffset,
         [Parameter(Mandatory = $true)][int64]$TransactionSize,
         [Parameter(Mandatory = $true)][int64]$SystemPartitionEnd,
+        [int64]$OriginalSystemPartitionEnd = 0,
         [int64]$RecoveryPartitionOffset = 0
     )
 
@@ -457,10 +751,23 @@ function Remove-EmptyTransactionExtendedContainer {
                 $RecoveryPartitionOffset -le 0 -or
                 $partitionEnd -le $RecoveryPartitionOffset
             )
+            $insideOriginalSystemExtent = (
+                $OriginalSystemPartitionEnd -le 0 -or
+                $partitionEnd -le $OriginalSystemPartitionEnd
+            )
+            $containsTransaction = (
+                $partitionStart -le $TransactionOffset -and
+                $partitionEnd -ge $transactionEnd
+            )
+            $isOnlyRemainingTransactionExtent = (
+                $OriginalSystemPartitionEnd -gt 0 -and
+                $partitionStart -ge $SystemPartitionEnd -and
+                $partitionEnd -le $OriginalSystemPartitionEnd
+            )
             $isExtendedType -and
                 $partitionStart -ge $SystemPartitionEnd -and
-                $partitionStart -le $TransactionOffset -and
-                $partitionEnd -ge $transactionEnd -and
+                $insideOriginalSystemExtent -and
+                ($containsTransaction -or $isOnlyRemainingTransactionExtent) -and
                 $precedesRecovery
         }
     )
@@ -512,7 +819,18 @@ function Remove-EmptyTransactionExtendedContainer {
 }
 
 try {
+    $pendingRecoveryRunId = Read-EnvValue -Path $Pending -Name "RECOVERY_RUN_ID"
+    $pendingPlanId = Read-EnvValue -Path $Pending -Name "PLAN_ID"
+    if ($pendingRecoveryRunId -match '^[0-9a-f]{32}$') {
+        $script:RecoveryCorrelationId = $pendingRecoveryRunId
+    } elseif ($pendingPlanId -match '^[0-9a-f]{32}$') {
+        $script:RecoveryCorrelationId = $pendingPlanId
+    }
     Write-RecoveryLog "Recovery guard started."
+    Initialize-RecoveryOperationHistory
+    if ($Action -eq "Revert") {
+        $script:RecoveryRollbackRequested = $true
+    }
     if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
         throw "Post-install verification module is missing from the recovery payload."
     }
@@ -521,6 +839,10 @@ try {
     $script:TrackRecoveryExecutionState = $false
     $recoveryExecutionState = Read-RecoveryExecutionState
     $rollbackFromSucceeded = [string]$recoveryExecutionState.status -eq "succeeded"
+    $temporaryBootWasPrepared = (
+        "windows.temporary-boot-prepared" -in
+        @($recoveryExecutionState.completedSteps)
+    )
 
     $expectedRecoveryRunId = Read-EnvValue -Path $Pending -Name "RECOVERY_RUN_ID"
     $successRecoveryRunId = Read-EnvValue `
@@ -563,7 +885,7 @@ try {
     }
 
     # A successful live install writes this marker before rebooting. In that case
-    # the Windows guard only cleans up its scheduled task and leaves disks alone.
+    # the Windows guard verifies the installed system and leaves disk geometry alone.
     $success = Read-EnvValue -Path $Result -Name "LIBERTIX_INSTALL_SUCCESS"
     $resultIsFresh = (
         (Test-Path -LiteralPath $Result -PathType Leaf) -and
@@ -619,17 +941,36 @@ try {
         [string]$recoveryExecutionState.status -eq "rolled-back"
     )
     if ($Action -eq "Check" -and $liveRollbackCompleted) {
+        $script:RecoveryRollbackRequested = $true
+        $script:RecoveryCompensationSequenceStarted = $true
         Write-RecoveryLog (
             "The live installer reported failure after a verified rollback; " +
             "restoring Windows settings and retiring the recovery task."
         )
-        Restore-BcdState -Required
-        Remove-PendingWindowsSharePayload
-        Restore-OriginalHibernationSetting
-        Remove-TemporaryBootPayload
-        Remove-TransactionArtifacts
-        Remove-RecoveryTask -Required
-        Remove-RecoveryPromptTask -Required
+        $null = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
+            Restore-BcdState -Required
+        }
+        $null = Invoke-RecoveryOperation -Name "windows-share.pending-cleanup" -Operation {
+            Remove-PendingWindowsSharePayload
+        }
+        $null = Invoke-RecoveryOperation -Name "hibernation.restore" -Operation {
+            Restore-OriginalHibernationSetting
+        }
+        $null = Invoke-RecoveryOperation -Name "boot-payload.cleanup" -Operation {
+            Remove-TemporaryBootPayload
+        }
+        $null = Invoke-RecoveryOperation -Name "downloads.cleanup" -Operation {
+            Remove-TransactionArtifacts
+        }
+        Assert-RecoveryOperationsSucceeded
+        $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
+            Remove-RecoveryTask -Required
+        }
+        $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
+            Remove-RecoveryPromptTask -Required
+        }
+        Assert-RecoveryOperationsSucceeded
+        Complete-RecoveryAttemptState
         Save-RecoveryLog
         exit 0
     }
@@ -642,6 +983,7 @@ try {
         exit 2
     }
 
+    $script:RecoveryRollbackRequested = $true
     $script:TrackRecoveryExecutionState = Initialize-RecoveryExecutionState `
         -State $recoveryExecutionState
 
@@ -697,161 +1039,287 @@ try {
         ($initialSystemOffset + $initialSystemSize) % $PartitionAlignmentBytes
     $expectedTransactionOffset = `
         $initialSystemOffset + $initialSystemSize - $alignmentPadding - $expectedBytes
-    $candidateOffsets = @(
-        [int64]($expectedTransactionOffset - $PartitionAlignmentBytes),
-        [int64]$expectedTransactionOffset,
-        [int64]($expectedTransactionOffset + $PartitionAlignmentBytes)
-    )
+    [int64]$initialSystemEnd = $initialSystemOffset + $initialSystemSize
 
-    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    if ($systemPartition.DiskNumber -ne $diskNumber -or $systemPartition.PartitionNumber -ne $systemPartitionNumber) {
-        throw "Windows system partition identity changed; refusing rollback."
-    }
-    $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
-    if ($expectedDiskId -and ([string]$disk.UniqueId).Trim() -ne $expectedDiskId.Trim()) {
-        throw "Windows system disk identity changed; refusing rollback."
-    }
-
-    # Windows may represent the fourth MBR slot as an extended container and a
-    # logical partition one alignment unit later. Accept only the three exact
-    # offsets produced by the old layout, the current logical layout, or a
-    # primary-partition layout, and never treat the container itself as data.
-    $partitions = Get-Partition -DiskNumber $diskNumber | Sort-Object Offset
-    $candidates = @()
-
-    foreach ($partition in $partitions) {
-        if ($partition.PartitionNumber -eq $systemPartition.PartitionNumber) {
-            continue
-        }
+    $script:RecoveryCompensationSequenceStarted = $true
+    $diskLayoutRestored = Invoke-RecoveryOperation -Name "disk-layout.restore" -Operation {
+        $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
         if (
-            [int]$partition.MbrType -in @(5, 15, 133) -or
-            [int64]$partition.Offset -notin $candidateOffsets
+            $systemPartition.DiskNumber -ne $diskNumber -or
+            $systemPartition.PartitionNumber -ne $systemPartitionNumber
         ) {
-            continue
+            throw "Windows system partition identity changed; refusing rollback."
+        }
+        $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
+        if (
+            $expectedDiskId -and
+            ([string]$disk.UniqueId).Trim() -ne $expectedDiskId.Trim()
+        ) {
+            throw "Windows system disk identity changed; refusing rollback."
         }
 
-        $volume = $null
-        try {
-            $volume = $partition | Get-Volume -ErrorAction SilentlyContinue
-        } catch {
-            $volume = $null
-        }
-
-        $label = if ($volume) { [string]$volume.FileSystemLabel } else { "" }
-        $fs = if ($volume) { [string]$volume.FileSystem } else { "" }
-        $letter = if ($volume) { [string]$volume.DriveLetter } else { "" }
-
-        $isTemporaryFat = ($label -eq "LIBERTIX")
-        $isLinuxFileSystem = ($fs -match "^(ext2|ext3|ext4)$")
-        $isRawTransaction = [string]::IsNullOrWhiteSpace($fs)
-        if (-not $isTemporaryFat -and -not $isLinuxFileSystem -and -not $isRawTransaction) {
-            continue
-        }
-
-        $matchesFinalSize = ($partition.Size -ge $minBytes -and $partition.Size -le $maxBytes)
-        $matchesStagingSize = (
-            $partition.Size -ge $stagingMinBytes -and
-            $partition.Size -le $stagingMaxBytes
+        # Imaging and partitioning tools can use different alignment padding. A
+        # transaction candidate must still be wholly owned by the exact extent
+        # released from the recorded Windows partition. This accepts variable
+        # padding without allowing recovery to cross the original Windows end.
+        $partitions = Get-Partition -DiskNumber $diskNumber | Sort-Object Offset
+        $candidates = @()
+        [int64]$systemPartitionEnd = (
+            [int64]$systemPartition.Offset + [int64]$systemPartition.Size
         )
-        if (
-            ($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
-            ($isLinuxFileSystem -and -not $matchesFinalSize) -or
-            ($isRawTransaction -and -not $matchesStagingSize)
-        ) {
-            continue
+
+        foreach ($partition in $partitions) {
+            if ($partition.PartitionNumber -eq $systemPartition.PartitionNumber) {
+                continue
+            }
+            [int64]$partitionStart = [int64]$partition.Offset
+            [int64]$partitionEnd = $partitionStart + [int64]$partition.Size
+            if (
+                [int]$partition.MbrType -in @(5, 15, 133) -or
+                $partitionStart -lt $systemPartitionEnd -or
+                $partitionEnd -gt $initialSystemEnd -or
+                (
+                    $recoveryPartitionOffset -gt 0 -and
+                    $partitionEnd -gt $recoveryPartitionOffset
+                )
+            ) {
+                continue
+            }
+
+            # A raw or ext4 partition normally has no Windows Volume object.
+            $volume = $partition | Get-Volume -ErrorAction SilentlyContinue
+
+            $label = if ($null -ne $volume) {
+                [string]$volume.FileSystemLabel
+            } else { "" }
+            $fs = if ($null -ne $volume) { [string]$volume.FileSystem } else { "" }
+            $letter = if ($null -ne $volume) { [string]$volume.DriveLetter } else { "" }
+
+            $isTemporaryFat = (
+                $label -eq $StagingVolumeLabel -or
+                $label -in $LegacyStagingVolumeLabels
+            )
+            $isLinuxFileSystem = ($fs -match "^(ext2|ext3|ext4)$")
+            $isRawTransaction = [string]::IsNullOrWhiteSpace($fs)
+            if (
+                -not $isTemporaryFat -and
+                -not $isLinuxFileSystem -and
+                -not $isRawTransaction
+            ) {
+                continue
+            }
+
+            $matchesFinalSize = (
+                $partition.Size -ge $minBytes -and
+                $partition.Size -le $maxBytes
+            )
+            $matchesStagingSize = (
+                $partition.Size -ge $stagingMinBytes -and
+                $partition.Size -le $stagingMaxBytes
+            )
+            if (
+                ($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
+                ($isLinuxFileSystem -and -not $matchesFinalSize) -or
+                ($isRawTransaction -and -not $matchesStagingSize)
+            ) {
+                continue
+            }
+
+            $candidates += [pscustomobject]@{
+                Partition = $partition
+                Label = $label
+                FileSystem = $fs
+                DriveLetter = $letter
+            }
         }
 
-        $candidates += [pscustomobject]@{
-            Partition = $partition
-            Label = $label
-            FileSystem = $fs
-            DriveLetter = $letter
-        }
-    }
-
-    if (@($candidates).Count -gt 1) {
-        throw "Multiple temporary Linux partition candidates found; refusing ambiguous rollback."
-    }
-
-    if (@($candidates).Count -eq 1) {
-        $candidate = $candidates[0]
-        $number = $candidate.Partition.PartitionNumber
-        $candidateOffset = [int64]$candidate.Partition.Offset
-        $candidateSize = [int64]$candidate.Partition.Size
-        $systemPartitionEnd = [int64]$systemPartition.Offset + [int64]$systemPartition.Size
-        $sizeMb = [Math]::Round($candidate.Partition.Size / 1MB, 0)
-        Write-RecoveryLog "Removing transaction partition number=$number sizeMB=$sizeMb label=$($candidate.Label) fs=$($candidate.FileSystem)."
-        Remove-Partition -DiskNumber $diskNumber -PartitionNumber $number -Confirm:$false -ErrorAction Stop
-        Start-Sleep -Seconds 2
-        Remove-EmptyTransactionExtendedContainer `
-            -DiskNumber $diskNumber `
-            -TransactionOffset $candidateOffset `
-            -TransactionSize $candidateSize `
-            -SystemPartitionEnd $systemPartitionEnd `
-            -RecoveryPartitionOffset $recoveryPartitionOffset
-    } else {
-        Write-RecoveryLog "No transaction partition exists; checking whether only the system partition needs extension."
-        Remove-EmptyTransactionExtendedContainer `
-            -DiskNumber $diskNumber `
-            -TransactionOffset $expectedTransactionOffset `
-            -TransactionSize $stagingBytes `
-            -SystemPartitionEnd ([int64]$systemPartition.Offset + [int64]$systemPartition.Size) `
-            -RecoveryPartitionOffset $recoveryPartitionOffset
-    }
-
-    $currentSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    if ($currentSystemPartition.Size -ne $initialSystemSize) {
-        $supported = Wait-SystemDriveResizeCapacity `
-            -DiskNumber $diskNumber `
-            -RequiredSize $initialSystemSize
-        if ($supported.SizeMin -gt $initialSystemSize -or $supported.SizeMax -lt $initialSystemSize) {
+        if (@($candidates).Count -gt 1) {
             throw (
-                "$SystemDrive cannot be restored to its initial size ($initialSystemSize); " +
-                "SizeMin=$($supported.SizeMin), SizeMax=$($supported.SizeMax)."
+                "Multiple temporary Linux partition candidates found; " +
+                "refusing ambiguous rollback."
             )
         }
-        Write-RecoveryLog "Restoring $SystemDrive to its exact initial size: $initialSystemSize bytes."
-        Resize-Partition -DriveLetter $SystemDriveLetter -Size $initialSystemSize -ErrorAction Stop
-    } else {
-        Write-RecoveryLog "$SystemDrive is already at or above its initial size; resize skipped."
+
+        if (@($candidates).Count -eq 1) {
+            $candidate = $candidates[0]
+            $number = $candidate.Partition.PartitionNumber
+            $candidateOffset = [int64]$candidate.Partition.Offset
+            $candidateSize = [int64]$candidate.Partition.Size
+            $sizeMb = [Math]::Round($candidate.Partition.Size / 1MB, 0)
+            Write-RecoveryLog (
+                "Removing transaction partition number=$number sizeMB=$sizeMb " +
+                "offset=$candidateOffset label=$($candidate.Label) " +
+                "fs=$($candidate.FileSystem)."
+            )
+            Remove-Partition `
+                -DiskNumber $diskNumber `
+                -PartitionNumber $number `
+                -Confirm:$false `
+                -ErrorAction Stop
+            Start-Sleep -Seconds 2
+            Remove-EmptyTransactionExtendedContainer `
+                -DiskNumber $diskNumber `
+                -TransactionOffset $candidateOffset `
+                -TransactionSize $candidateSize `
+                -SystemPartitionEnd $systemPartitionEnd `
+                -OriginalSystemPartitionEnd $initialSystemEnd `
+                -RecoveryPartitionOffset $recoveryPartitionOffset
+        } else {
+            Write-RecoveryLog (
+                "No transaction partition exists; checking whether only the " +
+                "system partition needs extension."
+            )
+            Remove-EmptyTransactionExtendedContainer `
+                -DiskNumber $diskNumber `
+                -TransactionOffset $expectedTransactionOffset `
+                -TransactionSize $stagingBytes `
+                -SystemPartitionEnd $systemPartitionEnd `
+                -OriginalSystemPartitionEnd $initialSystemEnd `
+                -RecoveryPartitionOffset $recoveryPartitionOffset
+        }
+
+        $currentSystemPartition = Get-Partition `
+            -DriveLetter $SystemDriveLetter `
+            -ErrorAction Stop
+        if ($currentSystemPartition.Size -ne $initialSystemSize) {
+            $supported = Wait-SystemDriveResizeCapacity `
+                -DiskNumber $diskNumber `
+                -RequiredSize $initialSystemSize
+            if (
+                $supported.SizeMin -gt $initialSystemSize -or
+                $supported.SizeMax -lt $initialSystemSize
+            ) {
+                throw (
+                    "$SystemDrive cannot be restored to its initial size " +
+                    "($initialSystemSize); SizeMin=$($supported.SizeMin), " +
+                    "SizeMax=$($supported.SizeMax)."
+                )
+            }
+            Write-RecoveryLog (
+                "Restoring $SystemDrive to its exact initial size: " +
+                "$initialSystemSize bytes."
+            )
+            Resize-Partition `
+                -DriveLetter $SystemDriveLetter `
+                -Size $initialSystemSize `
+                -ErrorAction Stop
+        } else {
+            Write-RecoveryLog (
+                "$SystemDrive is already at its initial size; resize skipped."
+            )
+        }
+
+        $finalSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
+        if ($finalSystemPartition.Size -ne $initialSystemSize) {
+            throw "$SystemDrive rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
+        }
     }
 
-    Restore-BcdState
-    Restore-BiosMbrBootCode -DiskNumber $diskNumber -Required:$rollbackFromSucceeded
-    if ($rollbackFromSucceeded) {
-        Remove-WindowsShareAfterRollback
-    } else {
-        Remove-PendingWindowsSharePayload
+    $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
+        Restore-BcdState -Required:$temporaryBootWasPrepared
+    }
+    $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
+        Restore-BiosMbrBootCode `
+            -DiskNumber $diskNumber `
+            -Required:$temporaryBootWasPrepared
+    }
+    $null = Invoke-RecoveryOperation -Name "windows-share.cleanup" -Operation {
+        if ($rollbackFromSucceeded) {
+            Remove-WindowsShareAfterRollback
+        } else {
+            Remove-PendingWindowsSharePayload
+        }
+    }
+    $null = Invoke-RecoveryOperation -Name "hibernation.restore" -Operation {
+        Restore-OriginalHibernationSetting
+    }
+    $bootPayloadRemoved = Invoke-RecoveryOperation -Name "boot-payload.cleanup" -Operation {
+        Remove-TemporaryBootPayload
+    }
+    $downloadsRemoved = Invoke-RecoveryOperation -Name "downloads.cleanup" -Operation {
+        Remove-TransactionArtifacts
     }
 
-    # A rollback removes the installation that required Fast Startup to be
-    # disabled, so restore the captured Windows setting before retiring guard.
-    Restore-OriginalHibernationSetting
-
-    Remove-TemporaryBootPayload
-    Remove-TransactionArtifacts
-
-    $finalSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    if ($finalSystemPartition.Size -ne $initialSystemSize) {
-        throw "$SystemDrive rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
+    if ($diskLayoutRestored) {
+        $null = Invoke-RecoveryOperation `
+            -Name "ledger.installer-partition.compensate" `
+            -Operation {
+                Complete-RecoveryCompensation `
+                    -Step "windows.installer-partition-created"
+            }
+        $null = Invoke-RecoveryOperation `
+            -Name "ledger.system-volume.compensate" `
+            -Operation {
+                Complete-RecoveryCompensation `
+                    -Step "windows.system-volume-shrunk"
+            }
     }
+    if ($bcdRestored -and $mbrRestored -and $bootPayloadRemoved) {
+        $null = Invoke-RecoveryOperation `
+            -Name "ledger.temporary-boot.compensate" `
+            -Operation {
+                Complete-RecoveryCompensation `
+                    -Step "windows.temporary-boot-prepared"
+            }
+    }
+    if ($bootPayloadRemoved -and $downloadsRemoved) {
+        $null = Invoke-RecoveryOperation `
+            -Name "ledger.live-media.compensate" `
+            -Operation {
+                Complete-RecoveryCompensation `
+                    -Step "windows.live-media-prepared"
+            }
+    }
+    Assert-RecoveryOperationsSucceeded
 
-    Complete-RecoveryCompensation -Step "windows.temporary-boot-prepared"
-    Complete-RecoveryCompensation -Step "windows.live-media-prepared"
-    Complete-RecoveryCompensation -Step "windows.installer-partition-created"
-    Complete-RecoveryCompensation -Step "windows.system-volume-shrunk"
-
-    Write-RecoveryLog "Recovery completed and verified."
-    Remove-RecoveryTask -Required
-    Remove-RecoveryPromptTask -Required
-    Complete-RecoveryCompensation -Step "windows.recovery-armed"
     if ($script:TrackRecoveryExecutionState) {
-        $null = Complete-LibertixRollback -Path $ExecutionStatePath
+        $null = Invoke-RecoveryOperation `
+            -Name "ledger.recovery-armed.compensate" `
+            -Operation {
+                Complete-RecoveryCompensation -Step "windows.recovery-armed"
+            }
+        Assert-RecoveryOperationsSucceeded
+        $rollbackStateCompleted = Invoke-RecoveryOperation `
+            -Name "ledger.rollback.complete" `
+            -Operation {
+                $null = Complete-LibertixRollback -Path $ExecutionStatePath
+            }
+        if ($rollbackStateCompleted) {
+            $script:TrackRecoveryExecutionState = $false
+        }
     }
+    Assert-RecoveryOperationsSucceeded
+
+    $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
+        Remove-RecoveryTask -Required
+    }
+    $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
+        Remove-RecoveryPromptTask -Required
+    }
+    Assert-RecoveryOperationsSucceeded
+    Complete-RecoveryAttemptState
+    $successfulOperationCount = @(
+        $script:RecoveryOperationRecords |
+            Where-Object { $_.status -eq "success" }
+    ).Count
+    Write-RecoveryLog (
+        "Recovery completed and verified with " +
+        "$successfulOperationCount successful operations."
+    )
     Save-RecoveryLog
     exit 0
 } catch {
-    Write-RecoveryLog "Recovery failed: $($_.Exception.Message)"
+    $primaryFailure = $_
+    if ($script:RecoveryRollbackRequested -and -not $script:RecoveryCompensationSequenceStarted) {
+        Invoke-MinimumRecoveryFallback
+    }
+    Write-RecoveryLog (
+        "Recovery failed: $($primaryFailure.Exception.Message); " +
+        "operationErrors=$($script:RecoveryErrors.Count). " +
+        "The recovery tasks and durable rollback payload remain armed."
+    )
+    $script:RecoveryAttemptStatus = "failed"
+    $null = Save-RecoveryOperationStateSafely -Context "attempt.failed"
     try {
         Save-RecoveryLog
     } catch {

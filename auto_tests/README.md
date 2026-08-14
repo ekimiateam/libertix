@@ -145,7 +145,7 @@ GitHub Pages `dev` channel.
 | `monitor_iso` | boolean, `true` | Continue through installation and post-install operating-system checks. |
 | `share_windows_files_in_linux` | boolean, `true` | Validate the Windows-to-Linux sharing path. |
 | `share_linux_files_in_windows` | boolean, `true` | Validate the read-only Linux-to-Windows sharing path. |
-| `simulate_fog_clone_boot_entries` | boolean, `false` | Inject stale UEFI Libertix entries for the explicit clone regression scenario. |
+| `simulate_stale_firmware_entries` | boolean, `false` | Inject a stale UEFI Libertix entry to verify current-ESP ownership matching. |
 
 VM selectors can also be repeated as query parameters (`?vm=vm1&vm=vm2`). Body and query
 selectors are combined. The `source` query parameter overrides its body value.

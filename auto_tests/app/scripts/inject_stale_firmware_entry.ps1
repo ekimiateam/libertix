@@ -25,7 +25,7 @@ $espPartitions = @(
         Where-Object { [string]$_.GptType -eq $espType }
 )
 if ($espPartitions.Count -ne 1) {
-    throw "The FOG clone fixture requires exactly one ESP on the Windows system disk."
+    throw "The stale firmware-entry fixture requires exactly one ESP on the Windows system disk."
 }
 $esp = $espPartitions[0]
 $staleGuid = [Guid]::NewGuid()
@@ -61,7 +61,7 @@ for ($candidate = 0; $candidate -le 0xFFFF; $candidate++) {
     }
 }
 if ($null -eq $bootNumber) {
-    throw "No free UEFI Boot#### variable is available for the FOG clone fixture."
+    throw "No free UEFI Boot#### variable is available for the stale firmware-entry fixture."
 }
 $bootVariable = "Boot{0:X4}" -f $bootNumber
 Set-FirmwareVariable -Name $bootVariable -Value $loadOption
@@ -73,7 +73,7 @@ $newOrder = @([uint16]$bootNumber) + @(
 Set-FirmwareVariable -Name "BootOrder" -Value (ConvertTo-BootOrderBytes -Order $newOrder)
 $readBack = Get-FirmwareVariableBytes -Name $bootVariable
 if (-not $readBack -or (Get-EfiLoadOptionDescription -Bytes $readBack) -ne "Libertix") {
-    throw "The stale FOG clone boot entry was not retained by firmware."
+    throw "The stale UEFI boot entry was not retained by firmware."
 }
 
 Write-Output "STALE_BOOT_VARIABLE=$bootVariable"

@@ -517,7 +517,7 @@ function Set-LibertixUefiBootEntry {
         }
     }
 
-    Remove-LibertixTemporaryFirmwareEntries
+    Remove-LibertixTemporaryFirmwareEntries -ExpectedLoaderPath $loaderPath
     foreach ($identifier in @("{bootmgr}", "{fwbootmgr}")) {
         try {
             Invoke-BcdeditCommand -Arguments @("/deletevalue", $identifier, "bootsequence") | Out-Null

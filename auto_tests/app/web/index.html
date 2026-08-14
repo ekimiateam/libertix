@@ -76,7 +76,9 @@
       }
 
       input[type="password"],
-      input[type="text"] {
+      input[type="text"],
+      input[type="number"],
+      select {
         min-height: 38px;
         padding: 8px;
         border: 1px solid var(--border);
@@ -141,6 +143,23 @@
         display: flex;
         flex-wrap: wrap;
         gap: 8px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 5px;
+      }
+
+      .check-field {
+        align-items: flex-start;
+      }
+
+      .request-preview {
+        background: var(--bg-soft);
+        border: 1px solid var(--border);
+        padding: 10px;
       }
 
       .muted {
@@ -225,19 +244,29 @@
 
         <section class="panel stack">
           <h2>Automation</h2>
-          <label>
-            Distribution
+          <label class="field">
+            <span>Distribution</span>
             <select id="distribution">
               <option value="mint">Linux Mint 22.3 Cinnamon</option>
               <option value="zorin">Zorin OS 18.1 Core</option>
             </select>
           </label>
-          <label>
-            Utilisateur Linux
-            <input id="linuxUsername" type="text" value="test" autocomplete="off" />
+          <label class="field">
+            <span>Utilisateur Linux</span>
+            <input
+              id="linuxUsername"
+              type="text"
+              value="test"
+              minlength="1"
+              maxlength="32"
+              pattern="[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?"
+              required
+              autocomplete="off"
+              title="Minuscules, chiffres et tirets uniquement ; doit commencer par une lettre."
+            />
           </label>
-          <label>
-            Mot de passe Linux
+          <label class="field">
+            <span>Mot de passe Linux</span>
             <input
               id="linuxPassword"
               type="password"
@@ -247,11 +276,37 @@
               autocomplete="new-password"
             />
           </label>
-          <label>
-            <input id="monitorIso" type="checkbox" checked />
-            Surveiller la progression ISO avec le LLM
+          <label class="field">
+            <span>Taille finale Linux (Gio)</span>
+            <input id="linuxSizeGib" type="number" value="100" min="20" max="16384" step="1" required />
           </label>
-          <p class="muted">L'automation est gardée côté API. Elle refuse les VM non autorisées.</p>
+          <label class="field">
+            <span>Premier système vérifié</span>
+            <select id="firstBoot">
+              <option value="windows">Windows en premier, puis Linux</option>
+              <option value="linux">Linux en premier, puis Windows</option>
+            </select>
+          </label>
+          <label class="check-field">
+            <input id="shareWindowsFilesInLinux" type="checkbox" checked />
+            Afficher les fichiers Windows dans Linux
+          </label>
+          <label class="check-field">
+            <input id="shareLinuxFilesInWindows" type="checkbox" checked />
+            Afficher les fichiers Linux dans Windows en lecture seule
+          </label>
+          <label class="check-field">
+            <input id="monitorIso" type="checkbox" checked />
+            Surveiller par vision uniquement les étapes d'installation qui en ont besoin
+          </label>
+          <label class="check-field">
+            <input id="simulateStaleFirmwareEntries" type="checkbox" />
+            Simuler des entrées firmware Libertix obsolètes avant l'installation
+          </label>
+          <p class="muted">
+            Le mot de passe est envoyé uniquement à l'API locale au lancement. Cette page ne le
+            conserve pas et l'aperçu le masque.
+          </p>
         </section>
 
         <section class="panel stack">
@@ -306,6 +361,11 @@
           <div id="summary" class="muted"></div>
         </section>
 
+        <section class="panel stack">
+          <h2>Aperçu de la requête unattended</h2>
+          <pre id="requestPreview" class="request-preview"></pre>
+        </section>
+
         <section class="panel">
           <h2>Résultat brut</h2>
           <pre id="rawResult">{}</pre>
@@ -331,11 +391,17 @@
       const distributionInput = document.getElementById("distribution");
       const linuxUsernameInput = document.getElementById("linuxUsername");
       const linuxPasswordInput = document.getElementById("linuxPassword");
+      const linuxSizeGibInput = document.getElementById("linuxSizeGib");
+      const firstBootInput = document.getElementById("firstBoot");
+      const shareWindowsFilesInLinuxInput = document.getElementById("shareWindowsFilesInLinux");
+      const shareLinuxFilesInWindowsInput = document.getElementById("shareLinuxFilesInWindows");
       const monitorIsoInput = document.getElementById("monitorIso");
+      const simulateStaleFirmwareEntriesInput = document.getElementById("simulateStaleFirmwareEntries");
       const vmList = document.getElementById("vmList");
       const statusBox = document.getElementById("status");
       const summaryBox = document.getElementById("summary");
       const rawResult = document.getElementById("rawResult");
+      const requestPreview = document.getElementById("requestPreview");
       const stepsBody = document.getElementById("steps");
       const buttons = [...document.querySelectorAll("button")];
 
@@ -361,6 +427,23 @@
       document.getElementById("automationJson").addEventListener("click", () => confirmAutomation(() => runAutomation(false)));
       document.getElementById("resetStream").addEventListener("click", () => confirmReset(() => runReset(true)));
       document.getElementById("resetJson").addEventListener("click", () => confirmReset(() => runReset(false)));
+
+      [
+        sourceModeInput,
+        distributionInput,
+        linuxUsernameInput,
+        linuxPasswordInput,
+        linuxSizeGibInput,
+        firstBootInput,
+        shareWindowsFilesInLinuxInput,
+        shareLinuxFilesInWindowsInput,
+        monitorIsoInput,
+        simulateStaleFirmwareEntriesInput,
+      ].forEach((input) => {
+        input.addEventListener("input", updateRequestPreview);
+        input.addEventListener("change", updateRequestPreview);
+      });
+      updateRequestPreview();
 
       function requestHeaders(hasJsonBody = false) {
         const headers = {};
@@ -389,20 +472,66 @@
       function automationBody() {
         const body = requestBody();
         if (!body) return null;
+        if (!validateAutomationInputs()) return null;
         return {
           ...body,
           apply: true,
           distribution: distributionInput.value || "mint",
           linux_username: linuxUsernameInput.value || "test",
           linux_password: linuxPasswordInput.value,
+          linux_size_gib: Number(linuxSizeGibInput.value),
+          first_boot: firstBootInput.value,
           monitor_iso: monitorIsoInput.checked,
+          share_windows_files_in_linux: shareWindowsFilesInLinuxInput.checked,
+          share_linux_files_in_windows: shareLinuxFilesInWindowsInput.checked,
+          simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
         };
+      }
+
+      function validateAutomationInputs() {
+        const inputs = [linuxUsernameInput, linuxPasswordInput, linuxSizeGibInput];
+        const invalidInput = inputs.find((input) => !input.checkValidity());
+        if (!invalidInput) return true;
+        invalidInput.reportValidity();
+        setStatus("Corrigez les paramètres unattended invalides avant de lancer l'installation.", true);
+        return false;
+      }
+
+      function previewAutomationBody() {
+        return {
+          vms: selectedVms(),
+          source: sourceModeInput.value || "local",
+          apply: true,
+          distribution: distributionInput.value || "mint",
+          linux_username: linuxUsernameInput.value || "test",
+          linux_password: "<masqué>",
+          linux_size_gib: Number(linuxSizeGibInput.value || 0),
+          first_boot: firstBootInput.value,
+          monitor_iso: monitorIsoInput.checked,
+          share_windows_files_in_linux: shareWindowsFilesInLinuxInput.checked,
+          share_linux_files_in_windows: shareLinuxFilesInWindowsInput.checked,
+          simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
+        };
+      }
+
+      function updateRequestPreview() {
+        const body = previewAutomationBody();
+        const json = JSON.stringify(body, null, 2);
+        const compactJson = JSON.stringify(body);
+        requestPreview.textContent = [
+          json,
+          "",
+          "curl -N -H 'Content-Type: application/json' \\",
+          `  --data '${compactJson}' \\`,
+          `  ${window.location.origin}/api/v1/automation/stream?format=ndjson`,
+        ].join("\n");
       }
 
       function setVmChecks(value) {
         document.querySelectorAll('input[name="vm"]').forEach((input) => {
           input.checked = value;
         });
+        updateRequestPreview();
       }
 
       function setBusy(value) {
@@ -469,8 +598,10 @@
               <input type="checkbox" name="vm" value="${escapeHtml(vm.name)}" />
               <span>${escapeHtml(vm.name)} — ${escapeHtml(vm.os)} — ${escapeHtml(vm.host)} — VNC ${escapeHtml(vm.vnc)}</span>
             `;
+            label.querySelector("input").addEventListener("change", updateRequestPreview);
             vmList.appendChild(label);
           });
+          updateRequestPreview();
           setStatus("VM chargées.", false);
         } catch (error) {
           setStatus(`Impossible de charger les VM: ${error.message}`, true);

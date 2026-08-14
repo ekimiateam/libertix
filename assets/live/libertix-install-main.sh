@@ -99,10 +99,33 @@ on_err() {
 }
 trap on_err ERR
 
+on_termination_signal() {
+    local signal_name="$1"
+    local rc="$2"
+
+    trap - ERR EXIT INT TERM
+    set +e +u
+    echo "TERMINATION: signal=$signal_name stage=${CURRENT_STAGE:-bootstrap}; starting verified rollback"
+    {
+        echo "stage=${CURRENT_STAGE:-bootstrap}"
+        echo "error=installation interrupted by $signal_name"
+        echo "signal=$signal_name"
+        echo "time=$(date -Is 2>/dev/null || date)"
+    } > "$FAIL_FILE"
+    if declare -F fail_and_exit >/dev/null 2>&1; then
+        fail_and_exit "$rc" "installation interrupted by $signal_name"
+    fi
+    sync || true
+    exit "$rc"
+}
+
+trap 'on_termination_signal TERM 143' TERM
+trap 'on_termination_signal INT 130' INT
+
 on_exit() {
     local rc="$?"
 
-    trap - ERR EXIT
+    trap - ERR EXIT INT TERM
     if [ "$rc" -eq 0 ]; then
         exit 0
     fi

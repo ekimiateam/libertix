@@ -17,6 +17,7 @@ dependencies = [
   "python-json-logger>=2.0,<4",
   "uvicorn[standard]>=0.30,<1",
   "vncdotool>=1.2,<2",
+  "websockets>=14,<17",
 ]
 
 [project.optional-dependencies]

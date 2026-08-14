@@ -22,6 +22,14 @@
     "maximumAttempts": 6,
     "retryBaseDelaySeconds": 10
   },
+  "volumeLabels": {
+    "installationMedia": "LIBERTIXISO",
+    "staging": "LIBERTIXSTG",
+    "legacyStagingForRecovery": [
+      "LIBERTIX",
+      "LIBERTIXEFI"
+    ]
+  },
   "account": {
     "reservedUsernamesSource": "https://sources.debian.org/src/user-setup/1.107/reserved-usernames",
     "reservedUsernames": [

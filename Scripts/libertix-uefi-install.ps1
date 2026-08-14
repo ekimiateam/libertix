@@ -204,7 +204,7 @@ $LowMemoryIsoPath = "$SystemDrive\libertix-live.iso"
 
 $InstallerLetter = Get-LibertixFreeDriveLetter
 $EspLetter = Get-LibertixFreeDriveLetter -ExcludedLetters @($InstallerLetter)
-$InstallerLabel = "LIBERTIXEFI"
+$InstallerLabel = [string]$installationPolicy.volumeLabels.staging
 $firmwareOwnerRunId = if ($RecoveryRunId -match '^[0-9a-f]{32}$') {
     $RecoveryRunId
 } elseif ($ExpectedRecoveryRunId -match '^[0-9a-f]{32}$') {
@@ -224,6 +224,7 @@ $InstallerEspDirectory = "EFI\LibertixInstaller"
 $InstallerEspOwnershipFile = ".libertix-owner"
 $InstalledEspDirectory = "EFI\Libertix"
 $InstalledBootDescription = "Libertix"
+$InstalledBootLoaderPath = "\EFI\Libertix\shimx64.efi"
 $TransactionStatePath = "$SystemDrive\LibertixTools\uefi-transaction.json"
 
 if ($BootStrategy -notin @("BootNext", "FirmwareBootOrder")) {

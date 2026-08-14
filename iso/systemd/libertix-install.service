@@ -2,6 +2,8 @@
 Description=Libertix automatic Linux installer
 After=local-fs.target systemd-udev-settle.service
 Wants=local-fs.target systemd-udev-settle.service
+Conflicts=getty@tty1.service
+Before=getty@tty1.service
 ConditionPathExists=/usr/local/sbin/libertix-runner
 
 [Service]
@@ -13,6 +15,7 @@ StandardOutput=journal
 StandardError=journal
 Restart=no
 TimeoutStartSec=3h
+TimeoutStopSec=30min
 KillMode=mixed
 
 [Install]

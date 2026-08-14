@@ -563,6 +563,7 @@ dependencies = [
     { name = "python-json-logger" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "vncdotool" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -588,6 +589,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30,<1" },
     { name = "vncdotool", specifier = ">=1.2,<2" },
+    { name = "websockets", specifier = ">=14,<17" },
 ]
 provides-extras = ["dev"]
 

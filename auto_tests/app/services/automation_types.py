@@ -18,7 +18,7 @@ class AutomationOptions:
     share_windows_files_in_linux: bool = True
     share_linux_files_in_windows: bool = True
     use_default_filepool: bool = False
-    simulate_fog_clone_boot_entries: bool = False
+    simulate_stale_firmware_entries: bool = False
     first_boot: Literal["windows", "linux"] = "windows"
 
 

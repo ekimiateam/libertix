@@ -150,8 +150,8 @@ namespace Libertix.Tests
         [TestMethod]
         public void PersistedRuntimeNamesRemainStable()
         {
-            Assert.AreEqual("LIBERTIXEFI", RuntimeNames.InstallerVolumeLabel);
-            Assert.AreEqual("LIBERTIX", RuntimeNames.BiosInstallerVolumeLabel);
+            Assert.AreEqual("LIBERTIXISO", RuntimeNames.InstallationMediaVolumeLabel);
+            Assert.AreEqual("LIBERTIXSTG", RuntimeNames.StagingVolumeLabel);
             Assert.AreEqual("LibertixInstallLogs", RuntimeNames.InstallationLogDirectory);
             Assert.AreEqual("Windows", RuntimeNames.WindowsLogDirectory);
             Assert.AreEqual("Linux", RuntimeNames.LinuxLogDirectory);

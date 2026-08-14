@@ -508,9 +508,6 @@ class FakeVncConnection:
     def mouseMove(self, x: int, y: int) -> None:  # noqa: N802
         self.events.append(("move", x, y))
 
-    def mousePress(self, button: int) -> None:  # noqa: N802
-        self.events.append(("press", button))
-
     def keyPress(self, key: str) -> None:  # noqa: N802
         self.events.append(("key", key))
 

@@ -240,7 +240,8 @@ wait_for_prereqs() {
         if [ "$config_ready" -eq 0 ]; then
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
-                [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = "LIBERTIXEFI" ] && {
+                [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = \
+                    "$LIBERTIX_STAGING_VOLUME_LABEL" ] && {
                     config_ready=1
                     break
                 }
@@ -558,14 +559,28 @@ cleanup_temporary_uefi_bootentries() {
         die "efibootmgr is required to remove the temporary UEFI entry"
 
     expected_description="Libertix UEFI Installer $RECOVERY_RUN_ID"
-    temporary_entries="$(efibootmgr 2>/dev/null \
+    temporary_entries="$(efibootmgr -v 2>/dev/null \
         | awk -v expected="$expected_description" '
+            BEGIN {
+                expected_path="file(\\efi\\libertixinstaller\\bootx64.efi)"
+            }
             /^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][* ] / {
                 n=substr($1,5,4)
                 gsub(/\*/, "", n)
                 $1=""
                 sub(/^ /, "")
-                if ($0 == expected) print n
+                separator=substr($0, length(expected) + 1, 1)
+                if (index($0, expected) == 1 && separator ~ /[[:space:]]/) {
+                    if (index(tolower($0), expected_path) == 0) {
+                        print "temporary UEFI entry has an unexpected loader path: Boot" n > "/dev/stderr"
+                        invalid=1
+                    } else {
+                        print n
+                    }
+                }
+            }
+            END {
+                if (invalid) exit 2
             }')" || die "cannot enumerate temporary UEFI boot entries"
     while read -r bootnum; do
         [ -n "$bootnum" ] || continue
@@ -573,11 +588,12 @@ cleanup_temporary_uefi_bootentries() {
         efibootmgr -b "$bootnum" -B || \
             die "cannot delete temporary UEFI installer entry Boot$bootnum"
     done <<< "$temporary_entries"
-    if efibootmgr 2>/dev/null | awk -v expected="$expected_description" '
+    if efibootmgr -v 2>/dev/null | awk -v expected="$expected_description" '
         /^Boot[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][* ] / {
             $1=""
             sub(/^ /, "")
-            if ($0 == expected) found=1
+            separator=substr($0, length(expected) + 1, 1)
+            if (index($0, expected) == 1 && separator ~ /[[:space:]]/) found=1
         }
         END { exit(found ? 0 : 1) }
     '; then

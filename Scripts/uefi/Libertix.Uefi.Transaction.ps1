@@ -257,6 +257,35 @@ function Update-TransactionFirmwareState {
     Save-LibertixTransactionStateAtomic -State $state
 }
 
+function Update-TransactionBcdEntryState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}$')]
+        [string]$FirmwareEntryId
+    )
+
+    $state = Get-TransactionPartitionState
+    if (-not $state) {
+        throw "Cannot save the BCD firmware owner without a transaction state file."
+    }
+    if (
+        -not ($state.PSObject.Properties.Name -contains "RecoveryRunId") -or
+        [string]$state.RecoveryRunId -ne $RecoveryRunId
+    ) {
+        throw "The BCD firmware owner does not match the active recovery run."
+    }
+
+    $state | Add-Member `
+        -NotePropertyName FirmwareEntryId `
+        -NotePropertyValue $FirmwareEntryId `
+        -Force
+    $state | Add-Member `
+        -NotePropertyName BcdEntryCreatedUtc `
+        -NotePropertyValue ([DateTime]::UtcNow.ToString("o")) `
+        -Force
+    Save-LibertixTransactionStateAtomic -State $state
+}
+
 function Get-ValidatedLibertixTransactionState {
     $state = Get-TransactionPartitionState
     if (-not $state) {
@@ -428,7 +457,8 @@ function Invoke-Revert {
             Remove-LibertixInstalledEspFiles -EspDrive $esp
         }
 
-        Remove-LibertixTemporaryFirmwareEntries
+        Remove-LibertixTemporaryFirmwareEntries `
+            -ExpectedLoaderPath "\$InstallerEspDirectory\BOOTX64.EFI"
         Restore-OriginalFirmwareBootOrder
         Complete-LibertixTrackedCompensation -Step "windows.temporary-boot-prepared"
 
@@ -451,7 +481,7 @@ function Invoke-Revert {
     if (-not $rollbackState) {
         # No transaction state means the workflow failed before Windows was resized.
         # Remove-LibertixInstallerPartitionIfPresent already refuses to continue
-        # if an unowned LIBERTIXEFI partition exists, so there is nothing left
+        # if an unowned staging partition exists, so there is nothing left
         # to restore in this early-failure case.
         Write-Log "No transaction state found; $SystemDrive was not resized by this run." "Gray"
         Remove-LibertixTransactionDownloads `

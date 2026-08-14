@@ -493,13 +493,50 @@ def test_reported_wizard_layouts_keep_text_and_controls_inside_the_window() -> N
     assert 'Grid.Row="3"' in status
     assert 'FontWeight="SemiBold"' in status
 
-    assert '<ScrollViewer VerticalScrollBarVisibility="Auto"' in warning
+    assert "<ScrollViewer" not in warning
+    warning_content = warning.split('<Border Grid.Row="1"', 1)[1].split("</Border>", 1)[0]
+    assert 'Width="640"' in warning_content
+    assert 'VerticalAlignment="Center"' in warning_content
+    assert 'Padding="12"' in warning_content
+    assert 'LineHeight="20"' in warning_content
+    for resource_key in (
+        "WarningMessage",
+        "WarningRisks",
+        "WarningRecommendations",
+        "WarningHibernationNotice",
+    ):
+        text_block = warning.split(f'Text="{{DynamicResource {resource_key}}}"', 1)[1].split(
+            "/>", 1
+        )[0]
+        assert 'TextAlignment="Left"' in text_block
     checkbox = warning.split('x:Name="ConfirmCheckBox"', 1)[1].split(">", 1)[0]
-    assert 'MinHeight="34"' in checkbox
-    assert 'Padding="2"' in checkbox
+    assert 'Grid.Column="1"' in checkbox
+    assert 'MinHeight="40"' in checkbox
+    assert 'HorizontalContentAlignment="Center"' in checkbox
+    assert 'VerticalContentAlignment="Center"' in checkbox
     assert 'AutomationProperties.AutomationId="WarningAcknowledgement"' in checkbox
+    checkbox_text = warning.split('Text="{DynamicResource WarningConfirmCheckbox}"', 1)[1].split(
+        "/>", 1
+    )[0]
+    assert 'TextWrapping="NoWrap"' in checkbox_text
+    assert 'TextAlignment="Center"' in checkbox_text
     confirm = warning.split('x:Name="ConfirmButton"', 1)[1].split("/>", 1)[0]
+    assert 'Grid.Column="2"' in confirm
     assert 'AutomationProperties.AutomationId="WarningConfirmButton"' in confirm
+
+
+def test_resize_slider_supports_direct_precise_track_interaction() -> None:
+    resize = (ROOT / "Pages/ResizeDisk.xaml").read_text(encoding="utf-8-sig")
+    slider = resize.split('x:Name="PartitionSlider"', 1)[1].split("/>", 1)[0]
+
+    assert 'IsMoveToPointEnabled="True"' in slider
+    assert 'SmallChange="1"' in slider
+    assert 'LargeChange="5"' in slider
+    assert 'IsSnapToTickEnabled="True"' in slider
+    assert 'AutoToolTipPlacement="TopLeft"' in slider
+    assert 'AutoToolTipPrecision="0"' in slider
+    assert '<Border Height="8"' in resize
+    assert '<Ellipse Width="28" Height="28"' in resize
 
 
 def test_unattended_warning_has_dedicated_localized_copy() -> None:

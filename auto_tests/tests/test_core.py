@@ -1763,7 +1763,7 @@ def test_automation_logs_vm500_reset_before_ui(monkeypatch: pytest.MonkeyPatch) 
     assert profile is not None
 
     result = ResultBuilder("automation")
-    service._restore_clean_snapshot(result, profile)  # noqa: SLF001
+    service.preflight.restore_clean_snapshot(result, profile)
 
     assert calls == [
         ("locate", 500, None),
@@ -1897,7 +1897,7 @@ def test_automation_logs_vm502_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -
     assert profile is not None
 
     result = ResultBuilder("automation")
-    service._restore_clean_snapshot(result, profile)  # noqa: SLF001
+    service.preflight.restore_clean_snapshot(result, profile)
 
     assert calls == [
         ("locate", 502, None),
@@ -1960,7 +1960,7 @@ def test_automation_logs_vm501_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -
     assert profile is not None
 
     result = ResultBuilder("automation")
-    service._restore_clean_snapshot(result, profile)  # noqa: SLF001
+    service.preflight.restore_clean_snapshot(result, profile)
 
     assert calls == [
         ("locate", 501, None),
@@ -2035,6 +2035,62 @@ def test_automation_isolates_unexpected_errors_to_the_originating_vm(
         "target": vm.host,
         "type": "TypeError",
         "exception_type": "WorkflowError",
+    }
+
+
+def test_automation_preserves_primary_failure_when_serial_capture_also_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    serial_session = SimpleNamespace()
+
+    monkeypatch.setattr(service, "_prepare_windows_test_vm", lambda *_args: None)
+    monkeypatch.setattr(
+        service.validation,
+        "deploy_to_documents",
+        lambda _vm, executable: executable,
+    )
+    monkeypatch.setattr(service, "_start_serial_capture", lambda *_args: serial_session)
+    monkeypatch.setattr(
+        service,
+        "_launch_elevated",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            WorkflowError(
+                "automation.primary",
+                "Primary failure",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_stop_serial_capture",
+        lambda *_args: (_ for _ in ()).throw(
+            WorkflowError(
+                "automation.serial_capture",
+                "Serial capture failure",
+                details={"vm": vm.name, "target": vm.host, "path": "serial.log"},
+            )
+        ),
+    )
+
+    result = service._run_vm_isolated(  # noqa: SLF001
+        vm,
+        PureWindowsPath("C:/Libertix/Libertix.exe"),
+        AutomationOptions("test", "testtest", False),
+        None,
+    )
+
+    assert result.status == "error"
+    assert [step.step for step in result.steps[-2:]] == [
+        "automation.serial_capture",
+        "automation.primary",
+    ]
+    assert result.steps[-2].context == {
+        "vm": vm.name,
+        "target": vm.host,
+        "path": "serial.log",
     }
 
 

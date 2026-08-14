@@ -27,6 +27,12 @@ if (-not (Test-Path -LiteralPath $geometryModule -PathType Leaf)) {
     throw "Libertix storage geometry module is missing: $geometryModule"
 }
 Import-Module -Name $geometryModule -Force -ErrorAction Stop
+$policyModule = Join-Path $PSScriptRoot "modules\Libertix.InstallationPolicy.psm1"
+if (-not (Test-Path -LiteralPath $policyModule -PathType Leaf)) {
+    throw "Libertix installation policy module is missing: $policyModule"
+}
+Import-Module -Name $policyModule -Force -ErrorAction Stop
+$installerLabel = [string](Get-LibertixInstallationPolicy).volumeLabels.staging
 
 function Get-ValidatedWindowsPartition {
     $driveLetter = $SystemDrive.TrimEnd(":")
@@ -158,7 +164,7 @@ switch ($Action) {
         Format-Volume `
             -Partition $partition `
             -FileSystem FAT32 `
-            -NewFileSystemLabel "LIBERTIX" `
+            -NewFileSystemLabel $installerLabel `
             -Confirm:$false `
             -Force `
             -ErrorAction Stop | Out-Null
@@ -197,7 +203,7 @@ switch ($Action) {
             [int64]$verifiedPartition.Offset -ne [int64]$partition.Offset -or
             [int64]$verifiedPartition.Size -ne $SizeBytes -or
             [string]$verifiedVolume.FileSystem -ne "FAT32" -or
-            [string]$verifiedVolume.FileSystemLabel -ne "LIBERTIX"
+            [string]$verifiedVolume.FileSystemLabel -ne $installerLabel
         ) {
             throw "The created BIOS staging partition failed postcondition checks."
         }

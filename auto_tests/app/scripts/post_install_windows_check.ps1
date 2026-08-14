@@ -19,6 +19,28 @@ function Assert-Condition {
     }
 }
 
+function Read-JsonFileWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [int]$TimeoutMilliseconds = 10000
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        try {
+            return Get-Content -LiteralPath $LiteralPath -Raw -Encoding UTF8 -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMilliseconds) {
+                throw
+            }
+            # The verifier replaces this file while the test is polling it. Windows can
+            # briefly deny access or expose an incomplete replacement between two reads.
+            Start-Sleep -Milliseconds 200
+        }
+    } while ($true)
+}
+
 function Get-LinuxDrive {
     param([Parameter(Mandatory = $true)][string]$LinuxUsername)
 
@@ -129,8 +151,7 @@ function Assert-LibertixPostInstallResult {
     $resultPath = Join-Path $root "post-install-verification.json"
     Assert-Condition (Test-Path -LiteralPath $resultPath -PathType Leaf) `
         "The post-install verification result is missing."
-    $result = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
-        ConvertFrom-Json -ErrorAction Stop
+    $result = Read-JsonFileWithRetry -LiteralPath $resultPath
     Assert-Condition ([string]$result.status -eq "succeeded") `
         "The post-install verification did not succeed: $($result.error)"
     Assert-Condition ([string]$result.planId -eq [string]$Session.Plan.planId) `
@@ -420,8 +441,7 @@ try {
                 $evidencePath = Join-Path $session.Root "installed-linux-boot.json"
                 $resultPath = Join-Path $session.Root "post-install-verification.json"
                 $waitingResult = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
-                    Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
-                        ConvertFrom-Json -ErrorAction Stop
+                    Read-JsonFileWithRetry -LiteralPath $resultPath
                 } else { $null }
                 $startupTasks = @(Get-LibertixRecoveryTasks | Where-Object {
                     $_.TaskName -eq "LibertixInstallRecovery" -or
@@ -490,8 +510,7 @@ try {
                     -ExpectedFirmware ([string]$config.expected_firmware)
                 $resultPath = Join-Path $session.Root "post-install-verification.json"
                 $resultStatus = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
-                    [string](Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
-                        ConvertFrom-Json -ErrorAction Stop).status
+                    [string](Read-JsonFileWithRetry -LiteralPath $resultPath).status
                 } else { "missing" }
                 $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
                 $startupTasks = @(Get-LibertixRecoveryTasks | Where-Object {
@@ -503,8 +522,7 @@ try {
                     throw "Libertix Windows finalization reached terminal status '$resultStatus'."
                 }
                 if ($resultStatus -eq "succeeded" -and [bool]$config.share_linux_files_in_windows) {
-                    $savedResult = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
-                        ConvertFrom-Json -ErrorAction Stop
+                    $savedResult = Read-JsonFileWithRetry -LiteralPath $resultPath
                     $interactiveCheckPassed = @($savedResult.checks | Where-Object {
                         [string]$_.name -eq "explorer-integration" -and [bool]$_.passed
                     }).Count -eq 1
@@ -756,7 +774,13 @@ try {
             Assert-Condition ([int]$volume.EncryptionPercentage -eq 0) "C: still contains encrypted data."
         }
         "temporary_artifacts" {
-            $installerVolumes = @(Get-Volume -FileSystemLabel "LIBERTIXEFI" -ErrorAction SilentlyContinue)
+            $stagingVolumeLabels = @($config.staging_volume_labels | ForEach-Object { [string]$_ })
+            Assert-Condition ($stagingVolumeLabels.Count -gt 0) `
+                "The staging-volume label contract is missing from the validation request."
+            $installerVolumes = @(
+                Get-Volume -ErrorAction SilentlyContinue |
+                    Where-Object { [string]$_.FileSystemLabel -in $stagingVolumeLabels }
+            )
             $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
             $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
             $recoveryTasks = @(Get-LibertixRecoveryTasks)
@@ -1082,8 +1106,7 @@ try {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $resultPath = Join-Path $session.Root "post-install-verification.json"
-            $savedResult = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 |
-                ConvertFrom-Json -ErrorAction Stop
+            $savedResult = Read-JsonFileWithRetry -LiteralPath $resultPath
             $checks = @($savedResult.checks | Where-Object {
                 [string]$_.name -eq "explorer-integration"
             })

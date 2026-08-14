@@ -9,6 +9,14 @@ $ProgressPreference = "SilentlyContinue"
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 |
     ConvertFrom-Json -ErrorAction Stop
+$stagingVolumeLabels = @(
+    $config.staging_volume_labels |
+        ForEach-Object { [string]$_ } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+)
+if ($stagingVolumeLabels.Count -eq 0) {
+    throw "Rollback verification requires at least one staging volume label."
+}
 $expectedDiskNumber = [int]$config.system_disk_number
 $expectedPartitionNumber = [int]$config.system_partition_number
 $expectedPartitionOffset = [int64]$config.system_partition_offset
@@ -19,7 +27,10 @@ $systemDisk = $systemPartition | Get-Disk -ErrorAction Stop
 $installerPartitions = @()
 foreach ($partition in @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop)) {
     $volume = $partition | Get-Volume -ErrorAction SilentlyContinue
-    if ($null -ne $volume -and [string]$volume.FileSystemLabel -eq "LIBERTIXEFI") {
+    if (
+        $null -ne $volume -and
+        [string]$volume.FileSystemLabel -in $stagingVolumeLabels
+    ) {
         $installerPartitions += $partition
     }
 }

@@ -3,6 +3,15 @@
 # Locate the single validated plan published by Windows. The live ISO may run
 # from RAM or from a loop device, so its mount point does not reliably expose
 # the FAT staging volume that carries the plan.
+load_libertix_staging_volume_label() {
+    [ -z "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ] || return 0
+    LIBERTIX_STAGING_VOLUME_LABEL="$(
+        /usr/local/lib/libertix/libertix_installation_policy.py staging-volume-label
+    )" || return 2
+    [ -n "$LIBERTIX_STAGING_VOLUME_LABEL" ] || return 2
+    export LIBERTIX_STAGING_VOLUME_LABEL
+}
+
 copy_libertix_context_candidate() {
     local plan="$1" candidate_dir="$2" state plan_hash state_hash context_id
 
@@ -18,6 +27,8 @@ copy_libertix_context_candidate() {
 find_libertix_installation_plan() (
     local candidate candidate_dir device label mount_dir plan state context_id plan_id state_plan_id
     local -A unique_contexts=()
+
+    load_libertix_staging_volume_label || return $?
 
     cleanup_plan_probe() {
         mountpoint -q "$mount_dir" && umount "$mount_dir" 2>/dev/null || true
@@ -42,7 +53,7 @@ find_libertix_installation_plan() (
         [ -b "$device" ] || continue
         label="$(blkid -s LABEL -o value "$device" 2>/dev/null || true)"
         case "$label" in
-            LIBERTIX|LIBERTIX_INSTALLER|LIBERTIXEFI) ;;
+            "$LIBERTIX_STAGING_VOLUME_LABEL") ;;
             *) continue ;;
         esac
 

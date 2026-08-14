@@ -139,10 +139,48 @@ $systemDrive = [string]$env:SystemDrive
 if ($systemDrive -notmatch '^[A-Za-z]:$') {
     throw "Windows did not expose a valid system drive."
 }
+$installationPolicyCandidates = @(
+    (Join-Path $systemDrive "LibertixInstallRecovery\Libertix.InstallationPolicy.json"),
+    (Join-Path $systemDrive "LibertixTools\Libertix.InstallationPolicy.json")
+)
+$installationPolicyPath = $installationPolicyCandidates |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+$stagingVolumeLabels = @()
+if ($installationPolicyPath) {
+    try {
+        $installationPolicy = Get-Content `
+            -LiteralPath $installationPolicyPath `
+            -Raw `
+            -Encoding UTF8 `
+            -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $stagingVolumeLabels = @(
+            @($installationPolicy.volumeLabels.staging) +
+                @($installationPolicy.volumeLabels.legacyStagingForRecovery) |
+                ForEach-Object { [string]$_ } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                Select-Object -Unique
+        )
+    } catch {
+        Write-Output ("INSTALLATION_POLICY_ERROR={0}" -f $_.Exception.Message)
+    }
+}
 Write-Output ("TRANSACTION_STATE_PRESENT={0}" -f
     (Test-Path -LiteralPath (Join-Path $systemDrive "LibertixTools\uefi-transaction.json")))
-Write-Output ("INSTALLER_VOLUME_PRESENT={0}" -f
-    [bool](Get-Volume -FileSystemLabel "LIBERTIXEFI" -ErrorAction SilentlyContinue))
+$installerVolumes = if ($stagingVolumeLabels.Count -gt 0) {
+    @(
+        Get-Volume -ErrorAction SilentlyContinue |
+            Where-Object { [string]$_.FileSystemLabel -in $stagingVolumeLabels }
+    )
+} else {
+    @()
+}
+Write-Output ("INSTALLATION_POLICY={0}" -f $(
+    if ($installationPolicyPath) { $installationPolicyPath } else { "NOT_FOUND" }
+))
+Write-Output ("INSTALLER_VOLUME_COUNT={0}" -f $installerVolumes.Count)
+Write-Output ("INSTALLER_VOLUME_PRESENT={0}" -f [bool]($installerVolumes.Count -gt 0))
 $uefiRecoveryRoot = Join-Path $systemDrive "ProgramData\Libertix\UefiRecovery"
 $uefiRecoverySessions = @(
     Get-ChildItem -LiteralPath $uefiRecoveryRoot -Directory -ErrorAction SilentlyContinue

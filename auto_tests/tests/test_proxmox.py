@@ -1,8 +1,13 @@
+from pathlib import Path
+from threading import Event
+
 import httpx
 import pytest
+from websockets.exceptions import InvalidMessage
 
 import app.clients.proxmox as proxmox_module
 from app.clients.proxmox import ProxmoxClient
+from app.clients.proxmox_serial import ProxmoxSerialCapture
 from app.errors import WorkflowError
 
 
@@ -173,3 +178,165 @@ def test_guest_agent_command_preserves_argument_boundaries() -> None:
     )
     assert requests[1][0] == "GET"
     assert "pid=42" in str(requests[1][1]) or requests[1][1].endswith("exec-status")
+
+
+def test_serial_terminal_proxy_is_requested_for_serial_zero() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "user": "automation@pve",
+                    "ticket": "private-console-ticket",
+                    "port": "5901",
+                    "upid": "UPID:node-a:1234:serial",
+                }
+            },
+        )
+
+    proxmox = ProxmoxClient(
+        "https://proxmox.test:8006",
+        "token",
+        "secret",
+        timeout=1,
+        task_timeout=1,
+    )
+    proxmox.client.close()
+    proxmox.client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        proxy = proxmox.create_serial_terminal_proxy("node-a", 500)
+    finally:
+        proxmox.client.close()
+
+    assert proxy.port == 5901
+    assert requests[0].url.path.endswith("/nodes/node-a/qemu/500/termproxy")
+    assert requests[0].content == b"serial=serial0"
+
+
+def test_serial_capture_reconnects_and_never_persists_console_ticket(tmp_path: Path) -> None:
+    stop_event = Event()
+    ready_event = Event()
+    connection_number = 0
+
+    class FakeProxy:
+        user = "automation@pve"
+        ticket = "private-console-ticket"
+        port = 5901
+        upid = "UPID:node-a:1234:serial"
+
+    class FakeProxmox:
+        api_origin = "https://proxmox.test:8006"
+        authorization = "PVEAPIToken=token=private-api-secret"
+        websocket_ssl_context = None
+        timeout = 1
+
+        def create_serial_terminal_proxy(self, _node: str, _vmid: int) -> FakeProxy:
+            return FakeProxy()
+
+    class FakeWebSocket:
+        def __init__(self, number: int) -> None:
+            self.number = number
+            self.calls = 0
+            self.sent: list[str] = []
+
+        def __enter__(self) -> "FakeWebSocket":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def send(self, value: str) -> None:
+            assert value == "automation@pve:private-console-ticket\n"
+            self.sent.append(value)
+
+        def recv(self, **_kwargs: object) -> bytes:
+            self.calls += 1
+            if self.number == 1 and self.calls > 1:
+                raise EOFError("guest reboot")
+            if self.number == 2:
+                stop_event.set()
+                return b"OKsecond boot\n"
+            return b"OKfirst boot\n"
+
+    def fake_connect(url: str, **kwargs: object) -> FakeWebSocket:
+        nonlocal connection_number
+        connection_number += 1
+        assert "private-console-ticket" in url
+        assert kwargs["additional_headers"] == {
+            "Authorization": "PVEAPIToken=token=private-api-secret"
+        }
+        return FakeWebSocket(connection_number)
+
+    destination = tmp_path / "serial" / "vm1-serial-console.log"
+    report = ProxmoxSerialCapture(
+        FakeProxmox(),  # type: ignore[arg-type]
+        reconnect_seconds=0.001,
+        connect_factory=fake_connect,
+    ).run("node-a", 500, destination, stop_event, ready_event)
+
+    saved = destination.read_bytes()
+    assert ready_event.is_set()
+    assert report.payload_bytes == len(b"first boot\nsecond boot\n")
+    assert report.connections == 2
+    assert report.disconnects == 1
+    assert b"first boot\n" in saved
+    assert b"second boot\n" in saved
+    assert b"private-console-ticket" not in saved
+    assert b"private-api-secret" not in saved
+
+
+def test_serial_capture_retries_a_transient_invalid_websocket_handshake(tmp_path: Path) -> None:
+    stop_event = Event()
+    ready_event = Event()
+    connection_number = 0
+
+    class FakeProxy:
+        user = "automation@pve"
+        ticket = "private-console-ticket"
+        port = 5901
+        upid = "UPID:node-a:1234:serial"
+
+    class FakeProxmox:
+        api_origin = "https://proxmox.test:8006"
+        authorization = "PVEAPIToken=token=private-api-secret"
+        websocket_ssl_context = None
+        timeout = 1
+
+        def create_serial_terminal_proxy(self, _node: str, _vmid: int) -> FakeProxy:
+            return FakeProxy()
+
+    class FakeWebSocket:
+        def __enter__(self) -> "FakeWebSocket":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def send(self, value: str) -> None:
+            assert value == "automation@pve:private-console-ticket\n"
+
+        def recv(self, **_kwargs: object) -> bytes:
+            stop_event.set()
+            return b"OKguest output\n"
+
+    def fake_connect(_url: str, **_kwargs: object) -> FakeWebSocket:
+        nonlocal connection_number
+        connection_number += 1
+        if connection_number == 1:
+            raise InvalidMessage("temporary invalid proxy response")
+        return FakeWebSocket()
+
+    destination = tmp_path / "serial" / "vm1-serial-console.log"
+    report = ProxmoxSerialCapture(
+        FakeProxmox(),  # type: ignore[arg-type]
+        reconnect_seconds=0.001,
+        connect_factory=fake_connect,
+    ).run("node-a", 500, destination, stop_event, ready_event)
+
+    assert ready_event.is_set()
+    assert report.payload_bytes == len(b"guest output\n")
+    assert report.connections == 1
+    assert report.disconnects == 1

@@ -43,7 +43,7 @@ and placed temporarily at the start of `BootOrder`. Windows Boot Manager does no
 chainload the live system. The live installer removes its BCD and EFI artifacts before changing the
 disk, and `-Revert` restores the saved firmware order, ESP files, and temporary partition.
 
-Disk-imaging systems such as FOG restore the ESP but do not recreate motherboard NVRAM entries.
+Disk-imaging systems can restore the ESP without recreating motherboard NVRAM entries.
 The installed-system phase therefore matches both Windows and Libertix entries against the current
 ESP partition number, GPT partition GUID, and EFI loader path. A same-named entry that targets an
 old cloned ESP is never reused. If the canonical Windows entry is absent, Libertix adds one for the

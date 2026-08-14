@@ -402,9 +402,9 @@ mount_ntfs_rw_or_die() {
 delete_live_bcd_entry_or_die() {
     local bcd_file="$1"
 
-    # cleanup-bcd.py edits the offline Windows BCD hive with hivex. Keeping the
-    # Python out of this shell module makes the boot cleanup auditable.
-    python3 /usr/local/lib/libertix/cleanup-bcd.py "$bcd_file"
+    # The dedicated Python module edits the offline Windows BCD hive with hivex.
+    # Keeping that logic out of shell makes the ownership checks auditable.
+    python3 /usr/local/lib/libertix/cleanup-bcd-main.py "$bcd_file"
 }
 write_windows_recovery_marker_file_best_effort() {
     local namespace="$1"

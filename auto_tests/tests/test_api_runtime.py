@@ -76,7 +76,7 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
     request = AutomationRequest(
         apply=True,
         linux_password="test-passphrase",
-        simulate_fog_clone_boot_entries=True,
+        simulate_stale_firmware_entries=True,
     )
 
     assert pickle.loads(pickle.dumps(main_module._stream_operation_worker)) is (  # noqa: SLF001
@@ -84,7 +84,7 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
     )
     restored_settings, restored_request = pickle.loads(pickle.dumps((settings(), request)))
     assert restored_request.linux_password == "test-passphrase"
-    assert restored_request.simulate_fog_clone_boot_entries is True
+    assert restored_request.simulate_stale_firmware_entries is True
 
 
 def test_stream_worker_serializes_parallel_vm_events(

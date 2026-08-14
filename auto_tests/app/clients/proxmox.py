@@ -4,6 +4,7 @@ import logging
 import re
 import ssl
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -12,6 +13,14 @@ import httpx
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SerialTerminalProxy:
+    user: str
+    ticket: str
+    port: int
+    upid: str
 
 
 class ProxmoxClient:
@@ -36,8 +45,16 @@ class ProxmoxClient:
         # opt into their own CA bundle; disabling verification requires an
         # explicit runtime setting and is never hidden in the transport client.
         tls_verification: bool | ssl.SSLContext = verify_tls
+        websocket_ssl_context: ssl.SSLContext | None = None
         if ca_bundle is not None:
             tls_verification = ssl.create_default_context(cafile=str(ca_bundle))
+            websocket_ssl_context = ssl.create_default_context(cafile=str(ca_bundle))
+        elif self.api_origin.startswith("https://"):
+            websocket_ssl_context = ssl.create_default_context()
+            if not verify_tls:
+                websocket_ssl_context.check_hostname = False
+                websocket_ssl_context.verify_mode = ssl.CERT_NONE
+        self.websocket_ssl_context = websocket_ssl_context
         self.client = httpx.Client(
             headers={"Authorization": self.authorization},
             verify=tls_verification,
@@ -141,6 +158,59 @@ class ProxmoxClient:
                 details={"vmid": vmid, "node": node},
             )
         return data
+
+    def create_serial_terminal_proxy(
+        self,
+        node: str,
+        vmid: int,
+        *,
+        serial: str = "serial0",
+    ) -> SerialTerminalProxy:
+        data = self._request(
+            "POST",
+            f"/nodes/{node}/qemu/{vmid}/termproxy",
+            step="proxmox.serial_proxy",
+            data={"serial": serial},
+        )
+        if not isinstance(data, dict):
+            raise WorkflowError(
+                "proxmox.serial_proxy",
+                "Invalid Proxmox serial-terminal proxy response",
+                details={"node": node, "vmid": vmid},
+            )
+        user = data.get("user")
+        ticket = data.get("ticket")
+        raw_port = data.get("port")
+        upid = data.get("upid")
+        if isinstance(raw_port, int):
+            port = raw_port
+        elif isinstance(raw_port, str) and raw_port.isascii() and raw_port.isdigit():
+            port = int(raw_port)
+        else:
+            port = None
+        if (
+            not isinstance(user, str)
+            or not user
+            or not isinstance(ticket, str)
+            or not ticket
+            or port is None
+            or not 5900 <= port <= 5999
+            or not isinstance(upid, str)
+            or not upid.startswith("UPID:")
+        ):
+            raise WorkflowError(
+                "proxmox.serial_proxy",
+                "Incomplete Proxmox serial-terminal proxy response",
+                details={
+                    "node": node,
+                    "vmid": vmid,
+                    "has_user": isinstance(user, str) and bool(user),
+                    "has_ticket": isinstance(ticket, str) and bool(ticket),
+                    "port": port,
+                    "has_upid": isinstance(upid, str) and upid.startswith("UPID:"),
+                },
+            )
+        return SerialTerminalProxy(user=user, ticket=ticket, port=port, upid=upid)
 
     def get_guest_network_interfaces(
         self,

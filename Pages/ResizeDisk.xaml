@@ -16,7 +16,10 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="RepeatButton">
-                        <Border Height="4" CornerRadius="2" Background="{TemplateBinding Background}"/>
+                        <Border Height="8"
+                                CornerRadius="4"
+                                VerticalAlignment="Center"
+                                Background="{TemplateBinding Background}"/>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -27,8 +30,8 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
                         <Grid>
-                            <Ellipse Width="20" Height="20" Fill="{DynamicResource AccentColor}"/>
-                            <Ellipse Width="16" Height="16" Fill="{DynamicResource PrimaryBackground}"/>
+                            <Ellipse Width="28" Height="28" Fill="{DynamicResource AccentColor}"/>
+                            <Ellipse Width="20" Height="20" Fill="{DynamicResource PrimaryBackground}"/>
                         </Grid>
                     </ControlTemplate>
                 </Setter.Value>
@@ -45,7 +48,9 @@
                                 <RowDefinition Height="Auto" MinHeight="{TemplateBinding MinHeight}"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
-                            <Track Grid.Row="1" x:Name="PART_Track">
+                            <Track Grid.Row="1"
+                                   x:Name="PART_Track"
+                                   VerticalAlignment="Center">
                                 <Track.DecreaseRepeatButton>
                                     <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="{DynamicResource AccentColor}"/>
                                 </Track.DecreaseRepeatButton>
@@ -165,13 +170,22 @@
 
                 <Slider x:Name="PartitionSlider"
                         Style="{StaticResource CustomSlider}"
+                        MinHeight="32"
                         Minimum="{Binding MinimumSize}"
                         Maximum="{Binding MaximumSize}"
                         Value="{Binding SelectedSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                         IsEnabled="{Binding CanAllocateLinux}"
+                        IsMoveToPointEnabled="True"
                         TabIndex="0"
                         TickFrequency="1"
-                        IsSnapToTickEnabled="True"/>
+                        SmallChange="1"
+                        LargeChange="5"
+                        Delay="250"
+                        Interval="40"
+                        IsSnapToTickEnabled="True"
+                        AutoToolTipPlacement="TopLeft"
+                        AutoToolTipPrecision="0"
+                        Cursor="Hand"/>
 
                 <TextBox x:Name="ManualSizeBox"
                          Grid.Column="1"
