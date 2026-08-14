@@ -304,7 +304,7 @@ function Save-RecoveryLogs {
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         return
     }
-    $archiveRoot = Join-Path $SystemDrive "LibertixInstallLogs\$($State.RunId)"
+    $archiveRoot = Join-Path $SystemDrive "LibertixInstallLogs\Windows\$($State.RunId)"
     New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
     Copy-Item `
         -LiteralPath $source `
@@ -616,6 +616,13 @@ try {
         Write-AgentLog "ERROR: $($_.Exception.Message)"
     } catch {
         Write-Verbose "Unable to persist the recovery failure: $($_.Exception.Message)"
+    }
+    try {
+        if ($null -ne (Get-Variable -Name state -ValueOnly -ErrorAction SilentlyContinue)) {
+            Save-RecoveryLogs -State $state
+        }
+    } catch {
+        Write-Verbose "Unable to archive the recovery failure log: $($_.Exception.Message)"
     }
     Write-Error $_.Exception.Message
     exit 1

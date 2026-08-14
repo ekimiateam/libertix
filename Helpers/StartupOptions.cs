@@ -15,6 +15,8 @@ namespace Libertix.Helpers
         private const string SkipNvramWriteProbeOption = "--skip-nvram-write-probe";
         private const string UefiBootNextFailedOption = "--uefi-bootnext-failed";
         private const string UefiRecoveryStateOption = "--uefi-recovery-state";
+        private const string UnattendedOption = "--unattended";
+        private const string UnattendedConfigOption = "--unattended-config";
 
         public string FilepoolBaseUrlOverride { get; private set; }
         public string DevelopmentSshStaticIpv4Address { get; private set; }
@@ -25,6 +27,15 @@ namespace Libertix.Helpers
         public bool SkipNvramWriteProbe { get; private set; }
         public bool UefiBootNextFailed { get; private set; }
         public string UefiRecoveryStatePath { get; private set; }
+        public UnattendedOptions Unattended { get; private set; }
+        private bool UnattendedRequested { get; set; }
+        private string UnattendedConfigPath { get; set; }
+
+        internal void CompleteUnattendedWorkflow()
+        {
+            Unattended?.ClearPassword();
+            Unattended = null;
+        }
 
         public static bool TryParse(string[] args, out StartupOptions options, out string error)
         {
@@ -184,6 +195,36 @@ namespace Libertix.Helpers
                     continue;
                 }
 
+                if (string.Equals(option, UnattendedOption, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (options.UnattendedRequested)
+                    {
+                        error = UnattendedOption + " can only be specified once.";
+                        return false;
+                    }
+                    options.UnattendedRequested = true;
+                    continue;
+                }
+
+                if (string.Equals(
+                    option,
+                    UnattendedConfigOption,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!TryReadSingleValue(
+                        args,
+                        ref index,
+                        UnattendedConfigOption,
+                        options.UnattendedConfigPath,
+                        out string value,
+                        out error))
+                    {
+                        return false;
+                    }
+                    options.UnattendedConfigPath = value;
+                    continue;
+                }
+
                 // Ignoring a misspelled safety or development option can run a
                 // materially different workflow from the one the caller
                 // requested. Reject every option outside the explicit contract.
@@ -191,7 +232,28 @@ namespace Libertix.Helpers
                 return false;
             }
 
-            return options.ValidateDevelopmentNetwork(out error);
+            if (!options.ValidateDevelopmentNetwork(out error))
+                return false;
+
+            bool hasUnattendedConfig = !string.IsNullOrWhiteSpace(options.UnattendedConfigPath);
+            if (options.UnattendedRequested != hasUnattendedConfig)
+            {
+                error = UnattendedOption + " and " + UnattendedConfigOption +
+                    " must be specified together.";
+                return false;
+            }
+            if (options.UnattendedRequested)
+            {
+                if (!UnattendedOptions.TryLoad(
+                    options.UnattendedConfigPath,
+                    out UnattendedOptions unattended,
+                    out error))
+                {
+                    return false;
+                }
+                options.Unattended = unattended;
+            }
+            return true;
         }
 
         private static bool TryReadSingleValue(

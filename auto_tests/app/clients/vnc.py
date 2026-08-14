@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -14,13 +15,19 @@ CAPTURE_RETRY_SECONDS = 2
 
 
 class VNCClient:
+    _connect_lock = threading.Lock()
+
     def __init__(self, connect_timeout: float = 15) -> None:
         if connect_timeout <= 0:
             raise ValueError("connect_timeout must be positive")
         self.connect_timeout = connect_timeout
 
     def connect(self, address: str):
-        return api.connect(self.vncdotool_address(address), timeout=self.connect_timeout)
+        # vncdotool lazily starts one process-wide Twisted reactor. Concurrent
+        # first connections can both observe it as stopped and race to start it.
+        # Serialize only connection establishment; VM workflows remain parallel.
+        with self._connect_lock:
+            return api.connect(self.vncdotool_address(address), timeout=self.connect_timeout)
 
     @staticmethod
     def vncdotool_address(address: str) -> str:

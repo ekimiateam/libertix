@@ -22,6 +22,10 @@ namespace Libertix.Installation
             InstallationPolicy.Current.Storage.LargeInstallationStagingSizeGiB;
         public static long PartitionAlignmentBytes =>
             InstallationPolicy.Current.Storage.PartitionAlignmentBytes;
+        public static double RecommendedLinuxFractionOfFreeSpace =>
+            InstallationPolicy.Current.Storage.RecommendedLinuxFractionOfFreeSpace;
+        public static int MaximumRecommendedLinuxSizeGiB =>
+            InstallationPolicy.Current.Storage.MaximumRecommendedLinuxSizeGiB;
         public const long BytesPerGiB = 1024L * 1024L * 1024L;
         public const long MebibytesPerGiB = 1024L;
 

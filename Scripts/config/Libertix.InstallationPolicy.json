@@ -8,7 +8,9 @@
     "preflightShrinkSafetyGiB": 2,
     "maximumDirectFat32SizeGiB": 31,
     "largeInstallationStagingSizeGiB": 8,
-    "partitionAlignmentBytes": 1048576
+    "partitionAlignmentBytes": 1048576,
+    "recommendedLinuxFractionOfFreeSpace": 0.4,
+    "maximumRecommendedLinuxSizeGiB": 100
   },
   "memory": {
     "windowsMinimumMiB": 2048,
@@ -16,7 +18,9 @@
     "liveMinimumMiB": 1536
   },
   "download": {
-    "aria2MaximumConnections": 5
+    "aria2MaximumConnections": 5,
+    "maximumAttempts": 6,
+    "retryBaseDelaySeconds": 10
   },
   "account": {
     "reservedUsernamesSource": "https://sources.debian.org/src/user-setup/1.107/reserved-usernames",

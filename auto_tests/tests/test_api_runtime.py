@@ -4,28 +4,29 @@ import json
 import multiprocessing
 import os
 import pickle
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-from starlette.testclient import TestClient as StarletteTestClient
 
 import app.main as main_module
 from app.api_runtime import (
     ProcessOperationLock,
-    cleanup_capture_workspaces,
+    capture_workspace_cleanup_candidates,
+    cleanup_operation_artifacts,
+    create_capture_workspace,
+    mark_capture_workspace_complete,
     mark_capture_workspace_owned,
 )
+from app.config import VMConfig
 from app.main import create_app
 from app.models import AutomationRequest, OperationResult, StepResult
 
+from .asgi_client import AsgiTestClient
 from .test_core import settings
-
-
-class TestClient(StarletteTestClient):
-    def __init__(self, *args, **kwargs) -> None:
-        kwargs.setdefault("client", ("127.0.0.1", 50000))
-        super().__init__(*args, **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +74,7 @@ def test_process_operation_lock_can_be_reused_without_network(tmp_path: Path) ->
 
 def test_spawn_worker_arguments_and_target_are_serializable() -> None:
     request = AutomationRequest(
+        apply=True,
         linux_password="test-passphrase",
         simulate_fog_clone_boot_entries=True,
     )
@@ -85,11 +87,123 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
     assert restored_request.simulate_fog_clone_boot_entries is True
 
 
+def test_stream_worker_serializes_parallel_vm_events(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class ConcurrentWriteDetector:
+        def __init__(self) -> None:
+            self._state_lock = threading.Lock()
+            self._active_writers = 0
+            self.overlap_detected = False
+            self.events: list[tuple[str, object]] = []
+
+        def send(self, event: tuple[str, object]) -> None:
+            with self._state_lock:
+                self._active_writers += 1
+                if self._active_writers > 1:
+                    self.overlap_detected = True
+            time.sleep(0.01)
+            self.events.append(event)
+            with self._state_lock:
+                self._active_writers -= 1
+
+        def close(self) -> None:
+            pass
+
+    def run_parallel_steps(
+        _configured,
+        _operation,
+        _selectors,
+        _request,
+        on_step,
+        _run_workspace,
+    ) -> OperationResult:
+        barrier = threading.Barrier(3)
+
+        def publish_vm_step(index: int) -> None:
+            barrier.wait()
+            on_step(
+                StepResult(
+                    step="automation.deploy",
+                    status="ok",
+                    message="deployed",
+                    context={"vm": f"vm{index}"},
+                )
+            )
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            list(executor.map(publish_vm_step, range(1, 4)))
+        return OperationResult(
+            status="ok",
+            operation="automation",
+            message="complete",
+            steps=[],
+        )
+
+    connection = ConcurrentWriteDetector()
+    workspace = tmp_path / "automation-20260813T120000Z-a0000000"
+    workspace.mkdir()
+    monkeypatch.setattr(main_module, "_run_operation", run_parallel_steps)
+    monkeypatch.setattr(main_module.vnc_api, "shutdown", lambda: None)
+
+    main_module._stream_operation_worker(  # noqa: SLF001
+        settings(capture_dir=tmp_path / "captures"),
+        "automation",
+        ["vm1", "vm2", "vm3"],
+        AutomationRequest(apply=True, linux_password="test"),
+        connection,  # type: ignore[arg-type]
+        workspace,
+    )
+
+    assert connection.overlap_detected is False
+    assert [event_type for event_type, _payload in connection.events] == [
+        "step",
+        "step",
+        "step",
+        "result",
+    ]
+
+
 def test_automation_password_accepts_four_characters_and_rejects_three() -> None:
-    assert AutomationRequest(linux_password="test").linux_password == "test"
+    assert AutomationRequest(apply=True, linux_password="test").linux_password == "test"
 
     with pytest.raises(ValidationError):
-        AutomationRequest(linux_password="bad")
+        AutomationRequest(apply=True, linux_password="bad")
+
+
+def test_automation_first_boot_accepts_both_orders_and_rejects_unknown_values() -> None:
+    assert AutomationRequest(apply=True, linux_password="pass").first_boot == "windows"
+    assert (
+        AutomationRequest(apply=True, linux_password="pass", first_boot="linux").first_boot
+        == "linux"
+    )
+
+    with pytest.raises(ValidationError):
+        AutomationRequest(  # type: ignore[arg-type]
+            apply=True, linux_password="pass", first_boot="other"
+        )
+
+
+def test_automation_account_and_storage_constraints_follow_the_shared_policy() -> None:
+    policy = json.loads(
+        (
+            Path(__file__).resolve().parents[2] / "Scripts/config/Libertix.InstallationPolicy.json"
+        ).read_text(encoding="utf-8")
+    )
+    minimum_size = policy["storage"]["minimumFinalSizeGiB"]
+
+    assert (
+        AutomationRequest(
+            apply=True, linux_password="pass", linux_size_gib=minimum_size
+        ).linux_size_gib
+        == minimum_size
+    )
+    for username in ("root", "admin"):
+        with pytest.raises(ValidationError):
+            AutomationRequest(apply=True, linux_password="pass", linux_username=username)
+    with pytest.raises(ValidationError):
+        AutomationRequest(apply=True, linux_password="pass", linux_size_gib=minimum_size - 1)
 
 
 def test_process_operation_lock_refuses_a_symlink(tmp_path: Path) -> None:
@@ -98,8 +212,49 @@ def test_process_operation_lock_refuses_a_symlink(tmp_path: Path) -> None:
     lock_path = tmp_path / "operation.lock"
     lock_path.symlink_to(outside)
 
-    assert ProcessOperationLock(lock_path).acquire() is False
+    with pytest.raises(OSError):
+        ProcessOperationLock(lock_path).acquire()
     assert outside.read_text(encoding="ascii") == "unchanged\n"
+
+
+def test_process_operation_lock_releases_thread_lock_after_open_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = ProcessOperationLock(tmp_path / "operation.lock")
+    real_open = os.open
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError("lock path is not writable")
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr("app.api_runtime.os.open", fail_once)
+
+    with pytest.raises(PermissionError):
+        lock.acquire()
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_vm_name_is_safe_for_paths_tasks_and_generated_linux_hostname() -> None:
+    common = {
+        "host": "192.0.2.1",
+        "os": "Windows",
+        "vnc": "192.0.2.2:1",
+        "screen_width": 1024,
+        "screen_height": 768,
+        "vmid": 500,
+        "firmware": "uefi",
+    }
+
+    assert VMConfig(name="vm-501", **common).name == "vm-501"
+    for invalid in ("../vm", "vm_name", ".vm", "vm.", "a" * 58):
+        with pytest.raises(ValidationError):
+            VMConfig(name=invalid, **common)
 
 
 def test_capture_cleanup_is_scoped_to_the_configured_workspace(tmp_path: Path) -> None:
@@ -108,32 +263,108 @@ def test_capture_cleanup_is_scoped_to_the_configured_workspace(tmp_path: Path) -
     (capture_dir / "run-a").mkdir()
     (capture_dir / "run-a" / "screen.png").write_bytes(b"png")
     (capture_dir / "orphan.png").write_bytes(b"png")
-    stale = capture_dir / "automation-stale"
-    stale.mkdir()
-    (stale / "screen.png").write_bytes(b"png")
+    completed_runs: list[Path] = []
+    for index in range(5):
+        run = capture_dir / f"automation-20260813T12000{index}Z-a000000{index}"
+        run.mkdir()
+        (run / "screen.png").write_bytes(b"png")
+        mark_capture_workspace_complete(run)
+        timestamp_ns = time.time_ns() - (10 - index) * 1_000_000_000
+        os.utime(run, ns=(timestamp_ns, timestamp_ns))
+        completed_runs.append(run)
     outside = tmp_path / "outside.png"
     outside.write_bytes(b"keep")
 
-    cleanup_capture_workspaces(settings(capture_dir=capture_dir))
+    configured = settings(capture_dir=capture_dir)
+    candidates = capture_workspace_cleanup_candidates(configured)
 
-    assert sorted(path.name for path in capture_dir.iterdir()) == ["orphan.png", "run-a"]
-    assert not stale.exists()
+    assert candidates == sorted(completed_runs[:2])
+
+    cleanup_operation_artifacts(configured)
+
+    assert sorted(path.name for path in capture_dir.iterdir()) == [
+        "automation-20260813T120002Z-a0000002",
+        "automation-20260813T120003Z-a0000003",
+        "automation-20260813T120004Z-a0000004",
+        "orphan.png",
+        "run-a",
+    ]
     assert outside.read_bytes() == b"keep"
 
 
 def test_capture_cleanup_preserves_workspace_owned_by_a_live_process(tmp_path: Path) -> None:
     capture_dir = tmp_path / "captures"
     active = capture_dir / "automation-active"
-    stale = capture_dir / "automation-stale"
     active.mkdir(parents=True)
-    stale.mkdir()
     mark_capture_workspace_owned(active)
-    (stale / ".owner-pid").write_text("999999999\n", encoding="ascii")
+    for index in range(4):
+        completed = capture_dir / f"automation-20260813T12000{index}Z-b000000{index}"
+        completed.mkdir()
+        mark_capture_workspace_complete(completed)
 
-    cleanup_capture_workspaces(settings(capture_dir=capture_dir))
+    cleanup_operation_artifacts(settings(capture_dir=capture_dir))
 
     assert (active / ".owner-pid").read_text(encoding="ascii").strip() == str(os.getpid())
-    assert not stale.exists()
+    assert len(list(capture_dir.glob("automation-*"))) == 4
+    assert len(list(capture_dir.glob("automation-20260813T*-b*"))) == 3
+
+
+def test_operation_retention_combines_legacy_logs_and_current_workspaces(
+    tmp_path: Path,
+) -> None:
+    capture_dir = tmp_path / "captures"
+    log_dir = tmp_path / "logs"
+    capture_dir.mkdir()
+    log_dir.mkdir()
+    legacy_logs: list[Path] = []
+    for index in range(3):
+        legacy = log_dir / f"automation-20260812T12000{index}Z-c000000{index}.txt"
+        legacy.write_text("legacy\n", encoding="utf-8")
+        timestamp_ns = time.time_ns() - (20 - index) * 1_000_000_000
+        os.utime(legacy, ns=(timestamp_ns, timestamp_ns))
+        legacy_logs.append(legacy)
+    current = capture_dir / "automation-20260813T120000Z-d0000000"
+    current.mkdir()
+    mark_capture_workspace_complete(current)
+
+    cleanup_operation_artifacts(settings(capture_dir=capture_dir, operation_log_dir=log_dir))
+
+    assert not legacy_logs[0].exists()
+    assert legacy_logs[1].is_file()
+    assert legacy_logs[2].is_file()
+    assert current.is_dir()
+
+
+def test_operation_retention_ignores_manual_and_malformed_files(tmp_path: Path) -> None:
+    capture_dir = tmp_path / "captures"
+    log_dir = tmp_path / "logs"
+    capture_dir.mkdir()
+    log_dir.mkdir()
+    manual_capture = capture_dir / "diagnostic-vm500.png"
+    manual_capture.write_bytes(b"png")
+    malformed_workspace = capture_dir / "automation-manual"
+    malformed_workspace.mkdir()
+    manual_log = log_dir / "api-background.log"
+    manual_log.write_text("keep\n", encoding="utf-8")
+
+    cleanup_operation_artifacts(
+        settings(capture_dir=capture_dir, operation_log_dir=log_dir), keep=1
+    )
+
+    assert manual_capture.read_bytes() == b"png"
+    assert malformed_workspace.is_dir()
+    assert manual_log.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_create_capture_workspace_uses_a_dedicated_owned_directory(tmp_path: Path) -> None:
+    configured = settings(capture_dir=tmp_path / "captures")
+
+    workspace = create_capture_workspace(configured, "automation")
+
+    assert workspace.parent == configured.capture_dir
+    assert workspace.name.startswith("automation-")
+    assert workspace.stat().st_mode & 0o777 == 0o700
+    assert (workspace / ".owner-pid").read_text(encoding="ascii").strip() == str(os.getpid())
 
 
 def test_capture_cleanup_refuses_a_workspace_named_symlink(tmp_path: Path) -> None:
@@ -142,12 +373,13 @@ def test_capture_cleanup_refuses_a_workspace_named_symlink(tmp_path: Path) -> No
     outside.mkdir()
     (outside / "keep.txt").write_text("keep", encoding="utf-8")
     capture_dir.mkdir()
-    (capture_dir / "automation-linked").symlink_to(outside, target_is_directory=True)
+    linked = capture_dir / "automation-20260813T120000Z-c0000000"
+    linked.symlink_to(outside, target_is_directory=True)
 
-    cleanup_capture_workspaces(settings(capture_dir=capture_dir))
+    cleanup_operation_artifacts(settings(capture_dir=capture_dir))
 
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
-    assert (capture_dir / "automation-linked").is_symlink()
+    assert linked.is_symlink()
 
 
 def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
@@ -183,12 +415,12 @@ def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
         operation_log_dir=tmp_path / "logs",
     )
 
-    with TestClient(create_app(configured)) as client:
+    with AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
             json={
                 "vms": ["vm1"],
-                "apply": False,
+                "apply": True,
                 "source": "local",
                 "linux_password": "test-passphrase",
             },
@@ -199,6 +431,62 @@ def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
     assert [event["event"] for event in events] == ["step", "result"]
     assert events[-1]["data"]["status"] == "ok"
     assert lock.acquire_calls == 1
+    assert lock.release_calls == 1
+    assert lock.held is False
+
+
+def test_synchronous_operation_persists_steps_and_result_in_its_run_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+
+    class FakeAutomationService:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+            step = StepResult(
+                step="automation.deploy",
+                status="ok",
+                message="deployment complete",
+                context={"vm": "vm1"},
+            )
+            on_step(step)
+            return OperationResult(
+                status="ok",
+                operation="automation",
+                message="complete",
+                steps=[step],
+            )
+
+    monkeypatch.setattr(main_module, "AutomationService", FakeAutomationService)
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+    )
+
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation",
+            json={
+                "vms": ["vm1"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test-passphrase",
+            },
+        )
+
+    assert response.status_code == 200
+    workspaces = list((tmp_path / "captures").glob("automation-*"))
+    assert len(workspaces) == 1
+    assert (workspaces[0] / ".completed").is_file()
+    logs = list(workspaces[0].glob("automation-*.txt"))
+    assert len(logs) == 1
+    events = [json.loads(line) for line in logs[0].read_text(encoding="utf-8").splitlines()]
+    assert [event["event"] for event in events] == ["step", "result"]
+    assert events[-1]["data"]["status"] == "ok"
     assert lock.release_calls == 1
     assert lock.held is False
 
@@ -223,11 +511,12 @@ def test_stream_converts_worker_exception_to_safe_terminal_result(
         operation_log_dir=tmp_path / "logs",
     )
 
-    with TestClient(create_app(configured)) as client:
+    with AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
             json={
                 "vms": ["vm1"],
+                "apply": True,
                 "source": "local",
                 "linux_password": "test-passphrase",
             },
@@ -260,11 +549,12 @@ def test_stream_refuses_concurrent_operation_without_starting_service(
         operation_log_dir=tmp_path / "logs",
     )
 
-    with TestClient(create_app(configured)) as client:
+    with AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
             json={
                 "vms": ["vm1"],
+                "apply": True,
                 "source": "local",
                 "linux_password": "test-passphrase",
             },
@@ -275,6 +565,88 @@ def test_stream_refuses_concurrent_operation_without_starting_service(
     assert event["data"]["status"] == "error"
     assert "another operation" in event["data"]["message"]
     assert lock.release_calls == 0
+    assert list((tmp_path / "captures").iterdir()) == []
+
+
+def test_synchronous_operation_refuses_concurrency_without_creating_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    lock.held = True
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+    )
+
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation",
+            json={
+                "vms": ["vm1"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
+    assert list((tmp_path / "captures").iterdir()) == []
+    assert lock.release_calls == 0
+
+
+def test_workspace_finalization_failure_does_not_hide_operation_result_or_hold_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+
+    class FakeAutomationService:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def run(self, _selectors, **_kwargs) -> OperationResult:
+            return OperationResult(
+                status="ok",
+                operation="automation",
+                message="complete",
+                steps=[],
+            )
+
+    monkeypatch.setattr(main_module, "AutomationService", FakeAutomationService)
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+    )
+
+    with AsgiTestClient(create_app(configured)) as client:
+        monkeypatch.setattr(
+            main_module,
+            "mark_capture_workspace_complete",
+            lambda _path: (_ for _ in ()).throw(OSError("read-only workspace")),
+        )
+        monkeypatch.setattr(
+            main_module,
+            "cleanup_operation_artifacts",
+            lambda _settings: (_ for _ in ()).throw(OSError("retention unavailable")),
+        )
+        response = client.post(
+            "/api/v1/automation",
+            json={
+                "vms": ["vm1"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert lock.release_calls == 1
+    assert lock.held is False
 
 
 def test_stream_keeps_full_log_but_emits_only_phase_changes(
@@ -296,18 +668,6 @@ def test_stream_keeps_full_log_but_emits_only_phase_changes(
                     status="ok",
                     message="Capture UI enregistrée",
                     context={"vm": "vm1", "capture": "/tmp/private-screen.png"},
-                ),
-                StepResult(
-                    step="automation.compatibility_wait",
-                    status="ok",
-                    message="Préflight encore en cours",
-                    context={"vm": "vm1", "detected_screen": "compatibility"},
-                ),
-                StepResult(
-                    step="automation.compatibility_wait",
-                    status="ok",
-                    message="Préflight encore en cours",
-                    context={"vm": "vm1", "detected_screen": "compatibility"},
                 ),
                 StepResult(
                     step="automation.monitor_installation",
@@ -353,11 +713,12 @@ def test_stream_keeps_full_log_but_emits_only_phase_changes(
         operation_log_dir=tmp_path / "logs",
     )
 
-    with TestClient(create_app(configured)) as client:
+    with AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
             json={
                 "vms": ["vm1"],
+                "apply": True,
                 "source": "local",
                 "linux_password": "test-passphrase",
             },
@@ -365,7 +726,6 @@ def test_stream_keeps_full_log_but_emits_only_phase_changes(
 
     events = [json.loads(line) for line in response.text.splitlines()]
     assert [event["data"]["step"] for event in events if event["event"] == "step"] == [
-        "automation.wizard_phase",
         "automation.installation_phase",
         "automation.installation_finished",
     ]
@@ -375,7 +735,9 @@ def test_stream_keeps_full_log_but_emits_only_phase_changes(
     assert events[-1]["data"]["steps"] == []
 
     detailed_log = Path(events[-1]["data"]["detailed_log"])
-    assert detailed_log.parent == tmp_path / "logs"
+    assert detailed_log.parent.parent == tmp_path / "captures"
+    assert detailed_log.parent.name.startswith("automation-")
+    assert (detailed_log.parent / ".completed").is_file()
     details = detailed_log.read_text(encoding="utf-8")
     assert "private-screen.png" in details
     assert "42%" in details
@@ -427,11 +789,12 @@ def test_stream_preserves_complete_installation_errors(
         operation_log_dir=tmp_path / "logs",
     )
 
-    with TestClient(create_app(configured)) as client:
+    with AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
             json={
                 "vms": ["vm1"],
+                "apply": True,
                 "source": "local",
                 "linux_password": "test-passphrase",
             },
@@ -491,10 +854,10 @@ def test_compact_stream_uses_short_success_lines_and_verbose_errors(
         operation_log_dir=tmp_path / "logs",
     )
 
-    with TestClient(create_app(configured)) as client:
+    with AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream",
-            json={"vms": ["vm1"], "linux_password": "test-passphrase"},
+            json={"vms": ["vm1"], "apply": True, "linux_password": "test-passphrase"},
         )
 
     lines = response.text.splitlines()

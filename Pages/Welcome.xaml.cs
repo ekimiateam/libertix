@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -26,8 +27,23 @@ namespace Libertix.Pages
             _changeLanguage = changeLanguage ?? throw new ArgumentNullException(nameof(changeLanguage));
 
             InitializeComponent();
+            PopulateLanguages();
             SelectLanguage(selectedLanguageCode);
             _initialized = true;
+        }
+
+        private void PopulateLanguages()
+        {
+            Style itemStyle = (Style)FindResource("ModernComboBoxItem");
+            foreach (KeyValuePair<string, string> language in Localization.GetAvailableLanguages())
+            {
+                LanguageComboBox.Items.Add(new ComboBoxItem
+                {
+                    Content = language.Value,
+                    Tag = language.Key,
+                    Style = itemStyle
+                });
+            }
         }
 
         private void SelectLanguage(string languageCode)

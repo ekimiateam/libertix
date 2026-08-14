@@ -60,6 +60,8 @@ install_target_configuration_payload() {
         /mnt/target/tmp/10_libertix
     install -m 0755 /usr/local/lib/libertix/render-libertix-menu.py \
         /mnt/target/tmp/render-libertix-menu.py
+    install -m 0644 /usr/local/lib/libertix/Libertix.Translations.json \
+        /mnt/target/usr/local/lib/libertix/Libertix.Translations.json
     install -m 0755 /usr/local/lib/libertix/libertix-validate-grub.sh \
         /mnt/target/usr/local/lib/libertix/libertix-validate-grub
     install -m 0755 /usr/local/lib/libertix/libertix-update-grub.sh \

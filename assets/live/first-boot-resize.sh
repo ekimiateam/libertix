@@ -6,6 +6,17 @@ VERIFIER="/usr/local/lib/libertix/libertix-first-boot-verify.py"
 CURRENT_STAGE="initialization"
 mkdir -p "$(dirname "$LOG")"
 echo "First boot resize - $(date)" > "$LOG"
+{
+    echo "===== SYSTEM CONTEXT ====="
+    uname -a
+    cat /etc/os-release
+    findmnt -R /
+    lsblk -o NAME,TYPE,SIZE,FSTYPE,PARTTYPENAME,MOUNTPOINTS
+    localectl status
+    systemctl --failed --no-pager --plain
+    dpkg --audit
+    echo "===== END SYSTEM CONTEXT ====="
+} >> "$LOG" 2>&1 || true
 
 record_failure() {
     local rc=$?

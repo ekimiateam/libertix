@@ -40,7 +40,6 @@ def build_windows_validation_plan(
 ) -> WindowsValidationPlan:
     check_names = [
         "finalization",
-        "post_install_result_ui",
         "identity",
         "firmware",
         "system_volume",

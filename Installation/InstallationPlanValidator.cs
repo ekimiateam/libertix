@@ -233,12 +233,9 @@ namespace Libertix.Installation
             }
 
             Require(
-                locale.LanguageCode == "en" ||
-                locale.LanguageCode == "fr" ||
-                locale.LanguageCode == "es" ||
-                locale.LanguageCode == "ja",
+                Localization.IsLanguageSupported(locale.LanguageCode),
                 errors,
-                "locale.languageCode must be one of: en, fr, es, ja.");
+                $"locale.languageCode must be one of: {Localization.GetSupportedLanguageList()}.");
             RequireNotBlank(locale.SystemLanguage, "locale.systemLanguage", errors);
             RequireNotBlank(locale.KeyboardLayout, "locale.keyboardLayout", errors);
             RequireNotBlank(locale.KeyboardModel, "locale.keyboardModel", errors);

@@ -32,11 +32,6 @@ class StreamEventProjector:
             return None
         if step.step == "automation.monitor_installation":
             return self._project_installation_phase(step)
-        if step.step in {"automation.compatibility_wait", "automation.wizard_navigation"}:
-            return self._project_wizard_phase(step)
-        if step.step == "automation.wizard_vision_retry":
-            return self._compact_step(step, keep_context=("vm", "target", "attempt", "error"))
-
         if step.step.startswith("automation.test."):
             return self._compact_step(step, keep_context=("vm", "test"))
 
@@ -45,7 +40,7 @@ class StreamEventProjector:
             "build_vm.compile",
             "automation.deploy",
             "automation.preparation_finished",
-            "automation.reboot_clicked",
+            "automation.reboot_requested",
             "automation.installed_boot_menu_seen",
             "automation.installation_finished",
             "automation.post_install_phase",
@@ -122,23 +117,6 @@ class StreamEventProjector:
                 "status": "ok",
                 "message": message,
                 "context": {"vm": vm, "phase": phase_id},
-            },
-        }
-
-    def _project_wizard_phase(self, step: StepResult) -> dict[str, Any] | None:
-        vm = self._vm_identity(step)
-        phase = str(step.context.get("detected_screen") or "compatibility")
-        signature = ("wizard-phase", vm, phase)
-        if signature in self._emitted:
-            return None
-        self._emitted.add(signature)
-        return {
-            "event": "step",
-            "data": {
-                "step": "automation.wizard_phase",
-                "status": "ok",
-                "message": f"Libertix wizard phase: {phase}",
-                "context": {"vm": vm, "phase": phase},
             },
         }
 

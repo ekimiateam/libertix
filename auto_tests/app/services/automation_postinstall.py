@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import shlex
 import time
 import uuid
@@ -12,7 +11,7 @@ from typing import Literal
 
 from PIL import Image
 
-from app.clients.ssh import CommandResult, SSHClient
+from app.clients.ssh import CommandResult, SSHClient, is_reconnectable_transport_error
 from app.config import VMConfig
 from app.distributions import DistributionProfile
 from app.errors import WorkflowError
@@ -25,65 +24,7 @@ from app.services.automation_windows_checks import (
 from app.services.common import ResultBuilder
 
 EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4
-POST_INSTALL_SUCCESS_MARKERS = (
-    "libertix installation verified",
-    "installation libertix vérifiée",
-    "instalación de libertix verificada",
-    "libertix のインストールを検証しました",
-    "libertix インストールの検証完了",
-)
-LINUX_LOGIN_SCREEN_MARKERS = (
-    "login screen",
-    "écran de connexion",
-    "ecran de connexion",
-    "mot de passe",
-    "password",
-    "contraseña",
-    "contrasena",
-    "パスワード",
-)
-WINDOWS_LOCK_SCREEN_MARKERS = (
-    "windows lock screen",
-    "lock screen",
-    "sign-in screen",
-    "écran de verrouillage",
-    "ecran de verrouillage",
-    "écran de connexion",
-    "ecran de connexion",
-)
-WINDOWS_PASSWORD_SCREEN_MARKERS = (
-    "password",
-    "mot de passe",
-)
-WINDOWS_DESKTOP_MARKERS = (
-    "windows desktop",
-    "bureau windows",
-    "taskbar",
-    "barre des tâches",
-    "barre des taches",
-)
-WINDOWS_SETUP_EXPERIENCE_MARKERS = (
-    "windows setup experience",
-    "finish setting up your device",
-    "get even more out of windows",
-    "let's customize your experience",
-    "vous avez presque terminé la configuration de votre pc",
-    "vous avez presque termine la configuration de votre pc",
-    "personnalisons votre expérience utilisateur",
-    "personnalisons votre experience utilisateur",
-    "me le rappeler plus tard",
-)
-
-
-def _looks_like_windows_lock_screen(evidence: str) -> bool:
-    """Recognize a clock-over-wallpaper lock screen omitted by the vision label."""
-
-    if any(marker in evidence for marker in WINDOWS_DESKTOP_MARKERS):
-        return False
-    return (
-        "wallpaper" in evidence
-        and re.search(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", evidence) is not None
-    )
+REMOTE_CHECK_SSH_MAX_ATTEMPTS = 6
 
 
 @dataclass(frozen=True)
@@ -114,47 +55,55 @@ class PostInstallValidationMixin:
 
         result.ok(
             "automation.post_install_phase",
-            "Waiting for Windows before the first installed Linux boot",
+            f"The requested first installed-system boot is {options.first_boot}",
             vm=vm.name,
             target=vm.host,
-            phase="windows-before-linux-ssh",
+            phase=f"first-boot-{options.first_boot}",
         )
-        waiting_windows_ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="windows_before_linux",
-            grub_entry="windows",
-            distribution=options.distribution,
-        )
-        try:
-            response = self.validation.run_windows_script(
-                waiting_windows_ssh,
-                script_name="post_install_windows_check.ps1",
-                config={
-                    "check": "waiting_for_linux",
-                    "expected_firmware": vm.firmware,
-                },
-                step="automation.test.windows",
-                timeout=240,
-            )
+        if options.first_boot == "windows":
             result.ok(
-                "automation.test.windows",
-                "windows.waiting_for_linux: OK",
+                "automation.post_install_phase",
+                "Waiting for Windows before the first installed Linux boot",
                 vm=vm.name,
                 target=vm.host,
-                test="windows.waiting_for_linux",
-                exit_code=response.exit_code,
-                stdout=response.stdout,
-                stderr=response.stderr,
+                phase="windows-before-linux-ssh",
             )
-            self._request_linux_boot_from_windows(waiting_windows_ssh, vm, result)
-        finally:
-            waiting_windows_ssh.__exit__(None, None, None)
+            waiting_windows_ssh = self._wait_for_ssh(
+                vm,
+                result=result,
+                username=vm.username,
+                password=self.settings.windows_ssh_password.get_secret_value(),
+                trust_on_first_use=False,
+                probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+                expected="LIBERTIX_WINDOWS_READY",
+                phase="windows_before_linux",
+                grub_entry="windows",
+                distribution=options.distribution,
+            )
+            try:
+                response = self.validation.run_windows_script(
+                    waiting_windows_ssh,
+                    script_name="post_install_windows_check.ps1",
+                    config={
+                        "check": "waiting_for_linux",
+                        "expected_firmware": vm.firmware,
+                    },
+                    step="automation.test.windows",
+                    timeout=240,
+                )
+                result.ok(
+                    "automation.test.windows",
+                    "windows.waiting_for_linux: OK",
+                    vm=vm.name,
+                    target=vm.host,
+                    test="windows.waiting_for_linux",
+                    exit_code=response.exit_code,
+                    stdout=response.stdout,
+                    stderr=response.stderr,
+                )
+                self._request_linux_boot_from_windows(waiting_windows_ssh, vm, result)
+            finally:
+                waiting_windows_ssh.__exit__(None, None, None)
 
         result.ok(
             "automation.post_install_phase",
@@ -202,11 +151,32 @@ class PostInstallValidationMixin:
                     timeout=270,
                 ),
             )
-            self._verify_post_install_success_dialog(
+            self._prepare_linux_graphical_session(
+                linux_ssh,
+                vm,
+                result,
+                options.linux_username,
+                options.linux_password,
+            )
+            self._run_remote_check(
+                linux_ssh,
                 vm,
                 result,
                 "linux",
-                login_password=options.linux_password,
+                RemoteCheck(
+                    "linux.post_install_result_ui",
+                    'i=0; while [ "$i" -lt 60 ]; do '
+                    "pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
+                    ">/dev/null && exit 0; "
+                    "i=$((i + 1)); sleep 1; done; exit 1",
+                    timeout=75,
+                ),
+            )
+            self._capture_and_dismiss_post_install_result(
+                vm,
+                result,
+                "linux",
+                linux_ssh,
             )
             self._run_linux_checks(linux_ssh, vm, options, result)
             artifacts = self._create_cross_os_artifacts(linux_ssh, vm, options, result)
@@ -245,7 +215,12 @@ class PostInstallValidationMixin:
             self._prepare_windows_graphical_session(windows_ssh, vm, result)
             try:
                 self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
-                self._verify_post_install_success_dialog(vm, result, "windows")
+                self._capture_and_dismiss_post_install_result(
+                    vm,
+                    result,
+                    "windows",
+                    windows_ssh,
+                )
             finally:
                 self._cleanup_windows_cross_os_artifact(windows_ssh, vm, options, artifacts, result)
             self._request_linux_boot_from_windows(windows_ssh, vm, result)
@@ -362,76 +337,215 @@ class PostInstallValidationMixin:
         finally:
             final_windows_ssh.__exit__(None, None, None)
 
-    def _verify_post_install_success_dialog(
+    def _capture_and_dismiss_post_install_result(
         self,
         vm: VMConfig,
         result: ResultBuilder,
         platform: Literal["linux", "windows"],
-        *,
-        login_password: str | None = None,
+        guest_ssh: SSHClient,
     ) -> None:
-        last_context: dict[str, object] | None = None
-        linux_login_attempts = 0
-        for attempt in range(1, 13):
-            capture = self._capture_with_name(
-                vm,
-                f"post-install-{platform}-success-{attempt:02d}",
+        if platform == "linux":
+            process = guest_ssh.run(
+                "pgrep -fo '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py'",
+                step="automation.linux_post_install_result_process",
+                timeout=15,
             )
-            verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
-            evidence = f"{verdict.visible_text}\n{verdict.summary}".casefold()
-            last_context = {
-                "vm": vm.name,
-                "target": vm.vnc,
-                "platform": platform,
-                "capture": str(capture),
-                "visible_text": verdict.visible_text,
-                "summary": verdict.summary,
-            }
-            if any(marker in evidence for marker in POST_INSTALL_SUCCESS_MARKERS):
-                client = None
-                try:
-                    client = self.vnc.connect(vm.vnc)
-                    client.keyPress("enter")
-                finally:
-                    if client is not None:
-                        client.disconnect()
-                result.ok(
-                    "automation.post_install_result_ui",
-                    f"{platform.capitalize()} post-install success dialog verified visually",
-                    **last_context,
+            process_id = process.stdout.strip()
+            if not process_id.isdigit() or int(process_id) <= 0:
+                raise WorkflowError(
+                    "automation.linux_post_install_result_process",
+                    "The Linux post-install result process ID is invalid",
+                    details={"vm": vm.name, "target": vm.host},
                 )
-                time.sleep(2)
-                return
+            focus = self.validation.run_linux_script(
+                guest_ssh,
+                script_name="focus_linux_post_install_result.py",
+                arguments=("--pid", process_id, "--timeout", "15"),
+                step="automation.linux_post_install_result_focused",
+                timeout=30,
+            )
+            values = self.validation.parse_powershell_results(
+                focus.stdout,
+                prefixes=("PROCESS_ID", "WINDOW_ID", "ACTIVE_WINDOW_PROVEN", "RESULT"),
+            )
             if (
-                platform == "linux"
-                and login_password is not None
-                and linux_login_attempts < 3
-                and any(marker in evidence for marker in LINUX_LOGIN_SCREEN_MARKERS)
+                values.get("PROCESS_ID") != process_id
+                or values.get("ACTIVE_WINDOW_PROVEN") != "True"
+                or values.get("RESULT") != "OK"
             ):
-                client = None
-                try:
-                    client = self.vnc.connect(vm.vnc)
-                    self._type_text(client, login_password, vm.vnc_keyboard_layout)
-                    client.keyPress("enter")
-                finally:
-                    if client is not None:
-                        client.disconnect()
-                linux_login_attempts += 1
+                raise WorkflowError(
+                    "automation.linux_post_install_result_focused",
+                    "The Linux post-install result window was not proven active",
+                    details={"vm": vm.name, "target": vm.host, **values},
+                )
+        else:
+            visibility = self.validation.run_windows_script(
+                guest_ssh,
+                script_name="post_install_windows_check.ps1",
+                config={
+                    "check": "post_install_result_ui",
+                    "expected_firmware": vm.firmware,
+                },
+                step="automation.windows_post_install_result_visible",
+                timeout=150,
+            )
+            values = self.validation.parse_powershell_results(
+                visibility.stdout,
+                prefixes=("POST_INSTALL_RESULT_UI_PROCESS_ID",),
+            )
+            process_id_text = values.get("POST_INSTALL_RESULT_UI_PROCESS_ID", "")
+            if not process_id_text.isdigit() or int(process_id_text) <= 0:
+                raise WorkflowError(
+                    "automation.windows_post_install_result_visible",
+                    "The Windows post-install result process ID is missing",
+                    details={"vm": vm.name, "target": vm.host},
+                )
+            self.validation.run_windows_script(
+                guest_ssh,
+                script_name="focus_post_install_result.ps1",
+                config={"process_id": int(process_id_text)},
+                step="automation.windows_post_install_result_focused",
+                timeout=30,
+            )
+        capture = self._capture_with_name(vm, f"post-install-{platform}-success")
+        client = None
+        try:
+            client = self.vnc.connect(vm.vnc)
+            client.keyPress("enter")
+        finally:
+            if client is not None:
+                client.disconnect()
+        if platform == "linux":
+            dismissal = guest_ssh.run(
+                'i=0; while [ "$i" -lt 30 ]; do '
+                "if ! pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
+                ">/dev/null && "
+                "python3 -c 'import json,pathlib; "
+                'p=pathlib.Path.home()/".local/state/libertix/first-boot-result-ack.json"; '
+                'v=json.loads(p.read_text(encoding="utf-8")); '
+                'assert v["schemaVersion"] == 1; assert len(v["fingerprint"]) == 64\' '
+                "; then exit 0; fi; i=$((i + 1)); sleep 1; done; exit 1",
+                step="automation.linux_post_install_result_dismissed",
+                timeout=45,
+            )
+        else:
+            dismissal = self.validation.run_windows_script(
+                guest_ssh,
+                script_name="post_install_windows_check.ps1",
+                config={
+                    "check": "post_install_result_ui_dismissed",
+                    "expected_firmware": vm.firmware,
+                },
+                step="automation.windows_post_install_result_dismissed",
+                timeout=60,
+            )
+        result.ok(
+            "automation.post_install_result_ui",
+            f"{platform.capitalize()} post-install result captured after guest-side proof",
+            vm=vm.name,
+            target=vm.vnc,
+            platform=platform,
+            capture=str(capture),
+            proof_source="guest-state-process-and-dismissal",
+            dismissal_exit_code=dismissal.exit_code,
+        )
+
+    def _prepare_linux_graphical_session(
+        self,
+        linux_ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        username: str,
+        password: str,
+    ) -> None:
+        quoted_username = shlex.quote(username)
+        graphical_session_probe = (
+            "for sid in $(loginctl list-sessions --no-legend | "
+            f"awk -v expected={quoted_username} '$3 == expected {{print $1}}'); do "
+            'type=$(loginctl show-session "$sid" -p Type --value); '
+            'active=$(loginctl show-session "$sid" -p Active --value); '
+            'case "$type:$active" in x11:yes|wayland:yes) '
+            "printf LIBERTIX_DESKTOP_READY; exit 0;; esac; done; "
+            "for sid in $(loginctl list-sessions --no-legend | awk '{print $1}'); do "
+            'class=$(loginctl show-session "$sid" -p Class --value); '
+            'type=$(loginctl show-session "$sid" -p Type --value); '
+            'active=$(loginctl show-session "$sid" -p Active --value); '
+            'case "$class:$type:$active" in greeter:x11:yes|greeter:wayland:yes) '
+            "printf LIBERTIX_GREETER_READY; exit 0;; esac; done; exit 1"
+        )
+        for attempt in range(1, 4):
+            response = linux_ssh.run(
+                graphical_session_probe,
+                step="automation.linux_graphical_session",
+                timeout=30,
+                check=False,
+            )
+            if response.exit_code == 0 and "LIBERTIX_DESKTOP_READY" in response.stdout:
+                capture = self._capture_with_name(
+                    vm,
+                    f"post-install-linux-session-ready-{attempt:02d}",
+                )
                 result.ok(
-                    "automation.linux_graphical_login",
-                    "Linux graphical session unlocked before verifying its result dialog",
+                    "automation.linux_graphical_session",
+                    "The active Linux graphical session was proven by loginctl",
                     vm=vm.name,
                     target=vm.vnc,
                     attempt=attempt,
-                    login_attempt=linux_login_attempts,
+                    capture=str(capture),
                 )
-                time.sleep(12)
+                return
+
+            if "LIBERTIX_GREETER_READY" not in response.stdout:
+                result.ok(
+                    "automation.linux_graphical_session_wait",
+                    "No active Linux desktop or login greeter is proven yet",
+                    vm=vm.name,
+                    target=vm.vnc,
+                    attempt=attempt,
+                )
+                time.sleep(10)
                 continue
-            time.sleep(3)
+
+            client = None
+            try:
+                client = self.vnc.connect(vm.vnc)
+                self._capture_from_client(
+                    client,
+                    vm,
+                    f"post-install-linux-login-{attempt:02d}-ready",
+                    result,
+                )
+                # LightDM already focuses the password entry for the selected
+                # user. Pressing Enter here would submit the empty field and
+                # discard the real password while authentication is pending.
+                client.keyDown("ctrl")
+                client.keyPress("q" if vm.vnc_keyboard_layout == "fr" else "a")
+                client.keyUp("ctrl")
+                client.keyPress("bsp")
+                self._type_text(client, password, vm.vnc_keyboard_layout)
+                self._capture_from_client(
+                    client,
+                    vm,
+                    f"post-install-linux-login-{attempt:02d}-password-entered",
+                    result,
+                )
+                client.keyPress("enter")
+            finally:
+                if client is not None:
+                    client.disconnect()
+            result.ok(
+                "automation.linux_graphical_login",
+                "Linux graphical credentials were submitted after loginctl found no active desktop",
+                vm=vm.name,
+                target=vm.vnc,
+                attempt=attempt,
+            )
+            time.sleep(10)
+
         raise WorkflowError(
-            "automation.post_install_result_ui",
-            f"The {platform} post-install success dialog was not visually proven",
-            details=last_context or {"vm": vm.name, "platform": platform},
+            "automation.linux_graphical_session",
+            "The Linux graphical session did not become active after three attempts",
+            details={"vm": vm.name, "target": vm.vnc},
         )
 
     def _prepare_windows_graphical_session(
@@ -440,21 +554,33 @@ class PostInstallValidationMixin:
         vm: VMConfig,
         result: ResultBuilder,
     ) -> None:
-        last_context: dict[str, object] | None = None
         password = self.settings.windows_ssh_password.get_secret_value()
-        for attempt in range(1, 7):
+        for attempt in range(1, 4):
+            inspection = self.validation.run_windows_script(
+                windows_ssh,
+                script_name="inspect_windows_graphical_session.ps1",
+                config={},
+                step="automation.windows_graphical_session",
+                timeout=60,
+            )
+            values = self.validation.parse_powershell_results(
+                inspection.stdout,
+                prefixes=(
+                    "EXPLORER_SESSION_READY",
+                    "SETUP_EXPERIENCE_PRESENT",
+                    "LOGIN_SCREEN_PRESENT",
+                    "SESSION_ID",
+                ),
+            )
             capture = self._capture_with_name(vm, f"post-install-windows-login-{attempt:02d}")
-            verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
-            evidence = f"{verdict.visible_text}\n{verdict.summary}".casefold()
-            last_context = {
+            context = {
                 "vm": vm.name,
                 "target": vm.vnc,
                 "capture": str(capture),
-                "visible_text": verdict.visible_text,
-                "summary": verdict.summary,
                 "attempt": attempt,
+                "session_id": values.get("SESSION_ID", "-1"),
             }
-            if any(marker in evidence for marker in WINDOWS_SETUP_EXPERIENCE_MARKERS):
+            if values.get("SETUP_EXPERIENCE_PRESENT") == "True":
                 response = self.validation.run_windows_script(
                     windows_ssh,
                     script_name="dismiss_windows_setup_experience.ps1",
@@ -473,92 +599,54 @@ class PostInstallValidationMixin:
                     raise WorkflowError(
                         "automation.windows_setup_experience",
                         "The identified Windows setup experience was not dismissed",
-                        details=last_context,
+                        details=context,
                     )
                 result.ok(
                     "automation.windows_setup_experience",
                     "The identified Windows setup experience was dismissed",
                     terminated_process_count=int(values.get("TERMINATED_PROCESS_COUNT", "0")),
-                    **last_context,
+                    **context,
                 )
                 time.sleep(5)
                 continue
-            if any(marker in evidence for marker in POST_INSTALL_SUCCESS_MARKERS) or any(
-                marker in evidence for marker in WINDOWS_DESKTOP_MARKERS
-            ):
+            if values.get("EXPLORER_SESSION_READY") == "True":
                 result.ok(
                     "automation.windows_graphical_session",
-                    "Windows interactive session is available for post-install verification",
-                    **last_context,
+                    "Windows Explorer confirmed the interactive session",
+                    **context,
                 )
                 return
-            if any(marker in evidence for marker in WINDOWS_PASSWORD_SCREEN_MARKERS):
-                client = None
-                try:
-                    client = self.vnc.connect(vm.vnc)
-                    self._type_text(client, password, vm.vnc_keyboard_layout)
-                    client.keyPress("enter")
-                finally:
-                    if client is not None:
-                        client.disconnect()
+
+            if values.get("LOGIN_SCREEN_PRESENT") != "True":
                 result.ok(
-                    "automation.windows_graphical_login",
-                    "Windows graphical session credentials were submitted",
-                    **last_context,
+                    "automation.windows_graphical_session_wait",
+                    "Windows has not exposed an Explorer desktop or a proven login screen yet",
+                    **context,
                 )
                 time.sleep(10)
                 continue
-            if any(marker in evidence for marker in WINDOWS_LOCK_SCREEN_MARKERS) or (
-                _looks_like_windows_lock_screen(evidence)
-            ):
-                client = None
-                try:
-                    client = self.vnc.connect(vm.vnc)
-                    client.keyPress("enter")
-                finally:
-                    if client is not None:
-                        client.disconnect()
-                result.ok(
-                    "automation.windows_graphical_unlock",
-                    "Windows lock screen was opened before submitting credentials",
-                    **last_context,
-                )
-                time.sleep(3)
-                continue
-            time.sleep(3)
+
+            client = None
+            try:
+                client = self.vnc.connect(vm.vnc)
+                client.keyPress("enter")
+                time.sleep(1)
+                self._type_text(client, password, vm.vnc_keyboard_layout)
+                client.keyPress("enter")
+            finally:
+                if client is not None:
+                    client.disconnect()
+            result.ok(
+                "automation.windows_graphical_login",
+                "Windows credentials were submitted after LogonUI proved the login screen",
+                **context,
+            )
+            time.sleep(10)
         raise WorkflowError(
             "automation.windows_graphical_session",
             "The Windows interactive session was not proven available",
-            details=last_context or {"vm": vm.name, "target": vm.vnc},
+            details={"vm": vm.name, "target": vm.vnc},
         )
-
-    def _select_linux_from_grub(self, vm: VMConfig, result: ResultBuilder) -> None:
-        client = None
-        try:
-            client = self.vnc.connect(vm.vnc)
-            client.mouseMove(5, 5)
-            client.keyPress("home")
-            client.keyDown("enter")
-            try:
-                time.sleep(0.15)
-            finally:
-                client.keyUp("enter")
-            result.ok(
-                "automation.post_install_phase",
-                "Selected the first installed Linux entry in GRUB",
-                vm=vm.name,
-                target=vm.vnc,
-                phase="linux-boot",
-            )
-        except Exception as exc:
-            raise WorkflowError(
-                "automation.linux_boot",
-                "Unable to select Linux from the installed GRUB menu",
-                details={"vm": vm.name, "target": vm.vnc, "error": str(exc)},
-            ) from exc
-        finally:
-            if client is not None:
-                client.disconnect()
 
     def _wait_for_ssh(
         self,
@@ -586,7 +674,8 @@ class PostInstallValidationMixin:
             )
         while time.monotonic() < deadline:
             attempt += 1
-            # Keep the slower vision-assisted retry for a lost VNC key event.
+            # A fresh local theme capture gates every retry. SSH remains the
+            # authoritative proof that the requested operating system booted.
             if grub_entry is not None and attempt % 3 == 0:
                 self._select_grub_entry_if_visible(
                     vm, result, grub_entry, attempt, distribution=distribution
@@ -636,8 +725,8 @@ class PostInstallValidationMixin:
         *,
         distribution: DistributionProfile | None,
     ) -> bool:
+        del distribution
         deadline = time.monotonic() + self.settings.post_install_grub_detection_timeout_seconds
-        consecutive_theme_frames = 0
         capture_attempt = 0
         while time.monotonic() < deadline:
             capture_attempt += 1
@@ -646,22 +735,10 @@ class PostInstallValidationMixin:
                 f"post-install-{entry}-grub-ready-{capture_attempt:03d}",
             )
             if self._installed_grub_theme_visible(capture):
-                consecutive_theme_frames += 1
-                if consecutive_theme_frames >= 2:
-                    return self._send_grub_entry(vm, result, entry)
-            else:
-                consecutive_theme_frames = 0
+                return self._send_grub_entry(vm, result, entry)
             time.sleep(self.settings.post_install_grub_detection_interval_seconds)
 
-        # Retain the semantic vision fallback for unexpected rendering,
-        # framebuffer color conversion, or a future theme revision.
-        return self._select_grub_entry_if_visible(
-            vm,
-            result,
-            entry,
-            0,
-            distribution=distribution,
-        )
+        return False
 
     @staticmethod
     def _installed_grub_theme_visible(capture: Path) -> bool:
@@ -674,7 +751,8 @@ class PostInstallValidationMixin:
         except (OSError, ValueError):
             return False
 
-        pixels = sample.get_flattened_data()
+        flattened_data = getattr(sample, "get_flattened_data", None)
+        pixels = tuple(flattened_data() if flattened_data is not None else sample.getdata())
         total = len(pixels)
         if total == 0:
             return False
@@ -699,18 +777,10 @@ class PostInstallValidationMixin:
         attempt: int,
         distribution: DistributionProfile | None = None,
     ) -> bool:
+        del distribution
         capture = self._capture_with_name(vm, f"post-install-{entry}-grub-{attempt:03d}")
         if not self._installed_grub_theme_visible(capture):
-            try:
-                verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
-            except WorkflowError:
-                # SSH remains authoritative. A transient vision failure must not
-                # abort the operating-system boot wait.
-                return False
-
-            evidence = f"{verdict.visible_text}\n{verdict.summary}"
-            if not self._reboot_or_live_started(evidence, distribution):
-                return False
+            return False
 
         return self._send_grub_entry(vm, result, entry)
 
@@ -723,13 +793,11 @@ class PostInstallValidationMixin:
         client = None
         try:
             client = self.vnc.connect(vm.vnc)
-            client.mouseMove(5, 5)
-            time.sleep(0.5)
             client.keyPress("home")
-            time.sleep(0.25)
+            time.sleep(0.05)
             if entry == "windows":
                 client.keyPress("down")
-                time.sleep(0.25)
+                time.sleep(0.05)
             client.keyDown("enter")
             try:
                 time.sleep(0.15)
@@ -738,7 +806,7 @@ class PostInstallValidationMixin:
             # Keep the VNC transport alive long enough to flush the final key
             # event. SSH, not this write, remains the authoritative success
             # signal and the menu will be retried if it stays visible.
-            time.sleep(1.0)
+            time.sleep(0.25)
         except Exception as exc:
             raise WorkflowError(
                 "automation.grub_selection",
@@ -883,16 +951,60 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck(
                 "linux.locale",
-                '. /etc/default/locale; test -n "${LANG:-}"; '
-                "expected=$(printf '%s' \"$LANG\" | tr '[:upper:]' '[:lower:]' | "
-                "sed 's/utf-8/utf8/'); "
-                "locale -a | tr '[:upper:]' '[:lower:]' | grep -Fx \"$expected\"",
+                "set -eu; plan=/etc/libertix/installation-plan.json; "
+                "expected_locale=$(python3 -c 'import json,sys; "
+                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
+                '["systemLanguage"])\' "$plan"); '
+                "expected_language=$(python3 -c 'import json,sys; "
+                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
+                '["languageCode"])\' "$plan"); '
+                ". /etc/default/locale; "
+                'test "${LANG:-}" = "$expected_locale"; '
+                'test "${LC_ALL:-}" = "$expected_locale"; '
+                'test "${LANGUAGE:-}" = "$expected_language"; '
+                "actual=$(locale -a | tr '[:upper:]' '[:lower:]' | "
+                "sed 's/utf-8/utf8/g' | grep -E '\\.utf8$' | "
+                "grep -v '^c\\.utf8$' | sort -u); "
+                "expected=$(printf '%s\\n' \"$expected_locale\" en_US.UTF-8 | "
+                "tr '[:upper:]' '[:lower:]' | sed 's/utf-8/utf8/g' | sort -u); "
+                'test "$actual" = "$expected"; printf \'%s\\n\' "$actual"',
             ),
             RemoteCheck(
                 "linux.keyboard",
-                '. /etc/default/keyboard; test -n "${XKBLAYOUT:-}"; '
+                "set -eu; plan=/etc/libertix/installation-plan.json; "
+                f"marker=/home/{username}/.config/libertix/keyboard-initialized.json; "
+                "expected_layout=$(python3 -c 'import json,sys; "
+                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
+                '["keyboardLayout"])\' "$plan"); '
+                "expected_variant=$(python3 -c 'import json,sys; "
+                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
+                '.get("keyboardVariant", ""))\' "$plan"); '
+                "expected_model=$(python3 -c 'import json,sys; "
+                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
+                '["keyboardModel"])\' "$plan"); '
+                ". /etc/default/keyboard; "
+                'test "${XKBLAYOUT:-}" = "$expected_layout"; '
+                'test "${XKBVARIANT:-}" = "$expected_variant"; '
+                'test "${XKBMODEL:-}" = "$expected_model"; '
                 "test -x /usr/local/bin/libertix-apply-keyboard-once; "
-                "test -s /etc/xdg/autostart/libertix-keyboard.desktop",
+                'test -s /etc/xdg/autostart/libertix-keyboard.desktop; test -s "$marker"; '
+                'python3 -c \'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); '
+                'm=json.load(open(sys.argv[2], encoding="utf-8")); l=p["locale"]; '
+                's=l["keyboardLayout"]+("+"+l.get("keyboardVariant", "") '
+                'if l.get("keyboardVariant") else ""); '
+                'assert m["status"] == "succeeded" and '
+                'm["sessionLanguage"] == l["systemLanguage"] and '
+                'm["desktopSource"] == s\' "$plan" "$marker"; '
+                'source="$expected_layout"; '
+                '[ -z "$expected_variant" ] || source="$source+$expected_variant"; '
+                "expected_sources=\"[('xkb', '$source')]\"; "
+                "uid=$(id -u); export XDG_RUNTIME_DIR=/run/user/$uid; "
+                "export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus; found=false; "
+                "for schema in org.gnome.desktop.input-sources "
+                "org.cinnamon.desktop.input-sources; do "
+                'gsettings list-schemas | grep -Fxq "$schema" || continue; found=true; '
+                'test "$(gsettings get "$schema" sources)" = "$expected_sources"; done; '
+                '[ "$found" = true ]',
             ),
             RemoteCheck(
                 "linux.timezone",
@@ -1042,6 +1154,19 @@ class PostInstallValidationMixin:
                 'assert s["system"]["passwordActive"] is True; '
                 'assert s["system"]["dpkgAuditClean"] is True; '
                 'assert s["system"]["failedSystemdUnits"] == 0; '
+                'l=p["locale"]; z=s["localization"]; '
+                'source=l["keyboardLayout"]+("+"+l.get("keyboardVariant", "") '
+                'if l.get("keyboardVariant") else ""); '
+                'expected_locales=sorted({l["systemLanguage"].casefold().replace('
+                '"utf-8","utf8"),"en_us.utf8"}); '
+                'assert z["verified"] is True; '
+                'assert z["languageCode"] == l["languageCode"]; '
+                'assert z["systemLocale"] == l["systemLanguage"]; '
+                'assert z["compiledUtf8Locales"] == expected_locales; '
+                'assert z["keyboardLayout"] == l["keyboardLayout"]; '
+                'assert z["keyboardVariant"] == l.get("keyboardVariant", ""); '
+                'assert z["keyboardModel"] == l["keyboardModel"]; '
+                'assert z["desktopSource"] == source; '
                 'assert s["grub"]["bootChain"]["verified"] is True; '
                 'assert s.get("windowsEvidencePath"); '
                 "fields={k:s.get(k) for k in "
@@ -1270,23 +1395,38 @@ class PostInstallValidationMixin:
             command = f"sudo -S -p '' sh -eu -c {shlex.quote(check.command)}"
             stdin_data = sudo_password + "\n"
             sensitive = True
-        try:
-            response = ssh.run(
-                command,
-                step=f"automation.test.{platform}",
-                timeout=check.timeout,
-                check=False,
-                sensitive=sensitive,
-                stdin_data=stdin_data,
-            )
-        except WorkflowError as exc:
+        last_error: WorkflowError | None = None
+        response: CommandResult | None = None
+        for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    ssh.reconnect()
+                response = ssh.run(
+                    command,
+                    step=f"automation.test.{platform}",
+                    timeout=check.timeout,
+                    check=False,
+                    sensitive=sensitive,
+                    stdin_data=stdin_data,
+                )
+                break
+            except WorkflowError as exc:
+                last_error = exc
+                if (
+                    not is_reconnectable_transport_error(exc)
+                    or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
+                ):
+                    break
+
+        if response is None:
+            assert last_error is not None
             result.error(
                 f"automation.test.{platform}",
                 f"{check.name} failed before a result was returned",
                 vm=vm.name,
                 target=vm.host,
                 test=check.name,
-                **exc.details,
+                **last_error.details,
             )
             return None
 

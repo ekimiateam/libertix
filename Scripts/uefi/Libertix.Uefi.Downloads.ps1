@@ -2,9 +2,14 @@
 
 # Download transports and verified distribution ISO acquisition.
 
+$policyModulePath = Join-Path $PSScriptRoot "..\modules\Libertix.InstallationPolicy.psm1"
+Import-Module $policyModulePath -Force -ErrorAction Stop
+$script:DownloadPolicy = (Get-LibertixInstallationPolicy).download
+
 $script:MaximumDistributionIsoBytes = 8GB
 $script:MaximumLiveIsoBytes = 2GB
 $script:MaximumHelperArchiveBytes = 128MB
+$script:MinimumDistributionIsoBytes = 100MB
 
 function Invoke-BoundedHttpDownload {
     param(
@@ -429,7 +434,8 @@ function Start-RobustDownload {
 
     if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
 
-    $maximumAria2Attempts = 3
+    $maximumAria2Attempts = [int]$script:DownloadPolicy.maximumAttempts
+    $retryBaseDelaySeconds = [int]$script:DownloadPolicy.retryBaseDelaySeconds
     for ($attempt = 1; $attempt -le $maximumAria2Attempts; $attempt++) {
         try {
             Start-Aria2Download -Url $Url -Destination $Destination -MaxBytes $MaxBytes
@@ -446,7 +452,7 @@ function Start-RobustDownload {
                     "aria2 attempt $attempt/$maximumAria2Attempts failed for $Label; " +
                     "retaining the partial download and retrying: $($_.Exception.Message)"
                 ) "Yellow"
-                Start-Sleep -Seconds (10 * $attempt)
+                Start-Sleep -Seconds ($retryBaseDelaySeconds * $attempt)
                 continue
             }
             Write-Log (
@@ -488,7 +494,7 @@ function Set-DistributionIsoOnWindows {
         Remove-Item -LiteralPath $DistributionIsoPath -Force
         $existing = $null
     }
-    if ($existing -and $existing.Length -gt 100MB) {
+    if ($existing -and $existing.Length -gt $script:MinimumDistributionIsoBytes) {
         $existingHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $DistributionIsoPath).Hash.ToLowerInvariant()
         if ($existingHash -eq $DistributionIsoSha256) {
             Write-Log "Distribution ISO already present and verified: $DistributionIsoPath" "Green"
@@ -506,7 +512,7 @@ function Set-DistributionIsoOnWindows {
         -MaxBytes $script:MaximumDistributionIsoBytes
 
     $downloadedIso = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction Stop
-    if ($downloadedIso.Length -le 100MB) {
+    if ($downloadedIso.Length -le $script:MinimumDistributionIsoBytes) {
         throw "Distribution ISO download is too small: $($downloadedIso.Length) bytes"
     }
     $downloadedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $DistributionIsoPath).Hash.ToLowerInvariant()

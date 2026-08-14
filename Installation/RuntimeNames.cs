@@ -7,7 +7,10 @@ namespace Libertix.Installation
     public static class RuntimeNames
     {
         public const string InstallerVolumeLabel = "LIBERTIXEFI";
+        public const string BiosInstallerVolumeLabel = "LIBERTIX";
         public const string InstallationLogDirectory = "LibertixInstallLogs";
+        public const string WindowsLogDirectory = "Windows";
+        public const string LinuxLogDirectory = "Linux";
         public const string BiosRecoveryDirectory = "LibertixInstallRecovery";
         public const string BiosRecoveryTask = "LibertixInstallRecovery";
         public const string BiosRecoveryPromptTask = "LibertixInstallRecoveryPrompt";

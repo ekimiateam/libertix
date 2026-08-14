@@ -61,7 +61,7 @@ addresses and contains no working credentials.
 | Linux orchestration host | `MAIN_SSH_HOST`, `MAIN_SSH_USER`, `MAIN_SSH_PASSWORD`, `SMB_ROOT` |
 | Samba and Windows SSH | `SAMBA_UNC`, `SAMBA_USERNAME`, `SAMBA_PASSWORD`, `WINDOWS_SSH_PASSWORD`, `SSH_KNOWN_HOSTS` |
 | Windows build VM | `BUILD_VM_HOST`, `BUILD_VM_USER`, `BUILD_VM_PASSWORD` |
-| Source and release | `REPOSITORY_URL`, `REPOSITORY_BRANCH`, `SOURCE_DIR_NAME`, `RELEASE_DIR_NAME`, `FILEPOOL_BASE_URL`, `PUBLISHED_DEV_METADATA_BASE_URL` |
+| Source and release | `REPOSITORY_URL`, `REPOSITORY_BRANCH`, `SOURCE_DIR_NAME`, `RELEASE_DIR_NAME`, `FILEPOOL_DIR_NAME`, `FILEPOOL_BASE_URL`, `PUBLISHED_DEV_METADATA_BASE_URL` |
 | Destructive-operation boundaries | `ALLOWED_SMB_ROOTS`, `ALLOWED_PROXMOX_VMIDS`, `RESET_SNAPSHOT`, `PROXMOX_STORAGE` |
 | Proxmox API | `PROXMOX_URL`, `PROXMOX_TOKEN_ID`, `PROXMOX_TOKEN_SECRET`, `PROXMOX_VERIFY_TLS`, optional `PROXMOX_CA_BUNDLE` |
 | Vision service | `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL`, reasoning, timeout, and retry variables |
@@ -117,7 +117,8 @@ host firewall because it can reset test VMs and start complete installations.
 Stream endpoints use compact text by default. Successful checks emit one short line such as
 `TEST vm1 linux.fstab OK`; failures include their full structured diagnostics and the terminal line
 links to the complete on-disk log. The service creates that detailed file automatically under
-`auto_tests/logs/`, so command-line clients do not need `tee` or manual redirection. Add
+the request workspace in `auto_tests/runtime/captures/`, so command-line clients do not need `tee`
+or manual redirection. Add
 `?format=ndjson` for a machine-readable stream. The bundled web interface requests NDJSON
 explicitly.
 
@@ -135,16 +136,19 @@ GitHub Pages `dev` channel.
 
 | Field | Type and default | Meaning |
 |---|---|---|
-| `apply` | boolean, `false` | Click Apply and authorize a real installation. |
+| `apply` | literal `true`, required | Explicitly authorize the destructive unattended installation. |
 | `distribution` | `mint` or `zorin`, default `mint` | Select the catalogue entry; both use the same generic mini-ISOs. |
 | `linux_username` | string, default `test` | Account created in the installed Linux system. |
 | `linux_password` | string, required, 4-128 characters | Linux account and sudo password. |
+| `linux_size_gib` | integer, default `100` | Requested final Linux partition size in GiB. |
+| `first_boot` | `windows` or `linux`, default `windows` | System validated first after installation; both systems are always tested. |
 | `monitor_iso` | boolean, `true` | Continue through installation and post-install operating-system checks. |
 | `share_windows_files_in_linux` | boolean, `true` | Validate the Windows-to-Linux sharing path. |
 | `share_linux_files_in_windows` | boolean, `true` | Validate the read-only Linux-to-Windows sharing path. |
+| `simulate_fog_clone_boot_entries` | boolean, `false` | Inject stale UEFI Libertix entries for the explicit clone regression scenario. |
 
 VM selectors can also be repeated as query parameters (`?vm=vm1&vm=vm2`). Body and query
-selectors are combined. `apply` and `source` query parameters override their body values.
+selectors are combined. The `source` query parameter overrides its body value.
 
 ### Copy-paste API commands
 
@@ -244,19 +248,24 @@ The stream emits `reset.scope` so clients can distinguish both behaviors.
 
 ## Automation UI
 
-The available automation targets and UI profiles come from `.env`.
-
-`apply=false` launches Libertix and stops before applying changes.
-
-`apply=true` authorizes the complete installation workflow.
+The available automation targets and unattended profiles come from `.env`. The automation endpoint
+accepts only an explicit `apply=true` request and always runs the complete unattended installation.
+Use the validation endpoint to compile, test, deploy and launch Libertix without installing.
 
 `distribution` selects the signed catalogue id and accepts `mint` (default) or `zorin`. The same
 generic BIOS and UEFI mini-ISOs are used for both choices.
 
 With `monitor_iso=true`, automation continues past the installer: it confirms the installed GRUB
-menu, boots Linux, runs the Linux checks over SSH, creates and hashes the sharing probes, selects
-Windows for the next boot, and runs the Windows checks over SSH. A failed check does not skip the
-remaining checks, but it makes the final operation result fail.
+menu, validates the system selected by `first_boot`, then validates the other system. It runs the
+Linux and Windows checks over SSH and verifies the cross-system sharing probes. A failed check does
+not skip independent remaining checks, but it makes the final operation result fail.
+
+For local and remote development builds, the automation launches Libertix with its development-only
+unattended contract. The application itself validates the requested distribution, partition size,
+account and sharing options. The destructive warning is still acknowledged through the visible
+keyboard workflow and proven before disk writes begin. A published `dev_<sha7>` build enables this
+development contract; a stable production build refuses it unless an explicit development filepool
+override is also supplied.
 
 For full installations, the service launches Libertix with a complete development network profile:
 `--dev-ssh-static-ip`, `--dev-ssh-prefix-length`, `--dev-ssh-gateway`, and one
@@ -344,11 +353,16 @@ Never copy `.env` into Samba or a source archive.
 Runtime evidence is organized as follows:
 
 ```text
-auto_tests/logs/             complete operation logs
-auto_tests/runtime/captures/ temporary VNC captures
+auto_tests/logs/             legacy complete operation logs
+auto_tests/runtime/captures/ per-operation workspaces with the compact log and stage captures
 auto_tests/runtime/filepool/ generated catalogue with current mini-ISO hashes
 auto_tests/api-background.log optional background-server output
 ```
+
+Each automation, validation, or reset request gets one private workspace. Automation captures every
+reported stage in that workspace, including deterministic keyboard/contract transitions and visual
+installation monitoring. Retention keeps the three most recent completed runs of each operation
+type; an active workspace is never selected for cleanup.
 
 The compact API stream is the normal operator view. Read a complete log only to diagnose a failed
 terminal `RESULT`, and keep generated runtime files out of commits.

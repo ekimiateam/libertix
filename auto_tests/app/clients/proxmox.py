@@ -5,7 +5,7 @@ import re
 import ssl
 import time
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -141,6 +141,108 @@ class ProxmoxClient:
                 details={"vmid": vmid, "node": node},
             )
         return data
+
+    def get_guest_network_interfaces(
+        self,
+        node: str,
+        vmid: int,
+        *,
+        step: str,
+    ) -> list[dict[str, object]]:
+        data = self._request(
+            "GET",
+            f"/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces",
+            step=step,
+        )
+        result = data.get("result", data) if isinstance(data, dict) else data
+        if not isinstance(result, list) or not all(isinstance(item, dict) for item in result):
+            raise WorkflowError(
+                step,
+                "Invalid QEMU guest-agent network response",
+                details={"vmid": vmid, "node": node},
+            )
+        return result
+
+    def execute_guest_agent_command(
+        self,
+        node: str,
+        vmid: int,
+        command: list[str],
+        *,
+        step: str,
+        timeout: float,
+    ) -> dict[str, object]:
+        if not command or any(
+            not isinstance(argument, str) or "\0" in argument for argument in command
+        ):
+            raise ValueError("command must contain non-NUL string arguments")
+
+        path = f"/nodes/{node}/qemu/{vmid}/agent/exec"
+        try:
+            response = self.client.post(
+                f"{self.base_url}{path}",
+                content=urlencode([("command", argument) for argument in command]).encode("ascii"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            response.raise_for_status()
+            data = response.json()["data"]
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            response = getattr(exc, "response", None)
+            raise WorkflowError(
+                step,
+                "QEMU guest-agent command could not be started",
+                details={
+                    "vmid": vmid,
+                    "node": node,
+                    "http_status": getattr(response, "status_code", None),
+                    "response_body": getattr(response, "text", "")[-2000:],
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            ) from exc
+
+        result = data.get("result", data) if isinstance(data, dict) else data
+        pid = result.get("pid") if isinstance(result, dict) else None
+        if not isinstance(pid, int):
+            raise WorkflowError(
+                step,
+                "QEMU guest-agent command returned no process identifier",
+                details={"vmid": vmid, "node": node},
+            )
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                response = self.client.get(
+                    f"{self.base_url}/nodes/{node}/qemu/{vmid}/agent/exec-status",
+                    params={"pid": pid},
+                )
+                response.raise_for_status()
+                data = response.json()["data"]
+            except (httpx.HTTPError, ValueError, KeyError) as exc:
+                response = getattr(exc, "response", None)
+                raise WorkflowError(
+                    step,
+                    "QEMU guest-agent command status could not be read",
+                    details={
+                        "vmid": vmid,
+                        "node": node,
+                        "http_status": getattr(response, "status_code", None),
+                        "response_body": getattr(response, "text", "")[-2000:],
+                        "exception_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                ) from exc
+            result = data.get("result", data) if isinstance(data, dict) else data
+            if isinstance(result, dict) and result.get("exited"):
+                return result
+            time.sleep(0.5)
+
+        raise WorkflowError(
+            step,
+            "QEMU guest-agent command timed out",
+            details={"vmid": vmid, "node": node, "timeout_seconds": timeout},
+        )
 
     def verify_rollback_state(
         self,

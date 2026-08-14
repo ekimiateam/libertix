@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import ModuleType
 
@@ -20,8 +21,12 @@ def result_ui() -> ModuleType:
 
 
 def test_all_supported_languages_have_success_and_failure_messages(result_ui: ModuleType) -> None:
-    assert set(result_ui.TRANSLATIONS) == {"en", "fr", "es", "ja"}
-    for translation in result_ui.TRANSLATIONS.values():
+    catalogue = json.loads(
+        (ROOT / "Resources/Libertix.Translations.json").read_text(encoding="utf-8")
+    )
+    assert catalogue["supportedLanguages"] == ["en", "fr", "es"]
+    for language in catalogue["supportedLanguages"]:
+        translation = result_ui.load_translations(language)
         assert all(translation[key].strip() for key in translation)
 
 
@@ -80,3 +85,104 @@ def test_dialog_prefers_keep_above_gtk_provider(
 
     assert result_ui.show_dialog("Verified", "Everything is valid", False) is True
     assert calls == [("Verified", "Everything is valid", False)]
+
+
+def test_session_localization_proof_matches_the_installation_plan(
+    result_ui: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    marker = home / ".config/libertix/keyboard-initialized.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "sessionLanguage": "fr_FR.UTF-8",
+                "configuredLanguage": "fr_FR.UTF-8",
+                "layout": "fr",
+                "variant": "",
+                "desktopSource": "fr",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(result_ui.Path, "home", lambda: home)
+    plan = {
+        "locale": {
+            "systemLanguage": "fr_FR.UTF-8",
+            "keyboardLayout": "fr",
+            "keyboardVariant": "",
+        }
+    }
+
+    assert result_ui.wait_for_session_localization(plan) is None
+
+
+def test_session_localization_proof_rejects_an_unexpected_input_source(
+    result_ui: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    marker = home / ".config/libertix/keyboard-initialized.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps(
+            {
+                "status": "succeeded",
+                "sessionLanguage": "fr_FR.UTF-8",
+                "configuredLanguage": "fr_FR.UTF-8",
+                "layout": "us",
+                "variant": "",
+                "desktopSource": "us",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(result_ui.Path, "home", lambda: home)
+    plan = {
+        "locale": {
+            "systemLanguage": "fr_FR.UTF-8",
+            "keyboardLayout": "fr",
+            "keyboardVariant": "",
+        }
+    }
+
+    assert "differs" in result_ui.wait_for_session_localization(plan)
+
+
+def test_session_localization_failure_is_not_acknowledged(
+    result_ui: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = {
+        "planId": "a" * 32,
+        "account": {"username": "test"},
+        "locale": {
+            "languageCode": "fr",
+            "systemLanguage": "fr_FR.UTF-8",
+            "keyboardLayout": "fr",
+            "keyboardVariant": "",
+        },
+    }
+    status = {
+        "planId": plan["planId"],
+        "status": "succeeded",
+        "updatedAtUtc": "2026-08-13T00:00:00Z",
+        "error": None,
+        "logPath": "/var/log/libertix/first-boot-resize.log",
+    }
+    home = tmp_path / "home"
+    monkeypatch.setattr(result_ui, "PLAN_PATH", tmp_path / "plan.json")
+    monkeypatch.setattr(result_ui, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(result_ui.Path, "home", lambda: home)
+    monkeypatch.setattr(
+        result_ui.pwd, "getpwuid", lambda _uid: type("User", (), {"pw_name": "test"})()
+    )
+    monkeypatch.setattr(result_ui.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(result_ui.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(result_ui, "wait_for_session_localization", lambda _plan: "mismatch")
+    monkeypatch.setattr(result_ui, "show_dialog", lambda *_args: True)
+    monkeypatch.setenv("DISPLAY", ":0")
+    result_ui.PLAN_PATH.write_text(json.dumps(plan), encoding="utf-8")
+    result_ui.STATUS_PATH.write_text(json.dumps(status), encoding="utf-8")
+
+    assert result_ui.main() == 0
+    assert not (home / ".local/state/libertix/first-boot-result-ack.json").exists()

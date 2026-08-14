@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import logging
 import re
-import tempfile
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import Literal
 
-from app.api_runtime import mark_capture_workspace_owned
+from app.api_runtime import (
+    cleanup_operation_artifacts,
+    create_capture_workspace,
+    mark_capture_workspace_complete,
+)
 from app.clients.proxmox import ProxmoxClient
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
@@ -33,15 +37,11 @@ class AutomationService(
     InstallationMonitoringMixin,
     PostInstallValidationMixin,
 ):
-    """Automate the Libertix wizard through the real VNC desktop.
+    """Run unattended Libertix installations on the configured test VMs.
 
     Profiles come exclusively from configured VM metadata. The service reuses
-    the build and deployment workflow, streams compact progress, and keeps disk
-    changes behind the explicit apply option.
+    the build and deployment workflow and streams compact progress.
     """
-
-    REFERENCE_WIDTH = 1024
-    REFERENCE_HEIGHT = 768
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -63,30 +63,37 @@ class AutomationService(
         self,
         vm_selectors: Sequence[str] | None = None,
         *,
-        apply: bool,
         linux_username: str,
         linux_password: str,
+        linux_size_gib: int = 100,
         distribution: str = "mint",
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
         simulate_fog_clone_boot_entries: bool = False,
+        first_boot: Literal["windows", "linux"] = "windows",
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
+        run_workspace: Path | None = None,
     ) -> OperationResult:
-        self.settings.capture_dir.mkdir(parents=True, exist_ok=True)
-        capture_workspace = tempfile.TemporaryDirectory(
-            prefix="automation-", dir=self.settings.capture_dir
-        )
-        mark_capture_workspace_owned(Path(capture_workspace.name))
+        owns_workspace = run_workspace is None
+        workspace = run_workspace or create_capture_workspace(self.settings, "automation")
+        capture_dir = workspace / "captures"
+        capture_dir.mkdir(mode=0o700, exist_ok=True)
         previous_capture_dir = self._capture_dir
-        self._capture_dir = Path(capture_workspace.name)
+        self._capture_dir = capture_dir
         result = ResultBuilder("automation", on_step=on_step)
         try:
-            if apply and not monitor_iso:
+            result.ok(
+                "automation.run_workspace",
+                "Automation run workspace initialized",
+                path=str(workspace),
+                capture_path=str(capture_dir),
+            )
+            if not monitor_iso:
                 raise WorkflowError(
                     "automation.monitor_required",
-                    "Apply requires visual monitoring until the live environment starts",
+                    "Installation automation requires monitoring through post-install validation",
                 )
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
@@ -101,15 +108,16 @@ class AutomationService(
                 path=str(windows_path),
             )
             options = AutomationOptions(
-                apply=apply,
                 linux_username=linux_username,
                 linux_password=linux_password,
+                linux_size_gib=linux_size_gib,
                 monitor_iso=monitor_iso,
                 distribution=load_distribution_profile(distribution),
                 share_windows_files_in_linux=share_windows_files_in_linux,
                 share_linux_files_in_windows=share_linux_files_in_windows,
                 use_default_filepool=source == "published",
                 simulate_fog_clone_boot_entries=simulate_fog_clone_boot_entries,
+                first_boot=first_boot,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
                 futures = {
@@ -118,7 +126,6 @@ class AutomationService(
                         vm,
                         windows_path,
                         options,
-                        profiles[vm.name],
                         on_step,
                     ): vm
                     for vm in selected_vms
@@ -137,14 +144,10 @@ class AutomationService(
                         message=f"Automation failed on one or more VMs: {messages}",
                         steps=result.steps,
                     )
-            suffix = (
+            return result.success(
+                f"Libertix automation on {len(selected_vms)} VM(s): "
                 "installation and Linux/Windows validation completed"
-                if apply and monitor_iso
-                else "Apply click sent without final-state validation"
-                if apply
-                else "interface launched only"
             )
-            return result.success(f"Libertix automation on {len(selected_vms)} VM(s): {suffix}")
         except WorkflowError as exc:
             return result.failure(exc)
         except Exception as exc:
@@ -158,7 +161,9 @@ class AutomationService(
             )
         finally:
             self._capture_dir = previous_capture_dir
-            capture_workspace.cleanup()
+            if owns_workspace:
+                mark_capture_workspace_complete(workspace)
+                cleanup_operation_artifacts(self.settings)
 
     def _automation_profile_for_vm(self, vm: VMConfig) -> WizardProfile | None:
         if not vm.automation_enabled:
@@ -168,18 +173,15 @@ class AutomationService(
             vm_name=vm.name,
             vm_host=vm.host,
             vmid=vm.vmid,
-            launch_only_label=vm.firmware.upper(),
         )
 
     def _automation_profiles(
         self, selected_vms: Sequence[VMConfig], selectors: Sequence[str] | None
     ) -> dict[str, WizardProfile]:
-        """Return validated UI automation profiles for every selected VM.
+        """Return validated unattended profiles for every selected VM.
 
-        Validation can target every configured VM, but UI automation is only
-        allowed for profiles whose click path has been manually validated. This
-        permits the explicitly supported BIOS/UEFI VMs to run in parallel while
-        still refusing unknown machines.
+        Validation can target every configured VM, but destructive automation is
+        allowed only for explicitly enabled BIOS/UEFI test machines.
         """
 
         profiles: dict[str, WizardProfile] = {}
@@ -196,8 +198,8 @@ class AutomationService(
 
         raise WorkflowError(
             "automation.scope",
-            "Libertix auto-click refused for one or more selected VMs. Select only "
-            "configured VMs whose automation_enabled flag is true.",
+            "Libertix unattended automation refused one or more selected VMs. Select "
+            "only configured VMs whose automation_enabled flag is true.",
             details={
                 "requested_selectors": list(selectors or []),
                 "selected_vms": [vm.name for vm in selected_vms],
@@ -237,7 +239,6 @@ class AutomationService(
         vm: VMConfig,
         executable: PureWindowsPath,
         options: AutomationOptions,
-        profile: WizardProfile,
         on_step: Callable[[StepResult], None] | None,
     ) -> OperationResult:
         result = ResultBuilder("automation", on_step=on_step)
@@ -256,6 +257,7 @@ class AutomationService(
             launch = self._launch_elevated(
                 vm,
                 local_executable,
+                options,
                 use_default_filepool=options.use_default_filepool,
             )
             result.ok(
@@ -265,18 +267,28 @@ class AutomationService(
                 vm=vm.name,
                 **launch,
             )
-            monitor_outcome = self._click_wizard(vm, options, profile, result)
-            if options.apply and options.monitor_iso:
-                if monitor_outcome is None:
-                    raise WorkflowError(
-                        "automation.post_install",
-                        "Installed-system monitoring ended without a boot outcome",
-                        details={"vm": vm.name, "host": vm.host},
-                    )
-                self._run_post_install_validation(vm, options, result, monitor_outcome)
+            monitor_outcome = self._run_unattended_wizard(vm, options, result, launch)
+            self._run_post_install_validation(vm, options, result, monitor_outcome)
             return result.success(f"Automation completed on {vm.name}")
         except WorkflowError as exc:
             return result.failure(exc)
+        except Exception as exc:
+            logger.exception(
+                "Unexpected internal error during automation on %s",
+                vm.name,
+                extra={"step": "automation.internal", "target": vm.host},
+            )
+            return result.failure(
+                WorkflowError(
+                    "automation.internal",
+                    f"Unexpected internal error during automation on {vm.name}",
+                    details={
+                        "vm": vm.name,
+                        "target": vm.host,
+                        "type": type(exc).__name__,
+                    },
+                )
+            )
 
     def _prepare_windows_test_vm(self, vm: VMConfig, result: ResultBuilder) -> None:
         values: dict[str, str] = {}
@@ -395,6 +407,7 @@ class AutomationService(
         self,
         vm: VMConfig,
         executable: PureWindowsPath,
+        options: AutomationOptions,
         *,
         use_default_filepool: bool = False,
     ) -> dict[str, object]:
@@ -405,9 +418,23 @@ class AutomationService(
             task_name=task_name,
             step="automation.launch_elevated",
             use_default_filepool=use_default_filepool,
+            unattended_config={
+                "schemaVersion": 1,
+                "distribution": options.distribution.id,
+                "linuxSizeGiB": options.linux_size_gib,
+                "linuxUsername": options.linux_username,
+                "linuxPassword": options.linux_password,
+                "computerName": f"{vm.name.lower()}-linux",
+                "shareWindowsFilesInLinux": options.share_windows_files_in_linux,
+                "shareLinuxFilesInWindows": options.share_linux_files_in_windows,
+            },
         )
         return {
             "pid": int(values["PID"]),
             "session_id": int(values["SESSION_ID"]),
+            "window_handle": int(values["WINDOW_HANDLE"]),
+            "window_title": values["WINDOW_TITLE"],
             "task_name": values.get("TASK_NAME", task_name),
+            "unattended_status_path": values.get("UNATTENDED_STATUS_PATH"),
+            "unattended_acknowledgement_path": values.get("UNATTENDED_ACKNOWLEDGEMENT_PATH"),
         }

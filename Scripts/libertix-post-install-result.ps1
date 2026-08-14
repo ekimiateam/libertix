@@ -157,12 +157,20 @@ Complete-InteractiveWindowsShareVerification `
     -Result $result `
     -Plan $plan
 $language = [string]$plan.locale.languageCode
-$translationsPath = Join-Path $PSScriptRoot "config\Libertix.PostInstallTranslations.json"
+$translationsPath = @(
+    (Join-Path $PSScriptRoot "config\Libertix.Translations.json"),
+    (Join-Path (Split-Path -Parent $PSScriptRoot) "Resources\Libertix.Translations.json")
+) | Where-Object {
+    Test-Path -LiteralPath $_ -PathType Leaf
+} | Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace($translationsPath)) {
+    throw "Libertix translation catalogue is missing."
+}
 $translations = Read-JsonFile -Path $translationsPath
-if ($language -notin @("en", "fr", "es", "ja")) {
+if ($language -notin @("en", "fr", "es")) {
     $language = "en"
 }
-$text = $translations.$language
+$text = $translations.languages.$language.postInstall
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
@@ -178,6 +186,7 @@ $window.MinWidth = 720
 $window.MinHeight = 520
 $window.WindowStartupLocation = "CenterScreen"
 $window.Background = [Windows.Media.Brushes]::White
+$window.Topmost = $true
 
 $root = New-Object Windows.Controls.Grid
 $root.Margin = New-Object Windows.Thickness(28)
@@ -247,6 +256,10 @@ $closeButton.MinWidth = 150
 $closeButton.Height = 46
 $closeButton.Padding = New-Object Windows.Thickness(18, 8, 18, 8)
 $closeButton.IsDefault = $true
+$closeButton.SetValue(
+    [Windows.Automation.AutomationProperties]::AutomationIdProperty,
+    "LibertixPostInstallCloseButton"
+)
 $closeButton.Add_Click({ $window.Close() })
 
 if ([string]$result.status -eq "failed" -and [bool]$result.rollbackAvailable) {
@@ -304,6 +317,12 @@ if ([string]$result.status -eq "failed" -and [bool]$result.rollbackAvailable) {
 $buttons.Children.Add($closeButton) | Out-Null
 $root.Children.Add($buttons) | Out-Null
 $window.Content = $root
-$window.Add_Closed({ Remove-PromptTask })
-$window.Add_ContentRendered({ $null = $closeButton.Focus() })
-$null = $window.ShowDialog()
+$window.Add_ContentRendered({
+    $null = $window.Activate()
+    $null = $closeButton.Focus()
+})
+try {
+    $null = $window.ShowDialog()
+} finally {
+    Remove-PromptTask
+}

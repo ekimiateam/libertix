@@ -95,6 +95,22 @@ namespace Libertix
 
             Filepool = filepool;
 
+            bool usesPublishedDevelopmentChannel =
+                Build.IsDevelopment &&
+                string.Equals(
+                    Filepool.BaseUrl,
+                    Build.MetadataBaseUrl,
+                    StringComparison.OrdinalIgnoreCase);
+            if (options.Unattended != null &&
+                !Filepool.IsDevelopmentMode &&
+                !usesPublishedDevelopmentChannel)
+            {
+                RejectInvalidStartupOptions(
+                    "Unattended mode requires a development build channel or " +
+                    "an explicit development filepool URL.");
+                return false;
+            }
+
             RuntimeOptions = options;
             ApplicationLogger.Write($"Filepool base URL: {Filepool.BaseUrl}");
             ApplicationLogger.Write($"Build version: {Build.Version}; channel={Build.Channel}.");
@@ -105,6 +121,8 @@ namespace Libertix
                     options.DevelopmentSshStaticIpv4Address + "/" +
                     options.DevelopmentSshStaticIpv4PrefixLength + ".");
             }
+            if (options.Unattended != null)
+                ApplicationLogger.Write("Unattended development workflow enabled.");
             return true;
         }
 
@@ -200,11 +218,24 @@ namespace Libertix
         private void RegisterApplicationErrorLogging()
         {
             DispatcherUnhandledException += (_, args) =>
-                ApplicationLogger.WriteException("Unhandled WPF dispatcher exception.", args.Exception);
+            {
+                UnattendedWorkflow.TryPublishFailure(
+                    "wpf-dispatcher-unhandled",
+                    args.Exception?.Message);
+                ApplicationLogger.WriteException(
+                    "Unhandled WPF dispatcher exception.",
+                    args.Exception);
+            };
             AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            {
+                UnattendedWorkflow.TryPublishFailure(
+                    "appdomain-unhandled",
+                    (args.ExceptionObject as Exception)?.Message ??
+                    "Unhandled AppDomain exception.");
                 ApplicationLogger.Write(
                     "Unhandled AppDomain exception." + Environment.NewLine +
                     (args.ExceptionObject?.ToString() ?? "No exception details."));
+            };
             TaskScheduler.UnobservedTaskException += (_, args) =>
                 ApplicationLogger.WriteException("Unobserved task exception.", args.Exception);
         }

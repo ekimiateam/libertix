@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+_INSTALLATION_POLICY = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "Scripts"
+        / "config"
+        / "Libertix.InstallationPolicy.json"
+    ).read_text(encoding="utf-8")
+)
+_MINIMUM_LINUX_SIZE_GIB = int(_INSTALLATION_POLICY["storage"]["minimumFinalSizeGiB"])
+_RESERVED_LINUX_USERNAMES = frozenset(
+    str(value).casefold() for value in _INSTALLATION_POLICY["account"]["reservedUsernames"]
+)
 
 SourceMode = Literal["remote", "local", "published"]
 DistributionId = Literal["mint", "zorin"]
+FirstBoot = Literal["windows", "linux"]
 
 
 class StepResult(BaseModel):
@@ -49,13 +65,13 @@ class ValidationRequest(BaseModel):
 
 
 class AutomationRequest(ValidationRequest):
-    """Libertix UI automation scope and safety options.
+    """Destructive unattended Libertix installation request.
 
-    By default, the automation only launches the visible Libertix interface.
-    Set apply=true only when the test may really start the Linux installation.
+    The explicit true literal prevents callers from confusing this endpoint
+    with the non-destructive validation endpoint.
     """
 
-    apply: bool = Field(default=False, description="Run the full installer UI and click Apply")
+    apply: Literal[True] = Field(description="Explicitly authorize the complete installation")
     distribution: DistributionId = Field(
         default="mint", description="Distribution catalog id selected in the Libertix wizard"
     )
@@ -66,6 +82,18 @@ class AutomationRequest(ValidationRequest):
         pattern=r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$",
     )
     linux_password: str = Field(min_length=4, max_length=128)
+    linux_size_gib: int = Field(
+        default=100,
+        ge=_MINIMUM_LINUX_SIZE_GIB,
+        le=16384,
+        description="Requested final Linux partition size in GiB",
+    )
+    first_boot: FirstBoot = Field(
+        default="windows",
+        description=(
+            "Installed operating system verified first; both Windows and Linux are always tested"
+        ),
+    )
     monitor_iso: bool = Field(default=True)
     share_windows_files_in_linux: bool = Field(default=True)
     share_linux_files_in_windows: bool = Field(default=True)
@@ -73,3 +101,10 @@ class AutomationRequest(ValidationRequest):
         default=False,
         description="Inject one stale UEFI Libertix entry before launch for clone regression tests",
     )
+
+    @field_validator("linux_username")
+    @classmethod
+    def reject_reserved_linux_username(cls, value: str) -> str:
+        if value.casefold() in _RESERVED_LINUX_USERNAMES:
+            raise ValueError("Linux username is reserved by Debian/Ubuntu")
+        return value

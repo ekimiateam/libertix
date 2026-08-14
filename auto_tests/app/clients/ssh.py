@@ -28,6 +28,19 @@ SUPPORTED_HOST_KEY_TYPES = {
 MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
 SSH_CONNECT_ATTEMPTS = 3
 SSH_CONNECT_RETRY_SECONDS = 2
+RECONNECTABLE_TRANSPORT_EXCEPTIONS = frozenset(
+    {
+        "BrokenPipeError",
+        "ConnectionAbortedError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "EOFError",
+        "NoValidConnectionsError",
+        "OSError",
+        "SSHException",
+        "TimeoutError",
+    }
+)
 POWERSHELL_CLIXML_MARKER = "#< CLIXML"
 POWERSHELL_ESCAPE_PATTERN = re.compile(r"_x([0-9A-Fa-f]{4})_")
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
@@ -176,7 +189,14 @@ class SSHClient:
     def __exit__(self, *_args: object) -> None:
         if self._client:
             self._client.close()
+            self._client = None
             logger.info("SSH connection closed", extra={"step": "ssh.close", "target": self.host})
+
+    def reconnect(self) -> SSHClient:
+        """Replace a dead transport while preserving the verified host policy."""
+
+        self.__exit__(None, None, None)
+        return self.__enter__()
 
     def run(
         self,
@@ -234,6 +254,7 @@ class SSHClient:
                     "command": "[SENSITIVE COMMAND REDACTED]" if sensitive else command,
                     "exception_type": type(exc).__name__,
                     "error": str(exc),
+                    "transport_error": True,
                 },
             ) from exc
         logger.info(
@@ -534,3 +555,11 @@ exit $exitCode
                 },
             ) from exc
         logger.info("SSH file upload completed", extra={"step": step, "target": self.host})
+
+
+def is_reconnectable_transport_error(error: WorkflowError) -> bool:
+    """Return whether a failed SSH operation can be retried on a fresh transport."""
+
+    return error.details.get("transport_error") is True or (
+        error.details.get("exception_type") in RECONNECTABLE_TRANSPORT_EXCEPTIONS
+    )

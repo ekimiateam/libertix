@@ -5,6 +5,10 @@
 # Candidate enumeration and manifest identity are firmware-neutral. Firmware
 # adapters keep only the partitioning and bootloader behavior that truly differs.
 
+# Exclude small BitLocker metadata or recovery volumes when diagnosing the
+# Windows system partition after a failed manifest match.
+readonly MINIMUM_LIKELY_WINDOWS_PARTITION_MIB=1000
+
 candidate_disks() {
     local disk
 
@@ -241,7 +245,8 @@ find_biggest_bitlocker_partition() {
         filesystem=$(blkid -s TYPE -o value "$partition" 2>/dev/null || echo "")
         echo "$filesystem" | grep -qi "bitlocker" || continue
         size_mib=$(($(blockdev --getsize64 "$partition" 2>/dev/null || echo 0) / 1024 / 1024))
-        if [ "$size_mib" -gt 1000 ] && [ "$size_mib" -gt "$best_size" ]; then
+        if [ "$size_mib" -gt "$MINIMUM_LIKELY_WINDOWS_PARTITION_MIB" ] \
+            && [ "$size_mib" -gt "$best_size" ]; then
             best="$partition"
             best_size="$size_mib"
         fi

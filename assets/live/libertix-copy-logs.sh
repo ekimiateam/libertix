@@ -62,7 +62,7 @@ else
     mounted_here=true
 fi
 
-log_root="$target/LibertixInstallLogs"
+log_root="$target/LibertixInstallLogs/Linux"
 log_dir="$log_root/$RUN_ID"
 latest_dir="$log_root/latest"
 latest_staging="$log_root/.latest-$RUN_ID"

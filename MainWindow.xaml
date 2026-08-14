@@ -25,7 +25,8 @@
                 IsHitTestVisible="False"
                 Panel.ZIndex="1000"
                 Visibility="Collapsed">
-            <TextBlock Text="DEVELOPMENT MODE - catalog signature verification is disabled."
+            <TextBlock x:Name="DevelopmentModeBannerText"
+                       Text="DEVELOPMENT MODE - catalog signature verification is disabled."
                        Foreground="#FFFFB347"
                        FontSize="14"
                        FontWeight="SemiBold"

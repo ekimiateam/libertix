@@ -14,28 +14,16 @@ from pydantic import ValidationError
 from app.clients.vision_contracts import (
     INSTALL_PROGRESS_SCHEMA,
     INSTALL_PROGRESS_SYSTEM_PROMPT,
-    SYSTEM_PROMPT,
-    VERDICT_SCHEMA,
-    WIZARD_STATE_SCHEMA,
 )
-from app.clients.vision_models import (
-    InstallProgressVerdict,
-    VisionVerdict,
-    WizardStateVerdict,
-)
+from app.clients.vision_models import InstallProgressVerdict
 from app.clients.vision_models import (
     contains_final_reboot_prompt as _contains_final_reboot_prompt,
 )
 from app.clients.vision_models import (
     contains_install_blocker as _contains_install_blocker,
 )
-from app.clients.vision_models import contains_warning_screen as _contains_warning_screen
-from app.clients.vision_models import (
-    contains_wizard_blocker as _contains_wizard_blocker,
-)
 from app.clients.vision_parsing import (
     load_progress_message_json,
-    load_wizard_json,
     optimize_image,
 )
 from app.errors import WorkflowError
@@ -117,62 +105,6 @@ class VisionLLMClient:
                     step, failure_message, exc, vm_name, response, attempt
                 ) from exc
         raise WorkflowError(step, "Maximum LLM attempt count exceeded")
-
-    def analyze(self, image_path: Path, vm_name: str, vm_os: str) -> VisionVerdict:
-        logger.info("LLM vision analysis started", extra={"step": "llm.analyze", "target": vm_name})
-        image = optimize_image(image_path)
-        user_prompt = (
-            f"Classify the visible Libertix welcome screen on {vm_name} ({vm_os}). "
-            "Return only the required JSON object."
-        )
-        payload = self._with_reasoning(
-            {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{image}"},
-                            },
-                        ],
-                    },
-                ],
-                "temperature": 0,
-                "max_tokens": 4096,
-                "stream": False,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "libertix_visual_verdict",
-                        "strict": True,
-                        "schema": VERDICT_SCHEMA,
-                    },
-                },
-            }
-        )
-
-        def decode(message: dict[str, object]) -> VisionVerdict:
-            content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("The LLM produced no visible JSON content")
-            return VisionVerdict.model_validate(json.loads(content))
-
-        verdict = self._request_verdict(
-            payload,
-            vm_name,
-            "llm.analyze",
-            "LLM response is missing, invalid, or does not match the strict JSON schema",
-            decode,
-        )
-        logger.info(
-            "LLM vision analysis completed",
-            extra={"step": "llm.analyze", "target": vm_name},
-        )
-        return verdict
 
     def analyze_install_progress(
         self, image_path: Path, vm_name: str, vm_os: str
@@ -262,184 +194,6 @@ class VisionLLMClient:
             vm_name,
             "llm.install_progress",
             "LLM progress response is missing, invalid, or non-conforming",
-            decode,
-        )
-
-    def analyze_wizard_state(
-        self,
-        image_path: Path,
-        vm_name: str,
-        vm_os: str,
-        *,
-        expected_screen: Literal["account", "warning"],
-        expected_username: str,
-        second_image_path: Path | None = None,
-    ) -> WizardStateVerdict:
-        """Fail-closed visual guard before the destructive wizard transition."""
-
-        image = optimize_image(image_path)
-        second_image = optimize_image(second_image_path) if second_image_path is not None else None
-        screen_instruction = (
-            "the account page with the exact username and both password fields filled"
-            if expected_screen == "account"
-            else "the final warning page shown immediately before installation"
-        )
-        payload = self._with_reasoning(
-            {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Classify the current Libertix wizard page from visible evidence only. "
-                            "Return only the required JSON object. detected_screen must name the "
-                            "visible page. expected_screen_visible must be true exactly when "
-                            "detected_screen equals the requested page. Set "
-                            "no_blocking_error=false "
-                            "only when visible_text copies a concrete Libertix validation or error "
-                            "message. A blank, partial, black, white, or transitioning window is "
-                            "detected_screen=other, expected_screen_visible=false, and "
-                            "no_blocking_error=true. If two chronological captures are supplied, "
-                            "classify the second one. Valid screens: welcome, compatibility, "
-                            "distro, resize, sharing, account, warning, apply, other. A visible "
-                            "COMPAT_E_* error or disabled Continue button on compatibility is "
-                            "blocking. warning_acknowledged is true only when the warning-page "
-                            "confirmation checkbox visibly contains its selected check mark; it "
-                            "is false on every other page and for an empty checkbox."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    f"Current screen for {vm_name} ({vm_os}). Verify "
-                                    f"{screen_instruction}. The exact expected username is "
-                                    f"{expected_username!r}. On the warning page, username_visible "
-                                    "and password_fields_filled may be false because those fields "
-                                    "are no longer shown. Inspect the confirmation checkbox itself "
-                                    "to set warning_acknowledged. Copy all decisive Libertix "
-                                    "text into "
-                                    "visible_text, especially titles, controls, validation "
-                                    "messages, "
-                                    "and errors. If no Libertix text is readable, use an empty "
-                                    "visible_text and classify a transient state without inventing "
-                                    "an error."
-                                ),
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/jpeg;base64,{image}"},
-                            },
-                            *(
-                                [
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:image/jpeg;base64,{second_image}"
-                                        },
-                                    }
-                                ]
-                                if second_image is not None
-                                else []
-                            ),
-                        ],
-                    },
-                ],
-                "temperature": 0,
-                "max_tokens": 2048,
-                "stream": False,
-                "response_format": {
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "libertix_wizard_state",
-                        "strict": True,
-                        "schema": WIZARD_STATE_SCHEMA,
-                    },
-                },
-            }
-        )
-
-        def decode(message: dict[str, object]) -> WizardStateVerdict:
-            content = message.get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("The LLM produced no screen verdict")
-            verdict = WizardStateVerdict.model_validate(load_wizard_json(content))
-            visible_evidence = f"{verdict.summary}\n{verdict.visible_text}"
-            if (
-                expected_screen == "warning"
-                and verdict.expected_screen_visible
-                and verdict.detected_screen != "warning"
-                and _contains_warning_screen(verdict.visible_text)
-            ):
-                # The localized title and confirmation control are stronger
-                # evidence than a contradictory enum emitted by the model.
-                verdict = verdict.model_copy(update={"detected_screen": "warning"})
-            critical_fields_confirmed = (
-                expected_screen == "account"
-                and verdict.detected_screen == "account"
-                and verdict.expected_screen_visible
-                and verdict.username_visible
-                and verdict.password_fields_filled
-                and expected_username.casefold() in visible_evidence.casefold()
-            )
-            warning_confirmed = (
-                expected_screen == "warning"
-                and verdict.detected_screen == "warning"
-                and verdict.expected_screen_visible
-            )
-            if (
-                not verdict.no_blocking_error
-                and (critical_fields_confirmed or warning_confirmed)
-                and not _contains_wizard_blocker(visible_evidence)
-            ):
-                verdict = verdict.model_copy(
-                    update={
-                        "no_blocking_error": True,
-                        "summary": (
-                            f"{verdict.summary} Verdict normalized: the screen and critical "
-                            "fields are confirmed with no visible Libertix error."
-                        ),
-                    }
-                )
-            if (
-                verdict.detected_screen == "other"
-                and not verdict.no_blocking_error
-                and not verdict.visible_text.strip()
-                and not _contains_wizard_blocker(visible_evidence)
-            ):
-                verdict = verdict.model_copy(
-                    update={
-                        "no_blocking_error": True,
-                        "summary": (
-                            f"{verdict.summary} Verdict normalized: no concrete Libertix "
-                            "error is visible during this transient state."
-                        ),
-                    }
-                )
-            if (
-                verdict.detected_screen == "apply"
-                and not verdict.no_blocking_error
-                and not _contains_wizard_blocker(visible_evidence)
-                and not _contains_install_blocker(visible_evidence)
-            ):
-                verdict = verdict.model_copy(
-                    update={
-                        "no_blocking_error": True,
-                        "summary": (
-                            f"{verdict.summary} Verdict normalized: the Apply page is active "
-                            "and no concrete installation error is visible."
-                        ),
-                    }
-                )
-            return verdict
-
-        return self._request_verdict(
-            payload,
-            vm_name,
-            "llm.wizard_state",
-            "The LLM did not confirm the critical wizard state",
             decode,
         )
 

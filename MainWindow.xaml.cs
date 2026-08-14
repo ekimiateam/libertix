@@ -24,9 +24,24 @@ namespace Libertix
             var application = (App)Application.Current;
             _installationState = application.InstallationState;
             InitializeComponent();
-            if (application.Filepool.IsDevelopmentMode)
+            if (application.Filepool.IsDevelopmentMode ||
+                application.RuntimeOptions.Unattended != null)
             {
                 DevelopmentModeBanner.Visibility = Visibility.Visible;
+                if (application.RuntimeOptions.Unattended != null)
+                {
+                    DevelopmentModeBanner.Background =
+                        new System.Windows.Media.SolidColorBrush(
+                            System.Windows.Media.Color.FromRgb(72, 0, 0));
+                    DevelopmentModeBanner.BorderBrush =
+                        new System.Windows.Media.SolidColorBrush(
+                            System.Windows.Media.Color.FromRgb(255, 82, 82));
+                    DevelopmentModeBannerText.Foreground =
+                        new System.Windows.Media.SolidColorBrush(
+                            System.Windows.Media.Color.FromRgb(255, 138, 128));
+                    DevelopmentModeBannerText.Text =
+                        "UNATTENDED DEVELOPMENT MODE - automated destructive installation is enabled.";
+                }
             }
             _installationState.InstallationRunningChanged += InstallationState_InstallationRunningChanged;
 
@@ -36,7 +51,9 @@ namespace Libertix
             _trayIcon = new TrayIconController(
                 RestoreFromTray,
                 ResourceText("TrayOpenLibertix", "Open Libertix"));
-            MainFrame.Content = CreateWelcomePage();
+            MainFrame.Content = application.RuntimeOptions.Unattended != null
+                ? (Page)new CompatibilityCheck(_installationState)
+                : CreateWelcomePage();
 
             if (_installationState.UefiRecoveryStatePath is string recoveryStatePath &&
                 !string.IsNullOrWhiteSpace(recoveryStatePath))

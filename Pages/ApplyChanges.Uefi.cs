@@ -263,7 +263,9 @@ namespace Libertix.Pages
             UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
             Log("UEFI installation preparation completed successfully.");
             RebootButton.Visibility = Visibility.Visible;
-            FinishInstallation(enableBackButton: false);
+            RebootButton.IsDefault = true;
+            RebootButton.Focus();
+            await PublishUnattendedRebootReadyAsync();
         }
 
         private async Task HandleUefiPreparationFailureAsync(
@@ -487,7 +489,7 @@ namespace Libertix.Pages
                     Path.GetExtension(path).Equals(".config", StringComparison.OrdinalIgnoreCase))
                 .ToArray();
             var payloadFiles = new List<string>(topLevelFiles);
-            foreach (string directoryName in new[] { "Scripts", "Tools" })
+            foreach (string directoryName in new[] { "Scripts", "Tools", "Resources" })
             {
                 string directory = Path.Combine(sourceRoot, directoryName);
                 if (Directory.Exists(directory))

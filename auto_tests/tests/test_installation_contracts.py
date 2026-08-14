@@ -786,6 +786,8 @@ def test_contract_implementations_share_the_same_policy_constants() -> None:
         "maximumDirectFat32SizeGiB": 31,
         "largeInstallationStagingSizeGiB": 8,
         "partitionAlignmentBytes": 1024**2,
+        "recommendedLinuxFractionOfFreeSpace": 0.4,
+        "maximumRecommendedLinuxSizeGiB": 100,
     }
     assert policy["memory"] == {
         "windowsMinimumMiB": 2048,
@@ -800,6 +802,9 @@ def test_contract_implementations_share_the_same_policy_constants() -> None:
         policy["account"]["reservedUsernames"]
     )
     assert "InstallationPolicy.Current.Storage" in csharp
+    resize = (ROOT / "Pages/ResizeDisk.xaml.cs").read_text(encoding="utf-8-sig")
+    assert "InstallationSizePolicy.RecommendedLinuxFractionOfFreeSpace" in resize
+    assert "InstallationSizePolicy.MaximumRecommendedLinuxSizeGiB" in resize
     assert "Get-LibertixInstallationPolicy" in powershell
     assert "INSTALLATION_POLICY.storage" in python
     for obsolete_literal in (
@@ -1045,7 +1050,10 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
     names = dict(re.findall(r'public const string (\w+) = "([A-Za-z0-9_]+)";', csharp))
     assert names == {
         "InstallerVolumeLabel": "LIBERTIXEFI",
+        "BiosInstallerVolumeLabel": "LIBERTIX",
         "InstallationLogDirectory": "LibertixInstallLogs",
+        "WindowsLogDirectory": "Windows",
+        "LinuxLogDirectory": "Linux",
         "BiosRecoveryDirectory": "LibertixInstallRecovery",
         "BiosRecoveryTask": "LibertixInstallRecovery",
         "BiosRecoveryPromptTask": "LibertixInstallRecoveryPrompt",
@@ -1053,6 +1061,7 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
     }
 
     recovery = (ROOT / "Scripts/libertix-recovery-guard.ps1").read_text(encoding="utf-8-sig")
+    bios_storage = (ROOT / "Scripts/libertix-bios-storage.ps1").read_text(encoding="utf-8-sig")
     windows_share = (ROOT / "Scripts/libertix-configure-windows-share.ps1").read_text(
         encoding="utf-8-sig"
     )
@@ -1063,11 +1072,18 @@ def test_persisted_runtime_names_match_across_language_boundaries() -> None:
     assert f'$TaskName = "{names["BiosRecoveryTask"]}"' in recovery
     assert f'$PromptTaskName = "{names["BiosRecoveryPromptTask"]}"' in recovery
     assert f'Join-Path $SystemDrive "{names["BiosRecoveryDirectory"]}"' in recovery
-    assert f'Join-Path $SystemDrive "{names["InstallationLogDirectory"]}"' in recovery
+    assert (
+        f'Join-Path $SystemDrive "{names["InstallationLogDirectory"]}\\'
+        f'{names["WindowsLogDirectory"]}"'
+    ) in recovery
     assert f'$script:LinuxReadOnlyTaskName = "{names["LinuxReadOnlyTask"]}"' in windows_share
     assert f'$InstallerLabel = "{names["InstallerVolumeLabel"]}"' in uefi
     assert names["InstallerVolumeLabel"] in live_context
+    assert names["BiosInstallerVolumeLabel"] in bios_storage
+    assert names["BiosInstallerVolumeLabel"] in recovery
+    assert names["BiosInstallerVolumeLabel"] in live_context
     assert names["InstallationLogDirectory"] in live_logs
+    assert f'/{names["LinuxLogDirectory"]}"' in live_logs
 
 
 def test_windows_state_models_and_powershell_property_sets_match_schema() -> None:

@@ -183,7 +183,6 @@
                     </Style>
                 </ResourceDictionary>
 
-                <ResourceDictionary Source="pack://application:,,,/Resources/Lang/Strings.en.xaml"/>
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

@@ -433,13 +433,8 @@ def test_installed_linux_persists_and_displays_its_first_boot_verification() -> 
     assert '"succeeded"' in verifier
     assert '"failed"' in verifier
     assert "/var/lib/libertix/first-boot-verification.json" in verifier
-    assert "TRANSLATIONS" in result_ui
-    assert set(re.findall(r'^    "(en|fr|es|ja)": \{', result_ui, re.MULTILINE)) == {
-        "en",
-        "fr",
-        "es",
-        "ja",
-    }
+    assert "Libertix.Translations.json" in result_ui
+    assert "load_translations" in result_ui
     assert "status_fingerprint" in result_ui
     assert "libertix-first-boot-result.desktop" in target_common
     assert "Exec=/usr/local/lib/libertix/libertix-first-boot-result.py" in desktop
@@ -915,6 +910,29 @@ def test_bios_bcd_guid_and_live_copy_processes_use_strict_bounded_contracts() ->
     assert "Timed-out process tree could not be proven stopped" in process_runner
 
 
+def test_all_blocking_windows_operations_use_the_named_timeout_policy() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    windows = read("Pages/ApplyChanges.Windows.cs")
+    downloads = read("Pages/ApplyChanges.Downloads.cs")
+    processes = read("Pages/ApplyChanges.Processes.cs")
+    policy = read("Helpers/WindowsProcessRunner.cs")
+
+    for name in (
+        "BootArtifactDownload",
+        "SupportArtifactDownload",
+        "RecoveryOperation",
+        "LiveIsoDownload",
+        "DistributionIsoDownload",
+    ):
+        assert f"TimeSpan {name}" in policy
+    assert "WindowsProcessTimeouts.RecoveryOperation" in bios
+    assert "WindowsProcessTimeouts.SupportArtifactDownload" in windows
+    assert "using Libertix.Helpers;" in downloads
+    assert "WindowsProcessTimeouts.LiveIsoDownload" in downloads
+    assert "WindowsProcessTimeouts.DistributionIsoDownload" in downloads
+    assert "WindowsProcessTimeouts.BootArtifactDownload" in processes
+
+
 def test_live_target_disk_requires_cross_platform_partition_table_identity() -> None:
     preflight = read("Scripts/libertix-storage-preflight.ps1")
     plan_exporter = read("assets/live/libertix-installation-plan.py")
@@ -1177,14 +1195,15 @@ def test_every_literal_live_install_stage_is_declared() -> None:
 
 def test_failure_shortcut_does_not_offer_reboot_before_verified_rollback() -> None:
     runner = read("assets/live/libertix-runner-main.sh")
-    translations = json.loads(read("assets/live/libertix-translations.json"))
+    catalogue = json.loads(read("Resources/Libertix.Translations.json"))
 
     assert 'if [ "$rollback_status" = "completed" ]' in runner
     assert "$LIBERTIX_I18N_SHORTCUTS_FAILURE_BLOCKED" in runner
-    for language in ("en", "fr", "es", "ja"):
-        blocked = translations[language]["shortcuts_failure_blocked"]
+    for language in ("en", "fr", "es"):
+        translations = catalogue["languages"][language]["live"]
+        blocked = translations["shortcuts_failure_blocked"]
         assert "[R]" in blocked
-        assert translations[language]["shortcuts_failure"] != blocked
+        assert translations["shortcuts_failure"] != blocked
 
 
 def test_shared_progress_helper_maps_unsquashfs_output(tmp_path: Path) -> None:
@@ -1407,31 +1426,60 @@ def test_release_restore_dismount_and_latest_logs_fail_closed() -> None:
     assert 'cp -a "$LOG_DIR/." "$log_root/latest/"' not in log_copy
 
 
-def test_warning_accessibility_worker_stays_within_task_scheduler_command_limit() -> None:
-    script = read("auto_tests/app/scripts/set_warning_acknowledgement.ps1")
-
-    task_command = script.split("$taskCommand =", 1)[1].split("\n", 2)[0]
-    assert "-ConfigPath" not in task_command
-    assert "$taskCommand.Length -gt 261" in script
-    assert "ACKNOWLEDGED=True" in script
-    assert "CONFIRM_ENABLED=True" in script
-    assert "function Find-LibertixAutomationControl" in script
-    assert "AutomationElement]::RootElement.FindFirst" in script
-    assert "AutomationElement]::ProcessIdProperty" in script
-    assert 'Scope = "process"' in script
-    assert "$InteractiveResultTimeoutSeconds" in script
-    assert "$MainWindowTimeoutSeconds = 30" in script
-    assert "$WarningControlTimeoutSeconds = 45" in script
-    assert "$InteractiveTaskStartupAllowanceSeconds = 30" in script
-    assert "$InteractiveResultTimeoutSeconds = `" in script
-    assert "AddSeconds($InteractiveResultTimeoutSeconds)" in script
-    assert "Start-Sleep -Milliseconds 200" in script
-
+def test_unattended_warning_is_a_single_fail_safe_keyboard_dialog() -> None:
+    dialog_xaml = read("Dialogs/UnattendedWarningDialog.xaml")
+    dialog_code = read("Dialogs/UnattendedWarningDialog.xaml.cs")
     wizard = read("auto_tests/app/services/automation_wizard.py")
-    acknowledgement = wizard.split("def _set_warning_acknowledgement", 1)[1].split(
-        "def _start_installation_from_warning", 1
+
+    assert 'x:Name="NoButton"' in dialog_xaml
+    assert 'TabIndex="0"' in dialog_xaml
+    assert 'IsCancel="True"' in dialog_xaml
+    assert 'x:Name="YesButton"' in dialog_xaml
+    assert 'TabIndex="1"' in dialog_xaml
+    assert 'IsDefault="False"' in dialog_xaml
+    assert 'BorderBrush="{StaticResource ErrorColor}"' in dialog_xaml
+    assert 'Background="{StaticResource ErrorColor}"' in dialog_xaml
+    assert "UnattendedWarningTitle" in dialog_xaml
+    assert "UnattendedWarningMessage" in dialog_xaml
+    assert "{DynamicResource WarningMessage}" not in dialog_xaml
+    assert "{DynamicResource WarningRisks}" not in dialog_xaml
+    assert "{DynamicResource WarningRecommendations}" not in dialog_xaml
+    assert '"warning-ready",' in dialog_code
+    assert "timeoutSeconds: 45" in dialog_code
+    assert "maximumAttempts = 3" in dialog_code
+    decision_start = dialog_code.index("if (completed == dialog._decision.Task)")
+    acknowledgement_after_decision = dialog_code.index("await acknowledgement;", decision_start)
+    accepted_return = dialog_code.index("return true;", decision_start)
+    assert acknowledgement_after_decision < accepted_return
+    assert "finally" in dialog_code
+    assert "if (dialog.IsVisible)" in dialog_code
+    assert 'self._press_key(client, "tab", 0.25)' in wizard
+    assert 'self._press_key(client, "enter", 0.5)' in wizard
+    assert "AddSeconds(5)" in wizard
+    assert "catch [IO.IOException]" in wizard
+    assert "Start-Sleep -Milliseconds 50" in wizard
+    assert "_set_warning_acknowledgement" not in wizard
+    assert "_click_wizard_path" not in wizard
+
+
+def test_unattended_mode_requires_a_development_channel_or_filepool() -> None:
+    app = read("App.xaml.cs")
+    guard = app.split("bool usesPublishedDevelopmentChannel", 1)[1].split(
+        "RuntimeOptions = options;", 1
     )[0]
-    assert "timeout=150" in acknowledgement
+
+    assert "Build.IsDevelopment" in guard
+    assert "Filepool.BaseUrl" in guard
+    assert "Build.MetadataBaseUrl" in guard
+    assert "!Filepool.IsDevelopmentMode" in guard
+    assert "requires a development build channel" in guard
+
+
+def test_unattended_acknowledgement_reader_does_not_lock_out_the_controller() -> None:
+    unattended = read("Helpers/UnattendedWorkflow.cs")
+
+    assert "ReadCoordinationFile(options.AcknowledgementPath).Trim()" in unattended
+    assert "FileShare.ReadWrite | FileShare.Delete" in unattended
 
 
 def test_windows_process_tree_must_be_proven_stopped_before_rollback() -> None:
@@ -1538,6 +1586,8 @@ def test_all_download_transports_enforce_bounded_file_sizes() -> None:
     assert "Invoke-WebRequest -Uri $Url -OutFile $Destination" not in uefi_downloads
     assert "MaximumDistributionIsoBytes = 8GB" in uefi_downloads
     assert "MaximumLiveIsoBytes = 2GB" in uefi_downloads
+    assert "MinimumDistributionIsoBytes = 100MB" in uefi_downloads
+    assert uefi_downloads.count("$script:MinimumDistributionIsoBytes") == 3
     assert "-MaxBytes $script:MaximumLiveIsoBytes" in uefi_staging
     assert "MaximumFileBytes" in process_module
     assert "Stop-LibertixNativeProcessTree" in process_module
@@ -1604,6 +1654,7 @@ def test_windows_share_and_postinstall_checks_bind_ext4_to_the_planned_partition
 def test_auto_test_exercises_windows_before_linux_and_both_result_dialogs() -> None:
     postinstall = read("auto_tests/app/services/automation_postinstall.py")
     checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    focus_result = read("auto_tests/app/scripts/focus_post_install_result.ps1")
 
     assert '"check": "waiting_for_linux"' in postinstall
     assert 'grub_entry="windows"' in postinstall
@@ -1611,16 +1662,56 @@ def test_auto_test_exercises_windows_before_linux_and_both_result_dialogs() -> N
     assert postinstall.index('"check": "waiting_for_linux"') < postinstall.index(
         '"linux.first_boot_verification_ready"'
     )
-    assert postinstall.count("self._verify_post_install_success_dialog(") == 2
+    assert postinstall.count("self._capture_and_dismiss_post_install_result(") == 2
     assert '"waiting_for_linux" {' in checks
     assert '"explorer_integration" {' in checks
     assert '"post_install_result_ui" {' in checks
-    result_ui = checks.split('"post_install_result_ui" {', 1)[1].split('"sharing_tasks" {', 1)[0]
-    assert "libertix-post-install-result\\.ps1" in result_ui
-    assert "libertix-uefi-recovery-agent\\.ps1" in result_ui
-    assert "-Action\\s+Prompt" in result_ui
-    assert 'Join-Path $session.Root "state.json"' in result_ui
+    assert '"post_install_result_ui_dismissed" {' in checks
+    result_process_lookup = checks.split("function Get-PostInstallResultUiProcesses", 1)[1].split(
+        "function Get-InteractiveUserProfile", 1
+    )[0]
+    assert "libertix-post-install-result\\.ps1" in result_process_lookup
+    assert "libertix-uefi-recovery-agent\\.ps1" in result_process_lookup
+    assert "-Action\\s+Prompt" in result_process_lookup
+    assert 'Join-Path $Session.Root "state.json"' in result_process_lookup
+    assert "$graphicalProcess.MainWindowHandle" not in result_process_lookup
+    assert "AutomationElement]::ProcessIdProperty" in focus_result
+    assert "AutomationElement]::RootElement.FindAll" in focus_result
+    assert "$window.Current.IsOffscreen" in focus_result
+    assert "LibertixPostInstallCloseButton" in focus_result
+    result_ui = checks.split('"post_install_result_ui" {', 1)[1].split(
+        '"post_install_result_ui_dismissed" {', 1
+    )[0]
+    assert "Get-PostInstallResultUiProcesses" in result_ui
     assert "AwaitingInstalledLinuxBoot" in checks
+    assert "first-boot-result-ack.json" in postinstall
+    assert "guest-state-process-and-dismissal" in postinstall
+
+
+def test_unattended_warning_keyboard_action_requires_proven_ui_focus() -> None:
+    wizard = read("auto_tests/app/services/automation_wizard.py")
+    focus_script = read("auto_tests/app/scripts/focus_unattended_warning.ps1")
+    dialog = read("Dialogs/UnattendedWarningDialog.xaml")
+
+    acceptance = wizard.split("def _accept_unattended_warning_dialog", 1)[1].split(
+        "def _capture_from_client", 1
+    )[0]
+    observation = wizard.split("def _observe_unattended_wizard", 1)[1].split(
+        "def _wait_for_unattended_stage", 1
+    )[0]
+    assert 'script_name="focus_unattended_warning.ps1"' in acceptance
+    assert "self.vnc.connect" not in acceptance
+    assert observation.index("warning_client = self.vnc.connect") < observation.index(
+        "self._accept_unattended_warning_dialog"
+    )
+    assert observation.index("self._capture_and_acknowledge_unattended_stage") < observation.index(
+        "warning_client.disconnect"
+    )
+    assert "UnattendedWarningNoButton" in focus_script
+    assert "UnattendedWarningYesButton" in focus_script
+    assert "$noButton.Current.HasKeyboardFocus" in focus_script
+    assert 'AutomationProperties.AutomationId="UnattendedWarningNoButton"' in dialog
+    assert 'AutomationProperties.AutomationId="UnattendedWarningYesButton"' in dialog
 
 
 def test_bios_post_install_prompt_hides_its_powershell_console() -> None:
@@ -1873,7 +1964,16 @@ def test_installed_keyboard_layout_is_applied_once_after_the_desktop_starts() ->
     assert 'KEYBOARD_VARIANT="$KEYBOARD_VARIANT"' in target_common
     assert 'XKBVARIANT="$KEYBOARD_VARIANT"' in target
     assert 'keyboard_source="${KEYBOARD_LAYOUT}+${KEYBOARD_VARIANT}"' in target
-    assert 'marker_path="$marker_directory/keyboard-initialized"' in first_session
+    assert 'marker_path="$marker_directory/keyboard-initialized.json"' in first_session
+    assert "org.gnome.desktop.input-sources" in first_session
+    assert "org.cinnamon.desktop.input-sources" in first_session
+    assert "expected_sources=\"[('xkb', '$keyboard_source')]\"" in first_session
+    assert 'gsettings set "$schema" sources "$expected_sources"' in first_session
+    assert 'gsettings get "$schema" sources' in first_session
+    assert '"status": "succeeded"' in first_session
+    assert '[ ! -e "$marker_path" ] || exit 0' not in first_session
+    assert "marker.get(key) == value" in first_session
+    assert "all(marker.get(key) == value for key, value in expected.items())" in first_session
 
 
 def test_ext4_setup_payload_matches_pinned_release_hash() -> None:
@@ -2079,13 +2179,68 @@ def test_installation_log_controls_preserve_manual_scroll_and_button_layout() ->
 
 def test_wpf_sensitive_state_catalog_and_timeout_guards_are_enforced() -> None:
     warning = read("Pages/WarningConfirmation.xaml.cs")
+    unattended_warning = read("Dialogs/UnattendedWarningDialog.xaml.cs")
+    compatibility = read("Pages/CompatibilityCheck.xaml.cs")
+    configurator = read("Installation/UnattendedInstallationConfigurator.cs")
     account = read("Pages/AccountCreation.xaml.cs")
     apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    apply_cancellation = read("Pages/ApplyChanges.Cancellation.cs")
+    apply_bios = read("Pages/ApplyChanges.Bios.cs")
+    apply_uefi = read("Pages/ApplyChanges.Uefi.cs")
+    startup_options = read("Helpers/StartupOptions.cs")
+    unattended = read("Helpers/UnattendedWorkflow.cs")
     downloads = read("Pages/ApplyChanges.Downloads.cs")
     processes = read("Pages/ApplyChanges.Processes.cs")
     atomic_json = read("Installation/AtomicJsonFile.cs")
 
     assert "_installationState.Account?.ClearPassword();" in warning
+    assert "Dispatcher.BeginInvoke(" in warning
+    assert "ConfirmCheckBox.IsChecked = true" not in warning
+    assert '"warning-ready",' in unattended_warning
+    assert "timeoutSeconds: 45" in unattended_warning
+    assert "maximumAttempts = 3" in unattended_warning
+    assert "UnattendedInstallationConfigurator.ConfigureAsync(" in compatibility
+    assert "new ApplyChanges(_installationState)" in compatibility
+    assert '"warning-accepted"' not in compatibility
+    assert '"configuration-distribution-applied"' in configurator
+    assert '"configuration-disk-size-applied"' in configurator
+    assert '"configuration-sharing-applied"' in configurator
+    assert '"configuration-account-applied"' in configurator
+    assert 'PublishStageAndWaitAsync("installation-started")' in apply_changes
+    assert (
+        "UnattendedWorkflow.Complete();"
+        not in apply_changes.split("ApplyChanges_Loaded", 1)[1].split(
+            "private void LoadSummary", 1
+        )[0]
+    )
+    assert 'PublishStageAndWaitAsync("reboot-ready")' in apply_cancellation
+    assert '"installation-preparation-failed"' in apply_cancellation
+    assert "await PublishUnattendedRebootReadyAsync();" in apply_bios
+    assert "await PublishUnattendedRebootReadyAsync();" in apply_uefi
+    assert "UnattendedWorkflow.Complete();" in apply_changes.split("RebootButton_Click", 1)[1]
+    reboot_handler = apply_changes.split("RebootButton_Click", 1)[1].split(
+        "private void UpdateProgress", 1
+    )[0]
+    assert reboot_handler.index("if (result.ExitCode != 0)") < reboot_handler.index(
+        "UnattendedWorkflow.Complete();"
+    )
+    for page in (
+        "Pages/Welcome.xaml.cs",
+        "Pages/ChooseDistro.xaml.cs",
+        "Pages/ResizeDisk.xaml.cs",
+        "Pages/SharingOptionsPage.xaml.cs",
+        "Pages/AccountCreation.xaml.cs",
+        "Pages/WarningConfirmation.xaml.cs",
+    ):
+        assert "UnattendedWorkflow" not in read(page)
+    assert "internal void CompleteUnattendedWorkflow()" in startup_options
+    assert "Unattended = null;" in startup_options
+    assert "RuntimeOptions.CompleteUnattendedWorkflow();" in unattended
+    assert '["stage"] = "failed"' in unattended
+    assert '["errorCode"] = safeCode' in unattended
+    assert "TryPublishFailure(ex.Code, ex.Message);" in compatibility
+    assert "DistributionCatalogLoader.LoadAsync(_filepool)" in read("Pages/ChooseDistro.xaml.cs")
+    assert '"wpf-dispatcher-unhandled"' in read("App.xaml.cs")
     assert "ToLowerInvariant()" in account
     assert "new Lazy<ArtifactCatalog>" in apply_changes
     assert "ArtifactCatalog.LoadFromApplicationDirectory();" not in apply_changes
@@ -2095,9 +2250,30 @@ def test_wpf_sensitive_state_catalog_and_timeout_guards_are_enforced() -> None:
     assert "when (writeFailure != null)" in atomic_json
 
 
+def test_windows_launch_requires_a_visible_uia_main_window() -> None:
+    launch = read("auto_tests/app/scripts/launch_libertix_elevated.ps1")
+    confirm = read("auto_tests/app/scripts/confirm_libertix_process.ps1")
+
+    for script in (launch, confirm):
+        assert "AutomationElement]::FromHandle" in script
+        assert ".Current.IsOffscreen" in script
+        assert "$bounds.Width -ge 100 -and $bounds.Height -ge 100" in script
+        assert "WINDOW_VISIBLE" in script
+
+
+def test_post_install_login_typing_requires_a_proven_guest_login_screen() -> None:
+    postinstall = read("auto_tests/app/services/automation_postinstall.py")
+    windows_probe = read("auto_tests/app/scripts/inspect_windows_graphical_session.ps1")
+
+    assert '"LIBERTIX_GREETER_READY" not in response.stdout' in postinstall
+    assert 'values.get("LOGIN_SCREEN_PRESENT") != "True"' in postinstall
+    assert "Name='LogonUI.exe'" in windows_probe
+    assert "LOGIN_SCREEN_PRESENT" in windows_probe
+
+
 def test_distribution_catalogue_key_is_embedded_and_payloads_are_bounded() -> None:
     project = read("Libertix.csproj")
-    chooser = read("Pages/ChooseDistro.xaml.cs")
+    loader = read("Installation/DistributionCatalogLoader.cs")
     trust = read("Installation/DistributionCatalogTrust.cs")
 
     key_entry = project.split(
@@ -2106,9 +2282,9 @@ def test_distribution_catalogue_key_is_embedded_and_payloads_are_bounded() -> No
     )[1].split("</EmbeddedResource>", 1)[0]
     assert "Libertix.Resources.CatalogPublicKey.xml" in key_entry
     assert "CopyToOutputDirectory" not in key_entry
-    assert "VerifyWithApplicationKey" in chooser
-    assert "BoundedHttpContent.ReadAsync" in chooser
-    assert "MaximumCatalogBytes" in chooser
+    assert "VerifyWithApplicationKey" in loader
+    assert "BoundedHttpContent.ReadAsync" in loader
+    assert "MaximumCatalogBytes" in loader
     assert "GetManifestResourceStream" in trust
 
 
@@ -2204,11 +2380,33 @@ def test_filepool_defaults_to_a_signed_build_channel_and_supports_an_override() 
     assert "application.Filepool.IsDevelopmentMode" in read("MainWindow.xaml.cs")
     assert "$useDefaultFilepool" in launch
     assert "if (-not $useDefaultFilepool)" in launch
-    assert "$taskCommand += ' --filepool-base-url \"{0}\"' -f $filepoolBaseUrl" in launch
+    assert "$applicationArguments += ' --filepool-base-url \"{0}\"' -f $filepoolBaseUrl" in launch
     assert '--dev-ssh-static-ip "{0}"' in launch
     assert '--dev-ssh-prefix-length "{0}"' in launch
     assert '--dev-ssh-gateway "{0}"' in launch
     assert '--dev-ssh-dns "{0}"' in launch
+
+
+def test_libertix_launch_proves_the_identified_interactive_window() -> None:
+    launch = read("auto_tests/app/scripts/launch_libertix_elevated.ps1")
+    confirmation = read("auto_tests/app/scripts/confirm_libertix_process.ps1")
+
+    for script in (launch, confirmation):
+        assert "function Test-VisibleMainWindow" in script
+        assert "MainWindowHandle -eq [IntPtr]::Zero" in script
+        assert 'MainWindowTitle -ne "Libertix"' in script
+        assert "Current.IsOffscreen" in script
+        assert "$bounds.Width -ge 100 -and $bounds.Height -ge 100" in script
+        assert "WINDOW_HANDLE" in script
+        assert "WINDOW_TITLE" in script
+
+    assert "[switch]$InteractiveWorker" in launch
+    assert "function Invoke-InteractiveWorker" in launch
+    assert "Start-Process" in launch
+    assert "$workerProcess.WaitForExit()" in launch
+    assert "window_width = [int]$bounds.Width" in launch
+    assert "window_height = [int]$bounds.Height" in launch
+    assert "The interactive Libertix worker did not report a result" in launch
 
 
 def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None:
@@ -2692,6 +2890,14 @@ def test_live_bitlocker_diagnostic_is_shared_by_bios_and_uefi() -> None:
     assert 'find_biggest_bitlocker_partition "$DISK"' in installer
 
 
+def test_live_bitlocker_diagnostic_names_its_windows_partition_threshold() -> None:
+    common = read("assets/live/libertix-storage-common.sh")
+
+    assert "readonly MINIMUM_LIKELY_WINDOWS_PARTITION_MIB=1000" in common
+    assert '"$size_mib" -gt "$MINIMUM_LIKELY_WINDOWS_PARTITION_MIB"' in common
+    assert '"$size_mib" -gt 1000' not in common
+
+
 def test_final_verification_waits_for_a_clean_target_release_in_both_modes() -> None:
     installer = read("assets/live/libertix-install-main.sh")
     target = read("assets/live/libertix-target-common.sh")
@@ -2956,10 +3162,10 @@ def test_temporary_media_and_grub_generator_workspaces_are_cleaned() -> None:
 
 
 def test_distribution_minimum_uses_the_shared_installation_size_policy() -> None:
-    chooser = read("Pages/ChooseDistro.xaml.cs")
+    catalog_loader = read("Installation/DistributionCatalogLoader.cs")
 
-    assert "distroJson.SizeInGB < InstallationSizePolicy.MinimumFinalSizeGiB" in chooser
-    assert "distroJson.SizeInGB < 20" not in chooser
+    assert "distribution.SizeInGB < InstallationSizePolicy.MinimumFinalSizeGiB" in catalog_loader
+    assert "distribution.SizeInGB < 20" not in catalog_loader
 
 
 def test_bios_iso_output_name_matches_the_filepool_contract() -> None:
@@ -3091,7 +3297,9 @@ def test_uefi_bits_fallback_times_out_and_cleans_an_incomplete_job() -> None:
     assert "BITS completed but the downloaded file is missing" in bits
     assert "Invoke-BoundedHttpDownload" in robust
     assert "-TimeoutSeconds 120" in robust
-    assert "$maximumAria2Attempts = 3" in robust
+    assert "$maximumAria2Attempts = [int]$script:DownloadPolicy.maximumAttempts" in robust
+    assert "$retryBaseDelaySeconds = [int]$script:DownloadPolicy.retryBaseDelaySeconds" in robust
+    assert "Start-Sleep -Seconds ($retryBaseDelaySeconds * $attempt)" in robust
     assert "retaining the partial download and retrying" in robust
 
 
@@ -3132,6 +3340,58 @@ def test_live_rootfs_masks_unused_serial_login_prompt() -> None:
     assert "ln -sf /dev/null /etc/systemd/system/serial-getty@ttyS0.service" in rootfs
 
 
+def test_live_rootfs_does_not_ship_an_unused_passworded_sudo_account() -> None:
+    rootfs = read("assets/live/setup-live-rootfs.sh")
+
+    assert "useradd" not in rootfs
+    assert "user:live" not in rootfs
+    assert "NOPASSWD" not in rootfs
+    packages = rootfs.split("packages=(", 1)[1].split(")", 1)[0]
+    assert "sudo" not in packages.split()
+
+
+def test_ntfs_scan_uses_the_documented_numeric_result_not_localized_text() -> None:
+    preflight = read("Scripts/libertix-compatibility-preflight.ps1")
+    scan = preflight.split('Write-Check "COMPAT_050_FILESYSTEM"', 1)[1].split(
+        "Get-PartitionSupportedSize", 1
+    )[0]
+
+    assert "[uint32]$scanResult" in scan
+    assert "$scanResult -ne 0" in scan
+    assert "NoErrorsFound" not in scan
+    assert "No Error" not in scan
+    assert "Aucune" not in scan
+
+
+def test_obsolete_clickonce_metadata_and_unused_test_dependency_are_absent() -> None:
+    project = read("Libertix.csproj")
+    pyproject = read("auto_tests/pyproject.toml")
+    lock = read("auto_tests/uv.lock")
+    requirements = read("auto_tests/requirements-dev.txt")
+
+    for clickonce_name in ("PublishUrl", "UpdateEnabled", "BootstrapperPackage"):
+        assert clickonce_name not in project
+    assert 'name = "httpx2"' not in lock
+    assert '"httpx2' not in pyproject
+    assert "httpx2" not in requirements
+
+
+def test_auto_test_documentation_points_detailed_logs_to_run_workspaces() -> None:
+    documentation = read("auto_tests/README.md")
+
+    assert "the request workspace in `auto_tests/runtime/captures/`" in documentation
+    assert "detailed file automatically under\n`auto_tests/logs/`" not in documentation
+    assert "A published `dev_<sha7>` build enables this" in documentation
+    assert "Published builds do not enable this contract" not in documentation
+
+
+def test_web_form_uses_the_shared_four_character_password_minimum() -> None:
+    web = read("auto_tests/app/web/index.html")
+
+    assert 'minlength="4"' in web
+    assert 'minlength="8"' not in web
+
+
 def test_developer_terminal_is_verbose_and_initialized_only_once() -> None:
     runner = read("assets/live/libertix-runner-main.sh")
 
@@ -3157,11 +3417,31 @@ def test_live_logs_are_copied_completely_and_verified() -> None:
     assert "sha256sum > SHA256SUMS" in helper
     assert "trap cleanup_mount EXIT" in helper
     assert 'mount -t ntfs-3g -o ro "$win" "$target"' in helper
+    assert 'log_root="$target/LibertixInstallLogs/Linux"' in helper
 
     runner = read("assets/live/libertix-runner-main.sh")
     assert "/usr/local/sbin/libertix-copy-logs" in runner
     assert "libertix-copy-logs.sh" in build
     assert 'LOG_COPY_STATUS="success"' in runner
+
+
+def test_product_logs_are_grouped_by_operating_system_without_retention() -> None:
+    application_logger = read("Helpers/ApplicationLogger.cs")
+    preparation = read("Pages/ApplyChanges.Cancellation.cs")
+    bios_recovery = read("Scripts/libertix-recovery-guard.ps1")
+    uefi_recovery = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    windows_share = read("Scripts/libertix-configure-windows-share.ps1")
+    first_boot = read("assets/live/libertix-first-boot-verify.py")
+
+    assert "RuntimeNames.WindowsLogDirectory" in application_logger
+    assert "RuntimeNames.WindowsLogDirectory" in preparation
+    assert "PruneApplicationLogs" not in application_logger
+    assert '"LibertixInstallLogs\\Windows"' in bios_recovery
+    assert '"LibertixInstallLogs\\Linux"' in bios_recovery
+    assert '"LibertixInstallLogs\\Windows\\$($State.RunId)"' in uefi_recovery
+    assert '"LibertixInstallLogs\\Windows"' in windows_share
+    assert 'WINDOWS_LOG_ROOT = Path("LibertixInstallLogs/Linux")' in first_boot
+    assert "archive_linux_diagnostics(plan, windows_device)" in first_boot
 
 
 def test_grub_submenu_entries_always_have_a_transparent_icon_class() -> None:
@@ -3400,7 +3680,6 @@ def test_grub_generators_remain_nested_after_package_updates() -> None:
         ("fr_FR.UTF-8", ["fr_FR.UTF-8 UTF-8", "en_US.UTF-8 UTF-8"]),
         ("en_US.UTF-8", ["en_US.UTF-8 UTF-8"]),
         ("es_ES.UTF-8", ["es_ES.UTF-8 UTF-8", "en_US.UTF-8 UTF-8"]),
-        ("ja_JP.UTF-8", ["ja_JP.UTF-8 UTF-8", "en_US.UTF-8 UTF-8"]),
     ],
 )
 def test_target_generates_only_the_selected_and_fallback_locales(
@@ -3413,15 +3692,12 @@ def test_target_generates_only_the_selected_and_fallback_locales(
 set -eu
 SYSTEM_LANG="$1"
 locale_gen_file="$2"
-selected_locales=("$SYSTEM_LANG")
 {
     printf '%s UTF-8\n' "$SYSTEM_LANG"
     if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]; then
         printf '%s UTF-8\n' "en_US.UTF-8"
-        selected_locales+=("en_US.UTF-8")
     fi
 } > "$locale_gen_file"
-printf '%s\n' "${selected_locales[@]}"
 """
     result = subprocess.run(
         ["bash", "-c", command, "locale-test", system_lang, str(locale_gen_file)],
@@ -3431,12 +3707,14 @@ printf '%s\n' "${selected_locales[@]}"
     )
 
     assert locale_gen_file.read_text(encoding="utf-8").splitlines() == expected
-    assert result.stdout.splitlines() == [line.split()[0] for line in expected]
+    assert result.stdout == ""
     target = read("assets/live/configure-target-main.sh")
     assert "> /etc/locale.gen" in target
     assert 'if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]' in target
-    assert "if [ -d /var/lib/locales/supported.d ]; then" in target
-    assert 'locale-gen "${selected_locales[@]}"' in target
+    assert 'if [ -d "$supported_directory" ]; then' in target
+    assert 'mv "$supported_directory" "$supported_backup"' in target
+    assert 'mv "$supported_backup" "$supported_directory"' in target
+    assert "locale-gen || locale_status=$?" in target
 
 
 def test_grub_kernel_update_keeps_all_advanced_entries_nested() -> None:
@@ -3711,8 +3989,12 @@ def test_wpf_runtime_failure_paths_are_bounded_and_recoverable() -> None:
     assert "_ownsSingleInstanceMutex = createdNew;" in app
     assert "if (_ownsSingleInstanceMutex)" in app
     assert "_singleInstanceMutex.Dispose();" in app.split("if (!createdNew)", 1)[1]
-    assert '"Resources/Lang/Strings."' in localization
-    assert "foreach (ResourceDictionary oldDictionary in oldDictionaries)" in localization
+    assert '"Resources",' in localization
+    assert '"Libertix.Translations.json"' in localization
+    assert (
+        "Application.Current.Resources.MergedDictionaries.Remove(_languageDictionary)"
+        in localization
+    )
     assert "return fallback;" in localization
     assert "Unloaded += ApplyChanges_Unloaded;" in apply_page
     assert "_installationCancellation.Dispose();" in apply_page
@@ -3724,14 +4006,19 @@ def test_wpf_runtime_failure_paths_are_bounded_and_recoverable() -> None:
 
 def test_distribution_selection_reuses_compatibility_and_publishes_catalog_atomically() -> None:
     chooser = read("Pages/ChooseDistro.xaml.cs")
+    catalog_loader = read("Installation/DistributionCatalogLoader.cs")
 
     assert "_partitionConfigValid = _installationState.Compatibility != null;" in chooser
     assert "CheckPartitionConfigurationAsync" not in chooser
-    validation_start = chooser.index("var validatedDistros = new List<DistroInfo>")
-    validation_end = chooser.index("_distros.Clear();", validation_start)
-    assert "validatedDistros.Add" in chooser[validation_start:validation_end]
-    assert "_distros.Add" not in chooser[validation_start:validation_end]
-    assert chooser.index("_distros.Add(distro);", validation_end) > validation_end
+    assert "DistributionCatalogLoader.LoadAsync(_filepool)" in chooser
+    assert "ValidateCatalog(catalog);" in catalog_loader
+    assert "return CreateDistributions(catalog, filepool);" in catalog_loader
+    assert "var distributions = new List<DistroInfo>" in catalog_loader
+    assert "distributions.Add(new DistroInfo" in catalog_loader
+    assert "return distributions;" in catalog_loader
+    catalog_loaded = chooser.index("DistributionCatalogLoader.LoadAsync(_filepool)")
+    catalog_published = chooser.index("_distros.Clear();", catalog_loaded)
+    assert chooser.index("_distros.Add(distro);", catalog_published) > catalog_published
 
 
 def test_dead_command_and_error_panel_action_plumbing_are_removed() -> None:
@@ -3844,7 +4131,6 @@ def test_rollback_uses_observed_partition_state_and_always_cleans_esp_mounts() -
         ("en", "Shutdown", "Advanced options"),
         ("fr", "Éteindre", "Options avancées"),
         ("es", "Apagar", "Opciones avanzadas"),
-        ("ja", "シャットダウン", "詳細オプション"),
     ],
 )
 def test_grub_renderer_localizes_root_labels(

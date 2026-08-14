@@ -18,21 +18,6 @@
     <OutputPath>$(BaseOutputPath)$(Configuration)\</OutputPath>
     <ApplicationIcon>Resources\Images\icon.ico</ApplicationIcon>
     <TargetFrameworkProfile />
-    <PublishUrl>publish\</PublishUrl>
-    <Install>true</Install>
-    <InstallFrom>Disk</InstallFrom>
-    <UpdateEnabled>false</UpdateEnabled>
-    <UpdateMode>Foreground</UpdateMode>
-    <UpdateInterval>7</UpdateInterval>
-    <UpdateIntervalUnits>Days</UpdateIntervalUnits>
-    <UpdatePeriodically>false</UpdatePeriodically>
-    <UpdateRequired>false</UpdateRequired>
-    <MapFileExtensions>true</MapFileExtensions>
-    <ApplicationRevision>0</ApplicationRevision>
-    <ApplicationVersion>1.0.0.%2a</ApplicationVersion>
-    <IsWebBootstrapper>false</IsWebBootstrapper>
-    <UseApplicationTrust>false</UseApplicationTrust>
-    <BootstrapperEnabled>true</BootstrapperEnabled>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
     <PlatformTarget>AnyCPU</PlatformTarget>
@@ -83,6 +68,7 @@
     <Compile Include="Helpers\ApplicationBuild.cs" />
     <Compile Include="Helpers\PowerShellJsonResult.cs" />
     <Compile Include="Helpers\StartupOptions.cs" />
+    <Compile Include="Helpers\UnattendedWorkflow.cs" />
     <Compile Include="Helpers\CompatibilityPreflightRunner.cs" />
     <Compile Include="Helpers\ApplicationLogger.cs" />
     <Compile Include="Helpers\WindowsProcessRunner.cs" />
@@ -93,9 +79,13 @@
     <Compile Include="Dialogs\LocalizedConfirmationDialog.xaml.cs">
       <DependentUpon>LocalizedConfirmationDialog.xaml</DependentUpon>
     </Compile>
+    <Compile Include="Dialogs\UnattendedWarningDialog.xaml.cs">
+      <DependentUpon>UnattendedWarningDialog.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Installation\AtomicJsonFile.cs" />
     <Compile Include="Installation\ArtifactCatalog.cs" />
     <Compile Include="Installation\DistributionCatalogTrust.cs" />
+    <Compile Include="Installation\DistributionCatalogLoader.cs" />
     <Compile Include="Installation\ReleaseMetadata.cs" />
     <Compile Include="Installation\InstallationExecutionState.cs" />
     <Compile Include="Installation\InstallationExecutionLedger.cs" />
@@ -106,6 +96,7 @@
     <Compile Include="Installation\InstallationPlanValidator.cs" />
     <Compile Include="Installation\Ipv4NetworkPolicy.cs" />
     <Compile Include="Installation\InstallationSizePolicy.cs" />
+    <Compile Include="Installation\UnattendedInstallationConfigurator.cs" />
     <Compile Include="Installation\InstallationTemporaryArtifacts.cs" />
     <Compile Include="Installation\InstallationStateMachine.cs" />
     <Compile Include="Installation\InstallationStateStore.cs" />
@@ -190,6 +181,7 @@
     <Compile Include="Installation\AccountPolicy.cs" />
     <Page Include="Pages\AccountCreation.xaml" />
     <Page Include="Pages\About.xaml" />
+    <Page Include="Dialogs\UnattendedWarningDialog.xaml" />
     <Page Include="Pages\Welcome.xaml" />
     <Page Include="Pages\ApplyChanges.xaml" />
     <Page Include="Pages\UefiBootFallback.xaml" />
@@ -255,7 +247,7 @@
     <EmbeddedResource Include="Scripts\config\Libertix.CatalogPublicKey.xml">
       <LogicalName>Libertix.Resources.CatalogPublicKey.xml</LogicalName>
     </EmbeddedResource>
-    <Content Include="Scripts\config\Libertix.CompatibilityMessages.json">
+    <Content Include="Resources\Libertix.Translations.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\config\Libertix.InstallationPolicy.json">
@@ -292,9 +284,6 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\libertix-post-install-result.ps1">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="Scripts\config\Libertix.PostInstallTranslations.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\libertix-storage-preflight.ps1">
@@ -357,26 +346,6 @@
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
-    <Page Include="Resources\Lang\Strings.en.xaml">
-      <SubType>Designer</SubType>
-      <Generator>MSBuild:Compile</Generator>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Page>
-    <Page Include="Resources\Lang\Strings.es.xaml">
-      <SubType>Designer</SubType>
-      <Generator>MSBuild:Compile</Generator>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Page>
-    <Page Include="Resources\Lang\Strings.fr.xaml">
-      <SubType>Designer</SubType>
-      <Generator>MSBuild:Compile</Generator>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Page>
-    <Page Include="Resources\Lang\Strings.ja.xaml">
-      <SubType>Designer</SubType>
-      <Generator>MSBuild:Compile</Generator>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Page>
   </ItemGroup>
   <ItemGroup>
     <Resource Include="Resources\Images\icon.ico" />
@@ -389,18 +358,6 @@
     <PackageReference Include="System.Text.Encodings.Web" Version="8.0.0" />
     <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.5.4" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
-  </ItemGroup>
-  <ItemGroup>
-    <BootstrapperPackage Include=".NETFramework,Version=v4.8">
-      <Visible>False</Visible>
-      <ProductName>Microsoft .NET Framework 4.8 %28x86 et x64%29</ProductName>
-      <Install>true</Install>
-    </BootstrapperPackage>
-    <BootstrapperPackage Include="Microsoft.Net.Framework.3.5.SP1">
-      <Visible>False</Visible>
-      <ProductName>.NET Framework 3.5 SP1</ProductName>
-      <Install>false</Install>
-    </BootstrapperPackage>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

@@ -13,10 +13,10 @@ namespace Libertix.Helpers
     /// </summary>
     internal static class ApplicationLogger
     {
-        private const int RetainedApplicationLogsPerPattern = 40;
         private static readonly string LogRoot = Path.Combine(
             Path.GetPathRoot(Environment.SystemDirectory),
-            RuntimeNames.InstallationLogDirectory);
+            RuntimeNames.InstallationLogDirectory,
+            RuntimeNames.WindowsLogDirectory);
         private static readonly object SyncRoot = new object();
         private static readonly Encoding Utf8WithoutBom = new UTF8Encoding(false);
         private static string _logPath;
@@ -40,7 +40,6 @@ namespace Libertix.Helpers
                 try
                 {
                     Directory.CreateDirectory(LogRoot);
-                    PruneApplicationLogsBestEffort();
                     _logPath = Path.Combine(
                         LogRoot,
                         $"libertix-exe-{DateTime.Now:yyyyMMdd-HHmmss}-pid{Process.GetCurrentProcess().Id}.log");
@@ -87,25 +86,5 @@ namespace Libertix.Helpers
             Write($"{context}{Environment.NewLine}{exception}");
         }
 
-        private static void PruneApplicationLogsBestEffort()
-        {
-            try
-            {
-                foreach (string pattern in new[] { "libertix-exe-*.log", "windows-preparation-*.log" })
-                {
-                    string[] files = Directory.GetFiles(LogRoot, pattern, SearchOption.TopDirectoryOnly);
-                    Array.Sort(
-                        files,
-                        (left, right) => File.GetLastWriteTimeUtc(right)
-                            .CompareTo(File.GetLastWriteTimeUtc(left)));
-                    for (int index = RetainedApplicationLogsPerPattern; index < files.Length; index++)
-                        File.Delete(files[index]);
-                }
-            }
-            catch
-            {
-                // Retention failures must never make the installer unavailable.
-            }
-        }
     }
 }

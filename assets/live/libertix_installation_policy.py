@@ -20,6 +20,8 @@ class StoragePolicy:
     maximum_direct_fat32_size_gib: int
     large_installation_staging_size_gib: int
     partition_alignment_bytes: int
+    recommended_linux_fraction_of_free_space: float
+    maximum_recommended_linux_size_gib: int
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,13 @@ def _require_integer(mapping: dict[str, Any], name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"installation policy {name} must be an integer")
     return value
+
+
+def _require_number(mapping: dict[str, Any], name: str) -> float:
+    value = mapping.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"installation policy {name} must be a number")
+    return float(value)
 
 
 def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
@@ -89,6 +98,12 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
             storage_raw, "largeInstallationStagingSizeGiB"
         ),
         partition_alignment_bytes=_require_integer(storage_raw, "partitionAlignmentBytes"),
+        recommended_linux_fraction_of_free_space=_require_number(
+            storage_raw, "recommendedLinuxFractionOfFreeSpace"
+        ),
+        maximum_recommended_linux_size_gib=_require_integer(
+            storage_raw, "maximumRecommendedLinuxSizeGiB"
+        ),
     )
     memory = MemoryPolicy(
         windows_minimum_mib=_require_integer(memory_raw, "windowsMinimumMiB"),
@@ -123,6 +138,9 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         or storage.windows_free_space_tolerance_gib >= storage.target_windows_free_space_gib
         or storage.windows_free_space_retry_window_gib < 0
         or storage.preflight_shrink_safety_gib < 0
+        or storage.recommended_linux_fraction_of_free_space <= 0
+        or storage.recommended_linux_fraction_of_free_space > 1
+        or storage.maximum_recommended_linux_size_gib < storage.minimum_final_size_gib
         or storage.maximum_direct_fat32_size_gib < storage.minimum_final_size_gib
         or storage.large_installation_staging_size_gib <= 0
         or storage.large_installation_staging_size_gib > storage.maximum_direct_fat32_size_gib

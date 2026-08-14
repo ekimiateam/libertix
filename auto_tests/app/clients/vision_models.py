@@ -31,8 +31,7 @@ def contains_install_blocker(content: str) -> bool:
 def contains_final_reboot_prompt(content: str) -> bool:
     text = content.casefold()
     reboot_button = any(
-        marker in text
-        for marker in ("redemarrer", "redémarrer", "reboot", "restart", "reiniciar", "再起動")
+        marker in text for marker in ("redemarrer", "redémarrer", "reboot", "restart", "reiniciar")
     )
     final_state = any(
         marker in text
@@ -41,47 +40,15 @@ def contains_final_reboot_prompt(content: str) -> bool:
             "partitionnement terminé",
             "partitioning complete",
             "particionamiento completado",
-            "パーティション作成完了",
             "uefi preparation complete",
             "préparation uefi terminée",
             "preparación uefi completada",
-            "uefi の準備が完了",
             "next reboot will automatically boot",
             "boot entry configured",
             "grub4dos installed",
         )
     )
     return reboot_button and final_state and re.search(r"\b100\s*%", text) is not None
-
-
-def contains_wizard_blocker(content: str) -> bool:
-    text = content.casefold()
-    return any(
-        marker in text
-        for marker in (
-            "compat_e_",
-            "une erreur s'est produite",
-            "une erreur s’est produite",
-            "installation bloquée",
-            "installation bloquee",
-            "champ invalide",
-            "passwords do not match",
-            "les mots de passe ne correspondent pas",
-        )
-    )
-
-
-def contains_warning_screen(content: str) -> bool:
-    """Require both a localized title and confirmation control."""
-
-    text = content.casefold()
-    title_visible = any(
-        marker in text for marker in ("avertissement", "warning", "advertencia", "警告")
-    )
-    confirmation_visible = any(
-        marker in text for marker in ("je comprends", "i understand", "entiendo", "理解しました")
-    )
-    return title_visible and confirmation_visible
 
 
 def contains_active_install_progress(content: str) -> bool:
@@ -125,18 +92,6 @@ def contains_active_install_progress(content: str) -> bool:
     )
 
 
-class VisionVerdict(BaseModel):
-    no_visible_problem: bool
-    libertix_running: bool
-    welcome_message_ok: bool
-    summary: str = Field(min_length=1)
-    visible_problems: list[str]
-
-    @property
-    def valid(self) -> bool:
-        return self.no_visible_problem and self.libertix_running and self.welcome_message_ok
-
-
 class InstallProgressVerdict(BaseModel):
     iso_download_finished: bool
     installation_finished: bool
@@ -160,24 +115,3 @@ class InstallProgressVerdict(BaseModel):
     @property
     def active_install_progress_visible(self) -> bool:
         return contains_active_install_progress(f"{self.summary}\n{self.visible_text}")
-
-
-class WizardStateVerdict(BaseModel):
-    detected_screen: Literal[
-        "welcome",
-        "compatibility",
-        "distro",
-        "resize",
-        "sharing",
-        "account",
-        "warning",
-        "apply",
-        "other",
-    ]
-    expected_screen_visible: bool
-    no_blocking_error: bool
-    username_visible: bool
-    password_fields_filled: bool
-    warning_acknowledged: bool = False
-    summary: str = Field(min_length=1)
-    visible_text: str

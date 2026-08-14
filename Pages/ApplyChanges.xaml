@@ -5,6 +5,7 @@
       xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
       xmlns:local="clr-namespace:Libertix.Pages"
       mc:Ignorable="d"
+      KeyboardNavigation.TabNavigation="Cycle"
       Title="ApplyChanges">
 
     <Grid Background="{DynamicResource PrimaryBackground}">
@@ -95,6 +96,7 @@
             <Button x:Name="RebootButton"
                     Content="{DynamicResource ApplyChangesReboot}"
                     Style="{StaticResource ModernButton}"
+                    AutomationProperties.AutomationId="ApplyChangesRebootButton"
                     Width="200"
                     Height="50"
                     HorizontalAlignment="Right"
@@ -104,6 +106,7 @@
             <Button x:Name="CancelInstallationButton"
                     Content="{DynamicResource ApplyChangesCancel}"
                     Style="{StaticResource ModernButton}"
+                    AutomationProperties.AutomationId="ApplyChangesCancelButton"
                     Width="220"
                     Height="50"
                     HorizontalAlignment="Right"

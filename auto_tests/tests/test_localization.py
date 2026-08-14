@@ -7,13 +7,20 @@ import re
 import subprocess
 from pathlib import Path
 from types import ModuleType
-from xml.etree import ElementTree
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-LANGUAGES = ("en", "fr", "es", "ja")
-XAML_KEY = "{http://schemas.microsoft.com/winfx/2006/xaml}Key"
+CATALOGUE_PATH = ROOT / "Resources/Libertix.Translations.json"
+LANGUAGES = ("en", "fr", "es")
+
+
+def translation_catalogue() -> dict[str, object]:
+    return json.loads(CATALOGUE_PATH.read_text(encoding="utf-8"))
+
+
+def language_section(language: str, section: str) -> dict[str, str]:
+    return translation_catalogue()["languages"][language][section]
 
 
 def load_i18n_module() -> ModuleType:
@@ -27,9 +34,60 @@ def load_i18n_module() -> ModuleType:
 
 
 def resource_keys(language: str) -> set[str]:
-    path = ROOT / f"Resources/Lang/Strings.{language}.xaml"
-    tree = ElementTree.parse(path)
-    return {element.attrib[XAML_KEY] for element in tree.getroot() if XAML_KEY in element.attrib}
+    return set(language_section(language, "wpf"))
+
+
+def test_translation_catalogue_is_the_single_runtime_source() -> None:
+    catalogue = translation_catalogue()
+    project = (ROOT / "Libertix.csproj").read_text(encoding="utf-8-sig")
+    runtime_sources = "\n".join(
+        (ROOT / relative).read_text(encoding="utf-8-sig")
+        for relative in (
+            "Localization.cs",
+            "Scripts/libertix-compatibility-preflight.ps1",
+            "Scripts/libertix-post-install-result.ps1",
+            "assets/live/libertix-i18n.py",
+            "assets/live/libertix-first-boot-result.py",
+            "grub/render-libertix-menu.py",
+            "iso-tools/build-iso.sh",
+        )
+    )
+
+    assert catalogue["schemaVersion"] == 1
+    assert catalogue["supportedLanguages"] == list(LANGUAGES)
+    assert set(catalogue["languages"]) == set(LANGUAGES)
+    assert 'Content Include="Resources\\Libertix.Translations.json"' in project
+    assert "Strings.en.xaml" not in project
+    assert "Libertix.CompatibilityMessages.json" not in runtime_sources
+    assert "Libertix.PostInstallTranslations.json" not in runtime_sources
+    assert "libertix-translations.json" not in runtime_sources
+    assert runtime_sources.count("Libertix.Translations.json") >= 7
+
+
+def test_supported_language_metadata_is_complete_and_exact() -> None:
+    catalogue = translation_catalogue()
+    expected = {
+        "en": ("English", "en_US.UTF-8", "us"),
+        "fr": ("Français", "fr_FR.UTF-8", "fr"),
+        "es": ("Español", "es_ES.UTF-8", "es"),
+    }
+    for language, values in expected.items():
+        entry = catalogue["languages"][language]
+        assert (entry["displayName"], entry["linuxLocale"], entry["keyboardLayout"]) == values
+
+
+def test_every_translation_section_has_key_and_placeholder_parity() -> None:
+    catalogue = translation_catalogue()
+    sections = ("wpf", "live", "postInstall", "firstBoot", "grub")
+    for section in sections:
+        english = catalogue["languages"]["en"][section]
+        for language in LANGUAGES:
+            translated = catalogue["languages"][language][section]
+            assert set(translated) == set(english), f"{language}:{section}"
+            for key, english_value in english.items():
+                expected = set(re.findall(r"\{[A-Za-z0-9_]+(?::[^}]*)?\}", english_value))
+                actual = set(re.findall(r"\{[A-Za-z0-9_]+(?::[^}]*)?\}", translated[key]))
+                assert actual == expected, f"{language}:{section}:{key}"
 
 
 def test_about_page_is_built_and_reachable_from_welcome() -> None:
@@ -88,25 +146,23 @@ def test_public_credits_are_present_in_every_wpf_language() -> None:
     required_donors = ("Olivier", "Boyka", "Coin des Geeks", "Matthieu")
 
     for language in LANGUAGES:
-        content = (ROOT / f"Resources/Lang/Strings.{language}.xaml").read_text(encoding="utf-8-sig")
+        content = "\n".join(language_section(language, "wpf").values())
         for name in (*required_names, *required_donors):
             assert name in content
 
 
 def test_live_translation_catalogues_have_identical_keys() -> None:
-    catalogue = json.loads(
-        (ROOT / "assets/live/libertix-translations.json").read_text(encoding="utf-8")
-    )
+    catalogue = translation_catalogue()
+    live = {language: catalogue["languages"][language]["live"] for language in LANGUAGES}
 
-    assert set(catalogue) == set(LANGUAGES)
-    assert len({frozenset(entries) for entries in catalogue.values()}) == 1
-    assert all(catalogue[language] for language in LANGUAGES)
+    assert catalogue["supportedLanguages"] == list(LANGUAGES)
+    assert set(catalogue["languages"]) == set(LANGUAGES)
+    assert len({frozenset(entries) for entries in live.values()}) == 1
+    assert all(live[language] for language in LANGUAGES)
 
 
 def test_post_install_result_catalogues_are_complete_and_parallel() -> None:
-    catalogues = json.loads(
-        (ROOT / "Scripts/config/Libertix.PostInstallTranslations.json").read_text(encoding="utf-8")
-    )
+    catalogues = {language: language_section(language, "postInstall") for language in LANGUAGES}
 
     assert set(catalogues) == set(LANGUAGES)
     expected = set(catalogues["en"])
@@ -136,46 +192,48 @@ def test_post_install_result_catalogues_are_complete_and_parallel() -> None:
 
 
 def test_linux_extraction_labels_are_concise_in_every_language() -> None:
-    catalogue = json.loads(
-        (ROOT / "assets/live/libertix-translations.json").read_text(encoding="utf-8")
-    )
     expected = {
         "en": ("Extracting the Linux system", "Extracting the Linux system:"),
         "fr": ("Extraction du système Linux", "Extraction du système Linux :"),
         "es": ("Extrayendo el sistema Linux", "Extrayendo el sistema Linux:"),
-        "ja": ("Linux システムを展開しています", "Linux システムを展開中："),
     }
 
     for language, (label, progress_prefix) in expected.items():
-        assert catalogue[language]["stage_120_unsquashfs"] == label
-        assert catalogue[language]["extraction_progress"].startswith(progress_prefix)
+        live = language_section(language, "live")
+        assert live["stage_120_unsquashfs"] == label
+        assert live["extraction_progress"].startswith(progress_prefix)
 
 
 def test_compatibility_message_catalogue_has_language_and_key_parity() -> None:
-    catalogue = json.loads(
-        (ROOT / "Scripts/config/Libertix.CompatibilityMessages.json").read_text(encoding="utf-8")
-    )
-
-    assert set(catalogue) == {
-        "checkMessages",
-        "warningMessages",
-        "errorMessages",
-        "bootstrapMessages",
+    catalogue = translation_catalogue()
+    compatibility = {
+        language: catalogue["languages"][language]["compatibility"] for language in LANGUAGES
     }
-    for section in catalogue.values():
-        assert set(section) == set(LANGUAGES)
-        assert len({frozenset(entries) for entries in section.values()}) == 1
-        assert all(section[language] for language in LANGUAGES)
+
+    assert all(
+        set(values)
+        == {
+            "checkMessages",
+            "warningMessages",
+            "errorMessages",
+            "bootstrapMessages",
+        }
+        for values in compatibility.values()
+    )
+    for section_name in compatibility["en"]:
+        sections = [compatibility[language][section_name] for language in LANGUAGES]
+        assert len({frozenset(entries) for entries in sections}) == 1
+        assert all(sections)
 
     assert {
         "AdministratorRequired",
         "SingleInstanceRequired",
         "InvalidStartupOptionsTitle",
         "InvalidStartupOptionsMessage",
-    } <= set(catalogue["bootstrapMessages"]["en"])
+    } <= set(compatibility["en"]["bootstrapMessages"])
 
     script = (ROOT / "Scripts/libertix-compatibility-preflight.ps1").read_text(encoding="utf-8-sig")
-    assert "Libertix.CompatibilityMessages.json" in script
+    assert "Libertix.Translations.json" in script
     assert "$checkMessages = @{" not in script
     assert "$warningMessages = @{" not in script
     assert "$errorMessages = @{" not in script
@@ -196,7 +254,6 @@ def test_live_translation_helper_loads_every_supported_language(language: str) -
         ("en", "Automatic installation"),
         ("fr", "Installation automatique"),
         ("es", "Instalación automática"),
-        ("ja", "自動インストール"),
     ),
 )
 def test_live_context_retry_preserves_language_exports(
@@ -282,21 +339,19 @@ def test_english_live_ui_contains_no_french_fallback_text() -> None:
 def test_compatibility_preflight_uses_the_selected_language() -> None:
     runner = (ROOT / "Helpers/CompatibilityPreflightRunner.cs").read_text(encoding="utf-8-sig")
     script = (ROOT / "Scripts/libertix-compatibility-preflight.ps1").read_text(encoding="utf-8-sig")
-    messages = json.loads(
-        (ROOT / "Scripts/config/Libertix.CompatibilityMessages.json").read_text(encoding="utf-8")
-    )
+    messages = language_section("en", "compatibility")
 
     assert "string languageCode = Localization.CurrentLanguage" in runner
     assert '" -LanguageCode " +' in runner
     assert "WindowsProcessRunner.QuoteArgument(languageCode)" in runner
-    assert '[ValidateSet("en", "fr", "es", "ja")]' in script
-    assert messages["checkMessages"]["en"]["COMPAT_010_PRIVILEGES"] == (
+    assert '[ValidateSet("en", "fr", "es")]' in script
+    assert messages["checkMessages"]["COMPAT_010_PRIVILEGES"] == (
         "Checking administrator privileges"
     )
-    assert messages["checkMessages"]["en"]["COMPAT_050_FILESYSTEM"] == (
+    assert messages["checkMessages"]["COMPAT_050_FILESYSTEM"] == (
         "Checking NTFS, BitLocker, and shrinkable space"
     )
-    assert messages["warningMessages"]["en"]["BITLOCKER"].startswith("BitLocker is active;")
+    assert messages["warningMessages"]["BITLOCKER"].startswith("BitLocker is active;")
     assert 'Write-Check "COMPAT_010_PRIVILEGES"' in script
     assert 'Write-Check "COMPAT_050_FILESYSTEM"' in script
     assert 'Write-LocalizedWarning "BITLOCKER"' in script
@@ -349,15 +404,7 @@ def test_every_csharp_localization_reference_exists_in_every_language() -> None:
 
 
 def test_wpf_translation_placeholders_match_in_every_language() -> None:
-    values_by_language: dict[str, dict[str, str]] = {}
-    for language in LANGUAGES:
-        path = ROOT / f"Resources/Lang/Strings.{language}.xaml"
-        tree = ElementTree.parse(path)
-        values_by_language[language] = {
-            element.attrib[XAML_KEY]: "".join(element.itertext())
-            for element in tree.getroot()
-            if XAML_KEY in element.attrib
-        }
+    values_by_language = {language: language_section(language, "wpf") for language in LANGUAGES}
 
     for key, english_value in values_by_language["en"].items():
         expected = set(re.findall(r"\{\d+(?::[^}]*)?\}", english_value))
@@ -455,6 +502,20 @@ def test_reported_wizard_layouts_keep_text_and_controls_inside_the_window() -> N
     assert 'AutomationProperties.AutomationId="WarningConfirmButton"' in confirm
 
 
+def test_unattended_warning_has_dedicated_localized_copy() -> None:
+    catalog = json.loads(
+        (ROOT / "Resources/Libertix.Translations.json").read_text(encoding="utf-8")
+    )
+    dialog = (ROOT / "Dialogs/UnattendedWarningDialog.xaml").read_text(encoding="utf-8")
+
+    assert "UnattendedWarningTitle" in dialog
+    assert "UnattendedWarningMessage" in dialog
+    for language in ("en", "fr", "es"):
+        strings = catalog["languages"][language]["wpf"]
+        assert strings["UnattendedWarningTitle"].strip()
+        assert strings["UnattendedWarningMessage"].strip()
+
+
 def test_resize_labels_and_windows_sharing_are_generic_and_localized() -> None:
     required_keys = {
         "ResizeDiskWindowsFreeInside",
@@ -477,11 +538,6 @@ def test_resize_labels_and_windows_sharing_are_generic_and_localized() -> None:
     assert "StringFormat=Free:" not in resize
 
     for language in LANGUAGES:
-        path = ROOT / f"Resources/Lang/Strings.{language}.xaml"
-        values = {
-            element.attrib[XAML_KEY]: "".join(element.itertext())
-            for element in ElementTree.parse(path).getroot()
-            if XAML_KEY in element.attrib
-        }
+        values = language_section(language, "wpf")
         assert "Mint" not in values["SharingWindowsToLinuxTitle"]
         assert "Linux" in values["SharingWindowsToLinuxTitle"]

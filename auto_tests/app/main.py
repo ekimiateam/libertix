@@ -16,7 +16,14 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from vncdotool import api as vnc_api
 
 from app.api_requests import automation_request, validation_request
-from app.api_runtime import ActiveOperationProcess, cleanup_capture_workspaces, operation_lock
+from app.api_runtime import (
+    ActiveOperationProcess,
+    cleanup_operation_artifacts,
+    create_capture_workspace,
+    mark_capture_workspace_complete,
+    mark_capture_workspace_owned,
+    operation_lock,
+)
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
 from app.models import (
@@ -35,6 +42,41 @@ logger = logging.getLogger(__name__)
 OperationName = Literal["validation", "reset", "automation"]
 
 
+def _operation_busy_result(operation: OperationName) -> OperationResult:
+    return OperationResult(
+        status="error",
+        operation=operation,
+        message="error: another operation is already running",
+        steps=[],
+    )
+
+
+def _unpersisted_result_event(result: OperationResult) -> dict[str, object]:
+    data = result.model_dump(mode="json")
+    data["steps"] = [
+        step.model_dump(mode="json") for step in result.steps if step.status == "error"
+    ]
+    data["detailed_log"] = ""
+    return {"event": "result", "data": data}
+
+
+def _finalize_operation_workspace(configured: Settings, run_workspace: Path) -> None:
+    try:
+        mark_capture_workspace_complete(run_workspace)
+    except Exception:
+        logger.exception(
+            "Failed to mark an operation workspace complete",
+            extra={"step": "capture.finalize", "target": str(run_workspace)},
+        )
+    try:
+        cleanup_operation_artifacts(configured)
+    except Exception:
+        logger.exception(
+            "Failed to apply operation artifact retention",
+            extra={"step": "capture.retention", "target": str(run_workspace)},
+        )
+
+
 def _resolve_distribution_metadata(runtime_dir: Path, filepool_dir: Path) -> Path | None:
     for candidate in (runtime_dir / "filepool" / "catalog.json", filepool_dir / "catalog.json"):
         if candidate.is_file():
@@ -48,6 +90,7 @@ def _run_operation(
     selectors: list[str] | None,
     request: ValidationRequest | AutomationRequest | None,
     on_step: Callable[[StepResult], None] | None = None,
+    run_workspace: Path | None = None,
 ) -> OperationResult:
     if operation == "validation":
         validation = request if isinstance(request, ValidationRequest) else ValidationRequest()
@@ -55,22 +98,25 @@ def _run_operation(
             selectors,
             source=validation.source,
             on_step=on_step,
+            run_workspace=run_workspace,
         )
     if operation == "automation":
         if not isinstance(request, AutomationRequest):
             raise ValueError("Automation request body is required")
         return AutomationService(configured).run(
             selectors,
-            apply=request.apply,
             linux_username=request.linux_username,
             linux_password=request.linux_password,
+            linux_size_gib=request.linux_size_gib,
             distribution=request.distribution,
             monitor_iso=request.monitor_iso,
             share_windows_files_in_linux=request.share_windows_files_in_linux,
             share_linux_files_in_windows=request.share_linux_files_in_windows,
             simulate_fog_clone_boot_entries=request.simulate_fog_clone_boot_entries,
+            first_boot=request.first_boot,
             source=request.source,
             on_step=on_step,
+            run_workspace=run_workspace,
         )
     return ResetService(configured).run(selectors, on_step=on_step)
 
@@ -81,23 +127,34 @@ def _stream_operation_worker(
     selectors: list[str] | None,
     request: ValidationRequest | AutomationRequest | None,
     process_events: Connection,
+    run_workspace: Path,
 ) -> None:
+    mark_capture_workspace_owned(run_workspace)
     event_stream_available = True
+    publish_lock = threading.Lock()
 
     def publish(event_type: str, payload: object) -> None:
         nonlocal event_stream_available
-        if not event_stream_available:
-            return
-        try:
-            process_events.send((event_type, payload))
-        except (BrokenPipeError, EOFError, OSError):
-            event_stream_available = False
+        with publish_lock:
+            if not event_stream_available:
+                return
+            try:
+                process_events.send((event_type, payload))
+            except (BrokenPipeError, EOFError, OSError):
+                event_stream_available = False
 
     def on_step(step: StepResult) -> None:
         publish("step", step.model_dump(mode="json"))
 
     try:
-        result = _run_operation(configured, operation, selectors, request, on_step)
+        result = _run_operation(
+            configured,
+            operation,
+            selectors,
+            request,
+            on_step,
+            run_workspace,
+        )
     except Exception as exc:
         logger.exception("Unexpected internal error in %s stream", operation)
         result = OperationResult(
@@ -132,7 +189,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_app: FastAPI):
         configure_logging(configured.log_level, configured.operation_log_dir)
         configured.capture_dir.mkdir(parents=True, exist_ok=True)
-        cleanup_capture_workspaces(configured)
+        cleanup_operation_artifacts(configured)
         yield
 
     api = FastAPI(
@@ -168,22 +225,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: ValidationRequest | AutomationRequest | None = None,
     ) -> OperationResult:
         if not operation_lock.acquire(blocking=False):
-            return OperationResult(
-                status="error",
-                operation=operation,  # type: ignore[arg-type]
-                message="error: another operation is already running",
-                steps=[],
-            )
+            return _operation_busy_result(operation)
         try:
-            return await asyncio.to_thread(
+            run_workspace = create_capture_workspace(configured, operation)
+        except BaseException:
+            operation_lock.release()
+            raise
+        projector = StreamEventProjector(operation, run_workspace)
+        try:
+            result = await asyncio.to_thread(
                 _run_operation,
                 configured,
                 operation,
                 selectors,
                 request,
+                projector.project_step,
+                run_workspace,
             )
+            projector.project_result(result)
+            return result
         finally:
             operation_lock.release()
+            _finalize_operation_workspace(configured, run_workspace)
 
     def stream_operation(
         operation: OperationName,
@@ -192,8 +255,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stream_format: Literal["compact", "ndjson"] = "compact",
     ):
         events: queue.Queue[tuple[str, str | int | None]] = queue.Queue()
-        projector = StreamEventProjector(operation, configured.operation_log_dir)
         terminal_result_seen = threading.Event()
+
+        if not operation_lock.acquire(blocking=False):
+            result = _operation_busy_result(operation)
+            events.put(
+                (
+                    "data",
+                    StreamEventProjector.render(
+                        _unpersisted_result_event(result),
+                        stream_format=stream_format,
+                    ),
+                )
+            )
+            events.put(("exit", 0))
+
+            async def rejected_generator():
+                while True:
+                    event_type, payload = await asyncio.to_thread(events.get)
+                    if event_type == "data":
+                        yield str(payload)
+                        continue
+                    break
+
+            return rejected_generator()
+
+        try:
+            run_workspace = create_capture_workspace(configured, operation)
+        except BaseException:
+            operation_lock.release()
+            raise
+        projector = StreamEventProjector(operation, run_workspace)
 
         def publish_result(result: OperationResult, stream_format: str) -> None:
             if terminal_result_seen.is_set():
@@ -202,79 +294,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             terminal_result_seen.set()
             events.put(("data", projector.render(event, stream_format=stream_format)))
 
-        if not operation_lock.acquire(blocking=False):
-            result = OperationResult(
-                status="error",
-                operation=operation,
-                message="error: another operation is already running",
-                steps=[],
-            )
-            publish_result(result, stream_format)
-            events.put(("exit", 0))
-        else:
-            process_context = multiprocessing.get_context("spawn")
-            process_events, worker_events = process_context.Pipe(duplex=False)
+        process_context = multiprocessing.get_context("spawn")
+        process_events, worker_events = process_context.Pipe(duplex=False)
 
-            def relay_process_events() -> None:
-                try:
-                    while True:
-                        if not process_events.poll(0.1):
-                            if not process.is_alive():
-                                return
-                            continue
-                        event_type, payload = process_events.recv()
-                        if event_type == "step":
-                            event = projector.project_step(StepResult.model_validate(payload))
-                            if event is not None:
-                                events.put(
-                                    (
-                                        "data",
-                                        projector.render(event, stream_format=stream_format),
-                                    )
-                                )
-                            continue
-                        if event_type == "result":
-                            publish_result(OperationResult.model_validate(payload), stream_format)
-                            # All operation cleanup has completed before the worker
-                            # publishes its result. Do not let an unexpected library
-                            # thread keep the global operation lock forever.
-                            process.join(timeout=5)
-                            if process.is_alive():
-                                logger.warning(
-                                    "Terminating an operation worker that remained alive "
-                                    "after its terminal result",
-                                    extra={"step": f"{operation}.process_exit"},
-                                )
-                                process.terminate()
-                            return
-                except (EOFError, OSError):
-                    return
-                finally:
-                    process_events.close()
-
-            process = process_context.Process(
-                target=_stream_operation_worker,
-                args=(configured, operation, selectors, request, worker_events),
-                daemon=True,
-            )
+        def relay_process_events() -> None:
             try:
-                process.start()
-                worker_events.close()
-                operation_process.register(process, operation)
-            except Exception:
+                while True:
+                    if not process_events.poll(0.1):
+                        if not process.is_alive():
+                            return
+                        continue
+                    event_type, payload = process_events.recv()
+                    if event_type == "step":
+                        event = projector.project_step(StepResult.model_validate(payload))
+                        if event is not None:
+                            events.put(
+                                (
+                                    "data",
+                                    projector.render(event, stream_format=stream_format),
+                                )
+                            )
+                        continue
+                    if event_type == "result":
+                        publish_result(OperationResult.model_validate(payload), stream_format)
+                        # All operation cleanup has completed before the worker
+                        # publishes its result. Do not let an unexpected library
+                        # thread keep the global operation lock forever.
+                        process.join(timeout=5)
+                        if process.is_alive():
+                            logger.warning(
+                                "Terminating an operation worker that remained alive "
+                                "after its terminal result",
+                                extra={"step": f"{operation}.process_exit"},
+                            )
+                            process.terminate()
+                        return
+            except (EOFError, OSError):
+                return
+            finally:
                 process_events.close()
-                worker_events.close()
-                operation_lock.release()
-                raise
 
-            relay_thread = threading.Thread(target=relay_process_events, daemon=True)
-            relay_thread.start()
+        process = process_context.Process(
+            target=_stream_operation_worker,
+            args=(configured, operation, selectors, request, worker_events, run_workspace),
+            daemon=True,
+        )
+        try:
+            process.start()
+            worker_events.close()
+            operation_process.register(process, operation)
+        except Exception:
+            process_events.close()
+            worker_events.close()
+            operation_lock.release()
+            _finalize_operation_workspace(configured, run_workspace)
+            raise
 
-            def watch_process() -> None:
+        relay_thread = threading.Thread(target=relay_process_events, daemon=True)
+        relay_thread.start()
+
+        def watch_process() -> None:
+            try:
                 process.join()
                 relay_thread.join()
-                operation_process.clear(process)
-                operation_lock.release()
                 if not terminal_result_seen.is_set():
                     exit_code = process.exitcode if process.exitcode is not None else -1
                     forced = exit_code < 0
@@ -304,9 +386,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         ],
                     )
                     publish_result(result, stream_format)
+            except Exception:
+                logger.exception(
+                    "Operation watcher failed",
+                    extra={"step": f"{operation}.watcher"},
+                )
+            finally:
+                operation_process.clear(process)
+                operation_lock.release()
+                _finalize_operation_workspace(configured, run_workspace)
                 events.put(("exit", process.exitcode))
 
-            threading.Thread(target=watch_process, daemon=True).start()
+        threading.Thread(target=watch_process, daemon=True).start()
 
         async def generator():
             while True:
@@ -379,10 +470,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def automation(
         body: Annotated[AutomationRequest, Body()],
         vm: Annotated[list[str] | None, Query()] = None,
-        apply: Annotated[bool | None, Query()] = None,
         source: Annotated[SourceMode | None, Query()] = None,
     ) -> OperationResult:
-        selectors, request = automation_request(body, vm, apply, source)
+        selectors, request = automation_request(body, vm, source)
         return await execute("automation", selectors, request)
 
     @api.post("/api/v1/validation/stream")
@@ -402,11 +492,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def automation_stream(
         body: Annotated[AutomationRequest, Body()],
         vm: Annotated[list[str] | None, Query()] = None,
-        apply: Annotated[bool | None, Query()] = None,
         source: Annotated[SourceMode | None, Query()] = None,
         format: Annotated[Literal["compact", "ndjson"], Query()] = "compact",
     ) -> StreamingResponse:
-        selectors, request = automation_request(body, vm, apply, source)
+        selectors, request = automation_request(body, vm, source)
         return StreamingResponse(
             stream_operation("automation", selectors, request, format),
             media_type="application/x-ndjson" if format == "ndjson" else "text/plain",

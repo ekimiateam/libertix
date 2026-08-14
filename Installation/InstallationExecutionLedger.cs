@@ -76,7 +76,8 @@ namespace Libertix.Installation
         public void BeginRollback()
         {
             if (State.Status != InstallationStatus.Running &&
-                State.Status != InstallationStatus.Failed)
+                State.Status != InstallationStatus.Failed &&
+                State.Status != InstallationStatus.Succeeded)
             {
                 return;
             }

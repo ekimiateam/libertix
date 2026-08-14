@@ -16,8 +16,6 @@ namespace Libertix.Pages
 {
     public partial class ResizeDisk : Page, INotifyPropertyChanged
     {
-        private const double RecommendedLinuxFractionOfFreeSpace = 0.4;
-        private const double MaximumRecommendedLinuxSizeGiB = 100;
         private readonly InstallationState _installationState;
         private readonly double _totalSpace;
         private readonly double _initialFreeSpace;
@@ -337,9 +335,9 @@ namespace Libertix.Pages
                 return MinimumSize;
             double recommendedSize = Math.Max(
                 MinimumSize,
-                _initialFreeSpace * RecommendedLinuxFractionOfFreeSpace);
+                _initialFreeSpace * InstallationSizePolicy.RecommendedLinuxFractionOfFreeSpace);
             return Math.Min(
-                Math.Min(recommendedSize, MaximumRecommendedLinuxSizeGiB),
+                Math.Min(recommendedSize, InstallationSizePolicy.MaximumRecommendedLinuxSizeGiB),
                 AvailableLinuxSize);
         }
 

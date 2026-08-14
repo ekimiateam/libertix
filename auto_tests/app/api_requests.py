@@ -29,13 +29,10 @@ def validation_request(
 def automation_request(
     body: AutomationRequest,
     query_vms: list[str] | None,
-    query_apply: bool | None,
     query_source: SourceMode | None,
 ) -> tuple[list[str] | None, AutomationRequest]:
     request = body
     selectors = validation_selectors(request, query_vms)
-    if query_apply is not None:
-        request.apply = query_apply
     if query_source is not None:
         request.source = query_source
     return selectors, request

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import uuid
@@ -22,6 +23,9 @@ WINDOWS_MOUNT_PATH = Path("/run/libertix-first-boot-windows")
 EVIDENCE_FILE_NAME = "installed-linux-boot.json"
 LOCAL_STATUS_PATH = Path("/var/lib/libertix/first-boot-verification.json")
 VERIFICATION_LOG_PATH = Path("/var/log/libertix/first-boot-resize.log")
+WINDOWS_LOG_ROOT = Path("LibertixInstallLogs/Linux")
+DEFAULT_LOCALE_PATH = Path("/etc/default/locale")
+DEFAULT_KEYBOARD_PATH = Path("/etc/default/keyboard")
 HEX_ID = re.compile(r"^[0-9a-f]{32}$")
 EFI_GLOBAL_VARIABLE_GUID = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 
@@ -94,6 +98,97 @@ def read_os_release(path: Path = Path("/etc/os-release")) -> dict[str, str]:
             raise VerificationError(f"invalid os-release field {name}: {error}") from error
         result[name] = parsed[0] if parsed else ""
     return result
+
+
+def read_shell_assignments(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise VerificationError(f"cannot read {path}: {error}") from error
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, raw_value = stripped.split("=", 1)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            raise VerificationError(f"invalid assignment name in {path}: {name}")
+        try:
+            values = shlex.split(raw_value, posix=True)
+        except ValueError as error:
+            raise VerificationError(f"invalid assignment {name} in {path}: {error}") from error
+        if len(values) > 1:
+            raise VerificationError(f"assignment {name} in {path} has multiple values")
+        result[name] = values[0] if values else ""
+    return result
+
+
+def normalize_locale_name(value: str) -> str:
+    return value.strip().casefold().replace("utf-8", "utf8")
+
+
+def verify_localization(
+    plan: dict[str, object],
+    *,
+    locale_path: Path = DEFAULT_LOCALE_PATH,
+    keyboard_path: Path = DEFAULT_KEYBOARD_PATH,
+    available_locales: str | None = None,
+) -> dict[str, object]:
+    expected = require_mapping(plan, "locale")
+    expected_language = require_text(expected, "languageCode")
+    expected_system_locale = require_text(expected, "systemLanguage")
+    expected_layout = require_text(expected, "keyboardLayout")
+    expected_model = require_text(expected, "keyboardModel")
+    expected_variant_value = expected.get("keyboardVariant", "")
+    if not isinstance(expected_variant_value, str):
+        raise VerificationError("installation plan field keyboardVariant is invalid")
+
+    configured_locale = read_shell_assignments(locale_path)
+    required_locale_values = {
+        "LANG": expected_system_locale,
+        "LC_ALL": expected_system_locale,
+        "LANGUAGE": expected_language,
+    }
+    for name, expected_value in required_locale_values.items():
+        if configured_locale.get(name) != expected_value:
+            raise VerificationError(f"configured {name} differs from the installation plan")
+
+    compiled_output = available_locales if available_locales is not None else run("locale", "-a")
+    compiled_utf8 = {
+        normalized
+        for value in compiled_output.splitlines()
+        if (normalized := normalize_locale_name(value)).endswith(".utf8") and normalized != "c.utf8"
+    }
+    expected_compiled = {normalize_locale_name(expected_system_locale), "en_us.utf8"}
+    if compiled_utf8 != expected_compiled:
+        raise VerificationError(
+            "compiled UTF-8 locales differ from the requested locale plus en_US.UTF-8"
+        )
+
+    configured_keyboard = read_shell_assignments(keyboard_path)
+    required_keyboard_values = {
+        "XKBMODEL": expected_model,
+        "XKBLAYOUT": expected_layout,
+        "XKBVARIANT": expected_variant_value,
+        "XKBOPTIONS": "",
+    }
+    for name, expected_value in required_keyboard_values.items():
+        if configured_keyboard.get(name) != expected_value:
+            raise VerificationError(f"configured {name} differs from the installation plan")
+
+    desktop_source = expected_layout
+    if expected_variant_value:
+        desktop_source += "+" + expected_variant_value
+    return {
+        "languageCode": expected_language,
+        "systemLocale": expected_system_locale,
+        "compiledUtf8Locales": sorted(compiled_utf8),
+        "keyboardLayout": expected_layout,
+        "keyboardVariant": expected_variant_value,
+        "keyboardModel": expected_model,
+        "desktopSource": desktop_source,
+        "verified": True,
+    }
 
 
 def sysfs_partition_geometry(device: Path) -> tuple[str, int, int, int]:
@@ -536,6 +631,7 @@ def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str
             "filesystem": run("findmnt", "-n", "-o", "FSTYPE", "/"),
         },
         "system": verify_installed_system(plan, root_uuid),
+        "localization": verify_localization(plan),
         "grub": verify_grub(plan, firmware, Path("/dev") / parent_name),
     }
     return evidence, windows_device
@@ -583,6 +679,68 @@ def publish_evidence(plan: dict[str, object], evidence: dict[str, object], devic
             run("umount", str(WINDOWS_MOUNT_PATH))
 
 
+def resolve_windows_device(plan: dict[str, object]) -> Path:
+    root_source = Path(run("findmnt", "-n", "-o", "SOURCE", "/"))
+    if not root_source.exists():
+        raise VerificationError(f"root source is not a block device: {root_source}")
+    parent_name, _, _, _ = sysfs_partition_geometry(root_source)
+    windows = require_mapping(require_mapping(plan, "disk"), "windows")
+    device, _ = find_partition_at_offset(parent_name, require_integer(windows, "offsetBytes"))
+    return device
+
+
+def update_log_checksums(directory: Path) -> None:
+    checksums = []
+    for path in sorted(directory.rglob("*")):
+        if path.is_file() and path.name != "SHA256SUMS":
+            checksums.append(f"{sha256(path)}  {path.relative_to(directory)}")
+    temporary = directory / f".SHA256SUMS.{os.getpid()}.tmp"
+    temporary.write_text("\n".join(checksums) + "\n", encoding="ascii")
+    os.replace(temporary, directory / "SHA256SUMS")
+
+
+def archive_linux_diagnostics(plan: dict[str, object], device: Path | None = None) -> Path:
+    runtime = require_mapping(plan, "runtime")
+    run_id = require_text(runtime, "recoveryRunId")
+    if not HEX_ID.fullmatch(run_id):
+        raise VerificationError("runtime.recoveryRunId is invalid")
+    windows_device = device if device is not None else resolve_windows_device(plan)
+    mount_path = mounted_target(windows_device)
+    mounted_here = mount_path is None
+    if mounted_here:
+        WINDOWS_MOUNT_PATH.mkdir(parents=True, exist_ok=True)
+        run("mount", "-t", "ntfs-3g", "-o", "rw", str(windows_device), str(WINDOWS_MOUNT_PATH))
+        mount_path = WINDOWS_MOUNT_PATH
+    assert mount_path is not None
+    try:
+        options = run("findmnt", "-rn", "-T", str(mount_path), "-o", "OPTIONS").split(",")
+        if "rw" not in options:
+            raise VerificationError("Windows partition is not mounted read-write")
+        archive = mount_path / WINDOWS_LOG_ROOT / run_id
+        archive.mkdir(parents=True, exist_ok=True)
+        sources = (
+            (VERIFICATION_LOG_PATH, "first-boot-verification.log"),
+            (LOCAL_STATUS_PATH, "first-boot-verification.json"),
+        )
+        for source, name in sources:
+            if source.is_file():
+                shutil.copy2(source, archive / name)
+        update_log_checksums(archive)
+
+        latest = mount_path / WINDOWS_LOG_ROOT / "latest"
+        latest_plan = read_json(latest / "installation-plan.json") if latest.is_dir() else {}
+        if latest_plan.get("planId") == plan.get("planId"):
+            for source, name in sources:
+                if source.is_file():
+                    shutil.copy2(source, latest / name)
+            update_log_checksums(latest)
+        run("sync")
+        return archive
+    finally:
+        if mounted_here:
+            run("umount", str(WINDOWS_MOUNT_PATH))
+
+
 def write_local_status(
     status: str,
     *,
@@ -607,6 +765,7 @@ def write_local_status(
         value["distribution"] = evidence.get("distribution", {})
         value["root"] = evidence.get("root", {})
         value["system"] = evidence.get("system", {})
+        value["localization"] = evidence.get("localization", {})
         value["grub"] = evidence.get("grub", {})
     if windows_evidence_path is not None:
         value["windowsEvidencePath"] = str(windows_evidence_path)
@@ -626,6 +785,11 @@ def record_service_failure(message: str) -> int:
         error=message,
         service_stage="first-boot-resize",
     )
+    if plan is not None:
+        try:
+            archive_linux_diagnostics(plan)
+        except Exception as archive_error:
+            print(f"FIRST_BOOT_LOG_ARCHIVE_ERROR={archive_error}", file=sys.stderr)
     return 0
 
 
@@ -644,7 +808,9 @@ def main() -> int:
         evidence=evidence,
         windows_evidence_path=destination,
     )
+    archive = archive_linux_diagnostics(plan, windows_device)
     print(f"FIRST_BOOT_EVIDENCE={destination}")
+    print(f"FIRST_BOOT_LOG_ARCHIVE={archive}")
     return 0
 
 
@@ -659,6 +825,11 @@ if __name__ == "__main__":
         except VerificationError:
             failed_plan = None
         write_local_status("failed", plan=failed_plan, error=str(error))
+        if failed_plan is not None:
+            try:
+                archive_linux_diagnostics(failed_plan)
+            except Exception as archive_error:
+                print(f"FIRST_BOOT_LOG_ARCHIVE_ERROR={archive_error}", file=sys.stderr)
         print(f"FIRST_BOOT_VERIFICATION_ERROR={error}", file=sys.stderr)
         raise SystemExit(1) from error
     except Exception as error:
@@ -671,5 +842,10 @@ if __name__ == "__main__":
             plan=failed_plan,
             error=f"unexpected verification error: {error}",
         )
+        if failed_plan is not None:
+            try:
+                archive_linux_diagnostics(failed_plan)
+            except Exception as archive_error:
+                print(f"FIRST_BOOT_LOG_ARCHIVE_ERROR={archive_error}", file=sys.stderr)
         print(f"FIRST_BOOT_VERIFICATION_ERROR={error}", file=sys.stderr)
         raise SystemExit(1) from error

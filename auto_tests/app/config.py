@@ -11,7 +11,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class VMConfig(BaseModel):
-    name: str
+    name: str = Field(
+        min_length=1,
+        max_length=57,
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,55}[A-Za-z0-9])?$",
+    )
     host: str
     os: str
     vnc: str
@@ -59,6 +63,7 @@ class Settings(BaseSettings):
     proxmox_storage_min_free_per_vm_gib: int = Field(default=20, ge=0)
     source_dir_name: str = "Libertix-source"
     release_dir_name: str = "Libertix-release"
+    filepool_dir_name: str = "Libertix-filepool"
     filepool_base_url: str
     published_dev_metadata_base_url: str = "https://ekimiateam.github.io/libertix/dev"
     development_static_ipv4_prefix_length: int = Field(ge=1, le=30)
@@ -152,12 +157,15 @@ class Settings(BaseSettings):
             )
         return normalized
 
-    @field_validator("source_dir_name", "release_dir_name")
+    @field_validator("source_dir_name", "release_dir_name", "filepool_dir_name")
     @classmethod
     def validate_workspace_directory_name(cls, value: str) -> str:
         normalized = value.strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", normalized):
-            raise ValueError("source_dir_name and release_dir_name must be simple directory names")
+            raise ValueError(
+                "source_dir_name, release_dir_name and filepool_dir_name "
+                "must be simple directory names"
+            )
         return normalized
 
     @field_validator("development_static_ipv4_gateway")

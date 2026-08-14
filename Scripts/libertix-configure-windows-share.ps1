@@ -18,9 +18,11 @@ function Write-ShareLog {
     param([string]$Message)
     $root = Split-Path -Parent $ConfigPath
     New-Item -ItemType Directory -Path $root -Force | Out-Null
-    Add-Content -LiteralPath (Join-Path $root "windows-share.log") -Value (
-        "[{0}] {1}" -f (Get-Date -Format o), $Message
-    )
+    $line = "[{0}] {1}" -f (Get-Date -Format o), $Message
+    Add-Content -LiteralPath (Join-Path $root "windows-share.log") -Value $line
+    $archiveRoot = Join-Path $env:SystemDrive "LibertixInstallLogs\Windows"
+    New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
+    Add-Content -LiteralPath (Join-Path $archiveRoot "windows-share.log") -Value $line
 }
 
 function Invoke-ProcessWithTimeout {

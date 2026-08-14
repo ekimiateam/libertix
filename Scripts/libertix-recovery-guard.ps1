@@ -17,12 +17,12 @@ $TaskName = "LibertixInstallRecovery"
 $PromptTaskName = "LibertixInstallRecoveryPrompt"
 $Log = Join-Path $Root "recovery.log"
 $Pending = Join-Path $Root "pending.env"
-$ArchiveRoot = Join-Path $SystemDrive "LibertixInstallLogs"
-$Result = Join-Path $ArchiveRoot "latest\result.env"
+$ArchiveRoot = Join-Path $SystemDrive "LibertixInstallLogs\Windows"
+$LinuxArchiveRoot = Join-Path $SystemDrive "LibertixInstallLogs\Linux"
+$Result = Join-Path $LinuxArchiveRoot "latest\result.env"
 $LiveStartedMarker = Join-Path $Root "live-started.env"
 $LiveFailedMarker = Join-Path $Root "live-failed.env"
 $InstallSuccessMarker = Join-Path $Root "install-success.env"
-$ArchiveLog = Join-Path $ArchiveRoot "windows-recovery.log"
 $BcdBackup = Join-Path $Root "bcd-backup"
 $MbrBackup = Join-Path $Root "mbr-backup\mbr-before-grub.bin"
 $MbrBackupHash = Join-Path $Root "mbr-backup\mbr-before-grub.sha256"
@@ -174,10 +174,18 @@ function Complete-RecoveryCompensation {
 }
 
 function Save-RecoveryLog {
-    New-Item -ItemType Directory -Force -Path $ArchiveRoot | Out-Null
+    $planId = Read-EnvValue -Path $Pending -Name "PLAN_ID"
+    if ($planId -notmatch '^[0-9a-f]{32}$') {
+        $planId = "unknown"
+    }
+    $sessionArchive = Join-Path $ArchiveRoot $planId
+    New-Item -ItemType Directory -Force -Path $sessionArchive | Out-Null
     if (Test-Path $Log) {
-        Add-Content -Path $ArchiveLog -Value ("===== Libertix recovery guard {0} =====" -f (Get-Date -Format o))
-        Get-Content $Log | Add-Content -Path $ArchiveLog
+        Copy-Item `
+            -LiteralPath $Log `
+            -Destination (Join-Path $sessionArchive "bios-recovery.log") `
+            -Force `
+            -ErrorAction Stop
     }
 }
 
@@ -354,8 +362,11 @@ function Invoke-VerifiedInstallationSuccess {
         if ($verificationStatus -in @("succeeded", "failed")) {
             # The prompt task remains until the interactive result window is
             # acknowledged. Only a terminal durable result retires the startup task.
-            Remove-RecoveryTask -Required
             Start-RecoveryPromptTask
+            # Starting the interactive task first avoids a Task Scheduler race:
+            # deleting the currently running startup task can briefly make a
+            # different task start fail with ERROR_FILE_NOT_FOUND.
+            Remove-RecoveryTask -Required
         } else {
             Write-RecoveryLog (
                 "Post-install verification was interrupted with status=" +
@@ -841,5 +852,10 @@ try {
     exit 0
 } catch {
     Write-RecoveryLog "Recovery failed: $($_.Exception.Message)"
+    try {
+        Save-RecoveryLog
+    } catch {
+        Write-RecoveryLog "Recovery log archival failed: $($_.Exception.Message)"
+    }
     exit 1
 }

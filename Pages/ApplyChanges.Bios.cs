@@ -49,7 +49,9 @@ namespace Libertix.Pages
             Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
 
             RebootButton.Visibility = Visibility.Visible;
-            FinishInstallation(enableBackButton: false);
+            RebootButton.IsDefault = true;
+            RebootButton.Focus();
+            await PublishUnattendedRebootReadyAsync();
         }
 
         private async Task<bool> PrepareBiosPartitionAsync(
@@ -478,7 +480,7 @@ namespace Libertix.Pages
                     StreamingProcessResult processResult = await RunStreamingProcessAsync(
                         powershell,
                         $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(recoveryScript)}",
-                        TimeSpan.FromMinutes(10),
+                        WindowsProcessTimeouts.RecoveryOperation,
                         line => Log($"ROLLBACK: {line}"),
                         observeCancellation: false);
                     rollbackSucceeded =

@@ -55,7 +55,10 @@ namespace Libertix.Installation
                 storage.LargeInstallationStagingSizeGiB <= 0 ||
                 storage.LargeInstallationStagingSizeGiB > storage.MaximumDirectFat32SizeGiB ||
                 storage.PartitionAlignmentBytes <= 0 ||
-                (storage.PartitionAlignmentBytes & (storage.PartitionAlignmentBytes - 1)) != 0)
+                (storage.PartitionAlignmentBytes & (storage.PartitionAlignmentBytes - 1)) != 0 ||
+                storage.RecommendedLinuxFractionOfFreeSpace <= 0 ||
+                storage.RecommendedLinuxFractionOfFreeSpace > 1 ||
+                storage.MaximumRecommendedLinuxSizeGiB < storage.MinimumFinalSizeGiB)
             {
                 throw new InvalidDataException("Installation storage policy is invalid.");
             }
@@ -66,7 +69,11 @@ namespace Libertix.Installation
                 throw new InvalidDataException("Installation memory policy is invalid.");
             }
             if (policy.Download.Aria2MaximumConnections <= 0 ||
-                policy.Download.Aria2MaximumConnections > 16)
+                policy.Download.Aria2MaximumConnections > 16 ||
+                policy.Download.MaximumAttempts <= 0 ||
+                policy.Download.MaximumAttempts > 20 ||
+                policy.Download.RetryBaseDelaySeconds <= 0 ||
+                policy.Download.RetryBaseDelaySeconds > 300)
             {
                 throw new InvalidDataException("Installation download policy is invalid.");
             }
@@ -97,6 +104,8 @@ namespace Libertix.Installation
         public int MaximumDirectFat32SizeGiB { get; set; }
         public int LargeInstallationStagingSizeGiB { get; set; }
         public long PartitionAlignmentBytes { get; set; }
+        public double RecommendedLinuxFractionOfFreeSpace { get; set; }
+        public int MaximumRecommendedLinuxSizeGiB { get; set; }
     }
 
     public sealed class InstallationMemoryPolicy
@@ -109,6 +118,8 @@ namespace Libertix.Installation
     public sealed class InstallationDownloadPolicy
     {
         public int Aria2MaximumConnections { get; set; }
+        public int MaximumAttempts { get; set; }
+        public int RetryBaseDelaySeconds { get; set; }
     }
 
     public sealed class InstallationAccountPolicy

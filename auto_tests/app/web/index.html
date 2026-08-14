@@ -241,7 +241,7 @@
             <input
               id="linuxPassword"
               type="password"
-              minlength="8"
+              minlength="4"
               maxlength="128"
               required
               autocomplete="new-password"
@@ -288,14 +288,9 @@
               <button id="validationJson">POST /validation</button>
             </div>
             <div class="stack">
-              <h3>Automation lancement UI</h3>
-              <button id="automationDryStream" class="primary">POST /automation/stream</button>
-              <button id="automationDryJson">POST /automation</button>
-            </div>
-            <div class="stack">
-              <h3>Automation Apply</h3>
-              <button id="automationApplyStream" class="danger">POST /automation/stream apply</button>
-              <button id="automationApplyJson" class="danger">POST /automation apply</button>
+              <h3>Automation unattended</h3>
+              <button id="automationStream" class="danger">POST /automation/stream</button>
+              <button id="automationJson" class="danger">POST /automation</button>
             </div>
             <div class="stack">
               <h3>Reset</h3>
@@ -362,10 +357,8 @@
 
       document.getElementById("validationStream").addEventListener("click", () => runValidation(true));
       document.getElementById("validationJson").addEventListener("click", () => runValidation(false));
-      document.getElementById("automationDryStream").addEventListener("click", () => runAutomation(false, true));
-      document.getElementById("automationDryJson").addEventListener("click", () => runAutomation(false, false));
-      document.getElementById("automationApplyStream").addEventListener("click", () => confirmApply(() => runAutomation(true, true)));
-      document.getElementById("automationApplyJson").addEventListener("click", () => confirmApply(() => runAutomation(true, false)));
+      document.getElementById("automationStream").addEventListener("click", () => confirmAutomation(() => runAutomation(true)));
+      document.getElementById("automationJson").addEventListener("click", () => confirmAutomation(() => runAutomation(false)));
       document.getElementById("resetStream").addEventListener("click", () => confirmReset(() => runReset(true)));
       document.getElementById("resetJson").addEventListener("click", () => confirmReset(() => runReset(false)));
 
@@ -393,12 +386,12 @@
         };
       }
 
-      function automationBody(apply) {
+      function automationBody() {
         const body = requestBody();
         if (!body) return null;
         return {
           ...body,
-          apply,
+          apply: true,
           distribution: distributionInput.value || "mint",
           linux_username: linuxUsernameInput.value || "test",
           linux_password: linuxPasswordInput.value,
@@ -541,17 +534,17 @@
         );
       }
 
-      function runAutomation(apply, stream) {
-        const body = automationBody(apply);
+      function runAutomation(stream) {
+        const body = automationBody();
         if (!body) return;
         if (stream) {
-          runStream("/api/v1/automation/stream?format=ndjson", body, apply ? "automation apply stream" : "automation launch-only stream");
+          runStream("/api/v1/automation/stream?format=ndjson", body, "automation unattended stream");
           return;
         }
         runJson(
           "/api/v1/automation",
           { method: "POST", headers: requestHeaders(true), body: JSON.stringify(body) },
-          apply ? "automation apply" : "automation launch-only",
+          "automation unattended",
         );
       }
 
@@ -646,8 +639,8 @@
         }
       }
 
-      function confirmApply(action) {
-        if (confirm("Confirmer l'automation avec Apply ? Cette action peut modifier le disque de la VM cible.")) {
+      function confirmAutomation(action) {
+        if (confirm("Confirmer l'automation unattended ? Cette action peut modifier le disque de la VM cible.")) {
           action();
         }
       }

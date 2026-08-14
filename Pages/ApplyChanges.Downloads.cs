@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Libertix.Helpers;
 using Libertix.Installation;
 
 namespace Libertix.Pages
@@ -22,8 +23,8 @@ namespace Libertix.Pages
             return await DownloadFileWithRetriesAsync(
                 url,
                 destinationPath,
-                attempts: 3,
-                timeout: TimeSpan.FromHours(2),
+                attempts: DownloadMaximumAttempts,
+                timeout: WindowsProcessTimeouts.LiveIsoDownload,
                 bufferSize: 8192,
                 progressStart: BiosProgress.LiveDownloadTransferStart,
                 progressSpan: BiosProgress.LiveDownloadTransferSpan,
@@ -37,8 +38,8 @@ namespace Libertix.Pages
             return await DownloadFileWithRetriesAsync(
                 url,
                 destinationPath,
-                attempts: 3,
-                timeout: TimeSpan.FromHours(4),
+                attempts: DownloadMaximumAttempts,
+                timeout: WindowsProcessTimeouts.DistributionIsoDownload,
                 bufferSize: 81920,
                 progressStart: BiosProgress.DistributionDownload,
                 progressSpan: BiosProgress.DistributionReady - BiosProgress.DistributionDownload,
@@ -112,7 +113,7 @@ namespace Libertix.Pages
                     Dispatcher.Invoke(() =>
                         Log($"{label}: partial download retained for the next resume attempt."));
                     await Task.Delay(
-                        TimeSpan.FromSeconds(10 * attempt),
+                        TimeSpan.FromSeconds(DownloadRetryBaseDelaySeconds * attempt),
                         _installationCancellation.Token);
                 }
                 catch (OperationCanceledException)
@@ -141,7 +142,7 @@ namespace Libertix.Pages
                     Dispatcher.Invoke(() =>
                         Log($"{label}: partial download retained for the next resume attempt."));
                     await Task.Delay(
-                        TimeSpan.FromSeconds(10 * attempt),
+                        TimeSpan.FromSeconds(DownloadRetryBaseDelaySeconds * attempt),
                         _installationCancellation.Token);
                 }
             }

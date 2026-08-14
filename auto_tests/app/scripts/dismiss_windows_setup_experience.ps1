@@ -12,9 +12,9 @@ if (-not $explorer) {
     throw "No interactive Explorer session is available."
 }
 
-# The caller invokes this script only after vision has identified the Windows
-# setup experience. Restrict termination to its System Settings host in the
-# same interactive session so unrelated background processes remain intact.
+# The caller invokes this script only after the guest inspection script found
+# System Settings in the active Explorer session. Restrict termination to that
+# session so unrelated background processes remain intact.
 $setupProcesses = @(
     Get-CimInstance Win32_Process -Filter "Name='SystemSettings.exe'" -ErrorAction Stop |
         Where-Object { [int]$_.SessionId -eq [int]$explorer.SessionId }

@@ -15,9 +15,12 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
-from app.api_runtime import mark_capture_workspace_owned
+from app.api_runtime import (
+    cleanup_operation_artifacts,
+    create_capture_workspace,
+    mark_capture_workspace_complete,
+)
 from app.clients.ssh import CommandResult, SSHClient
-from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
@@ -33,15 +36,6 @@ class ValidationService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._capture_dir = Path(settings.capture_dir)
-        self.vision_llm = VisionLLMClient(
-            settings.llm_api_key.get_secret_value(),
-            settings.llm_api_url,
-            settings.llm_model,
-            settings.llm_timeout_seconds,
-            reasoning_effort=settings.llm_reasoning_effort,
-            max_attempts=settings.llm_max_attempts,
-            retry_base_seconds=settings.llm_retry_base_seconds,
-        )
         self.vnc = VNCClient(settings.vnc_timeout_seconds)
 
     def run(
@@ -50,16 +44,22 @@ class ValidationService:
         *,
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
+        run_workspace: Path | None = None,
     ) -> OperationResult:
-        self.settings.capture_dir.mkdir(parents=True, exist_ok=True)
-        capture_workspace = tempfile.TemporaryDirectory(
-            prefix="validation-", dir=self.settings.capture_dir
-        )
-        mark_capture_workspace_owned(Path(capture_workspace.name))
+        owns_workspace = run_workspace is None
+        workspace = run_workspace or create_capture_workspace(self.settings, "validation")
+        capture_dir = workspace / "captures"
+        capture_dir.mkdir(mode=0o700, exist_ok=True)
         previous_capture_dir = self._capture_dir
-        self._capture_dir = Path(capture_workspace.name)
+        self._capture_dir = capture_dir
         result = ResultBuilder("validation", on_step=on_step)
         try:
+            result.ok(
+                "validation.run_workspace",
+                "Validation run workspace initialized",
+                path=str(workspace),
+                capture_path=str(capture_dir),
+            )
             selected_vms = self.select_vms(vm_selectors)
             executable = self.prepare_server(result, source=source)
             windows_path = self.to_windows_share_path(executable)
@@ -102,7 +102,9 @@ class ValidationService:
             )
         finally:
             self._capture_dir = previous_capture_dir
-            capture_workspace.cleanup()
+            if owns_workspace:
+                mark_capture_workspace_complete(workspace)
+                cleanup_operation_artifacts(self.settings)
 
     def select_vms(self, selectors: Sequence[str] | None) -> tuple[VMConfig, ...]:
         if not selectors:
@@ -240,6 +242,60 @@ class ValidationService:
                     exc_info=exc,
                 )
 
+    def run_linux_script(
+        self,
+        ssh: SSHClient,
+        *,
+        script_name: str,
+        arguments: Sequence[str],
+        step: str,
+        timeout: float,
+    ) -> CommandResult:
+        """Upload, execute, then remove one repository-owned Linux helper."""
+
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", script_name):
+            raise WorkflowError(step, "Linux helper script name is invalid")
+        script_path = Path(__file__).resolve().parents[1] / "scripts" / script_name
+        if not script_path.is_file():
+            raise WorkflowError(
+                step,
+                "Linux helper script not found",
+                details={"path": str(script_path), "script": script_name},
+            )
+
+        run_id = uuid.uuid4().hex
+        remote_script = f"/tmp/libertix-auto-tests-{run_id}-{script_path.name}"
+        command = " ".join(
+            ["python3", shlex.quote(remote_script), *(shlex.quote(value) for value in arguments)]
+        )
+        cleanup_command = (
+            "python3 -c "
+            + shlex.quote("import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)")
+            + " "
+            + shlex.quote(remote_script)
+        )
+        try:
+            ssh.upload_text(
+                remote_script,
+                script_path.read_text(encoding="utf-8"),
+                step=f"{step}.upload_script",
+            )
+            return ssh.run(command, step=step, timeout=timeout)
+        finally:
+            try:
+                ssh.run(
+                    cleanup_command,
+                    step=f"{step}.cleanup_script",
+                    timeout=30,
+                    check=False,
+                )
+            except WorkflowError as exc:
+                logger.warning(
+                    "Temporary Linux test helper could not be removed",
+                    extra={"step": f"{step}.cleanup_script", "target": ssh.host},
+                    exc_info=exc,
+                )
+
     @staticmethod
     def parse_powershell_results(stdout: str, *, prefixes: Sequence[str]) -> dict[str, str]:
         """Extract NAME=VALUE lines emitted intentionally by our .ps1 scripts."""
@@ -333,6 +389,7 @@ class ValidationService:
                 # Local mode is for validating unpushed changes. It archives this
                 # working tree and expands it directly into the Samba source folder.
                 self._copy_local_source_to_server(ssh, result, source_path)
+                self._sync_local_filepool_to_server(ssh, result)
 
         if published_executable is not None:
             return published_executable
@@ -484,6 +541,128 @@ class ValidationService:
                         exc_info=exc,
                     )
 
+    def _sync_local_filepool_to_server(
+        self,
+        ssh: SSHClient,
+        result: ResultBuilder,
+    ) -> None:
+        s = self.settings
+        local_filepool = self._local_repository_root() / "auto_tests" / "app" / "filepool"
+        if not local_filepool.is_dir():
+            raise WorkflowError(
+                "server.filepool_sync",
+                "The local development filepool directory is missing",
+                details={"path": str(local_filepool)},
+            )
+
+        artifacts = {
+            path.name: path
+            for path in local_filepool.iterdir()
+            if path.is_file() and not path.is_symlink()
+        }
+        runtime_catalog = s.runtime_dir / "filepool" / "catalog.json"
+        if runtime_catalog.is_file() and not runtime_catalog.is_symlink():
+            artifacts["catalog.json"] = runtime_catalog
+        required = {
+            "catalog.json",
+            "libertix-installer-bios.iso",
+            "libertix-installer-uefi.iso",
+        }
+        missing = sorted(required - artifacts.keys())
+        if missing:
+            raise WorkflowError(
+                "server.filepool_sync",
+                "The local development filepool is incomplete",
+                details={"missing": missing, "path": str(local_filepool)},
+            )
+
+        remote_root = PurePosixPath(s.smb_root) / s.filepool_dir_name
+        prepare = (
+            "set -eu; "
+            f"root={shlex.quote(s.smb_root)}; dest={shlex.quote(str(remote_root))}; "
+            'root=$(realpath -m -- "$root"); dest=$(realpath -m -- "$dest"); '
+            'case "$dest" in "$root"/*) ;; *) '
+            'echo "Filepool destination is outside SMB_ROOT" >&2; exit 22;; esac; '
+            'mkdir -p -- "$dest"'
+        )
+        ssh.run(
+            prepare,
+            step="server.filepool_prepare",
+            timeout=s.command_timeout_seconds,
+        )
+
+        copied = 0
+        reused = 0
+        manifest: dict[str, dict[str, object]] = {}
+        for name, local_path in sorted(artifacts.items()):
+            digest = hashlib.sha256()
+            with local_path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            sha256 = digest.hexdigest()
+            size = local_path.stat().st_size
+            remote_path = remote_root / name
+            remote_digest = ssh.run(
+                "if [ -f {path} ]; then sha256sum -- {path} | cut -d' ' -f1; fi".format(
+                    path=shlex.quote(str(remote_path))
+                ),
+                step="server.filepool_hash",
+                timeout=max(s.command_timeout_seconds, 300),
+                check=False,
+            ).stdout.strip()
+            if remote_digest == sha256:
+                reused += 1
+            else:
+                temporary_path = remote_root / f".{name}.{uuid.uuid4().hex}.tmp"
+                try:
+                    ssh.upload_file(
+                        local_path,
+                        str(temporary_path),
+                        step="server.filepool_upload",
+                    )
+                    publish = (
+                        "set -eu; "
+                        f"tmp={shlex.quote(str(temporary_path))}; "
+                        f"dest={shlex.quote(str(remote_path))}; "
+                        f"expected_hash={shlex.quote(sha256)}; "
+                        f"expected_size={size}; "
+                        'actual_hash=$(sha256sum -- "$tmp" | cut -d" " -f1); '
+                        'actual_size=$(stat -c %s -- "$tmp"); '
+                        '[ "$actual_hash" = "$expected_hash" ]; '
+                        '[ "$actual_size" = "$expected_size" ]; '
+                        'mv -f -- "$tmp" "$dest"'
+                    )
+                    ssh.run(
+                        publish,
+                        step="server.filepool_publish",
+                        timeout=max(s.command_timeout_seconds, 300),
+                    )
+                    copied += 1
+                finally:
+                    ssh.run(
+                        f"rm -f -- {shlex.quote(str(temporary_path))}",
+                        step="server.filepool_cleanup_temporary",
+                        timeout=30,
+                        check=False,
+                    )
+            manifest[name] = {"size": size, "sha256": sha256}
+
+        catalog_url = s.filepool_base_url.rstrip("/") + "/catalog.json"
+        ssh.run(
+            f"curl -fsS --max-time 15 --range 0-0 -- {shlex.quote(catalog_url)} >/dev/null",
+            step="server.filepool_http_probe",
+            timeout=30,
+        )
+        result.ok(
+            "server.filepool_sync",
+            "Local development filepool synchronized and reachable",
+            target=s.main_ssh_host,
+            remote_path=str(remote_root),
+            copied=copied,
+            reused=reused,
+            files=manifest,
+        )
+
     @staticmethod
     def _local_repository_root() -> Path:
         return LocalSourceTree.repository_root()
@@ -600,46 +779,24 @@ class ValidationService:
             seconds=self.settings.launch_wait_seconds,
         )
 
-        maximum_visual_attempts = 3
-        last_context: dict[str, object] = {}
-        for attempt in range(1, maximum_visual_attempts + 1):
-            if attempt > 1:
-                time.sleep(self.settings.launch_wait_seconds)
-            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-            capture = self._capture_dir / f"{vm.name}-{stamp}.png"
-            self.vnc.capture(vm.vnc, capture)
-            result.ok(
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        capture = self._capture_dir / f"{vm.name}-{stamp}.png"
+        self.vnc.capture(vm.vnc, capture)
+        if not capture.is_file() or capture.stat().st_size == 0:
+            raise WorkflowError(
                 "vnc.capture",
-                "VNC capture saved",
-                target=vm.vnc,
-                path=str(capture),
-                attempt=attempt,
+                "VNC did not produce a non-empty validation capture",
+                details={"vm": vm.name, "target": vm.vnc, "path": str(capture)},
             )
-
-            verdict = self.vision_llm.analyze(capture, vm.name, vm.os)
-            last_context = verdict.model_dump()
-            if verdict.valid:
-                result.ok(
-                    "llm.verdict",
-                    "Visual validation positive",
-                    target=vm.name,
-                    attempt=attempt,
-                    **last_context,
-                )
-                return
-            if attempt < maximum_visual_attempts:
-                result.ok(
-                    "llm.verdict_retry",
-                    "Libertix was not visible yet; the validation capture will be retried",
-                    target=vm.name,
-                    attempt=attempt,
-                    summary=last_context.get("summary"),
-                )
-
-        raise WorkflowError(
-            "llm.verdict",
-            "Visual validation reported a problem after all capture attempts",
-            details={"vm": vm.name, **last_context},
+        result.ok(
+            "vnc.capture",
+            "Libertix process, interactive main window, and non-empty VNC capture confirmed",
+            target=vm.vnc,
+            vm=vm.name,
+            path=str(capture),
+            window_handle=launch["window_handle"],
+            window_title=launch["window_title"],
+            proof_source="uia-visible-window-and-vnc-capture",
         )
 
     def _validate_vm_isolated(
@@ -742,10 +899,12 @@ class ValidationService:
         return {
             "pid": int(values["PID"]),
             "session_id": int(values["SESSION_ID"]),
-            "window_handle": 0,
+            "window_handle": int(values["WINDOW_HANDLE"]),
+            "window_title": values["WINDOW_TITLE"],
+            "window_visible": values["WINDOW_VISIBLE"] == "True",
             "task_name": values.get("TASK_NAME", task_name),
             "launch_method": "scheduled_task_elevated",
-            "visual_confirmation": "capture_vnc_et_llm",
+            "visual_confirmation": "uia_visible_window_and_vnc_capture",
         }
 
     def launch_elevated_process(
@@ -756,7 +915,19 @@ class ValidationService:
         task_name: str,
         step: str,
         use_default_filepool: bool = False,
+        unattended_config: dict[str, object] | None = None,
     ) -> dict[str, str]:
+        def has_interactive_window_proof(parsed: dict[str, str]) -> bool:
+            handle = parsed.get("WINDOW_HANDLE", "")
+            return (
+                parsed.get("PID", "").isdigit()
+                and parsed.get("SESSION_ID", "").isdigit()
+                and handle.isdigit()
+                and int(handle) > 0
+                and parsed.get("WINDOW_TITLE", "").strip() == "Libertix"
+                and parsed.get("WINDOW_VISIBLE", "") == "True"
+            )
+
         with self.ssh(
             vm.host,
             vm.username,
@@ -780,15 +951,26 @@ class ValidationService:
                         self.settings.development_static_ipv4_gateway
                     ),
                     "development_dns_servers": list(self.settings.development_dns_servers),
+                    "unattended": unattended_config,
                 },
                 step=step,
                 timeout=90,
             )
             values = self.parse_powershell_results(
                 response.stdout,
-                prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE"),
+                prefixes=(
+                    "PID",
+                    "SESSION_ID",
+                    "TASK_NAME",
+                    "EXECUTABLE",
+                    "WINDOW_HANDLE",
+                    "WINDOW_TITLE",
+                    "WINDOW_VISIBLE",
+                    "UNATTENDED_STATUS_PATH",
+                    "UNATTENDED_ACKNOWLEDGEMENT_PATH",
+                ),
             )
-            if not values.get("PID", "").isdigit() or not values.get("SESSION_ID", "").isdigit():
+            if not has_interactive_window_proof(values):
                 confirmation = self.run_windows_script(
                     ssh,
                     script_name="confirm_libertix_process.ps1",
@@ -796,17 +978,23 @@ class ValidationService:
                     step=f"{step}.confirm_process",
                     timeout=60,
                 )
-                values = self.parse_powershell_results(
+                confirmation_values = self.parse_powershell_results(
                     confirmation.stdout,
-                    prefixes=("PID", "SESSION_ID", "TASK_NAME", "EXECUTABLE"),
+                    prefixes=(
+                        "PID",
+                        "SESSION_ID",
+                        "TASK_NAME",
+                        "EXECUTABLE",
+                        "WINDOW_HANDLE",
+                        "WINDOW_TITLE",
+                        "WINDOW_VISIBLE",
+                    ),
                 )
-                if (
-                    not values.get("PID", "").isdigit()
-                    or not values.get("SESSION_ID", "").isdigit()
-                ):
+                values.update(confirmation_values)
+                if not has_interactive_window_proof(values):
                     raise WorkflowError(
                         step,
-                        "Elevated Libertix process was not confirmed",
+                        "Elevated Libertix process and interactive window were not confirmed",
                         details={
                             "vm": vm.name,
                             "host": vm.host,

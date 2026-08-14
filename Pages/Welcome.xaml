@@ -42,12 +42,7 @@
                           Width="120"
                           TabIndex="1"
                           Style="{StaticResource ModernComboBox}"
-                          SelectionChanged="LanguageComboBox_SelectionChanged">
-                    <ComboBoxItem Content="English" Tag="en" Style="{StaticResource ModernComboBoxItem}"/>
-                    <ComboBoxItem Content="Français" Tag="fr" Style="{StaticResource ModernComboBoxItem}"/>
-                    <ComboBoxItem Content="Español" Tag="es" Style="{StaticResource ModernComboBoxItem}"/>
-                    <ComboBoxItem Content="日本語" Tag="ja" Style="{StaticResource ModernComboBoxItem}"/>
-                </ComboBox>
+                          SelectionChanged="LanguageComboBox_SelectionChanged"/>
             </StackPanel>
 
         </StackPanel>

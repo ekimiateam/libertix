@@ -32,6 +32,31 @@ function Test-LibertixProperty {
     return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
 }
 
+function Write-LibertixPostInstallErrorDiagnostic {
+    param(
+        [Parameter(Mandatory = $true)][System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [Parameter(Mandatory = $true)][scriptblock]$WriteLog,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    & $WriteLog "$Context exceptionType=$($ErrorRecord.Exception.GetType().FullName)"
+    & $WriteLog "$Context fullyQualifiedErrorId=$($ErrorRecord.FullyQualifiedErrorId)"
+    & $WriteLog "$Context category=$($ErrorRecord.CategoryInfo.Category) reason=$($ErrorRecord.CategoryInfo.Reason)"
+    if (-not [string]::IsNullOrWhiteSpace([string]$ErrorRecord.InvocationInfo.PositionMessage)) {
+        & $WriteLog "$Context position=$([string]$ErrorRecord.InvocationInfo.PositionMessage)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$ErrorRecord.ScriptStackTrace)) {
+        & $WriteLog "$Context powershellStack=$([string]$ErrorRecord.ScriptStackTrace)"
+    }
+    $inner = $ErrorRecord.Exception.InnerException
+    $depth = 0
+    while ($null -ne $inner -and $depth -lt 8) {
+        & $WriteLog "$Context innerException[$depth]=$($inner.GetType().FullName): $($inner.Message)"
+        $inner = $inner.InnerException
+        $depth++
+    }
+}
+
 function Read-LibertixJsonObject {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -266,7 +291,10 @@ function Add-LibertixPostInstallCheck {
         throw "Post-install result contains duplicate check '$Name'."
     }
     if ($existingChecks.Count -eq 1 -and [bool]$existingChecks[0].passed) {
-        & $WriteLog "Post-install check resumed from durable result: $Name"
+        & $WriteLog (
+            "Post-install check resumed from durable result: $Name - " +
+            [string]$existingChecks[0].detail
+        )
         return
     }
     $Result.checks = @($Result.checks | Where-Object { [string]$_.name -ne $Name })
@@ -282,7 +310,7 @@ function Add-LibertixPostInstallCheck {
             }
         )
         Write-LibertixPostInstallResult -Path $ResultPath -Result $Result
-        & $WriteLog "Post-install check passed: $Name"
+        & $WriteLog "Post-install check passed: $Name - $($Result.checks[-1].detail)"
     } catch {
         $Result.checks = @($Result.checks) + @(
             [pscustomobject][ordered]@{
@@ -294,6 +322,10 @@ function Add-LibertixPostInstallCheck {
         )
         Write-LibertixPostInstallResult -Path $ResultPath -Result $Result
         & $WriteLog "Post-install check failed: $Name - $($_.Exception.Message)"
+        Write-LibertixPostInstallErrorDiagnostic `
+            -ErrorRecord $_ `
+            -WriteLog $WriteLog `
+            -Context "Post-install check diagnostic: $Name"
         throw
     }
 }
@@ -777,6 +809,11 @@ function Invoke-LibertixPostInstallVerification {
             -LogPath $LogPath
     }
     Write-LibertixPostInstallResult -Path $resultPath -Result $result
+    & $WriteLog (
+        "Post-install verification started: plan=$($plan.planId) " +
+        "firmware=$($plan.firmware) host=$env:COMPUTERNAME " +
+        "powershell=$($PSVersionTable.PSVersion) os=$([Environment]::OSVersion.VersionString)"
+    )
 
     try {
         Set-LibertixShutdownVerificationPriority
@@ -832,6 +869,10 @@ function Invoke-LibertixPostInstallVerification {
         $result.rollbackAvailable = $true
         Write-LibertixPostInstallResult -Path $resultPath -Result $result
         & $WriteLog "Post-install verification failed: $($_.Exception.Message)"
+        Write-LibertixPostInstallErrorDiagnostic `
+            -ErrorRecord $_ `
+            -WriteLog $WriteLog `
+            -Context "Post-install verification diagnostic"
         throw
     }
     return $result

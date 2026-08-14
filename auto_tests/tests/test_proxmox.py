@@ -124,3 +124,52 @@ def test_post_rollback_verification_fails_closed(
         client.verify_rollback_state("node-a", 500, "clean2", require_running=True)
 
     assert step in caught.value.step
+
+
+def test_guest_agent_command_preserves_argument_boundaries() -> None:
+    requests: list[tuple[str, str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, request.content))
+        if request.method == "POST":
+            return httpx.Response(200, json={"data": {"result": {"pid": 42}}})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "result": {
+                        "exited": True,
+                        "exitcode": 0,
+                        "out-data": "ok",
+                    }
+                }
+            },
+        )
+
+    proxmox = ProxmoxClient(
+        "https://proxmox.test:8006",
+        "token",
+        "secret",
+        timeout=1,
+        task_timeout=1,
+    )
+    proxmox.client.close()
+    proxmox.client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        result = proxmox.execute_guest_agent_command(
+            "node-a",
+            500,
+            ["netsh.exe", "name=Ethernet 2", "address=192.0.2.240"],
+            step="test.guest_exec",
+            timeout=1,
+        )
+    finally:
+        proxmox.client.close()
+
+    assert result["exitcode"] == 0
+    assert requests[0][0] == "POST"
+    assert requests[0][2] == (
+        b"command=netsh.exe&command=name%3DEthernet+2&command=address%3D192.0.2.240"
+    )
+    assert requests[1][0] == "GET"
+    assert "pid=42" in str(requests[1][1]) or requests[1][1].endswith("exec-status")

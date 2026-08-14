@@ -8,8 +8,25 @@ import json
 import shlex
 from pathlib import Path
 
-SUPPORTED_LANGUAGES = {"en", "fr", "es", "ja"}
-CATALOGUE_PATH = Path(__file__).with_name("libertix-translations.json")
+
+def resolve_catalogue_path() -> Path:
+    adjacent = Path(__file__).with_name("Libertix.Translations.json")
+    source_tree = Path(__file__).resolve().parents[2] / "Resources/Libertix.Translations.json"
+    return adjacent if adjacent.is_file() else source_tree
+
+
+CATALOGUE_PATH = resolve_catalogue_path()
+
+
+def load_translation_catalogue() -> dict[str, object]:
+    catalogue = json.loads(CATALOGUE_PATH.read_text(encoding="utf-8"))
+    if not isinstance(catalogue, dict):
+        raise ValueError("Libertix translation catalogue must be an object")
+    return catalogue
+
+
+CATALOGUE = load_translation_catalogue()
+SUPPORTED_LANGUAGES = frozenset(CATALOGUE["supportedLanguages"])
 
 
 def normalize_language(language: str | None) -> str:
@@ -18,10 +35,10 @@ def normalize_language(language: str | None) -> str:
 
 
 def load_catalogue(language: str | None) -> dict[str, str]:
-    catalogue = json.loads(CATALOGUE_PATH.read_text(encoding="utf-8"))
     selected = normalize_language(language)
-    translations = catalogue[selected]
-    fallback = catalogue["en"]
+    languages = CATALOGUE["languages"]
+    translations = languages[selected]["live"]
+    fallback = languages["en"]["live"]
     return {key: translations.get(key, value) for key, value in fallback.items()}
 
 

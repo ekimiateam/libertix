@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("en", "fr", "es", "ja")]
+    [ValidateSet("en", "fr", "es")]
     [string]$LanguageCode = "en",
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
@@ -30,6 +30,7 @@ function Stop-Compatibility {
 }
 
 $messageCatalog = $null
+$englishMessageCatalog = $null
 $warnings = New-Object System.Collections.Generic.List[string]
 
 function Get-LocalizedMessage {
@@ -42,18 +43,11 @@ function Get-LocalizedMessage {
     if ($null -eq $sectionProperty) {
         return $null
     }
-    $languageProperty = $sectionProperty.Value.PSObject.Properties[$LanguageCode]
-    if ($null -eq $languageProperty) {
-        $languageProperty = $sectionProperty.Value.PSObject.Properties["en"]
-    }
-    if ($null -eq $languageProperty) {
-        return $null
-    }
-    $messageProperty = $languageProperty.Value.PSObject.Properties[$Key]
+    $messageProperty = $sectionProperty.Value.PSObject.Properties[$Key]
     if ($null -eq $messageProperty -and $LanguageCode -ne "en") {
-        $englishProperty = $sectionProperty.Value.PSObject.Properties["en"]
-        if ($null -ne $englishProperty) {
-            $messageProperty = $englishProperty.Value.PSObject.Properties[$Key]
+        $englishSection = $englishMessageCatalog.PSObject.Properties[$Section]
+        if ($null -ne $englishSection) {
+            $messageProperty = $englishSection.Value.PSObject.Properties[$Key]
         }
     }
     if ($null -eq $messageProperty) {
@@ -299,12 +293,21 @@ function Test-NvramAndBootNext {
 }
 
 try {
-    $messageCatalogPath = Join-Path $PSScriptRoot "config\Libertix.CompatibilityMessages.json"
+    $messageCatalogPath = Join-Path `
+        (Split-Path -Parent $PSScriptRoot) `
+        "Resources\Libertix.Translations.json"
     if (-not (Test-Path -LiteralPath $messageCatalogPath -PathType Leaf)) {
         throw "Libertix compatibility message catalogue is missing: $messageCatalogPath"
     }
-    $messageCatalog = Get-Content -LiteralPath $messageCatalogPath -Raw -Encoding UTF8 |
+    $translationCatalog = Get-Content -LiteralPath $messageCatalogPath -Raw -Encoding UTF8 |
         ConvertFrom-Json -ErrorAction Stop
+    $languageProperty = $translationCatalog.languages.PSObject.Properties[$LanguageCode]
+    $englishProperty = $translationCatalog.languages.PSObject.Properties["en"]
+    if ($null -eq $languageProperty -or $null -eq $englishProperty) {
+        throw "Libertix compatibility translations are incomplete for '$LanguageCode'."
+    }
+    $messageCatalog = $languageProperty.Value.compatibility
+    $englishMessageCatalog = $englishProperty.Value.compatibility
 
     $geometryModule = Join-Path $PSScriptRoot "modules\Libertix.StorageGeometry.psm1"
     if (-not (Test-Path -LiteralPath $geometryModule -PathType Leaf)) {
@@ -487,9 +490,12 @@ try {
         Stop-Compatibility "COMPAT_E_NTFS_HEALTH" @($volume.FileSystem, $volume.HealthStatus)
     }
     try {
-        $scan = Repair-Volume -DriveLetter $systemDrive.Substring(0, 1) -Scan -ErrorAction Stop
-        if ($null -ne $scan -and [string]$scan -notmatch "NoErrorsFound|No Error|Aucune") {
-            Stop-Compatibility "COMPAT_E_NTFS_SCAN" @($scan)
+        [uint32]$scanResult = Repair-Volume `
+            -DriveLetter $systemDrive.Substring(0, 1) `
+            -Scan `
+            -ErrorAction Stop
+        if ($scanResult -ne 0) {
+            Stop-Compatibility "COMPAT_E_NTFS_SCAN" @($scanResult)
         }
     } catch {
         if ($_.Exception.Message -match "^\[COMPAT_") { throw }

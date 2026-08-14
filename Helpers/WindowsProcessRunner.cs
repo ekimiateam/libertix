@@ -17,8 +17,12 @@ namespace Libertix.Helpers
         public static readonly TimeSpan ServiceCommand = TimeSpan.FromMinutes(1);
         public static readonly TimeSpan DiskOperation = TimeSpan.FromMinutes(2);
         public static readonly TimeSpan DiskImageOperation = TimeSpan.FromMinutes(5);
+        public static readonly TimeSpan BootArtifactDownload = TimeSpan.FromMinutes(5);
         public static readonly TimeSpan CompatibilityPreflight = TimeSpan.FromMinutes(10);
+        public static readonly TimeSpan SupportArtifactDownload = TimeSpan.FromMinutes(20);
         public static readonly TimeSpan RecoveryOperation = TimeSpan.FromMinutes(30);
+        public static readonly TimeSpan LiveIsoDownload = TimeSpan.FromHours(2);
+        public static readonly TimeSpan DistributionIsoDownload = TimeSpan.FromHours(4);
         public static readonly TimeSpan FileCopy = TimeSpan.FromHours(4);
         public static readonly TimeSpan InstallerOperation = TimeSpan.FromHours(6.5);
     }

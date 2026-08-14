@@ -3,7 +3,9 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using Libertix.Dialogs;
 using Libertix.Helpers;
+using Libertix.Installation;
 using Libertix.Models;
 
 namespace Libertix.Pages
@@ -46,6 +48,7 @@ namespace Libertix.Pages
 
             try
             {
+                await UnattendedWorkflow.PublishStageAndWaitAsync("compatibility-running");
                 bool skipNvramWriteProbe =
                     ((App)Application.Current).RuntimeOptions.SkipNvramWriteProbe;
                 CompatibilityInfo info = await CompatibilityPreflightRunner.RunAsync(
@@ -63,9 +66,34 @@ namespace Libertix.Pages
                 ContinueButton.Focus();
                 foreach (string warning in info.Warnings)
                     AppendDetail(Localization.GetString("CompatibilityWarningPrefix") + warning);
+                if (UnattendedWorkflow.IsEnabled)
+                {
+                    await UnattendedWorkflow.PublishStageAndWaitAsync("compatibility-passed");
+                    var application = (App)Application.Current;
+                    await UnattendedInstallationConfigurator.ConfigureAsync(
+                        _installationState,
+                        application.Filepool);
+                    bool accepted = await UnattendedWarningDialog.ShowAsync(
+                        application.MainWindow,
+                        _installationState);
+                    if (!accepted)
+                    {
+                        UnattendedWorkflow.TryPublishFailure(
+                            "unattended-warning-declined",
+                            "The unattended destructive installation was declined.");
+                        application.Shutdown(0);
+                        return;
+                    }
+
+                    NavigationHelper.NavigateWithAnimation(
+                        NavigationService,
+                        new ApplyChanges(_installationState),
+                        TimeSpan.FromSeconds(0.3));
+                }
             }
             catch (CompatibilityPreflightException ex)
             {
+                UnattendedWorkflow.TryPublishFailure(ex.Code, ex.Message);
                 _installationState.Compatibility = null;
                 CheckProgress.IsIndeterminate = false;
                 CheckProgress.Value = 0;
@@ -77,6 +105,9 @@ namespace Libertix.Pages
             }
             catch (Exception ex)
             {
+                UnattendedWorkflow.TryPublishFailure(
+                    "compatibility-unexpected",
+                    ex.Message);
                 _installationState.Compatibility = null;
                 CheckProgress.IsIndeterminate = false;
                 CheckProgress.Value = 0;

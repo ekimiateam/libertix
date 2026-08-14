@@ -132,9 +132,9 @@ flowchart TB
 - At least 20 GiB of shrinkable space on the Windows system disk
 - A storage layout accepted by the compatibility preflight
 
-Libertix supports common local SATA/AHCI and NVMe system disks. It refuses ambiguous or unsafe
-topologies such as Windows dynamic disks, Storage Spaces, USB system disks, VHD/iSCSI system disks,
-unsupported RAID controllers and unsupported Intel RST/VMD or AMD RAID configurations.
+Libertix supports one local SATA, ATA, NVMe, SAS, SCSI, or MMC system disk. It refuses ambiguous or
+unsafe topologies such as Windows dynamic disks, Storage Spaces, USB system disks, VHD/iSCSI system
+disks, unsupported RAID controllers and unsupported Intel RST/VMD or AMD RAID configurations.
 
 BitLocker or Device Encryption must be fully decrypted before the live installer boots. Libertix
 can request decryption and waits for it to finish. The detected Windows Recovery partition is kept

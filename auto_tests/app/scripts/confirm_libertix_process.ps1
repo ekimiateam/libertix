@@ -6,6 +6,23 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+Add-Type -AssemblyName UIAutomationClient
+
+function Test-VisibleMainWindow {
+    param([System.Diagnostics.Process]$Process)
+
+    if ($Process.MainWindowHandle -eq [IntPtr]::Zero -or
+        $Process.MainWindowTitle -ne "Libertix") {
+        return $false
+    }
+    $element = [Windows.Automation.AutomationElement]::FromHandle(
+        $Process.MainWindowHandle)
+    if ($null -eq $element -or $element.Current.IsOffscreen) {
+        return $false
+    }
+    $bounds = $element.Current.BoundingRectangle
+    return $bounds.Width -ge 100 -and $bounds.Height -ge 100
+}
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
 $executable = [IO.Path]::GetFullPath([string]$config.executable)
@@ -28,14 +45,29 @@ if (-not $process) {
     throw ("Libertix is absent from the interactive session; task=" + ($taskState -join " | "))
 }
 
-# A scheduled task can remain registered when the SSH channel closes immediately after launch.
-# Removing the definition does not terminate its already-running interactive process.
+# Removing the task definition does not terminate its already-running process.
 $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($task) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+}
+
+$graphicalProcess = Get-Process -Id $process.ProcessId -ErrorAction Stop
+$windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
+do {
+    $graphicalProcess.Refresh()
+    if (Test-VisibleMainWindow -Process $graphicalProcess) {
+        break
+    }
+    Start-Sleep -Milliseconds 200
+} while ([DateTime]::UtcNow -lt $windowDeadline)
+if (-not (Test-VisibleMainWindow -Process $graphicalProcess)) {
+    throw "Libertix is running but did not expose its identified interactive main window"
 }
 
 Write-Output ("PID={0}" -f $process.ProcessId)
 Write-Output ("SESSION_ID={0}" -f $process.SessionId)
 Write-Output ("TASK_NAME={0}" -f $taskName)
 Write-Output ("EXECUTABLE={0}" -f $process.ExecutablePath)
+Write-Output ("WINDOW_HANDLE={0}" -f $graphicalProcess.MainWindowHandle.ToInt64())
+Write-Output ("WINDOW_TITLE={0}" -f $graphicalProcess.MainWindowTitle)
+Write-Output "WINDOW_VISIBLE=True"

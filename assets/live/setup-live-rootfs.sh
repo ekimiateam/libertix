@@ -14,7 +14,7 @@ keep_apt_cache="${LIBERTIX_KEEP_APT_CACHE:-0}"
 packages=(
     linux-image-amd64 live-boot live-boot-initramfs-tools live-config
     live-config-systemd systemd-sysv initramfs-tools parted fdisk e2fsprogs
-    squashfs-tools dosfstools ntfs-3g python3-hivex python3-jsonschema sudo nano util-linux coreutils
+    squashfs-tools dosfstools ntfs-3g python3-hivex python3-jsonschema nano util-linux coreutils
     psmisc lsof xserver-xorg-core xserver-xorg-input-libinput xserver-xorg-video-vesa
     xserver-xorg-video-fbdev x11-xserver-utils python3-tk kbd
     fonts-dejavu-core fonts-noto-cjk imagemagick grub-common plymouth
@@ -55,10 +55,6 @@ ln -sf /dev/null /etc/systemd/system/serial-getty@ttyS0.service
 /usr/local/lib/libertix/configure-live-boot-splash
 update-initramfs -u -k all
 lsinitramfs /boot/initrd.img-* 2>/dev/null | grep -E "live" | head -5 || true
-
-useradd -m -s /bin/bash -G sudo user 2>/dev/null || true
-echo "user:live" | chpasswd
-echo "user ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 if [ "$keep_apt_cache" != "1" ]; then
     apt clean

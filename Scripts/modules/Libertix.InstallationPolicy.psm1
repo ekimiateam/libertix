@@ -49,11 +49,19 @@ function Get-LibertixInstallationPolicy {
             [int]$storage.maximumDirectFat32SizeGiB -or
         $alignmentBytes -le 0 -or
         ($alignmentBytes -band ($alignmentBytes - 1)) -ne 0 -or
+        [double]$storage.recommendedLinuxFractionOfFreeSpace -le 0 -or
+        [double]$storage.recommendedLinuxFractionOfFreeSpace -gt 1 -or
+        [int]$storage.maximumRecommendedLinuxSizeGiB -lt `
+            [int]$storage.minimumFinalSizeGiB -or
         [int]$memory.liveMinimumMiB -le 0 -or
         [int]$memory.windowsMinimumMiB -lt [int]$memory.liveMinimumMiB -or
         [int]$memory.lowMemoryThresholdMiB -le [int]$memory.windowsMinimumMiB -or
         [int]$policy.download.aria2MaximumConnections -le 0 -or
         [int]$policy.download.aria2MaximumConnections -gt 16 -or
+        [int]$policy.download.maximumAttempts -le 0 -or
+        [int]$policy.download.maximumAttempts -gt 20 -or
+        [int]$policy.download.retryBaseDelaySeconds -le 0 -or
+        [int]$policy.download.retryBaseDelaySeconds -gt 300 -or
         [string]::IsNullOrWhiteSpace([string]$account.reservedUsernamesSource) -or
         $reservedUsernames.Count -eq 0 -or
         @($reservedUsernames | Where-Object {

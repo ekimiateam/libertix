@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from app.distributions import DistributionProfile, load_distribution_profile
 
 
 @dataclass(frozen=True)
 class AutomationOptions:
-    apply: bool
     linux_username: str
     linux_password: str
     monitor_iso: bool
+    linux_size_gib: int = 100
     distribution: DistributionProfile = field(
         default_factory=lambda: load_distribution_profile("mint")
     )
@@ -18,12 +19,7 @@ class AutomationOptions:
     share_linux_files_in_windows: bool = True
     use_default_filepool: bool = False
     simulate_fog_clone_boot_entries: bool = False
-
-
-@dataclass(frozen=True)
-class Point:
-    x: int
-    y: int
+    first_boot: Literal["windows", "linux"] = "windows"
 
 
 @dataclass(frozen=True)
@@ -32,4 +28,3 @@ class WizardProfile:
     vm_name: str
     vm_host: str
     vmid: int
-    launch_only_label: str

@@ -124,7 +124,7 @@ namespace Libertix.Pages
                 using (var timeoutCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                     _installationCancellation.Token))
                 {
-                    timeoutCancellation.CancelAfter(TimeSpan.FromMinutes(5));
+                    timeoutCancellation.CancelAfter(WindowsProcessTimeouts.BootArtifactDownload);
                     using (var response = await SharedHttpClient.GetAsync(
                         url,
                         HttpCompletionOption.ResponseHeadersRead,

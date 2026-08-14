@@ -30,7 +30,8 @@ namespace Libertix.Pages
             {
                 string logRoot = Path.Combine(
                     WindowsSystemDrive,
-                    RuntimeNames.InstallationLogDirectory);
+                    RuntimeNames.InstallationLogDirectory,
+                    RuntimeNames.WindowsLogDirectory);
                 Directory.CreateDirectory(logRoot);
                 _persistentLogPath = Path.Combine(
                     logRoot,
@@ -57,8 +58,32 @@ namespace Libertix.Pages
 
         private void FinishInstallation(bool enableBackButton)
         {
+            if (UnattendedWorkflow.IsEnabled &&
+                !_unattendedRebootReady &&
+                !_unattendedFailurePublished)
+            {
+                _unattendedFailurePublished = true;
+                UnattendedWorkflow.TryPublishFailure(
+                    "installation-preparation-failed",
+                    "Installation preparation did not reach the verified reboot-ready state.");
+            }
             BackButton.IsEnabled = enableBackButton;
             SetInstallationRunning(false);
+        }
+
+        private async Task PublishUnattendedRebootReadyAsync()
+        {
+            _unattendedRebootReady = true;
+            FinishInstallation(enableBackButton: false);
+            try
+            {
+                await UnattendedWorkflow.PublishStageAndWaitAsync("reboot-ready");
+            }
+            catch
+            {
+                _unattendedRebootReady = false;
+                throw;
+            }
         }
 
         private void ThrowIfCancellationRequested()

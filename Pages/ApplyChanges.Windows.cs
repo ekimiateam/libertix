@@ -109,8 +109,8 @@ namespace Libertix.Pages
                         if (!await DownloadFileWithRetriesAsync(
                             setupUrl,
                             setupPath,
-                            attempts: 3,
-                            timeout: TimeSpan.FromMinutes(20),
+                            attempts: DownloadMaximumAttempts,
+                            timeout: WindowsProcessTimeouts.SupportArtifactDownload,
                             bufferSize: 81920,
                             progressStart: 5,
                             progressSpan: 3,
@@ -356,8 +356,8 @@ namespace Libertix.Pages
                         Path.Combine("Scripts", "libertix-post-install-result.ps1"),
                         "libertix-post-install-result.ps1");
                     CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "config", "Libertix.PostInstallTranslations.json"),
-                        Path.Combine("config", "Libertix.PostInstallTranslations.json"));
+                        Path.Combine("Resources", "Libertix.Translations.json"),
+                        Path.Combine("config", "Libertix.Translations.json"));
 
                     if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
                     {

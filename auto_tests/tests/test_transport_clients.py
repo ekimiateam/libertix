@@ -3,10 +3,13 @@ from __future__ import annotations
 import base64
 import gzip
 import re
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from vncdotool.client import KEYMAP
 
 import app.clients.ssh as ssh_module
 import app.clients.vnc as vnc_module
@@ -601,3 +604,41 @@ def test_vnc_rejects_invalid_addresses_before_connecting(address: str) -> None:
         VNCClient.vncdotool_address(address)
 
     assert caught.value.step == "vnc.address"
+
+
+def test_vncdotool_exposes_the_password_field_clear_key() -> None:
+    assert "bsp" in KEYMAP
+
+
+def test_vnc_connection_establishment_is_serialized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = 0
+    maximum_active = 0
+    state_lock = threading.Lock()
+
+    def fake_connect(address: str, *, timeout: float):
+        nonlocal active, maximum_active
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.02)
+        with state_lock:
+            active -= 1
+        return (address, timeout)
+
+    monkeypatch.setattr("app.clients.vnc.api.connect", fake_connect)
+    client = VNCClient(connect_timeout=7)
+    results: list[object] = []
+
+    threads = [
+        threading.Thread(target=lambda address=address: results.append(client.connect(address)))
+        for address in ("192.0.2.10:10", "192.0.2.10:11", "192.0.2.10:12")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert maximum_active == 1
+    assert len(results) == 3

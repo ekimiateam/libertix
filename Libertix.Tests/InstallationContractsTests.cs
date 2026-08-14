@@ -68,6 +68,7 @@ namespace Libertix.Tests
             {
                 Directory.CreateDirectory(Path.Combine(root, "Scripts", "modules"));
                 Directory.CreateDirectory(Path.Combine(root, "Tools", "aria2"));
+                Directory.CreateDirectory(Path.Combine(root, "Resources"));
                 Directory.CreateDirectory(Path.Combine(root, "Unrelated"));
                 string[] included =
                 {
@@ -76,7 +77,8 @@ namespace Libertix.Tests
                     "System.Text.Json.dll",
                     Path.Combine("Scripts", "libertix-uefi-install.ps1"),
                     Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
-                    Path.Combine("Tools", "aria2", "aria2c.exe")
+                    Path.Combine("Tools", "aria2", "aria2c.exe"),
+                    Path.Combine("Resources", "Libertix.Translations.json")
                 };
                 foreach (string relativePath in included)
                 {
@@ -264,10 +266,97 @@ namespace Libertix.Tests
                 options.UefiRecoveryStatePath);
         }
 
+        [DataTestMethod]
+        [DataRow("--unattended")]
+        [DataRow("--unattended-config")]
+        public void UnattendedStartupOptionsRequireThePairedArguments(string option)
+        {
+            string[] arguments = option == "--unattended"
+                ? new[] { option }
+                : new[] { option, @"C:\ProgramData\Libertix\Automation\missing.json" };
+
+            bool parsed = StartupOptions.TryParse(arguments, out _, out string error);
+
+            Assert.IsFalse(parsed);
+            StringAssert.Contains(error, "must be specified together");
+        }
+
+        [TestMethod]
+        public void UnattendedStartupOptionsLoadValidatedValuesAndConsumeTheSecretFile()
+        {
+            string configPath = WriteUnattendedConfig(
+                "{\"schemaVersion\":1,\"distribution\":\"zorin\"," +
+                "\"linuxSizeGiB\":120,\"linuxUsername\":\"test\"," +
+                "\"linuxPassword\":\"pass\",\"computerName\":\"test-linux\"," +
+                "\"shareWindowsFilesInLinux\":true," +
+                "\"shareLinuxFilesInWindows\":false}");
+
+            bool parsed = StartupOptions.TryParse(
+                new[] { "--unattended", "--unattended-config", configPath },
+                out StartupOptions options,
+                out string error);
+
+            Assert.IsTrue(parsed, error);
+            Assert.IsFalse(File.Exists(configPath));
+            Assert.AreEqual("zorin", options.Unattended.Distribution);
+            Assert.AreEqual(120, options.Unattended.LinuxSizeGiB);
+            Assert.AreEqual("test", options.Unattended.LinuxUsername);
+            Assert.AreEqual("pass", options.Unattended.LinuxPassword);
+            Assert.AreEqual("test-linux", options.Unattended.ComputerName);
+            Assert.IsTrue(options.Unattended.ShareWindowsFilesInLinux);
+            Assert.IsFalse(options.Unattended.ShareLinuxFilesInWindows);
+            StringAssert.EndsWith(options.Unattended.StatusPath, ".status.json");
+            StringAssert.EndsWith(options.Unattended.AcknowledgementPath, ".ack");
+        }
+
+        [TestMethod]
+        public void UnattendedStartupOptionsRejectAReservedLinuxAccountAndConsumeTheFile()
+        {
+            string configPath = WriteUnattendedConfig(
+                "{\"schemaVersion\":1,\"distribution\":\"mint\"," +
+                "\"linuxSizeGiB\":100,\"linuxUsername\":\"root\"," +
+                "\"linuxPassword\":\"pass\",\"computerName\":\"test-linux\"," +
+                "\"shareWindowsFilesInLinux\":true," +
+                "\"shareLinuxFilesInWindows\":true}");
+
+            bool parsed = StartupOptions.TryParse(
+                new[] { "--unattended", "--unattended-config", configPath },
+                out _,
+                out string error);
+
+            Assert.IsFalse(parsed);
+            StringAssert.Contains(error, "invalid or reserved");
+            Assert.IsFalse(File.Exists(configPath));
+        }
+
+        private static string WriteUnattendedConfig(string json)
+        {
+            string directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "Libertix",
+                "Automation");
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, "unattended-test-" + Guid.NewGuid() + ".json");
+            File.WriteAllText(path, json);
+            return path;
+        }
+
         [TestMethod]
         public void SharedInstallationPolicyDefinesTheAria2ConnectionLimit()
         {
             Assert.AreEqual(5, InstallationPolicy.Current.Download.Aria2MaximumConnections);
+            Assert.AreEqual(6, InstallationPolicy.Current.Download.MaximumAttempts);
+            Assert.AreEqual(10, InstallationPolicy.Current.Download.RetryBaseDelaySeconds);
+        }
+
+        [TestMethod]
+        public void SharedInstallationPolicyDefinesTheRecommendedLinuxSize()
+        {
+            Assert.AreEqual(
+                0.4,
+                InstallationSizePolicy.RecommendedLinuxFractionOfFreeSpace,
+                0.0001);
+            Assert.AreEqual(100, InstallationSizePolicy.MaximumRecommendedLinuxSizeGiB);
         }
 
         [TestMethod]
@@ -672,6 +761,55 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void ExecutionLedgerPersistsRollbackStartedAfterSuccessfulInstallation()
+        {
+            string directory = Path.Combine(
+                Path.GetTempPath(),
+                "libertix-ledger-success-rollback-" + Guid.NewGuid().ToString("N"));
+            string statePath = Path.Combine(directory, "installation-state.json");
+            try
+            {
+                InstallationStateMachine machine = InstallationStateMachine.Create(PlanId);
+                foreach (string step in new[]
+                {
+                    InstallationStep.WindowsPreflightVerified,
+                    InstallationStep.WindowsArtifactsVerified,
+                    InstallationStep.WindowsRecoveryArmed,
+                    InstallationStep.WindowsSystemVolumeShrunk,
+                    InstallationStep.WindowsInstallerPartitionCreated,
+                    InstallationStep.WindowsLiveMediaPrepared,
+                    InstallationStep.WindowsTemporaryBootPrepared,
+                    InstallationStep.LivePreflightVerified,
+                    InstallationStep.LiveInstallerPartitionExpanded,
+                    InstallationStep.LiveTargetFilesystemCreated,
+                    InstallationStep.LiveDistributionExtracted,
+                    InstallationStep.TargetSystemConfigured,
+                    InstallationStep.TargetBootloaderInstalled,
+                    InstallationStep.TargetInstallationVerified
+                })
+                {
+                    machine.StartStep(step);
+                    machine.CompleteStep(step);
+                }
+                machine.CompleteInstallation();
+                InstallationStateStore.WriteAtomic(statePath, machine.State);
+
+                InstallationExecutionLedger ledger =
+                    InstallationExecutionLedger.Open(statePath);
+                ledger.BeginRollback();
+
+                InstallationExecutionState persisted = InstallationStateStore.Read(statePath);
+                Assert.AreEqual(InstallationStatus.RollbackRunning, persisted.Status);
+                Assert.AreEqual(InstallationPhase.Rollback, persisted.Phase);
+            }
+            finally
+            {
+                if (Directory.Exists(directory))
+                    Directory.Delete(directory, true);
+            }
+        }
+
+        [TestMethod]
         public void ExecutionLedgerPersistsPrimaryAndMirroredTransitions()
         {
             string directory = Path.Combine(
@@ -869,9 +1007,8 @@ namespace Libertix.Tests
         [DataRow("0000100C", "ch", "fr", false)]
         [DataRow("0000040A", "es", "winkeys", false)]
         [DataRow("0000080A", "latam", "", false)]
-        [DataRow("00000411", "jp", "", false)]
         [DataRow("A000040C", "fr", "", true)]
-        [DataRow("not-a-klid", "jp", "", true)]
+        [DataRow("not-a-klid", "us", "", true)]
         public void WindowsKeyboardIdentifiersResolveToExpectedXkbConfiguration(
             string identifier,
             string expectedLayout,
@@ -880,7 +1017,7 @@ namespace Libertix.Tests
         {
             LinuxKeyboardConfiguration resolved = WindowsKeyboardLayout.ResolveIdentifier(
                 identifier,
-                "jp");
+                "us");
 
             Assert.AreEqual(expectedLayout, resolved.Layout);
             Assert.AreEqual(expectedVariant, resolved.Variant);

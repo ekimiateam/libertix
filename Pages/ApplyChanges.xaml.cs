@@ -37,6 +37,10 @@ namespace Libertix.Pages
         private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
         private static int Aria2MaxConnections =>
             InstallationPolicy.Current.Download.Aria2MaximumConnections;
+        private static int DownloadMaximumAttempts =>
+            InstallationPolicy.Current.Download.MaximumAttempts;
+        private static int DownloadRetryBaseDelaySeconds =>
+            InstallationPolicy.Current.Download.RetryBaseDelaySeconds;
         private static readonly string WindowsShareRoot =
             Path.Combine(WindowsSystemDrive, @"ProgramData\Libertix\WindowsShare");
         private static readonly Lazy<ArtifactCatalog> ArtifactCatalogHolder =
@@ -49,6 +53,8 @@ namespace Libertix.Pages
         private string _biosInstallerDriveLetter;
         private bool _logOutputAutoScroll = true;
         private bool _expandedLogOutputAutoScroll = true;
+        private bool _unattendedRebootReady;
+        private bool _unattendedFailurePublished;
 
         private string BiosInstallerRoot
         {
@@ -85,6 +91,7 @@ namespace Libertix.Pages
 
         private async void ApplyChanges_Loaded(object sender, RoutedEventArgs e)
         {
+            await UnattendedWorkflow.PublishStageAndWaitAsync("installation-started");
             await StartInstallationAsync();
         }
 
@@ -243,6 +250,7 @@ namespace Libertix.Pages
                         throw new InvalidOperationException(
                             $"shutdown.exe failed with rc={result.ExitCode}: {result.StandardError}".Trim());
                     }
+                    UnattendedWorkflow.Complete();
                 }
                 catch (Exception ex)
                 {

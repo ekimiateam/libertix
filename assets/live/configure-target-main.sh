@@ -113,20 +113,38 @@ configure_windows_readonly_request() {
 }
 
 configure_locale() {
-    local -a selected_locales=("$SYSTEM_LANG")
+    local supported_directory=/var/lib/locales/supported.d
+    local supported_backup=/var/lib/locales/.libertix-supported.d.backup
+    local generated_directory=/var/lib/locales/.libertix-generated-supported.d
+    local locale_status=0
 
     {
         printf '%s UTF-8\n' "$SYSTEM_LANG"
         if [ "$SYSTEM_LANG" != "en_US.UTF-8" ]; then
             printf '%s UTF-8\n' "en_US.UTF-8"
-            selected_locales+=("en_US.UTF-8")
         fi
     } > /etc/locale.gen
-    # Ubuntu language packs add broad locale lists under supported.d. Passing
-    # explicit locales prevents locale-gen from compiling every regional
-    # variant; Debian relies only on locale.gen and rejects positional locales.
-    if [ -d /var/lib/locales/supported.d ]; then
-        locale-gen "${selected_locales[@]}"
+
+    # Ubuntu language packs add broad generated lists under supported.d. The
+    # directory must remain installed for package maintenance, but hiding it
+    # during this one rebuild makes locale-gen compile only locale.gen. Debian
+    # has no supported.d directory and follows the same locale.gen contract.
+    if [ -d "$supported_directory" ]; then
+        [ ! -e "$supported_backup" ] || {
+            echo "Locale generation backup already exists: $supported_backup" >&2
+            return 1
+        }
+        [ ! -e "$generated_directory" ] || {
+            echo "Locale generation staging directory already exists: $generated_directory" >&2
+            return 1
+        }
+        mv "$supported_directory" "$supported_backup"
+        mkdir "$supported_directory"
+        locale-gen || locale_status=$?
+        mv "$supported_directory" "$generated_directory"
+        mv "$supported_backup" "$supported_directory"
+        rmdir "$generated_directory"
+        [ "$locale_status" -eq 0 ] || return "$locale_status"
     else
         locale-gen
     fi
@@ -202,6 +220,12 @@ EOF
     fi
 
     mkdir -p /etc/dconf/db/local.d
+    mkdir -p /etc/dconf/profile
+    if [ ! -f /etc/dconf/profile/user ]; then
+        printf '%s\n' 'user-db:user' 'system-db:local' > /etc/dconf/profile/user
+    elif ! grep -Fxq 'system-db:local' /etc/dconf/profile/user; then
+        printf '%s\n' 'system-db:local' >> /etc/dconf/profile/user
+    fi
     cat > /etc/dconf/db/local.d/00-keyboard <<EOF
 [org/gnome/libgnomekbd/keyboard]
 layouts=['$keyboard_source']

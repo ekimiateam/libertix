@@ -46,6 +46,18 @@ def verifier() -> ModuleType:
     return module
 
 
+def test_log_checksums_cover_all_archived_diagnostics(verifier: ModuleType, tmp_path: Path) -> None:
+    (tmp_path / "first-boot-verification.log").write_text("log\n", encoding="utf-8")
+    (tmp_path / "first-boot-verification.json").write_text("{}\n", encoding="utf-8")
+
+    verifier.update_log_checksums(tmp_path)
+
+    lines = (tmp_path / "SHA256SUMS").read_text(encoding="ascii").splitlines()
+    assert len(lines) == 2
+    assert any(line.endswith("  first-boot-verification.log") for line in lines)
+    assert any(line.endswith("  first-boot-verification.json") for line in lines)
+
+
 def test_uefi_boot_chain_requires_bootcurrent_to_select_libertix(
     verifier: ModuleType, tmp_path: Path
 ) -> None:
@@ -210,6 +222,73 @@ def test_installed_system_proof_rejects_failed_units(
             root_uuid,
             fstab_path=fstab,
             machine_id_path=machine_id,
+        )
+
+
+def test_localization_proof_requires_exact_plan_locale_and_keyboard(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    locale_file = tmp_path / "locale"
+    keyboard_file = tmp_path / "keyboard"
+    locale_file.write_text(
+        "LANG=fr_FR.UTF-8\nLC_ALL=fr_FR.UTF-8\nLANGUAGE=fr\n",
+        encoding="utf-8",
+    )
+    keyboard_file.write_text(
+        'XKBMODEL="pc105"\nXKBLAYOUT="fr"\nXKBVARIANT=""\nXKBOPTIONS=""\n',
+        encoding="utf-8",
+    )
+    plan = {
+        "locale": {
+            "languageCode": "fr",
+            "systemLanguage": "fr_FR.UTF-8",
+            "keyboardLayout": "fr",
+            "keyboardVariant": "",
+            "keyboardModel": "pc105",
+        }
+    }
+
+    proof = verifier.verify_localization(
+        plan,
+        locale_path=locale_file,
+        keyboard_path=keyboard_file,
+        available_locales="C\nC.utf8\nen_US.utf8\nfr_FR.utf8\nPOSIX\n",
+    )
+
+    assert proof["verified"] is True
+    assert proof["compiledUtf8Locales"] == ["en_us.utf8", "fr_fr.utf8"]
+    assert proof["desktopSource"] == "fr"
+
+
+def test_localization_proof_rejects_an_unrequested_compiled_locale(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    locale_file = tmp_path / "locale"
+    keyboard_file = tmp_path / "keyboard"
+    locale_file.write_text(
+        "LANG=fr_FR.UTF-8\nLC_ALL=fr_FR.UTF-8\nLANGUAGE=fr\n",
+        encoding="utf-8",
+    )
+    keyboard_file.write_text(
+        'XKBMODEL="pc105"\nXKBLAYOUT="fr"\nXKBVARIANT=""\nXKBOPTIONS=""\n',
+        encoding="utf-8",
+    )
+    plan = {
+        "locale": {
+            "languageCode": "fr",
+            "systemLanguage": "fr_FR.UTF-8",
+            "keyboardLayout": "fr",
+            "keyboardVariant": "",
+            "keyboardModel": "pc105",
+        }
+    }
+
+    with pytest.raises(verifier.VerificationError, match="compiled UTF-8 locales"):
+        verifier.verify_localization(
+            plan,
+            locale_path=locale_file,
+            keyboard_path=keyboard_file,
+            available_locales="C\nen_US.utf8\nfr_FR.utf8\nes_ES.utf8\n",
         )
 
 

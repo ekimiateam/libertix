@@ -5,7 +5,7 @@
 detect_libertix_language() {
     local value
 
-    if [[ "${LANGUAGE_CODE:-}" =~ ^(en|fr|es|ja)$ ]]; then
+    if [[ "${LANGUAGE_CODE:-}" =~ ^(en|fr|es)$ ]]; then
         printf '%s\n' "$LANGUAGE_CODE"
         return 0
     fi
@@ -14,7 +14,6 @@ detect_libertix_language() {
     case "$value" in
         fr*) printf 'fr\n' ;;
         es*) printf 'es\n' ;;
-        ja*) printf 'ja\n' ;;
         *) printf 'en\n' ;;
     esac
 }

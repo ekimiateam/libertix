@@ -17,53 +17,39 @@ namespace Libertix
 
         public static string CurrentLanguage { get; private set; } = "en";
 
-        private static readonly string[] AvailableLanguages = { "en", "fr", "es", "ja" };
+        private static readonly Lazy<TranslationCatalog> Translations =
+            new Lazy<TranslationCatalog>(LoadTranslations);
 
-        private static readonly Dictionary<string, string> LinuxLocales = new Dictionary<string, string>
-        {
-            { "en", "en_US.UTF-8" },
-            { "fr", "fr_FR.UTF-8" },
-            { "es", "es_ES.UTF-8" },
-            { "ja", "ja_JP.UTF-8" }
-        };
-
-        private static readonly Dictionary<string, string> KeyboardLayouts = new Dictionary<string, string>
-        {
-            { "en", "us" },
-            { "fr", "fr" },
-            { "es", "es" },
-            { "ja", "jp" }
-        };
+        private static ResourceDictionary _languageDictionary;
 
         private static readonly Lazy<IReadOnlyDictionary<string, string>> WindowsToIanaZones =
             new Lazy<IReadOnlyDictionary<string, string>>(LoadWindowsToIanaZones);
 
         public static void SetLanguage(string cultureName)
         {
-            cultureName = AvailableLanguages.FirstOrDefault(
+            cultureName = Translations.Value.SupportedLanguages.FirstOrDefault(
                 language => string.Equals(
                     language,
                     cultureName,
                     StringComparison.OrdinalIgnoreCase)) ?? "en";
             CurrentLanguage = cultureName;
 
-            List<ResourceDictionary> oldDictionaries = Application.Current.Resources
-                .MergedDictionaries
-                .Where(dict =>
-                    dict.Source != null &&
-                    dict.Source.OriginalString.IndexOf(
-                        "Resources/Lang/Strings.",
-                        StringComparison.OrdinalIgnoreCase) >= 0)
-                .ToList();
+            if (_languageDictionary != null)
+                Application.Current.Resources.MergedDictionaries.Remove(_languageDictionary);
 
-            foreach (ResourceDictionary oldDictionary in oldDictionaries)
-                Application.Current.Resources.MergedDictionaries.Remove(oldDictionary);
-
-            var newDict = new ResourceDictionary
+            TranslationLanguage english = Translations.Value.Languages["en"];
+            TranslationLanguage selected = Translations.Value.Languages[cultureName];
+            var dictionary = new ResourceDictionary();
+            foreach (KeyValuePair<string, string> entry in english.Wpf)
             {
-                Source = new Uri($"pack://application:,,,/Libertix;component/Resources/Lang/Strings.{cultureName}.xaml", UriKind.Absolute)
-            };
-            Application.Current.Resources.MergedDictionaries.Add(newDict);
+                dictionary[entry.Key] = selected.Wpf.TryGetValue(
+                    entry.Key,
+                    out string value)
+                    ? value
+                    : entry.Value;
+            }
+            _languageDictionary = dictionary;
+            Application.Current.Resources.MergedDictionaries.Add(dictionary);
 
             LanguageChanged?.Invoke(null, EventArgs.Empty);
         }
@@ -78,7 +64,7 @@ namespace Libertix
                 var culture = CultureInfo.CurrentUICulture;
                 string twoLetterCode = culture.TwoLetterISOLanguageName.ToLowerInvariant();
 
-                foreach (var lang in AvailableLanguages)
+                foreach (string lang in Translations.Value.SupportedLanguages)
                 {
                     if (lang == twoLetterCode)
                         return lang;
@@ -94,29 +80,15 @@ namespace Libertix
 
         public static string GetBootstrapString(string key, string fallback)
         {
-            string path = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                "Scripts",
-                "config",
-                "Libertix.CompatibilityMessages.json");
             try
             {
-                using (JsonDocument document = JsonDocument.Parse(File.ReadAllText(path)))
-                {
-                    JsonElement section = document.RootElement.GetProperty("bootstrapMessages");
-                    string language = GetWindowsLanguageCode();
-                    if (!section.TryGetProperty(language, out JsonElement messages))
-                        messages = section.GetProperty("en");
-                    if (!messages.TryGetProperty(key, out JsonElement value))
-                    {
-                        if (language == "en" ||
-                            !section.GetProperty("en").TryGetProperty(key, out value))
-                            return fallback;
-                    }
-                    string message = value.GetString();
-                    if (!string.IsNullOrWhiteSpace(message))
-                        return message;
-                }
+                string language = GetWindowsLanguageCode();
+                TranslationLanguage selected = Translations.Value.Languages[language];
+                TranslationLanguage english = Translations.Value.Languages["en"];
+                if (!selected.Compatibility.BootstrapMessages.TryGetValue(key, out string message))
+                    english.Compatibility.BootstrapMessages.TryGetValue(key, out message);
+                if (!string.IsNullOrWhiteSpace(message))
+                    return message;
             }
             catch (IOException)
             {
@@ -193,7 +165,7 @@ namespace Libertix
         /// </summary>
         public static string GetLinuxLocale()
         {
-            return LinuxLocales.TryGetValue(CurrentLanguage, out string locale) ? locale : "en_US.UTF-8";
+            return GetCurrentLanguage().LinuxLocale;
         }
 
         /// <summary>
@@ -201,7 +173,27 @@ namespace Libertix
         /// </summary>
         public static string GetKeyboardLayout()
         {
-            return KeyboardLayouts.TryGetValue(CurrentLanguage, out string layout) ? layout : "us";
+            return GetCurrentLanguage().KeyboardLayout;
+        }
+
+        public static IReadOnlyList<KeyValuePair<string, string>> GetAvailableLanguages()
+        {
+            return Translations.Value.SupportedLanguages
+                .Select(language => new KeyValuePair<string, string>(
+                    language,
+                    Translations.Value.Languages[language].DisplayName))
+                .ToList();
+        }
+
+        public static bool IsLanguageSupported(string language)
+        {
+            return Translations.Value.SupportedLanguages.Any(candidate =>
+                string.Equals(candidate, language, StringComparison.Ordinal));
+        }
+
+        public static string GetSupportedLanguageList()
+        {
+            return string.Join(", ", Translations.Value.SupportedLanguages);
         }
 
         /// <summary>
@@ -218,6 +210,80 @@ namespace Libertix
         public static string GetString(string key, string englishFallback)
         {
             return Application.Current.TryFindResource(key) as string ?? englishFallback;
+        }
+
+        private static TranslationLanguage GetCurrentLanguage()
+        {
+            return Translations.Value.Languages.TryGetValue(
+                CurrentLanguage,
+                out TranslationLanguage language)
+                ? language
+                : Translations.Value.Languages["en"];
+        }
+
+        private static TranslationCatalog LoadTranslations()
+        {
+            string path = Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "Resources",
+                "Libertix.Translations.json");
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+            TranslationCatalog catalogue = JsonSerializer.Deserialize<TranslationCatalog>(
+                File.ReadAllText(path),
+                options);
+            if (catalogue?.SupportedLanguages == null ||
+                catalogue.Languages == null ||
+                catalogue.SupportedLanguages.Count == 0 ||
+                !catalogue.Languages.ContainsKey("en"))
+            {
+                throw new InvalidOperationException(
+                    "The Libertix translation catalogue is incomplete.");
+            }
+
+            foreach (string language in catalogue.SupportedLanguages)
+            {
+                if (!catalogue.Languages.TryGetValue(
+                        language,
+                        out TranslationLanguage values) ||
+                    string.IsNullOrWhiteSpace(values.DisplayName) ||
+                    string.IsNullOrWhiteSpace(values.LinuxLocale) ||
+                    string.IsNullOrWhiteSpace(values.KeyboardLayout) ||
+                    values.Wpf == null ||
+                    values.Compatibility?.BootstrapMessages == null)
+                {
+                    throw new InvalidOperationException(
+                        $"The Libertix translation catalogue is incomplete for '{language}'.");
+                }
+            }
+            return catalogue;
+        }
+
+        private sealed class TranslationCatalog
+        {
+            public List<string> SupportedLanguages { get; set; }
+
+            public Dictionary<string, TranslationLanguage> Languages { get; set; }
+        }
+
+        private sealed class TranslationLanguage
+        {
+            public string DisplayName { get; set; }
+
+            public string LinuxLocale { get; set; }
+
+            public string KeyboardLayout { get; set; }
+
+            public Dictionary<string, string> Wpf { get; set; }
+
+            public CompatibilityTranslations Compatibility { get; set; }
+        }
+
+        private sealed class CompatibilityTranslations
+        {
+            public Dictionary<string, string> BootstrapMessages { get; set; }
         }
     }
 }

@@ -5,6 +5,8 @@
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
 
 function Assert-Condition {
     param(
@@ -47,7 +49,7 @@ function Get-LibertixRecoveryTasks {
 function Get-LibertixRecoverySession {
     param([Parameter(Mandatory = $true)][string]$ExpectedFirmware)
 
-    $archivedPlanPath = "C:\LibertixInstallLogs\latest\installation-plan.json"
+    $archivedPlanPath = "C:\LibertixInstallLogs\Linux\latest\installation-plan.json"
     Assert-Condition (Test-Path -LiteralPath $archivedPlanPath -PathType Leaf) `
         "The archived installation plan is missing for recovery verification."
     $archivedPlan = Get-Content -LiteralPath $archivedPlanPath -Raw -Encoding UTF8 |
@@ -76,6 +78,45 @@ function Get-LibertixRecoverySession {
     Assert-Condition ($matchingSessions.Count -eq 1) `
         "The permanent recovery session for the current installation is absent or ambiguous."
     return $matchingSessions[0]
+}
+
+function Get-PostInstallResultUiProcesses {
+    param(
+        [Parameter(Mandatory = $true)]$Session,
+        [Parameter(Mandatory = $true)][string]$ExpectedFirmware
+    )
+
+    $resultStatePath = Join-Path $Session.Root "post-install-verification.json"
+    $resultStatePattern = [regex]::Escape($resultStatePath)
+    $recoveryStatePath = Join-Path $Session.Root "state.json"
+    $recoveryStatePattern = [regex]::Escape($recoveryStatePath)
+    $interactiveSessionIds = @(
+        Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" |
+            ForEach-Object { [int]$_.SessionId }
+    )
+    $resultProcesses = @()
+    foreach ($process in @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'")) {
+        $commandLine = [string]$process.CommandLine
+        $matchesCommand = if ($ExpectedFirmware -eq "uefi") {
+            $commandLine -match '(?i)libertix-uefi-recovery-agent\.ps1' -and
+            $commandLine -match '(?i)-Action\s+Prompt(?:\s|$)' -and
+            $commandLine -match $recoveryStatePattern
+        } else {
+            $commandLine -match '(?i)libertix-post-install-result\.ps1' -and
+            $commandLine -match $resultStatePattern
+        }
+        if (-not $matchesCommand -or
+            $interactiveSessionIds -notcontains [int]$process.SessionId) {
+            continue
+        }
+
+        $resultProcesses += [pscustomobject]@{
+            ProcessId = [int]$process.ProcessId
+            SessionId = [int]$process.SessionId
+            CommandLine = $commandLine
+        }
+    }
+    return @($resultProcesses)
 }
 
 function Assert-LibertixPostInstallResult {
@@ -148,6 +189,13 @@ function Assert-LibertixPostInstallResult {
         [bool]$evidence.system.dpkgAuditClean -and
         [int]$evidence.system.failedSystemdUnits -eq 0
     ) "The first Linux boot did not prove a healthy installed system."
+    Assert-Condition (
+        [bool]$evidence.localization.verified -and
+        [string]$evidence.localization.languageCode -eq [string]$Session.Plan.locale.languageCode -and
+        [string]$evidence.localization.systemLocale -eq [string]$Session.Plan.locale.systemLanguage -and
+        [string]$evidence.localization.keyboardLayout -eq [string]$Session.Plan.locale.keyboardLayout -and
+        [string]$evidence.localization.keyboardVariant -eq [string]$Session.Plan.locale.keyboardVariant
+    ) "The first Linux boot did not prove the planned locale and keyboard configuration."
     if ($ExpectedFirmware -eq "uefi") {
         Assert-Condition ([string]$evidence.grub.bootChain.type -eq "uefi-boot-current") `
             "The UEFI BootCurrent proof is missing."
@@ -163,7 +211,7 @@ function Assert-LibertixPostInstallResult {
 }
 
 function Get-ExpectedLinuxMountIdentity {
-    $planPath = "C:\LibertixInstallLogs\latest\installation-plan.json"
+    $planPath = "C:\LibertixInstallLogs\Linux\latest\installation-plan.json"
     Assert-Condition (Test-Path -LiteralPath $planPath -PathType Leaf) `
         "The archived installation plan is missing for Linux mount verification."
     $plan = Get-Content -LiteralPath $planPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -601,7 +649,7 @@ try {
             Assert-Condition ($partitions.Count -ge 3) "The system disk has too few partitions after installation."
         }
         "partition_geometry" {
-            $planPath = "C:\LibertixInstallLogs\latest\installation-plan.json"
+            $planPath = "C:\LibertixInstallLogs\Linux\latest\installation-plan.json"
             Assert-Condition (Test-Path -LiteralPath $planPath -PathType Leaf) `
                 "The archived installation plan is missing."
             $plan = Get-Content -LiteralPath $planPath -Raw -ErrorAction Stop | ConvertFrom-Json
@@ -756,15 +804,68 @@ try {
                 Format-Table Name, Type, IPAddress -AutoSize
         }
         "locale" {
+            $session = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $plannedLocale = $session.Plan.locale
             $systemLocale = Get-WinSystemLocale
             $languages = @(Get-WinUserLanguageList)
+            $uiCulture = Get-UICulture
             $timeZone = Get-TimeZone
+            $inputMethodTips = @(
+                $languages |
+                    ForEach-Object { @($_.InputMethodTips) } |
+                    ForEach-Object { [string]$_ }
+            )
+            $supportedUiLanguage = switch ($uiCulture.TwoLetterISOLanguageName.ToLowerInvariant()) {
+                { $_ -in @("en", "fr", "es") } { $_; break }
+                default { "en" }
+            }
+            $exactKeyboardMappings = @{
+                "00000409" = "us|"; "00010409" = "us|dvorak"; "00020409" = "us|intl"
+                "00030409" = "us|dvorak-l"; "00040409" = "us|dvorak-r"; "00000809" = "gb|"
+                "0000040C" = "fr|"; "0000080C" = "be|"; "00000C0C" = "ca|fr-legacy"
+                "00001009" = "ca|"; "00011009" = "ca|multix"; "0000100C" = "ch|fr"
+                "0000040A" = "es|winkeys"; "0000080A" = "latam|"
+            }
+            $languageKeyboardMappings = @{
+                "0409" = "us|"; "0809" = "gb|"; "040C" = "fr|"; "080C" = "be|"
+                "0C0C" = "ca|fr-legacy"; "1009" = "ca|"; "1109" = "ca|multix"
+                "100C" = "ch|fr"; "040A" = "es|winkeys"; "080A" = "latam|"
+            }
+            $uiKeyboardFallbacks = @{ "en" = "us|"; "fr" = "fr|"; "es" = "es|" }
+            $windowsKeyboardMappings = @(
+                foreach ($tip in $inputMethodTips) {
+                    $identifier = (($tip -split ":")[-1]).ToUpperInvariant()
+                    if ($exactKeyboardMappings.ContainsKey($identifier)) {
+                        $exactKeyboardMappings[$identifier]
+                    } elseif ($identifier.Length -eq 8 -and
+                        $languageKeyboardMappings.ContainsKey($identifier.Substring(4))) {
+                        $languageKeyboardMappings[$identifier.Substring(4)]
+                    } else {
+                        $uiKeyboardFallbacks[$supportedUiLanguage]
+                    }
+                }
+            )
+            $plannedKeyboard = "{0}|{1}" -f `
+                [string]$plannedLocale.keyboardLayout, [string]$plannedLocale.keyboardVariant
             Write-Output ("SYSTEM_LOCALE={0}" -f $systemLocale.Name)
+            Write-Output ("UI_CULTURE={0}" -f $uiCulture.Name)
             Write-Output ("LANGUAGES={0}" -f (($languages.LanguageTag) -join ","))
+            Write-Output ("INPUT_METHOD_TIPS={0}" -f ($inputMethodTips -join ","))
             Write-Output ("TIME_ZONE={0}" -f $timeZone.Id)
             Assert-Condition (-not [string]::IsNullOrWhiteSpace($systemLocale.Name)) "Windows has no system locale."
             Assert-Condition ($languages.Count -ge 1) "Windows has no user language."
+            Assert-Condition ($inputMethodTips.Count -ge 1) "Windows has no configured input method."
             Assert-Condition (-not [string]::IsNullOrWhiteSpace($timeZone.Id)) "Windows has no time zone."
+            Assert-Condition (
+                [string]$plannedLocale.languageCode -eq $supportedUiLanguage
+            ) "The Linux interface language differs from the Windows UI language selected by unattended mode."
+            Assert-Condition (
+                -not [string]::IsNullOrWhiteSpace([string]$plannedLocale.keyboardLayout)
+            ) "The installation plan has no Linux keyboard layout."
+            Assert-Condition (
+                $windowsKeyboardMappings -contains $plannedKeyboard
+            ) "The planned Linux keyboard does not match any configured Windows input method."
         }
         "ssh_service" {
             $service = Get-Service -Name "sshd" -ErrorAction Stop
@@ -994,35 +1095,47 @@ try {
         "post_install_result_ui" {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
-            $resultStatePath = Join-Path $session.Root "post-install-verification.json"
-            $resultStatePattern = [regex]::Escape($resultStatePath)
-            $recoveryStatePath = Join-Path $session.Root "state.json"
-            $recoveryStatePattern = [regex]::Escape($recoveryStatePath)
             $expectedFirmware = [string]$config.expected_firmware
             $deadline = [DateTime]::UtcNow.AddMinutes(2)
             do {
-                $uiProcesses = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-                    Where-Object {
-                        $commandLine = [string]$_.CommandLine
-                        if ($expectedFirmware -eq "uefi") {
-                            return (
-                                $commandLine -match '(?i)libertix-uefi-recovery-agent\.ps1' -and
-                                $commandLine -match '(?i)-Action\s+Prompt(?:\s|$)' -and
-                                $commandLine -match $recoveryStatePattern
-                            )
-                        }
-                        return (
-                            $commandLine -match '(?i)libertix-post-install-result\.ps1' -and
-                            $commandLine -match $resultStatePattern
-                        )
-                    })
-                if ($uiProcesses.Count -eq 1) { break }
+                $uiProcesses = @(
+                    Get-PostInstallResultUiProcesses `
+                        -Session $session `
+                        -ExpectedFirmware $expectedFirmware
+                )
+            if ($uiProcesses.Count -eq 1) { break }
                 if ([DateTime]::UtcNow -ge $deadline) {
                     throw "The interactive Windows post-install result window is not running."
                 }
                 Start-Sleep -Seconds 2
             } while ($true)
-            $uiProcesses | Format-List ProcessId, CommandLine
+            $uiProcesses | Format-List ProcessId, SessionId, CommandLine
+            Write-Output ("POST_INSTALL_RESULT_UI_PROCESS_ID={0}" -f `
+                [int]$uiProcesses[0].ProcessId)
+        }
+        "post_install_result_ui_dismissed" {
+            $session = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $expectedFirmware = [string]$config.expected_firmware
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            do {
+                $uiProcesses = @(
+                    Get-PostInstallResultUiProcesses `
+                        -Session $session `
+                        -ExpectedFirmware $expectedFirmware
+                )
+                $promptTasks = @(Get-LibertixRecoveryTasks | Where-Object {
+                    $_.TaskName -match "Prompt"
+                })
+                if ($uiProcesses.Count -eq 0 -and $promptTasks.Count -eq 0) {
+                    break
+                }
+                if ([DateTime]::UtcNow -ge $deadline) {
+                    throw "The Windows post-install result window or its prompt task is still active."
+                }
+                Start-Sleep -Seconds 1
+            } while ($true)
+            Write-Output "POST_INSTALL_RESULT_UI_DISMISSED=True"
         }
         "sharing_tasks" {
             $mountTasks = @(Get-ScheduledTask -TaskName "LibertixLinuxReadOnly" -ErrorAction SilentlyContinue)

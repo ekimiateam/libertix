@@ -357,8 +357,8 @@ function Assert-LibertixInstallationPlan {
     $locale = Assert-LibertixPlanProperty -Object $Plan -Name "locale" -Path "locale"
     Assert-LibertixExactPlanProperties -Object $locale -Path "locale" -PropertySet "locale"
     $languageCode = [string](Assert-LibertixPlanProperty -Object $locale -Name "languageCode" -Path "locale.languageCode")
-    if ($languageCode -notin @("en", "fr", "es", "ja")) {
-        throw "Installation plan field locale.languageCode must be one of: en, fr, es, ja."
+    if ($languageCode -notin @("en", "fr", "es")) {
+        throw "Installation plan field locale.languageCode must be one of: en, fr, es."
     }
     foreach ($name in @("systemLanguage", "keyboardLayout", "keyboardModel", "timezone")) {
         $value = [string](Assert-LibertixPlanProperty -Object $locale -Name $name -Path "locale.$name")

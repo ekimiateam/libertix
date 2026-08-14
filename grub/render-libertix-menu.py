@@ -8,12 +8,21 @@ import json
 import re
 from pathlib import Path
 
-MENU_LABELS = {
-    "en": {"shutdown": "Shutdown", "advanced": "Advanced options"},
-    "fr": {"shutdown": "Éteindre", "advanced": "Options avancées"},
-    "es": {"shutdown": "Apagar", "advanced": "Opciones avanzadas"},
-    "ja": {"shutdown": "シャットダウン", "advanced": "詳細オプション"},
-}
+
+def resolve_translation_catalogue_path() -> Path:
+    adjacent = Path(__file__).with_name("Libertix.Translations.json")
+    source_tree = Path(__file__).resolve().parents[1] / "Resources/Libertix.Translations.json"
+    return adjacent if adjacent.is_file() else source_tree
+
+
+TRANSLATION_CATALOGUE_PATH = resolve_translation_catalogue_path()
+
+
+def load_grub_labels(language: object) -> dict[str, str]:
+    catalogue = json.loads(TRANSLATION_CATALOGUE_PATH.read_text(encoding="utf-8"))
+    if language not in catalogue["supportedLanguages"]:
+        raise ValueError("installation plan has an unsupported GRUB language")
+    return catalogue["languages"][language]["grub"]
 
 
 def read_lines(path: Path) -> list[str]:
@@ -68,9 +77,7 @@ def read_distribution_presentation(path: Path) -> tuple[str, str, dict[str, str]
     if not isinstance(locale, dict):
         raise ValueError("installation plan has no locale object")
     language = locale.get("languageCode")
-    if language not in MENU_LABELS:
-        raise ValueError("installation plan has an unsupported GRUB language")
-    return display_name, icon, MENU_LABELS[language]
+    return display_name, icon, load_grub_labels(language)
 
 
 def main() -> int:

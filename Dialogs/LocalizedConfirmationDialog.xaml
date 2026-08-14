@@ -28,12 +28,14 @@
 
             <Button x:Name="NoButton"
                     Grid.Column="0"
+                    AutomationProperties.AutomationId="LocalizedConfirmationNoButton"
                     Height="48"
                     IsCancel="True"
                     Style="{StaticResource ModernButton}"
                     Click="NoButton_Click" />
             <Button x:Name="YesButton"
                     Grid.Column="2"
+                    AutomationProperties.AutomationId="LocalizedConfirmationYesButton"
                     Height="48"
                     IsDefault="True"
                     Background="{StaticResource AccentColor}"

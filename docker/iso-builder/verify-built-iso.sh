@@ -76,8 +76,8 @@ compare_rootfs_file usr/local/lib/libertix/libertix-i18n.py \
     /workspace/assets/live/libertix-i18n.py
 compare_rootfs_file usr/local/lib/libertix/libertix-i18n.sh \
     /workspace/assets/live/libertix-i18n.sh
-compare_rootfs_file usr/local/lib/libertix/libertix-translations.json \
-    /workspace/assets/live/libertix-translations.json
+compare_rootfs_file usr/local/lib/libertix/Libertix.Translations.json \
+    /workspace/Resources/Libertix.Translations.json
 compare_rootfs_file usr/local/lib/libertix/libertix-target-common.sh \
     /workspace/assets/live/libertix-target-common.sh
 compare_rootfs_file usr/local/lib/libertix/configure-development-access.sh \

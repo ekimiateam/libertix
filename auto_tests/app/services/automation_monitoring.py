@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Literal
+
+from PIL import Image
 
 from app.config import VMConfig
 from app.distributions import DistributionProfile, load_distribution_profile
 from app.errors import WorkflowError
-from app.services.automation_types import Point
 from app.services.common import ResultBuilder
 
 logger = logging.getLogger(__name__)
@@ -19,8 +21,11 @@ FINAL_BOOT_MENU_LABELS = (
     ("shutdown", "advanced options"),
     ("éteindre", "options avancées"),
     ("apagar", "opciones avanzadas"),
-    ("シャットダウン", "詳細オプション"),
 )
+REBOOT_RECHECK_INTERVAL_SECONDS = 2.0
+REBOOT_DIALOG_DELAY_SECONDS = 0.75
+REBOOT_ACCEPT_DELAY_SECONDS = 1.0
+UNCHANGED_CAPTURE_ANALYSIS_INTERVAL = 4
 
 
 class InstallationMonitoringMixin:
@@ -32,6 +37,8 @@ class InstallationMonitoringMixin:
         result: ResultBuilder,
         firmware: Literal["bios", "uefi"],
         distribution: DistributionProfile | None = None,
+        *,
+        reboot_requested: bool = False,
     ) -> Literal["boot-menu", "linux-desktop"]:
         """Monitor Windows preparation and the following live boot as one transaction."""
 
@@ -39,16 +46,68 @@ class InstallationMonitoringMixin:
         deadline = time.monotonic() + self.settings.automation_monitor_timeout_seconds
         attempt = 0
         last_context: dict[str, object] | None = None
-        reboot_attempts = 0
+        reboot_attempts = 1 if reboot_requested else 0
+        previous_signature: tuple[int, ...] | None = None
+        unchanged_captures = 0
+        vision_disabled = False
+        monitor_delay_seconds = self.settings.automation_monitor_interval_seconds
         while time.monotonic() < deadline:
             attempt += 1
-            time.sleep(self.settings.automation_monitor_interval_seconds)
+            time.sleep(monitor_delay_seconds)
+            monitor_delay_seconds = self.settings.automation_monitor_interval_seconds
             capture = self._capture_with_name(vm, f"{firmware}-monitor-{attempt:03d}")
+            if self._installed_grub_theme_visible(capture):
+                result.ok(
+                    "automation.installed_boot_menu_seen",
+                    f"Installed {firmware.upper()} boot menu confirmed by local theme detection",
+                    target=vm.vnc,
+                    vm=vm.name,
+                    capture=str(capture),
+                    proof_source="local-theme-colors",
+                )
+                return "boot-menu"
+            signature = self._capture_signature(capture)
+            if signature is not None and signature == previous_signature:
+                unchanged_captures += 1
+                if unchanged_captures % UNCHANGED_CAPTURE_ANALYSIS_INTERVAL != 0:
+                    result.ok(
+                        "automation.monitor_unchanged",
+                        f"{firmware.upper()} capture is unchanged; AI analysis skipped",
+                        target=vm.vnc,
+                        vm=vm.name,
+                        capture=str(capture),
+                        unchanged_count=unchanged_captures,
+                    )
+                    continue
+            else:
+                previous_signature = signature
+                unchanged_captures = 0
+            if vision_disabled:
+                result.ok(
+                    "automation.monitor_without_vision",
+                    f"{firmware.upper()} installation remains under deterministic observation",
+                    target=vm.vnc,
+                    vm=vm.name,
+                    capture=str(capture),
+                )
+                continue
             try:
                 verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
             except WorkflowError as exc:
-                exc.details.update({"vm": vm.name, "target": vm.vnc, "capture": str(capture)})
-                raise
+                http_status = exc.details.get("http_status")
+                if http_status in (401, 402, 403):
+                    vision_disabled = True
+                result.ok(
+                    "automation.monitor_vision_unavailable",
+                    f"{firmware.upper()} vision observation is unavailable; "
+                    "deterministic monitoring continues",
+                    target=vm.vnc,
+                    vm=vm.name,
+                    capture=str(capture),
+                    http_status=http_status,
+                    vision_disabled=vision_disabled,
+                )
+                continue
             context = {
                 "target": vm.vnc,
                 "vm": vm.name,
@@ -105,7 +164,7 @@ class InstallationMonitoringMixin:
             ):
                 if reboot_attempts >= 3:
                     raise WorkflowError(
-                        "automation.reboot_click",
+                        "automation.reboot_request",
                         "The Windows restart prompt remained visible after three attempts",
                         details=context,
                     )
@@ -122,8 +181,14 @@ class InstallationMonitoringMixin:
                     ),
                     **context,
                 )
-                self._click_reboot_after_preparation(vm, result)
+                self._request_reboot_after_preparation(vm, result)
                 reboot_attempts += 1
+                previous_signature = None
+                unchanged_captures = 0
+                monitor_delay_seconds = min(
+                    self.settings.automation_monitor_interval_seconds,
+                    REBOOT_RECHECK_INTERVAL_SECONDS,
+                )
                 continue
             # Some vision models put GRUB OCR in the summary instead of
             # visible_text. Inspect both, but accept only the complete final
@@ -156,6 +221,22 @@ class InstallationMonitoringMixin:
         )
 
     @staticmethod
+    def _capture_signature(capture: Path) -> tuple[int, ...] | None:
+        try:
+            with Image.open(capture) as screenshot:
+                grayscale = screenshot.convert("L").resize(
+                    (32, 24),
+                    Image.Resampling.BILINEAR,
+                )
+                flattened_data = getattr(grayscale, "get_flattened_data", None)
+                pixel_values = (
+                    flattened_data() if flattened_data is not None else grayscale.getdata()
+                )
+                return tuple(value // 16 for value in pixel_values)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
     def _rollback_in_progress(content: str) -> bool:
         """Keep monitoring while the installer is still restoring Windows."""
 
@@ -167,7 +248,6 @@ class InstallationMonitoringMixin:
                 "running automatic revert",
                 "restauration de windows",
                 "restaurando windows",
-                "windows を復元しています",
             )
         )
 
@@ -180,7 +260,6 @@ class InstallationMonitoringMixin:
             "rollback incomplete",
             "rollback incomplet",
             "restauración incompleta",
-            "ロールバックが完了していません",
         )
         if any(marker in text for marker in incomplete_markers):
             return "incomplete"
@@ -190,12 +269,10 @@ class InstallationMonitoringMixin:
             "windows a été restauré",
             "windows a ete restaure",
             "windows ha sido restaurado",
-            "windows を復元しました",
             "windows rollback completed and verified",
             "rollback windows terminé et vérifié",
             "rollback windows termine et verifie",
             "la restauración de windows terminó y fue verificada",
-            "windows のロールバックと検証が完了しました",
         )
         if any(marker in text for marker in verified_markers):
             return "verified"
@@ -308,50 +385,25 @@ class InstallationMonitoringMixin:
             marker in text for marker in desktop_markers
         )
 
-    def _click_reboot_after_preparation(self, vm: VMConfig, result: ResultBuilder) -> None:
+    def _request_reboot_after_preparation(self, vm: VMConfig, result: ResultBuilder) -> None:
         client = None
         try:
             client = self.vnc.connect(vm.vnc)
             self._capture_from_client(client, vm, "reboot-ready", result)
-            # Small delays keep the click sequence visible and avoid racing the
-            # confirmation dialog after the LLM declares the wizard complete.
-            time.sleep(2)
-            if vm.screen_width >= 1200:
-                reboot_point = Point(
-                    round(1045 * vm.screen_width / 1280),
-                    round(643 * vm.screen_height / 800),
-                )
-                confirm_point = Point(
-                    round(756 * vm.screen_width / 1280),
-                    round(427 * vm.screen_height / 800),
-                )
-            else:
-                reboot_point = Point(
-                    round(919 * vm.screen_width / 1024),
-                    round(628 * vm.screen_height / 768),
-                )
-                confirm_point = Point(
-                    round(640 * vm.screen_width / 1024),
-                    round(427 * vm.screen_height / 768),
-                )
-            # The confirmation is a fixed-width WPF dialog rendered by
-            # Libertix, not a native MessageBox. Click the center of its
-            # localized affirmative button at each validated VM resolution.
-            self._click_absolute(client, vm, reboot_point, 1.0)
+            self._press_key(client, "enter", REBOOT_DIALOG_DELAY_SECONDS)
             self._capture_from_client(client, vm, "reboot-confirm", result)
-            time.sleep(1)
-            self._click_absolute(client, vm, confirm_point, 3.0)
+            self._press_key(client, "enter", REBOOT_ACCEPT_DELAY_SECONDS)
             self._capture_from_client(client, vm, "reboot-accepted", result)
             result.ok(
-                "automation.reboot_clicked",
-                "Reboot command sent after final LLM verdict",
+                "automation.reboot_requested",
+                "Reboot requested from the focused default controls after the reboot-ready stage",
                 target=vm.vnc,
                 vm=vm.name,
             )
         except Exception as exc:
             raise WorkflowError(
-                "automation.reboot_click",
-                "Failed to click the final reboot control",
+                "automation.reboot_request",
+                "Failed to request reboot from the final controls",
                 details={"vm": vm.name, "target": vm.vnc, "error": str(exc)},
             ) from exc
         finally:
