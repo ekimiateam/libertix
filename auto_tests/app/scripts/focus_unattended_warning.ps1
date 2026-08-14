@@ -24,6 +24,22 @@ function Write-AtomicJson {
     Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
 }
 
+function Invoke-ScheduledTaskCommand {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $previousPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = -1
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = @(& "$env:SystemRoot\System32\schtasks.exe" @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
+}
+
 function Set-UnattendedWarningFocus {
     param([Parameter(Mandatory = $true)][int]$TargetProcessId)
 
@@ -154,28 +170,23 @@ $taskName = "LibertixAutoFocus_{0}" -f $focusId.Substring(0, 12)
 $taskCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
     '-File "{0}" -ConfigPath "{1}" -InteractiveWorker' -f `
     $workerScriptPath, $workerConfigPath
-$startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+$startTime = (Get-Date).AddMinutes(2).ToString("HH:mm")
 
 try {
-    $createOutput = schtasks.exe `
-        /Create `
-        /TN $taskName `
-        /TR $taskCommand `
-        /SC ONCE `
-        /ST $startTime `
-        /RL HIGHEST `
-        /IT `
-        /F 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create the interactive focus task: $($createOutput -join ' | ')"
+    $createResult = Invoke-ScheduledTaskCommand -Arguments @(
+        "/Create", "/TN", $taskName, "/TR", $taskCommand, "/SC", "ONCE",
+        "/ST", $startTime, "/RL", "HIGHEST", "/IT", "/F"
+    )
+    if ($createResult.ExitCode -ne 0) {
+        throw "Failed to create the interactive focus task: $($createResult.Output -join ' | ')"
     }
-    $runOutput = schtasks.exe /Run /TN $taskName 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to start the interactive focus task: $($runOutput -join ' | ')"
+    $runResult = Invoke-ScheduledTaskCommand -Arguments @("/Run", "/TN", $taskName)
+    if ($runResult.ExitCode -ne 0) {
+        throw "Failed to start the interactive focus task: $($runResult.Output -join ' | ')"
     }
 
     $workerResult = $null
-    for ($attempt = 0; $attempt -lt 150 -and $null -eq $workerResult; $attempt++) {
+    for ($attempt = 0; $attempt -lt 450 -and $null -eq $workerResult; $attempt++) {
         Start-Sleep -Milliseconds 100
         if (Test-Path -LiteralPath $workerResultPath -PathType Leaf) {
             try {
@@ -187,7 +198,13 @@ try {
         }
     }
     if ($null -eq $workerResult) {
-        throw "The interactive focus task did not report a result."
+        $taskState = (Invoke-ScheduledTaskCommand -Arguments @(
+                "/Query", "/TN", $taskName, "/V", "/FO", "LIST"
+            )).Output
+        throw (
+            "The interactive focus task did not report a result within 45 seconds; task=" +
+            ($taskState -join " | ")
+        )
     }
     if ([string]$workerResult.status -ne "ok") {
         throw "The interactive focus worker failed: $([string]$workerResult.error)"
@@ -197,13 +214,7 @@ try {
     Write-Output ("FOCUSED_CONTROL={0}" -f [string]$workerResult.focused_control)
     Write-Output "RESULT=OK"
 } finally {
-    $oldErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
-    } finally {
-        $ErrorActionPreference = $oldErrorActionPreference
-    }
+    $null = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")
     Remove-Item -LiteralPath $workerScriptPath, $workerConfigPath, $workerResultPath `
         -Force -ErrorAction SilentlyContinue
 }

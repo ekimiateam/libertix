@@ -29,7 +29,15 @@ Remove-RecoveryTask -TaskName $StartupTaskName
 Remove-RecoveryTask -TaskName $PromptTaskName
 
 try {
-    $settings = New-ScheduledTaskSettingsSet `
+    $startupSettings = New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -DisallowHardTerminate `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    $promptSettings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
@@ -50,7 +58,7 @@ try {
         -Action $startupAction `
         -Trigger $startupTrigger `
         -Principal $startupPrincipal `
-        -Settings $settings `
+        -Settings $startupSettings `
         -Force | Out-Null
 
     $promptAction = New-ScheduledTaskAction `
@@ -66,7 +74,7 @@ try {
         -Action $promptAction `
         -Trigger $promptTrigger `
         -Principal $promptPrincipal `
-        -Settings $settings `
+        -Settings $promptSettings `
         -Force | Out-Null
 
     Write-Output "RECOVERY_TASKS_REGISTERED=true"

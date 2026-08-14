@@ -360,4 +360,11 @@
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" Version="8.0.0" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <Target Name="CopyLibertixRuntimeIcon" AfterTargets="Build">
+    <MakeDir Directories="$(TargetDir)Resources\Images" />
+    <Copy
+      SourceFiles="Resources\Images\icon.ico"
+      DestinationFolder="$(TargetDir)Resources\Images"
+      SkipUnchangedFiles="true" />
+  </Target>
 </Project>

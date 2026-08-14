@@ -36,7 +36,15 @@ try {
         -UserId "SYSTEM" `
         -LogonType ServiceAccount `
         -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet `
+    $startupSettings = New-ScheduledTaskSettingsSet `
+        -StartWhenAvailable `
+        -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries `
+        -DisallowHardTerminate `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
+    $promptSettings = New-ScheduledTaskSettingsSet `
         -StartWhenAvailable `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
@@ -48,7 +56,7 @@ try {
         -Action $action `
         -Trigger $trigger `
         -Principal $principal `
-        -Settings $settings `
+        -Settings $startupSettings `
         -Force | Out-Null
 
     $promptArguments = (
@@ -69,7 +77,7 @@ try {
         -Action $promptAction `
         -Trigger $promptTrigger `
         -Principal $promptPrincipal `
-        -Settings $settings `
+        -Settings $promptSettings `
         -Force | Out-Null
 
     $registered = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop

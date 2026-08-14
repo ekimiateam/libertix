@@ -30,6 +30,15 @@ def resolve_translation_catalogue_path() -> Path:
 TRANSLATION_CATALOGUE_PATH = resolve_translation_catalogue_path()
 
 
+def resolve_logo_path() -> Path:
+    adjacent = Path(__file__).with_name("Libertix.ico")
+    source_tree = Path(__file__).resolve().parents[2] / "Resources/Images/icon.ico"
+    return adjacent if adjacent.is_file() else source_tree
+
+
+LOGO_PATH = resolve_logo_path()
+
+
 def load_translations(language: object) -> dict[str, str]:
     catalogue = json.loads(TRANSLATION_CATALOGUE_PATH.read_text(encoding="utf-8"))
     supported = catalogue["supportedLanguages"]
@@ -74,30 +83,81 @@ def show_gtk_dialog(
     state_root: Path | None = None,
     fingerprint: str | None = None,
     development_mode: bool = False,
+    close_label: str = "OK",
 ) -> bool:
     try:
         gi = importlib.import_module("gi")
         gi.require_version("Gtk", "3.0")
         gtk = importlib.import_module("gi.repository.Gtk")
         glib = importlib.import_module("gi.repository.GLib")
+        gdk = importlib.import_module("gi.repository.Gdk")
+        pango = importlib.import_module("gi.repository.Pango")
     except (ImportError, ValueError):
         return False
 
     try:
-        dialog = gtk.MessageDialog(
-            transient_for=None,
-            flags=gtk.DialogFlags.MODAL,
-            message_type=gtk.MessageType.ERROR if failed else gtk.MessageType.INFO,
-            buttons=gtk.ButtonsType.OK,
-            text=title,
-        )
-        dialog.format_secondary_text(message)
-        dialog.set_title(title)
-        dialog.set_default_size(640, -1)
+        dialog = gtk.Dialog(title=f"Libertix - {title}", flags=gtk.DialogFlags.MODAL)
+        dialog.add_button(close_label, gtk.ResponseType.OK)
+        dialog.set_default_size(720, 430)
         dialog.set_keep_above(True)
         dialog.set_urgency_hint(True)
         dialog.set_position(gtk.WindowPosition.CENTER)
         dialog.stick()
+
+        provider = gtk.CssProvider()
+        provider.load_from_data(
+            b"""
+            #libertix-result { background: #232139; color: #f7f3ff; }
+            #libertix-header { background: #2d2a47; padding: 22px; }
+            #libertix-brand { color: #f7f3ff; font-size: 28px; font-weight: bold; }
+            #libertix-title { color: #38b9e8; font-size: 19px; font-weight: bold; }
+            #libertix-title-error { color: #e96a91; font-size: 19px; font-weight: bold; }
+            #libertix-message { color: #f7f3ff; font-size: 15px; padding: 26px; }
+            #libertix-close {
+                background: #38b9e8;
+                color: #232139;
+                font-weight: bold;
+                padding: 10px 28px;
+            }
+            """
+        )
+        screen = gdk.Screen.get_default()
+        if screen is not None:
+            gtk.StyleContext.add_provider_for_screen(
+                screen,
+                provider,
+                gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+            )
+
+        dialog.set_name("libertix-result")
+        if LOGO_PATH.is_file():
+            dialog.set_icon_from_file(str(LOGO_PATH))
+        content = dialog.get_content_area()
+        content.set_spacing(0)
+
+        header = gtk.Box(orientation=gtk.Orientation.HORIZONTAL, spacing=18)
+        header.set_name("libertix-header")
+        heading = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=4)
+        brand = gtk.Label(label="Libertix", xalign=0)
+        brand.set_name("libertix-brand")
+        title_label = gtk.Label(label=title, xalign=0)
+        title_label.set_line_wrap(True)
+        title_label.set_name("libertix-title-error" if failed else "libertix-title")
+        heading.pack_start(brand, False, False, 0)
+        heading.pack_start(title_label, False, False, 0)
+        header.pack_start(heading, True, True, 0)
+        content.pack_start(header, False, False, 0)
+
+        message_label = gtk.Label(label=message, xalign=0, yalign=0)
+        message_label.set_name("libertix-message")
+        message_label.set_line_wrap(True)
+        message_label.set_line_wrap_mode(pango.WrapMode.WORD_CHAR)
+        message_label.set_selectable(True)
+        content.pack_start(message_label, True, True, 0)
+
+        close_button = dialog.get_widget_for_response(gtk.ResponseType.OK)
+        if close_button is not None:
+            close_button.set_name("libertix-close")
         dialog.show_all()
         dialog.present()
 
@@ -182,9 +242,10 @@ def show_dialog(
     state_root: Path | None = None,
     fingerprint: str | None = None,
     development_mode: bool = False,
+    close_label: str = "OK",
 ) -> bool:
     if state_root is None:
-        gtk_shown = show_gtk_dialog(title, message, failed)
+        gtk_shown = show_gtk_dialog(title, message, failed, close_label=close_label)
     else:
         gtk_shown = show_gtk_dialog(
             title,
@@ -193,6 +254,7 @@ def show_dialog(
             state_root,
             fingerprint,
             development_mode,
+            close_label,
         )
     if gtk_shown:
         return True
@@ -209,6 +271,8 @@ def show_dialog(
                 title,
                 "--text",
                 message,
+                "--ok-label",
+                close_label,
             ]
         )
     if shutil.which("yad"):
@@ -333,6 +397,7 @@ def main() -> int:
         state_root,
         fingerprint,
         Path("/var/lib/libertix/development-ssh-ready").is_file(),
+        text["close"],
     ):
         return 0
 

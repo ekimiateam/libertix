@@ -169,6 +169,9 @@ def test_post_install_result_catalogues_are_complete_and_parallel() -> None:
     assert expected == {
         "successTitle",
         "successMessage",
+        "waitingTitle",
+        "waitingMessage",
+        "waitingDetail",
         "failureTitle",
         "failureMessage",
         "details",

@@ -46,7 +46,7 @@ def test_dialog_uses_a_modal_provider_before_notifications(
     result_ui: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(result_ui, "show_gtk_dialog", lambda *_args: False)
+    monkeypatch.setattr(result_ui, "show_gtk_dialog", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         result_ui.shutil,
         "which",
@@ -75,7 +75,7 @@ def test_dialog_prefers_keep_above_gtk_provider(
     monkeypatch.setattr(
         result_ui,
         "show_gtk_dialog",
-        lambda title, message, failed: calls.append((title, message, failed)) or True,
+        lambda title, message, failed, **_kwargs: calls.append((title, message, failed)) or True,
     )
     monkeypatch.setattr(
         result_ui.subprocess,

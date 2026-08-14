@@ -866,6 +866,7 @@ try {
                 "The live installation succeeded. Waiting for the installed Linux system " +
                 "to boot and publish installed-linux-boot.json."
             )
+            Start-RecoveryPromptTask
             Save-RecoveryLog
             exit 0
         }
@@ -906,6 +907,7 @@ try {
                 "The live installation succeeded. Waiting for the installed Linux system " +
                 "to boot and publish installed-linux-boot.json."
             )
+            Start-RecoveryPromptTask
             Save-RecoveryLog
             exit 0
         }

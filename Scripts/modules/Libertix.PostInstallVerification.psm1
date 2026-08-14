@@ -177,10 +177,88 @@ function New-LibertixPostInstallResult {
         startedAtUtc = [DateTime]::UtcNow.ToString("o")
         updatedAtUtc = [DateTime]::UtcNow.ToString("o")
         checks = @()
+        attempts = @()
+        activeAttemptId = $null
+        interruptionCount = 0
         error = $null
         logPath = $LogPath
         rollbackAvailable = $true
     }
+}
+
+function Start-LibertixPostInstallAttempt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Result,
+        [Parameter(Mandatory = $true)][string]$ResultPath,
+        [Parameter(Mandatory = $true)][scriptblock]$WriteLog
+    )
+
+    $now = [DateTime]::UtcNow.ToString("o")
+    if (-not (Test-LibertixProperty -Object $Result -Name "attempts")) {
+        $Result | Add-Member -NotePropertyName attempts -NotePropertyValue @()
+    }
+    if (-not (Test-LibertixProperty -Object $Result -Name "interruptionCount")) {
+        $Result | Add-Member -NotePropertyName interruptionCount -NotePropertyValue 0
+    }
+    $interruptedAttempts = 0
+    foreach ($attempt in @($Result.attempts)) {
+        if ([string]$attempt.outcome -eq "running") {
+            $attempt.outcome = "interrupted"
+            $attempt.completedAtUtc = $now
+            $attempt | Add-Member `
+                -NotePropertyName interruptionDetectedAtUtc `
+                -NotePropertyValue $now `
+                -Force
+            $interruptedAttempts++
+        }
+    }
+    if ($interruptedAttempts -gt 0) {
+        $Result.interruptionCount = [int]$Result.interruptionCount + $interruptedAttempts
+        & $WriteLog (
+            "Resuming post-install verification after $interruptedAttempts " +
+            "interrupted attempt(s); durable successful checks will not be repeated."
+        )
+    }
+
+    $attemptId = [Guid]::NewGuid().ToString("N")
+    $Result.attempts = @($Result.attempts) + @(
+        [pscustomobject][ordered]@{
+            attemptId = $attemptId
+            processId = $PID
+            startedAtUtc = $now
+            completedAtUtc = $null
+            outcome = "running"
+        }
+    )
+    $Result | Add-Member `
+        -NotePropertyName activeAttemptId `
+        -NotePropertyValue $attemptId `
+        -Force
+    Write-LibertixPostInstallResult -Path $ResultPath -Result $Result
+    return $attemptId
+}
+
+function Complete-LibertixPostInstallAttempt {
+    param(
+        [Parameter(Mandatory = $true)][object]$Result,
+        [Parameter(Mandatory = $true)][string]$AttemptId,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("succeeded", "failed")]
+        [string]$Outcome
+    )
+
+    $attemptMatches = @(
+        $Result.attempts | Where-Object { [string]$_.attemptId -eq $AttemptId }
+    )
+    if ($attemptMatches.Count -ne 1) {
+        throw "Post-install verification attempt identity is missing or ambiguous."
+    }
+    if ([string]$attemptMatches[0].outcome -ne "running") {
+        throw "Post-install verification attempt is not running."
+    }
+    $attemptMatches[0].outcome = $Outcome
+    $attemptMatches[0].completedAtUtc = [DateTime]::UtcNow.ToString("o")
+    $Result.activeAttemptId = $null
 }
 
 function Set-LibertixPostInstallWaitingForLinux {
@@ -579,14 +657,16 @@ function Test-LibertixRecoveryArchive {
             "payload\Scripts\modules\Libertix.InstallationState.psm1",
             "payload\Scripts\modules\Libertix.PostInstallVerification.psm1",
             "payload\Scripts\libertix-uefi-recovery-agent.ps1",
-            "payload\Scripts\libertix-post-install-result.ps1"
+            "payload\Scripts\libertix-post-install-result.ps1",
+            "payload\Resources\Images\icon.ico"
         )
     } else {
         @(
             "Libertix.InstallationState.psm1",
             "Libertix.PostInstallVerification.psm1",
             "recover.ps1",
-            "libertix-post-install-result.ps1"
+            "libertix-post-install-result.ps1",
+            "Images\icon.ico"
         )
     }
     foreach ($relativePath in $runtimeFiles) {
@@ -808,9 +888,12 @@ function Invoke-LibertixPostInstallVerification {
             -Firmware ([string]$plan.firmware) `
             -LogPath $LogPath
     }
-    Write-LibertixPostInstallResult -Path $resultPath -Result $result
+    $attemptId = Start-LibertixPostInstallAttempt `
+        -Result $result `
+        -ResultPath $resultPath `
+        -WriteLog $WriteLog
     & $WriteLog (
-        "Post-install verification started: plan=$($plan.planId) " +
+        "Post-install verification started: attempt=$attemptId plan=$($plan.planId) " +
         "firmware=$($plan.firmware) host=$env:COMPUTERNAME " +
         "powershell=$($PSVersionTable.PSVersion) os=$([Environment]::OSVersion.VersionString)"
     )
@@ -859,22 +942,43 @@ function Invoke-LibertixPostInstallVerification {
             -Name "permanent-recovery-archive" -WriteLog $WriteLog -Test {
                 Test-LibertixRecoveryArchive -Plan $plan -RecoveryRoot $RecoveryRoot
             }
-        $result.status = "succeeded"
-        $result.rollbackAvailable = $true
-        Write-LibertixPostInstallResult -Path $resultPath -Result $result
-        & $WriteLog "Post-install verification completed successfully."
     } catch {
+        $primaryError = $_
         $result.status = "failed"
-        $result.error = $_.Exception.Message
+        $result.error = $primaryError.Exception.Message
         $result.rollbackAvailable = $true
-        Write-LibertixPostInstallResult -Path $resultPath -Result $result
-        & $WriteLog "Post-install verification failed: $($_.Exception.Message)"
-        Write-LibertixPostInstallErrorDiagnostic `
-            -ErrorRecord $_ `
-            -WriteLog $WriteLog `
-            -Context "Post-install verification diagnostic"
-        throw
+        try {
+            Complete-LibertixPostInstallAttempt `
+                -Result $result `
+                -AttemptId $attemptId `
+                -Outcome "failed"
+            Write-LibertixPostInstallResult -Path $resultPath -Result $result
+        } catch {
+            & $WriteLog (
+                "Could not persist the failed post-install attempt; " +
+                "the startup task will retry: $($_.Exception.Message)"
+            )
+        }
+        & $WriteLog "Post-install verification failed: $($primaryError.Exception.Message)"
+        try {
+            Write-LibertixPostInstallErrorDiagnostic `
+                -ErrorRecord $primaryError `
+                -WriteLog $WriteLog `
+                -Context "Post-install verification diagnostic"
+        } catch {
+            & $WriteLog "Could not write the extended error diagnostic: $($_.Exception.Message)"
+        }
+        throw $primaryError
     }
+
+    $result.status = "succeeded"
+    $result.rollbackAvailable = $true
+    Complete-LibertixPostInstallAttempt `
+        -Result $result `
+        -AttemptId $attemptId `
+        -Outcome "succeeded"
+    Write-LibertixPostInstallResult -Path $resultPath -Result $result
+    & $WriteLog "Post-install verification completed successfully."
     return $result
 }
 

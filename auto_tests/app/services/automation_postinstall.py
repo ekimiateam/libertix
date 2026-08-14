@@ -147,7 +147,21 @@ class PostInstallValidationMixin:
                     'p=json.load(open("/var/lib/libertix/first-boot-verification.json", '
                     'encoding="utf-8")); assert p["status"] == "succeeded"\' '
                     "&& exit 0; "
-                    "i=$((i + 1)); sleep 2; done; exit 1",
+                    "i=$((i + 1)); sleep 2; done; "
+                    "python3 -c 'import json; "
+                    'p=json.load(open("/var/lib/libertix/first-boot-verification.json", '
+                    'encoding="utf-8")); '
+                    'failed=["{}: {}".format(c.get("name"), c.get("message")) '
+                    'for c in p.get("checks", []) if not c.get("passed")]; '
+                    'print("FIRST_BOOT_STATUS={}".format(p.get("status")), '
+                    'file=__import__("sys").stderr); '
+                    'print("FIRST_BOOT_ERROR={}".format(p.get("error")), '
+                    'file=__import__("sys").stderr); '
+                    'print("FIRST_BOOT_FAILED_CHECKS="+"; ".join(failed), '
+                    'file=__import__("sys").stderr)\' '
+                    "|| true; "
+                    "tail -n 80 /var/log/libertix/first-boot-resize.log >&2 2>/dev/null || true; "
+                    "exit 1",
                     timeout=270,
                 ),
             )
@@ -405,7 +419,7 @@ class PostInstallValidationMixin:
                 script_name="focus_post_install_result.ps1",
                 config={"process_id": int(process_id_text)},
                 step="automation.windows_post_install_result_focused",
-                timeout=30,
+                timeout=60,
             )
         capture = self._capture_with_name(vm, f"post-install-{platform}-success")
         client = None

@@ -6,6 +6,9 @@ After=local-fs.target
 Type=oneshot
 ExecStart=/usr/local/bin/first-boot-resize.sh
 RemainAfterExit=no
+KillMode=mixed
+TimeoutStartSec=30min
+TimeoutStopSec=15min
 
 [Install]
 WantedBy=multi-user.target

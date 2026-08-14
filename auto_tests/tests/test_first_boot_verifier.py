@@ -331,3 +331,56 @@ def test_service_failure_is_durable_for_the_desktop_session(
     assert status["status"] == "failed"
     assert status["error"] == "resize failed"
     assert status["serviceStage"] == "first-boot-resize"
+
+
+def test_service_attempt_history_detects_an_interrupted_previous_boot(
+    verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "first-boot-service-state.json"
+    monkeypatch.setattr(verifier, "SERVICE_STATE_PATH", state_path)
+
+    first_id = verifier.record_service_start("initialization")
+    second_id = verifier.record_service_start("initialization")
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert first_id != second_id
+    assert state["interruptionCount"] == 1
+    assert state["activeAttemptId"] == second_id
+    assert state["attempts"][0]["outcome"] == "interrupted"
+    assert state["attempts"][1]["outcome"] == "running"
+
+
+def test_service_attempt_can_finish_after_shutdown_was_requested(
+    verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "first-boot-service-state.json"
+    monkeypatch.setattr(verifier, "SERVICE_STATE_PATH", state_path)
+    attempt_id = verifier.record_service_start("installed-system-verification")
+
+    verifier.update_service_attempt(
+        attempt_id,
+        "installed-system-verification",
+        "shutdown-requested",
+    )
+    verifier.update_service_attempt(attempt_id, "one-shot-service-retirement", "succeeded")
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "succeeded"
+    assert state["activeAttemptId"] is None
+    assert state["attempts"][0]["outcome"] == "succeeded"
+    assert state["attempts"][0]["shutdownRequestedAtUtc"]
+
+
+def test_service_attempt_can_record_a_failure_after_late_retirement_error(
+    verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "first-boot-service-state.json"
+    monkeypatch.setattr(verifier, "SERVICE_STATE_PATH", state_path)
+    attempt_id = verifier.record_service_start("one-shot-service-retirement")
+
+    verifier.update_service_attempt(attempt_id, "one-shot-service-retirement", "succeeded")
+    verifier.update_service_attempt(attempt_id, "one-shot-service-retirement", "failed")
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert state["attempts"][0]["outcome"] == "failed"

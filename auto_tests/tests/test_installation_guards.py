@@ -1057,6 +1057,37 @@ def test_interrupted_post_install_verification_keeps_startup_recovery_armed() ->
     assert "Remove-StartupRecoveryTask -State $State" in uefi
 
 
+def test_post_install_tasks_retry_abnormal_system_verifier_exits() -> None:
+    bios = read("Scripts/libertix-register-bios-recovery-task.ps1")
+    uefi = read("Scripts/libertix-register-uefi-recovery-tasks.ps1")
+
+    for registration in (bios, uefi):
+        assert "-RestartCount 3" in registration
+        assert "-RestartInterval (New-TimeSpan -Minutes 1)" in registration
+        assert "-Settings $startupSettings" in registration
+        assert "-Settings $promptSettings" in registration
+
+
+def test_linux_first_boot_service_finishes_or_resumes_during_shutdown() -> None:
+    service = read("assets/live/first-boot-resize.service")
+    resize = read("assets/live/first-boot-resize.sh")
+    verifier = read("assets/live/libertix-first-boot-verify.py")
+
+    assert "KillMode=mixed" in service
+    assert "TimeoutStopSec=15min" in service
+    assert "trap record_shutdown_request TERM INT HUP" in resize
+    assert "--record-service-start" in resize
+    assert '"shutdown-requested"' in resize
+    assert "--archive-service-diagnostics" in resize
+    assert resize.index("--archive-service-diagnostics") < resize.index(
+        "systemctl disable first-boot-resize.service"
+    )
+    assert 'echo "First boot resize' not in resize
+    assert "SERVICE_STATE_PATH" in verifier
+    assert '"interruptionCount"' in verifier
+    assert '(SERVICE_STATE_PATH, "first-boot-service-state.json")' in verifier
+
+
 def test_windows_recovery_waits_durably_for_the_first_installed_linux_boot() -> None:
     bios = read("Scripts/libertix-recovery-guard.ps1")
     uefi = read("Scripts/libertix-uefi-recovery-agent.ps1")
@@ -1073,6 +1104,29 @@ def test_windows_recovery_waits_durably_for_the_first_installed_linux_boot() -> 
     assert "installed-linux-boot.json" in result_ui
     assert result_ui.index("installed-linux-boot.json") < result_ui.index("AddMinutes(15)")
     assert "the two tasks raced each other" in result_ui
+    assert "waitingAdviceAcknowledgedAtUtc" in result_ui
+    assert "Start-RecoveryPromptTask" in bios
+    assert "Start-PostInstallPromptTask -State $state" in uefi
+    assert "waitingTitle" in result_ui
+
+
+def test_post_install_result_windows_are_branded_and_survive_shutdown_close() -> None:
+    windows = read("Scripts/libertix-post-install-result.ps1")
+    linux = read("assets/live/libertix-first-boot-result.py")
+    target = read("assets/live/libertix-target-common.sh")
+    builder = read("iso-tools/build-iso.sh")
+
+    assert '$brand.Text = "Libertix"' in windows
+    assert '"Images\\icon.ico"' in windows
+    assert "New-Object Windows.Controls.Image" not in windows
+    assert "$script:ResultAcknowledged = $false" in windows
+    assert "if (-not $isWaitingForLinux -and $script:ResultAcknowledged)" in windows
+    assert 'brand = gtk.Label(label="Libertix"' in linux
+    assert "Libertix.ico" in linux
+    assert "dialog.set_icon_from_file" in linux
+    assert "gtk.Image.new_from_file" not in linux
+    assert "Libertix.ico" in target
+    assert "Resources/Images/icon.ico" in builder
 
 
 def test_windows_post_install_checks_retry_transient_result_file_contention() -> None:
@@ -1087,8 +1141,41 @@ def test_windows_post_install_checks_retry_transient_result_file_contention() ->
     assert "TimeoutMilliseconds = 10000" in retry_reader
     assert "Start-Sleep -Milliseconds 200" in retry_reader
     assert "throw" in retry_reader
-    assert finalization.count("Read-JsonFileWithRetry -LiteralPath $resultPath") >= 2
+    assert finalization.count("Read-JsonFileWithRetry -LiteralPath $resultPath") == 1
     assert "Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8" not in finalization
+    assert "FailedChecks=" in finalization
+    assert "LogPath=" in finalization
+
+
+def test_auto_test_reports_guest_verifier_failures_with_persistent_log_context() -> None:
+    postinstall = read("auto_tests/app/services/automation_postinstall.py")
+    windows_checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    assert "FIRST_BOOT_STATUS=" in postinstall
+    assert "FIRST_BOOT_ERROR=" in postinstall
+    assert "FIRST_BOOT_FAILED_CHECKS=" in postinstall
+    assert "tail -n 80 /var/log/libertix/first-boot-resize.log >&2 2>/dev/null" in postinstall
+    diagnostics = postinstall.split('print("FIRST_BOOT_STATUS=', 1)[1].split(
+        "tail -n 80 /var/log/libertix/first-boot-resize.log", 1
+    )[0]
+    assert "2>/dev/null" not in diagnostics
+    assert "\"FailedChecks='$($failedChecks -join '; ')'. \"" in windows_checks
+    assert "\"LogPath='$([string]$savedResult.logPath)'.\"" in windows_checks
+
+
+def test_interactive_scheduled_tasks_tolerate_nonfatal_localized_stderr() -> None:
+    for relative_path in (
+        "auto_tests/app/scripts/launch_libertix_elevated.ps1",
+        "auto_tests/app/scripts/focus_unattended_warning.ps1",
+        "auto_tests/app/scripts/focus_post_install_result.ps1",
+        "auto_tests/app/scripts/request_installation_cancellation.ps1",
+    ):
+        script = read(relative_path)
+        assert "function Invoke-ScheduledTaskCommand" in script
+        assert '$ErrorActionPreference = "Continue"' in script
+        assert ".ExitCode -ne 0" in script
+        assert '.AddMinutes(2).ToString("HH:mm")' in script
+        assert "$createOutput = schtasks.exe" not in script
 
 
 def test_completed_bios_recovery_proves_task_absence_after_schtasks_delete() -> None:
@@ -1682,6 +1769,9 @@ def test_auto_test_exercises_windows_before_linux_and_both_result_dialogs() -> N
     postinstall = read("auto_tests/app/services/automation_postinstall.py")
     checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
     focus_result = read("auto_tests/app/scripts/focus_post_install_result.ps1")
+    result_dismissal = postinstall.split("def _capture_and_dismiss_post_install_result", 1)[
+        1
+    ].split("def _prepare_linux_graphical_session", 1)[0]
 
     assert '"check": "waiting_for_linux"' in postinstall
     assert 'grub_entry="windows"' in postinstall
@@ -1706,6 +1796,10 @@ def test_auto_test_exercises_windows_before_linux_and_both_result_dialogs() -> N
     assert "AutomationElement]::RootElement.FindAll" in focus_result
     assert "$window.Current.IsOffscreen" in focus_result
     assert "LibertixPostInstallCloseButton" in focus_result
+    assert "$attempt -lt 450" in focus_result
+    assert '"/Query", "/TN", $taskName, "/V", "/FO", "LIST"' in focus_result
+    assert 'script_name="focus_post_install_result.ps1"' in result_dismissal
+    assert "timeout=60" in result_dismissal
     result_ui = checks.split('"post_install_result_ui" {', 1)[1].split(
         '"post_install_result_ui_dismissed" {', 1
     )[0]
@@ -1737,6 +1831,9 @@ def test_unattended_warning_keyboard_action_requires_proven_ui_focus() -> None:
     assert "UnattendedWarningNoButton" in focus_script
     assert "UnattendedWarningYesButton" in focus_script
     assert "$noButton.Current.HasKeyboardFocus" in focus_script
+    assert "$attempt -lt 450" in focus_script
+    assert '"/Query", "/TN", $taskName, "/V", "/FO", "LIST"' in focus_script
+    assert "timeout=60" in acceptance
     assert 'AutomationProperties.AutomationId="UnattendedWarningNoButton"' in dialog
     assert 'AutomationProperties.AutomationId="UnattendedWarningYesButton"' in dialog
 

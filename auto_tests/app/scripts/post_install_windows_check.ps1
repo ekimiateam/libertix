@@ -509,8 +509,11 @@ try {
                 $session = Get-LibertixRecoverySession `
                     -ExpectedFirmware ([string]$config.expected_firmware)
                 $resultPath = Join-Path $session.Root "post-install-verification.json"
-                $resultStatus = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
-                    [string](Read-JsonFileWithRetry -LiteralPath $resultPath).status
+                $savedResult = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+                    Read-JsonFileWithRetry -LiteralPath $resultPath
+                } else { $null }
+                $resultStatus = if ($null -ne $savedResult) {
+                    [string]$savedResult.status
                 } else { "missing" }
                 $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
                 $startupTasks = @(Get-LibertixRecoveryTasks | Where-Object {
@@ -519,10 +522,16 @@ try {
                 })
                 $interactiveCheckPassed = -not [bool]$config.share_linux_files_in_windows
                 if ($resultStatus -in @("failed", "rolled-back")) {
-                    throw "Libertix Windows finalization reached terminal status '$resultStatus'."
+                    $failedChecks = @($savedResult.checks | Where-Object { -not [bool]$_.passed } |
+                        ForEach-Object { "{0}: {1}" -f [string]$_.name, [string]$_.message })
+                    throw (
+                        "Libertix Windows finalization reached terminal status '$resultStatus'. " +
+                        "Error='$([string]$savedResult.error)'. " +
+                        "FailedChecks='$($failedChecks -join '; ')'. " +
+                        "LogPath='$([string]$savedResult.logPath)'."
+                    )
                 }
                 if ($resultStatus -eq "succeeded" -and [bool]$config.share_linux_files_in_windows) {
-                    $savedResult = Read-JsonFileWithRetry -LiteralPath $resultPath
                     $interactiveCheckPassed = @($savedResult.checks | Where-Object {
                         [string]$_.name -eq "explorer-integration" -and [bool]$_.passed
                     }).Count -eq 1

@@ -436,7 +436,7 @@ class WizardAutomationMixin:
                 script_name="focus_unattended_warning.ps1",
                 config={"process_id": process_id},
                 step="automation.unattended_warning_focus",
-                timeout=20,
+                timeout=60,
             )
             capture = self._capture_from_client(
                 client,

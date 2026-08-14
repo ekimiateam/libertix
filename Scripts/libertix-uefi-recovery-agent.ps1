@@ -455,8 +455,10 @@ function Invoke-VerifiedInstallationSuccess {
             } catch { "unreadable" }
         } else { "missing" }
         if ($verificationStatus -in @("succeeded", "failed")) {
-            Remove-StartupRecoveryTask -State $State
             Start-PostInstallPromptTask -State $State
+            # Start the interactive task before retiring the startup task. This
+            # avoids losing the result if shutdown begins between both actions.
+            Remove-StartupRecoveryTask -State $State
         } else {
             Write-AgentLog (
                 "Post-install verification was interrupted with status=" +
@@ -565,6 +567,7 @@ try {
                 "The live installation succeeded. Waiting for the installed Linux system " +
                 "to boot and publish installed-linux-boot.json."
             )
+            Start-PostInstallPromptTask -State $state
             exit 0
         }
         Write-AgentLog "Live success found; starting cross-runtime post-install verification."

@@ -134,7 +134,8 @@ Describe "Permanent recovery archive" {
             "payload\Scripts\modules\Libertix.InstallationState.psm1",
             "payload\Scripts\modules\Libertix.PostInstallVerification.psm1",
             "payload\Scripts\libertix-uefi-recovery-agent.ps1",
-            "payload\Scripts\libertix-post-install-result.ps1"
+            "payload\Scripts\libertix-post-install-result.ps1",
+            "payload\Resources\Images\icon.ico"
         )) {
             $path = Join-Path $root $relativePath
             New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
@@ -169,6 +170,73 @@ Describe "Scheduled task principal identity" {
 
 Describe "Durable post-install checkpoints" {
     InModuleScope Libertix.PostInstallVerification {
+        It "keeps successful final persistence outside the primary verification catch" {
+            $definition = ${function:Invoke-LibertixPostInstallVerification}.ToString()
+            $catchBody = ($definition -split [regex]::Escape('} catch {'), 2)[1]
+            $catchBody = ($catchBody -split [regex]::Escape('throw $primaryError'), 2)[0]
+            $successBody = ($definition -split [regex]::Escape('throw $primaryError'), 2)[1]
+
+            $catchBody | Should -Match 'Outcome "failed"'
+            $catchBody | Should -Match 'startup task will retry'
+            $successBody | Should -Match 'Outcome "succeeded"'
+            $successBody | Should -Match 'Post-install verification completed successfully'
+        }
+
+        It "records and resumes an interrupted verification attempt" {
+            $result = [pscustomobject]@{
+                updatedAtUtc = "2026-08-11T10:00:00Z"
+                attempts = @(
+                    [pscustomobject]@{
+                        attemptId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        processId = 10
+                        startedAtUtc = "2026-08-11T10:00:00Z"
+                        completedAtUtc = $null
+                        outcome = "running"
+                    }
+                )
+                activeAttemptId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                interruptionCount = 0
+            }
+            $messages = [Collections.Generic.List[string]]::new()
+            $writeLog = { param($Message) $messages.Add([string]$Message) }
+            Mock Write-LibertixPostInstallResult
+
+            $attemptId = Start-LibertixPostInstallAttempt `
+                -Result $result `
+                -ResultPath (Join-Path $TestDrive "result.json") `
+                -WriteLog $writeLog
+
+            $attemptId | Should -Match "^[0-9a-f]{32}$"
+            $result.interruptionCount | Should -Be 1
+            @($result.attempts).Count | Should -Be 2
+            $result.attempts[0].outcome | Should -Be "interrupted"
+            $result.attempts[1].outcome | Should -Be "running"
+            $messages[0] | Should -Match "interrupted attempt"
+            Should -Invoke Write-LibertixPostInstallResult -Times 1
+        }
+
+        It "persists the terminal outcome on the active attempt" {
+            $result = [pscustomobject]@{
+                activeAttemptId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                attempts = @(
+                    [pscustomobject]@{
+                        attemptId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        completedAtUtc = $null
+                        outcome = "running"
+                    }
+                )
+            }
+
+            Complete-LibertixPostInstallAttempt `
+                -Result $result `
+                -AttemptId $result.activeAttemptId `
+                -Outcome "succeeded"
+
+            $result.activeAttemptId | Should -BeNullOrEmpty
+            $result.attempts[0].outcome | Should -Be "succeeded"
+            $result.attempts[0].completedAtUtc | Should -Not -BeNullOrEmpty
+        }
+
         It "does not rerun a check already persisted as successful" {
             $result = [pscustomobject]@{
                 updatedAtUtc = "2026-08-11T10:00:00Z"

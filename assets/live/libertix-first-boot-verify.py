@@ -22,6 +22,7 @@ GRUB_CONFIG_PATH = Path("/boot/grub/grub.cfg")
 WINDOWS_MOUNT_PATH = Path("/run/libertix-first-boot-windows")
 EVIDENCE_FILE_NAME = "installed-linux-boot.json"
 LOCAL_STATUS_PATH = Path("/var/lib/libertix/first-boot-verification.json")
+SERVICE_STATE_PATH = Path("/var/lib/libertix/first-boot-service-state.json")
 VERIFICATION_LOG_PATH = Path("/var/log/libertix/first-boot-resize.log")
 WINDOWS_LOG_ROOT = Path("LibertixInstallLogs/Linux")
 DEFAULT_LOCALE_PATH = Path("/etc/default/locale")
@@ -721,6 +722,7 @@ def archive_linux_diagnostics(plan: dict[str, object], device: Path | None = Non
         sources = (
             (VERIFICATION_LOG_PATH, "first-boot-verification.log"),
             (LOCAL_STATUS_PATH, "first-boot-verification.json"),
+            (SERVICE_STATE_PATH, "first-boot-service-state.json"),
         )
         for source, name in sources:
             if source.is_file():
@@ -773,7 +775,105 @@ def write_local_status(
     return value
 
 
-def record_service_failure(message: str) -> int:
+def read_optional_json(path: Path) -> dict[str, object] | None:
+    try:
+        return read_json(path)
+    except VerificationError:
+        return None
+
+
+def record_service_start(stage: str) -> str:
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    state = read_optional_json(SERVICE_STATE_PATH) or {
+        "schemaVersion": 1,
+        "attempts": [],
+        "interruptionCount": 0,
+    }
+    attempts = state.get("attempts")
+    if not isinstance(attempts, list):
+        attempts = []
+    interrupted = 0
+    for attempt in attempts:
+        if isinstance(attempt, dict) and attempt.get("outcome") in (
+            "running",
+            "shutdown-requested",
+        ):
+            attempt["outcome"] = "interrupted"
+            attempt["interruptionDetectedAtUtc"] = now
+            interrupted += 1
+    count = state.get("interruptionCount", 0)
+    if not isinstance(count, int) or isinstance(count, bool):
+        count = 0
+    attempt_id = uuid.uuid4().hex
+    attempts.append(
+        {
+            "attemptId": attempt_id,
+            "processId": os.getpid(),
+            "startedAtUtc": now,
+            "completedAtUtc": None,
+            "stage": stage,
+            "outcome": "running",
+        }
+    )
+    state.update(
+        {
+            "schemaVersion": 1,
+            "status": "running",
+            "activeAttemptId": attempt_id,
+            "attempts": attempts,
+            "interruptionCount": count + interrupted,
+            "updatedAtUtc": now,
+        }
+    )
+    write_json_atomic(SERVICE_STATE_PATH, state, mode=0o644)
+    return attempt_id
+
+
+def update_service_attempt(attempt_id: str, stage: str, outcome: str) -> None:
+    if not HEX_ID.fullmatch(attempt_id):
+        raise VerificationError("first-boot service attempt identifier is invalid")
+    if outcome not in ("shutdown-requested", "succeeded", "failed"):
+        raise VerificationError("first-boot service attempt outcome is invalid")
+    state = read_json(SERVICE_STATE_PATH)
+    attempts = state.get("attempts")
+    if not isinstance(attempts, list):
+        raise VerificationError("first-boot service attempt history is invalid")
+    matches = [
+        attempt
+        for attempt in attempts
+        if isinstance(attempt, dict) and attempt.get("attemptId") == attempt_id
+    ]
+    if len(matches) != 1:
+        raise VerificationError("first-boot service attempt is missing or ambiguous")
+    attempt = matches[0]
+    current_outcome = attempt.get("outcome")
+    if current_outcome not in ("running", "shutdown-requested") and not (
+        current_outcome == "succeeded" and outcome == "failed"
+    ):
+        raise VerificationError("first-boot service attempt is not active")
+    now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    attempt["stage"] = stage
+    attempt["outcome"] = outcome
+    if outcome == "shutdown-requested":
+        attempt["shutdownRequestedAtUtc"] = now
+    else:
+        attempt["completedAtUtc"] = now
+        state["activeAttemptId"] = None
+    state["status"] = outcome
+    state["updatedAtUtc"] = now
+    write_json_atomic(SERVICE_STATE_PATH, state, mode=0o644)
+
+
+def archive_service_diagnostics() -> Path:
+    plan = read_json(PLAN_PATH)
+    return archive_linux_diagnostics(plan)
+
+
+def record_service_failure(
+    message: str,
+    attempt_id: str | None = None,
+    stage: str = "first-boot-resize",
+) -> int:
     plan: dict[str, object] | None
     try:
         plan = read_json(PLAN_PATH)
@@ -783,8 +883,10 @@ def record_service_failure(message: str) -> int:
         "failed",
         plan=plan,
         error=message,
-        service_stage="first-boot-resize",
+        service_stage=stage,
     )
+    if attempt_id:
+        update_service_attempt(attempt_id, stage, "failed")
     if plan is not None:
         try:
             archive_linux_diagnostics(plan)
@@ -815,8 +917,20 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--record-service-failure":
-        raise SystemExit(record_service_failure(sys.argv[2]))
+    if len(sys.argv) == 3 and sys.argv[1] == "--record-service-start":
+        print(record_service_start(sys.argv[2]))
+        raise SystemExit(0)
+    if len(sys.argv) == 5 and sys.argv[1] == "--update-service-attempt":
+        update_service_attempt(sys.argv[2], sys.argv[3], sys.argv[4])
+        raise SystemExit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "--archive-service-diagnostics":
+        print(f"FIRST_BOOT_LOG_ARCHIVE={archive_service_diagnostics()}")
+        raise SystemExit(0)
+    if len(sys.argv) in (3, 4, 5) and sys.argv[1] == "--record-service-failure":
+        attempt_id = sys.argv[2] if len(sys.argv) >= 4 else None
+        stage = sys.argv[3] if len(sys.argv) == 5 else "first-boot-resize"
+        message = sys.argv[4] if len(sys.argv) == 5 else sys.argv[-1]
+        raise SystemExit(record_service_failure(message, attempt_id, stage))
     try:
         raise SystemExit(main())
     except VerificationError as error:

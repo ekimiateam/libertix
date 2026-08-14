@@ -325,6 +325,9 @@
         "stage_installer_failed": "Installation failed"
       },
       "postInstall": {
+        "waitingTitle": "Linux must be started once",
+        "waitingMessage": "The installation has finished, but the installed Linux system has not been started yet. This is normal if Windows was selected first.",
+        "waitingDetail": "Some functions, including access to Linux files from Windows, may not be available yet. Restart the computer, select Linux once in the Libertix boot menu, then return to Windows. Verification will resume automatically.",
         "successTitle": "Libertix installation verified",
         "successMessage": "Linux started successfully through the installed boot environment. Windows, the disk layout, Recovery and the boot configuration also passed every verification.",
         "failureTitle": "Libertix installation verification failed",
@@ -349,7 +352,8 @@
         "success": "Linux started through the installed Libertix boot chain. The ext4 root, account, packages, services, GRUB, running kernel and Windows handoff evidence were verified successfully.",
         "failure_title": "Libertix verification failed",
         "failure": "The installed system could not be fully verified.",
-        "log": "Detailed log"
+        "log": "Detailed log",
+        "close": "Close"
       },
       "grub": {
         "shutdown": "Shutdown",
@@ -675,6 +679,9 @@
         "stage_installer_failed": "Échec de l'installation"
       },
       "postInstall": {
+        "waitingTitle": "Linux doit être démarré une première fois",
+        "waitingMessage": "L’installation est terminée, mais le système Linux installé n’a pas encore été démarré. C’est normal si Windows a été sélectionné en premier.",
+        "waitingDetail": "Certaines fonctions, notamment l’accès aux fichiers Linux depuis Windows, peuvent ne pas encore être disponibles. Redémarrez l’ordinateur, sélectionnez Linux une fois dans le menu de démarrage Libertix, puis revenez sous Windows. La vérification reprendra automatiquement.",
         "successTitle": "Installation Libertix vérifiée",
         "successMessage": "Linux a démarré correctement avec l’environnement de démarrage installé. Windows, la disposition du disque, Recovery et la configuration de démarrage ont également réussi toutes les vérifications.",
         "failureTitle": "Échec de la vérification de l’installation Libertix",
@@ -699,7 +706,8 @@
         "success": "Linux a démarré via la chaîne de démarrage Libertix installée. La racine ext4, le compte, les paquets, les services, GRUB, le noyau actif et la preuve transmise à Windows ont été vérifiés avec succès.",
         "failure_title": "Échec de la vérification Libertix",
         "failure": "Le système installé n’a pas pu être entièrement vérifié.",
-        "log": "Journal détaillé"
+        "log": "Journal détaillé",
+        "close": "Fermer"
       },
       "grub": {
         "shutdown": "Éteindre",
@@ -1025,6 +1033,9 @@
         "stage_installer_failed": "Instalación fallida"
       },
       "postInstall": {
+        "waitingTitle": "Linux debe iniciarse una vez",
+        "waitingMessage": "La instalación ha terminado, pero el sistema Linux instalado aún no se ha iniciado. Esto es normal si se seleccionó Windows primero.",
+        "waitingDetail": "Es posible que algunas funciones, incluido el acceso a los archivos de Linux desde Windows, todavía no estén disponibles. Reinicie el equipo, seleccione Linux una vez en el menú de arranque de Libertix y vuelva después a Windows. La verificación se reanudará automáticamente.",
         "successTitle": "Instalación de Libertix verificada",
         "successMessage": "Linux se inició correctamente mediante el entorno de arranque instalado. Windows, la disposición del disco, Recovery y la configuración de arranque también superaron todas las verificaciones.",
         "failureTitle": "Error al verificar la instalación de Libertix",
@@ -1049,7 +1060,8 @@
         "success": "Linux se inició mediante la cadena de arranque Libertix instalada. Se verificaron correctamente la raíz ext4, la cuenta, los paquetes, los servicios, GRUB, el núcleo activo y la prueba enviada a Windows.",
         "failure_title": "Falló la verificación de Libertix",
         "failure": "No se pudo verificar completamente el sistema instalado.",
-        "log": "Registro detallado"
+        "log": "Registro detallado",
+        "close": "Cerrar"
       },
       "grub": {
         "shutdown": "Apagar",

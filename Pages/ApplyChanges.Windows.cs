@@ -358,6 +358,9 @@ namespace Libertix.Pages
                     CopyRequiredRecoveryFile(
                         Path.Combine("Resources", "Libertix.Translations.json"),
                         Path.Combine("config", "Libertix.Translations.json"));
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Resources", "Images", "icon.ico"),
+                        Path.Combine("Images", "icon.ico"));
 
                     if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
                     {

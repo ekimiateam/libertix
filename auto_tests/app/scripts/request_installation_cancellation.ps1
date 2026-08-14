@@ -24,6 +24,22 @@ function Write-AtomicJson {
     Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
 }
 
+function Invoke-ScheduledTaskCommand {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $previousPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = -1
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = @(& "$env:SystemRoot\System32\schtasks.exe" @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
+}
+
 function Get-AutomationElementById {
     param(
         [Parameter(Mandatory = $true)]
@@ -200,17 +216,19 @@ $taskName = "LibertixCancel_{0}" -f $runId
 $taskCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
     '-File "{0}" -ConfigPath "{1}" -InteractiveWorker' -f `
     $workerScriptPath, $workerConfigPath
-$startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
+$startTime = (Get-Date).AddMinutes(2).ToString("HH:mm")
 
 try {
-    $createOutput = schtasks.exe /Create /TN $taskName /TR $taskCommand /SC ONCE `
-        /ST $startTime /RL HIGHEST /IT /F 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to create the interactive cancellation task: $($createOutput -join ' | ')"
+    $createResult = Invoke-ScheduledTaskCommand -Arguments @(
+        "/Create", "/TN", $taskName, "/TR", $taskCommand, "/SC", "ONCE",
+        "/ST", $startTime, "/RL", "HIGHEST", "/IT", "/F"
+    )
+    if ($createResult.ExitCode -ne 0) {
+        throw "Failed to create the interactive cancellation task: $($createResult.Output -join ' | ')"
     }
-    $runOutput = schtasks.exe /Run /TN $taskName 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to start the interactive cancellation task: $($runOutput -join ' | ')"
+    $runResult = Invoke-ScheduledTaskCommand -Arguments @("/Run", "/TN", $taskName)
+    if ($runResult.ExitCode -ne 0) {
+        throw "Failed to start the interactive cancellation task: $($runResult.Output -join ' | ')"
     }
 
     $workerResult = $null
@@ -240,13 +258,7 @@ try {
     Write-Output ("CONFIRMATION_CONTROL={0}" -f [string]$workerResult.confirmation_control)
     Write-Output "RESULT=OK"
 } finally {
-    $oldErrorActionPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        schtasks.exe /Delete /TN $taskName /F 2>&1 | Out-Null
-    } finally {
-        $ErrorActionPreference = $oldErrorActionPreference
-    }
+    $null = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")
     Remove-Item -LiteralPath $workerScriptPath, $workerConfigPath, $workerResultPath `
         -Force -ErrorAction SilentlyContinue
 }

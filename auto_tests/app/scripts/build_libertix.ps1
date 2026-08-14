@@ -446,6 +446,10 @@ try {
     if (-not (Test-Path -LiteralPath $stagedExe -PathType Leaf)) {
         throw "Libertix.exe is missing from Libertix-release after copying"
     }
+    $stagedRuntimeIcon = Join-Path $releaseStaging "Resources\Images\icon.ico"
+    if (-not (Test-Path -LiteralPath $stagedRuntimeIcon -PathType Leaf)) {
+        throw "The Libertix runtime icon is missing from Libertix-release after copying"
+    }
     $finalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedExe).Hash.ToLowerInvariant()
 
     if (Test-Path -LiteralPath $releasePath) {

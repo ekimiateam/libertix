@@ -122,40 +122,51 @@ function Complete-InteractiveWindowsShareVerification {
     }
 }
 
-if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) {
-    exit 0
+$stateDeadline = [DateTime]::UtcNow.AddMinutes(2)
+while (
+    -not (Test-Path -LiteralPath $StatePath -PathType Leaf) -and
+    [DateTime]::UtcNow -lt $stateDeadline
+) {
+    Start-Sleep -Seconds 2
 }
+if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) { exit 0 }
 $result = Read-JsonFile -Path $StatePath
-if ([string]$result.status -notin @("succeeded", "failed", "rolled-back")) {
-    $recoveryRoot = Split-Path -Parent $StatePath
-    $linuxEvidencePath = Join-Path $recoveryRoot "installed-linux-boot.json"
-    if (-not (Test-Path -LiteralPath $linuxEvidencePath -PathType Leaf)) {
-        exit 0
-    }
-
-    # At logon the interactive trigger can run a few seconds before the SYSTEM
-    # startup verifier. Once Linux evidence exists, keep this instance alive so
-    # the result cannot be lost merely because the two tasks raced each other.
-    $deadline = [DateTime]::UtcNow.AddMinutes(15)
-    do {
-        Start-Sleep -Seconds 2
-        if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
-            $result = Read-JsonFile -Path $StatePath
-        }
-    } while (
-        [string]$result.status -notin @("succeeded", "failed", "rolled-back") -and
-        [DateTime]::UtcNow -lt $deadline
-    )
-    if ([string]$result.status -notin @("succeeded", "failed", "rolled-back")) {
-        exit 0
-    }
-}
-
 $recoveryRoot = Split-Path -Parent $StatePath
 $plan = Read-JsonFile -Path (Join-Path $recoveryRoot "installation-plan.json")
-Complete-InteractiveWindowsShareVerification `
-    -Result $result `
-    -Plan $plan
+$isWaitingForLinux = $false
+if ([string]$result.status -notin @("succeeded", "failed", "rolled-back")) {
+    $linuxEvidencePath = Join-Path $recoveryRoot "installed-linux-boot.json"
+    if (-not (Test-Path -LiteralPath $linuxEvidencePath -PathType Leaf)) {
+        if ([string]$result.status -ne "waiting-linux-boot") { exit 0 }
+        if ($result.PSObject.Properties.Name -contains "waitingAdviceAcknowledgedAtUtc") {
+            exit 0
+        }
+        $isWaitingForLinux = $true
+    } else {
+        # At logon the interactive trigger can run a few seconds before the SYSTEM
+        # startup verifier. Once Linux evidence exists, keep this instance alive so
+        # the result cannot be lost merely because the two tasks raced each other.
+        $deadline = [DateTime]::UtcNow.AddMinutes(15)
+        do {
+            Start-Sleep -Seconds 2
+            if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+                $result = Read-JsonFile -Path $StatePath
+            }
+        } while (
+            [string]$result.status -notin @("succeeded", "failed", "rolled-back") -and
+            [DateTime]::UtcNow -lt $deadline
+        )
+        if ([string]$result.status -notin @("succeeded", "failed", "rolled-back")) {
+            exit 0
+        }
+    }
+}
+
+if (-not $isWaitingForLinux) {
+    Complete-InteractiveWindowsShareVerification `
+        -Result $result `
+        -Plan $plan
+}
 $language = [string]$plan.locale.languageCode
 $translationsPath = @(
     (Join-Path $PSScriptRoot "config\Libertix.Translations.json"),
@@ -174,43 +185,91 @@ $text = $translations.languages.$language.postInstall
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$window = New-Object Windows.Window
-$window.Title = if ([string]$result.status -eq "succeeded") {
+function New-Brush {
+    param([Parameter(Mandatory = $true)][string]$Color)
+
+    return New-Object Windows.Media.SolidColorBrush(
+        [Windows.Media.ColorConverter]::ConvertFromString($Color)
+    )
+}
+
+$surfaceBrush = New-Brush "#232139"
+$panelBrush = New-Brush "#2D2A47"
+$textBrush = New-Brush "#F7F3FF"
+$accentBrush = if ($isWaitingForLinux) {
+    New-Brush "#F2B84B"
+} elseif ([string]$result.status -eq "succeeded") {
+    New-Brush "#38B9E8"
+} else {
+    New-Brush "#E96A91"
+}
+$resultTitle = if ($isWaitingForLinux) {
+    [string]$text.waitingTitle
+} elseif ([string]$result.status -eq "succeeded") {
     [string]$text.successTitle
 } else {
     [string]$text.failureTitle
 }
+$logoPath = @(
+    (Join-Path $PSScriptRoot "Images\icon.ico"),
+    (Join-Path (Split-Path -Parent $PSScriptRoot) "Resources\Images\icon.ico")
+) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+$window = New-Object Windows.Window
+$window.Title = "Libertix - $resultTitle"
 $window.Width = 820
 $window.Height = 610
 $window.MinWidth = 720
 $window.MinHeight = 520
 $window.WindowStartupLocation = "CenterScreen"
-$window.Background = [Windows.Media.Brushes]::White
+$window.Background = $surfaceBrush
+$window.Foreground = $textBrush
 $window.Topmost = $true
+if (-not [string]::IsNullOrWhiteSpace([string]$logoPath)) {
+    $window.Icon = [Windows.Media.Imaging.BitmapFrame]::Create(
+        [Uri]::new($logoPath, [UriKind]::Absolute)
+    )
+}
 
 $root = New-Object Windows.Controls.Grid
-$root.Margin = New-Object Windows.Thickness(28)
+$root.Margin = New-Object Windows.Thickness(34)
 $root.RowDefinitions.Add((New-Object Windows.Controls.RowDefinition -Property @{ Height = "Auto" }))
 $root.RowDefinitions.Add((New-Object Windows.Controls.RowDefinition -Property @{ Height = "Auto" }))
 $root.RowDefinitions.Add((New-Object Windows.Controls.RowDefinition -Property @{ Height = "*" }))
 $root.RowDefinitions.Add((New-Object Windows.Controls.RowDefinition -Property @{ Height = "Auto" }))
 
+$header = New-Object Windows.Controls.Grid
+$header.Margin = New-Object Windows.Thickness(0, 0, 0, 22)
+$header.ColumnDefinitions.Add((New-Object Windows.Controls.ColumnDefinition -Property @{ Width = "*" }))
+$heading = New-Object Windows.Controls.StackPanel
+$brand = New-Object Windows.Controls.TextBlock
+$brand.Text = "Libertix"
+$brand.FontSize = 30
+$brand.FontWeight = "Bold"
+$brand.Foreground = $textBrush
+$heading.Children.Add($brand) | Out-Null
 $title = New-Object Windows.Controls.TextBlock
-$title.Text = $window.Title
-$title.FontSize = 28
+$title.Text = $resultTitle
+$title.FontSize = 20
 $title.FontWeight = "SemiBold"
+$title.Foreground = $accentBrush
 $title.TextWrapping = "Wrap"
-$title.Margin = New-Object Windows.Thickness(0, 0, 0, 18)
-[Windows.Controls.Grid]::SetRow($title, 0)
-$root.Children.Add($title) | Out-Null
+$heading.Children.Add($title) | Out-Null
+[Windows.Controls.Grid]::SetColumn($heading, 0)
+$header.Children.Add($heading) | Out-Null
+[Windows.Controls.Grid]::SetRow($header, 0)
+$root.Children.Add($header) | Out-Null
 
 $message = New-Object Windows.Controls.TextBlock
-$message.Text = if ([string]$result.status -eq "succeeded") {
+$message.Text = if ($isWaitingForLinux) {
+    [string]$text.waitingMessage
+} elseif ([string]$result.status -eq "succeeded") {
     [string]$text.successMessage
 } else {
     [string]$text.failureMessage
 }
 $message.FontSize = 16
+$message.Foreground = $textBrush
 $message.TextWrapping = "Wrap"
 $message.Margin = New-Object Windows.Thickness(0, 0, 0, 18)
 [Windows.Controls.Grid]::SetRow($message, 1)
@@ -223,12 +282,20 @@ $details.TextWrapping = "Wrap"
 $details.VerticalScrollBarVisibility = "Auto"
 $details.FontFamily = New-Object Windows.Media.FontFamily("Consolas")
 $details.FontSize = 13
+$details.Background = $panelBrush
+$details.Foreground = $textBrush
+$details.BorderBrush = $accentBrush
+$details.BorderThickness = New-Object Windows.Thickness(1)
+$details.Padding = New-Object Windows.Thickness(14)
 $detailLines = @(
     "$($text.details):",
     "$($text.statusLabel): $($result.status)",
     "$($text.planLabel): $($result.planId)",
     "$($text.logLabel): $($result.logPath)"
 )
+if ($isWaitingForLinux) {
+    $detailLines += [string]$text.waitingDetail
+}
 foreach ($check in @($result.checks)) {
     $checkLabel = if ($check.passed) {
         [string]$text.checkPassedLabel
@@ -255,12 +322,27 @@ $closeButton.Content = [string]$text.close
 $closeButton.MinWidth = 150
 $closeButton.Height = 46
 $closeButton.Padding = New-Object Windows.Thickness(18, 8, 18, 8)
+$closeButton.Background = $accentBrush
+$closeButton.Foreground = $surfaceBrush
+$closeButton.BorderThickness = New-Object Windows.Thickness(0)
+$closeButton.FontWeight = "SemiBold"
 $closeButton.IsDefault = $true
 $closeButton.SetValue(
     [Windows.Automation.AutomationProperties]::AutomationIdProperty,
     "LibertixPostInstallCloseButton"
 )
-$closeButton.Add_Click({ $window.Close() })
+$script:ResultAcknowledged = $false
+$closeButton.Add_Click({
+    if ($isWaitingForLinux) {
+        $result | Add-Member `
+            -NotePropertyName waitingAdviceAcknowledgedAtUtc `
+            -NotePropertyValue ([DateTime]::UtcNow.ToString("o")) `
+            -Force
+        Write-JsonFileAtomic -Path $StatePath -Value $result
+    }
+    $script:ResultAcknowledged = $true
+    $window.Close()
+})
 
 if ([string]$result.status -eq "failed" -and [bool]$result.rollbackAvailable) {
     $rollbackButton = New-Object Windows.Controls.Button
@@ -269,6 +351,10 @@ if ([string]$result.status -eq "failed" -and [bool]$result.rollbackAvailable) {
     $rollbackButton.Height = 46
     $rollbackButton.Margin = New-Object Windows.Thickness(0, 0, 12, 0)
     $rollbackButton.Padding = New-Object Windows.Thickness(18, 8, 18, 8)
+    $rollbackButton.Background = $panelBrush
+    $rollbackButton.Foreground = $textBrush
+    $rollbackButton.BorderBrush = $accentBrush
+    $rollbackButton.BorderThickness = New-Object Windows.Thickness(1)
     $rollbackButton.Add_Click({
         $answer = [Windows.MessageBox]::Show(
             [string]$text.rollbackConfirmMessage,
@@ -324,5 +410,7 @@ $window.Add_ContentRendered({
 try {
     $null = $window.ShowDialog()
 } finally {
-    Remove-PromptTask
+    if (-not $isWaitingForLinux -and $script:ResultAcknowledged) {
+        Remove-PromptTask
+    }
 }

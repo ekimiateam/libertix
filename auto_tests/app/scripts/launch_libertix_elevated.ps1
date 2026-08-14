@@ -49,6 +49,22 @@ function Write-AtomicJson {
     Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
 }
 
+function Invoke-ScheduledTaskCommand {
+    param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+    $previousPreference = $ErrorActionPreference
+    $output = @()
+    $exitCode = -1
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = @(& "$env:SystemRoot\System32\schtasks.exe" @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
+}
+
 function Invoke-InteractiveWorker {
     param(
         [Parameter(Mandatory = $true)]
@@ -274,18 +290,9 @@ if (-not [string]::IsNullOrWhiteSpace($developmentStaticIpv4)) {
 # with /IT attaches the installer to the active desktop where VNC can drive it.
 Stop-Process -Name "Libertix" -Force -ErrorAction SilentlyContinue
 
-# schtasks reports a native error when the old task is absent. That expected
-# condition must not abort creation of the new interactive task.
-$oldPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-try {
-    schtasks.exe /Delete /TN $taskName /F 2>$null | Out-Null
-}
-finally {
-    $ErrorActionPreference = $oldPreference
-}
+$null = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")
 
-$time = (Get-Date).AddMinutes(1).ToString("HH:mm")
+$time = (Get-Date).AddMinutes(2).ToString("HH:mm")
 $applicationArguments = ""
 if (-not $useDefaultFilepool) {
     $applicationArguments += ' --filepool-base-url "{0}"' -f $filepoolBaseUrl
@@ -316,33 +323,29 @@ $interactiveSession = Get-Process -Name explorer -ErrorAction Stop |
     Sort-Object StartTime -Descending |
     Select-Object -First 1 -ExpandProperty SessionId
 
-$createOutput = schtasks.exe `
-    /Create `
-    /TN $taskName `
-    /TR $taskCommand `
-    /SC ONCE `
-    /ST $time `
-    /RL HIGHEST `
-    /IT `
-    /F 2>&1
-
-if ($LASTEXITCODE -ne 0) {
+$createResult = Invoke-ScheduledTaskCommand -Arguments @(
+    "/Create", "/TN", $taskName, "/TR", $taskCommand, "/SC", "ONCE",
+    "/ST", $time, "/RL", "HIGHEST", "/IT", "/F"
+)
+if ($createResult.ExitCode -ne 0) {
     if ($unattendedConfigPath) {
         Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `
         -Force -ErrorAction SilentlyContinue
-    throw ("Failed to create the Libertix scheduled task; output=" + ($createOutput -join " | "))
+    throw ("Failed to create the Libertix scheduled task; output=" +
+        ($createResult.Output -join " | "))
 }
 
-$runOutput = schtasks.exe /Run /TN $taskName 2>&1
-if ($LASTEXITCODE -ne 0) {
+$runResult = Invoke-ScheduledTaskCommand -Arguments @("/Run", "/TN", $taskName)
+if ($runResult.ExitCode -ne 0) {
     if ($unattendedConfigPath) {
         Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `
         -Force -ErrorAction SilentlyContinue
-    throw ("Failed to start the Libertix scheduled task; output=" + ($runOutput -join " | "))
+    throw ("Failed to start the Libertix scheduled task; output=" +
+        ($runResult.Output -join " | "))
 }
 
 $workerResult = $null
@@ -363,14 +366,9 @@ if (-not $workerResult) {
     if ($unattendedConfigPath) {
         Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
     }
-    $oldPreference = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    try {
-        $taskState = schtasks.exe /Query /TN $taskName /V /FO LIST 2>&1
-    }
-    finally {
-        $ErrorActionPreference = $oldPreference
-    }
+    $taskState = (Invoke-ScheduledTaskCommand -Arguments @(
+            "/Query", "/TN", $taskName, "/V", "/FO", "LIST"
+        )).Output
     Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `
         -Force -ErrorAction SilentlyContinue
     throw ("The interactive Libertix worker did not report a result; task=" +
@@ -408,12 +406,13 @@ if ($processInfo.ExecutablePath -ne $exe -or $processInfo.SessionId -ne $interac
     throw "Libertix process identity does not match the deployed executable/session"
 }
 
-$deleteOutput = schtasks.exe /Delete /TN $taskName /F 2>&1
-if ($LASTEXITCODE -ne 0) {
+$deleteResult = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")
+if ($deleteResult.ExitCode -ne 0) {
     Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `
         -Force -ErrorAction SilentlyContinue
-    throw ("Libertix started but scheduled task cleanup failed; sortie=" + ($deleteOutput -join " | "))
+    throw ("Libertix started but scheduled task cleanup failed; output=" +
+        ($deleteResult.Output -join " | "))
 }
 
 Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `

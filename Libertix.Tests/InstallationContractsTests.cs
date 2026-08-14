@@ -78,7 +78,8 @@ namespace Libertix.Tests
                     Path.Combine("Scripts", "libertix-uefi-install.ps1"),
                     Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
                     Path.Combine("Tools", "aria2", "aria2c.exe"),
-                    Path.Combine("Resources", "Libertix.Translations.json")
+                    Path.Combine("Resources", "Libertix.Translations.json"),
+                    Path.Combine("Resources", "Images", "icon.ico")
                 };
                 foreach (string relativePath in included)
                 {
