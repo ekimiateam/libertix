@@ -1225,6 +1225,89 @@ def test_linux_remote_check_does_not_retry_a_remote_failure() -> None:
     assert result.steps[-1].status == "error"
 
 
+def test_windows_script_reconnects_after_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+
+    class ReconnectingSsh:
+        def __init__(self) -> None:
+            self.reconnections = 0
+
+        def reconnect(self) -> None:
+            self.reconnections += 1
+
+    calls = 0
+
+    def fake_run_windows_script(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise WorkflowError(
+                "automation.test.windows",
+                "Remote command execution failed",
+                details={"exception_type": "SSHException", "error": "session inactive"},
+            )
+        return CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
+
+    monkeypatch.setattr(service.validation, "run_windows_script", fake_run_windows_script)
+    ssh = ReconnectingSsh()
+
+    response = service._run_windows_script_resiliently(  # noqa: SLF001
+        ssh,  # type: ignore[arg-type]
+        script_name="post_install_windows_check.ps1",
+        config={"check": "chkdsk_scan"},
+        step="automation.test.windows",
+        timeout=1800,
+    )
+
+    assert response == CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
+    assert (calls, ssh.reconnections) == (2, 1)
+
+
+def test_linux_script_reconnects_after_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+
+    class ReconnectingSsh:
+        def __init__(self) -> None:
+            self.reconnections = 0
+
+        def reconnect(self) -> None:
+            self.reconnections += 1
+
+    calls = 0
+
+    def fake_run_linux_script(*_args: object, **_kwargs: object) -> CommandResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise WorkflowError(
+                "automation.test.linux",
+                "SSH text upload failed",
+                details={"exception_type": "SSHException", "error": "Channel closed."},
+            )
+        return CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
+
+    monkeypatch.setattr(service.validation, "run_linux_script", fake_run_linux_script)
+    retry_delays: list[float] = []
+    monkeypatch.setattr("app.services.automation_postinstall.time.sleep", retry_delays.append)
+    ssh = ReconnectingSsh()
+
+    response = service._run_linux_script_resiliently(  # noqa: SLF001
+        ssh,  # type: ignore[arg-type]
+        script_name="focus_linux_post_install_result.py",
+        arguments=("--pid", "4321"),
+        step="automation.test.linux",
+        timeout=30,
+    )
+
+    assert response == CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
+    assert (calls, ssh.reconnections) == (2, 1)
+    assert retry_delays == [3]
+
+
 def test_unattended_wizard_captures_and_acknowledges_every_stage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1893,7 +1976,10 @@ def test_snapshot_restore_network_uses_guest_agent_and_shared_configuration() ->
             step: str,
             timeout: float,
         ) -> dict[str, object]:
-            assert step == "automation.guest_network_configure"
+            assert step in {
+                "automation.guest_interactive_session",
+                "automation.guest_network_configure",
+            }
             assert timeout > 0
             commands.append(command)
             return {"exited": True, "exitcode": 0}
@@ -1911,11 +1997,13 @@ def test_snapshot_restore_network_uses_guest_agent_and_shared_configuration() ->
         "gateway": "192.0.2.1",
         "dns_server_count": 2,
     }
-    assert commands[0][0:5] == ["netsh.exe", "interface", "ipv4", "set", "address"]
-    assert f"address={profile.vm_host}" in commands[0]
-    assert "mask=255.255.255.0" in commands[0]
-    assert commands[1][4] == "dnsservers"
-    assert commands[2][3:5] == ["add", "dnsservers"]
+    assert commands[0][0] == "powershell.exe"
+    assert "Get-Process explorer" in commands[0][-1]
+    assert commands[1][0:5] == ["netsh.exe", "interface", "ipv4", "set", "address"]
+    assert f"address={profile.vm_host}" in commands[1]
+    assert "mask=255.255.255.0" in commands[1]
+    assert commands[2][4] == "dnsservers"
+    assert commands[3][3:5] == ["add", "dnsservers"]
 
 
 def test_automation_logs_vm502_reset_for_uefi(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2165,6 +2253,35 @@ def test_automation_preserves_primary_failure_when_serial_capture_also_fails(
     }
 
 
+def test_serial_capture_unavailable_is_reported_without_false_success(
+    tmp_path: Path,
+) -> None:
+    service = AutomationService(settings(capture_dir=tmp_path))
+    vm = service.validation.select_vms(["vm1"])[0]
+    destination = tmp_path / "serial" / "vm1-serial-console.log"
+    session = SimpleNamespace(
+        stop_event=SimpleNamespace(set=lambda: None),
+        thread=SimpleNamespace(join=lambda **_kwargs: None, is_alive=lambda: False),
+        error=None,
+        report=SimpleNamespace(
+            path=destination,
+            payload_bytes=52,
+            connections=1,
+            disconnects=0,
+            unavailable_reason="serial0 is not configured on the VM",
+        ),
+        destination=destination,
+    )
+    result = ResultBuilder("automation")
+
+    service._stop_serial_capture(vm, session, result)  # noqa: SLF001
+
+    assert result.steps[-1].step == "automation.serial_capture_unavailable"
+    assert result.steps[-1].status == "ok"
+    assert result.steps[-1].context["capture_available"] is False
+    assert not any(step.step == "automation.serial_capture_complete" for step in result.steps)
+
+
 def test_validation_run_retains_completed_capture_workspace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2312,6 +2429,74 @@ def test_installation_monitor_survives_vision_payment_failure_until_local_grub(
         "automation.installed_boot_menu_seen",
     ]
     assert result.steps[-1].context["proof_source"] == "local-theme-colors"
+
+
+def test_installation_monitor_reboots_verified_live_failure_and_reports_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = AutomationService(
+        settings(
+            automation_monitor_interval_seconds=0.2,
+            automation_monitor_timeout_seconds=10,
+            automation_stall_timeout_seconds=5,
+        )
+    )
+    vm = service.validation.select_vms(["vm1"])[0]
+    capture = tmp_path / "verified-live-failure.png"
+    Image.new("RGB", (320, 200), (11, 16, 32)).save(capture)
+    clock = {"now": 0.0}
+    probes: list[Path] = []
+
+    def unavailable_vision(*_args: object) -> InstallProgressVerdict:
+        raise WorkflowError(
+            "llm.install_progress",
+            "Vision provider payment required",
+            details={"http_status": 402},
+        )
+
+    monkeypatch.setattr(service, "_capture_with_name", lambda *_args: capture)
+    monkeypatch.setattr(service, "_installed_grub_theme_visible", lambda _capture: False)
+    monkeypatch.setattr(service.vision_llm, "analyze_install_progress", unavailable_vision)
+    monkeypatch.setattr(
+        service,
+        "_request_live_failure_reboot_probe",
+        lambda _vm, selected_capture, _result: probes.append(selected_capture),
+    )
+    monkeypatch.setattr(
+        service,
+        "_read_archived_live_failure",
+        lambda _vm: {
+            "message": "CRASH_TEST: target filesystem failed",
+            "stage": "090-mount-target",
+            "exit_code": "1",
+            "rollback": "completed",
+            "run_id": "test-run",
+        },
+    )
+    monkeypatch.setattr(
+        automation_monitoring_module.time,
+        "monotonic",
+        lambda: clock["now"],
+    )
+    monkeypatch.setattr(
+        automation_monitoring_module.time,
+        "sleep",
+        lambda seconds: clock.__setitem__("now", clock["now"] + seconds),
+    )
+
+    with pytest.raises(WorkflowError) as raised:
+        service._monitor_until_live_boot(  # noqa: SLF001
+            vm,
+            ResultBuilder("automation"),
+            "bios",
+            reboot_requested=True,
+        )
+
+    assert raised.value.step == "automation.live_installer_failure"
+    assert raised.value.message == "CRASH_TEST: target filesystem failed"
+    assert raised.value.details["rollback"] == "completed"
+    assert probes == [capture]
 
 
 @pytest.mark.parametrize("firmware", ["bios", "uefi"])
@@ -3450,6 +3635,11 @@ def test_post_install_flow_proves_windows_before_first_linux_boot(
     )
     monkeypatch.setattr(
         service,
+        "_wait_for_first_boot_verification",
+        lambda *_args, **_kwargs: events.append("linux-verification-ready"),
+    )
+    monkeypatch.setattr(
+        service,
         "_capture_and_dismiss_post_install_result",
         lambda _vm, _result, platform, _ssh: events.append(f"dialog:{platform}"),
     )
@@ -3531,6 +3721,7 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
 
     monkeypatch.setattr(service, "_wait_for_ssh", wait_for_ssh)
     monkeypatch.setattr(service, "_run_remote_check", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service, "_wait_for_first_boot_verification", lambda *_args: None)
     monkeypatch.setattr(service, "_prepare_linux_graphical_session", lambda *_args: None)
     monkeypatch.setattr(service, "_prepare_windows_graphical_session", lambda *_args: None)
     monkeypatch.setattr(
@@ -3560,6 +3751,61 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
     assert events.count("wait:windows_final:windows") == 1
     assert events.count("dialog:linux") == 1
     assert events.count("dialog:windows") == 1
+
+
+def test_first_boot_verification_failure_is_terminal_and_preserves_exact_reason() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    result = ResultBuilder("automation")
+
+    class FakeSSH:
+        def run(self, command: str, **kwargs: object) -> CommandResult:
+            assert "first-boot-verification.json" in command
+            assert kwargs["check"] is False
+            return CommandResult(
+                stdout=(
+                    '{"status":"failed","error":"CRASH_TEST_CT06: forced failure",'
+                    '"failedChecks":[]}'
+                ),
+                stderr="",
+                exit_code=1,
+            )
+
+    with pytest.raises(WorkflowError) as caught:
+        service._wait_for_first_boot_verification(  # type: ignore[arg-type]  # noqa: SLF001
+            FakeSSH(), vm, result
+        )
+
+    assert caught.value.step == "automation.test.linux"
+    assert caught.value.message == (
+        "Linux first-boot verification failed: CRASH_TEST_CT06: forced failure"
+    )
+    assert caught.value.details["status"] == "failed"
+    assert caught.value.details["state_path"].endswith("first-boot-verification.json")
+    assert caught.value.details["log_path"].endswith("first-boot-resize.log")
+    assert result.steps == []
+
+
+def test_first_boot_verification_success_records_one_clean_result() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    result = ResultBuilder("automation")
+
+    class FakeSSH:
+        def run(self, _command: str, **_kwargs: object) -> CommandResult:
+            return CommandResult(
+                stdout='{"status":"succeeded","error":null,"failedChecks":[]}',
+                stderr="",
+                exit_code=0,
+            )
+
+    service._wait_for_first_boot_verification(  # type: ignore[arg-type]  # noqa: SLF001
+        FakeSSH(), vm, result
+    )
+
+    assert len(result.steps) == 1
+    assert result.steps[0].status == "ok"
+    assert result.steps[0].message == "linux.first_boot_verification_ready: OK"
 
 
 def test_linux_graphical_session_uses_loginctl_before_submitting_credentials(

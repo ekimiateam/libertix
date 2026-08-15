@@ -227,10 +227,16 @@ namespace Libertix.Pages
 
                 if (processResult.Completion != StreamingProcessCompletion.Exited || processResult.ExitCode != 0)
                 {
+                    ReloadExecutionState();
+                    string persistedFailure = _executionLedger?.State?.Failure?.Message;
+                    string reason = string.IsNullOrWhiteSpace(persistedFailure)
+                        ? $"UEFI installer preparation failed with rc={processResult.ExitCode} " +
+                          $"({processResult.Completion})."
+                        : persistedFailure;
                     await HandleUefiPreparationFailureAsync(
                         scriptPath,
                         powershell,
-                        $"UEFI installer preparation failed with rc={processResult.ExitCode} ({processResult.Completion}).");
+                        reason);
                     return;
                 }
 
@@ -317,6 +323,9 @@ namespace Libertix.Pages
                     Localized(
                         "ApplyChangesPreparationErrorRestored",
                         "Preparation failed. Windows has been restored."));
+                PublishUnattendedFailure(
+                    failureCode.ToLowerInvariant().Replace('_', '-'),
+                    $"{reason} Automatic rollback was verified.");
                 FinishInstallation(enableBackButton: true);
                 return;
             }
@@ -327,6 +336,9 @@ namespace Libertix.Pages
                 Localized(
                     "ApplyChangesRollbackIncomplete",
                     "Rollback incomplete. Manual intervention is required."));
+            PublishUnattendedFailure(
+                "uefi-rollback-incomplete",
+                $"{reason} Automatic rollback could not be verified.");
             FinishInstallation(enableBackButton: false);
             MessageBox.Show(
                 LocalizedFormat(

@@ -142,6 +142,8 @@ class LibertixGui:
         self.root.geometry(f"{self.root.winfo_screenwidth()}x{self.root.winfo_screenheight()}+0+0")
         for sequence in ("<F12>", "<Control-Alt-KeyPress-d>"):
             self.root.bind_all(sequence, self.enter_dev_mode)
+        for sequence in ("<KeyPress-r>", "<KeyPress-R>"):
+            self.root.bind_all(sequence, self.request_verified_failure_reboot)
         self.root.bind("<Configure>", self.on_resize)
         self.details_visible = False
         self.dev_requested = False
@@ -430,6 +432,15 @@ class LibertixGui:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+
+    def request_verified_failure_reboot(self, _event: object | None = None) -> str:
+        result = parse_env(RESULT_FILE)
+        if (
+            result.get("LIBERTIX_INSTALL_SUCCESS") == "false"
+            and result.get("LIBERTIX_INSTALL_ROLLBACK") == "completed"
+        ):
+            self.reboot()
+        return "break"
 
     def draw_progress(self) -> None:
         self.progress_canvas.delete("all")

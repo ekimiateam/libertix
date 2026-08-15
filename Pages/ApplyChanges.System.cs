@@ -44,7 +44,8 @@ namespace Libertix.Pages
 
         private async Task<StoragePreflightInfo> RunStoragePreflightAsync(
             FirmwareType firmware,
-            bool decryptBitLocker = true)
+            bool decryptBitLocker = true,
+            bool observeCancellation = true)
         {
             string scriptPath = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
@@ -70,6 +71,7 @@ namespace Libertix.Pages
                     ? WindowsProcessTimeouts.InstallerOperation
                     : WindowsProcessTimeouts.DiskOperation,
                 line => Log(line),
+                observeCancellation: observeCancellation,
                 captureStandardOutput: line =>
                 {
                     lock (outputLock)

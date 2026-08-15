@@ -322,6 +322,9 @@ namespace Libertix.Pages
             CleanupTransactionDownloadsBestEffort();
             Log($"ERROR: {reason}");
             UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+            PublishUnattendedFailure(
+                "bios-artifact-preparation-failed",
+                reason);
             FinishInstallation(enableBackButton: true);
             return false;
         }
@@ -509,6 +512,9 @@ namespace Libertix.Pages
                         Localized(
                             "ApplyChangesPreparationErrorRestored",
                             "Preparation failed. Windows has been restored."));
+                PublishUnattendedFailure(
+                    "bios-preparation-failed",
+                    $"{reason} Automatic rollback was verified.");
                 FinishInstallation(enableBackButton: true);
             }
             else
@@ -519,6 +525,9 @@ namespace Libertix.Pages
                     Localized(
                         "ApplyChangesRollbackIncomplete",
                         "Rollback incomplete. Manual intervention is required."));
+                PublishUnattendedFailure(
+                    "bios-rollback-incomplete",
+                    $"{reason} Automatic rollback could not be verified.");
                 FinishInstallation(enableBackButton: false);
                 MessageBox.Show(
                     LocalizedFormat(

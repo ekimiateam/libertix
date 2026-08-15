@@ -416,6 +416,18 @@ class AutomationService(
                 },
             ) from session.error
         report = session.report
+        if report is not None and report.unavailable_reason is not None:
+            result.ok(
+                "automation.serial_capture_unavailable",
+                "Proxmox serial-console capture is unavailable for this VM",
+                vm=vm.name,
+                target=vm.host,
+                vmid=vm.vmid,
+                path=str(report.path),
+                reason=report.unavailable_reason,
+                capture_available=False,
+            )
+            return
         if report is None or report.payload_bytes == 0:
             raise WorkflowError(
                 "automation.serial_capture",

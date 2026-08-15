@@ -16,6 +16,7 @@ from app.services.common import ResultBuilder
 GIB = 1024**3
 WINDOWS_GUEST_AGENT_READY_TIMEOUT_SECONDS = 180.0
 WINDOWS_GUEST_AGENT_COMMAND_TIMEOUT_SECONDS = 30.0
+WINDOWS_INTERACTIVE_SESSION_PROBE_SECONDS = 2.0
 
 
 class AutomationPreflight:
@@ -137,6 +138,7 @@ class AutomationPreflight:
         profile: WizardProfile,
     ) -> dict[str, object]:
         deadline = time.monotonic() + WINDOWS_GUEST_AGENT_READY_TIMEOUT_SECONDS
+        self._wait_for_windows_interactive_session(proxmox, node, profile, deadline)
         last_error: WorkflowError | None = None
         interfaces: list[dict[str, object]] = []
         while time.monotonic() < deadline:
@@ -290,6 +292,48 @@ class AutomationPreflight:
                 "expected_ipv4": profile.vm_host,
             },
         )
+
+    @staticmethod
+    def _wait_for_windows_interactive_session(
+        proxmox: ProxmoxClient,
+        node: str,
+        profile: WizardProfile,
+        deadline: float,
+    ) -> None:
+        last_error: WorkflowError | None = None
+        while time.monotonic() < deadline:
+            try:
+                execution = proxmox.execute_guest_agent_command(
+                    node,
+                    profile.vmid,
+                    [
+                        "powershell.exe",
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "if (Get-Process explorer -ErrorAction SilentlyContinue) "
+                        "{ exit 0 } else { exit 1 }",
+                    ],
+                    step="automation.guest_interactive_session",
+                    timeout=WINDOWS_GUEST_AGENT_COMMAND_TIMEOUT_SECONDS,
+                )
+                if execution.get("exitcode") == 0:
+                    return
+            except WorkflowError as exc:
+                last_error = exc
+            time.sleep(WINDOWS_INTERACTIVE_SESSION_PROBE_SECONDS)
+
+        raise WorkflowError(
+            "automation.guest_interactive_session",
+            "Windows did not expose an interactive Explorer session after snapshot restore",
+            details={
+                "vm": profile.vm_name,
+                "vmid": profile.vmid,
+                "node": node,
+                "last_error": str(last_error) if last_error else "",
+            },
+        ) from last_error
 
     @staticmethod
     def assert_vm_not_in_io_error(

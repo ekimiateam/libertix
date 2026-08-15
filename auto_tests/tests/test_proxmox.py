@@ -340,3 +340,47 @@ def test_serial_capture_retries_a_transient_invalid_websocket_handshake(tmp_path
     assert report.payload_bytes == len(b"guest output\n")
     assert report.connections == 1
     assert report.disconnects == 1
+
+
+def test_serial_capture_reports_unconfigured_serial_interface(tmp_path: Path) -> None:
+    stop_event = Event()
+    ready_event = Event()
+
+    class FakeProxy:
+        user = "automation@pve"
+        ticket = "private-console-ticket"
+        port = 5901
+        upid = "UPID:node-a:1234:serial"
+
+    class FakeProxmox:
+        api_origin = "https://proxmox.test:8006"
+        authorization = "PVEAPIToken=token=private-api-secret"
+        websocket_ssl_context = None
+        timeout = 1
+
+        def create_serial_terminal_proxy(self, _node: str, _vmid: int) -> FakeProxy:
+            return FakeProxy()
+
+    class FakeWebSocket:
+        def __enter__(self) -> "FakeWebSocket":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def send(self, _value: str) -> None:
+            pass
+
+        def recv(self, **_kwargs: object) -> bytes:
+            stop_event.set()
+            return b"OKserial interface 'serial0' is not configured\n"
+
+    destination = tmp_path / "serial" / "vm1-serial-console.log"
+    report = ProxmoxSerialCapture(
+        FakeProxmox(),  # type: ignore[arg-type]
+        connect_factory=lambda *_args, **_kwargs: FakeWebSocket(),
+    ).run("node-a", 500, destination, stop_event, ready_event)
+
+    assert report.unavailable_reason == "serial0 is not configured on the VM"
+    assert report.payload_bytes > 0
+    assert b"serial0' is not configured" in destination.read_bytes()

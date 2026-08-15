@@ -58,17 +58,22 @@ namespace Libertix.Pages
 
         private void FinishInstallation(bool enableBackButton)
         {
-            if (UnattendedWorkflow.IsEnabled &&
-                !_unattendedRebootReady &&
-                !_unattendedFailurePublished)
-            {
-                _unattendedFailurePublished = true;
-                UnattendedWorkflow.TryPublishFailure(
-                    "installation-preparation-failed",
-                    "Installation preparation did not reach the verified reboot-ready state.");
-            }
+            PublishUnattendedFailure(
+                "installation-preparation-failed",
+                "Installation preparation did not reach the verified reboot-ready state.");
             BackButton.IsEnabled = enableBackButton;
             SetInstallationRunning(false);
+        }
+
+        private void PublishUnattendedFailure(string errorCode, string errorMessage)
+        {
+            if (!UnattendedWorkflow.IsEnabled ||
+                _unattendedRebootReady ||
+                _unattendedFailurePublished)
+                return;
+
+            _unattendedFailurePublished = true;
+            UnattendedWorkflow.TryPublishFailure(errorCode, errorMessage);
         }
 
         private async Task PublishUnattendedRebootReadyAsync()
@@ -159,6 +164,9 @@ namespace Libertix.Pages
                 Localized(
                     "ApplyChangesCancelledBeforeDiskChange",
                     "Installation cancelled before any disk change."));
+            PublishUnattendedFailure(
+                "installation-cancelled-before-disk-change",
+                "Installation cancelled before any disk change.");
             FinishInstallation(enableBackButton: true);
         }
 
@@ -213,6 +221,9 @@ namespace Libertix.Pages
                     Localized(
                         "ApplyChangesCancelledRestored",
                         "Installation cancelled. Windows has been restored."));
+                PublishUnattendedFailure(
+                    "uefi-installation-cancelled",
+                    "Installation cancelled. Windows was restored and the rollback was verified.");
                 FinishInstallation(enableBackButton: true);
                 return;
             }
@@ -223,6 +234,9 @@ namespace Libertix.Pages
                 Localized(
                     "ApplyChangesRollbackIncomplete",
                     "Rollback incomplete. Manual intervention is required."));
+            PublishUnattendedFailure(
+                "uefi-cancellation-rollback-incomplete",
+                "Installation cancellation rollback could not be verified.");
             FinishInstallation(enableBackButton: false);
             MessageBox.Show(
                 LocalizedFormat(
@@ -246,7 +260,8 @@ namespace Libertix.Pages
             {
                 current = await RunStoragePreflightAsync(
                     initial.Firmware,
-                    decryptBitLocker: false);
+                    decryptBitLocker: false,
+                    observeCancellation: false);
             }
             catch (Exception ex)
             {

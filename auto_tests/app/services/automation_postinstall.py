@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import time
 import uuid
@@ -25,6 +26,7 @@ from app.services.common import ResultBuilder
 
 EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4
 REMOTE_CHECK_SSH_MAX_ATTEMPTS = 6
+LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 3
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,102 @@ class RemoteCheck:
 
 class PostInstallValidationMixin:
     """Validate both installed operating systems after the installer exits."""
+
+    def _run_linux_command_resiliently(
+        self,
+        ssh: SSHClient,
+        *,
+        command: str,
+        step: str,
+        timeout: float,
+    ) -> CommandResult:
+        """Retry an idempotent Linux command after a proven transport failure."""
+
+        last_error: WorkflowError | None = None
+        for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    ssh.reconnect()
+                return ssh.run(command, step=step, timeout=timeout)
+            except WorkflowError as exc:
+                last_error = exc
+                if (
+                    not is_reconnectable_transport_error(exc)
+                    or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
+                ):
+                    raise
+
+        assert last_error is not None
+        raise last_error
+
+    def _run_linux_script_resiliently(
+        self,
+        ssh: SSHClient,
+        *,
+        script_name: str,
+        arguments: tuple[str, ...],
+        step: str,
+        timeout: float,
+    ) -> CommandResult:
+        """Upload and run a Linux helper again after a proven transport failure."""
+
+        last_error: WorkflowError | None = None
+        for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    ssh.reconnect()
+                return self.validation.run_linux_script(
+                    ssh,
+                    script_name=script_name,
+                    arguments=arguments,
+                    step=step,
+                    timeout=timeout,
+                )
+            except WorkflowError as exc:
+                last_error = exc
+                if (
+                    not is_reconnectable_transport_error(exc)
+                    or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
+                ):
+                    raise
+                time.sleep(LINUX_SCRIPT_RECONNECT_DELAY_SECONDS)
+
+        assert last_error is not None
+        raise last_error
+
+    def _run_windows_script_resiliently(
+        self,
+        ssh: SSHClient,
+        *,
+        script_name: str,
+        config: dict[str, object],
+        step: str,
+        timeout: float,
+    ) -> CommandResult:
+        """Run a Windows helper again only after a proven transport failure."""
+
+        last_error: WorkflowError | None = None
+        for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    ssh.reconnect()
+                return self.validation.run_windows_script(
+                    ssh,
+                    script_name=script_name,
+                    config=config,
+                    step=step,
+                    timeout=timeout,
+                )
+            except WorkflowError as exc:
+                last_error = exc
+                if (
+                    not is_reconnectable_transport_error(exc)
+                    or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
+                ):
+                    raise
+
+        assert last_error is not None
+        raise last_error
 
     def _run_post_install_validation(
         self,
@@ -81,7 +179,7 @@ class PostInstallValidationMixin:
                 distribution=options.distribution,
             )
             try:
-                response = self.validation.run_windows_script(
+                response = self._run_windows_script_resiliently(
                     waiting_windows_ssh,
                     script_name="post_install_windows_check.ps1",
                     config={
@@ -135,36 +233,7 @@ class PostInstallValidationMixin:
                 test="linux.ssh",
                 server_key_sha256=linux_ssh.server_key_sha256,
             )
-            self._run_remote_check(
-                linux_ssh,
-                vm,
-                result,
-                "linux",
-                RemoteCheck(
-                    "linux.first_boot_verification_ready",
-                    'i=0; while [ "$i" -lt 120 ]; do '
-                    "python3 -c 'import json; "
-                    'p=json.load(open("/var/lib/libertix/first-boot-verification.json", '
-                    'encoding="utf-8")); assert p["status"] == "succeeded"\' '
-                    "&& exit 0; "
-                    "i=$((i + 1)); sleep 2; done; "
-                    "python3 -c 'import json; "
-                    'p=json.load(open("/var/lib/libertix/first-boot-verification.json", '
-                    'encoding="utf-8")); '
-                    'failed=["{}: {}".format(c.get("name"), c.get("message")) '
-                    'for c in p.get("checks", []) if not c.get("passed")]; '
-                    'print("FIRST_BOOT_STATUS={}".format(p.get("status")), '
-                    'file=__import__("sys").stderr); '
-                    'print("FIRST_BOOT_ERROR={}".format(p.get("error")), '
-                    'file=__import__("sys").stderr); '
-                    'print("FIRST_BOOT_FAILED_CHECKS="+"; ".join(failed), '
-                    'file=__import__("sys").stderr)\' '
-                    "|| true; "
-                    "tail -n 80 /var/log/libertix/first-boot-resize.log >&2 2>/dev/null || true; "
-                    "exit 1",
-                    timeout=270,
-                ),
-            )
+            self._wait_for_first_boot_verification(linux_ssh, vm, result)
             self._prepare_linux_graphical_session(
                 linux_ssh,
                 vm,
@@ -316,7 +385,7 @@ class PostInstallValidationMixin:
         )
         try:
             try:
-                response = self.validation.run_windows_script(
+                response = self._run_windows_script_resiliently(
                     final_windows_ssh,
                     script_name="post_install_windows_check.ps1",
                     config={
@@ -351,6 +420,79 @@ class PostInstallValidationMixin:
         finally:
             final_windows_ssh.__exit__(None, None, None)
 
+    def _wait_for_first_boot_verification(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> None:
+        state_path = "/var/lib/libertix/first-boot-verification.json"
+        log_path = "/var/log/libertix/first-boot-resize.log"
+        command = (
+            'i=0; status=""; while [ "$i" -lt 120 ]; do '
+            "status=$(python3 -c 'import json,sys; "
+            'print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", ""))\' '
+            f"{shlex.quote(state_path)} 2>/dev/null || true); "
+            'case "$status" in succeeded|failed) break;; esac; '
+            "i=$((i + 1)); sleep 2; done; "
+            "python3 -c 'import json,sys; "
+            'p=json.load(open(sys.argv[1], encoding="utf-8")); '
+            'failed=[{"name": c.get("name"), "message": c.get("message")} '
+            'for c in p.get("checks", []) if not c.get("passed")]; '
+            'print(json.dumps({"status": p.get("status"), "error": p.get("error"), '
+            '"failedChecks": failed}, ensure_ascii=True)); '
+            'raise SystemExit(0 if p.get("status") == "succeeded" else 1)\' '
+            f"{shlex.quote(state_path)}"
+        )
+        response = ssh.run(
+            f"sh -eu -c {shlex.quote(command)}",
+            step="automation.test.linux",
+            timeout=270,
+            check=False,
+        )
+        try:
+            payload = json.loads(response.stdout.strip())
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise WorkflowError(
+                "automation.test.linux",
+                "Linux first-boot verification returned an unreadable terminal state",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "test": "linux.first_boot_verification_ready",
+                    "exit_code": response.exit_code,
+                    "state_path": state_path,
+                    "log_path": log_path,
+                },
+            ) from exc
+
+        status = str(payload.get("status") or "unknown")
+        error = str(payload.get("error") or "").strip()
+        failed_checks = payload.get("failedChecks")
+        context = {
+            "vm": vm.name,
+            "target": vm.host,
+            "test": "linux.first_boot_verification_ready",
+            "exit_code": response.exit_code,
+            "status": status,
+            "error": error,
+            "failed_checks": failed_checks if isinstance(failed_checks, list) else [],
+            "state_path": state_path,
+            "log_path": log_path,
+        }
+        if response.exit_code != 0 or status != "succeeded":
+            reason = error or f"terminal status is {status}"
+            raise WorkflowError(
+                "automation.test.linux",
+                f"Linux first-boot verification failed: {reason}",
+                details=context,
+            )
+        result.ok(
+            "automation.test.linux",
+            "linux.first_boot_verification_ready: OK",
+            **context,
+        )
+
     def _capture_and_dismiss_post_install_result(
         self,
         vm: VMConfig,
@@ -359,8 +501,9 @@ class PostInstallValidationMixin:
         guest_ssh: SSHClient,
     ) -> None:
         if platform == "linux":
-            process = guest_ssh.run(
-                "pgrep -fo '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py'",
+            process = self._run_linux_command_resiliently(
+                guest_ssh,
+                command=("pgrep -fo '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py'"),
                 step="automation.linux_post_install_result_process",
                 timeout=15,
             )
@@ -371,7 +514,7 @@ class PostInstallValidationMixin:
                     "The Linux post-install result process ID is invalid",
                     details={"vm": vm.name, "target": vm.host},
                 )
-            focus = self.validation.run_linux_script(
+            focus = self._run_linux_script_resiliently(
                 guest_ssh,
                 script_name="focus_linux_post_install_result.py",
                 arguments=("--pid", process_id, "--timeout", "15"),
@@ -393,7 +536,7 @@ class PostInstallValidationMixin:
                     details={"vm": vm.name, "target": vm.host, **values},
                 )
         else:
-            visibility = self.validation.run_windows_script(
+            visibility = self._run_windows_script_resiliently(
                 guest_ssh,
                 script_name="post_install_windows_check.ps1",
                 config={
@@ -414,7 +557,7 @@ class PostInstallValidationMixin:
                     "The Windows post-install result process ID is missing",
                     details={"vm": vm.name, "target": vm.host},
                 )
-            self.validation.run_windows_script(
+            self._run_windows_script_resiliently(
                 guest_ssh,
                 script_name="focus_post_install_result.ps1",
                 config={"process_id": int(process_id_text)},
@@ -430,20 +573,23 @@ class PostInstallValidationMixin:
             if client is not None:
                 client.disconnect()
         if platform == "linux":
-            dismissal = guest_ssh.run(
-                'i=0; while [ "$i" -lt 30 ]; do '
-                "if ! pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
-                ">/dev/null && "
-                "python3 -c 'import json,pathlib; "
-                'p=pathlib.Path.home()/".local/state/libertix/first-boot-result-ack.json"; '
-                'v=json.loads(p.read_text(encoding="utf-8")); '
-                'assert v["schemaVersion"] == 1; assert len(v["fingerprint"]) == 64\' '
-                "; then exit 0; fi; i=$((i + 1)); sleep 1; done; exit 1",
+            dismissal = self._run_linux_command_resiliently(
+                guest_ssh,
+                command=(
+                    'i=0; while [ "$i" -lt 30 ]; do '
+                    "if ! pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
+                    ">/dev/null && "
+                    "python3 -c 'import json,pathlib; "
+                    'p=pathlib.Path.home()/".local/state/libertix/first-boot-result-ack.json"; '
+                    'v=json.loads(p.read_text(encoding="utf-8")); '
+                    'assert v["schemaVersion"] == 1; assert len(v["fingerprint"]) == 64\' '
+                    "; then exit 0; fi; i=$((i + 1)); sleep 1; done; exit 1"
+                ),
                 step="automation.linux_post_install_result_dismissed",
                 timeout=45,
             )
         else:
-            dismissal = self.validation.run_windows_script(
+            dismissal = self._run_windows_script_resiliently(
                 guest_ssh,
                 script_name="post_install_windows_check.ps1",
                 config={
@@ -570,7 +716,7 @@ class PostInstallValidationMixin:
     ) -> None:
         password = self.settings.windows_ssh_password.get_secret_value()
         for attempt in range(1, 4):
-            inspection = self.validation.run_windows_script(
+            inspection = self._run_windows_script_resiliently(
                 windows_ssh,
                 script_name="inspect_windows_graphical_session.ps1",
                 config={},
@@ -595,7 +741,7 @@ class PostInstallValidationMixin:
                 "session_id": values.get("SESSION_ID", "-1"),
             }
             if values.get("SETUP_EXPERIENCE_PRESENT") == "True":
-                response = self.validation.run_windows_script(
+                response = self._run_windows_script_resiliently(
                     windows_ssh,
                     script_name="dismiss_windows_setup_experience.ps1",
                     config={},
@@ -1564,7 +1710,7 @@ class PostInstallValidationMixin:
         plan = build_windows_validation_plan(vm, options, artifacts)
         for name in plan.check_names:
             try:
-                response = self.validation.run_windows_script(
+                response = self._run_windows_script_resiliently(
                     ssh,
                     script_name="post_install_windows_check.ps1",
                     config={**plan.base_config, "check": name},

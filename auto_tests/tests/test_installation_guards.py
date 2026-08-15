@@ -1078,6 +1078,11 @@ def test_linux_first_boot_service_finishes_or_resumes_during_shutdown() -> None:
     assert "trap record_shutdown_request TERM INT HUP" in resize
     assert "--record-service-start" in resize
     assert '"shutdown-requested"' in resize
+    assert 'FAILURE_DETAIL=""' in resize
+    assert "FIRST_BOOT_VERIFICATION_ERROR=" in resize
+    assert 'FAILURE_DETAIL="$(' in resize
+    assert 'if VERIFICATION_OUTPUT="$("$VERIFIER" 2>&1)"; then' in resize
+    assert 'return_failure "$VERIFICATION_RC"' in resize
     assert "--archive-service-diagnostics" in resize
     assert resize.index("--archive-service-diagnostics") < resize.index(
         "systemctl disable first-boot-resize.service"
@@ -1086,6 +1091,24 @@ def test_linux_first_boot_service_finishes_or_resumes_during_shutdown() -> None:
     assert "SERVICE_STATE_PATH" in verifier
     assert '"interruptionCount"' in verifier
     assert '(SERVICE_STATE_PATH, "first-boot-service-state.json")' in verifier
+
+
+def test_linux_first_boot_repairs_interrupted_package_configuration_before_verifying() -> None:
+    resize = read("assets/live/first-boot-resize.sh")
+
+    assert 'CURRENT_STAGE="package-manager-recovery"' in resize
+    assert "interruptionCount" in resize
+    assert "DEBIAN_FRONTEND=noninteractive dpkg --configure -a" in resize
+    assert "dpkg --audit" in resize
+    assert "Pending package configuration could not be resumed after 12 attempts." in resize
+    development_ssh = read("assets/live/libertix-development-ssh-first-boot.sh")
+    assert "empty host-key files" in development_ssh
+    assert (
+        "for ssh_host_key in /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub"
+    ) in development_ssh
+    assert '[ -s "$ssh_host_key" ] || rm -f -- "$ssh_host_key"' in development_ssh
+    assert "ssh-keygen -A" in development_ssh
+    assert "-name 'ssh_host_*_key' -size +0c" in development_ssh
 
 
 def test_windows_recovery_waits_durably_for_the_first_installed_linux_boot() -> None:
@@ -1151,14 +1174,12 @@ def test_auto_test_reports_guest_verifier_failures_with_persistent_log_context()
     postinstall = read("auto_tests/app/services/automation_postinstall.py")
     windows_checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
 
-    assert "FIRST_BOOT_STATUS=" in postinstall
-    assert "FIRST_BOOT_ERROR=" in postinstall
-    assert "FIRST_BOOT_FAILED_CHECKS=" in postinstall
-    assert "tail -n 80 /var/log/libertix/first-boot-resize.log >&2 2>/dev/null" in postinstall
-    diagnostics = postinstall.split('print("FIRST_BOOT_STATUS=', 1)[1].split(
-        "tail -n 80 /var/log/libertix/first-boot-resize.log", 1
-    )[0]
-    assert "2>/dev/null" not in diagnostics
+    assert '"failedChecks": failed' in postinstall
+    assert 'status = str(payload.get("status") or "unknown")' in postinstall
+    assert 'error = str(payload.get("error") or "").strip()' in postinstall
+    assert '"state_path": state_path' in postinstall
+    assert '"log_path": log_path' in postinstall
+    assert "Linux first-boot verification failed: {reason}" in postinstall
     assert "\"FailedChecks='$($failedChecks -join '; ')'. \"" in windows_checks
     assert "\"LogPath='$([string]$savedResult.logPath)'.\"" in windows_checks
 
@@ -1178,16 +1199,16 @@ def test_interactive_scheduled_tasks_tolerate_nonfatal_localized_stderr() -> Non
         assert "$createOutput = schtasks.exe" not in script
 
 
-def test_completed_bios_recovery_proves_task_absence_after_schtasks_delete() -> None:
+def test_completed_bios_recovery_proves_task_absence_after_structured_delete() -> None:
     bios = read("Scripts/libertix-recovery-guard.ps1")
-    removal = bios.split("function Remove-RecoveryTask", 1)[1].split(
-        "function Remove-RecoveryPromptTask", 1
+    removal = bios.split("function Test-RootScheduledTaskExists", 1)[1].split(
+        "function Start-RecoveryPromptTask", 1
     )[0]
 
-    assert "schtasks.exe /Delete" in removal
-    assert "schtasks.exe /Query" in removal
-    assert "if (-not $taskStillExists)" in removal
-    assert "deleteExitCode -ne 0" not in removal
+    assert 'Get-ScheduledTask -TaskPath "\\" -ErrorAction Stop' in removal
+    assert "Unregister-ScheduledTask" in removal
+    assert "if (-not (Test-RootScheduledTaskExists -Name $Name))" in removal
+    assert "schtasks.exe" not in removal
 
 
 def test_temporary_artifact_check_preserves_permanent_rollback_metadata() -> None:
@@ -2160,6 +2181,20 @@ def test_live_failure_summary_stays_bounded_with_reachable_details() -> None:
     assert "self.details_button" in gui
     assert "self.details_frame.pack(fill=tk.BOTH, expand=True" in gui
 
+    assert "self.root.bind_all(sequence, self.request_verified_failure_reboot)" in gui
+    failure_reboot = gui.split("def request_verified_failure_reboot", 1)[1].split(
+        "def draw_progress", 1
+    )[0]
+    assert 'result.get("LIBERTIX_INSTALL_SUCCESS") == "false"' in failure_reboot
+    assert 'result.get("LIBERTIX_INSTALL_ROLLBACK") == "completed"' in failure_reboot
+
+    inspector = read("auto_tests/app/scripts/inspect_live_failure.ps1")
+    assert "$systemDrive = [string]$env:SystemDrive" in inspector
+    assert 'Join-Path $systemDrive "LibertixInstallLogs\\Linux\\latest"' in inspector
+    assert '"C:\\LibertixInstallLogs\\Linux\\latest"' not in inspector
+    assert 'Read-EnvValue -Path $failurePath -Name "error"' in inspector
+    assert 'Write-Output "LIVE_FAILURE_PRESENT=True"' in inspector
+
 
 def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     xaml = read("Pages/ApplyChanges.xaml")
@@ -2178,6 +2213,24 @@ def test_windows_installation_can_be_cancelled_with_verified_rollback() -> None:
     assert "QuoteArgument(scriptPath)} -Revert" in cancellation
     assert "observeCancellation: false" in cancellation
     assert "catch (OperationCanceledException)" in apply_changes
+
+
+def test_unattended_failures_preserve_the_exact_cause_after_rollback() -> None:
+    apply_changes = read("Pages/ApplyChanges.xaml.cs")
+    cancellation = read("Pages/ApplyChanges.Cancellation.cs")
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    uefi = read("Pages/ApplyChanges.Uefi.cs")
+
+    assert "private void PublishUnattendedFailure(" in cancellation
+    assert "UnattendedWorkflow.TryPublishFailure(errorCode, errorMessage);" in cancellation
+    assert '"windows-preparation-failed",\n                    ex.Message' in apply_changes
+    assert '$"{reason} Automatic rollback was verified."' in bios
+    assert '$"{reason} Automatic rollback was verified."' in uefi
+    assert '$"{reason} Automatic rollback could not be verified."' in bios
+    assert '$"{reason} Automatic rollback could not be verified."' in uefi
+    assert '"bios-artifact-preparation-failed",\n                reason' in bios
+    assert "string persistedFailure = _executionLedger?.State?.Failure?.Message;" in uefi
+    assert "string.IsNullOrWhiteSpace(persistedFailure)" in uefi
 
 
 def test_process_termination_failure_never_starts_partition_rollback() -> None:
@@ -2262,6 +2315,9 @@ def test_all_rollbacks_verify_bitlocker_against_the_pre_decryption_state() -> No
     assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in bios
     assert "BitLockerMatchesInitialPreflightStateAfterRollbackAsync" in uefi
     assert "decryptBitLocker: false" in cancellation
+    assert "observeCancellation: false" in cancellation
+    assert "bool observeCancellation = true" in system
+    assert "observeCancellation: observeCancellation" in system
     assert "firmware == FirmwareType.Bios && decryptBitLocker && !info.BitLockerSafe" in system
     assert "BitLocker did not " in cancellation
     assert "return to its initial state." in cancellation
@@ -2861,6 +2917,9 @@ def test_bios_recovery_guard_removes_only_the_empty_transaction_extended_contain
     assert "$partitionStart -le $TransactionOffset" in helper
     assert "$partitionEnd -ge $transactionEnd" in helper
     assert "$partitionEnd -le $RecoveryPartitionOffset" in helper
+    assert "$trustedContainerBoundary" in helper
+    assert "$insideTrustedContainerBoundary" in helper
+    assert "$partitionStart -lt $OriginalSystemPartitionEnd" in helper
     assert "$containedPartitions.Count -ne 0" in helper
     assert "Remove-Partition -InputObject $container" in helper
     assert "The empty transaction MBR extended container still exists after removal" in helper
@@ -2892,8 +2951,13 @@ def test_bios_recovery_guard_persists_and_aggregates_independent_compensations()
     recovery = read("Scripts/libertix-recovery-guard.ps1")
 
     assert 'status = "running"' in recovery
+    assert "operations = $script:RecoveryOperationRecords.ToArray()" in recovery
+    assert "errors = $script:RecoveryErrors.ToArray()" in recovery
     assert "attempts = @($script:RecoveryPriorAttempts) + @($currentAttempt)" in recovery
     assert "Publish-LibertixFileAtomic" in recovery
+    assert "$atomicFileModule = Import-Module" in recovery
+    assert "& $atomicFileModule {" in recovery
+    assert "-Global" not in recovery
     assert 'operation = "state.persistence"' in recovery
     assert "Invoke-MinimumRecoveryFallback" in recovery
     assert "The recovery tasks and durable rollback payload remain armed." in recovery
@@ -2920,6 +2984,29 @@ def test_bios_recovery_guard_persists_and_aggregates_independent_compensations()
     assert ledger_complete < startup_task_remove
     assert "Existing recovery operation history is unreadable" in recovery
     assert '$script:RecoveryAttemptStatus = "failed"' in recovery
+    assert "function Test-RootScheduledTaskExists" in recovery
+    assert "Get-ScheduledTask" in recovery
+    assert "Unregister-ScheduledTask" in recovery
+    assert "schtasks.exe /Delete" not in recovery
+    save_state = recovery.split("function Save-RecoveryOperationState", 1)[1].split(
+        "function Initialize-RecoveryOperationHistory", 1
+    )[0]
+    assert "$atomicFileModule = Import-Module" in save_state
+    assert "-PassThru `" in save_state
+    assert "& $atomicFileModule {" in save_state
+
+
+def test_bios_recovery_retries_transient_storage_capacity_refresh_failures() -> None:
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+    helper = recovery.split("function Wait-SystemDriveResizeCapacity", 1)[1].split(
+        "function Remove-EmptyTransactionExtendedContainer", 1
+    )[0]
+
+    assert "$capacityReadFailures = 0" in helper
+    assert "Get-PartitionSupportedSize `" in helper
+    assert "Windows storage capacity is still refreshing" in helper
+    assert "Start-Sleep -Seconds 2" in helper
+    assert "Windows storage capacity did not become readable" in helper
 
 
 def test_bios_recovery_cleanup_verifies_files_share_tasks_bcd_and_hibernation() -> None:

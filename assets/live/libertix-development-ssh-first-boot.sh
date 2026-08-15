@@ -51,6 +51,17 @@ install_openssh_server
 [ -s "$sshd_policy" ]
 grep -Fx "AllowUsers $username" "$sshd_policy" >/dev/null
 
+# A reset during openssh-server configuration can leave empty host-key files.
+# ssh-keygen -A skips existing paths, so remove only invalid empty placeholders.
+shopt -s nullglob
+for ssh_host_key in /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub; do
+    [ -s "$ssh_host_key" ] || rm -f -- "$ssh_host_key"
+done
+shopt -u nullglob
+ssh-keygen -A
+find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -size +0c \
+    -print -quit | grep -q .
+
 # The package can finish before systemd starts ssh.service and creates its
 # RuntimeDirectory. sshd refuses even a configuration check without this path.
 install -d -m 0755 /run/sshd

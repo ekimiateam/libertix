@@ -117,8 +117,10 @@ function Save-RecoveryOperationState {
         action = $Action
         status = $script:RecoveryAttemptStatus
         updatedAtUtc = [DateTime]::UtcNow.ToString("o")
-        operations = @($script:RecoveryOperationRecords)
-        errors = @($script:RecoveryErrors)
+        # Windows PowerShell 5.1 can fail with "Argument types do not match"
+        # when an array subexpression enumerates a generic List[object].
+        operations = $script:RecoveryOperationRecords.ToArray()
+        errors = $script:RecoveryErrors.ToArray()
     }
     $state = [ordered]@{
         schemaVersion = 1
@@ -137,10 +139,26 @@ function Save-RecoveryOperationState {
             (($state | ConvertTo-Json -Depth 8) + "`n"),
             $encoding
         )
-        Publish-LibertixFileAtomic `
-            -TemporaryPath $temporaryPath `
-            -DestinationPath $RecoveryOperationsPath `
-            -BackupPath $backupPath
+        # Nested recovery modules also import the atomic writer with -Force.
+        # Windows PowerShell 5.1 can consequently remove its exported command
+        # from this script's scope. Invoke a fresh module instance in its own
+        # session state so persistence is independent from module import order.
+        $atomicFileModule = Import-Module `
+            -Name $AtomicFileModulePath `
+            -Force `
+            -PassThru `
+            -ErrorAction Stop
+        & $atomicFileModule {
+            param(
+                [string]$TemporaryPath,
+                [string]$DestinationPath,
+                [string]$BackupPath
+            )
+            Publish-LibertixFileAtomic `
+                -TemporaryPath $TemporaryPath `
+                -DestinationPath $DestinationPath `
+                -BackupPath $BackupPath
+        } $temporaryPath $RecoveryOperationsPath $backupPath
     } finally {
         if ([IO.File]::Exists($temporaryPath)) {
             [IO.File]::Delete($temporaryPath)
@@ -320,34 +338,82 @@ function Read-EnvValue {
     return ($line -replace "^$([regex]::Escape($Name))=", "").Trim()
 }
 
+function Test-RootScheduledTaskExists {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return @(
+        Get-ScheduledTask -TaskPath "\" -ErrorAction Stop |
+            Where-Object {
+                [string]::Equals(
+                    [string]$_.TaskName,
+                    $Name,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    ).Count -ne 0
+}
+
+function Remove-NamedRecoveryTask {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Description,
+        [switch]$Required
+    )
+
+    try {
+        if (-not (Test-RootScheduledTaskExists -Name $Name)) {
+            return
+        }
+        Unregister-ScheduledTask `
+            -TaskName $Name `
+            -TaskPath "\" `
+            -Confirm:$false `
+            -ErrorAction Stop
+        if (-not (Test-RootScheduledTaskExists -Name $Name)) {
+            return
+        }
+        throw "$Description task still exists after deletion."
+    } catch {
+        $primaryFailure = $_
+        try {
+            if (-not (Test-RootScheduledTaskExists -Name $Name)) {
+                return
+            }
+        } catch {
+            $verificationFailure = $_.Exception.Message
+            $message = (
+                "Cannot verify removal of $Description task '$Name': " +
+                $verificationFailure
+            )
+            if ($Required) { throw $message }
+            Write-RecoveryLog $message
+            return
+        }
+        $message = (
+            "Cannot remove $Description task '$Name': " +
+            $primaryFailure.Exception.Message
+        )
+        if ($Required) { throw $message }
+        Write-RecoveryLog $message
+    }
+}
+
 function Remove-RecoveryTask {
     param([switch]$Required)
 
-    $null = & schtasks.exe /Delete /TN $TaskName /F 2>&1
-    $deleteExitCode = $LASTEXITCODE
-    $null = & schtasks.exe /Query /TN $TaskName 2>&1
-    $taskStillExists = $LASTEXITCODE -eq 0
-    if (-not $taskStillExists) {
-        return
-    }
-    $message = "Recovery task still exists after deletion attempt (rc=$deleteExitCode)."
-    if ($Required) { throw $message }
-    Write-RecoveryLog $message
+    Remove-NamedRecoveryTask `
+        -Name $TaskName `
+        -Description "recovery" `
+        -Required:$Required
 }
 
 function Remove-RecoveryPromptTask {
     param([switch]$Required)
 
-    $null = & schtasks.exe /Delete /TN $PromptTaskName /F 2>&1
-    $deleteExitCode = $LASTEXITCODE
-    $null = & schtasks.exe /Query /TN $PromptTaskName 2>&1
-    $taskStillExists = $LASTEXITCODE -eq 0
-    if (-not $taskStillExists) {
-        return
-    }
-    $message = "Recovery prompt task still exists after deletion attempt (rc=$deleteExitCode)."
-    if ($Required) { throw $message }
-    Write-RecoveryLog $message
+    Remove-NamedRecoveryTask `
+        -Name $PromptTaskName `
+        -Description "recovery prompt" `
+        -Required:$Required
 }
 
 function Start-RecoveryPromptTask {
@@ -703,15 +769,42 @@ function Wait-SystemDriveResizeCapacity {
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $capacityReadFailures = 0
     do {
         # Removing a partition updates the disk before every Storage CIM object
         # sees the new free extent. Refresh both caches before trusting SizeMax.
         Update-HostStorageCache -ErrorAction SilentlyContinue
         Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
 
-        $partition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-        $supported = Get-PartitionSupportedSize -DriveLetter $SystemDriveLetter -ErrorAction Stop
+        try {
+            $partition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
+            $supported = Get-PartitionSupportedSize `
+                -DriveLetter $SystemDriveLetter `
+                -ErrorAction Stop
+        } catch {
+            $capacityReadFailures++
+            if ($capacityReadFailures -eq 1) {
+                Write-RecoveryLog (
+                    "Windows storage capacity is still refreshing after partition " +
+                    "removal; retrying: $($_.Exception.Message)"
+                )
+            }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw (
+                    "Windows storage capacity did not become readable within " +
+                    "$TimeoutSeconds seconds: $($_.Exception.Message)"
+                )
+            }
+            Start-Sleep -Seconds 2
+            continue
+        }
         if ($partition.Size -ge $RequiredSize -or $supported.SizeMax -ge $RequiredSize) {
+            if ($capacityReadFailures -gt 0) {
+                Write-RecoveryLog (
+                    "Windows storage capacity became readable after " +
+                    "$capacityReadFailures transient failure(s)."
+                )
+            }
             return $supported
         }
         if ([DateTime]::UtcNow -ge $deadline) {
@@ -751,9 +844,14 @@ function Remove-EmptyTransactionExtendedContainer {
                 $RecoveryPartitionOffset -le 0 -or
                 $partitionEnd -le $RecoveryPartitionOffset
             )
-            $insideOriginalSystemExtent = (
-                $OriginalSystemPartitionEnd -le 0 -or
-                $partitionEnd -le $OriginalSystemPartitionEnd
+            $trustedContainerBoundary = if ($RecoveryPartitionOffset -gt 0) {
+                $RecoveryPartitionOffset
+            } else {
+                $OriginalSystemPartitionEnd
+            }
+            $insideTrustedContainerBoundary = (
+                $trustedContainerBoundary -le 0 -or
+                $partitionEnd -le $trustedContainerBoundary
             )
             $containsTransaction = (
                 $partitionStart -le $TransactionOffset -and
@@ -762,11 +860,12 @@ function Remove-EmptyTransactionExtendedContainer {
             $isOnlyRemainingTransactionExtent = (
                 $OriginalSystemPartitionEnd -gt 0 -and
                 $partitionStart -ge $SystemPartitionEnd -and
-                $partitionEnd -le $OriginalSystemPartitionEnd
+                $partitionStart -lt $OriginalSystemPartitionEnd -and
+                $insideTrustedContainerBoundary
             )
             $isExtendedType -and
                 $partitionStart -ge $SystemPartitionEnd -and
-                $insideOriginalSystemExtent -and
+                $insideTrustedContainerBoundary -and
                 ($containsTransaction -or $isOnlyRemainingTransactionExtent) -and
                 $precedesRecovery
         }

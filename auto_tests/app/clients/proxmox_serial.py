@@ -22,10 +22,16 @@ class SerialCaptureReport:
     payload_bytes: int
     connections: int
     disconnects: int
+    unavailable_reason: str | None = None
 
 
 class ProxmoxSerialCapture:
     """Persist one VM serial stream across guest reboots."""
+
+    _UNAVAILABLE_MARKERS = (
+        b"serial interface 'serial0' is not configured",
+        b'serial interface "serial0" is not configured',
+    )
 
     def __init__(
         self,
@@ -84,6 +90,8 @@ class ProxmoxSerialCapture:
         connections = 0
         disconnects = 0
         last_error: Exception | None = None
+        diagnostic_tail = bytearray()
+        unavailable_reason: str | None = None
 
         with self._open_private_append_file(destination) as output:
             output.write(
@@ -147,6 +155,14 @@ class ProxmoxSerialCapture:
                             if chunk:
                                 output.write(chunk)
                                 payload_bytes += len(chunk)
+                                diagnostic_tail.extend(chunk.lower())
+                                if len(diagnostic_tail) > 4096:
+                                    del diagnostic_tail[:-4096]
+                                if any(
+                                    marker in diagnostic_tail
+                                    for marker in self._UNAVAILABLE_MARKERS
+                                ):
+                                    unavailable_reason = "serial0 is not configured on the VM"
                     last_error = None
                 except (
                     ConnectionClosed,
@@ -184,4 +200,5 @@ class ProxmoxSerialCapture:
             payload_bytes=payload_bytes,
             connections=connections,
             disconnects=disconnects,
+            unavailable_reason=unavailable_reason,
         )

@@ -130,6 +130,9 @@ namespace Libertix.Pages
                 {
                     Log($"ERROR: Invalid Linux partition size: {_linuxSizeGB:N1}GB");
                     UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+                    PublishUnattendedFailure(
+                        "invalid-linux-partition-size",
+                        $"Invalid Linux partition size: {_linuxSizeGB:N1}GB");
                     FinishInstallation(enableBackButton: true);
                     return;
                 }
@@ -201,6 +204,9 @@ namespace Libertix.Pages
                     Localized(
                         "ApplyChangesRollbackIncomplete",
                         "Rollback incomplete. Manual intervention is required."));
+                PublishUnattendedFailure(
+                    "windows-process-termination-unverified",
+                    ex.Message);
                 FinishInstallation(enableBackButton: false);
             }
             catch (Exception ex)
@@ -217,6 +223,9 @@ namespace Libertix.Pages
                 Log($"ERROR: {ex.Message}");
                 CleanupPendingWindowsSharePayload();
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+                PublishUnattendedFailure(
+                    "windows-preparation-failed",
+                    ex.Message);
                 FinishInstallation(enableBackButton: true);
             }
         }

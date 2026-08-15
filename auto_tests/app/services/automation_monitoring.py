@@ -51,11 +51,27 @@ class InstallationMonitoringMixin:
         unchanged_captures = 0
         last_visual_change_at = time.monotonic()
         vision_disabled = False
+        live_failure_reboot_probe_sent = False
         monitor_delay_seconds = self.settings.automation_monitor_interval_seconds
         while time.monotonic() < deadline:
             attempt += 1
             time.sleep(monitor_delay_seconds)
             monitor_delay_seconds = self.settings.automation_monitor_interval_seconds
+            if live_failure_reboot_probe_sent:
+                failure = self._read_archived_live_failure(vm)
+                if failure is not None:
+                    raise WorkflowError(
+                        "automation.live_installer_failure",
+                        failure["message"],
+                        details={
+                            "vm": vm.name,
+                            "target": vm.host,
+                            "stage": failure["stage"],
+                            "exit_code": failure["exit_code"],
+                            "rollback": failure["rollback"],
+                            "run_id": failure["run_id"],
+                        },
+                    )
             capture = self._capture_with_name(vm, f"{firmware}-monitor-{attempt:03d}")
             if self._installed_grub_theme_visible(capture):
                 result.ok(
@@ -97,6 +113,9 @@ class InstallationMonitoringMixin:
                         unchanged_count=unchanged_captures,
                     )
                     continue
+                if vision_disabled:
+                    self._request_live_failure_reboot_probe(vm, capture, result)
+                    live_failure_reboot_probe_sent = True
             else:
                 previous_signature = signature
                 unchanged_captures = 0
@@ -239,6 +258,72 @@ class InstallationMonitoringMixin:
             f"Timed out waiting for Windows to reboot into the {firmware.upper()} live",
             details=last_context or {"vm": vm.name, "target": vm.vnc},
         )
+
+    def _request_live_failure_reboot_probe(
+        self,
+        vm: VMConfig,
+        capture: Path,
+        result: ResultBuilder,
+    ) -> None:
+        client = None
+        try:
+            client = self.vnc.connect(vm.vnc)
+            self._press_key(client, "r", 0)
+            result.ok(
+                "automation.live_failure_reboot_probe",
+                "A deterministic failure-only reboot probe was sent to the live UI",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(capture),
+            )
+        except Exception as exc:
+            raise WorkflowError(
+                "automation.live_failure_reboot_probe",
+                "Failed to send the failure-only reboot probe to the live UI",
+                details={"vm": vm.name, "target": vm.vnc, "error": str(exc)},
+            ) from exc
+        finally:
+            if client is not None:
+                client.disconnect()
+
+    def _read_archived_live_failure(self, vm: VMConfig) -> dict[str, str] | None:
+        try:
+            with self.validation.ssh(
+                vm.host,
+                vm.username,
+                self.settings.windows_ssh_password.get_secret_value(),
+                remote_os="windows",
+            ) as ssh:
+                response = self.validation.run_windows_script(
+                    ssh,
+                    script_name="inspect_live_failure.ps1",
+                    config={},
+                    step="automation.live_failure_evidence",
+                    timeout=60,
+                )
+        except WorkflowError:
+            return None
+
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "LIVE_FAILURE_PRESENT",
+                "LIVE_FAILURE_MESSAGE",
+                "LIVE_FAILURE_STAGE",
+                "LIVE_FAILURE_EXIT_CODE",
+                "LIVE_FAILURE_ROLLBACK",
+                "LIVE_FAILURE_RUN_ID",
+            ),
+        )
+        if values.get("LIVE_FAILURE_PRESENT") != "True":
+            return None
+        return {
+            "message": values.get("LIVE_FAILURE_MESSAGE", "Live installer failed"),
+            "stage": values.get("LIVE_FAILURE_STAGE", "unknown"),
+            "exit_code": values.get("LIVE_FAILURE_EXIT_CODE", "unknown"),
+            "rollback": values.get("LIVE_FAILURE_ROLLBACK", "unknown"),
+            "run_id": values.get("LIVE_FAILURE_RUN_ID", "unknown"),
+        }
 
     @staticmethod
     def _capture_signature(capture: Path) -> tuple[int, ...] | None:
