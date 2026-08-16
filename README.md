@@ -5,6 +5,9 @@ alongside an existing Windows system. It handles the Windows-side preparation, b
 purpose-built live environment, installs the selected distribution and configures a dual-boot menu
 for either BIOS/MBR or UEFI/GPT machines.
 
+Read the project's position on AI-assisted development and contributions in the
+[`AI_POLICY.md`](AI_POLICY.md) document.
+
 > [!WARNING]
 > Libertix modifies disk partitions and boot configuration. Back up important data before using it.
 > The compatibility checks deliberately reject layouts that cannot be handled safely.
