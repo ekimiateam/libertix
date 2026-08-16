@@ -59,15 +59,13 @@ secure_boot_enabled = runtime.get("secureBootEnabled")
 if not isinstance(secure_boot_enabled, bool):
     raise SystemExit("installation plan Secure Boot state is invalid")
 print("true" if secure_boot_enabled else "false")
-print(";".join(trusted))
 print(";".join(supported))
 PY
 )
 [ "${plan_values[0]:-}" = uefi ] || exit 0
 recovery_run_id="${plan_values[1]:-}"
 secure_boot_enabled="${plan_values[2]:-}"
-plan_trusted_authorities="${plan_values[3]:-}"
-plan_supported_authorities="${plan_values[4]:-}"
+plan_supported_authorities="${plan_values[3]:-}"
 
 if [ ! -f "$owner_file" ]; then
     [ "$allow_missing" = true ] && exit 0
