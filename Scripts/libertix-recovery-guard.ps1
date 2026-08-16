@@ -544,6 +544,31 @@ function Restore-OriginalHibernationSetting {
     }
 }
 
+function Restore-HibernationAfterInstallation {
+    $planPath = Join-Path $Root "installation-plan.json"
+    if (-not (Test-Path -LiteralPath $planPath -PathType Leaf)) {
+        throw "Installation plan is missing before hibernation finalization."
+    }
+    $plan = Get-Content -LiteralPath $planPath -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    $expectedPlanId = Read-EnvValue -Path $Pending -Name "PLAN_ID"
+    if (
+        [string]$plan.planId -notmatch '^[0-9a-f]{32}$' -or
+        [string]$plan.planId -ne [string]$expectedPlanId
+    ) {
+        throw "Installation plan identity does not match the BIOS recovery transaction."
+    }
+    if ([bool]$plan.features.shareWindowsFilesInLinux) {
+        Write-RecoveryLog (
+            "Hibernation remains disabled because " +
+            "Windows file sharing in Linux is enabled."
+        )
+        return
+    }
+    Restore-OriginalHibernationSetting
+    Write-RecoveryLog "Original hibernation state restored after verified installation."
+}
+
 function Restore-BcdState {
     param([switch]$Required)
 
@@ -658,16 +683,32 @@ function Invoke-WindowsShareFinalize {
 
 function Invoke-VerifiedInstallationSuccess {
     Write-RecoveryLog "Successful install marker found; starting cross-runtime verification."
+    if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
+        throw "Post-install verification module is missing from the recovery payload."
+    }
+    Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
     try {
+        $writeLog = { param($Message) Write-RecoveryLog -Message $Message }
+        $filesystemRepair = Invoke-LibertixWindowsFilesystemRepairIfRequired `
+            -RecoveryRoot $Root `
+            -LogPath $Log `
+            -WriteLog $writeLog
+        if ([bool]$filesystemRepair.RestartRequired) {
+            Write-RecoveryLog (
+                "A verified Windows boot-volume repair is scheduled; " +
+                "requesting restart before final verification."
+            )
+            & shutdown.exe /r /t 5 /d p:4:1 /c "Libertix Windows filesystem verification"
+            if ($LASTEXITCODE -ne 0) {
+                throw "Windows restart request failed with rc=$LASTEXITCODE."
+            }
+            return
+        }
         Restore-BcdState -Required
         Remove-TemporaryBootPayload
         Remove-TransactionArtifacts
         Invoke-WindowsShareFinalize
-        if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
-            throw "Post-install verification module is missing from the recovery payload."
-        }
-        Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
-        $writeLog = { param($Message) Write-RecoveryLog -Message $Message }
+        Restore-HibernationAfterInstallation
         $null = Invoke-LibertixPostInstallVerification `
             -RecoveryRoot $Root `
             -LogPath $Log `

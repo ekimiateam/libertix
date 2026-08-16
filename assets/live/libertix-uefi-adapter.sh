@@ -164,7 +164,10 @@ firmware_resolve_rollback_partition() {
         return 0
     fi
 
-    candidate="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+    candidate="$(partition_at_offset "$DISK" "$INSTALLER_FINAL_OFFSET_BYTES" || true)"
+    if [ -z "$candidate" ]; then
+        candidate="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+    fi
     if [ -n "$candidate" ]; then
         NEW_PART="$candidate"
         NEW_PART_NUM="$(partition_number "$candidate")"
@@ -177,8 +180,60 @@ firmware_rollback_partition_is_owned() {
 
     [ "$partition" != "$WINDOWS_PART" ] \
         && [ "$(parent_disk_from_part "$partition")" = "$DISK" ] \
-        && [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
-            "$INSTALLER_PARTITION_OFFSET_BYTES" ]
+        && {
+            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
+                "$INSTALLER_PARTITION_OFFSET_BYTES" ] ||
+            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
+                "$INSTALLER_FINAL_OFFSET_BYTES" ]
+        }
+}
+
+firmware_relocate_installer_partition_or_die() {
+    local final_offset="$1" final_size="$2"
+    local logical_sector start_sector size_sectors old_number
+    local linux_gpt_guid="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+
+    [ "$(uefi_partition_table_or_die)" = "gpt" ] || \
+        die "offline UEFI resize requires a GPT partition table"
+    firmware_rollback_partition_is_owned "$NEW_PART" || \
+        die "offline UEFI resize does not own the staging partition"
+    assert_not_mounted_or_open "$NEW_PART"
+    logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || echo 0)"
+    start_sector="$(bytes_to_logical_sectors "$final_offset" "$logical_sector")" || \
+        die "final UEFI partition offset is not sector aligned"
+    size_sectors="$(bytes_to_logical_sectors "$final_size" "$logical_sector")" || \
+        die "final UEFI partition size is not sector aligned"
+    old_number="$NEW_PART_NUM"
+
+    echo "Relocating GPT staging partition $old_number to the final Linux extent"
+    run_logged parted -s "$DISK" rm "$old_number"
+    sync
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+    if parted -sm "$DISK" print 2>/dev/null |
+        awk -F: -v number="$old_number" '$1 == number { found=1 } END { exit !found }'; then
+        die "GPT staging partition remains after removal"
+    fi
+
+    printf 'start=%s, size=%s, type=%s, name="LibertixLinux"\n' \
+        "$start_sector" "$size_sectors" "$linux_gpt_guid" |
+        sfdisk --lock --append --no-reread -N "$old_number" "$DISK" || \
+        die "sfdisk could not create the final GPT Linux partition"
+    sync
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+
+    NEW_PART=""
+    for _ in $(seq 1 20); do
+        NEW_PART="$(partition_at_offset "$DISK" "$final_offset" || true)"
+        [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] && break
+        sleep 0.25
+    done
+    [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] || \
+        die "final GPT Linux partition could not be resolved"
+    NEW_PART_NUM="$(partition_number "$NEW_PART")"
+    [ "$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)" = "$final_size" ] || \
+        die "final GPT Linux partition size verification failed"
 }
 
 firmware_cleanup_partition_container_best_effort() {

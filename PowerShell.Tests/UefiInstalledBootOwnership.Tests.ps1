@@ -118,4 +118,28 @@ Describe "UEFI load option path ownership" {
             -ExpectedPath "\EFI\Microsoft\Boot\bootmgfw.efi" |
             Should -BeFalse
     }
+
+    It "decodes the exact GPT hard-drive node used by a load option" {
+        $partition = [pscustomobject]@{
+            DiskNumber = 0
+            PartitionNumber = 3
+            Offset = 1048576
+            Size = 209715200
+            Guid = "11111111-2222-3333-4444-555555555555"
+        }
+        $bytes = New-EfiLoadOption `
+            -Description "Libertix" `
+            -Partition $partition `
+            -LoaderPath "\EFI\Libertix\shimx64.efi"
+
+        $nodes = @(Get-EfiLoadOptionHardDriveNodes -Bytes $bytes)
+
+        $nodes.Count | Should -Be 1
+        $nodes[0].PartitionNumber | Should -Be 3
+        $nodes[0].PartitionStartLba | Should -Be 2048
+        $nodes[0].PartitionSizeLba | Should -Be 409600
+        $nodes[0].PartitionGuid | Should -Be "11111111-2222-3333-4444-555555555555"
+        $nodes[0].MbrType | Should -Be 2
+        $nodes[0].SignatureType | Should -Be 2
+    }
 }

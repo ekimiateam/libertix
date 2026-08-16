@@ -72,7 +72,24 @@ class InstallationMonitoringMixin:
                             "run_id": failure["run_id"],
                         },
                     )
-            capture = self._capture_with_name(vm, f"{firmware}-monitor-{attempt:03d}")
+            try:
+                capture = self._capture_with_name(vm, f"{firmware}-monitor-{attempt:03d}")
+            except WorkflowError as exc:
+                if reboot_attempts <= 0 or exc.step != "vnc.capture":
+                    raise
+                last_context = {
+                    "vm": vm.name,
+                    "target": vm.vnc,
+                    "attempt": attempt,
+                    "capture_error": exc.message,
+                    **exc.details,
+                }
+                result.ok(
+                    "automation.display_temporarily_unavailable",
+                    f"{firmware.upper()} display is temporarily unavailable during reboot",
+                    **last_context,
+                )
+                continue
             if self._installed_grub_theme_visible(capture):
                 result.ok(
                     "automation.installed_boot_menu_seen",

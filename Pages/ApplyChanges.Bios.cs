@@ -58,6 +58,7 @@ namespace Libertix.Pages
             InstallationSizes installationSizes)
         {
             double requestedLinuxMB = installationSizes.FinalSizeMiB;
+            double stagingMB = installationSizes.StagingSizeMiB;
 
             Log("Installing Windows recovery guard...");
             // This guard is installed before any partition change. If the live
@@ -87,7 +88,14 @@ namespace Libertix.Pages
                 decryptBitLocker: true);
             ThrowIfCancellationRequested();
 
-            if (_installationState.Sharing.ShareWindowsFilesInLinux &&
+            // Query SizeMin after disabling Fast Startup because hiberfil.sys is
+            // unmovable and can otherwise make Windows report an artificially
+            // small shrink range.
+            bool forceOfflineResize = ((App)Application.Current)
+                .RuntimeOptions.ForceOfflineNtfsResize;
+            bool hibernationAlreadyDisabled =
+                _installationState.Sharing.ShareWindowsFilesInLinux || forceOfflineResize;
+            if (hibernationAlreadyDisabled &&
                 !SetHibernateEnabled(false))
             {
                 await FailBiosPreparationAndRollbackAsync(
@@ -95,24 +103,56 @@ namespace Libertix.Pages
                 return false;
             }
 
-            // Query SizeMin after disabling Fast Startup because hiberfil.sys is
-            // unmovable and can otherwise make Windows report an artificially
-            // small shrink range.
             Log("Checking available shrink space...");
             double maxShrinkMB = await QueryShrinkSpaceAsync();
             ThrowIfCancellationRequested();
             Log($"Maximum shrinkable space: {maxShrinkMB / 1024:N1}GB ({maxShrinkMB:N0}MB)");
-            if (maxShrinkMB < requestedLinuxMB)
+            if (!forceOfflineResize && maxShrinkMB < requestedLinuxMB &&
+                !hibernationAlreadyDisabled)
+            {
+                if (!SetHibernateEnabled(false))
+                {
+                    await FailBiosPreparationAndRollbackAsync(
+                        "Windows hibernation could not be disabled for the final online shrink attempt");
+                    return false;
+                }
+                hibernationAlreadyDisabled = true;
+                maxShrinkMB = await QueryShrinkSpaceAsync();
+                ThrowIfCancellationRequested();
+                Log(
+                    $"Maximum shrinkable space after disabling hibernation: " +
+                    $"{maxShrinkMB / 1024:N1}GB ({maxShrinkMB:N0}MB)");
+            }
+            bool useOfflineResize = forceOfflineResize || maxShrinkMB < requestedLinuxMB;
+            double windowsShrinkMB = useOfflineResize ? stagingMB : requestedLinuxMB;
+            if (useOfflineResize && !hibernationAlreadyDisabled &&
+                !SetHibernateEnabled(false))
             {
                 await FailBiosPreparationAndRollbackAsync(
-                    "Windows does not expose enough shrinkable space for the requested Linux size");
+                    "Windows hibernation could not be disabled for offline NTFS resize");
                 return false;
+            }
+            if (maxShrinkMB < windowsShrinkMB)
+            {
+                await FailBiosPreparationAndRollbackAsync(
+                    "Windows does not expose enough shrinkable space for the Libertix staging partition");
+                return false;
+            }
+            SetInstallationResizeMode(
+                useOfflineResize
+                    ? InstallationResizeMode.LiveOffline
+                    : InstallationResizeMode.WindowsOnline);
+            if (useOfflineResize)
+            {
+                Log(
+                    $"Windows will reserve only {stagingMB / 1024:N0}GB for the live environment; " +
+                    $"the offline installer will safely complete the {_linuxSizeGB:N0}GB NTFS resize.");
             }
 
             UpdateProgress(BiosProgress.ShrinkWindows, Localized("ApplyChangesStep1", "Shrinking Windows partition..."));
-            Log($"Step 2: Shrinking Windows by {_linuxSizeGB:N0}GB for the reusable live/Linux partition...");
+            Log($"Step 2: Shrinking Windows by {windowsShrinkMB / 1024:N0}GB for the reusable live/Linux partition...");
             StartExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
-            bool shrinkSucceeded = await ShrinkWindowsPartitionAsync(requestedLinuxMB);
+            bool shrinkSucceeded = await ShrinkWindowsPartitionAsync(windowsShrinkMB);
             ThrowIfCancellationRequested();
             if (!shrinkSucceeded)
             {
@@ -121,15 +161,16 @@ namespace Libertix.Pages
             }
             CompleteExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
 
-            // Windows cannot reliably format FAT32 above 32 GB, so large Linux
-            // allocations use an 8 GB staging partition that the live expands.
-            double biosStagingMB = installationSizes.StagingSizeMiB;
+            // Keep the FAT32 live payload bounded. Windows can still reserve the
+            // complete final extent online; the live expands this staging partition
+            // into that reserved space before converting it to ext4.
+            double biosStagingMB = stagingMB;
             UpdateProgress(
                 BiosProgress.CreateInstallerPartition,
                 Localized("ApplyChangesStep2", "Creating FAT32 boot partition..."));
             Log(
                 biosStagingMB < requestedLinuxMB
-                    ? $"Step 3: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; the live will expand it to {_linuxSizeGB:N0}GB..."
+                    ? $"Step 3: Creating {biosStagingMB / 1024:N0}GB FAT32 staging partition; the live will prepare the final {_linuxSizeGB:N0}GB slot..."
                     : $"Step 3: Creating FAT32 live partition at final size ({_linuxSizeGB:N0}GB)...");
 
             StartExecutionStep(InstallationStep.WindowsInstallerPartitionCreated);

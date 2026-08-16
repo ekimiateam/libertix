@@ -29,7 +29,9 @@ Describe "Post-install Linux boot evidence" {
             disk = [pscustomobject]@{
                 installer = [pscustomobject]@{
                     offsetBytes = 107374182400
+                    finalOffsetBytes = 107374182400
                     finalSizeBytes = 42949672960
+                    resizeMode = "windows-online"
                 }
             }
         }
@@ -102,6 +104,56 @@ Describe "Post-install Linux boot evidence" {
         } | Should -Throw "*firmware selected Libertix*"
     }
 
+    It "accepts the Windows firmware path only with the complete verified fallback proof" {
+        $script:Evidence.grub.bootChain.type = "uefi-preferred-windows-path"
+        $script:Evidence.grub.bootChain.entry.description = "Windows Boot Manager"
+        $script:Evidence.grub.bootChain.entry.loaderPath = "\EFI\Microsoft\Boot\bootmgfw.efi"
+        $script:Evidence.grub.bootChain | Add-Member -NotePropertyName preferredPath -NotePropertyValue (
+            [pscustomobject]@{
+                manifestPath = "/boot/efi/EFI/Libertix/preferred-boot-path.json"
+                manifestSha256 = "d" * 64
+                secureBootEvidencePath = "/boot/efi/EFI/Libertix/secure-boot-chain.json"
+                verifiedHashes = [pscustomobject]@{
+                    "bootmgfw.efi" = "1" * 64
+                    "grubx64.efi" = "2" * 64
+                    "mmx64.efi" = "3" * 64
+                    "grub.cfg" = "4" * 64
+                    "bootmgfw.libertix-windows.efi" = "5" * 64
+                }
+            }
+        )
+
+        {
+            Assert-LibertixLinuxBootEvidence `
+                -Evidence $script:Evidence `
+                -Plan $script:Plan `
+                -AlignmentBytes 1048576
+        } | Should -Not -Throw
+    }
+
+    It "rejects an incomplete preferred Windows path proof" {
+        $script:Evidence.grub.bootChain.type = "uefi-preferred-windows-path"
+        $script:Evidence.grub.bootChain.entry.description = "Windows Boot Manager"
+        $script:Evidence.grub.bootChain.entry.loaderPath = "\EFI\Microsoft\Boot\bootmgfw.efi"
+        $script:Evidence.grub.bootChain | Add-Member -NotePropertyName preferredPath -NotePropertyValue (
+            [pscustomobject]@{
+                manifestPath = "/boot/efi/EFI/Libertix/preferred-boot-path.json"
+                manifestSha256 = "d" * 64
+                secureBootEvidencePath = "/boot/efi/EFI/Libertix/secure-boot-chain.json"
+                verifiedHashes = [pscustomobject]@{
+                    "bootmgfw.efi" = "1" * 64
+                }
+            }
+        )
+
+        {
+            Assert-LibertixLinuxBootEvidence `
+                -Evidence $script:Evidence `
+                -Plan $script:Plan `
+                -AlignmentBytes 1048576
+        } | Should -Throw "*verified hash for 'grubx64.efi'*"
+    }
+
     It "rejects legacy UEFI evidence without boot-entry identity clearly" {
         $script:Evidence.grub.bootChain.PSObject.Properties.Remove("entry")
         {
@@ -149,6 +201,34 @@ Describe "Permanent recovery archive" {
         New-Item -ItemType File -Path (Join-Path $root "uefi-transaction.json") | Out-Null
         Test-LibertixRecoveryArchive -Plan $plan -RecoveryRoot $root |
             Should -Be "rollback archive retained"
+    }
+}
+
+Describe "Concurrent Explorer shortcut verification" {
+    InModuleScope Libertix.PostInstallVerification {
+        It "retries while the interactive pin task replaces the shortcut" {
+            $script:ShortcutReadCount = 0
+            $shell = [pscustomobject]@{}
+            $shell | Add-Member -MemberType ScriptMethod -Name CreateShortcut -Value {
+                param([string]$Path)
+                $script:ShortcutReadCount++
+                [pscustomobject]@{
+                    TargetPath = if ($script:ShortcutReadCount -eq 1) {
+                        ""
+                    } else {
+                        "l:\home\test\"
+                    }
+                }
+            }
+
+            Test-LibertixShortcutTargetWithRetry `
+                -Shell $shell `
+                -ShortcutPath "C:\Users\test\Links\Linux_test_read-only.lnk" `
+                -ExpectedTarget "L:\home\test" `
+                -TimeoutMilliseconds 1000 |
+                Should -BeTrue
+            $script:ShortcutReadCount | Should -BeGreaterThan 1
+        }
     }
 }
 
@@ -397,5 +477,84 @@ Describe "Waiting for the first installed Linux boot" {
                 -RecoveryRoot $root `
                 -LogPath (Join-Path $root "recovery.log")
         } | Should -Throw "*belongs to another contract*"
+    }
+}
+
+Describe "Windows filesystem repair after offline NTFS resize" {
+    InModuleScope Libertix.PostInstallVerification {
+        BeforeEach {
+            $script:RepairRoot = Join-Path $TestDrive "filesystem-repair"
+            New-Item -ItemType Directory -Path $script:RepairRoot -Force | Out-Null
+            $script:RepairPlan = [pscustomobject]@{
+                planId = "ffffffffffffffffffffffffffffffff"
+                firmware = "bios"
+                disk = [pscustomobject]@{
+                    systemDrive = "C:"
+                    installer = [pscustomobject]@{
+                        resizeMode = "live-offline"
+                    }
+                }
+            }
+            Mock Read-LibertixJsonObject { $script:RepairPlan }
+            Mock Get-LibertixWindowsBootIdentity { "2026-08-15T10:00:00.0000000Z" }
+            Mock Write-LibertixPostInstallResult
+            Mock Set-LibertixPostInstallWaitingForWindowsRepair
+            Mock Register-LibertixWindowsBootVolumeCheck
+        }
+
+        It "does nothing for the normal Windows online resize path" {
+            $script:RepairPlan.disk.installer.resizeMode = "windows-online"
+
+            $result = Invoke-LibertixWindowsFilesystemRepairIfRequired `
+                -RecoveryRoot $script:RepairRoot `
+                -LogPath (Join-Path $script:RepairRoot "recovery.log") `
+                -WriteLog { param($Message) }
+
+            $result.Required | Should -BeFalse
+            $result.RestartRequired | Should -BeFalse
+            Should -Invoke Register-LibertixWindowsBootVolumeCheck -Times 0
+        }
+
+        It "schedules and persists a bounded boot-time repair for an unhealthy volume" {
+            Mock Get-LibertixWindowsVolumeHealth {
+                [pscustomobject]@{
+                    IsHealthy = $false
+                    Detail = "drive=C: filesystem=NTFS health=Warning operational=Scan Needed"
+                }
+            }
+
+            $result = Invoke-LibertixWindowsFilesystemRepairIfRequired `
+                -RecoveryRoot $script:RepairRoot `
+                -LogPath (Join-Path $script:RepairRoot "recovery.log") `
+                -WriteLog { param($Message) }
+
+            $result.Required | Should -BeTrue
+            $result.RestartRequired | Should -BeTrue
+            $result.AttemptCount | Should -Be 1
+            Should -Invoke Register-LibertixWindowsBootVolumeCheck -Times 1 `
+                -ParameterFilter { $SystemDrive -eq "C:" }
+            Should -Invoke Set-LibertixPostInstallWaitingForWindowsRepair -Times 1
+            Should -Invoke Write-LibertixPostInstallResult -Times 1 `
+                -ParameterFilter { $Path -like "*windows-filesystem-repair.json" }
+        }
+
+        It "continues verification as soon as Windows reports the volume healthy" {
+            Mock Get-LibertixWindowsVolumeHealth {
+                [pscustomobject]@{
+                    IsHealthy = $true
+                    Detail = "drive=C: filesystem=NTFS health=Healthy operational=OK"
+                }
+            }
+
+            $result = Invoke-LibertixWindowsFilesystemRepairIfRequired `
+                -RecoveryRoot $script:RepairRoot `
+                -LogPath (Join-Path $script:RepairRoot "recovery.log") `
+                -WriteLog { param($Message) }
+
+            $result.RestartRequired | Should -BeFalse
+            Should -Invoke Register-LibertixWindowsBootVolumeCheck -Times 0
+            Should -Invoke Write-LibertixPostInstallResult -Times 1 `
+                -ParameterFilter { $Path -like "*windows-filesystem-repair.json" }
+        }
     }
 }

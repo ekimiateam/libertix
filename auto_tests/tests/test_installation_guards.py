@@ -141,10 +141,10 @@ def test_windows_share_uses_the_observed_partition_identity() -> None:
     uefi = read("Pages/ApplyChanges.Uefi.cs")
 
     assert "PublishObservedWindowsSharePartitionIdentity" in windows
-    assert (
-        "configuration.ExpectedLinuxPartitionOffset =\n"
-        "                _installationPlan.Disk.Installer.OffsetBytes.Value;"
-    ) in windows
+    assert "GetExpectedFinalLinuxOffset()" in windows
+    assert "InstallationResizeMode.LiveOffline" in windows
+    assert "return installer.FinalOffsetBytes;" in windows
+    assert "return installer.OffsetBytes" in windows
     assert (
         "await UpdateInstallerPartitionIdentityAsync(_biosInstallerDriveLetter[0]);\n"
         "            PublishObservedWindowsSharePartitionIdentity();"
@@ -672,7 +672,8 @@ def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
     assert '"WINDOWS_PARTITION_SIZE_BYTES"' in plan
     assert "WINDOWS_PARTITION_SIZE_BYTES" in loader
     assert "WINDOWS_PARTITION_OFFSET_BYTES + WINDOWS_PARTITION_SIZE_BYTES" in rollback
-    assert '"$((original_end_sector - 1))s"' in rollback
+    assert '"$((WINDOWS_PARTITION_SIZE_BYTES / logical_sector))"' in rollback
+    assert "resize_partition_size_sectors" in rollback
     assert 'resize_end="100%"' not in rollback
 
 
@@ -954,6 +955,8 @@ def test_live_target_disk_requires_cross_platform_partition_table_identity() -> 
 
 def test_uefi_bitlocker_decryption_requests_surface_initial_and_retry_failures() -> None:
     storage = read("Scripts/uefi/Libertix.Uefi.Storage.ps1")
+    orchestration = read("Scripts/libertix-uefi-install.ps1")
+    execution = read("Scripts/uefi/Libertix.Uefi.Execution.ps1")
     helper = storage.split("function Request-BitLockerDecryption", 1)[1].split(
         "function Set-WindowsVolumeReadableFromLinux", 1
     )[0]
@@ -970,6 +973,14 @@ def test_uefi_bitlocker_decryption_requests_surface_initial_and_retry_failures()
         == 2
     )
     assert "-ErrorAction Continue" not in workflow
+    assert "function Set-LibertixInstallationPlanWindowsBitLockerState" in execution
+    assert (
+        orchestration.index("Set-WindowsVolumeReadableFromLinux")
+        < orchestration.index(
+            'Set-LibertixInstallationPlanWindowsBitLockerState -State "FullyDecrypted"'
+        )
+        < orchestration.index("New-OrReuseInstallerPartition")
+    )
 
 
 def test_final_verification_counts_mbr_slots_instead_of_lsblk_children() -> None:
@@ -1131,6 +1142,23 @@ def test_windows_recovery_waits_durably_for_the_first_installed_linux_boot() -> 
     assert "Start-RecoveryPromptTask" in bios
     assert "Start-PostInstallPromptTask -State $state" in uefi
     assert "waitingTitle" in result_ui
+
+
+def test_offline_ntfs_resize_schedules_a_verified_windows_boot_repair() -> None:
+    bios = read("Scripts/libertix-recovery-guard.ps1")
+    uefi = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    module = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+
+    assert "Invoke-LibertixWindowsFilesystemRepairIfRequired" in bios
+    assert "Invoke-LibertixWindowsFilesystemRepairIfRequired" in uefi
+    assert 'resizeMode -ne "live-offline"' in module
+    assert 'status = "waiting-windows-filesystem-repair"' in module
+    assert 'foreach ($answer in @("Y", "O", "S"))' in module
+    assert "BootExecute" in module
+    assert "scheduledFromBootId" in module
+    assert "attemptCount -ge 2" in module
+    assert "shutdown.exe /r /t 5" in bios
+    assert "shutdown.exe /r /t 5" in uefi
 
 
 def test_post_install_result_windows_are_branded_and_survive_shutdown_close() -> None:
@@ -1610,6 +1638,28 @@ def test_unattended_mode_requires_a_development_channel_or_filepool() -> None:
     assert "requires a development build channel" in guard
 
 
+def test_forced_offline_ntfs_resize_is_explicit_and_development_only() -> None:
+    startup = read("Helpers/StartupOptions.cs")
+    app = read("App.xaml.cs")
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    uefi = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+
+    assert 'ForceOfflineNtfsResizeOption = "--force-offline-ntfs-resize"' in startup
+    option = startup.split("ForceOfflineNtfsResizeOption", 2)[2].split(
+        "// Ignoring a misspelled safety", 1
+    )[0]
+    assert "can only be specified once" in option
+    assert "options.ForceOfflineNtfsResize = true" in option
+    guard = app.split("if (options.ForceOfflineNtfsResize", 1)[1].split(
+        "RuntimeOptions = options;", 1
+    )[0]
+    assert "!Filepool.IsDevelopmentMode" in guard
+    assert "!usesPublishedDevelopmentChannel" in guard
+    assert "requires a development build channel" in guard
+    assert "RuntimeOptions.ForceOfflineNtfsResize" in bios
+    assert 'resizeMode -eq "live-offline"' in uefi
+
+
 def test_unattended_acknowledgement_reader_does_not_lock_out_the_controller() -> None:
     unattended = read("Helpers/UnattendedWorkflow.cs")
 
@@ -1738,6 +1788,9 @@ def test_uefi_recovery_retires_only_the_exact_transaction_partition() -> None:
         "SystemDiskUniqueId",
         "SystemDiskPartitionTableId",
         "SystemDiskSize",
+        "BootPartitionNumber",
+        "BootPartitionOffset",
+        "BootPartitionSize",
         "ExpectedLinuxPartitionOffset",
         "ExpectedLinuxPartitionSize",
     ):
@@ -1751,6 +1804,88 @@ def test_uefi_recovery_retires_only_the_exact_transaction_partition() -> None:
     assert "[int64]$_.Size -eq $expectedSize" in partition_check
     assert "gpt:" in partition_check
     assert "256MB" not in partition_check
+
+
+def test_uefi_recovery_proves_firmware_bypass_before_offering_preferred_path() -> None:
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    firmware = read("Scripts/modules/Libertix.Firmware.psm1")
+    firmware_read = read("Scripts/modules/Libertix.FirmwareRead.psm1")
+
+    evidence = agent.split("function Get-FirmwareBootBypassEvidence", 1)[1].split(
+        "function Remove-RecoveryTasks", 1
+    )[0]
+    assert "function Get-VerifiedEspPartition" in agent
+    for required in (
+        "Invoke-WithVerifiedEsp",
+        ".libertix-owner",
+        "BootCurrent",
+        "BootOrder",
+        "\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
+        "\\EFI\\Libertix\\shimx64.efi",
+        "Test-EfiLoadOptionTargetsPartition",
+        "firmware-retained-windows-first",
+    ):
+        assert required in evidence
+    assert "$currentBootNumber -ne $firstBootNumber" in evidence
+    assert "$firstBootNumber -eq $ownedBootNumber" in evidence
+    assert "firmware-boot-bypass.json" in agent
+    assert 'Phase = "InstalledBootBypassed"' in agent
+    assert "Get-EfiLoadOptionHardDriveNodes" in firmware
+    assert "GetFirmwareEnvironmentVariable" in firmware_read
+    assert "SetFirmwareEnvironmentVariable" not in firmware_read
+    prompt_flow = agent.split('if ($Action -eq "Prompt")', 1)[1].split(
+        'if ($Action -eq "Cancel")', 1
+    )[0]
+    assert "Get-FirmwareBootBypassEvidence -State $state" in prompt_flow
+    assert prompt_flow.index("Get-FirmwareBootBypassEvidence -State $state") < prompt_flow.index(
+        "Start-PostInstallResultUi -State $state"
+    )
+
+
+def test_preferred_windows_path_is_transactional_and_avoids_grub_recursion() -> None:
+    module = read("Scripts/modules/Libertix.PreferredBootPath.psm1")
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    target = read("assets/live/configure-target-main.sh")
+    sync = read("assets/live/libertix-sync-efi.sh")
+    preferred_sync = read("assets/live/libertix-preferred-boot-path.py")
+
+    for required in (
+        "bootmgfw.libertix-windows.efi",
+        'Join-Path $State.RecoveryRoot "preferred-boot-path"',
+        "Copy-LibertixPreferredPathFileAtomic",
+        "Move-LibertixPreferredPathFileAtomic",
+        "MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH",
+        "Restore-LibertixPreferredBootPath",
+        "secure-boot-chain.json",
+    ):
+        assert required in module
+    assert module.index("PreferredGrubRelativePath") < module.index("-Destination $windowsLoader")
+    assert '"InstallPreferredPath"' in agent
+    assert "Get-FirmwareBootBypassEvidence -State $state" in agent
+    assert agent.index("Restore-PreferredBootPathIfPresent") < agent.index(
+        "Restore-UefiTransactionArchive -State $state"
+    )
+    assert "set libertix_windows_loader=/EFI/Microsoft/Boot/bootmgfw.efi" in target
+    assert "chainloader \\${libertix_windows_loader}" in target
+    assert "export libertix_windows_loader" in module
+    assert "export libertix_windows_loader" in preferred_sync
+    assert "synchronize_preferred_boot_path" in sync
+    assert "[IO.File]::Replace" not in module
+    assert "Do not display the generic first-Linux-boot advice" in agent
+
+    catalogue = json.loads(read("Resources/Libertix.Translations.json"))
+    keys = {
+        "UefiPreferredPathTitle",
+        "UefiPreferredPathDescription",
+        "UefiPreferredPathReady",
+        "UefiPreferredPathUse",
+        "UefiPreferredPathDetectedLog",
+        "UefiPreferredPathPreparing",
+        "UefiPreferredPathFailedFormat",
+        "UefiPreferredPathRebootReady",
+    }
+    for language in catalogue["supportedLanguages"]:
+        assert keys <= catalogue["languages"][language]["wpf"].keys()
 
 
 def test_windows_share_and_postinstall_checks_bind_ext4_to_the_planned_partition() -> None:
@@ -2493,7 +2628,7 @@ def test_bios_adapter_resolves_partition_table_without_ambient_state() -> None:
     bios = read("assets/live/libertix-bios-adapter.sh")
 
     assert "bios_partition_table_or_die()" in bios
-    assert bios.count("bios_partition_table_or_die >/dev/null") == 2
+    assert bios.count("bios_partition_table_or_die >/dev/null") == 3
     assert "$PART_TABLE" not in bios
 
 
@@ -2604,6 +2739,7 @@ def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None
     unit = read("assets/live/libertix-development-ssh.service")
     automation = read("auto_tests/app/services/automation.py")
     validation = read("auto_tests/app/services/validation.py")
+    launch_script = read("auto_tests/app/scripts/launch_libertix_elevated.ps1")
 
     assert '[ "${DEVELOPMENT_SSH_ENABLED:-false}" = "true" ] || exit 0' in target
     assert "autoconnect-priority=1000" in target
@@ -2623,6 +2759,9 @@ def test_development_ssh_is_installed_only_from_the_explicit_plan_flag() -> None
     assert first_boot.index("install -d -m 0755 /run/sshd") < first_boot.index("/usr/sbin/sshd -t")
     assert "After=network-online.target" in unit
     assert "launch_elevated_process(" in automation
+    assert "force_offline_ntfs_resize=options.force_offline_ntfs_resize" in automation
+    assert "if ($forceOfflineNtfsResize)" in launch_script
+    assert "$applicationArguments += ' --force-offline-ntfs-resize'" in launch_script
     assert '"development_static_ipv4": vm.host' in validation
     assert '"development_dns_servers": list(self.settings.development_dns_servers)' in validation
     postinstall = read("auto_tests/app/services/automation_postinstall.py")
@@ -2867,7 +3006,9 @@ def test_uefi_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
     assert "$stagingSizeGB = [int]($stagingBytes / 1GB)" in create_or_reuse
     assert "Wait-LibertixWindowsFreeSpaceBudget" in create_or_reuse
     assert "-AllocationBytes $shrinkBytes" in create_or_reuse
-    assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$fullGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$stagingGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$shrinkGeometry = if ($useOfflineResize)" in create_or_reuse
     assert "$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes" in create_or_reuse
     assert "-Size $stagingBytes" in create_or_reuse
 
@@ -2880,15 +3021,74 @@ def test_bios_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
 
     assert "InstallationSizePolicy.FromRequestedGigabytes" in apply_changes
     assert "installationSizes.StagingSizeMiB" in partitioning
-    assert "ShrinkWindowsPartitionAsync(requestedLinuxMB)" in partitioning
+    assert "ShrinkWindowsPartitionAsync(windowsShrinkMB)" in partitioning
+    assert "useOfflineResize ? stagingMB : requestedLinuxMB" in partitioning
     assert "CreateFat32PartitionSimpleAsync(biosStagingMB)" in partitioning
-    assert "the live will expand it" in partitioning
-    assert partitioning.index("PrepareBiosDistributionIsoAsync(distribution)") < (
-        partitioning.index("InstallWindowsRecoveryGuardAsync(requestedLinuxMB)")
+    assert "the live will prepare the final" in partitioning
+    workflow = apply_changes.split("private async Task ExecutePartitioningAsync", 1)[1].split(
+        "private async Task<bool> PrepareBiosPartitionAsync", 1
+    )[0]
+    assert workflow.index("PrepareBiosDistributionIsoAsync(distribution)") < (
+        workflow.index("PrepareBiosPartitionAsync(installationSizes)")
     )
-    assert partitioning.index("PrepareBiosDistributionIsoAsync(distribution)") < (
-        partitioning.index("ShrinkWindowsPartitionAsync(requestedLinuxMB)")
+
+
+def test_live_offline_ntfs_resize_is_fail_closed_and_runs_before_ext4() -> None:
+    resize = read("assets/live/libertix-offline-ntfs-resize.sh")
+    installer = read("assets/live/libertix-install-main.sh")
+    builder = read("iso-tools/build-iso.sh")
+    stages = read("assets/live/libertix-stages.tsv")
+
+    assert '[ "$INSTALLER_RESIZE_MODE" = "live-offline" ] || return 0' in resize
+    assert "assert_no_target_disk_mounts" in resize
+    assert 'assert_not_mounted_or_open "$LIVE_PART"' in resize
+    assert 'assert_not_mounted_or_open "$WINDOWS_PART"' in resize
+    assert "assert_recovery_unchanged_or_die" in resize
+    assert "FullyDecrypted|NotEncryptable" in resize
+    assert "BitLocker to be absent or fully decrypted" in resize
+    assert "ntfs-3g.probe --readwrite" in resize
+    assert "ntfsresize --check" in resize
+    assert "ntfsresize --info" in resize
+    assert "ntfsresize --no-action --force --size" in resize
+    assert resize.index("ntfsresize --no-action --force --size") < resize.index(
+        "ntfsresize --force --size"
     )
+    assert resize.index("ntfsresize --force --size") < resize.index(
+        'resize_partition_size_sectors "$DISK" "$windows_number"'
+    )
+    assert "sfdisk --lock --no-reread -N" in resize
+    assert "sfdisk --verify" in resize
+    assert "offline Windows partition-table resize failed" in resize
+    assert "offline Windows partition start changed unexpectedly" in resize
+    assert "firmware_relocate_installer_partition_or_die" in resize
+    assert "relocated installer partition offset verification failed" in resize
+    assert installer.index("prepare_offline_ntfs_resize_or_die") < installer.index(
+        'mark "080-mkfs-ext4"'
+    )
+    assert "libertix-offline-ntfs-resize.sh" in builder
+    assert "045-offline-ntfs-preflight" in stages
+    assert "046-offline-ntfs-resize" in stages
+    assert "047-relocate-installer-partition" in stages
+
+
+def test_offline_resize_rollback_resolves_staging_or_final_geometry() -> None:
+    rollback = read("assets/live/libertix-rollback-common.sh")
+    bios = read("assets/live/libertix-bios-adapter.sh")
+    uefi = read("assets/live/libertix-uefi-adapter.sh")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+
+    for adapter in (bios, uefi):
+        assert 'partition_at_offset "$DISK" "$INSTALLER_FINAL_OFFSET_BYTES"' in adapter
+        assert 'partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES"' in adapter
+        assert '"$INSTALLER_FINAL_OFFSET_BYTES"' in adapter
+        assert '"$INSTALLER_PARTITION_OFFSET_BYTES"' in adapter
+    assert "restore_windows_partition_best_effort" in rollback
+    assert "resize_partition_size_sectors" in rollback
+    assert 'ntfsresize -f "$WINDOWS_PART"' in rollback
+    assert "installationPlan.runtime.recoveryRunId" in transaction
+    assert "installationPlan.planId -eq [string]$state.RecoveryRunId" not in transaction
+    assert "finalOffsetBytes" in transaction
+    assert "finalSizeBytes" in transaction
 
 
 def test_bios_recovery_guard_accepts_staging_or_final_partition_size() -> None:
@@ -3087,7 +3287,9 @@ def test_uefi_shrink_uses_shared_geometry_for_partition_creation() -> None:
         "function Get-ReusablePreparedInstallerPartition", 1
     )[0]
 
-    assert "$shrinkGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$fullGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$stagingGeometry = Get-LibertixAlignedShrinkGeometry" in create_or_reuse
+    assert "$shrinkGeometry = if ($useOfflineResize)" in create_or_reuse
     assert "$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes" in create_or_reuse
     hibernation_position = create_or_reuse.index("Set-HibernateEnabled -Enabled $false")
     free_space_position = create_or_reuse.index("Wait-LibertixWindowsFreeSpaceBudget")
@@ -3103,7 +3305,7 @@ def test_windows_hibernation_validation_distinguishes_preference_from_capability
     staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
 
-    assert "if ($ShareWindowsFilesInLinux)" in staging
+    assert "$hibernationDisabled = $ShareWindowsFilesInLinux -or $forcedOfflineResize" in staging
     assert "Set-HibernateEnabled -Enabled $false" in staging
     assert '"HIBERNATION_ENABLED={0}"' in checks
     assert '"FAST_STARTUP_CONFIGURED={0}"' in checks
@@ -3443,6 +3645,22 @@ def test_live_handoff_is_published_atomically_and_hidden_before_reboot() -> None
     assert 'Dismount-Letter -Letter ($drive.TrimEnd(":"))' in orchestrator
 
 
+def test_uefi_recovery_uses_shared_atomic_publish_without_null_backup_paths() -> None:
+    recovery = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    transaction = read("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
+
+    assert '"Scripts\\modules\\Libertix.AtomicFile.psm1"' in recovery
+    assert "Publish-RecoveryFileAtomic" in recovery
+    assert "& $atomicFileModule {" in recovery
+    assert "Publish-LibertixFileAtomic" in recovery
+    assert "Write-AgentErrorRecord -ErrorRecord $fatalError" in recovery
+    assert "ERROR PowerShellStack:" in recovery
+    assert "[IO.File]::Replace($temporary, $path, $null)" not in recovery
+    assert "[IO.File]::Replace($temporary, $destination, $null)" not in recovery
+    assert "[IO.File]::Replace($temporary, $destination, $null)" not in transaction
+    assert "Publish-LibertixFileAtomic" in transaction
+
+
 def test_temporary_media_and_grub_generator_workspaces_are_cleaned() -> None:
     staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
     grub_generator = read("grub/10_libertix")
@@ -3693,6 +3911,35 @@ def test_obsolete_clickonce_metadata_and_unused_test_dependency_are_absent() -> 
     assert 'name = "httpx2"' not in lock
     assert '"httpx2' not in pyproject
     assert "httpx2" not in requirements
+
+
+def test_uefi_recovery_runtime_modules_are_packaged_with_the_wpf_application() -> None:
+    project = read("Libertix.csproj")
+    apply_changes = read("Pages/ApplyChanges.Uefi.cs")
+
+    for relative_path in (
+        r"Scripts\modules\Libertix.FirmwareRead.psm1",
+        r"Scripts\modules\Libertix.PreferredBootPath.psm1",
+    ):
+        entry = project.split(f'<Content Include="{relative_path}">', 1)[1].split("</Content>", 1)[
+            0
+        ]
+        assert "<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>" in entry
+        assert relative_path.rsplit("\\", 1)[-1] in apply_changes
+
+
+def test_uefi_recovery_mounts_a_letterless_esp_at_an_explicit_free_access_path() -> None:
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    mount = agent.split("function Invoke-WithVerifiedEsp", 1)[1].split(
+        "function Test-EfiLoadOptionTargetsPartition", 1
+    )[0]
+
+    assert ').Trim().TrimEnd(":")' in mount
+    assert "$driveLetter -notmatch '^[A-Za-z]$'" in mount
+    assert "Get-LibertixFreeDriveLetter" in mount
+    assert "-AccessPath $assignedAccessPath" in mount
+    assert "-AssignDriveLetter" not in mount
+    assert "Remove-PartitionAccessPath" in mount
 
 
 def test_auto_test_documentation_points_detailed_logs_to_run_workspaces() -> None:

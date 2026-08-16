@@ -38,6 +38,11 @@ WINDOWS_PARTITION_OFFSET_BYTES=""
 WINDOWS_PARTITION_SIZE_BYTES=""
 WINDOWS_BOOT_PARTITION_OFFSET_BYTES=""
 INSTALLER_PARTITION_OFFSET_BYTES=""
+INSTALLER_FINAL_OFFSET_BYTES=""
+INSTALLER_FINAL_SIZE_BYTES=""
+INSTALLER_STAGING_SIZE_BYTES=""
+INSTALLER_RESIZE_MODE=""
+WINDOWS_BITLOCKER_STATE=""
 EXPECTED_PARTITION_STYLE=""
 RECOVERY_PARTITION_OFFSET_BYTES=""
 RECOVERY_PARTITION_SIZE_BYTES=""
@@ -145,6 +150,7 @@ on_exit() {
 . /usr/local/lib/libertix/libertix-install-platform-common.sh
 . /usr/local/lib/libertix/libertix-storage-common.sh
 . /usr/local/lib/libertix/libertix-install-runtime-common.sh
+. /usr/local/lib/libertix/libertix-offline-ntfs-resize.sh
 . /usr/local/lib/libertix/libertix-distribution-common.sh
 . /usr/local/lib/libertix/libertix-target-common.sh
 . /usr/local/lib/libertix/libertix-rollback-common.sh
@@ -190,6 +196,9 @@ DISKNAME="$(basename "$DISK")"
 
 LIVE_PART=$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)
 [ -n "$LIVE_PART" ] && [ -b "$LIVE_PART" ] || die "Installer partition does not match the Windows manifest"
+[ "$(blockdev --getsize64 "$LIVE_PART" 2>/dev/null || echo 0)" = \
+    "$INSTALLER_STAGING_SIZE_BYTES" ] || \
+    die "Installer partition size does not match the Windows manifest"
 
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$DISK"
 
@@ -261,17 +270,19 @@ unmount_target_disk_partitions
 assert_no_target_disk_mounts
 NEW_PART="$LIVE_PART"
 NEW_PART_NUM=$(partition_number "$NEW_PART")
-mark "050-assert-live-detached"
 assert_not_mounted_or_open "$NEW_PART"
 
-# Windows may deliberately create a small FAT32 staging partition when the
-# requested Linux size exceeds the historical Windows FAT32 limit. C: has
-# already been shrunk by the complete requested size, leaving the remainder
-# contiguous after this partition. Expand it before mkfs.ext4.
+# Windows may deliberately create only the FAT32 staging extent. Complete an
+# approved offline NTFS resize first when required, then ensure that the
+# resulting Linux partition reaches its final extent before mkfs.ext4.
 current_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
 requested_partition_bytes=$((LINUX_SIZE_GB * 1024 * 1024 * 1024))
 desired_partition_bytes="$requested_partition_bytes"
 start_installation_state_step "live.installer-partition-expanded"
+prepare_offline_ntfs_resize_or_die
+mark "050-assert-live-detached"
+assert_not_mounted_or_open "$NEW_PART"
+current_partition_bytes=$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)
 if [ "$current_partition_bytes" -lt "$requested_partition_bytes" ]; then
     logical_sector_bytes=$(blockdev --getss "$DISK" 2>/dev/null || echo 0)
     [ "$logical_sector_bytes" -gt 0 ] || die "cannot determine target disk logical sector size"

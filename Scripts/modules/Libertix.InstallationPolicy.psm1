@@ -51,8 +51,8 @@ function Get-LibertixInstallationPolicy {
         [int]$storage.preflightShrinkSafetyGiB -lt 0 -or
         [int]$storage.maximumDirectFat32SizeGiB -lt `
             [int]$storage.minimumFinalSizeGiB -or
-        [int]$storage.largeInstallationStagingSizeGiB -le 0 -or
-        [int]$storage.largeInstallationStagingSizeGiB -gt `
+        [int]$storage.stagingSizeGiB -le 0 -or
+        [int]$storage.stagingSizeGiB -gt `
             [int]$storage.maximumDirectFat32SizeGiB -or
         $alignmentBytes -le 0 -or
         ($alignmentBytes -band ($alignmentBytes - 1)) -ne 0 -or

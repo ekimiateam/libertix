@@ -203,10 +203,10 @@ def bcd_cleanup_module() -> ModuleType:
 def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
     """Build the smallest complete plan shared by BIOS and UEFI."""
 
-    staging_size_gib = 8 if final_size_gib > 31 else final_size_gib
+    staging_size_gib = min(final_size_gib, 8)
     is_bios = firmware == "bios"
     return {
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "planId": "a" * 32,
         "createdAtUtc": "2026-07-15T12:00:00Z",
         "firmware": firmware,
@@ -259,6 +259,8 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             "installer": {
                 "number": 4,
                 "offsetBytes": (201 - final_size_gib) * GIB,
+                "finalOffsetBytes": (201 - final_size_gib) * GIB,
+                "resizeMode": "windows-online",
                 "finalSizeBytes": final_size_gib * GIB,
                 "stagingSizeBytes": staging_size_gib * GIB,
             },
@@ -269,6 +271,7 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             "windowsProfilesJsonBase64": "W10=",
         },
         "runtime": {
+            "windowsBitLockerState": "FullyDecrypted",
             "lowMemoryMode": False,
             "bootStrategy": "bios-grub4dos" if is_bios else "uefi-boot-next",
             "secureBootEnabled": not is_bios,
@@ -307,7 +310,7 @@ def test_shell_plan_loader_accepts_the_partition_table_identity(tmp_path: Path) 
 @pytest.mark.parametrize("firmware", ["bios", "uefi"])
 @pytest.mark.parametrize(
     ("final_size_gib", "staging_size_gib"),
-    [(20, 20), (31, 31), (32, 8), (40, 8)],
+    [(20, 8), (31, 8), (32, 8), (40, 8)],
 )
 def test_bios_and_uefi_use_the_same_size_policy(
     plan_module: ModuleType,
@@ -329,6 +332,56 @@ def test_bios_and_uefi_use_the_same_size_policy(
     assert exported["DISTRIBUTION_SECURE_BOOT_MICROSOFT_AUTHORITIES"] == "2011"
     assert exported["TRUSTED_MICROSOFT_UEFI_AUTHORITIES"] == ("" if firmware == "bios" else "2011")
     assert exported["SECURE_BOOT_ENABLED"] == ("false" if firmware == "bios" else "true")
+
+
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+def test_offline_resize_exports_staging_and_final_geometry(
+    plan_module: ModuleType,
+    firmware: str,
+) -> None:
+    plan = make_plan(firmware, 40)
+    installer = plan["disk"]["installer"]  # type: ignore[index]
+    installer["resizeMode"] = "live-offline"
+    installer["offsetBytes"] = (201 - 8) * GIB
+
+    validated = plan_module.validate_plan(plan, require_installer=True)
+    exported = plan_module.shell_values(validated)
+
+    assert exported["INSTALLER_RESIZE_MODE"] == "live-offline"
+    assert exported["INSTALLER_PARTITION_OFFSET_BYTES"] == str((201 - 8) * GIB)
+    assert exported["INSTALLER_FINAL_OFFSET_BYTES"] == str((201 - 40) * GIB)
+    assert exported["WINDOWS_BITLOCKER_STATE"] == "FullyDecrypted"
+
+
+def test_offline_resize_rejects_unexpected_staging_offset(plan_module: ModuleType) -> None:
+    plan = make_plan("uefi", 40)
+    installer = plan["disk"]["installer"]  # type: ignore[index]
+    installer["resizeMode"] = "live-offline"
+    installer["offsetBytes"] = (201 - 9) * GIB
+
+    with pytest.raises(plan_module.PlanValidationError, match="selected Windows shrink geometry"):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_plan_rejects_non_decrypted_bitlocker_state(plan_module: ModuleType) -> None:
+    plan = make_plan("uefi", 40)
+    plan["runtime"]["windowsBitLockerState"] = "FullyEncrypted"  # type: ignore[index]
+
+    with pytest.raises(plan_module.PlanValidationError, match="windowsBitLockerState"):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+@pytest.mark.parametrize("state", ["FullyDecrypted", "NotEncryptable"])
+def test_live_plan_accepts_only_safe_bitlocker_states(
+    plan_module: ModuleType,
+    state: str,
+) -> None:
+    plan = make_plan("bios", 40)
+    plan["runtime"]["windowsBitLockerState"] = state  # type: ignore[index]
+
+    validated = plan_module.validate_plan(plan, require_installer=True)
+
+    assert validated["runtime"]["windowsBitLockerState"] == state
 
 
 def test_plan_rejects_unknown_secure_boot_authority(plan_module: ModuleType) -> None:
@@ -583,7 +636,7 @@ def test_plan_rejects_installer_offset_not_derived_from_original_windows_geometr
     plan = make_plan("uefi", 24)
     plan["disk"]["installer"]["offsetBytes"] += 1024 * 1024  # type: ignore[index]
 
-    with pytest.raises(plan_module.PlanValidationError, match="aligned Windows shrink geometry"):
+    with pytest.raises(plan_module.PlanValidationError, match="selected Windows shrink geometry"):
         plan_module.validate_plan(plan, require_installer=True)
 
 
@@ -602,7 +655,7 @@ def test_uefi_plan_rejects_bios_primary_partition_offset(
     plan = make_plan("uefi", 24)
     plan["disk"]["installer"]["offsetBytes"] -= 1024 * 1024  # type: ignore[index]
 
-    with pytest.raises(plan_module.PlanValidationError, match="aligned Windows shrink geometry"):
+    with pytest.raises(plan_module.PlanValidationError, match="selected Windows shrink geometry"):
         plan_module.validate_plan(plan, require_installer=True)
 
 
@@ -784,7 +837,7 @@ def test_contract_implementations_share_the_same_policy_constants() -> None:
         "windowsFreeSpaceRetryWindowGiB": 2,
         "preflightShrinkSafetyGiB": 2,
         "maximumDirectFat32SizeGiB": 31,
-        "largeInstallationStagingSizeGiB": 8,
+        "stagingSizeGiB": 8,
         "partitionAlignmentBytes": 1024**2,
         "recommendedLinuxFractionOfFreeSpace": 0.4,
         "maximumRecommendedLinuxSizeGiB": 100,

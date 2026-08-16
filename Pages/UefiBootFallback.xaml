@@ -89,6 +89,7 @@
                     HorizontalAlignment="Left"
                     Click="CancelButton_Click"/>
             <Button x:Name="FallbackButton"
+                    AutomationProperties.AutomationId="UefiPreferredPathAcceptButton"
                     Content="{DynamicResource UefiFallbackUseFirmware}"
                     Style="{StaticResource ModernButton}"
                     Width="330"
@@ -97,6 +98,7 @@
                     HorizontalAlignment="Right"
                     Click="FallbackButton_Click"/>
             <Button x:Name="RebootButton"
+                    AutomationProperties.AutomationId="UefiPreferredPathRebootButton"
                     Content="{DynamicResource UefiFallbackReboot}"
                     Style="{StaticResource ModernButton}"
                     Width="330"

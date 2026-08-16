@@ -58,6 +58,41 @@ def test_log_checksums_cover_all_archived_diagnostics(verifier: ModuleType, tmp_
     assert any(line.endswith("  first-boot-verification.json") for line in lines)
 
 
+def test_planned_linux_offset_uses_final_geometry_after_offline_resize(
+    verifier: ModuleType,
+) -> None:
+    installer = {
+        "resizeMode": "live-offline",
+        "offsetBytes": 90 * 1024**3,
+        "finalOffsetBytes": 70 * 1024**3,
+    }
+
+    assert verifier.planned_linux_offset(installer) == 70 * 1024**3
+
+
+def test_planned_linux_offset_keeps_observed_geometry_after_windows_resize(
+    verifier: ModuleType,
+) -> None:
+    installer = {
+        "resizeMode": "windows-online",
+        "offsetBytes": 70 * 1024**3,
+        "finalOffsetBytes": 70 * 1024**3,
+    }
+
+    assert verifier.planned_linux_offset(installer) == 70 * 1024**3
+
+
+def test_planned_linux_offset_rejects_unknown_resize_mode(verifier: ModuleType) -> None:
+    installer = {
+        "resizeMode": "unknown",
+        "offsetBytes": 70 * 1024**3,
+        "finalOffsetBytes": 70 * 1024**3,
+    }
+
+    with pytest.raises(verifier.VerificationError, match="resize mode is invalid"):
+        verifier.planned_linux_offset(installer)
+
+
 def test_uefi_boot_chain_requires_bootcurrent_to_select_libertix(
     verifier: ModuleType, tmp_path: Path
 ) -> None:
@@ -88,6 +123,108 @@ def test_uefi_boot_chain_rejects_direct_windows_boot(verifier: ModuleType, tmp_p
 
     with pytest.raises(verifier.VerificationError, match="does not identify"):
         verifier.verify_uefi_boot_current(tmp_path)
+
+
+def test_uefi_boot_chain_accepts_verified_preferred_windows_path(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    guid = verifier.EFI_GLOBAL_VARIABLE_GUID
+    (tmp_path / f"BootCurrent-{guid}").write_bytes(b"\x07\x00\x00\x00" + (1).to_bytes(2, "little"))
+    (tmp_path / f"Boot0001-{guid}").write_bytes(
+        efi_boot_variable("Windows Boot Manager", r"\EFI\Microsoft\Boot\bootmgfw.efi")
+    )
+
+    proof = verifier.verify_uefi_boot_current(
+        tmp_path,
+        expected_boot_number="0007",
+        expected_partition_number=1,
+        expected_partition_guid=ESP_GUID,
+        preferred_path={"manifestSha256": "a" * 64},
+    )
+
+    assert proof["verified"] is True
+    assert proof["type"] == "uefi-preferred-windows-path"
+    assert proof["bootNumber"] == "0001"
+
+
+def test_preferred_uefi_boot_path_requires_manifest_and_file_hashes(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    efi_root = tmp_path / "EFI" / "Libertix"
+    microsoft = tmp_path / "EFI" / "Microsoft" / "Boot"
+    efi_root.mkdir(parents=True)
+    microsoft.mkdir(parents=True)
+    payloads = {
+        "bootmgfw.efi": b"shim",
+        "grubx64.efi": b"grub",
+        "mmx64.efi": b"mok-manager",
+        "grub.cfg": b"configfile /boot/grub/grub.cfg\n",
+        "bootmgfw.libertix-windows.efi": b"windows",
+    }
+    hashes = {name: verifier.hashlib.sha256(value).hexdigest() for name, value in payloads.items()}
+    for name, value in payloads.items():
+        (microsoft / name).write_bytes(value)
+    (efi_root / "secure-boot-chain.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "status": "not-required",
+                "secureBootEnabled": False,
+                "images": {
+                    "shim": {"sha256": hashes["bootmgfw.efi"]},
+                    "grub": {"sha256": hashes["grubx64.efi"]},
+                    "mokManager": {"sha256": hashes["mmx64.efi"]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan_id = "0123456789abcdef0123456789abcdef"
+    (efi_root / "preferred-boot-path.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "runId": plan_id,
+                "status": "installed",
+                "secureBootEnabled": False,
+                "esp": {"partitionNumber": 1, "partitionGuid": ESP_GUID},
+                "windowsLoader": {
+                    "activePath": r"\EFI\Microsoft\Boot\bootmgfw.efi",
+                    "backupPath": r"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi",
+                    "sha256": hashes["bootmgfw.libertix-windows.efi"],
+                },
+                "preferred": {
+                    "shimSha256": hashes["bootmgfw.efi"],
+                    "grubSha256": hashes["grubx64.efi"],
+                    "mokManagerSha256": hashes["mmx64.efi"],
+                    "grubConfigSha256": hashes["grub.cfg"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    owner = {
+        "bootNumber": "0007",
+        "partitionNumber": 1,
+        "partitionGuid": ESP_GUID,
+        "loaderPath": r"\EFI\Libertix\shimx64.efi",
+    }
+
+    proof = verifier.verify_preferred_uefi_boot_path(efi_root, plan_id, owner)
+
+    assert proof is not None
+    assert proof["verifiedHashes"]["bootmgfw.efi"] == hashes["bootmgfw.efi"]
+    manifest_path = efi_root / "preferred-boot-path.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["status"] = "prepared"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(verifier.VerificationError, match="identity or status"):
+        verifier.verify_preferred_uefi_boot_path(efi_root, plan_id, owner)
+    manifest["status"] = "installed"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (microsoft / "grubx64.efi").write_bytes(b"corrupt")
+    with pytest.raises(verifier.VerificationError, match="differs from its verified manifest"):
+        verifier.verify_preferred_uefi_boot_path(efi_root, plan_id, owner)
 
 
 def test_uefi_owner_marker_preserves_plan_and_boot_number(

@@ -168,7 +168,10 @@ firmware_resolve_rollback_partition() {
     local candidate
 
     [ -z "$NEW_PART" ] || return 0
-    candidate="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+    candidate="$(partition_at_offset "$DISK" "$INSTALLER_FINAL_OFFSET_BYTES" || true)"
+    if [ -z "$candidate" ]; then
+        candidate="$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)"
+    fi
     if [ -n "$candidate" ]; then
         NEW_PART="$candidate"
         NEW_PART_NUM="$(partition_number "$candidate")"
@@ -212,7 +215,77 @@ firmware_rollback_partition_is_owned() {
     local partition="$1"
 
     [ "$(parent_disk_from_part "$partition")" = "$DISK" ] \
-        && [ "$(partition_start_bytes "$DISK" "$partition" || true)" = "$INSTALLER_PARTITION_OFFSET_BYTES" ]
+        && {
+            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
+                "$INSTALLER_PARTITION_OFFSET_BYTES" ] ||
+            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
+                "$INSTALLER_FINAL_OFFSET_BYTES" ]
+        }
+}
+
+firmware_relocate_installer_partition_or_die() {
+    local final_offset="$1" final_size="$2"
+    local layout logical_sector installer_sector recovery_sector owned_layout
+    local target_number start_sector size_sectors extended_number
+
+    bios_partition_table_or_die >/dev/null
+    firmware_rollback_partition_is_owned "$NEW_PART" || \
+        die "offline BIOS resize does not own the staging partition"
+    assert_not_mounted_or_open "$NEW_PART"
+    logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || echo 0)"
+    start_sector="$(bytes_to_logical_sectors "$final_offset" "$logical_sector")" || \
+        die "final BIOS partition offset is not sector aligned"
+    size_sectors="$(bytes_to_logical_sectors "$final_size" "$logical_sector")" || \
+        die "final BIOS partition size is not sector aligned"
+    target_number="$NEW_PART_NUM"
+
+    if [ "$NEW_PART_NUM" -ge 5 ] 2>/dev/null; then
+        layout="$(parted -sm "$DISK" unit s print 2>/dev/null)" || \
+            die "cannot read MBR layout before offline relocation"
+        installer_sector="$(bytes_to_logical_sectors \
+            "$INSTALLER_PARTITION_OFFSET_BYTES" "$logical_sector")" || \
+            die "staging offset is not sector aligned"
+        recovery_sector="$(bytes_to_logical_sectors \
+            "$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector")" || \
+            die "Recovery offset is not sector aligned"
+        owned_layout="$(printf '%s\n' "$layout" |
+            mbr_owned_logical_layout_from_machine_output \
+                "$installer_sector" "$recovery_sector")" || \
+            die "offline BIOS resize could not prove ownership of the logical staging layout"
+        IFS=: read -r _ _ _ extended_number _ _ <<< "$owned_layout"
+        target_number="$extended_number"
+    fi
+
+    echo "Relocating MBR staging partition $NEW_PART_NUM to final primary slot $target_number"
+    remove_mbr_partition_entry_verified \
+        "$NEW_PART_NUM" "offline MBR staging cleanup" || \
+        die "offline BIOS staging partition could not be removed"
+    NEW_PART=""
+    NEW_PART_NUM=""
+    if [ -n "${extended_number:-}" ]; then
+        firmware_cleanup_partition_container_best_effort || \
+            die "offline BIOS extended container could not be removed"
+    fi
+
+    printf 'start=%s, size=%s, type=83\n' "$start_sector" "$size_sectors" |
+        sfdisk --lock --append --no-reread -N "$target_number" "$DISK" || \
+        die "sfdisk could not create the final primary MBR Linux partition"
+    sync
+    partprobe "$DISK" 2>/dev/null || true
+    udevadm settle --timeout=10 2>/dev/null || true
+
+    for _ in $(seq 1 20); do
+        NEW_PART="$(partition_at_offset "$DISK" "$final_offset" || true)"
+        [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] && break
+        sleep 0.25
+    done
+    [ -n "$NEW_PART" ] && [ -b "$NEW_PART" ] || \
+        die "final primary MBR Linux partition could not be resolved"
+    NEW_PART_NUM="$(partition_number "$NEW_PART")"
+    [ "$NEW_PART_NUM" -ge 1 ] && [ "$NEW_PART_NUM" -le 4 ] || \
+        die "offline BIOS relocation did not create a primary partition"
+    [ "$(blockdev --getsize64 "$NEW_PART" 2>/dev/null || echo 0)" = "$final_size" ] || \
+        die "final primary MBR Linux partition size verification failed"
 }
 
 firmware_cleanup_partition_container_best_effort() {

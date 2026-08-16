@@ -27,12 +27,16 @@ $script:InstallationPlanPropertySets = [ordered]@{
         "systemDrive", "windows", "boot", "recovery", "installer"
     )
     partition = @("number", "offsetBytes", "sizeBytes")
-    installer = @("number", "offsetBytes", "finalSizeBytes", "stagingSizeBytes")
+    installer = @(
+        "number", "offsetBytes", "finalOffsetBytes", "resizeMode",
+        "finalSizeBytes", "stagingSizeBytes"
+    )
     features = @(
         "shareWindowsFilesInLinux", "shareLinuxFilesInWindows",
         "windowsProfilesJsonBase64"
     )
     runtime = @(
+        "windowsBitLockerState",
         "lowMemoryMode", "bootStrategy", "secureBootEnabled", "trustedMicrosoftUefiAuthorities",
         "recoveryRootWindows", "recoveryRunId"
     )
@@ -281,7 +285,7 @@ function Assert-LibertixInstallationPlan {
     Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
 
     $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
-    if ([int]$schemaVersion -ne 2) {
+    if ([int]$schemaVersion -ne 3) {
         throw "Unsupported installation plan schemaVersion: $schemaVersion."
     }
 
@@ -506,8 +510,14 @@ function Assert-LibertixInstallationPlan {
     }
     $finalSize = Assert-LibertixPlanProperty -Object $installer -Name "finalSizeBytes" -Path "disk.installer.finalSizeBytes"
     $stagingSize = Assert-LibertixPlanProperty -Object $installer -Name "stagingSizeBytes" -Path "disk.installer.stagingSizeBytes"
+    $finalOffset = Assert-LibertixPlanProperty -Object $installer -Name "finalOffsetBytes" -Path "disk.installer.finalOffsetBytes"
+    $resizeMode = Assert-LibertixPlanProperty -Object $installer -Name "resizeMode" -Path "disk.installer.resizeMode"
     Assert-LibertixPositiveInteger -Value $finalSize -Path "disk.installer.finalSizeBytes"
     Assert-LibertixPositiveInteger -Value $stagingSize -Path "disk.installer.stagingSizeBytes"
+    Assert-LibertixPositiveInteger -Value $finalOffset -Path "disk.installer.finalOffsetBytes"
+    if ($resizeMode -notin @("windows-online", "live-offline")) {
+        throw "Installation plan resizeMode must be windows-online or live-offline."
+    }
     if (
         [int64]$finalSize % $script:BytesPerGiB -ne 0 -or
         [int64]$stagingSize % $script:BytesPerGiB -ne 0
@@ -518,38 +528,43 @@ function Assert-LibertixInstallationPlan {
     if ($finalSizeGiB -lt [int]$script:InstallationPolicy.storage.minimumFinalSizeGiB) {
         throw "Installation plan finalSizeBytes must be at least $($script:InstallationPolicy.storage.minimumFinalSizeGiB) GiB."
     }
-    [int64]$expectedStagingSizeGiB = if (
-        $finalSizeGiB -gt [int]$script:InstallationPolicy.storage.maximumDirectFat32SizeGiB
-    ) {
-        [int]$script:InstallationPolicy.storage.largeInstallationStagingSizeGiB
-    } else {
-        $finalSizeGiB
-    }
+    [int64]$expectedStagingSizeGiB = [Math]::Min(
+        $finalSizeGiB,
+        [int]$script:InstallationPolicy.storage.stagingSizeGiB
+    )
     if ([int64]$stagingSize -ne $expectedStagingSizeGiB * $script:BytesPerGiB) {
         throw "Installation plan stagingSizeBytes does not match the shared FAT32 staging policy."
     }
+    [int64]$alignmentBytes =
+        [int64]$script:InstallationPolicy.storage.partitionAlignmentBytes
+    [int64]$alignmentPadding = $windowsEnd % $alignmentBytes
+    if ([int64]$finalSize -gt $windowsEnd - $alignmentPadding) {
+        throw "Installation plan finalSizeBytes exceeds the original Windows extent."
+    }
+    [int64]$expectedFinalOffset = `
+        $windowsEnd - $alignmentPadding - [int64]$finalSize
+    if ([int64]$finalOffset -ne $expectedFinalOffset) {
+        throw "Installation plan finalOffsetBytes does not match the aligned final geometry."
+    }
+    if (
+        [int64]$finalSize -gt $recoveryOffset -or
+        [int64]$finalOffset -gt $recoveryOffset - [int64]$finalSize
+    ) {
+        throw "Installation plan final installer extent would overlap Recovery."
+    }
     if ($null -ne $installerOffset) {
-        [int64]$alignmentBytes =
-            [int64]$script:InstallationPolicy.storage.partitionAlignmentBytes
-        [int64]$alignmentPadding = $windowsEnd % $alignmentBytes
-        if ([int64]$finalSize -gt $windowsEnd - $alignmentPadding) {
-            throw "Installation plan finalSizeBytes exceeds the original Windows extent."
+        [int64]$expectedObservedOffset = if ($resizeMode -eq "live-offline") {
+            $windowsEnd - $alignmentPadding - [int64]$stagingSize
+        } else {
+            $expectedFinalOffset
         }
-        [int64]$expectedInstallerOffset = `
-            $windowsEnd - $alignmentPadding - [int64]$finalSize
-        [int64]$primaryMbrOffset = $expectedInstallerOffset - $alignmentBytes
+        [int64]$primaryMbrOffset = $expectedObservedOffset - $alignmentBytes
         $offsetMatches = (
-            [int64]$installerOffset -eq $expectedInstallerOffset -or
+            [int64]$installerOffset -eq $expectedObservedOffset -or
             ($partitionStyle -eq "MBR" -and [int64]$installerOffset -eq $primaryMbrOffset)
         )
         if (-not $offsetMatches) {
-            throw "Installation plan installer offset does not match the aligned Windows shrink geometry."
-        }
-        if (
-            [int64]$finalSize -gt $recoveryOffset -or
-            [int64]$installerOffset -gt $recoveryOffset - [int64]$finalSize
-        ) {
-            throw "Installation plan installer final extent would overlap Recovery."
+            throw "Installation plan installer offset does not match the selected Windows shrink geometry."
         }
     }
 
@@ -582,6 +597,21 @@ function Assert-LibertixInstallationPlan {
         -Object $runtime `
         -Path "runtime" `
         -PropertySet "runtime"
+    $windowsBitLockerState = [string](Assert-LibertixPlanProperty `
+        -Object $runtime `
+        -Name "windowsBitLockerState" `
+        -Path "runtime.windowsBitLockerState")
+    $safeBitLockerState = $windowsBitLockerState -cin @(
+        "FullyDecrypted",
+        "NotEncryptable"
+    )
+    $pendingUefiDecryption = (
+        $firmware -eq "uefi" -and
+        $windowsBitLockerState -ceq "EncryptedOrProtected"
+    )
+    if (-not $safeBitLockerState -and -not $pendingUefiDecryption) {
+        throw "Installation plan field runtime.windowsBitLockerState is invalid for the selected firmware."
+    }
     $lowMemoryMode = Assert-LibertixPlanProperty -Object $runtime -Name "lowMemoryMode" -Path "runtime.lowMemoryMode"
     if ($lowMemoryMode -isnot [bool]) {
         throw "Installation plan field runtime.lowMemoryMode must be a boolean."

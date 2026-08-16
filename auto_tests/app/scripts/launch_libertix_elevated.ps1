@@ -185,6 +185,10 @@ $unattended = if (
 } else {
     $null
 }
+$forceOfflineNtfsResize = (
+    $config.PSObject.Properties.Name -contains "force_offline_ntfs_resize" -and
+    [bool]$config.force_offline_ntfs_resize
+)
 $unattendedConfigPath = ""
 $unattendedStatusPath = ""
 $unattendedAcknowledgementPath = ""
@@ -307,6 +311,9 @@ if (-not [string]::IsNullOrEmpty($developmentStaticIpv4)) {
 }
 if ($null -ne $unattended) {
     $applicationArguments += ' --unattended --unattended-config "{0}"' -f $unattendedConfigPath
+}
+if ($forceOfflineNtfsResize) {
+    $applicationArguments += ' --force-offline-ntfs-resize'
 }
 [System.IO.File]::WriteAllText(
     $workerConfigPath,

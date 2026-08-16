@@ -143,6 +143,27 @@ namespace Libertix.Pages
             InstallationPlanSerializer.WriteAtomic(_installationPlanPath, _installationPlan);
         }
 
+        private void SetInstallationResizeMode(string resizeMode)
+        {
+            if (_installationPlan?.Disk?.Installer == null)
+                throw new InvalidOperationException("Installation plan is not initialized.");
+            if (resizeMode != InstallationResizeMode.WindowsOnline &&
+                resizeMode != InstallationResizeMode.LiveOffline)
+            {
+                throw new ArgumentOutOfRangeException(nameof(resizeMode));
+            }
+            if (_installationPlan.Disk.Installer.Number.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "Resize mode cannot change after the staging partition exists.");
+            }
+
+            _installationPlan.Disk.Installer.ResizeMode = resizeMode;
+            InstallationPlanValidator.Validate(_installationPlan);
+            InstallationPlanSerializer.WriteAtomic(_installationPlanPath, _installationPlan);
+            Log($"NTFS resize mode selected: {resizeMode}.");
+        }
+
         private void PublishInstallationContextToLive(string liveRoot)
         {
             if (_installationPlan == null || _executionLedger == null)

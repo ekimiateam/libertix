@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v2.json",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v3.json",
   "title": "Libertix Installation Plan",
   "description": "Versioned contract shared by the Windows application, the live installer, the installed target and rollback tooling.",
   "type": "object",
@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 2
+      "const": 3
     },
     "planId": {
       "type": "string",
@@ -274,6 +274,8 @@
       "required": [
         "number",
         "offsetBytes",
+        "finalOffsetBytes",
+        "resizeMode",
         "finalSizeBytes",
         "stagingSizeBytes"
       ],
@@ -297,6 +299,15 @@
             {
               "$ref": "#/$defs/positiveInteger"
             }
+          ]
+        },
+        "finalOffsetBytes": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "resizeMode": {
+          "enum": [
+            "windows-online",
+            "live-offline"
           ]
         },
         "finalSizeBytes": {
@@ -336,6 +347,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "windowsBitLockerState",
         "lowMemoryMode",
         "bootStrategy",
         "secureBootEnabled",
@@ -344,6 +356,12 @@
         "recoveryRunId"
       ],
       "properties": {
+        "windowsBitLockerState": {
+          "enum": [
+            "FullyDecrypted",
+            "NotEncryptable"
+          ]
+        },
         "lowMemoryMode": {
           "type": "boolean"
         },

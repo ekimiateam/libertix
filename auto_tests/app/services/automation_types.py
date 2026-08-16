@@ -19,6 +19,7 @@ class AutomationOptions:
     share_linux_files_in_windows: bool = True
     use_default_filepool: bool = False
     simulate_stale_firmware_entries: bool = False
+    force_offline_ntfs_resize: bool = False
     first_boot: Literal["windows", "linux"] = "windows"
 
 

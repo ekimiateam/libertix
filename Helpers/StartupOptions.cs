@@ -17,6 +17,7 @@ namespace Libertix.Helpers
         private const string UefiRecoveryStateOption = "--uefi-recovery-state";
         private const string UnattendedOption = "--unattended";
         private const string UnattendedConfigOption = "--unattended-config";
+        private const string ForceOfflineNtfsResizeOption = "--force-offline-ntfs-resize";
 
         public string FilepoolBaseUrlOverride { get; private set; }
         public string DevelopmentSshStaticIpv4Address { get; private set; }
@@ -28,6 +29,7 @@ namespace Libertix.Helpers
         public bool UefiBootNextFailed { get; private set; }
         public string UefiRecoveryStatePath { get; private set; }
         public UnattendedOptions Unattended { get; private set; }
+        public bool ForceOfflineNtfsResize { get; private set; }
         private bool UnattendedRequested { get; set; }
         private string UnattendedConfigPath { get; set; }
 
@@ -222,6 +224,20 @@ namespace Libertix.Helpers
                         return false;
                     }
                     options.UnattendedConfigPath = value;
+                    continue;
+                }
+
+                if (string.Equals(
+                    option,
+                    ForceOfflineNtfsResizeOption,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    if (options.ForceOfflineNtfsResize)
+                    {
+                        error = ForceOfflineNtfsResizeOption + " can only be specified once.";
+                        return false;
+                    }
+                    options.ForceOfflineNtfsResize = true;
                     continue;
                 }
 

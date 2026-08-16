@@ -10,6 +10,8 @@ from app.clients.ssh import SSHClient
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
 from app.models import OperationResult, StepResult
+from app.services.automation_preflight import AutomationPreflight
+from app.services.automation_types import WizardProfile
 from app.services.common import ResultBuilder
 from app.services.validation import ValidationService
 
@@ -20,6 +22,7 @@ class ResetService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.validation = ValidationService(settings)
+        self.automation_preflight = AutomationPreflight(self._proxmox, settings)
 
     def run(
         self,
@@ -149,22 +152,35 @@ class ResetService:
                     details={"vmid": vmid},
                 )
 
-        def restore_one(vmid: int) -> tuple[int, str, dict[str, object]]:
+        def restore_one(
+            vmid: int,
+        ) -> tuple[int, str, dict[str, object], dict[str, object]]:
             node = locations[vmid]
+            vm = next(configured for configured in self.settings.vms if configured.vmid == vmid)
             with self._proxmox() as proxmox:
                 proxmox.rollback(node, vmid, self.settings.reset_snapshot)
                 verified = proxmox.verify_rollback_state(
                     node,
                     vmid,
                     self.settings.reset_snapshot,
-                    require_running=False,
+                    require_running=True,
                 )
-            return vmid, node, verified
+                network = self.automation_preflight.configure_windows_guest_network(
+                    proxmox,
+                    node,
+                    WizardProfile(
+                        name=vm.firmware,
+                        vm_name=vm.name,
+                        vm_host=vm.host,
+                        vmid=vm.vmid,
+                    ),
+                )
+            return vmid, node, verified, network
 
         with ThreadPoolExecutor(max_workers=len(vmids)) as executor:
             futures = {executor.submit(restore_one, vmid): vmid for vmid in vmids}
             for future in as_completed(futures):
-                vmid, node, verified = future.result()
+                vmid, node, verified, network = future.result()
                 result.ok(
                     "proxmox.rollback",
                     "Snapshot restored successfully",
@@ -172,4 +188,11 @@ class ResetService:
                     node=node,
                     snapshot=self.settings.reset_snapshot,
                     **verified,
+                )
+                result.ok(
+                    "reset.guest_network_ready",
+                    "Windows test VM static network verified after snapshot restore",
+                    target=str(vmid),
+                    node=node,
+                    **network,
                 )

@@ -17,6 +17,7 @@ BeforeAll {
 
 Describe "UEFI transaction partition resolution" {
     BeforeEach {
+        $script:installationPlan = $null
         $script:savedState = [pscustomobject]@{
             DiskNumber = 0
             DiskUniqueId = "disk-identity"
@@ -76,6 +77,70 @@ Describe "UEFI transaction partition resolution" {
         $result.PartitionNumber | Should -Be 7
         $script:savedState.PartitionNumber | Should -Be 7
         Should -Invoke Save-LibertixTransactionStateAtomic -Times 1
+    }
+
+    It "resolves the relocated offline partition from the matching durable plan" {
+        $script:installationPlan = [pscustomobject]@{
+            planId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            runtime = [pscustomobject]@{
+                recoveryRunId = "0123456789abcdef0123456789abcdef"
+            }
+            disk = [pscustomobject]@{
+                number = 0
+                installer = [pscustomobject]@{
+                    resizeMode = "live-offline"
+                    finalOffsetBytes = 172872433664
+                    finalSizeBytes = 42949672960
+                }
+            }
+        }
+        Mock Get-Partition {
+            @(
+                [pscustomobject]@{
+                    DiskNumber = 0
+                    PartitionNumber = 5
+                    Offset = 172872433664
+                    Size = 42949672960
+                }
+            )
+        }
+
+        $result = Get-VerifiedTransactionPartition
+
+        $result.Offset | Should -Be 172872433664
+        $script:savedState.PartitionOffset | Should -Be 172872433664
+        $script:savedState.PartitionSize | Should -Be 42949672960
+        Should -Invoke Save-LibertixTransactionStateAtomic -Times 1
+    }
+
+    It "does not trust a relocated partition from another recovery run" {
+        $script:installationPlan = [pscustomobject]@{
+            planId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            runtime = [pscustomobject]@{
+                recoveryRunId = "ffffffffffffffffffffffffffffffff"
+            }
+            disk = [pscustomobject]@{
+                number = 0
+                installer = [pscustomobject]@{
+                    resizeMode = "live-offline"
+                    finalOffsetBytes = 172872433664
+                    finalSizeBytes = 42949672960
+                }
+            }
+        }
+        Mock Get-Partition {
+            @(
+                [pscustomobject]@{
+                    DiskNumber = 0
+                    PartitionNumber = 5
+                    Offset = 172872433664
+                    Size = 42949672960
+                }
+            )
+        }
+
+        { Get-VerifiedTransactionPartition } | Should -Throw "*matches=0*"
+        Should -Invoke Save-LibertixTransactionStateAtomic -Times 0
     }
 }
 

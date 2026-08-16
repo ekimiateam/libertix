@@ -6,7 +6,7 @@ BeforeAll {
     function New-ValidInstallationPlan {
         return @'
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "planId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "createdAtUtc": "2026-07-15T12:00:00Z",
   "firmware": "uefi",
@@ -51,6 +51,8 @@ BeforeAll {
     "installer": {
       "number": 4,
       "offsetBytes": 172872433664,
+      "finalOffsetBytes": 172872433664,
+      "resizeMode": "windows-online",
       "finalSizeBytes": 42949672960,
       "stagingSizeBytes": 8589934592
     }
@@ -61,6 +63,7 @@ BeforeAll {
     "windowsProfilesJsonBase64": "W10="
   },
   "runtime": {
+    "windowsBitLockerState": "FullyDecrypted",
     "lowMemoryMode": false,
     "bootStrategy": "uefi-boot-next",
     "secureBootEnabled": true,
@@ -139,6 +142,46 @@ Describe "Installation plan contract" {
     It "accepts a complete valid plan" {
         $plan = New-ValidInstallationPlan
         { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It "accepts the staging geometry selected for live offline resize" {
+        $plan = New-ValidInstallationPlan
+        $plan.disk.installer.resizeMode = "live-offline"
+        $plan.disk.installer.offsetBytes = 207232172032
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It "rejects an offline resize whose staging offset uses the final extent" {
+        $plan = New-ValidInstallationPlan
+        $plan.disk.installer.resizeMode = "live-offline"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*selected Windows shrink geometry*"
+    }
+
+    It "accepts a UEFI plan while verified decryption is still pending" {
+        $plan = New-ValidInstallationPlan
+        $plan.runtime.windowsBitLockerState = "EncryptedOrProtected"
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It "rejects pending BitLocker decryption in a BIOS plan" {
+        $plan = New-ValidInstallationPlan
+        $plan.firmware = "bios"
+        $plan.disk.partitionStyle = "MBR"
+        $plan.disk.partitionTableId = "mbr:12345678"
+        $plan.runtime.bootStrategy = "bios-grub4dos"
+        $plan.runtime.secureBootEnabled = $false
+        $plan.runtime.trustedMicrosoftUefiAuthorities = @()
+        $plan.runtime.windowsBitLockerState = "EncryptedOrProtected"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*windowsBitLockerState is invalid*"
+    }
+
+    It "rejects an unknown Windows BitLocker state" {
+        $plan = New-ValidInstallationPlan
+        $plan.runtime.windowsBitLockerState = "FullyEncrypted"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*windowsBitLockerState is invalid*"
     }
 
     It "rejects an unknown root property" {

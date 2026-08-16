@@ -387,6 +387,7 @@ def test_local_filepool_sync_reuses_matching_remote_artifacts(
         ("llm_max_attempts", 0),
         ("proxmox_task_timeout_seconds", 0),
         ("automation_monitor_interval_seconds", 0),
+        ("automation_operation_timeout_seconds", 0),
         ("automation_stall_timeout_seconds", 0),
         ("post_install_boot_timeout_seconds", -5),
         ("vms", ()),
@@ -537,6 +538,7 @@ def test_reset_scope_is_exact() -> None:
     configured = settings(reset_snapshot="baseline-a")
     assert ResetService(configured)._selected_vmids(None) == (500, 501, 502)  # noqa: SLF001
     assert configured.reset_snapshot == "baseline-a"
+    assert configured.automation_operation_timeout_seconds == 1800
 
 
 def test_reset_selector_uses_configured_vm_names() -> None:
@@ -594,11 +596,14 @@ def test_reset_restores_selected_vms_in_parallel(monkeypatch: pytest.MonkeyPatch
             *,
             require_running: bool,
         ) -> dict[str, object]:
-            assert not require_running
+            assert require_running
             return {"snapshot_parent": snapshot, "status": "running", "qmpstatus": "running"}
 
     monkeypatch.setattr("app.services.reset.ProxmoxClient", FakeProxmox)
     service = ResetService(settings())
+    service.automation_preflight.configure_windows_guest_network = (  # type: ignore[method-assign]
+        lambda _proxmox, _node, profile: {"ipv4": profile.vm_host}
+    )
     result = ResultBuilder("reset")
 
     service._restore_snapshots(  # noqa: SLF001
@@ -609,7 +614,10 @@ def test_reset_restores_selected_vms_in_parallel(monkeypatch: pytest.MonkeyPatch
 
     assert entered == set(selected)
     assert max_active == len(selected)
-    assert sorted(step.context["target"] for step in result.steps) == ["500", "501", "502"]
+    rollback_steps = [step for step in result.steps if step.step == "proxmox.rollback"]
+    network_steps = [step for step in result.steps if step.step == "reset.guest_network_ready"]
+    assert sorted(step.context["target"] for step in rollback_steps) == ["500", "501", "502"]
+    assert sorted(step.context["target"] for step in network_steps) == ["500", "501", "502"]
 
 
 def test_local_source_copy_excludes_ignored_runtime_files() -> None:
@@ -1014,6 +1022,7 @@ def test_full_automation_launch_passes_unattended_values_without_a_password_argu
         distribution=load_distribution_profile("zorin"),
         share_windows_files_in_linux=False,
         share_linux_files_in_windows=True,
+        force_offline_ntfs_resize=True,
     )
 
     launch = service._launch_elevated(  # noqa: SLF001
@@ -1032,6 +1041,7 @@ def test_full_automation_launch_passes_unattended_values_without_a_password_argu
         "shareWindowsFilesInLinux": False,
         "shareLinuxFilesInWindows": True,
     }
+    assert observed["force_offline_ntfs_resize"] is True
     assert "pass" not in " ".join(str(value) for value in launch.values())
     assert launch["unattended_status_path"].endswith("unattended.status.json")
 
@@ -2431,6 +2441,71 @@ def test_installation_monitor_survives_vision_payment_failure_until_local_grub(
     assert result.steps[-1].context["proof_source"] == "local-theme-colors"
 
 
+def test_installation_monitor_tolerates_transient_vnc_outage_during_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    captures = iter(
+        (
+            WorkflowError(
+                "vnc.capture",
+                "VNC capture failed",
+                details={"address": vm.vnc, "attempts": 3, "error": "Network is unreachable"},
+            ),
+            Path("/tmp/final-grub.png"),
+        )
+    )
+
+    def capture_after_reboot(*_args: object) -> Path:
+        outcome = next(captures)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(service, "_capture_with_name", capture_after_reboot)
+    monkeypatch.setattr(service, "_installed_grub_theme_visible", lambda _capture: True)
+    result = ResultBuilder("automation")
+
+    outcome = service._monitor_until_live_boot(  # noqa: SLF001
+        vm,
+        result,
+        "uefi",
+        reboot_requested=True,
+    )
+
+    assert outcome == "boot-menu"
+    assert [step.step for step in result.steps] == [
+        "automation.display_temporarily_unavailable",
+        "automation.installed_boot_menu_seen",
+    ]
+    assert result.steps[0].context["error"] == "Network is unreachable"
+
+
+def test_installation_monitor_does_not_hide_vnc_failure_before_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    failure = WorkflowError(
+        "vnc.capture",
+        "VNC capture failed",
+        details={"address": vm.vnc, "attempts": 3, "error": "Network is unreachable"},
+    )
+    monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(WorkflowError) as raised:
+        service._monitor_until_live_boot(vm, ResultBuilder("automation"), "uefi")  # noqa: SLF001
+
+    assert raised.value is failure
+
+
 def test_installation_monitor_reboots_verified_live_failure_and_reports_archive(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -3625,6 +3700,11 @@ def test_post_install_flow_proves_windows_before_first_linux_boot(
     )
     monkeypatch.setattr(
         service,
+        "_wait_for_windows_filesystem_repair",
+        lambda ssh, *_args: (events.append("windows-filesystem-ready"), ssh)[1],
+    )
+    monkeypatch.setattr(
+        service,
         "_prepare_linux_graphical_session",
         lambda *_args: events.append("prepare-linux-session"),
     )
@@ -3726,6 +3806,11 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
     monkeypatch.setattr(service, "_prepare_windows_graphical_session", lambda *_args: None)
     monkeypatch.setattr(
         service,
+        "_wait_for_windows_filesystem_repair",
+        lambda ssh, *_args: ssh,
+    )
+    monkeypatch.setattr(
+        service,
         "_capture_and_dismiss_post_install_result",
         lambda _vm, _result, platform, _ssh: events.append(f"dialog:{platform}"),
     )
@@ -3751,6 +3836,80 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
     assert events.count("wait:windows_final:windows") == 1
     assert events.count("dialog:linux") == 1
     assert events.count("dialog:windows") == 1
+
+
+def test_windows_filesystem_repair_waits_for_reboot_then_resumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        distribution=load_distribution_profile("mint"),
+    )
+    result = ResultBuilder("automation")
+    closed: list[str] = []
+    waits: list[str] = []
+
+    class FakeSSH:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __exit__(self, *_args: object) -> None:
+            closed.append(self.name)
+
+    responses = iter(
+        (
+            CommandResult(
+                stdout=(
+                    "WINDOWS_FILESYSTEM_REPAIR_STATUS=waiting-reboot\n"
+                    "WINDOWS_FILESYSTEM_REPAIR_ATTEMPT=1\n"
+                    "WINDOWS_FILESYSTEM_REPAIR_SCHEDULED_BOOT=boot-1\n"
+                    "WINDOWS_CURRENT_BOOT=boot-1\n"
+                ),
+                stderr="",
+                exit_code=0,
+            ),
+            CommandResult(
+                stdout=(
+                    "WINDOWS_FILESYSTEM_REPAIR_STATUS=succeeded\n"
+                    "WINDOWS_FILESYSTEM_REPAIR_ATTEMPT=1\n"
+                    "WINDOWS_FILESYSTEM_REPAIR_SCHEDULED_BOOT=boot-1\n"
+                    "WINDOWS_CURRENT_BOOT=boot-2\n"
+                ),
+                stderr="",
+                exit_code=0,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_windows_script_resiliently",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    monkeypatch.setattr(
+        service,
+        "_wait_for_ssh",
+        lambda *_args, phase, **_kwargs: (waits.append(phase), FakeSSH("repaired"))[1],
+    )
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
+
+    repaired_ssh = service._wait_for_windows_filesystem_repair(  # noqa: SLF001
+        FakeSSH("initial"),
+        vm,
+        options,
+        result,
+    )
+
+    assert repaired_ssh.name == "repaired"
+    assert closed == ["initial"]
+    assert waits == ["windows_filesystem_repair"]
+    assert [step.step for step in result.steps] == [
+        "automation.windows_filesystem_repair_reboot",
+        "automation.windows_filesystem_repair",
+    ]
 
 
 def test_first_boot_verification_failure_is_terminal_and_preserves_exact_reason() -> None:
@@ -4402,6 +4561,7 @@ def test_windows_post_install_script_exposes_every_requested_check() -> None:
         "final_state",
         "finalization",
         "waiting_for_linux",
+        "filesystem_repair_state",
         "post_install_result_ui",
         "identity",
         "firmware",
@@ -4448,3 +4608,23 @@ def test_final_windows_state_check_excludes_slow_health_scans() -> None:
     assert "dism.exe" not in final_state
     assert "sfc.exe" not in final_state
     assert "chkdsk.exe" not in final_state
+
+
+def test_windows_final_state_accepts_only_complete_preferred_uefi_path_evidence() -> None:
+    script = read_repo("auto_tests/app/scripts/post_install_windows_check.ps1")
+    verifier = script.split("function Assert-LibertixPostInstallResult", maxsplit=1)[1].split(
+        "function Get-PlannedLinuxOffset", maxsplit=1
+    )[0]
+
+    assert '"uefi-preferred-windows-path"' in verifier
+    assert '"/boot/efi/EFI/Libertix/preferred-boot-path.json"' in verifier
+    assert '"/boot/efi/EFI/Libertix/secure-boot-chain.json"' in verifier
+    for required_hash in (
+        "bootmgfw.efi",
+        "grubx64.efi",
+        "mmx64.efi",
+        "grub.cfg",
+        "bootmgfw.libertix-windows.efi",
+    ):
+        assert f'"{required_hash}"' in verifier
+    assert "The verified UEFI BootCurrent or preferred Windows-path proof is missing." in verifier

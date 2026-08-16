@@ -24,6 +24,7 @@ from app.api_runtime import (
     mark_capture_workspace_owned,
     operation_lock,
 )
+from app.clients.vnc import VNCClient
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
 from app.models import (
@@ -84,6 +85,32 @@ def _resolve_distribution_metadata(runtime_dir: Path, filepool_dir: Path) -> Pat
     return None
 
 
+def _capture_automation_timeout_screens(
+    configured: Settings,
+    selectors: list[str] | None,
+    run_workspace: Path,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Capture every selected VM before terminating an expired automation run."""
+
+    captures: dict[str, str] = {}
+    errors: dict[str, str] = {}
+    try:
+        selected_vms = ValidationService(configured).select_vms(selectors)
+    except Exception as exc:
+        return captures, {"selection": f"{type(exc).__name__}: {exc}"}
+
+    vnc = VNCClient(configured.vnc_timeout_seconds)
+    capture_dir = run_workspace / "captures"
+    for vm in selected_vms:
+        destination = capture_dir / f"timeout-{vm.name}.png"
+        try:
+            vnc.capture(vm.vnc, destination)
+            captures[vm.name] = str(destination)
+        except Exception as exc:
+            errors[vm.name] = f"{type(exc).__name__}: {exc}"
+    return captures, errors
+
+
 def _run_operation(
     configured: Settings,
     operation: OperationName,
@@ -113,6 +140,7 @@ def _run_operation(
             share_windows_files_in_linux=request.share_windows_files_in_linux,
             share_linux_files_in_windows=request.share_linux_files_in_windows,
             simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
+            force_offline_ntfs_resize=request.force_offline_ntfs_resize,
             first_boot=request.first_boot,
             source=request.source,
             on_step=on_step,
@@ -256,6 +284,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ):
         events: queue.Queue[tuple[str, str | int | None]] = queue.Queue()
         terminal_result_seen = threading.Event()
+        terminal_result_lock = threading.Lock()
+        latest_steps: dict[str, str] = {}
+        latest_steps_lock = threading.Lock()
 
         if not operation_lock.acquire(blocking=False):
             result = _operation_busy_result(operation)
@@ -288,11 +319,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         projector = StreamEventProjector(operation, run_workspace)
 
         def publish_result(result: OperationResult, stream_format: str) -> None:
-            if terminal_result_seen.is_set():
-                return
-            event = projector.project_result(result)
-            terminal_result_seen.set()
-            events.put(("data", projector.render(event, stream_format=stream_format)))
+            with terminal_result_lock:
+                if terminal_result_seen.is_set():
+                    return
+                event = projector.project_result(result)
+                terminal_result_seen.set()
+                events.put(("data", projector.render(event, stream_format=stream_format)))
 
         process_context = multiprocessing.get_context("spawn")
         process_events, worker_events = process_context.Pipe(duplex=False)
@@ -306,7 +338,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         continue
                     event_type, payload = process_events.recv()
                     if event_type == "step":
-                        event = projector.project_step(StepResult.model_validate(payload))
+                        step = StepResult.model_validate(payload)
+                        vm = str(step.context.get("vm") or step.context.get("target") or "global")
+                        with latest_steps_lock:
+                            latest_steps[vm] = step.step
+                        event = projector.project_step(step)
                         if event is not None:
                             events.put(
                                 (
@@ -352,6 +388,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         relay_thread = threading.Thread(target=relay_process_events, daemon=True)
         relay_thread.start()
+
+        def enforce_automation_timeout() -> None:
+            if operation != "automation":
+                return
+            if terminal_result_seen.wait(configured.automation_operation_timeout_seconds):
+                return
+            if not process.is_alive():
+                return
+
+            captures, capture_errors = _capture_automation_timeout_screens(
+                configured,
+                selectors,
+                run_workspace,
+            )
+            if terminal_result_seen.is_set() or not process.is_alive():
+                return
+            with latest_steps_lock:
+                active_steps = dict(latest_steps)
+            result = OperationResult(
+                status="error",
+                operation="automation",
+                message="error: automation exceeded its configured global timeout",
+                steps=[
+                    StepResult(
+                        step="automation.global_timeout",
+                        status="error",
+                        message="Automation exceeded its configured global timeout",
+                        context={
+                            "timeout_seconds": configured.automation_operation_timeout_seconds,
+                            "active_steps": active_steps,
+                            "captures": captures,
+                            "capture_errors": capture_errors,
+                        },
+                    )
+                ],
+            )
+            publish_result(result, stream_format)
+            process.terminate()
+
+        threading.Thread(target=enforce_automation_timeout, daemon=True).start()
 
         def watch_process() -> None:
             try:

@@ -10,6 +10,9 @@ readonly log="${LIBERTIX_BOOT_MAINTENANCE_LOG:-/var/log/libertix/boot-maintenanc
 readonly lock_path="${LIBERTIX_EFI_SYNC_LOCK:-/run/lock/libertix-sync-efi.lock}"
 readonly shim_directory="${LIBERTIX_SHIM_DIRECTORY:-/usr/lib/shim}"
 readonly grub_signed_directory="${LIBERTIX_GRUB_SIGNED_DIRECTORY:-/usr/lib/grub/x86_64-efi-signed}"
+readonly secure_boot_verifier="${LIBERTIX_SECURE_BOOT_VERIFIER:-/usr/local/lib/libertix/libertix-secure-boot-chain.py}"
+readonly preferred_boot_sync="${LIBERTIX_PREFERRED_BOOT_SYNC:-/usr/local/lib/libertix/libertix-preferred-boot-path.py}"
+readonly secure_boot_evidence="$efi_directory/secure-boot-chain.json"
 allow_missing=false
 
 case "${1:-}" in
@@ -86,12 +89,16 @@ flock -w 120 9 || {
     exit 1
 }
 
-for command_name in sbverify dpkg-query sha256sum python3; do
+for command_name in sbverify dpkg-query sha256sum python3 openssl; do
     command -v "$command_name" >/dev/null 2>&1 || {
         echo "$command_name is required to verify the installed Secure Boot chain" >&2
         exit 1
     }
 done
+[ -x "$secure_boot_verifier" ] || {
+    echo "Secure Boot chain verifier is missing: $secure_boot_verifier" >&2
+    exit 1
+}
 mountpoint -q "$esp_mount" || mount "$esp_mount"
 mountpoint -q "$esp_mount" || {
     echo "The EFI System Partition is not mounted at $esp_mount" >&2
@@ -131,22 +138,37 @@ append_authority() {
     esac
 }
 
-detected_authorities=""
-if command -v mokutil >/dev/null 2>&1; then
-    secure_boot_state="$(LC_ALL=C mokutil --sb-state 2>/dev/null || true)"
-    if grep -Fqi "SecureBoot enabled" <<< "$secure_boot_state"; then
-        secure_boot_enabled=true
-    elif grep -Fqi "SecureBoot disabled" <<< "$secure_boot_state"; then
-        secure_boot_enabled=false
-    fi
+command -v mokutil >/dev/null 2>&1 || {
+    echo "mokutil is required to verify the active Secure Boot state" >&2
+    exit 1
+}
+secure_boot_state="$(LC_ALL=C mokutil --sb-state 2>/dev/null)" || {
+    echo "The active Secure Boot state could not be read" >&2
+    exit 1
+}
+if grep -Fqi "SecureBoot enabled" <<< "$secure_boot_state"; then
+    secure_boot_enabled=true
+elif grep -Fqi "SecureBoot disabled" <<< "$secure_boot_state"; then
+    secure_boot_enabled=false
+else
+    echo "The active Secure Boot state is ambiguous: $secure_boot_state" >&2
+    exit 1
 fi
-if [ "$secure_boot_enabled" = true ] && command -v mokutil >/dev/null 2>&1; then
-    db_text="$(LC_ALL=C mokutil --db 2>/dev/null || true)"
+
+detected_authorities=""
+if [ "$secure_boot_enabled" = true ]; then
+    db_text="$(LC_ALL=C mokutil --db 2>/dev/null)" || {
+        echo "The active firmware Secure Boot db could not be read" >&2
+        exit 1
+    }
     grep -Fq "Microsoft Corporation UEFI CA 2011" <<< "$db_text" && append_authority 2011
     grep -Eq "Microsoft( Corporation)? UEFI CA 2023" <<< "$db_text" && append_authority 2023
 fi
 if [ "$secure_boot_enabled" = true ]; then
-    [ -n "$detected_authorities" ] || detected_authorities="$plan_trusted_authorities"
+    [ -n "$detected_authorities" ] || {
+        echo "No Microsoft third-party UEFI authority is present in the active firmware db" >&2
+        exit 1
+    }
 else
     detected_authorities="$plan_supported_authorities"
 fi
@@ -229,6 +251,53 @@ mm_source="$(select_signed_file shim-signed \
     exit 1
 }
 
+verify_secure_boot_chain() {
+    local shim="$1" grub="$2" mok_manager="$3" output="$4"
+    local -a arguments=(
+        --shim "$shim"
+        --grub "$grub"
+        --mok-manager "$mok_manager"
+        --authority "$selected_authority"
+        --output "$output"
+    )
+    if [ "$secure_boot_enabled" = true ]; then
+        arguments+=(--secure-boot-enabled)
+    fi
+    "$secure_boot_verifier" "${arguments[@]}"
+}
+
+synchronize_preferred_boot_path() {
+    [ -f "$efi_directory/preferred-boot-path.json" ] || return 0
+    [ -x "$preferred_boot_sync" ] || {
+        echo "Preferred boot path helper is missing: $preferred_boot_sync" >&2
+        return 1
+    }
+    "$preferred_boot_sync" \
+        --esp "$esp_mount" \
+        --secure-boot-verifier "$secure_boot_verifier"
+    echo "[$(date -u +%FT%TZ)] Preferred Windows boot path synchronized"
+}
+
+staged_paths=()
+cleanup_staged_paths() {
+    local path
+    for path in "${staged_paths[@]}"; do
+        [ ! -e "$path" ] || rm -f -- "$path"
+    done
+}
+trap cleanup_staged_paths EXIT HUP INT TERM
+
+candidate_evidence="$history_root/.secure-boot-candidate.$$"
+staged_paths+=("$candidate_evidence")
+verify_secure_boot_chain \
+    "$shim_source" \
+    "$grub_source" \
+    "$mm_source" \
+    "$candidate_evidence" || {
+    echo "The candidate distribution EFI chain failed firmware trust or revocation checks" >&2
+    exit 1
+}
+
 declare -A sources=(
     [shimx64.efi]="$shim_source"
     [grubx64.efi]="$grub_source"
@@ -242,6 +311,21 @@ for name in shimx64.efi grubx64.efi mmx64.efi; do
 done
 
 if [ "$changed" = false ]; then
+    installed_evidence="$efi_directory/.secure-boot-chain.new.$$"
+    staged_paths+=("$installed_evidence")
+    verify_secure_boot_chain \
+        "$efi_directory/shimx64.efi" \
+        "$efi_directory/grubx64.efi" \
+        "$efi_directory/mmx64.efi" \
+        "$installed_evidence" || {
+        echo "The installed EFI chain failed firmware trust or revocation checks" >&2
+        exit 1
+    }
+    chmod 0600 "$installed_evidence"
+    sync -f "$installed_evidence" 2>/dev/null || sync
+    mv -f "$installed_evidence" "$secure_boot_evidence"
+    sync -f "$secure_boot_evidence" 2>/dev/null || sync
+    synchronize_preferred_boot_path
     echo "[$(date -u +%FT%TZ)] EFI/Libertix already matches verified distribution packages (Microsoft UEFI CA $selected_authority)"
     exit 0
 fi
@@ -251,7 +335,7 @@ if [ -f "$efi_directory/shimx64.efi" ]; then
     history_directory="$(mktemp -d \
         "$history_root/$(date -u +%Y%m%dT%H%M%SZ)-${current_hash:0:16}-XXXXXX")"
     chmod 0700 "$history_directory"
-    for name in shimx64.efi grubx64.efi mmx64.efi grub.cfg .libertix-owner; do
+    for name in shimx64.efi grubx64.efi mmx64.efi grub.cfg .libertix-owner secure-boot-chain.json; do
         [ -f "$efi_directory/$name" ] || continue
         cp -a "$efi_directory/$name" "$history_directory/$name"
     done
@@ -259,15 +343,6 @@ if [ -f "$efi_directory/shimx64.efi" ]; then
     chmod 0600 "$history_directory/SHA256SUMS"
     echo "[$(date -u +%FT%TZ)] Archived previous EFI chain in $history_directory"
 fi
-
-staged_paths=()
-cleanup_staged_paths() {
-    local path
-    for path in "${staged_paths[@]}"; do
-        [ ! -e "$path" ] || rm -f -- "$path"
-    done
-}
-trap cleanup_staged_paths EXIT HUP INT TERM
 
 stage_and_replace() {
     local source="$1" destination="$2" temporary expected actual
@@ -303,5 +378,22 @@ has_efi_signature "$efi_directory/mmx64.efi" || {
     echo "Installed MokManager signature verification failed" >&2
     exit 1
 }
+
+installed_evidence="$efi_directory/.secure-boot-chain.new.$$"
+staged_paths+=("$installed_evidence")
+verify_secure_boot_chain \
+    "$efi_directory/shimx64.efi" \
+    "$efi_directory/grubx64.efi" \
+    "$efi_directory/mmx64.efi" \
+    "$installed_evidence" || {
+    echo "Installed EFI chain failed the final firmware trust or revocation check" >&2
+    exit 1
+}
+chmod 0600 "$installed_evidence"
+sync -f "$installed_evidence" 2>/dev/null || sync
+mv -f "$installed_evidence" "$secure_boot_evidence"
+sync -f "$secure_boot_evidence" 2>/dev/null || sync
+
+synchronize_preferred_boot_path
 
 echo "[$(date -u +%FT%TZ)] EFI/Libertix synchronized from signed distribution packages (Microsoft UEFI CA $selected_authority)"

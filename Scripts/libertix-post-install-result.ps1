@@ -260,6 +260,8 @@ $header.Children.Add($heading) | Out-Null
 [Windows.Controls.Grid]::SetRow($header, 0)
 $root.Children.Add($header) | Out-Null
 
+$messagePanel = New-Object Windows.Controls.StackPanel
+$messagePanel.Margin = New-Object Windows.Thickness(0, 0, 0, 18)
 $message = New-Object Windows.Controls.TextBlock
 $message.Text = if ($isWaitingForLinux) {
     [string]$text.waitingMessage
@@ -271,9 +273,18 @@ $message.Text = if ($isWaitingForLinux) {
 $message.FontSize = 16
 $message.Foreground = $textBrush
 $message.TextWrapping = "Wrap"
-$message.Margin = New-Object Windows.Thickness(0, 0, 0, 18)
-[Windows.Controls.Grid]::SetRow($message, 1)
-$root.Children.Add($message) | Out-Null
+$messagePanel.Children.Add($message) | Out-Null
+if ($isWaitingForLinux) {
+    $advice = New-Object Windows.Controls.TextBlock
+    $advice.Text = [string]$text.waitingAdvice
+    $advice.FontSize = 15
+    $advice.Foreground = $accentBrush
+    $advice.TextWrapping = "Wrap"
+    $advice.Margin = New-Object Windows.Thickness(0, 10, 0, 0)
+    $messagePanel.Children.Add($advice) | Out-Null
+}
+[Windows.Controls.Grid]::SetRow($messagePanel, 1)
+$root.Children.Add($messagePanel) | Out-Null
 
 $details = New-Object Windows.Controls.TextBox
 $details.IsReadOnly = $true
@@ -293,9 +304,6 @@ $detailLines = @(
     "$($text.planLabel): $($result.planId)",
     "$($text.logLabel): $($result.logPath)"
 )
-if ($isWaitingForLinux) {
-    $detailLines += [string]$text.waitingDetail
-}
 foreach ($check in @($result.checks)) {
     $checkLabel = if ($check.passed) {
         [string]$text.checkPassedLabel

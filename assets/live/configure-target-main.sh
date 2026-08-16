@@ -373,7 +373,10 @@ menuentry "Windows Boot Manager" --class windows --class os --id libertix-window
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $windows_boot_uuid
-    chainloader /EFI/Microsoft/Boot/bootmgfw.efi
+    if [ -z "\${libertix_windows_loader}" ]; then
+        set libertix_windows_loader=/EFI/Microsoft/Boot/bootmgfw.efi
+    fi
+    chainloader \${libertix_windows_loader}
 }
 EOF
 }

@@ -146,6 +146,7 @@ GitHub Pages `dev` channel.
 | `share_windows_files_in_linux` | boolean, `true` | Validate the Windows-to-Linux sharing path. |
 | `share_linux_files_in_windows` | boolean, `true` | Validate the read-only Linux-to-Windows sharing path. |
 | `simulate_stale_firmware_entries` | boolean, `false` | Inject a stale UEFI Libertix entry to verify current-ESP ownership matching. |
+| `force_offline_ntfs_resize` | boolean, `false` | Force the development-only live offline NTFS resize path for regression testing. |
 
 VM selectors can also be repeated as query parameters (`?vm=vm1&vm=vm2`). Body and query
 selectors are combined. The `source` query parameter overrides its body value.
@@ -368,6 +369,11 @@ Windows preparation and live installation monitoring also enforce a visual-stall
 by `AUTOMATION_STALL_TIMEOUT_SECONDS`. Any real screen change rearms the watchdog. If the display
 remains unchanged for the complete interval, the exact timeout capture is retained and the terminal
 error identifies the VM, phase and observed duration.
+
+The complete automation request also has a 30-minute deadline by default, configured with
+`AUTOMATION_OPERATION_TIMEOUT_SECONDS`. When that deadline expires, the service captures every
+selected VM into the run workspace, records each VM's last reported step, emits one terminal error,
+and stops the isolated worker process.
 
 The compact API stream is the normal operator view. Read a complete log only to diagnose a failed
 terminal `RESULT`, and keep generated runtime files out of commits.

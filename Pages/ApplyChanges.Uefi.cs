@@ -244,7 +244,7 @@ namespace Libertix.Pages
                     _installationPlanPath);
                 PublishObservedWindowsSharePartitionIdentity();
                 recovery.ExpectedLinuxPartitionOffset =
-                    _installationPlan.Disk.Installer.OffsetBytes.Value;
+                    GetExpectedFinalLinuxOffset();
                 recovery.ExpectedLinuxPartitionSize =
                     _installationPlan.Disk.Installer.FinalSizeBytes;
                 recovery.Phase = "AwaitingReboot";
@@ -420,6 +420,9 @@ namespace Libertix.Pages
                 SystemDiskUniqueId = _storagePreflight.SystemDiskUniqueId,
                 SystemDiskPartitionTableId = _storagePreflight.SystemDiskPartitionTableId,
                 SystemDiskSize = _storagePreflight.SystemDiskSize,
+                BootPartitionNumber = _storagePreflight.BootPartitionNumber,
+                BootPartitionOffset = _storagePreflight.BootPartitionOffset,
+                BootPartitionSize = _storagePreflight.BootPartitionSize,
                 ExpectedLinuxPartitionOffset = expectedLinuxOffset,
                 ExpectedLinuxPartitionSize = expectedLinuxSize,
                 SecureBootEnabled = _installationState.Compatibility?.SecureBootEnabled == true
@@ -528,7 +531,34 @@ namespace Libertix.Pages
                 recovery.PayloadRoot,
                 "Scripts",
                 "libertix-register-uefi-recovery-tasks.ps1");
-            if (!File.Exists(agent) || !File.Exists(taskRegistrationScript) || !File.Exists(recovery.ConfigPath))
+            string firmwareReadModule = Path.Combine(
+                recovery.PayloadRoot,
+                "Scripts",
+                "modules",
+                "Libertix.FirmwareRead.psm1");
+            string preferredBootPathModule = Path.Combine(
+                recovery.PayloadRoot,
+                "Scripts",
+                "modules",
+                "Libertix.PreferredBootPath.psm1");
+            string storageGeometryModule = Path.Combine(
+                recovery.PayloadRoot,
+                "Scripts",
+                "modules",
+                "Libertix.StorageGeometry.psm1");
+            string atomicFileModule = Path.Combine(
+                recovery.PayloadRoot,
+                "Scripts",
+                "modules",
+                "Libertix.AtomicFile.psm1");
+            if (
+                !File.Exists(agent) ||
+                !File.Exists(taskRegistrationScript) ||
+                !File.Exists(firmwareReadModule) ||
+                !File.Exists(preferredBootPathModule) ||
+                !File.Exists(storageGeometryModule) ||
+                !File.Exists(atomicFileModule) ||
+                !File.Exists(recovery.ConfigPath))
                 throw new InvalidOperationException("Cached UEFI recovery payload is incomplete.");
 
             recovery.Phase = "Preparing";

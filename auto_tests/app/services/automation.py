@@ -84,6 +84,7 @@ class AutomationService(
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
         simulate_stale_firmware_entries: bool = False,
+        force_offline_ntfs_resize: bool = False,
         first_boot: Literal["windows", "linux"] = "windows",
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
@@ -130,6 +131,7 @@ class AutomationService(
                 share_linux_files_in_windows=share_linux_files_in_windows,
                 use_default_filepool=source == "published",
                 simulate_stale_firmware_entries=simulate_stale_firmware_entries,
+                force_offline_ntfs_resize=force_offline_ntfs_resize,
                 first_boot=first_boot,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
@@ -579,6 +581,7 @@ class AutomationService(
             task_name=task_name,
             step="automation.launch_elevated",
             use_default_filepool=use_default_filepool,
+            force_offline_ntfs_resize=options.force_offline_ntfs_resize,
             unattended_config={
                 "schemaVersion": 1,
                 "distribution": options.distribution.id,

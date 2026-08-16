@@ -150,6 +150,69 @@ function Get-EfiLoadOptionFilePaths {
     return @($paths)
 }
 
+function Get-EfiLoadOptionHardDriveNodes {
+    param([byte[]]$Bytes)
+
+    $nodes = [System.Collections.Generic.List[object]]::new()
+    if (-not $Bytes -or $Bytes.Length -lt 8) {
+        return @($nodes)
+    }
+
+    $filePathListLength = [BitConverter]::ToUInt16($Bytes, 4)
+    $offset = 6
+    $descriptionTerminated = $false
+    while ($offset + 1 -lt $Bytes.Length) {
+        if ($Bytes[$offset] -eq 0 -and $Bytes[$offset + 1] -eq 0) {
+            $offset += 2
+            $descriptionTerminated = $true
+            break
+        }
+        $offset += 2
+    }
+    if (-not $descriptionTerminated) {
+        return @($nodes)
+    }
+
+    $filePathListEnd = $offset + $filePathListLength
+    if ($filePathListEnd -gt $Bytes.Length) {
+        return @($nodes)
+    }
+    while ($offset + 4 -le $filePathListEnd) {
+        $nodeType = $Bytes[$offset]
+        $nodeSubType = $Bytes[$offset + 1]
+        $nodeLength = [BitConverter]::ToUInt16($Bytes, $offset + 2)
+        if ($nodeLength -lt 4 -or $offset + $nodeLength -gt $filePathListEnd) {
+            return @()
+        }
+        if ($nodeType -eq 0x04 -and $nodeSubType -eq 0x01) {
+            if ($nodeLength -ne 42) {
+                return @()
+            }
+            $signatureBytes = New-Object byte[] 16
+            [Array]::Copy($Bytes, $offset + 24, $signatureBytes, 0, 16)
+            $signatureType = [byte]$Bytes[$offset + 41]
+            $partitionGuid = if ($signatureType -eq 2) {
+                ([Guid]$signatureBytes).ToString("D").ToLowerInvariant()
+            } else {
+                ""
+            }
+            $nodes.Add([pscustomobject]@{
+                PartitionNumber = [uint32][BitConverter]::ToUInt32($Bytes, $offset + 4)
+                PartitionStartLba = [uint64][BitConverter]::ToUInt64($Bytes, $offset + 8)
+                PartitionSizeLba = [uint64][BitConverter]::ToUInt64($Bytes, $offset + 16)
+                PartitionGuid = $partitionGuid
+                MbrType = [byte]$Bytes[$offset + 40]
+                SignatureType = $signatureType
+            })
+        }
+        $offset += $nodeLength
+    }
+    if ($offset -ne $filePathListEnd) {
+        return @()
+    }
+    return @($nodes)
+}
+
 function Test-EfiLoadOptionLoaderPath {
     param(
         [byte[]]$Bytes,
@@ -207,5 +270,6 @@ Export-ModuleMember -Function `
     New-EfiFilePathNode, New-EfiHardDriveNode, New-EfiEndNode, New-EfiLoadOption, `
     ConvertFrom-BootOrderBytes, ConvertTo-BootOrderBytes, `
     Get-EfiLoadOptionDescription, Get-EfiLoadOptionFilePaths, `
+    Get-EfiLoadOptionHardDriveNodes, `
     Test-EfiLoadOptionLoaderPath, Get-EfiLoadOptionOptionalDataLength, `
     Remove-EfiLoadOptionOptionalData

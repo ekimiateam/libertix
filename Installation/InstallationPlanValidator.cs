@@ -386,7 +386,7 @@ namespace Libertix.Installation
             Require(windowsEnd <= disk.Recovery.OffsetBytes, errors,
                 "disk.recovery must start at or after the original Windows partition end.");
 
-            if (!disk.Installer.OffsetBytes.HasValue ||
+            if (disk.Installer.FinalOffsetBytes <= 0 ||
                 disk.Installer.FinalSizeBytes <= 0 ||
                 disk.LogicalSectorSizeBytes <= 0)
             {
@@ -404,23 +404,35 @@ namespace Libertix.Installation
                 return;
             }
             long expectedOffset = windowsEnd - alignmentPadding - disk.Installer.FinalSizeBytes;
-            // Converting an MBR logical partition into a primary partition may consume
-            // the adjacent alignment unit that previously held the extended container.
-            long primaryMbrOffset = expectedOffset - partitionAlignmentBytes;
-            bool offsetMatches = disk.Installer.OffsetBytes.Value == expectedOffset ||
+            Require(disk.Installer.FinalOffsetBytes == expectedOffset, errors,
+                "disk.installer.finalOffsetBytes does not match the final aligned Windows shrink geometry.");
+            Require(
+                disk.Installer.FinalSizeBytes <= disk.Recovery.OffsetBytes &&
+                disk.Installer.FinalOffsetBytes <=
+                    disk.Recovery.OffsetBytes - disk.Installer.FinalSizeBytes,
+                errors,
+                "disk.installer final extent would overlap disk.recovery.");
+
+            if (!disk.Installer.OffsetBytes.HasValue)
+                return;
+
+            long expectedObservedOffset = string.Equals(
+                disk.Installer.ResizeMode,
+                InstallationResizeMode.LiveOffline,
+                StringComparison.Ordinal)
+                ? windowsEnd - alignmentPadding - disk.Installer.StagingSizeBytes
+                : expectedOffset;
+            // Windows may expose the MBR extended-container start rather than
+            // the logical payload start while the transaction is in flight.
+            long primaryMbrOffset = expectedObservedOffset - partitionAlignmentBytes;
+            bool offsetMatches = disk.Installer.OffsetBytes.Value == expectedObservedOffset ||
                 (string.Equals(
                     disk.PartitionStyle,
                     InstallationPartitionStyle.Mbr,
                     StringComparison.Ordinal) &&
                  disk.Installer.OffsetBytes.Value == primaryMbrOffset);
             Require(offsetMatches, errors,
-                "disk.installer.offsetBytes does not match the aligned Windows shrink geometry.");
-            Require(
-                disk.Installer.FinalSizeBytes <= disk.Recovery.OffsetBytes &&
-                disk.Installer.OffsetBytes.Value <=
-                    disk.Recovery.OffsetBytes - disk.Installer.FinalSizeBytes,
-                errors,
-                "disk.installer final extent would overlap disk.recovery.");
+                "disk.installer.offsetBytes does not match the selected Windows shrink geometry.");
         }
 
         private static void ValidatePartition(
@@ -474,6 +486,18 @@ namespace Libertix.Installation
 
             RequirePositive(installer.FinalSizeBytes, "disk.installer.finalSizeBytes", errors);
             RequirePositive(installer.StagingSizeBytes, "disk.installer.stagingSizeBytes", errors);
+            RequirePositive(installer.FinalOffsetBytes, "disk.installer.finalOffsetBytes", errors);
+            Require(
+                string.Equals(
+                    installer.ResizeMode,
+                    InstallationResizeMode.WindowsOnline,
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    installer.ResizeMode,
+                    InstallationResizeMode.LiveOffline,
+                    StringComparison.Ordinal),
+                errors,
+                "disk.installer.resizeMode must be windows-online or live-offline.");
             bool finalSizeIsWholeGiB = installer.FinalSizeBytes > 0 &&
                 installer.FinalSizeBytes % InstallationSizePolicy.BytesPerGiB == 0;
             bool stagingSizeIsWholeGiB = installer.StagingSizeBytes > 0 &&
@@ -487,10 +511,9 @@ namespace Libertix.Installation
             if (finalSizeIsWholeGiB && stagingSizeIsWholeGiB)
             {
                 long finalSizeGiB = installer.FinalSizeBytes / InstallationSizePolicy.BytesPerGiB;
-                long expectedStagingSizeGiB = finalSizeGiB >
-                    InstallationSizePolicy.MaximumDirectFat32SizeGiB
-                    ? InstallationSizePolicy.LargeInstallationStagingSizeGiB
-                    : finalSizeGiB;
+                long expectedStagingSizeGiB = Math.Min(
+                    finalSizeGiB,
+                    InstallationSizePolicy.StagingSizeGiB);
                 Require(finalSizeGiB >= InstallationSizePolicy.MinimumFinalSizeGiB, errors,
                     $"disk.installer.finalSizeBytes must be at least " +
                     $"{InstallationSizePolicy.MinimumFinalSizeGiB} GiB.");
@@ -540,6 +563,27 @@ namespace Libertix.Installation
                 errors.Add("runtime is required.");
                 return;
             }
+
+            bool safeBitLockerState = string.Equals(
+                    runtime.WindowsBitLockerState,
+                    InstallationBitLockerState.FullyDecrypted,
+                    StringComparison.Ordinal) ||
+                string.Equals(
+                    runtime.WindowsBitLockerState,
+                    InstallationBitLockerState.NotEncryptable,
+                    StringComparison.Ordinal);
+            bool pendingUefiDecryption = string.Equals(
+                    firmware,
+                    InstallationFirmware.Uefi,
+                    StringComparison.Ordinal) &&
+                string.Equals(
+                    runtime.WindowsBitLockerState,
+                    InstallationBitLockerState.EncryptedOrProtected,
+                    StringComparison.Ordinal);
+            Require(
+                safeBitLockerState || pendingUefiDecryption,
+                errors,
+                "runtime.windowsBitLockerState is invalid for the selected firmware.");
 
             if (string.Equals(firmware, InstallationFirmware.Bios, StringComparison.Ordinal))
             {

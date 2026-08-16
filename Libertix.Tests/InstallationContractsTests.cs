@@ -77,6 +77,9 @@ namespace Libertix.Tests
                     "System.Text.Json.dll",
                     Path.Combine("Scripts", "libertix-uefi-install.ps1"),
                     Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
+                    Path.Combine("Scripts", "modules", "Libertix.FirmwareRead.psm1"),
+                    Path.Combine("Scripts", "modules", "Libertix.PreferredBootPath.psm1"),
+                    Path.Combine("Scripts", "modules", "Libertix.StorageGeometry.psm1"),
                     Path.Combine("Tools", "aria2", "aria2c.exe"),
                     Path.Combine("Resources", "Libertix.Translations.json"),
                     Path.Combine("Resources", "Images", "icon.ico")
@@ -450,6 +453,36 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void InstallationPlanValidatorAcceptsPendingUefiBitLockerDecryption()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Runtime.WindowsBitLockerState =
+                InstallationBitLockerState.EncryptedOrProtected;
+
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void InstallationPlanValidatorRejectsPendingBiosBitLockerDecryption()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Firmware = InstallationFirmware.Bios;
+            plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+            plan.Disk.PartitionTableId = "mbr:12345678";
+            plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+            plan.Runtime.SecureBootEnabled = false;
+            plan.Runtime.TrustedMicrosoftUefiAuthorities = new string[0];
+            plan.Runtime.WindowsBitLockerState =
+                InstallationBitLockerState.EncryptedOrProtected;
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "windowsBitLockerState is invalid");
+        }
+
+        [TestMethod]
         public void InstallationPlanValidatorRejectsFirmwarePartitionMismatch()
         {
             InstallationPlan plan = CreateValidPlan();
@@ -596,11 +629,11 @@ namespace Libertix.Tests
         }
 
         [DataTestMethod]
-        [DataRow(20.0, 20, 20)]
-        [DataRow(31.0, 31, 31)]
+        [DataRow(20.0, 20, 8)]
+        [DataRow(31.0, 31, 8)]
         [DataRow(32.0, 32, 8)]
         [DataRow(72.0, 72, 8)]
-        public void SizePolicyUsesSmallFat32StagingOnlyForLargeInstallations(
+        public void SizePolicyUsesOneBoundedFat32StagingSize(
             double requestedGiB,
             int expectedFinalGiB,
             int expectedStagingGiB)
@@ -950,7 +983,8 @@ namespace Libertix.Tests
                         BootPartitionSize = 100L * 1024L * 1024L,
                         RecoveryPartitionNumber = 4,
                         RecoveryPartitionOffset = 240L * GiB,
-                        RecoveryPartitionSize = 1L * GiB
+                        RecoveryPartitionSize = 1L * GiB,
+                        BitLockerState = "FullyDecrypted"
                     },
                     Sizes = InstallationSizePolicy.FromRequestedGigabytes(40),
                     Keyboard = WindowsKeyboardLayout.ResolveIdentifier("00000409", "us"),
@@ -1226,8 +1260,10 @@ namespace Libertix.Tests
                     {
                         Number = 5,
                         OffsetBytes = 142L * GiB,
+                        FinalOffsetBytes = 142L * GiB,
                         FinalSizeBytes = 40L * GiB,
-                        StagingSizeBytes = 8L * GiB
+                        StagingSizeBytes = 8L * GiB,
+                        ResizeMode = InstallationResizeMode.WindowsOnline
                     }
                 },
                 Features = new InstallationFeatures
@@ -1239,6 +1275,7 @@ namespace Libertix.Tests
                     BootStrategy = InstallationBootStrategy.UefiBootNext,
                     SecureBootEnabled = true,
                     TrustedMicrosoftUefiAuthorities = new[] { "2011" },
+                    WindowsBitLockerState = "FullyDecrypted",
                     RecoveryRootWindows = @"C:\ProgramData\Libertix\Recovery",
                     RecoveryRunId = new string('d', 32)
                 }

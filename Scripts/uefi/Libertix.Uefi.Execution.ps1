@@ -213,6 +213,39 @@ function Update-LibertixInstallationPlanPartition {
     Write-LibertixInstallationPlanAtomic -Path $InstallationPlanPath -Plan $installationPlan
 }
 
+function Set-LibertixInstallationPlanResizeMode {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("windows-online", "live-offline")]
+        [string]$ResizeMode
+    )
+
+    if ($null -eq $installationPlan) {
+        throw "Installation plan is unavailable while selecting the NTFS resize mode."
+    }
+    if ($null -ne $installationPlan.disk.installer.number) {
+        throw "NTFS resize mode cannot change after the staging partition exists."
+    }
+    $installationPlan.disk.installer.resizeMode = $ResizeMode
+    Write-LibertixInstallationPlanAtomic -Path $InstallationPlanPath -Plan $installationPlan
+    Write-Log "NTFS resize mode selected: $ResizeMode."
+}
+
+function Set-LibertixInstallationPlanWindowsBitLockerState {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("FullyDecrypted", "NotEncryptable")]
+        [string]$State
+    )
+
+    if ($null -eq $installationPlan) {
+        throw "Installation plan is unavailable while recording the verified BitLocker state."
+    }
+    $installationPlan.runtime.windowsBitLockerState = $State
+    Write-LibertixInstallationPlanAtomic -Path $InstallationPlanPath -Plan $installationPlan
+    Write-Log "Verified Windows BitLocker state recorded in the installation plan: $State."
+}
+
 function Publish-LibertixInstallationContext {
     param([Parameter(Mandatory = $true)][string]$PartitionDrive)
 

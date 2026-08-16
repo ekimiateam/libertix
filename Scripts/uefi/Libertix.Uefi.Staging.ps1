@@ -87,44 +87,82 @@ function New-OrReuseInstallerPartition {
     $stagingSizeGB = [int]($stagingBytes / 1GB)
     $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
     $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
-
-    $shrinkGeometry = Get-LibertixAlignedShrinkGeometry `
-        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
-        -PartitionSizeBytes ([int64]$systemPartition.Size) `
-        -RequestedAllocationBytes $requestedBytes `
-        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
-    $shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes
-    $installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
     $recoveryOffsetBytes = [int64]$installationPlan.disk.recovery.offsetBytes
     if (
         $requestedBytes -gt $recoveryOffsetBytes -or
-        $installerOffsetBytes -gt $recoveryOffsetBytes - $requestedBytes
+        [int64]$installationPlan.disk.installer.finalOffsetBytes -gt `
+            $recoveryOffsetBytes - $requestedBytes
     ) {
         throw "The requested Linux partition would overlap Windows Recovery."
-    }
-    if ($stagingSizeGB -lt $SizeGB) {
-        Write-Log "Reserving ${SizeGB}GB for Linux with a compatible ${stagingSizeGB}GB FAT32 staging partition '$InstallerLabel'..." "Cyan"
-    } else {
-        Write-Log "Creating ${SizeGB}GB FAT32 installer partition '$InstallerLabel'..." "Cyan"
     }
 
     Start-LibertixTrackedStep -Step "windows.recovery-armed"
     Save-TransactionPreparationState -SystemPartition $systemPartition
     Complete-LibertixTrackedStep -Step "windows.recovery-armed"
 
-    if ($ShareWindowsFilesInLinux) {
+    $forcedOfflineResize = (
+        [string]$installationPlan.disk.installer.resizeMode -eq "live-offline"
+    )
+    $hibernationDisabled = $ShareWindowsFilesInLinux -or $forcedOfflineResize
+    if ($hibernationDisabled) {
         # Fast Startup leaves NTFS metadata cached by Windows. Linux mounts the
-        # shared volume read-write, so hibernation must remain disabled for the
-        # installed system. Run powercfg even when the registry already says
-        # disabled: cloned images can retain a stale hiberfile or inconsistent
-        # power state that only the supported Windows command can normalize.
+        # volume offline during fallback resize, and it remains disabled when
+        # Windows sharing is enabled. Run powercfg even when the registry says
+        # disabled because cloned images can retain a stale hiberfile.
         Set-HibernateEnabled -Enabled $false
     }
 
-    # Read free space after hibernation has been disabled. hiberfil.sys can be
-    # several GiB, so checking the earlier volume snapshot rejects layouts that
-    # become safely shrinkable as part of this transaction. The shared budget
-    # applies the same bounded Windows free-space policy to BIOS and UEFI.
+    $fullGeometry = Get-LibertixAlignedShrinkGeometry `
+        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
+        -PartitionSizeBytes ([int64]$systemPartition.Size) `
+        -RequestedAllocationBytes $requestedBytes `
+        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
+    $stagingGeometry = Get-LibertixAlignedShrinkGeometry `
+        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
+        -PartitionSizeBytes ([int64]$systemPartition.Size) `
+        -RequestedAllocationBytes $stagingBytes `
+        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
+
+    $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
+    $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
+    if (-not $forcedOfflineResize -and [int64]$fullGeometry.ShrinkBytes -gt $maxShrink) {
+        if (-not $hibernationDisabled) {
+            Set-HibernateEnabled -Enabled $false
+            $hibernationDisabled = $true
+            $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
+            $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
+            $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
+        }
+        if ([int64]$fullGeometry.ShrinkBytes -gt $maxShrink) {
+            Set-LibertixInstallationPlanResizeMode -ResizeMode "live-offline"
+        }
+    }
+
+    $useOfflineResize = (
+        [string]$installationPlan.disk.installer.resizeMode -eq "live-offline"
+    )
+    $shrinkGeometry = if ($useOfflineResize) { $stagingGeometry } else { $fullGeometry }
+    [int64]$shrinkBytes = [int64]$shrinkGeometry.ShrinkBytes
+    [int64]$installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
+    if ($shrinkBytes -gt $maxShrink) {
+        throw (
+            "Cannot reserve even the Libertix staging partition on $SystemDrive " +
+            "(required=$shrinkBytes bytes, maximum=$maxShrink bytes)."
+        )
+    }
+    if ($useOfflineResize) {
+        Write-Log (
+            "Windows will reserve only ${stagingSizeGB}GB for '$InstallerLabel'; " +
+            "the live installer will safely complete the ${SizeGB}GB NTFS resize offline."
+        ) "Cyan"
+    } elseif ($stagingSizeGB -lt $SizeGB) {
+        Write-Log "Reserving ${SizeGB}GB for Linux with a compatible ${stagingSizeGB}GB FAT32 staging partition '$InstallerLabel'..." "Cyan"
+    } else {
+        Write-Log "Creating ${SizeGB}GB FAT32 installer partition '$InstallerLabel'..." "Cyan"
+    }
+
+    # The shared budget applies the same bounded Windows free-space policy to
+    # BIOS and UEFI for the allocation Windows is actually asked to reserve.
     $freeSpaceBudget = Wait-LibertixWindowsFreeSpaceBudget `
         -DriveLetter $SystemDriveLetter `
         -AllocationBytes $shrinkBytes
@@ -142,12 +180,6 @@ function New-OrReuseInstallerPartition {
             "Windows free space is within the bounded tolerance: " +
             "available=$remainingBytes required=$($freeSpaceBudget.RequiredBytes)."
         ) "Yellow"
-    }
-
-    $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
-    $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
-    if ($shrinkBytes -gt $maxShrink) {
-        throw "Cannot shrink $SystemDrive by ${SizeGB}GB (max ~$( [math]::Round($maxShrink / 1GB, 1) ) GB)."
     }
 
     Start-LibertixTrackedStep -Step "windows.system-volume-shrunk"

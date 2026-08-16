@@ -29,6 +29,7 @@ namespace Libertix.Pages
         private bool _running;
         private bool _secureBootFlow;
         private bool _secureBootRestored;
+        private bool _preferredPathFlow;
 
         public UefiBootFallback() : this(((App)Application.Current).InstallationState)
         {
@@ -52,7 +53,11 @@ namespace Libertix.Pages
                 _state = JsonSerializer.Deserialize<UefiRecoveryState>(File.ReadAllText(_statePath));
                 if (_state == null || string.IsNullOrWhiteSpace(_state.PayloadRoot) || string.IsNullOrWhiteSpace(_state.ConfigPath))
                     throw new InvalidOperationException(Localization.GetString("UefiFallbackStateIncomplete"));
-                if (_state.SecureBootEnabled)
+                if (IsPreferredPathPhase(_state.Phase))
+                {
+                    ConfigurePreferredPathFlow();
+                }
+                else if (_state.SecureBootEnabled)
                 {
                     ConfigureSecureBootFlow();
                 }
@@ -69,6 +74,24 @@ namespace Libertix.Pages
                 FallbackButton.IsEnabled = false;
                 CancelButton.IsEnabled = false;
             }
+        }
+
+        private static bool IsPreferredPathPhase(string phase)
+        {
+            return phase == "InstalledBootBypassed" ||
+                phase == "PreferredPathPrompted" ||
+                phase == "PreferredPathPreparationFailed" ||
+                phase == "AwaitingPreferredPathReboot";
+        }
+
+        private void ConfigurePreferredPathFlow()
+        {
+            _preferredPathFlow = true;
+            PageTitleText.Text = Localization.GetString("UefiPreferredPathTitle");
+            DescriptionText.Text = Localization.GetString("UefiPreferredPathDescription");
+            CurrentStepText.Text = Localization.GetString("UefiPreferredPathReady");
+            FallbackButton.Content = Localization.GetString("UefiPreferredPathUse");
+            Log(Localization.GetString("UefiPreferredPathDetectedLog"));
         }
 
         private void ConfigureSecureBootFlow()
@@ -106,21 +129,48 @@ namespace Libertix.Pages
             string powershell = WindowsProcessRunner.ResolvePowerShell();
             try
             {
-                _state.Phase = "FallbackRunning";
-                SaveState();
-                int exitCode = await RunProcessAsync(
-                    powershell,
-                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(script)} " +
-                    $"-ConfigPath {QuoteArgument(_state.ConfigPath)} -PreserveConfig " +
-                    "-BootStrategy FirmwareBootOrder -ReusePreparedInstaller");
+                int exitCode;
+                if (_preferredPathFlow)
+                {
+                    _state.Phase = "PreferredPathRunning";
+                    SaveState();
+                    CurrentStepText.Text = Localization.GetString("UefiPreferredPathPreparing");
+                    string agent = Path.Combine(
+                        _state.PayloadRoot,
+                        "Scripts",
+                        "libertix-uefi-recovery-agent.ps1");
+                    exitCode = await RunProcessAsync(
+                        powershell,
+                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agent)} " +
+                        $"-StatePath {QuoteArgument(_statePath)} -Action InstallPreferredPath");
+                }
+                else
+                {
+                    _state.Phase = "FallbackRunning";
+                    SaveState();
+                    exitCode = await RunProcessAsync(
+                        powershell,
+                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(script)} " +
+                        $"-ConfigPath {QuoteArgument(_state.ConfigPath)} -PreserveConfig " +
+                        "-BootStrategy FirmwareBootOrder -ReusePreparedInstaller");
+                }
                 if (exitCode != 0)
                     throw new InvalidOperationException(string.Format(
-                        Localization.GetString("UefiFallbackFirmwareFailedFormat"), exitCode));
+                        Localization.GetString(
+                            _preferredPathFlow
+                                ? "UefiPreferredPathFailedFormat"
+                                : "UefiFallbackFirmwareFailedFormat"),
+                        exitCode));
 
-                _state.Phase = "AwaitingFallbackReboot";
+                _state.Phase = _preferredPathFlow
+                    ? "AwaitingPreferredPathReboot"
+                    : "AwaitingFallbackReboot";
                 SaveState();
                 ProgressBar.Value = 100;
-                CurrentStepText.Text = Localization.GetString("UefiFallbackFirmwareReady");
+                CurrentStepText.Text = Localization.GetString(
+                    _preferredPathFlow
+                        ? "UefiPreferredPathRebootReady"
+                        : "UefiFallbackFirmwareReady");
                 RebootButton.Visibility = Visibility.Visible;
                 FallbackButton.Visibility = Visibility.Collapsed;
             }
@@ -140,7 +190,9 @@ namespace Libertix.Pages
             }
             catch (Exception ex)
             {
-                _state.Phase = "FallbackPreparationFailed";
+                _state.Phase = _preferredPathFlow
+                    ? "PreferredPathPreparationFailed"
+                    : "FallbackPreparationFailed";
                 try
                 {
                     SaveState();

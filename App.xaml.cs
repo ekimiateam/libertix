@@ -110,6 +110,15 @@ namespace Libertix
                     "an explicit development filepool URL.");
                 return false;
             }
+            if (options.ForceOfflineNtfsResize &&
+                !Filepool.IsDevelopmentMode &&
+                !usesPublishedDevelopmentChannel)
+            {
+                RejectInvalidStartupOptions(
+                    "Forced offline NTFS resize requires a development build channel or " +
+                    "an explicit development filepool URL.");
+                return false;
+            }
 
             RuntimeOptions = options;
             ApplicationLogger.Write($"Filepool base URL: {Filepool.BaseUrl}");
@@ -123,6 +132,8 @@ namespace Libertix
             }
             if (options.Unattended != null)
                 ApplicationLogger.Write("Unattended development workflow enabled.");
+            if (options.ForceOfflineNtfsResize)
+                ApplicationLogger.Write("Forced offline NTFS resize development workflow enabled.");
             return true;
         }
 

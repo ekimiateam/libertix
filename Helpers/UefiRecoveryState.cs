@@ -16,6 +16,9 @@ namespace Libertix.Helpers
         public string SystemDiskUniqueId { get; set; }
         public string SystemDiskPartitionTableId { get; set; }
         public long SystemDiskSize { get; set; }
+        public int BootPartitionNumber { get; set; }
+        public long BootPartitionOffset { get; set; }
+        public long BootPartitionSize { get; set; }
         public long ExpectedLinuxPartitionOffset { get; set; }
         public long ExpectedLinuxPartitionSize { get; set; }
         public bool SecureBootEnabled { get; set; }

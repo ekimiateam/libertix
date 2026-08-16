@@ -70,6 +70,10 @@ install_target_configuration_payload() {
         /mnt/target/usr/local/lib/libertix/libertix-update-grub.sh
     install -m 0755 /usr/local/lib/libertix/libertix-sync-efi.sh \
         /mnt/target/usr/local/sbin/libertix-sync-efi
+    install -m 0755 /usr/local/lib/libertix/libertix-preferred-boot-path.py \
+        /mnt/target/usr/local/lib/libertix/libertix-preferred-boot-path.py
+    install -m 0755 /usr/local/lib/libertix/libertix-secure-boot-chain.py \
+        /mnt/target/usr/local/lib/libertix/libertix-secure-boot-chain.py
     install -m 0644 /usr/local/lib/libertix/libertix-efi-sync.service \
         /mnt/target/etc/systemd/system/libertix-efi-sync.service
     install -m 0644 /usr/local/lib/libertix/libertix-efi-sync.path \

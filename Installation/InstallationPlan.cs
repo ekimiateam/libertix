@@ -13,7 +13,7 @@ namespace Libertix.Installation
     /// </summary>
     public sealed class InstallationPlan
     {
-        public const int CurrentSchemaVersion = 2;
+        public const int CurrentSchemaVersion = 3;
 
         [JsonPropertyName("schemaVersion")]
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
@@ -61,6 +61,19 @@ namespace Libertix.Installation
         public const string BiosGrub4Dos = "bios-grub4dos";
         public const string UefiBootNext = "uefi-boot-next";
         public const string UefiFirmwareBootOrder = "uefi-firmware-boot-order";
+    }
+
+    public static class InstallationResizeMode
+    {
+        public const string WindowsOnline = "windows-online";
+        public const string LiveOffline = "live-offline";
+    }
+
+    public static class InstallationBitLockerState
+    {
+        public const string FullyDecrypted = "FullyDecrypted";
+        public const string NotEncryptable = "NotEncryptable";
+        public const string EncryptedOrProtected = "EncryptedOrProtected";
     }
 
     public static class InstallationPartitionStyle
@@ -197,6 +210,12 @@ namespace Libertix.Installation
         [JsonPropertyName("offsetBytes")]
         public long? OffsetBytes { get; set; }
 
+        [JsonPropertyName("finalOffsetBytes")]
+        public long FinalOffsetBytes { get; set; }
+
+        [JsonPropertyName("resizeMode")]
+        public string ResizeMode { get; set; }
+
         [JsonPropertyName("finalSizeBytes")]
         public long FinalSizeBytes { get; set; }
 
@@ -218,6 +237,9 @@ namespace Libertix.Installation
 
     public sealed class InstallationRuntime
     {
+        [JsonPropertyName("windowsBitLockerState")]
+        public string WindowsBitLockerState { get; set; }
+
         [JsonPropertyName("lowMemoryMode")]
         public bool LowMemoryMode { get; set; }
 

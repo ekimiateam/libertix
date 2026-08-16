@@ -8,6 +8,9 @@ runner-start	stage_runner_start	1
 030-check-installer-iso	stage_030_check_installer_iso	18
 035-umount-windows	stage_035_umount_windows	22
 040-unmount-target-disk	stage_040_unmount_target_disk	26
+045-offline-ntfs-preflight	stage_045_offline_ntfs_preflight	27
+046-offline-ntfs-resize	stage_046_offline_ntfs_resize	28
+047-relocate-installer-partition	stage_047_relocate_installer_partition	29
 050-assert-live-detached	stage_050_assert_live_detached	30
 055-normalize-mbr-linux-slot	stage_055_normalize_mbr_linux_slot	32
 060-set-linux-partition-type	stage_060_linux_partition	34

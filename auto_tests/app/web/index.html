@@ -303,6 +303,10 @@
             <input id="simulateStaleFirmwareEntries" type="checkbox" />
             Simuler des entrées firmware Libertix obsolètes avant l'installation
           </label>
+          <label class="check-field">
+            <input id="forceOfflineNtfsResize" type="checkbox" />
+            Forcer le redimensionnement NTFS hors ligne dans le mini-ISO
+          </label>
           <p class="muted">
             Le mot de passe est envoyé uniquement à l'API locale au lancement. Cette page ne le
             conserve pas et l'aperçu le masque.
@@ -397,6 +401,7 @@
       const shareLinuxFilesInWindowsInput = document.getElementById("shareLinuxFilesInWindows");
       const monitorIsoInput = document.getElementById("monitorIso");
       const simulateStaleFirmwareEntriesInput = document.getElementById("simulateStaleFirmwareEntries");
+      const forceOfflineNtfsResizeInput = document.getElementById("forceOfflineNtfsResize");
       const vmList = document.getElementById("vmList");
       const statusBox = document.getElementById("status");
       const summaryBox = document.getElementById("summary");
@@ -439,6 +444,7 @@
         shareLinuxFilesInWindowsInput,
         monitorIsoInput,
         simulateStaleFirmwareEntriesInput,
+        forceOfflineNtfsResizeInput,
       ].forEach((input) => {
         input.addEventListener("input", updateRequestPreview);
         input.addEventListener("change", updateRequestPreview);
@@ -485,6 +491,7 @@
           share_windows_files_in_linux: shareWindowsFilesInLinuxInput.checked,
           share_linux_files_in_windows: shareLinuxFilesInWindowsInput.checked,
           simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
+          force_offline_ntfs_resize: forceOfflineNtfsResizeInput.checked,
         };
       }
 
@@ -511,6 +518,7 @@
           share_windows_files_in_linux: shareWindowsFilesInLinuxInput.checked,
           share_linux_files_in_windows: shareLinuxFilesInWindowsInput.checked,
           simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
+          force_offline_ntfs_resize: forceOfflineNtfsResizeInput.checked,
         };
       }
 

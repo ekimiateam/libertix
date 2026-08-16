@@ -229,6 +229,17 @@ case "$1" in
 esac
 """,
     )
+    write_executable(
+        commands / "secure-boot-verifier",
+        """#!/bin/sh
+output=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then output="$2"; shift 2; else shift; fi
+done
+[ -n "$output" ]
+printf '{"status":"verified"}\n' > "$output"
+""",
+    )
     write_executable(commands / "mountpoint", "#!/bin/sh\nexit 0\n")
 
     environment = {
@@ -241,6 +252,7 @@ esac
         "LIBERTIX_EFI_SYNC_LOCK": str(tmp_path / "locks" / "efi.lock"),
         "LIBERTIX_SHIM_DIRECTORY": str(shim),
         "LIBERTIX_GRUB_SIGNED_DIRECTORY": str(grub),
+        "LIBERTIX_SECURE_BOOT_VERIFIER": str(commands / "secure-boot-verifier"),
     }
     return environment, efi, shim
 

@@ -7,7 +7,7 @@
     "windowsFreeSpaceRetryWindowGiB": 2,
     "preflightShrinkSafetyGiB": 2,
     "maximumDirectFat32SizeGiB": 31,
-    "largeInstallationStagingSizeGiB": 8,
+    "stagingSizeGiB": 8,
     "partitionAlignmentBytes": 1048576,
     "recommendedLinuxFractionOfFreeSpace": 0.4,
     "maximumRecommendedLinuxSizeGiB": 100

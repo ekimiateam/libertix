@@ -208,6 +208,15 @@ def sysfs_partition_geometry(device: Path) -> tuple[str, int, int, int]:
     return parent_name, partition_number, offset_bytes, size_bytes
 
 
+def planned_linux_offset(installer: dict[str, object]) -> int:
+    resize_mode = require_text(installer, "resizeMode")
+    if resize_mode == "live-offline":
+        return require_integer(installer, "finalOffsetBytes")
+    if resize_mode == "windows-online":
+        return require_integer(installer, "offsetBytes")
+    raise VerificationError("installation plan resize mode is invalid")
+
+
 def find_partition_at_offset(parent_name: str, offset_bytes: int) -> tuple[Path, int]:
     matches: list[tuple[Path, int]] = []
     for candidate in Path("/sys/class/block").glob(f"{parent_name}*"):
@@ -398,6 +407,7 @@ def verify_uefi_boot_current(
     expected_partition_number: int | None = None,
     expected_partition_guid: str | None = None,
     expected_loader_path: str = r"\EFI\Libertix\shimx64.efi",
+    preferred_path: dict[str, object] | None = None,
 ) -> dict[str, object]:
     current_path = efivars / f"BootCurrent-{EFI_GLOBAL_VARIABLE_GUID}"
     try:
@@ -414,12 +424,22 @@ def verify_uefi_boot_current(
     except OSError as error:
         raise VerificationError(f"cannot read UEFI Boot{boot_number}: {error}") from error
     entry = parse_efi_load_option(entry_value)
-    if (
-        entry["description"] != "Libertix"
-        or str(entry["loaderPath"]).casefold() != expected_loader_path.casefold()
-    ):
+    normal_libertix_path = (
+        entry["description"] == "Libertix"
+        and str(entry["loaderPath"]).casefold() == expected_loader_path.casefold()
+    )
+    preferred_windows_path = (
+        preferred_path is not None
+        and entry["description"] == "Windows Boot Manager"
+        and str(entry["loaderPath"]).casefold() == r"\EFI\Microsoft\Boot\bootmgfw.efi".casefold()
+    )
+    if not normal_libertix_path and not preferred_windows_path:
         raise VerificationError("UEFI BootCurrent does not identify the installed Libertix shim")
-    if expected_boot_number is not None and boot_number != expected_boot_number.casefold():
+    if (
+        normal_libertix_path
+        and expected_boot_number is not None
+        and boot_number != expected_boot_number.casefold()
+    ):
         raise VerificationError("UEFI BootCurrent differs from the installed boot ownership marker")
     if (
         expected_partition_number is not None
@@ -432,10 +452,98 @@ def verify_uefi_boot_current(
     ):
         raise VerificationError("UEFI BootCurrent identifies a different ESP partition GUID")
     return {
-        "type": "uefi-boot-current",
+        "type": "uefi-preferred-windows-path" if preferred_windows_path else "uefi-boot-current",
         "bootNumber": boot_number,
         "entry": entry,
+        "preferredPath": preferred_path or {},
         "verified": True,
+    }
+
+
+def verify_preferred_uefi_boot_path(
+    efi_root: Path,
+    plan_id: str,
+    uefi_owner: dict[str, object],
+) -> dict[str, object] | None:
+    manifest_path = efi_root / "preferred-boot-path.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = read_json(manifest_path)
+    if (
+        manifest.get("version") != 1
+        or manifest.get("runId") != plan_id
+        or manifest.get("status") != "installed"
+    ):
+        raise VerificationError("preferred UEFI boot manifest identity or status is invalid")
+    esp = require_mapping(manifest, "esp")
+    windows_loader = require_mapping(manifest, "windowsLoader")
+    preferred = require_mapping(manifest, "preferred")
+    if (
+        esp.get("partitionNumber") != uefi_owner["partitionNumber"]
+        or str(esp.get("partitionGuid", "")).casefold() != uefi_owner["partitionGuid"]
+        or windows_loader.get("activePath") != r"\EFI\Microsoft\Boot\bootmgfw.efi"
+        or windows_loader.get("backupPath") != r"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi"
+    ):
+        raise VerificationError("preferred UEFI boot manifest targets a different ESP or path")
+
+    secure_boot_enabled = manifest.get("secureBootEnabled")
+    if not isinstance(secure_boot_enabled, bool):
+        raise VerificationError("preferred UEFI boot manifest Secure Boot state is invalid")
+    secure_boot = read_json(efi_root / "secure-boot-chain.json")
+    expected_secure_status = "verified" if secure_boot_enabled else "not-required"
+    if (
+        secure_boot.get("version") != 1
+        or secure_boot.get("status") != expected_secure_status
+        or secure_boot.get("secureBootEnabled") is not secure_boot_enabled
+    ):
+        raise VerificationError("preferred UEFI boot Secure Boot evidence is invalid")
+    secure_images = require_mapping(secure_boot, "images")
+    microsoft_root = efi_root.parent / "Microsoft" / "Boot"
+    expected_files = (
+        (
+            microsoft_root / "bootmgfw.efi",
+            preferred.get("shimSha256"),
+            require_mapping(secure_images, "shim").get("sha256"),
+        ),
+        (
+            microsoft_root / "grubx64.efi",
+            preferred.get("grubSha256"),
+            require_mapping(secure_images, "grub").get("sha256"),
+        ),
+        (
+            microsoft_root / "mmx64.efi",
+            preferred.get("mokManagerSha256"),
+            require_mapping(secure_images, "mokManager").get("sha256"),
+        ),
+        (
+            microsoft_root / "grub.cfg",
+            preferred.get("grubConfigSha256"),
+            preferred.get("grubConfigSha256"),
+        ),
+        (
+            microsoft_root / "bootmgfw.libertix-windows.efi",
+            windows_loader.get("sha256"),
+            windows_loader.get("sha256"),
+        ),
+    )
+    verified_hashes: dict[str, str] = {}
+    for path, manifest_hash, trusted_hash in expected_files:
+        if (
+            not isinstance(manifest_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest_hash)
+            or manifest_hash != trusted_hash
+            or not path.is_file()
+            or sha256(path) != manifest_hash
+        ):
+            raise VerificationError(
+                f"preferred UEFI boot file differs from its verified manifest: {path.name}"
+            )
+        verified_hashes[path.name] = manifest_hash
+    return {
+        "manifestPath": str(manifest_path),
+        "manifestSha256": sha256(manifest_path),
+        "secureBootEvidencePath": str(efi_root / "secure-boot-chain.json"),
+        "verifiedHashes": verified_hashes,
     }
 
 
@@ -471,6 +579,7 @@ def verify_boot_chain(
     firmware: str,
     disk_device: Path,
     uefi_owner: dict[str, object] | None = None,
+    preferred_path: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if firmware == "uefi":
         if uefi_owner is None:
@@ -480,6 +589,7 @@ def verify_boot_chain(
             expected_partition_number=int(uefi_owner["partitionNumber"]),
             expected_partition_guid=str(uefi_owner["partitionGuid"]),
             expected_loader_path=str(uefi_owner["loaderPath"]),
+            preferred_path=preferred_path,
         )
 
     try:
@@ -523,6 +633,7 @@ def verify_grub(plan: dict[str, object], firmware: str, disk_device: Path) -> di
         raise VerificationError("the running kernel or its initramfs is missing from /boot")
 
     uefi_owner: dict[str, object] | None = None
+    preferred_path: dict[str, object] | None = None
     if firmware == "uefi":
         if not Path("/sys/firmware/efi").is_dir():
             raise VerificationError("the installed system did not boot in UEFI mode")
@@ -534,10 +645,15 @@ def verify_grub(plan: dict[str, object], firmware: str, disk_device: Path) -> di
             efi_root / ".libertix-owner",
             require_text(plan, "planId"),
         )
+        preferred_path = verify_preferred_uefi_boot_path(
+            efi_root,
+            require_text(plan, "planId"),
+            uefi_owner,
+        )
     elif Path("/sys/firmware/efi").exists():
         raise VerificationError("the installed system unexpectedly booted in UEFI mode")
 
-    boot_chain = verify_boot_chain(firmware, disk_device, uefi_owner)
+    boot_chain = verify_boot_chain(firmware, disk_device, uefi_owner, preferred_path)
 
     return {
         "configPath": str(GRUB_CONFIG_PATH),
@@ -573,7 +689,8 @@ def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str
         raise VerificationError("recovery identity differs from the installation plan")
 
     parent_name, partition_number, offset_bytes, size_bytes = sysfs_partition_geometry(root_device)
-    if offset_bytes != require_integer(installer, "offsetBytes"):
+    linux_offset = planned_linux_offset(installer)
+    if offset_bytes != linux_offset:
         raise VerificationError("root partition offset differs from the installation plan")
     planned_size_bytes = require_integer(installer, "finalSizeBytes")
     if size_bytes > planned_size_bytes or size_bytes < planned_size_bytes - alignment_bytes:
@@ -595,7 +712,6 @@ def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str
         require_integer(windows, "offsetBytes"),
     )
     windows_end = require_integer(windows, "offsetBytes") + windows_size_bytes
-    linux_offset = require_integer(installer, "offsetBytes")
     gap_before_linux = linux_offset - windows_end
     if gap_before_linux < 0 or gap_before_linux > 1024 * 1024:
         raise VerificationError("Windows and Linux partition geometry has an unexpected gap")

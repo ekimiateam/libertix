@@ -4,7 +4,7 @@ namespace Libertix.Installation
 {
     /// <summary>
     /// Single source of truth for the final Linux allocation and the temporary
-    /// FAT32 staging allocation used by both firmware workflows.
+    /// bounded FAT32 staging allocation used by both firmware workflows.
     /// </summary>
     public static class InstallationSizePolicy
     {
@@ -18,8 +18,8 @@ namespace Libertix.Installation
             TargetWindowsFreeSpaceGiB - WindowsFreeSpaceToleranceGiB;
         public static int MaximumDirectFat32SizeGiB =>
             InstallationPolicy.Current.Storage.MaximumDirectFat32SizeGiB;
-        public static int LargeInstallationStagingSizeGiB =>
-            InstallationPolicy.Current.Storage.LargeInstallationStagingSizeGiB;
+        public static int StagingSizeGiB =>
+            InstallationPolicy.Current.Storage.StagingSizeGiB;
         public static long PartitionAlignmentBytes =>
             InstallationPolicy.Current.Storage.PartitionAlignmentBytes;
         public static double RecommendedLinuxFractionOfFreeSpace =>
@@ -37,9 +37,7 @@ namespace Libertix.Installation
             int finalSizeGiB = Math.Max(
                 MinimumFinalSizeGiB,
                 checked((int)Math.Round(requestedGigabytes)));
-            int stagingSizeGiB = finalSizeGiB > MaximumDirectFat32SizeGiB
-                ? LargeInstallationStagingSizeGiB
-                : finalSizeGiB;
+            int stagingSizeGiB = Math.Min(finalSizeGiB, StagingSizeGiB);
 
             return new InstallationSizes(finalSizeGiB, stagingSizeGiB);
         }

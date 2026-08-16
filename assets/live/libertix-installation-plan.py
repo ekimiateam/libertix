@@ -123,7 +123,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError(f"installation plan schema validation failed: {error}") from error
 
     root = require_mapping(plan, "plan")
-    if root.get("schemaVersion") != 2:
+    if root.get("schemaVersion") != 3:
         raise PlanValidationError("unsupported installation plan schemaVersion")
     if not HEX_ID_PATTERN.fullmatch(str(root.get("planId", ""))):
         raise PlanValidationError("planId must contain 32 lowercase hexadecimal characters")
@@ -293,6 +293,14 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         installer.get("stagingSizeBytes"),
         "disk.installer.stagingSizeBytes",
     )
+    final_offset = require_positive_integer(
+        installer.get("finalOffsetBytes"), "disk.installer.finalOffsetBytes"
+    )
+    resize_mode = installer.get("resizeMode")
+    if resize_mode not in {"windows-online", "live-offline"}:
+        raise PlanValidationError(
+            "disk.installer.resizeMode must be windows-online or live-offline"
+        )
     if final_size % GIB != 0 or staging_size % GIB != 0:
         raise PlanValidationError("installer sizes must be whole numbers of GiB")
     final_size_gib = final_size // GIB
@@ -301,27 +309,35 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
             "finalSizeBytes must be at least "
             f"{INSTALLATION_POLICY.storage.minimum_final_size_gib} GiB"
         )
-    expected_staging_gib = (
-        INSTALLATION_POLICY.storage.large_installation_staging_size_gib
-        if final_size_gib > INSTALLATION_POLICY.storage.maximum_direct_fat32_size_gib
-        else final_size_gib
+    expected_staging_gib = min(
+        final_size_gib,
+        INSTALLATION_POLICY.storage.staging_size_gib,
     )
     if staging_size != expected_staging_gib * GIB:
         raise PlanValidationError("stagingSizeBytes does not match the shared FAT32 staging policy")
+    alignment_bytes = INSTALLATION_POLICY.storage.partition_alignment_bytes
+    alignment_padding = windows_end % alignment_bytes
+    expected_final_offset = windows_end - alignment_padding - final_size
+    if expected_final_offset <= 0 or final_offset != expected_final_offset:
+        raise PlanValidationError(
+            "disk.installer.finalOffsetBytes does not match the aligned final geometry"
+        )
+    if final_offset + final_size > recovery_offset:
+        raise PlanValidationError("disk.installer final extent would overlap disk.recovery")
     if offset is not None:
-        alignment_bytes = INSTALLATION_POLICY.storage.partition_alignment_bytes
-        alignment_padding = windows_end % alignment_bytes
-        expected_installer_offset = windows_end - alignment_padding - final_size
-        primary_mbr_offset = expected_installer_offset - alignment_bytes
-        offset_matches = parsed_offset == expected_installer_offset or (
+        expected_observed_offset = (
+            windows_end - alignment_padding - staging_size
+            if resize_mode == "live-offline"
+            else expected_final_offset
+        )
+        primary_mbr_offset = expected_observed_offset - alignment_bytes
+        offset_matches = parsed_offset == expected_observed_offset or (
             firmware == "bios" and parsed_offset == primary_mbr_offset
         )
-        if expected_installer_offset <= 0 or not offset_matches:
+        if not offset_matches:
             raise PlanValidationError(
-                "disk.installer.offsetBytes does not match the aligned Windows shrink geometry"
+                "disk.installer.offsetBytes does not match the selected Windows shrink geometry"
             )
-        if parsed_offset + final_size > recovery_offset:
-            raise PlanValidationError("disk.installer final extent would overlap disk.recovery")
 
     features = require_mapping(root.get("features"), "features")
     for name in ("shareWindowsFilesInLinux", "shareLinuxFilesInWindows"):
@@ -334,6 +350,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     project_windows_profiles(profiles)
 
     runtime = require_mapping(root.get("runtime"), "runtime")
+    if runtime.get("windowsBitLockerState") not in {"FullyDecrypted", "NotEncryptable"}:
+        raise PlanValidationError(
+            "runtime.windowsBitLockerState must prove that BitLocker is absent or fully decrypted"
+        )
     if not isinstance(runtime.get("lowMemoryMode"), bool):
         raise PlanValidationError("runtime.lowMemoryMode must be a boolean")
     supported_strategies = {
@@ -534,6 +554,8 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "WINDOWS_BOOT_PARTITION_OFFSET_BYTES": str(disk["boot"]["offsetBytes"]),
         "INSTALLER_PARTITION_NUMBER": str(installer["number"]),
         "INSTALLER_PARTITION_OFFSET_BYTES": str(installer["offsetBytes"]),
+        "INSTALLER_FINAL_OFFSET_BYTES": str(installer["finalOffsetBytes"]),
+        "INSTALLER_RESIZE_MODE": installer["resizeMode"],
         "INSTALLER_FINAL_SIZE_BYTES": str(installer["finalSizeBytes"]),
         "INSTALLER_STAGING_SIZE_BYTES": str(installer["stagingSizeBytes"]),
         "EXPECTED_PARTITION_STYLE": disk["partitionStyle"],
@@ -542,6 +564,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "RECOVERY_PARTITION_SIZE_BYTES": str(disk["recovery"]["sizeBytes"]),
         "RECOVERY_ROOT_WINDOWS": runtime["recoveryRootWindows"] or "",
         "RECOVERY_RUN_ID": runtime["recoveryRunId"] or "",
+        "WINDOWS_BITLOCKER_STATE": runtime["windowsBitLockerState"],
         "LOW_MEMORY_MODE": str(runtime["lowMemoryMode"]).lower(),
         "SECURE_BOOT_ENABLED": str(runtime["secureBootEnabled"]).lower(),
         "TRUSTED_MICROSOFT_UEFI_AUTHORITIES": ";".join(runtime["trustedMicrosoftUefiAuthorities"]),

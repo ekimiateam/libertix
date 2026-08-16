@@ -428,6 +428,7 @@ try {
     Assert-LibertixPlanMatchesCurrentStorage
     Test-LibertixSecureBootCompatibility -InstallationPlan $installationPlan
     Set-WindowsVolumeReadableFromLinux
+    Set-LibertixInstallationPlanWindowsBitLockerState -State "FullyDecrypted"
     Start-LibertixTrackedStep -Step "windows.artifacts-verified"
     Write-LibertixProgress -Stage "installer-iso-download" -Percent 30
     Set-DistributionIsoOnWindows

@@ -151,9 +151,34 @@ function Invoke-PowerShellQualityChecks {
     $configuration.Output.Verbosity = "Normal"
     $pesterResult = Invoke-Pester -Configuration $configuration
     if ($pesterResult.FailedCount -ne 0 -or $pesterResult.Result -ne "Passed") {
+        $failureSummaries = @()
+        foreach ($failedTest in @($pesterResult.Tests | Where-Object Result -eq "Failed")) {
+            $failureMessage = if (@($failedTest.ErrorRecord).Count -gt 0) {
+                @($failedTest.ErrorRecord | ForEach-Object {
+                    $parts = @([string]$_.Exception.Message)
+                    if (-not [string]::IsNullOrWhiteSpace([string]$_.ScriptStackTrace)) {
+                        $parts += "Stack: $([string]$_.ScriptStackTrace)"
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$_.InvocationInfo.PositionMessage)) {
+                        $parts += "Position: $([string]$_.InvocationInfo.PositionMessage)"
+                    }
+                    $parts -join " ; "
+                }) -join " | "
+            } else {
+                "No Pester error record was returned."
+            }
+            $failureSummary = (
+                "{0} :: {1}" -f
+                [string]$failedTest.ExpandedName,
+                $failureMessage.Replace("`r", " ").Replace("`n", " ")
+            )
+            $failureSummaries += $failureSummary
+            Write-Output "PESTER_FAILURE=$failureSummary"
+        }
         throw (
             "Pester failed: result=$($pesterResult.Result), " +
-            "failed=$($pesterResult.FailedCount), total=$($pesterResult.TotalCount)."
+            "failed=$($pesterResult.FailedCount), total=$($pesterResult.TotalCount). " +
+            "Failures: $($failureSummaries -join ' || ')"
         )
     }
     return $pesterResult

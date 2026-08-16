@@ -334,15 +334,18 @@ function Save-LibertixRollbackTransactionArchive {
     $temporary = Join-Path `
         ([string]$state.RecoveryRoot) `
         ".uefi-transaction.$([Guid]::NewGuid().ToString('N')).tmp"
+    $backup = Join-Path `
+        ([string]$state.RecoveryRoot) `
+        ".uefi-transaction.$([Guid]::NewGuid().ToString('N')).bak"
     try {
         Copy-Item -LiteralPath $TransactionStatePath -Destination $temporary -Force -ErrorAction Stop
-        if ([IO.File]::Exists($destination)) {
-            [IO.File]::Replace($temporary, $destination, $null)
-        } else {
-            [IO.File]::Move($temporary, $destination)
-        }
+        Publish-LibertixFileAtomic `
+            -TemporaryPath $temporary `
+            -DestinationPath $destination `
+            -BackupPath $backup
     } finally {
         if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+        if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
     }
     Write-Log "UEFI rollback transaction state archived permanently." "Green"
 }
@@ -391,6 +394,33 @@ function Get-VerifiedTransactionPartition {
                 [int64]$_.Size -eq [int64]$state.PartitionSize
             }
     )
+    if (
+        $partitionMatches.Count -eq 0 -and
+        $null -ne $installationPlan -and
+        [string]$installationPlan.disk.installer.resizeMode -eq "live-offline" -and
+        [string]$installationPlan.runtime.recoveryRunId -eq [string]$state.RecoveryRunId -and
+        [int]$installationPlan.disk.number -eq $diskNumber
+    ) {
+        [int64]$finalOffset = [int64]$installationPlan.disk.installer.finalOffsetBytes
+        [int64]$finalSize = [int64]$installationPlan.disk.installer.finalSizeBytes
+        $partitionMatches = @(
+            Get-Partition -DiskNumber $diskNumber -ErrorAction Stop |
+                Where-Object {
+                    [int64]$_.Offset -eq $finalOffset -and
+                    [int64]$_.Size -eq $finalSize
+                }
+        )
+        if ($partitionMatches.Count -eq 1) {
+            $state.PartitionNumber = [int]$partitionMatches[0].PartitionNumber
+            $state.PartitionOffset = $finalOffset
+            $state.PartitionSize = $finalSize
+            Save-LibertixTransactionStateAtomic -State $state
+            Write-Log (
+                "Resolved the offline-resized UEFI partition from the durable plan: " +
+                "disk=$diskNumber offset=$finalOffset size=$finalSize."
+            ) "Yellow"
+        }
+    }
     if ($partitionMatches.Count -eq 0 -and $AllowMissing) {
         Write-Log (
             "The saved UEFI transaction partition is already absent: " +

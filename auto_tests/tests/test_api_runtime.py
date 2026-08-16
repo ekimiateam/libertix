@@ -77,6 +77,7 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
         apply=True,
         linux_password="test-passphrase",
         simulate_stale_firmware_entries=True,
+        force_offline_ntfs_resize=True,
     )
 
     assert pickle.loads(pickle.dumps(main_module._stream_operation_worker)) is (  # noqa: SLF001
@@ -85,6 +86,7 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
     restored_settings, restored_request = pickle.loads(pickle.dumps((settings(), request)))
     assert restored_request.linux_password == "test-passphrase"
     assert restored_request.simulate_stale_firmware_entries is True
+    assert restored_request.force_offline_ntfs_resize is True
 
 
 def test_stream_worker_serializes_parallel_vm_events(
@@ -165,6 +167,58 @@ def test_stream_worker_serializes_parallel_vm_events(
     ]
 
 
+def test_stream_publishes_only_one_terminal_result_when_timeout_races_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    barrier = multiprocessing.Barrier(2)
+
+    def finish_at_timeout(
+        _configured,
+        _operation,
+        _selectors,
+        _request,
+        _on_step,
+        _run_workspace,
+    ) -> OperationResult:
+        barrier.wait(timeout=5)
+        return OperationResult(
+            status="ok",
+            operation="automation",
+            message="complete",
+            steps=[],
+        )
+
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=0.05,
+    )
+    monkeypatch.setattr(main_module, "_run_operation", finish_at_timeout)
+
+    def release_worker_at_timeout(*_args):
+        barrier.wait(timeout=5)
+        return {}, {}
+
+    monkeypatch.setattr(
+        main_module,
+        "_capture_automation_timeout_screens",
+        release_worker_at_timeout,
+    )
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation/stream?format=ndjson",
+            json={"apply": True, "linux_password": "test"},
+        )
+    terminal_events = [
+        json.loads(line)
+        for line in response.text.splitlines()
+        if json.loads(line).get("event") == "result"
+    ]
+
+    assert len(terminal_events) == 1
+
+
 def test_automation_password_accepts_four_characters_and_rejects_three() -> None:
     assert AutomationRequest(apply=True, linux_password="test").linux_password == "test"
 
@@ -183,6 +237,16 @@ def test_automation_first_boot_accepts_both_orders_and_rejects_unknown_values() 
         AutomationRequest(  # type: ignore[arg-type]
             apply=True, linux_password="pass", first_boot="other"
         )
+
+
+def test_offline_ntfs_resize_fixture_is_opt_in() -> None:
+    assert AutomationRequest(apply=True, linux_password="pass").force_offline_ntfs_resize is False
+    request = AutomationRequest(
+        apply=True,
+        linux_password="pass",
+        force_offline_ntfs_resize=True,
+    )
+    assert request.force_offline_ntfs_resize is True
 
 
 def test_automation_account_and_storage_constraints_follow_the_shared_policy() -> None:
@@ -431,6 +495,74 @@ def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
     assert [event["event"] for event in events] == ["step", "result"]
     assert events[-1]["data"]["status"] == "ok"
     assert lock.acquire_calls == 1
+    assert lock.release_calls == 1
+    assert lock.held is False
+
+
+def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+    captured: list[tuple[list[str] | None, Path]] = []
+
+    class HangingAutomationService:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+            on_step(
+                StepResult(
+                    step="automation.installed_boot_menu_seen",
+                    status="ok",
+                    message="GRUB menu detected",
+                    context={"vm": "vm2"},
+                )
+            )
+            time.sleep(5)
+            raise AssertionError("the timed-out worker must be terminated")
+
+    def capture_timeout_screens(_settings, selectors, workspace):
+        captured.append((selectors, workspace))
+        destination = workspace / "captures" / "timeout-vm2.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"png")
+        return {"vm2": str(destination)}, {}
+
+    monkeypatch.setattr(main_module, "AutomationService", HangingAutomationService)
+    monkeypatch.setattr(
+        main_module,
+        "_capture_automation_timeout_screens",
+        capture_timeout_screens,
+    )
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=0.05,
+    )
+
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation/stream?format=ndjson",
+            json={
+                "vms": ["vm2"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test-passphrase",
+            },
+        )
+
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert [event["event"] for event in events] == ["step", "result"]
+    result = events[-1]["data"]
+    assert result["status"] == "error"
+    assert result["steps"][0]["step"] == "automation.global_timeout"
+    assert result["steps"][0]["context"]["active_steps"] == {
+        "vm2": "automation.installed_boot_menu_seen"
+    }
+    assert result["steps"][0]["context"]["captures"]["vm2"].endswith("timeout-vm2.png")
+    assert captured[0][0] == ["vm2"]
     assert lock.release_calls == 1
     assert lock.held is False
 

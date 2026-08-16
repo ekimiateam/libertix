@@ -19,6 +19,15 @@ function Assert-Condition {
     }
 }
 
+function Test-ObjectProperty {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
+}
+
 function Read-JsonFileWithRetry {
     param(
         [Parameter(Mandatory = $true)][string]$LiteralPath,
@@ -218,8 +227,43 @@ function Assert-LibertixPostInstallResult {
         [string]$evidence.localization.keyboardVariant -eq [string]$Session.Plan.locale.keyboardVariant
     ) "The first Linux boot did not prove the planned locale and keyboard configuration."
     if ($ExpectedFirmware -eq "uefi") {
-        Assert-Condition ([string]$evidence.grub.bootChain.type -eq "uefi-boot-current") `
-            "The UEFI BootCurrent proof is missing."
+        $bootChainType = [string]$evidence.grub.bootChain.type
+        $bootCurrentVerified = $bootChainType -eq "uefi-boot-current"
+        $preferredPathVerified = $false
+        if ($bootChainType -eq "uefi-preferred-windows-path") {
+            $preferred = $evidence.grub.bootChain.preferredPath
+            $preferredPathVerified = (
+                (Test-ObjectProperty -Object $preferred -Name "manifestPath") -and
+                (Test-ObjectProperty -Object $preferred -Name "manifestSha256") -and
+                (Test-ObjectProperty -Object $preferred -Name "secureBootEvidencePath") -and
+                (Test-ObjectProperty -Object $preferred -Name "verifiedHashes") -and
+                [string]$preferred.manifestPath -eq (
+                    "/boot/efi/EFI/Libertix/preferred-boot-path.json"
+                ) -and
+                [string]$preferred.manifestSha256 -match '^[0-9a-f]{64}$' -and
+                [string]$preferred.secureBootEvidencePath -eq (
+                    "/boot/efi/EFI/Libertix/secure-boot-chain.json"
+                )
+            )
+            if ($preferredPathVerified) {
+                foreach ($name in @(
+                    "bootmgfw.efi", "grubx64.efi", "mmx64.efi", "grub.cfg",
+                    "bootmgfw.libertix-windows.efi"
+                )) {
+                    if (
+                        -not (Test-ObjectProperty -Object $preferred.verifiedHashes -Name $name) -or
+                        [string]$preferred.verifiedHashes.PSObject.Properties[$name].Value -notmatch (
+                            '^[0-9a-f]{64}$'
+                        )
+                    ) {
+                        $preferredPathVerified = $false
+                        break
+                    }
+                }
+            }
+        }
+        Assert-Condition ($bootCurrentVerified -or $preferredPathVerified) `
+            "The verified UEFI BootCurrent or preferred Windows-path proof is missing."
         Assert-Condition (Test-Path -LiteralPath (Join-Path $root "uefi-transaction.json") -PathType Leaf) `
             "The permanent UEFI rollback transaction is missing."
     } else {
@@ -229,6 +273,15 @@ function Assert-LibertixPostInstallResult {
             "The permanent BIOS BCD backup is missing."
     }
     return $result
+}
+
+function Get-PlannedLinuxOffset {
+    param([Parameter(Mandatory = $true)]$Plan)
+
+    if ([string]$Plan.disk.installer.resizeMode -eq "live-offline") {
+        return [int64]$Plan.disk.installer.finalOffsetBytes
+    }
+    return [int64]$Plan.disk.installer.offsetBytes
 }
 
 function Get-ExpectedLinuxMountIdentity {
@@ -241,13 +294,14 @@ function Get-ExpectedLinuxMountIdentity {
         ([string]$disk.UniqueId).Trim() -eq ([string]$plan.disk.uniqueId).Trim()
     ) "The Linux mount disk identity differs from the installation plan."
     [int64]$plannedSize = [int64]$plan.disk.installer.finalSizeBytes
+    [int64]$plannedOffset = Get-PlannedLinuxOffset -Plan $plan
     [int64]$alignmentBytes = [int64]$config.partition_alignment_bytes
     Assert-Condition ($alignmentBytes -gt 0 -and $alignmentBytes -le $plannedSize) `
         "The partition alignment contract is invalid."
     $partitions = @(
         Get-Partition -DiskNumber $disk.Number -ErrorAction Stop |
             Where-Object {
-                [int64]$_.Offset -eq [int64]$plan.disk.installer.offsetBytes -and
+                [int64]$_.Offset -eq $plannedOffset -and
                 [int64]$_.Size -le $plannedSize -and
                 [int64]$_.Size -ge ($plannedSize - $alignmentBytes)
             }
@@ -508,6 +562,37 @@ try {
                 "The Windows result window started before Linux first-boot evidence existed."
             Write-Output "LIBERTIX_WAITING_FOR_LINUX=verified"
         }
+        "filesystem_repair_state" {
+            $session = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $currentBootId = ([DateTime](
+                Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            ).LastBootUpTime).ToUniversalTime().ToString("o")
+            $repairPath = Join-Path $session.Root "windows-filesystem-repair.json"
+            if ([string]$session.Plan.disk.installer.resizeMode -ne "live-offline") {
+                Write-Output "WINDOWS_FILESYSTEM_REPAIR_STATUS=not-required"
+                Write-Output "WINDOWS_FILESYSTEM_REPAIR_ATTEMPT=0"
+                Write-Output "WINDOWS_FILESYSTEM_REPAIR_SCHEDULED_BOOT="
+                Write-Output "WINDOWS_CURRENT_BOOT=$currentBootId"
+                break
+            }
+            if (-not (Test-Path -LiteralPath $repairPath -PathType Leaf)) {
+                Write-Output "WINDOWS_FILESYSTEM_REPAIR_STATUS=pending"
+                Write-Output "WINDOWS_FILESYSTEM_REPAIR_ATTEMPT=0"
+                Write-Output "WINDOWS_FILESYSTEM_REPAIR_SCHEDULED_BOOT="
+                Write-Output "WINDOWS_CURRENT_BOOT=$currentBootId"
+                break
+            }
+            $repair = Read-JsonFileWithRetry -LiteralPath $repairPath
+            Assert-Condition (
+                [int]$repair.schemaVersion -eq 1 -and
+                [string]$repair.planId -eq [string]$session.Plan.planId
+            ) "Windows filesystem repair state belongs to another installation plan."
+            Write-Output "WINDOWS_FILESYSTEM_REPAIR_STATUS=$([string]$repair.status)"
+            Write-Output "WINDOWS_FILESYSTEM_REPAIR_ATTEMPT=$([int]$repair.attemptCount)"
+            Write-Output "WINDOWS_FILESYSTEM_REPAIR_SCHEDULED_BOOT=$([string]$repair.scheduledFromBootId)"
+            Write-Output "WINDOWS_CURRENT_BOOT=$currentBootId"
+        }
         "finalization" {
             $deadline = [DateTime]::UtcNow.AddMinutes(5)
             do {
@@ -688,7 +773,7 @@ try {
             $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
             $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
             $partitions = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop)
-            $installerOffset = [int64]$plan.disk.installer.offsetBytes
+            $installerOffset = Get-PlannedLinuxOffset -Plan $plan
             $finalLinuxSize = [int64]$plan.disk.installer.finalSizeBytes
             $recoverySession = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)

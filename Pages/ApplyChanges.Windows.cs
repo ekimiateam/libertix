@@ -183,7 +183,7 @@ namespace Libertix.Pages
             configuration.SystemDiskNumber = _installationPlan.Disk.Number;
             configuration.SystemDiskUniqueId = _installationPlan.Disk.UniqueId;
             configuration.ExpectedLinuxPartitionOffset =
-                _installationPlan.Disk.Installer.OffsetBytes.Value;
+                GetExpectedFinalLinuxOffset();
             configuration.ExpectedLinuxPartitionSize =
                 _installationPlan.Disk.Installer.FinalSizeBytes;
             configuration.PartitionSizeToleranceBytes =
@@ -194,6 +194,21 @@ namespace Libertix.Pages
                 $"installation plan: offset={configuration.ExpectedLinuxPartitionOffset}, " +
                 $"size={configuration.ExpectedLinuxPartitionSize}, " +
                 $"tolerance={configuration.PartitionSizeToleranceBytes}.");
+        }
+
+        private long GetExpectedFinalLinuxOffset()
+        {
+            InstallerPartitionPlan installer = _installationPlan?.Disk?.Installer ??
+                throw new InvalidOperationException("Installation plan is not initialized.");
+            if (string.Equals(
+                installer.ResizeMode,
+                InstallationResizeMode.LiveOffline,
+                StringComparison.Ordinal))
+            {
+                return installer.FinalOffsetBytes;
+            }
+            return installer.OffsetBytes ?? throw new InvalidOperationException(
+                "Observed installer partition identity is unavailable.");
         }
 
         private static void CleanupPendingWindowsSharePayload()

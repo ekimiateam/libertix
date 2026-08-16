@@ -158,14 +158,25 @@ restore_windows_partition_best_effort() {
     # before Recovery. Cloned layouts may intentionally contain a pre-existing
     # gap, and growing C: into that gap would make rollback non-reversible.
     echo "ROLLBACK: restoring Windows partition $WINDOWS_PART to its original end"
-    parted -s "$DISK" unit s resizepart \
-        "$windows_number" "$((original_end_sector - 1))s" || {
+    resize_partition_size_sectors \
+        "$DISK" "$windows_number" \
+        "$((WINDOWS_PARTITION_SIZE_BYTES / logical_sector))" || {
         echo "ROLLBACK: partition resize failed"
         return 1
     }
 
     partprobe "$DISK" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
+    [ "$(partition_start_bytes "$DISK" "$WINDOWS_PART" || true)" = \
+        "$WINDOWS_PARTITION_OFFSET_BYTES" ] || {
+        echo "ROLLBACK: Windows partition start changed unexpectedly"
+        return 1
+    }
+    [ "$(blockdev --getsize64 "$WINDOWS_PART" 2>/dev/null || echo 0)" = \
+        "$WINDOWS_PARTITION_SIZE_BYTES" ] || {
+        echo "ROLLBACK: Windows partition size was not restored"
+        return 1
+    }
     echo "ROLLBACK: growing NTFS filesystem"
     ntfsresize -f "$WINDOWS_PART" <<< "y" && ntfsfix -d "$WINDOWS_PART" || {
         echo "ROLLBACK: NTFS growth or verification failed"

@@ -108,6 +108,12 @@ class AutomationRequest(ValidationRequest):
             "Inject one stale UEFI Libertix entry before launch for ownership regression tests"
         ),
     )
+    force_offline_ntfs_resize: bool = Field(
+        default=False,
+        description=(
+            "Force the development-only live offline NTFS resize path for regression testing"
+        ),
+    )
 
     @field_validator("linux_username")
     @classmethod

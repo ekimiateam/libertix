@@ -19,7 +19,7 @@ class StoragePolicy:
     windows_free_space_retry_window_gib: int
     preflight_shrink_safety_gib: int
     maximum_direct_fat32_size_gib: int
-    large_installation_staging_size_gib: int
+    staging_size_gib: int
     partition_alignment_bytes: int
     recommended_linux_fraction_of_free_space: float
     maximum_recommended_linux_size_gib: int
@@ -105,9 +105,7 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         ),
         preflight_shrink_safety_gib=_require_integer(storage_raw, "preflightShrinkSafetyGiB"),
         maximum_direct_fat32_size_gib=_require_integer(storage_raw, "maximumDirectFat32SizeGiB"),
-        large_installation_staging_size_gib=_require_integer(
-            storage_raw, "largeInstallationStagingSizeGiB"
-        ),
+        staging_size_gib=_require_integer(storage_raw, "stagingSizeGiB"),
         partition_alignment_bytes=_require_integer(storage_raw, "partitionAlignmentBytes"),
         recommended_linux_fraction_of_free_space=_require_number(
             storage_raw, "recommendedLinuxFractionOfFreeSpace"
@@ -173,8 +171,8 @@ def load_installation_policy(path: Path | None = None) -> InstallationPolicy:
         or storage.recommended_linux_fraction_of_free_space > 1
         or storage.maximum_recommended_linux_size_gib < storage.minimum_final_size_gib
         or storage.maximum_direct_fat32_size_gib < storage.minimum_final_size_gib
-        or storage.large_installation_staging_size_gib <= 0
-        or storage.large_installation_staging_size_gib > storage.maximum_direct_fat32_size_gib
+        or storage.staging_size_gib <= 0
+        or storage.staging_size_gib > storage.maximum_direct_fat32_size_gib
         or storage.partition_alignment_bytes <= 0
         or storage.partition_alignment_bytes & (storage.partition_alignment_bytes - 1) != 0
         or memory.live_minimum_mib <= 0

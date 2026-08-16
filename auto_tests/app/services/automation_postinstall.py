@@ -295,6 +295,12 @@ class PostInstallValidationMixin:
                 test="windows.ssh",
                 server_key_sha256=windows_ssh.server_key_sha256,
             )
+            windows_ssh = self._wait_for_windows_filesystem_repair(
+                windows_ssh,
+                vm,
+                options,
+                result,
+            )
             self._prepare_windows_graphical_session(windows_ssh, vm, result)
             try:
                 self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
@@ -419,6 +425,123 @@ class PostInstallValidationMixin:
                 )
         finally:
             final_windows_ssh.__exit__(None, None, None)
+
+    @staticmethod
+    def _parse_windows_repair_state(stdout: str) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in stdout.splitlines():
+            if "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            if name.startswith("WINDOWS_"):
+                values[name] = value.strip()
+        return values
+
+    def _wait_for_windows_filesystem_repair(
+        self,
+        windows_ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> SSHClient:
+        deadline = time.monotonic() + (self.settings.post_install_boot_timeout_seconds * 3)
+        repair_reboots = 0
+        current_ssh = windows_ssh
+        while time.monotonic() < deadline:
+            try:
+                response = self._run_windows_script_resiliently(
+                    current_ssh,
+                    script_name="post_install_windows_check.ps1",
+                    config={
+                        "check": "filesystem_repair_state",
+                        "expected_firmware": vm.firmware,
+                    },
+                    step="automation.windows_filesystem_repair_state",
+                    timeout=60,
+                )
+            except WorkflowError as exc:
+                if not is_reconnectable_transport_error(exc):
+                    raise
+                current_ssh.__exit__(None, None, None)
+                time.sleep(10)
+                current_ssh = self._wait_for_ssh(
+                    vm,
+                    result=result,
+                    username=vm.username,
+                    password=self.settings.windows_ssh_password.get_secret_value(),
+                    trust_on_first_use=False,
+                    probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+                    expected="LIBERTIX_WINDOWS_READY",
+                    phase="windows_filesystem_repair",
+                    grub_entry="windows",
+                    distribution=options.distribution,
+                )
+                continue
+
+            state = self._parse_windows_repair_state(response.stdout)
+            status = state.get("WINDOWS_FILESYSTEM_REPAIR_STATUS", "")
+            if status in {"not-required", "succeeded"}:
+                result.ok(
+                    "automation.windows_filesystem_repair",
+                    "Windows filesystem repair state is ready",
+                    vm=vm.name,
+                    target=vm.host,
+                    status=status,
+                    attempt_count=state.get("WINDOWS_FILESYSTEM_REPAIR_ATTEMPT", "0"),
+                )
+                return current_ssh
+            if status == "failed":
+                raise WorkflowError(
+                    "automation.windows_filesystem_repair",
+                    "Windows boot-volume repair reached a terminal failure",
+                    details={"vm": vm.name, "target": vm.host, **state},
+                )
+            if status not in {"pending", "waiting-reboot"}:
+                raise WorkflowError(
+                    "automation.windows_filesystem_repair",
+                    "Windows filesystem repair returned an unknown state",
+                    details={"vm": vm.name, "target": vm.host, **state},
+                )
+
+            scheduled_boot = state.get("WINDOWS_FILESYSTEM_REPAIR_SCHEDULED_BOOT", "")
+            current_boot = state.get("WINDOWS_CURRENT_BOOT", "")
+            if status == "waiting-reboot" and scheduled_boot == current_boot:
+                repair_reboots += 1
+                if repair_reboots > 2:
+                    raise WorkflowError(
+                        "automation.windows_filesystem_repair",
+                        "Windows requested more than two filesystem repair reboots",
+                        details={"vm": vm.name, "target": vm.host, **state},
+                    )
+                result.ok(
+                    "automation.windows_filesystem_repair_reboot",
+                    "Waiting for the scheduled Windows boot-volume repair",
+                    vm=vm.name,
+                    target=vm.host,
+                    attempt=repair_reboots,
+                )
+                current_ssh.__exit__(None, None, None)
+                time.sleep(10)
+                current_ssh = self._wait_for_ssh(
+                    vm,
+                    result=result,
+                    username=vm.username,
+                    password=self.settings.windows_ssh_password.get_secret_value(),
+                    trust_on_first_use=False,
+                    probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+                    expected="LIBERTIX_WINDOWS_READY",
+                    phase="windows_filesystem_repair",
+                    grub_entry="windows",
+                    distribution=options.distribution,
+                )
+                continue
+            time.sleep(2)
+
+        raise WorkflowError(
+            "automation.windows_filesystem_repair",
+            "Timed out waiting for Windows boot-volume repair",
+            details={"vm": vm.name, "target": vm.host},
+        )
 
     def _wait_for_first_boot_verification(
         self,

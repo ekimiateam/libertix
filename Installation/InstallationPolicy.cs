@@ -53,8 +53,8 @@ namespace Libertix.Installation
                 storage.WindowsFreeSpaceRetryWindowGiB < 0 ||
                 storage.PreflightShrinkSafetyGiB < 0 ||
                 storage.MaximumDirectFat32SizeGiB < storage.MinimumFinalSizeGiB ||
-                storage.LargeInstallationStagingSizeGiB <= 0 ||
-                storage.LargeInstallationStagingSizeGiB > storage.MaximumDirectFat32SizeGiB ||
+                storage.StagingSizeGiB <= 0 ||
+                storage.StagingSizeGiB > storage.MaximumDirectFat32SizeGiB ||
                 storage.PartitionAlignmentBytes <= 0 ||
                 (storage.PartitionAlignmentBytes & (storage.PartitionAlignmentBytes - 1)) != 0 ||
                 storage.RecommendedLinuxFractionOfFreeSpace <= 0 ||
@@ -115,7 +115,7 @@ namespace Libertix.Installation
         public int WindowsFreeSpaceRetryWindowGiB { get; set; }
         public int PreflightShrinkSafetyGiB { get; set; }
         public int MaximumDirectFat32SizeGiB { get; set; }
-        public int LargeInstallationStagingSizeGiB { get; set; }
+        public int StagingSizeGiB { get; set; }
         public long PartitionAlignmentBytes { get; set; }
         public double RecommendedLinuxFractionOfFreeSpace { get; set; }
         public int MaximumRecommendedLinuxSizeGiB { get; set; }

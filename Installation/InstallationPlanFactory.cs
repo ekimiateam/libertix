@@ -53,6 +53,13 @@ namespace Libertix.Installation
                     options.SystemDriveRoot,
                     options.PlanId,
                     options.Distribution.IsoInstallerFileName);
+            long originalWindowsEnd = checked(
+                options.Storage.WindowsPartition.OffsetBytes +
+                options.Storage.WindowsPartition.SizeBytes);
+            long alignmentPadding = originalWindowsEnd %
+                InstallationSizePolicy.PartitionAlignmentBytes;
+            long finalInstallerOffset = checked(
+                originalWindowsEnd - alignmentPadding - options.Sizes.FinalSizeBytes);
             var plan = new InstallationPlan
             {
                 PlanId = options.PlanId,
@@ -107,6 +114,10 @@ namespace Libertix.Installation
                     Recovery = options.Storage.RecoveryPartition,
                     Installer = new InstallerPartitionPlan
                     {
+                        FinalOffsetBytes = finalInstallerOffset,
+                        ResizeMode = options.StartupOptions.ForceOfflineNtfsResize
+                            ? InstallationResizeMode.LiveOffline
+                            : InstallationResizeMode.WindowsOnline,
                         FinalSizeBytes = options.Sizes.FinalSizeBytes,
                         StagingSizeBytes = options.Sizes.StagingSizeBytes
                     }
@@ -119,6 +130,7 @@ namespace Libertix.Installation
                 },
                 Runtime = new InstallationRuntime
                 {
+                    WindowsBitLockerState = options.Storage.BitLockerState,
                     LowMemoryMode = options.Compatibility?.LowMemoryMode == true,
                     BootStrategy = isUefi
                         ? InstallationBootStrategy.UefiBootNext
