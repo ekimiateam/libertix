@@ -500,6 +500,7 @@ namespace Libertix.Pages
                     SearchOption.TopDirectoryOnly)
                 .Where(path =>
                     Path.GetFileName(path).Equals("Libertix.exe", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetFileName(path).Equals("Libertix.BootGuardian.exe", StringComparison.OrdinalIgnoreCase) ||
                     Path.GetExtension(path).Equals(".dll", StringComparison.OrdinalIgnoreCase) ||
                     Path.GetExtension(path).Equals(".config", StringComparison.OrdinalIgnoreCase))
                 .ToArray();
@@ -541,6 +542,14 @@ namespace Libertix.Pages
                 "Scripts",
                 "modules",
                 "Libertix.PreferredBootPath.psm1");
+            string bootGuardianModule = Path.Combine(
+                recovery.PayloadRoot,
+                "Scripts",
+                "modules",
+                "Libertix.BootGuardian.psm1");
+            string bootGuardianExecutable = Path.Combine(
+                recovery.PayloadRoot,
+                "Libertix.BootGuardian.exe");
             string storageGeometryModule = Path.Combine(
                 recovery.PayloadRoot,
                 "Scripts",
@@ -556,6 +565,8 @@ namespace Libertix.Pages
                 !File.Exists(taskRegistrationScript) ||
                 !File.Exists(firmwareReadModule) ||
                 !File.Exists(preferredBootPathModule) ||
+                !File.Exists(bootGuardianModule) ||
+                !File.Exists(bootGuardianExecutable) ||
                 !File.Exists(storageGeometryModule) ||
                 !File.Exists(atomicFileModule) ||
                 !File.Exists(recovery.ConfigPath))

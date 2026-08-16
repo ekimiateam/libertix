@@ -40,6 +40,7 @@
   <ItemGroup>
     <Compile Include="InstallationContractsTests.cs" />
     <Compile Include="RuntimeContractTests.cs" />
+    <Compile Include="BootGuardianTests.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
@@ -51,6 +52,10 @@
     <ProjectReference Include="..\Libertix.csproj">
       <Project>{0E3A4663-C258-4180-B222-4FF7990D73F9}</Project>
       <Name>Libertix</Name>
+    </ProjectReference>
+    <ProjectReference Include="..\BootGuardian\Libertix.BootGuardian.csproj">
+      <Project>{A147B320-A380-4E00-B8FC-8DB44410C6F5}</Project>
+      <Name>Libertix.BootGuardian</Name>
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>

@@ -161,6 +161,8 @@ def test_web_ui_is_served() -> None:
     assert "simulate_stale_firmware_entries" in response.text
     assert 'id="forceOfflineNtfsResize"' in response.text
     assert "force_offline_ntfs_resize" in response.text
+    assert "boot_guardian_fault" in response.text
+    assert 'id="bootGuardianFault"' in response.text
     assert "distribution" in response.text
     assert "Zorin OS 18.1 Core" in response.text
     assert "source" in response.text

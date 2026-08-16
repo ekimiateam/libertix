@@ -50,7 +50,6 @@ class InstallationMonitoringMixin:
         previous_signature: tuple[int, ...] | None = None
         unchanged_captures = 0
         last_visual_change_at = time.monotonic()
-        vision_disabled = False
         live_failure_reboot_probe_sent = False
         monitor_delay_seconds = self.settings.automation_monitor_interval_seconds
         while time.monotonic() < deadline:
@@ -130,39 +129,26 @@ class InstallationMonitoringMixin:
                         unchanged_count=unchanged_captures,
                     )
                     continue
-                if vision_disabled:
-                    self._request_live_failure_reboot_probe(vm, capture, result)
-                    live_failure_reboot_probe_sent = True
             else:
                 previous_signature = signature
                 unchanged_captures = 0
                 last_visual_change_at = time.monotonic()
-            if vision_disabled:
-                result.ok(
-                    "automation.monitor_without_vision",
-                    f"{firmware.upper()} installation remains under deterministic observation",
-                    target=vm.vnc,
-                    vm=vm.name,
-                    capture=str(capture),
-                )
-                continue
             try:
                 verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
             except WorkflowError as exc:
-                http_status = exc.details.get("http_status")
-                if http_status in (401, 402, 403):
-                    vision_disabled = True
-                result.ok(
-                    "automation.monitor_vision_unavailable",
-                    f"{firmware.upper()} vision observation is unavailable; "
-                    "deterministic monitoring continues",
-                    target=vm.vnc,
-                    vm=vm.name,
-                    capture=str(capture),
-                    http_status=http_status,
-                    vision_disabled=vision_disabled,
-                )
-                continue
+                raise WorkflowError(
+                    "automation.monitor_vision_required",
+                    f"{firmware.upper()} installation monitoring requires the configured "
+                    "vision provider",
+                    details={
+                        **exc.details,
+                        "target": vm.vnc,
+                        "vm": vm.name,
+                        "capture": str(capture),
+                        "provider_step": exc.step,
+                        "provider_message": exc.message,
+                    },
+                ) from exc
             context = {
                 "target": vm.vnc,
                 "vm": vm.name,
@@ -207,6 +193,10 @@ class InstallationMonitoringMixin:
                 )
                 continue
             if verdict.error_visible or verdict.blocking_problem_visible:
+                if reboot_attempts > 0 and not live_failure_reboot_probe_sent:
+                    self._request_live_failure_reboot_probe(vm, capture, result)
+                    live_failure_reboot_probe_sent = True
+                    continue
                 raise WorkflowError(
                     "automation.monitor_installation",
                     f"Visible error during {firmware.upper()} installation",

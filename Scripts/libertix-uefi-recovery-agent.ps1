@@ -539,6 +539,75 @@ function Import-PreferredBootPathModule {
     Import-Module -Name $modulePath -Force -ErrorAction Stop
 }
 
+function Import-BootGuardianModule {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $modulePath = Join-Path `
+        $State.PayloadRoot `
+        "Scripts\modules\Libertix.BootGuardian.psm1"
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
+        throw "Boot guardian module is missing from the recovery payload."
+    }
+    Import-Module -Name $modulePath -Force -ErrorAction Stop
+}
+
+function Install-BootGuardianForCurrentBootPath {
+    param([Parameter(Mandatory = $true)]$State)
+
+    Import-BootGuardianModule -State $State
+    $preferredManifest = Join-Path `
+        $State.RecoveryRoot `
+        "preferred-boot-path\manifest.json"
+    $mode = "firmware-boot-order"
+    if (Test-Path -LiteralPath $preferredManifest -PathType Leaf) {
+        $preferredState = Get-Content `
+            -LiteralPath $preferredManifest `
+            -Raw `
+            -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        if (
+            [int]$preferredState.version -ne 1 -or
+            [string]$preferredState.runId -ne [string]$State.RunId
+        ) {
+            throw "Preferred boot path archive identity is invalid before guardian installation."
+        }
+        if ([string]$preferredState.status -eq "installed") {
+            Import-PreferredBootPathModule -State $State
+            $mode = "preferred-windows-path"
+        } elseif ([string]$preferredState.status -ne "restored") {
+            throw "Preferred boot path archive has an incomplete state before guardian installation."
+        }
+    }
+    $writeLog = { param($Message) Write-AgentLog -Message $Message }
+    return Invoke-WithVerifiedEsp -State $State -Action {
+        param($espPartition, $espRoot)
+        return Install-LibertixBootGuardian `
+            -State $State `
+            -EspPartition $espPartition `
+            -EspRoot $espRoot `
+            -Mode $mode `
+            -WriteLog $writeLog
+    }
+}
+
+function Remove-BootGuardianIfPresent {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $archiveConfig = Join-Path $State.RecoveryRoot "boot-guardian\config.json"
+    if (-not (Test-Path -LiteralPath $archiveConfig -PathType Leaf)) {
+        return $false
+    }
+    Import-BootGuardianModule -State $State
+    $writeLog = { param($Message) Write-AgentLog -Message $Message }
+    return Invoke-WithVerifiedEsp -State $State -Action {
+        param($espPartition, $espRoot)
+        $null = $espPartition
+        return Remove-LibertixBootGuardian `
+            -State $State `
+            -EspRoot $espRoot `
+            -WriteLog $writeLog
+    }
+}
+
 function Restore-PreferredBootPathIfPresent {
     param([Parameter(Mandatory = $true)]$State)
 
@@ -878,6 +947,7 @@ function Invoke-VerifiedInstallationSuccess {
         Invoke-WindowsShareFinalize
         Remove-TemporaryRecoveryArtifacts -State $State
         Restore-HibernationAfterInstallation -State $State
+        $null = Install-BootGuardianForCurrentBootPath -State $State
         $null = Invoke-LibertixPostInstallVerification `
             -RecoveryRoot ([string]$State.RecoveryRoot) `
             -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
@@ -1030,6 +1100,7 @@ try {
 
     if ($Action -eq "Cancel") {
         $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded"
+        $null = Remove-BootGuardianIfPresent -State $state
         if ([string]$executionState.status -ne "rolled-back") {
             $null = Restore-PreferredBootPathIfPresent -State $state
             Restore-UefiTransactionArchive -State $state
@@ -1088,6 +1159,7 @@ try {
                 -EspRoot $espRoot `
                 -WriteLog $writeLog
         }
+        $null = Install-BootGuardianForCurrentBootPath -State $state
         $state.Phase = "AwaitingPreferredPathReboot"
         Save-State -State $state
         Write-AgentLog "Preferred Windows boot path fallback is installed and ready for reboot."
@@ -1113,9 +1185,11 @@ try {
                 [string]$state.Phase -eq "AwaitingPreferredPathReboot" -and
                 (Test-Path -LiteralPath $preferredManifest -PathType Leaf)
             )
+            $firmwareBypassEvaluationSucceeded = $preferredPathAlreadyInstalled
             if (-not $preferredPathAlreadyInstalled) {
                 try {
                     $firmwareBypassEvidence = Get-FirmwareBootBypassEvidence -State $state
+                    $firmwareBypassEvaluationSucceeded = $true
                 } catch {
                     Write-AgentLog (
                         "Firmware bypass evidence could not be proven; continuing to wait for " +
@@ -1133,6 +1207,8 @@ try {
                     "Firmware bypass proven: Windows Boot Manager is BootCurrent and remains " +
                     "first in BootOrder while the exact owned Libertix entry targets the same ESP."
                 )
+            } elseif ($firmwareBypassEvaluationSucceeded) {
+                $null = Install-BootGuardianForCurrentBootPath -State $state
             }
             $null = Set-LibertixPostInstallWaitingForLinux `
                 -RecoveryRoot ([string]$state.RecoveryRoot) `

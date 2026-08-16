@@ -20,6 +20,7 @@ class AutomationOptions:
     use_default_filepool: bool = False
     simulate_stale_firmware_entries: bool = False
     force_offline_ntfs_resize: bool = False
+    boot_guardian_fault: Literal["none", "boot-order", "preferred-path"] = "none"
     first_boot: Literal["windows", "linux"] = "windows"
 
 

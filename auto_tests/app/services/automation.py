@@ -85,6 +85,7 @@ class AutomationService(
         share_linux_files_in_windows: bool = True,
         simulate_stale_firmware_entries: bool = False,
         force_offline_ntfs_resize: bool = False,
+        boot_guardian_fault: Literal["none", "boot-order", "preferred-path"] = "none",
         first_boot: Literal["windows", "linux"] = "windows",
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
@@ -111,6 +112,22 @@ class AutomationService(
                 )
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
+            if boot_guardian_fault != "none":
+                if len(selected_vms) != 1 or selected_vms[0].firmware != "uefi":
+                    raise WorkflowError(
+                        "automation.boot_guardian_fault_scope",
+                        "A boot guardian fault test requires exactly one UEFI test VM",
+                        details={
+                            "selected_vms": [vm.name for vm in selected_vms],
+                            "fault": boot_guardian_fault,
+                        },
+                    )
+                if first_boot != "windows":
+                    raise WorkflowError(
+                        "automation.boot_guardian_fault_order",
+                        "A boot guardian fault test requires first_boot=windows",
+                        details={"fault": boot_guardian_fault, "first_boot": first_boot},
+                    )
             # Restore every selected VM after one all-VM preflight barrier so
             # parallel nominal runs start from one coherent clean baseline.
             self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
@@ -132,6 +149,7 @@ class AutomationService(
                 use_default_filepool=source == "published",
                 simulate_stale_firmware_entries=simulate_stale_firmware_entries,
                 force_offline_ntfs_resize=force_offline_ntfs_resize,
+                boot_guardian_fault=boot_guardian_fault,
                 first_boot=first_boot,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:

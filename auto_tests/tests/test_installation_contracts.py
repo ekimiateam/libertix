@@ -25,7 +25,14 @@ def test_legacy_project_compiles_every_application_source_file() -> None:
         for element in project.findall(".//msbuild:Compile", namespace)
         if "Include" in element.attrib
     }
-    ignored_roots = {"auto_tests", "Libertix.Tests", "bin", "obj", ".work"}
+    ignored_roots = {
+        "auto_tests",
+        "BootGuardian",
+        "Libertix.Tests",
+        "bin",
+        "obj",
+        ".work",
+    }
     application_sources = {
         path.relative_to(ROOT).as_posix()
         for path in ROOT.rglob("*.cs")

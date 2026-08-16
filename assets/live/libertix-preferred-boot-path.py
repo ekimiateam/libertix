@@ -30,21 +30,28 @@ def read_manifest(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise PreferredBootPathError(f"cannot read preferred boot manifest: {error}") from error
+        raise PreferredBootPathError(
+            f"cannot read preferred boot manifest: {error}"
+        ) from error
     if not isinstance(value, dict) or value.get("version") != 1:
         raise PreferredBootPathError("preferred boot manifest version is invalid")
     run_id = value.get("runId")
     if not isinstance(run_id, str) or len(run_id) != 32:
-        raise PreferredBootPathError("preferred boot manifest run identifier is invalid")
+        raise PreferredBootPathError(
+            "preferred boot manifest run identifier is invalid"
+        )
     windows = value.get("windowsLoader")
     preferred = value.get("preferred")
     if not isinstance(windows, dict) or not isinstance(preferred, dict):
         raise PreferredBootPathError("preferred boot manifest payload is invalid")
     if (
         windows.get("activePath") != r"\EFI\Microsoft\Boot\bootmgfw.efi"
-        or windows.get("backupPath") != r"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi"
+        or windows.get("backupPath")
+        != r"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi"
     ):
-        raise PreferredBootPathError("preferred boot manifest contains unexpected EFI paths")
+        raise PreferredBootPathError(
+            "preferred boot manifest contains unexpected EFI paths"
+        )
     for parent, name in (
         (windows, "sha256"),
         (preferred, "shimSha256"),
@@ -54,7 +61,9 @@ def read_manifest(path: Path) -> dict[str, object]:
     ):
         digest = parent.get(name)
         if not isinstance(digest, str) or len(digest) != 64:
-            raise PreferredBootPathError(f"preferred boot manifest hash is invalid: {name}")
+            raise PreferredBootPathError(
+                f"preferred boot manifest hash is invalid: {name}"
+            )
     return value
 
 
@@ -87,7 +96,9 @@ def replace_atomic(source: Path, destination: Path, expected_hash: str) -> None:
 
 
 def verify_windows_loader(verifier: Path, loader: Path) -> None:
-    with tempfile.TemporaryDirectory(prefix="libertix-windows-loader-evidence-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix="libertix-windows-loader-evidence-"
+    ) as directory:
         evidence = Path(directory) / "evidence.json"
         result = subprocess.run(
             [
@@ -108,7 +119,9 @@ def verify_windows_loader(verifier: Path, loader: Path) -> None:
             )
         value = json.loads(evidence.read_text(encoding="utf-8"))
         if value.get("status") != "verified-windows-loader":
-            raise PreferredBootPathError("Windows Boot Manager trust evidence is incomplete")
+            raise PreferredBootPathError(
+                "Windows Boot Manager trust evidence is incomplete"
+            )
 
 
 def archive_windows_loader(history_root: Path, loader: Path, digest: str) -> None:
@@ -158,11 +171,15 @@ def synchronize(args: argparse.Namespace) -> None:
     original_hash = str(windows["sha256"])
     previous_shim_hash = str(preferred["shimSha256"])
     if sha256(backup_loader) != original_hash:
-        raise PreferredBootPathError("preferred Windows Boot Manager backup hash mismatch")
+        raise PreferredBootPathError(
+            "preferred Windows Boot Manager backup hash mismatch"
+        )
 
     if active_hash not in {original_hash, previous_shim_hash}:
         verify_windows_loader(Path(args.secure_boot_verifier), active_loader)
-        archive_windows_loader(libertix / "WindowsBootManagerHistory", backup_loader, original_hash)
+        archive_windows_loader(
+            libertix / "WindowsBootManagerHistory", backup_loader, original_hash
+        )
         replace_atomic(active_loader, backup_loader, active_hash)
         original_hash = active_hash
         windows["sha256"] = active_hash
@@ -174,7 +191,9 @@ def synchronize(args: argparse.Namespace) -> None:
     }
     source_hashes = {name: sha256(path) for name, path in sources.items()}
     microsoft.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=".libertix-preferred-", dir=microsoft) as directory:
+    with tempfile.TemporaryDirectory(
+        prefix=".libertix-preferred-", dir=microsoft
+    ) as directory:
         config = Path(directory) / "grub.cfg"
         config_hash = preferred_grub_config(libertix / "grub.cfg", config)
         replace_atomic(
@@ -188,9 +207,41 @@ def synchronize(args: argparse.Namespace) -> None:
             source_hashes["mokManagerSha256"],
         )
         replace_atomic(config, microsoft / "grub.cfg", config_hash)
+        reference = libertix / "BootGuardianReference"
+        if reference.exists():
+            if not reference.is_dir():
+                raise PreferredBootPathError(
+                    "boot guardian reference path is not a directory"
+                )
+            owner = reference / ".libertix-owner"
+            if (
+                not owner.is_file()
+                or owner.read_text(encoding="utf-8").strip() != manifest["runId"]
+            ):
+                raise PreferredBootPathError(
+                    "boot guardian reference ownership is invalid"
+                )
+            replace_atomic(
+                sources["grubSha256"],
+                reference / "grubx64.efi",
+                source_hashes["grubSha256"],
+            )
+            replace_atomic(
+                sources["mokManagerSha256"],
+                reference / "mmx64.efi",
+                source_hashes["mokManagerSha256"],
+            )
+            replace_atomic(config, reference / "grub.cfg", config_hash)
+            replace_atomic(
+                sources["shimSha256"],
+                reference / "shimx64.efi",
+                source_hashes["shimSha256"],
+            )
         # The first-stage loader is published last so a failed synchronization
         # always leaves either the previous complete chain or the new one.
-        replace_atomic(sources["shimSha256"], active_loader, source_hashes["shimSha256"])
+        replace_atomic(
+            sources["shimSha256"], active_loader, source_hashes["shimSha256"]
+        )
 
     preferred.update(source_hashes)
     preferred["grubConfigSha256"] = config_hash
@@ -214,7 +265,9 @@ def main() -> int:
     try:
         synchronize(parse_args())
     except (OSError, ValueError, json.JSONDecodeError, PreferredBootPathError) as error:
-        print(f"Preferred boot path synchronization failed: {error}", file=os.sys.stderr)
+        print(
+            f"Preferred boot path synchronization failed: {error}", file=os.sys.stderr
+        )
         return 1
     return 0
 

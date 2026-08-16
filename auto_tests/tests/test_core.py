@@ -1623,7 +1623,7 @@ def test_unattended_windows_preparation_reports_a_visual_stall(
     assert raised.value.details["stalled_seconds"] >= 0.5
 
 
-def test_unattended_windows_preparation_survives_vision_payment_failure(
+def test_unattended_windows_preparation_reports_vision_payment_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = AutomationService(settings())
@@ -1663,20 +1663,22 @@ def test_unattended_windows_preparation_survives_vision_payment_failure(
     monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     result = ResultBuilder("automation")
 
-    observed = service._wait_for_unattended_stage(  # noqa: SLF001
-        FakeSsh(),
-        vm,
-        r"C:\ProgramData\Libertix\Automation\run.status.json",
-        10,
-        ("reboot-ready",),
-        observe_installation_progress=True,
-        result=result,
-    )
+    with pytest.raises(WorkflowError) as raised:
+        service._wait_for_unattended_stage(  # noqa: SLF001
+            FakeSsh(),
+            vm,
+            r"C:\ProgramData\Libertix\Automation\run.status.json",
+            10,
+            ("reboot-ready",),
+            observe_installation_progress=True,
+            result=result,
+        )
 
-    assert observed == {"sequence": 11, "stage": "reboot-ready"}
-    assert [step.step for step in result.steps] == [
-        "automation.windows_preparation_vision_unavailable"
-    ]
+    assert raised.value.step == "automation.windows_preparation_vision_required"
+    assert raised.value.details["http_status"] == 402
+    assert raised.value.details["provider_step"] == "llm.install_progress"
+    assert raised.value.details["capture"] == "/tmp/windows-preparation-progress.png"
+    assert result.steps == []
 
 
 def test_automation_prepares_snapshot_clock_before_deployment(
@@ -1840,6 +1842,82 @@ def test_automation_requires_visual_monitoring() -> None:
 
     assert result.status == "error"
     assert result.steps[-1].step == "automation.monitor_required"
+
+
+def test_boot_guardian_fault_scope_is_rejected_before_vm_mutation() -> None:
+    bios_result = AutomationService(settings()).run(
+        ["vm1"],
+        linux_username="test",
+        linux_password="test",
+        monitor_iso=True,
+        source="local",
+        boot_guardian_fault="boot-order",
+    )
+    assert bios_result.status == "error"
+    assert bios_result.steps[-1].step == "automation.boot_guardian_fault_scope"
+
+    linux_first_result = AutomationService(settings()).run(
+        ["vm2"],
+        linux_username="test",
+        linux_password="test",
+        monitor_iso=True,
+        source="local",
+        first_boot="linux",
+        boot_guardian_fault="boot-order",
+    )
+    assert linux_first_result.status == "error"
+    assert linux_first_result.steps[-1].step == "automation.boot_guardian_fault_order"
+
+
+def test_boot_guardian_boot_order_fixture_requires_dry_run_and_repair_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    actions: list[str] = []
+
+    def fake_script(_ssh: object, **kwargs: object) -> CommandResult:
+        config = kwargs["config"]
+        assert isinstance(config, dict)
+        action = str(config["action"])
+        actions.append(action)
+        outputs = {
+            "plan-boot-order": (
+                "RUN_ID=0123456789abcdef0123456789abcdef\n"
+                "MODE=firmware-boot-order\nOWNED_BOOT=Boot0007\n"
+                "WINDOWS_BOOT=Boot0001\nCURRENT_ORDER=Boot0007,Boot0001\n"
+                "FAULT_ORDER=Boot0001,Boot0007\nWOULD_WRITE_BOOT_ORDER=true\nRESULT=OK\n"
+            ),
+            "inject-boot-order": (
+                "INJECTED_UTC=2026-08-16T10:00:00.0000000Z\n"
+                "VERIFIED_FAULT_ORDER=Boot0001,Boot0007\n"
+                "WINDOWS_BOOT=Boot0001\nRESULT=OK\n"
+            ),
+            "verify-boot-order": (
+                "REPAIR_LOG=C:\\LibertixInstallLogs\\Windows\\run\\BootGuardian\\repair.log\n"
+                "REPAIRED_ORDER=Boot0007,Boot0001\nOWNED_BOOT=Boot0007\nRESULT=OK\n"
+            ),
+        }
+        return CommandResult(stdout=outputs[action], stderr="", exit_code=0)
+
+    monkeypatch.setattr(service, "_run_windows_script_resiliently", fake_script)
+    result = ResultBuilder("automation")
+    injected = service._inject_boot_guardian_boot_order_fault(  # noqa: SLF001
+        object(),
+        vm,
+        result,  # type: ignore[arg-type]
+    )
+    service._verify_boot_guardian_boot_order_repair(  # noqa: SLF001
+        object(),
+        vm,
+        result,
+        injected,  # type: ignore[arg-type]
+    )
+
+    assert actions == ["plan-boot-order", "inject-boot-order", "verify-boot-order"]
+    assert injected == "2026-08-16T10:00:00.0000000Z"
+    assert result.steps[-1].status == "ok"
+    assert result.steps[-1].context["REPAIRED_ORDER"] == "Boot0007,Boot0001"
 
 
 def test_automation_scope_rejects_unvalidated_vm() -> None:
@@ -2398,13 +2476,12 @@ def test_automation_monitor_stops_only_on_the_installed_boot_menu(
     )
 
 
-def test_installation_monitor_survives_vision_payment_failure_until_local_grub(
+def test_installation_monitor_reports_vision_payment_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm2"])[0]
-    captures = iter((Path("/tmp/live-install.png"), Path("/tmp/final-grub.png")))
-    theme_results = iter((False, True))
+    capture = Path("/tmp/live-install.png")
     analyses = {"value": 0}
 
     def unavailable_vision(*_args: object) -> InstallProgressVerdict:
@@ -2416,29 +2493,29 @@ def test_installation_monitor_survives_vision_payment_failure_until_local_grub(
         )
 
     monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(service, "_capture_with_name", lambda *_args: next(captures))
+    monkeypatch.setattr(service, "_capture_with_name", lambda *_args: capture)
     monkeypatch.setattr(
         service,
         "_installed_grub_theme_visible",
-        lambda _capture: next(theme_results),
+        lambda _capture: False,
     )
     monkeypatch.setattr(service.vision_llm, "analyze_install_progress", unavailable_vision)
     result = ResultBuilder("automation")
 
-    outcome = service._monitor_until_live_boot(  # noqa: SLF001
-        vm,
-        result,
-        "uefi",
-        reboot_requested=True,
-    )
+    with pytest.raises(WorkflowError) as raised:
+        service._monitor_until_live_boot(  # noqa: SLF001
+            vm,
+            result,
+            "uefi",
+            reboot_requested=True,
+        )
 
-    assert outcome == "boot-menu"
+    assert raised.value.step == "automation.monitor_vision_required"
+    assert raised.value.details["http_status"] == 402
+    assert raised.value.details["provider_step"] == "llm.install_progress"
+    assert raised.value.details["capture"] == str(capture)
     assert analyses["value"] == 1
-    assert [step.step for step in result.steps] == [
-        "automation.monitor_vision_unavailable",
-        "automation.installed_boot_menu_seen",
-    ]
-    assert result.steps[-1].context["proof_source"] == "local-theme-colors"
+    assert result.steps == []
 
 
 def test_installation_monitor_tolerates_transient_vnc_outage_during_reboot(
@@ -2523,16 +2600,21 @@ def test_installation_monitor_reboots_verified_live_failure_and_reports_archive(
     clock = {"now": 0.0}
     probes: list[Path] = []
 
-    def unavailable_vision(*_args: object) -> InstallProgressVerdict:
-        raise WorkflowError(
-            "llm.install_progress",
-            "Vision provider payment required",
-            details={"http_status": 402},
+    def visible_live_failure(*_args: object) -> InstallProgressVerdict:
+        return InstallProgressVerdict(
+            iso_download_finished=True,
+            installation_finished=False,
+            reboot_prompt_visible=False,
+            still_in_progress=False,
+            error_visible=True,
+            blocking_problem_visible=True,
+            summary="The live installer reports a terminal failure.",
+            visible_text="Installation failed. Press R to reboot.",
         )
 
     monkeypatch.setattr(service, "_capture_with_name", lambda *_args: capture)
     monkeypatch.setattr(service, "_installed_grub_theme_visible", lambda _capture: False)
-    monkeypatch.setattr(service.vision_llm, "analyze_install_progress", unavailable_vision)
+    monkeypatch.setattr(service.vision_llm, "analyze_install_progress", visible_live_failure)
     monkeypatch.setattr(
         service,
         "_request_live_failure_reboot_probe",
@@ -3652,6 +3734,48 @@ def test_windows_post_install_checks_continue_after_one_failure(
     assert timeouts["chkdsk_scan"] == 1800
 
 
+def test_windows_to_linux_reboot_transport_failure_stops_the_flow() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+
+    class BrokenSSH:
+        def run(self, *_args, **_kwargs):
+            raise WorkflowError(
+                "ssh.command",
+                "transport closed",
+                details={"exception_type": "SSHException"},
+            )
+
+    with pytest.raises(WorkflowError) as captured:
+        service._request_linux_boot_from_windows(  # noqa: SLF001
+            BrokenSSH(),
+            vm,
+            ResultBuilder("automation"),
+        )
+
+    assert captured.value.step == "automation.linux_return_boot"
+    assert "could not request" in captured.value.message
+
+
+def test_windows_to_linux_reboot_rejection_stops_the_flow() -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+
+    class RejectingSSH:
+        def run(self, *_args, **_kwargs):
+            return CommandResult(stdout="", stderr="shutdown rejected", exit_code=5)
+
+    with pytest.raises(WorkflowError) as captured:
+        service._request_linux_boot_from_windows(  # noqa: SLF001
+            RejectingSSH(),
+            vm,
+            ResultBuilder("automation"),
+        )
+
+    assert captured.value.step == "automation.linux_return_boot"
+    assert captured.value.details["exit_code"] == 5
+
+
 def test_post_install_flow_proves_windows_before_first_linux_boot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3771,6 +3895,7 @@ def test_post_install_flow_proves_windows_before_first_linux_boot(
     assert events.count("wait:windows_before_linux:windows") == 1
     assert events.count("wait:windows:windows") == 1
     assert events.count("wait:windows_final:windows") == 1
+    assert events.count("prepare-windows-session") == 2
 
 
 def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
@@ -3803,7 +3928,11 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
     monkeypatch.setattr(service, "_run_remote_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service, "_wait_for_first_boot_verification", lambda *_args: None)
     monkeypatch.setattr(service, "_prepare_linux_graphical_session", lambda *_args: None)
-    monkeypatch.setattr(service, "_prepare_windows_graphical_session", lambda *_args: None)
+    monkeypatch.setattr(
+        service,
+        "_prepare_windows_graphical_session",
+        lambda *_args: events.append("prepare-windows-session"),
+    )
     monkeypatch.setattr(
         service,
         "_wait_for_windows_filesystem_repair",
@@ -3834,6 +3963,7 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
     assert events.count("wait:windows:windows") == 1
     assert events.count("wait:linux_return:linux") == 1
     assert events.count("wait:windows_final:windows") == 1
+    assert events.count("prepare-windows-session") == 2
     assert events.count("dialog:linux") == 1
     assert events.count("dialog:windows") == 1
 

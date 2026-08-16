@@ -144,6 +144,8 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
         monitor_outcome: str,
     ) -> None:
+        guardian_fault_injected_utc = ""
+        preferred_loader_fault_injected_utc = ""
         if monitor_outcome != "boot-menu":
             raise WorkflowError(
                 "automation.windows_before_linux",
@@ -199,9 +201,23 @@ class PostInstallValidationMixin:
                     stdout=response.stdout,
                     stderr=response.stderr,
                 )
+                if options.boot_guardian_fault == "boot-order":
+                    guardian_fault_injected_utc = self._inject_boot_guardian_boot_order_fault(
+                        waiting_windows_ssh,
+                        vm,
+                        result,
+                    )
+                elif options.boot_guardian_fault == "preferred-path":
+                    self._inject_boot_guardian_preferred_bypass(
+                        waiting_windows_ssh,
+                        vm,
+                        result,
+                    )
                 self._request_linux_boot_from_windows(waiting_windows_ssh, vm, result)
             finally:
                 waiting_windows_ssh.__exit__(None, None, None)
+            if options.boot_guardian_fault == "preferred-path":
+                self._accept_preferred_path_fallback(vm, options, result)
 
         result.ok(
             "automation.post_install_phase",
@@ -304,12 +320,27 @@ class PostInstallValidationMixin:
             self._prepare_windows_graphical_session(windows_ssh, vm, result)
             try:
                 self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
+                if options.boot_guardian_fault == "boot-order":
+                    self._verify_boot_guardian_boot_order_repair(
+                        windows_ssh,
+                        vm,
+                        result,
+                        guardian_fault_injected_utc,
+                    )
                 self._capture_and_dismiss_post_install_result(
                     vm,
                     result,
                     "windows",
                     windows_ssh,
                 )
+                if options.boot_guardian_fault == "preferred-path":
+                    preferred_loader_fault_injected_utc = (
+                        self._inject_boot_guardian_preferred_loader_fault(
+                            windows_ssh,
+                            vm,
+                            result,
+                        )
+                    )
             finally:
                 self._cleanup_windows_cross_os_artifact(windows_ssh, vm, options, artifacts, result)
             self._request_linux_boot_from_windows(windows_ssh, vm, result)
@@ -390,6 +421,7 @@ class PostInstallValidationMixin:
             distribution=options.distribution,
         )
         try:
+            self._prepare_windows_graphical_session(final_windows_ssh, vm, result)
             try:
                 response = self._run_windows_script_resiliently(
                     final_windows_ssh,
@@ -422,6 +454,13 @@ class PostInstallValidationMixin:
                     target=vm.host,
                     test="windows.final_state",
                     **exc.details,
+                )
+            if options.boot_guardian_fault == "preferred-path":
+                self._verify_boot_guardian_preferred_loader_repair(
+                    final_windows_ssh,
+                    vm,
+                    result,
+                    preferred_loader_fault_injected_utc,
                 )
         finally:
             final_windows_ssh.__exit__(None, None, None)
@@ -756,7 +795,7 @@ class PostInstallValidationMixin:
             'case "$class:$type:$active" in greeter:x11:yes|greeter:wayland:yes) '
             "printf LIBERTIX_GREETER_READY; exit 0;; esac; done; exit 1"
         )
-        for attempt in range(1, 4):
+        for attempt in range(1, 6):
             response = linux_ssh.run(
                 graphical_session_probe,
                 step="automation.linux_graphical_session",
@@ -913,9 +952,15 @@ class PostInstallValidationMixin:
             try:
                 client = self.vnc.connect(vm.vnc)
                 client.keyPress("enter")
-                time.sleep(1)
+                # The first Enter dismisses the lock screen. Give LogonUI time
+                # to expose and focus the credential field before typing.
+                time.sleep(2.5)
                 self._type_text(client, password, vm.vnc_keyboard_layout)
+                time.sleep(0.75)
                 client.keyPress("enter")
+                # Keep the transport alive while LogonUI consumes the submit
+                # event; the next loop iteration proves Explorer, not the key.
+                time.sleep(2)
             finally:
                 if client is not None:
                     client.disconnect()
@@ -924,10 +969,10 @@ class PostInstallValidationMixin:
                 "Windows credentials were submitted after LogonUI proved the login screen",
                 **context,
             )
-            time.sleep(10)
+            time.sleep(12)
         raise WorkflowError(
             "automation.windows_graphical_session",
-            "The Windows interactive session was not proven available",
+            "The Windows interactive session was not proven available after five attempts",
             details={"vm": vm.name, "target": vm.vnc},
         )
 
@@ -1793,33 +1838,452 @@ class PostInstallValidationMixin:
                 check=False,
             )
         except WorkflowError as exc:
-            result.error(
-                "automation.test.windows",
-                "windows.linux_reboot: FAILED",
-                vm=vm.name,
-                target=vm.host,
-                test="windows.linux_reboot",
-                **exc.details,
-            )
-            return
+            raise WorkflowError(
+                "automation.linux_return_boot",
+                "Windows could not request the Linux return reboot",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "test": "windows.linux_reboot",
+                    **exc.details,
+                },
+            ) from exc
         if response.exit_code not in {0, -1}:
-            result.error(
-                "automation.test.windows",
-                "windows.linux_reboot: FAILED",
-                vm=vm.name,
-                target=vm.host,
-                test="windows.linux_reboot",
-                exit_code=response.exit_code,
-                stdout=response.stdout,
-                stderr=response.stderr,
+            raise WorkflowError(
+                "automation.linux_return_boot",
+                "Windows rejected the Linux return reboot request",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "test": "windows.linux_reboot",
+                    "exit_code": response.exit_code,
+                    "stdout": response.stdout,
+                    "stderr": response.stderr,
+                },
             )
-            return
         result.ok(
             "automation.test.windows",
             "windows.linux_reboot: OK",
             vm=vm.name,
             target=vm.host,
             test="windows.linux_reboot",
+        )
+
+    def _inject_boot_guardian_boot_order_fault(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> str:
+        plan = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_fault.ps1",
+            config={"action": "plan-boot-order"},
+            step="automation.boot_guardian_fault.plan",
+            timeout=90,
+        )
+        plan_values = self.validation.parse_powershell_results(
+            plan.stdout,
+            prefixes=(
+                "RUN_ID",
+                "MODE",
+                "OWNED_BOOT",
+                "WINDOWS_BOOT",
+                "CURRENT_ORDER",
+                "FAULT_ORDER",
+                "WOULD_WRITE_BOOT_ORDER",
+                "RESULT",
+            ),
+        )
+        if (
+            plan_values.get("MODE") != "firmware-boot-order"
+            or plan_values.get("WOULD_WRITE_BOOT_ORDER") != "true"
+            or plan_values.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                "automation.boot_guardian_fault.plan",
+                "The BootOrder fault dry-run was not proven safe",
+                details={"vm": vm.name, "target": vm.host, **plan_values},
+            )
+        result.ok(
+            "automation.boot_guardian_fault.plan",
+            "BootOrder fault dry-run proved the exact owned and Windows entries",
+            vm=vm.name,
+            target=vm.host,
+            **plan_values,
+        )
+        injection = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_fault.ps1",
+            config={"action": "inject-boot-order"},
+            step="automation.boot_guardian_fault.inject",
+            timeout=90,
+        )
+        injection_values = self.validation.parse_powershell_results(
+            injection.stdout,
+            prefixes=(
+                "INJECTED_UTC",
+                "VERIFIED_FAULT_ORDER",
+                "WINDOWS_BOOT",
+                "RESULT",
+            ),
+        )
+        injected_utc = injection_values.get("INJECTED_UTC", "")
+        if not injected_utc or injection_values.get("RESULT") != "OK":
+            raise WorkflowError(
+                "automation.boot_guardian_fault.inject",
+                "The BootOrder fault was not verified after injection",
+                details={"vm": vm.name, "target": vm.host, **injection_values},
+            )
+        result.ok(
+            "automation.boot_guardian_fault.inject",
+            "Windows Boot Manager was deliberately placed first for the preshutdown repair test",
+            vm=vm.name,
+            target=vm.host,
+            **injection_values,
+        )
+        return injected_utc
+
+    def _verify_boot_guardian_boot_order_repair(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        injected_utc: str,
+    ) -> None:
+        if not injected_utc:
+            raise WorkflowError(
+                "automation.boot_guardian_fault.verify",
+                "The BootOrder fault injection timestamp was not retained",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        verification = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_fault.ps1",
+            config={
+                "action": "verify-boot-order",
+                "injected_after_utc": injected_utc,
+            },
+            step="automation.boot_guardian_fault.verify",
+            timeout=90,
+        )
+        values = self.validation.parse_powershell_results(
+            verification.stdout,
+            prefixes=("REPAIR_LOG", "REPAIRED_ORDER", "OWNED_BOOT", "RESULT"),
+        )
+        if values.get("RESULT") != "OK" or not values.get("REPAIR_LOG"):
+            raise WorkflowError(
+                "automation.boot_guardian_fault.verify",
+                "The BootOrder guardian repair was not proven",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        result.ok(
+            "automation.boot_guardian_fault.verify",
+            "BootOrder repair, retained GRUB boot, and detailed repair journal were proven",
+            vm=vm.name,
+            target=vm.host,
+            **values,
+        )
+
+    def _inject_boot_guardian_preferred_bypass(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> None:
+        plan = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_fault.ps1",
+            config={"action": "plan-preferred-bypass"},
+            step="automation.preferred_path_bypass.plan",
+            timeout=90,
+        )
+        plan_values = self.validation.parse_powershell_results(
+            plan.stdout,
+            prefixes=(
+                "RUN_ID",
+                "MODE",
+                "OWNED_BOOT",
+                "WINDOWS_BOOT",
+                "CURRENT_ORDER",
+                "FAULT_ORDER",
+                "WOULD_WRITE_BOOT_ORDER",
+                "WOULD_STOP_GUARDIAN",
+                "RESULT",
+            ),
+        )
+        if (
+            plan_values.get("MODE") != "firmware-boot-order"
+            or plan_values.get("WOULD_WRITE_BOOT_ORDER") != "true"
+            or plan_values.get("WOULD_STOP_GUARDIAN") != "true"
+            or plan_values.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                "automation.preferred_path_bypass.plan",
+                "The preferred-path firmware bypass dry-run was not proven safe",
+                details={"vm": vm.name, "target": vm.host, **plan_values},
+            )
+        result.ok(
+            "automation.preferred_path_bypass.plan",
+            "The exact one-boot firmware bypass mutation was proven before execution",
+            vm=vm.name,
+            target=vm.host,
+            **plan_values,
+        )
+        injection = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_fault.ps1",
+            config={"action": "inject-preferred-bypass"},
+            step="automation.preferred_path_bypass.inject",
+            timeout=90,
+        )
+        values = self.validation.parse_powershell_results(
+            injection.stdout,
+            prefixes=(
+                "INJECTED_UTC",
+                "VERIFIED_FAULT_ORDER",
+                "WINDOWS_BOOT",
+                "GUARDIAN_STOPPED",
+                "RESULT",
+            ),
+        )
+        if values.get("GUARDIAN_STOPPED") != "true" or values.get("RESULT") != "OK":
+            raise WorkflowError(
+                "automation.preferred_path_bypass.inject",
+                "The controlled firmware bypass was not retained before reboot",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        result.ok(
+            "automation.preferred_path_bypass.inject",
+            "Windows was deliberately left first for one reboot with the guardian stopped",
+            vm=vm.name,
+            target=vm.host,
+            **values,
+        )
+
+    def _accept_preferred_path_fallback(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        result.ok(
+            "automation.preferred_path_prompt",
+            "Waiting for Windows to prove the installed Linux boot was bypassed",
+            vm=vm.name,
+            target=vm.host,
+        )
+        ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="preferred_path_prompt",
+            distribution=options.distribution,
+        )
+        try:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            accept = self._run_windows_script_resiliently(
+                ssh,
+                script_name="focus_unattended_warning.ps1",
+                config={"mode": "preferred-accept"},
+                step="automation.preferred_path_prompt.focus_accept",
+                timeout=210,
+            )
+            accept_values = self.validation.parse_powershell_results(
+                accept.stdout,
+                prefixes=(
+                    "PROCESS_ID",
+                    "WINDOW_HANDLE",
+                    "FOCUSED_CONTROL",
+                    "STATE_PATH",
+                    "STATE_PHASE",
+                    "RESULT",
+                ),
+            )
+            if (
+                accept_values.get("FOCUSED_CONTROL") != "UefiPreferredPathAcceptButton"
+                or accept_values.get("STATE_PHASE") != "PreferredPathPrompted"
+                or accept_values.get("RESULT") != "OK"
+            ):
+                raise WorkflowError(
+                    "automation.preferred_path_prompt.focus_accept",
+                    "The translated preferred-path consent button was not proven focused",
+                    details={"vm": vm.name, "target": vm.host, **accept_values},
+                )
+            accept_capture = self._capture_with_name(vm, "preferred-path-consent-ready")
+            self._send_focused_enter(vm)
+            result.ok(
+                "automation.preferred_path_prompt.accepted",
+                "The translated preferred-path consent was accepted by keyboard",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(accept_capture),
+                **accept_values,
+            )
+
+            reboot = self._run_windows_script_resiliently(
+                ssh,
+                script_name="focus_unattended_warning.ps1",
+                config={"mode": "preferred-reboot"},
+                step="automation.preferred_path_prompt.focus_reboot",
+                timeout=210,
+            )
+            reboot_values = self.validation.parse_powershell_results(
+                reboot.stdout,
+                prefixes=("FOCUSED_CONTROL", "STATE_PHASE", "RESULT"),
+            )
+            if (
+                reboot_values.get("FOCUSED_CONTROL") != "UefiPreferredPathRebootButton"
+                or reboot_values.get("STATE_PHASE") != "AwaitingPreferredPathReboot"
+                or reboot_values.get("RESULT") != "OK"
+            ):
+                raise WorkflowError(
+                    "automation.preferred_path_prompt.focus_reboot",
+                    "The verified preferred-path reboot button was not proven focused",
+                    details={"vm": vm.name, "target": vm.host, **reboot_values},
+                )
+            reboot_capture = self._capture_with_name(vm, "preferred-path-reboot-ready")
+            self._send_focused_enter(vm)
+            result.ok(
+                "automation.preferred_path_prompt.rebooted",
+                "The installed preferred Windows EFI path was requested through its UI",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(reboot_capture),
+                **reboot_values,
+            )
+        finally:
+            ssh.__exit__(None, None, None)
+
+    def _send_focused_enter(self, vm: VMConfig) -> None:
+        client = None
+        try:
+            client = self.vnc.connect(vm.vnc)
+            client.keyDown("enter")
+            try:
+                time.sleep(0.15)
+            finally:
+                client.keyUp("enter")
+            time.sleep(0.35)
+        finally:
+            if client is not None:
+                client.disconnect()
+
+    def _inject_boot_guardian_preferred_loader_fault(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> str:
+        plan = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_preferred_path_fault.ps1",
+            config={"action": "plan-loader"},
+            step="automation.preferred_path_guardian.plan",
+            timeout=90,
+        )
+        plan_values = self.validation.parse_powershell_results(
+            plan.stdout,
+            prefixes=(
+                "RUN_ID",
+                "MODE",
+                "ACTIVE_HASH",
+                "ORIGINAL_HASH",
+                "PREFERRED_HASH",
+                "WOULD_RESTORE_WINDOWS_LOADER",
+                "RESULT",
+            ),
+        )
+        if (
+            plan_values.get("MODE") != "preferred-windows-path"
+            or plan_values.get("WOULD_RESTORE_WINDOWS_LOADER") != "true"
+            or plan_values.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                "automation.preferred_path_guardian.plan",
+                "The preferred-loader fault dry-run was not proven safe",
+                details={"vm": vm.name, "target": vm.host, **plan_values},
+            )
+        result.ok(
+            "automation.preferred_path_guardian.plan",
+            "The permanent Windows loader archive and preferred shim were hash-proven",
+            vm=vm.name,
+            target=vm.host,
+            **plan_values,
+        )
+        injection = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_preferred_path_fault.ps1",
+            config={"action": "inject-loader"},
+            step="automation.preferred_path_guardian.inject",
+            timeout=90,
+        )
+        values = self.validation.parse_powershell_results(
+            injection.stdout,
+            prefixes=("INJECTED_UTC", "INJECTED_HASH", "RESULT"),
+        )
+        injected_utc = values.get("INJECTED_UTC", "")
+        if not injected_utc or values.get("RESULT") != "OK":
+            raise WorkflowError(
+                "automation.preferred_path_guardian.inject",
+                "The original Windows loader was not restored for the controlled repair test",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        result.ok(
+            "automation.preferred_path_guardian.inject",
+            "The original Windows loader was deliberately restored before shutdown",
+            vm=vm.name,
+            target=vm.host,
+            **values,
+        )
+        return injected_utc
+
+    def _verify_boot_guardian_preferred_loader_repair(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        injected_utc: str,
+    ) -> None:
+        if not injected_utc:
+            raise WorkflowError(
+                "automation.preferred_path_guardian.verify",
+                "The preferred-loader fault injection timestamp was not retained",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        verification = self._run_windows_script_resiliently(
+            ssh,
+            script_name="test_boot_guardian_preferred_path_fault.ps1",
+            config={"action": "verify-loader", "injected_after_utc": injected_utc},
+            step="automation.preferred_path_guardian.verify",
+            timeout=90,
+        )
+        values = self.validation.parse_powershell_results(
+            verification.stdout,
+            prefixes=(
+                "REPAIR_LOG",
+                "REPAIRED_HASH",
+                "UNEXPECTED_ARCHIVE",
+                "RESULT",
+            ),
+        )
+        if values.get("RESULT") != "OK" or not values.get("REPAIR_LOG"):
+            raise WorkflowError(
+                "automation.preferred_path_guardian.verify",
+                "The preferred Windows EFI path repair was not proven",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        result.ok(
+            "automation.preferred_path_guardian.verify",
+            "The preferred shim, displaced Windows loader archive, GRUB boot, "
+            "and repair log were proven",
+            vm=vm.name,
+            target=vm.host,
+            **values,
         )
 
     def _run_windows_checks(

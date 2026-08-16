@@ -78,6 +78,7 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
         linux_password="test-passphrase",
         simulate_stale_firmware_entries=True,
         force_offline_ntfs_resize=True,
+        boot_guardian_fault="boot-order",
     )
 
     assert pickle.loads(pickle.dumps(main_module._stream_operation_worker)) is (  # noqa: SLF001
@@ -87,6 +88,7 @@ def test_spawn_worker_arguments_and_target_are_serializable() -> None:
     assert restored_request.linux_password == "test-passphrase"
     assert restored_request.simulate_stale_firmware_entries is True
     assert restored_request.force_offline_ntfs_resize is True
+    assert restored_request.boot_guardian_fault == "boot-order"
 
 
 def test_stream_worker_serializes_parallel_vm_events(
@@ -247,6 +249,25 @@ def test_offline_ntfs_resize_fixture_is_opt_in() -> None:
         force_offline_ntfs_resize=True,
     )
     assert request.force_offline_ntfs_resize is True
+
+
+def test_boot_guardian_fault_accepts_only_explicit_fixture_modes() -> None:
+    assert AutomationRequest(apply=True, linux_password="pass").boot_guardian_fault == "none"
+    for mode in ("boot-order", "preferred-path"):
+        assert (
+            AutomationRequest(
+                apply=True,
+                linux_password="pass",
+                boot_guardian_fault=mode,
+            ).boot_guardian_fault
+            == mode
+        )
+    with pytest.raises(ValidationError):
+        AutomationRequest(
+            apply=True,
+            linux_password="pass",
+            boot_guardian_fault="unsafe",  # type: ignore[arg-type]
+        )
 
 
 def test_automation_account_and_storage_constraints_follow_the_shared_policy() -> None:
@@ -557,12 +578,71 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
     assert [event["event"] for event in events] == ["step", "result"]
     result = events[-1]["data"]
     assert result["status"] == "error"
-    assert result["steps"][0]["step"] == "automation.global_timeout"
+    assert result["steps"][0]["step"] == "automation.inactivity_timeout"
+    assert result["steps"][0]["context"]["inactivity_timeout_seconds"] == 0.05
     assert result["steps"][0]["context"]["active_steps"] == {
         "vm2": "automation.installed_boot_menu_seen"
     }
     assert result["steps"][0]["context"]["captures"]["vm2"].endswith("timeout-vm2.png")
     assert captured[0][0] == ["vm2"]
+    assert lock.release_calls == 1
+    assert lock.held is False
+
+
+def test_stream_inactivity_timeout_resets_after_each_progress_step(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+
+    class ProgressingAutomationService:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+            steps: list[StepResult] = []
+            for index in range(4):
+                step = StepResult(
+                    step=f"automation.progress_{index}",
+                    status="ok",
+                    message="progress",
+                    context={"vm": "vm2"},
+                )
+                steps.append(step)
+                on_step(step)
+                time.sleep(0.03)
+            return OperationResult(
+                status="ok",
+                operation="automation",
+                message="complete",
+                steps=steps,
+            )
+
+    monkeypatch.setattr(main_module, "AutomationService", ProgressingAutomationService)
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=0.05,
+    )
+
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation/stream?format=ndjson",
+            json={
+                "vms": ["vm2"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test-passphrase",
+            },
+        )
+
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert events[-1]["event"] == "result"
+    assert events[-1]["data"]["status"] == "ok"
+    assert all(
+        step["step"] != "automation.inactivity_timeout" for step in events[-1]["data"]["steps"]
+    )
     assert lock.release_calls == 1
     assert lock.held is False
 

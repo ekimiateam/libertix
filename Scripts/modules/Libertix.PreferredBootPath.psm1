@@ -7,6 +7,36 @@ $script:PreferredGrubRelativePath = "EFI\Microsoft\Boot\grubx64.efi"
 $script:PreferredMokManagerRelativePath = "EFI\Microsoft\Boot\mmx64.efi"
 $script:PreferredGrubConfigRelativePath = "EFI\Microsoft\Boot\grub.cfg"
 $script:EspManifestRelativePath = "EFI\Libertix\preferred-boot-path.json"
+$script:PreferredPathOriginalsRelativePath = "EFI\Libertix\PreferredPathOriginals"
+
+function Get-LibertixPreferredPathProtectedFiles {
+    return @(
+        [pscustomobject]@{
+            RelativePath = $script:WindowsBackupRelativePath
+            ManifestPath = "\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi"
+            ArchiveName = "preexisting-bootmgfw.libertix-windows.efi"
+            EspBackupName = "bootmgfw.libertix-windows.efi"
+        },
+        [pscustomobject]@{
+            RelativePath = $script:PreferredGrubRelativePath
+            ManifestPath = "\EFI\Microsoft\Boot\grubx64.efi"
+            ArchiveName = "preexisting-grubx64.efi"
+            EspBackupName = "grubx64.efi"
+        },
+        [pscustomobject]@{
+            RelativePath = $script:PreferredMokManagerRelativePath
+            ManifestPath = "\EFI\Microsoft\Boot\mmx64.efi"
+            ArchiveName = "preexisting-mmx64.efi"
+            EspBackupName = "mmx64.efi"
+        },
+        [pscustomobject]@{
+            RelativePath = $script:PreferredGrubConfigRelativePath
+            ManifestPath = "\EFI\Microsoft\Boot\grub.cfg"
+            ArchiveName = "preexisting-grub.cfg"
+            EspBackupName = "grub.cfg"
+        }
+    )
+}
 
 function Initialize-LibertixPreferredPathMoveApi {
     if (([System.Management.Automation.PSTypeName]"LibertixPreferredPathMoveApi").Type) {
@@ -134,6 +164,106 @@ function Copy-LibertixPreferredPathFileAtomic {
     }
 }
 
+function Get-LibertixPreferredPathOriginalFileRecords {
+    param(
+        [Parameter(Mandatory = $true)][string]$EspRoot,
+        [Parameter(Mandatory = $true)][string]$ArchiveRoot,
+        $ExistingManifest
+    )
+
+    $definitions = @(Get-LibertixPreferredPathProtectedFiles)
+    $hasExistingRecords = (
+        $null -ne $ExistingManifest -and
+        $ExistingManifest.PSObject.Properties.Name -contains "originalFiles"
+    )
+    if ($null -ne $ExistingManifest -and -not $hasExistingRecords) {
+        # Version 1 manifests created before complete destination snapshots remain restorable
+        # through the legacy cleanup path. Never infer originals from an already modified ESP.
+        return $null
+    }
+
+    $archiveDirectory = Join-Path $ArchiveRoot "original-files"
+    $espBackupDirectory = Join-Path $EspRoot $script:PreferredPathOriginalsRelativePath
+    if ($hasExistingRecords) {
+        $records = @($ExistingManifest.originalFiles)
+        if ($records.Count -ne $definitions.Count) {
+            throw "Preferred boot original-file manifest has an invalid cardinality."
+        }
+        foreach ($definition in $definitions) {
+            $matching = @(
+                $records | Where-Object {
+                    [string]$_.path -eq [string]$definition.ManifestPath
+                }
+            )
+            if ($matching.Count -ne 1) {
+                throw "Preferred boot original-file manifest contains an unexpected path set."
+            }
+            $record = $matching[0]
+            $expectedEspBackupPath = (
+                "\EFI\Libertix\PreferredPathOriginals\" +
+                [string]$definition.EspBackupName
+            )
+            if (
+                [string]$record.archiveName -ne [string]$definition.ArchiveName -or
+                [string]$record.espBackupPath -ne $expectedEspBackupPath
+            ) {
+                throw "Preferred boot original-file manifest contains unexpected backup paths."
+            }
+            if ([bool]$record.existed) {
+                $hash = [string]$record.sha256
+                $archivePath = Join-Path $archiveDirectory $definition.ArchiveName
+                $espBackupPath = Join-Path $espBackupDirectory $definition.EspBackupName
+                if (
+                    $hash -notmatch '^[0-9a-f]{64}$' -or
+                    -not (Test-Path -LiteralPath $archivePath -PathType Leaf) -or
+                    (Get-LibertixPreferredPathHash -Path $archivePath) -ne $hash -or
+                    -not (Test-Path -LiteralPath $espBackupPath -PathType Leaf) -or
+                    (Get-LibertixPreferredPathHash -Path $espBackupPath) -ne $hash
+                ) {
+                    throw "Preferred boot original-file backup is missing or corrupted."
+                }
+            } elseif (-not [string]::IsNullOrEmpty([string]$record.sha256)) {
+                throw "Preferred boot absent original file unexpectedly has a hash."
+            }
+        }
+        return @($records)
+    }
+
+    [IO.Directory]::CreateDirectory($archiveDirectory) | Out-Null
+    [IO.Directory]::CreateDirectory($espBackupDirectory) | Out-Null
+    $records = [Collections.Generic.List[object]]::new()
+    foreach ($definition in $definitions) {
+        $source = Join-Path $EspRoot $definition.RelativePath
+        $record = [ordered]@{
+            path = [string]$definition.ManifestPath
+            existed = $false
+            sha256 = ""
+            archiveName = [string]$definition.ArchiveName
+            espBackupPath = (
+                "\EFI\Libertix\PreferredPathOriginals\" +
+                [string]$definition.EspBackupName
+            )
+        }
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            $hash = Get-LibertixPreferredPathHash -Path $source
+            $archivePath = Join-Path $archiveDirectory $definition.ArchiveName
+            $espBackupPath = Join-Path $espBackupDirectory $definition.EspBackupName
+            Copy-LibertixPreferredPathFileAtomic `
+                -Source $source `
+                -Destination $archivePath `
+                -ExpectedSha256 $hash
+            Copy-LibertixPreferredPathFileAtomic `
+                -Source $archivePath `
+                -Destination $espBackupPath `
+                -ExpectedSha256 $hash
+            $record.existed = $true
+            $record.sha256 = $hash
+        }
+        $null = $records.Add([pscustomobject]$record)
+    }
+    return @($records.ToArray())
+}
+
 function Get-LibertixPreferredPathSecureBootEvidence {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -238,10 +368,12 @@ function Install-LibertixPreferredBootPath {
     $archiveManifest = Join-Path $archiveRoot "manifest.json"
     $espBackup = Join-Path $EspRoot $script:WindowsBackupRelativePath
     $espManifest = Join-Path $EspRoot $script:EspManifestRelativePath
+    $existingManifest = $null
 
     if (Test-Path -LiteralPath $archiveManifest -PathType Leaf) {
         $existing = Get-Content -LiteralPath $archiveManifest -Raw -Encoding UTF8 |
             ConvertFrom-Json -ErrorAction Stop
+        $existingManifest = $existing
         $windowsLoaderHash = [string]$existing.windowsLoader.sha256
         $allowedActiveHashes = @(
             $windowsLoaderHash,
@@ -297,10 +429,10 @@ function Install-LibertixPreferredBootPath {
             throw "Permanent Windows Boot Manager archive hash mismatch."
         }
     }
-    Copy-LibertixPreferredPathFileAtomic `
-        -Source $archiveLoader `
-        -Destination $espBackup `
-        -ExpectedSha256 $windowsLoaderHash
+    $originalFiles = Get-LibertixPreferredPathOriginalFileRecords `
+        -EspRoot $EspRoot `
+        -ArchiveRoot $archiveRoot `
+        -ExistingManifest $existingManifest
 
     $grubConfigSource = Join-Path $EspRoot "EFI\Libertix\grub.cfg"
     $stagedGrubConfig = Join-Path $archiveRoot ".grub.cfg.$([Guid]::NewGuid().ToString('N')).tmp"
@@ -334,9 +466,16 @@ function Install-LibertixPreferredBootPath {
             secureBootEnabled = [bool]$State.SecureBootEnabled
             status = "prepared"
         }
+        if ($null -ne $originalFiles) {
+            $manifest["originalFiles"] = @($originalFiles)
+        }
         Write-LibertixPreferredPathJsonAtomic -Path $archiveManifest -Value $manifest
         Write-LibertixPreferredPathJsonAtomic -Path $espManifest -Value $manifest
 
+        Copy-LibertixPreferredPathFileAtomic `
+            -Source $archiveLoader `
+            -Destination $espBackup `
+            -ExpectedSha256 $windowsLoaderHash
         Copy-LibertixPreferredPathFileAtomic `
             -Source ([string]$secureBoot.Files.grub.path) `
             -Destination (Join-Path $EspRoot $script:PreferredGrubRelativePath) `
@@ -367,6 +506,138 @@ function Install-LibertixPreferredBootPath {
             [IO.File]::Delete($stagedGrubConfig)
         }
     }
+}
+
+function Restore-LibertixPreferredPathOriginalFiles {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ArchiveRoot,
+        [Parameter(Mandatory = $true)][string]$EspRoot,
+        [Parameter(Mandatory = $true)][scriptblock]$WriteLog
+    )
+
+    if ($Manifest.PSObject.Properties.Name -notcontains "originalFiles") {
+        return $false
+    }
+    $definitions = @(Get-LibertixPreferredPathProtectedFiles)
+    $records = @($Manifest.originalFiles)
+    if ($records.Count -ne $definitions.Count) {
+        throw "Preferred boot original-file manifest has an invalid cardinality."
+    }
+    $archiveDirectory = Join-Path $ArchiveRoot "original-files"
+    $espBackupDirectory = Join-Path $EspRoot $script:PreferredPathOriginalsRelativePath
+    foreach ($definition in $definitions) {
+        $matching = @(
+            $records | Where-Object {
+                [string]$_.path -eq [string]$definition.ManifestPath
+            }
+        )
+        if ($matching.Count -ne 1) {
+            throw "Preferred boot original-file manifest contains an unexpected path set."
+        }
+        $record = $matching[0]
+        $expectedEspBackupManifestPath = (
+            "\EFI\Libertix\PreferredPathOriginals\" +
+            [string]$definition.EspBackupName
+        )
+        if (
+            [string]$record.archiveName -ne [string]$definition.ArchiveName -or
+            [string]$record.espBackupPath -ne $expectedEspBackupManifestPath
+        ) {
+            throw "Preferred boot original-file manifest contains unexpected backup paths."
+        }
+        $ownedHash = switch ([string]$definition.ManifestPath) {
+            "\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi" {
+                [string]$Manifest.windowsLoader.sha256
+                break
+            }
+            "\EFI\Microsoft\Boot\grubx64.efi" {
+                [string]$Manifest.preferred.grubSha256
+                break
+            }
+            "\EFI\Microsoft\Boot\mmx64.efi" {
+                [string]$Manifest.preferred.mokManagerSha256
+                break
+            }
+            "\EFI\Microsoft\Boot\grub.cfg" {
+                [string]$Manifest.preferred.grubConfigSha256
+                break
+            }
+            default { throw "Preferred boot original-file definition is unsupported." }
+        }
+        if ($ownedHash -notmatch '^[0-9a-f]{64}$') {
+            throw "Preferred boot owned-file hash is invalid."
+        }
+
+        $destination = Join-Path $EspRoot $definition.RelativePath
+        if ([bool]$record.existed) {
+            $originalHash = [string]$record.sha256
+            if ($originalHash -notmatch '^[0-9a-f]{64}$') {
+                throw "Preferred boot original-file hash is invalid."
+            }
+            $archivePath = Join-Path $archiveDirectory $definition.ArchiveName
+            $espBackupPath = Join-Path $espBackupDirectory $definition.EspBackupName
+            $restoreSource = $null
+            if (
+                (Test-Path -LiteralPath $archivePath -PathType Leaf) -and
+                (Get-LibertixPreferredPathHash -Path $archivePath) -eq $originalHash
+            ) {
+                $restoreSource = $archivePath
+            } elseif (
+                (Test-Path -LiteralPath $espBackupPath -PathType Leaf) -and
+                (Get-LibertixPreferredPathHash -Path $espBackupPath) -eq $originalHash
+            ) {
+                $restoreSource = $espBackupPath
+            } else {
+                throw "Preferred boot original-file backup is missing or corrupted."
+            }
+            if (Test-Path -LiteralPath $destination -PathType Leaf) {
+                $currentHash = Get-LibertixPreferredPathHash -Path $destination
+                if ($currentHash -notin @($ownedHash, $originalHash)) {
+                    $unexpected = Join-Path `
+                        $archiveDirectory `
+                        ("unexpected-{0}-{1}" -f $definition.ArchiveName, $currentHash)
+                    if (-not (Test-Path -LiteralPath $unexpected -PathType Leaf)) {
+                        Copy-LibertixPreferredPathFileAtomic `
+                            -Source $destination `
+                            -Destination $unexpected `
+                            -ExpectedSha256 $currentHash
+                    }
+                    & $WriteLog (
+                        "Unexpected preferred boot support file was archived before restoration: " +
+                        [string]$definition.ManifestPath
+                    )
+                }
+            }
+            Copy-LibertixPreferredPathFileAtomic `
+                -Source $restoreSource `
+                -Destination $destination `
+                -ExpectedSha256 $originalHash
+            if (Test-Path -LiteralPath $espBackupPath -PathType Leaf) {
+                if ((Get-LibertixPreferredPathHash -Path $espBackupPath) -ne $originalHash) {
+                    throw "Preferred boot ESP original-file backup changed before cleanup."
+                }
+                [IO.File]::Delete($espBackupPath)
+            }
+        } else {
+            if (-not [string]::IsNullOrEmpty([string]$record.sha256)) {
+                throw "Preferred boot absent original file unexpectedly has a hash."
+            }
+            if (Test-Path -LiteralPath $destination -PathType Leaf) {
+                if ((Get-LibertixPreferredPathHash -Path $destination) -ne $ownedHash) {
+                    throw "Preferred boot cleanup refused a file whose hash changed: $destination"
+                }
+                [IO.File]::Delete($destination)
+            }
+        }
+    }
+    if (
+        [IO.Directory]::Exists($espBackupDirectory) -and
+        @([IO.Directory]::GetFileSystemEntries($espBackupDirectory)).Count -eq 0
+    ) {
+        [IO.Directory]::Delete($espBackupDirectory, $false)
+    }
+    return $true
 }
 
 function Restore-LibertixPreferredBootPath {
@@ -402,16 +673,26 @@ function Restore-LibertixPreferredBootPath {
         if (
             [int]$espManifest.version -ne $script:PreferredBootPathVersion -or
             [string]$espManifest.runId -ne [string]$State.RunId -or
-            $espOriginalHash -notmatch '^[0-9a-f]{64}$' -or
-            -not (Test-Path -LiteralPath $espBackup -PathType Leaf) -or
-            (Get-LibertixPreferredPathHash -Path $espBackup) -ne $espOriginalHash
+            [string]$espManifest.windowsLoader.activePath -ne "\EFI\Microsoft\Boot\bootmgfw.efi" -or
+            [string]$espManifest.windowsLoader.backupPath -ne "\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi" -or
+            $espOriginalHash -notmatch '^[0-9a-f]{64}$'
         ) {
-            throw "ESP preferred boot manifest or Windows loader backup is invalid."
+            throw "ESP preferred boot manifest is invalid."
         }
-        if (
-            -not (Test-Path -LiteralPath $archiveLoader -PathType Leaf) -or
-            (Get-LibertixPreferredPathHash -Path $archiveLoader) -ne $espOriginalHash
-        ) {
+        $archiveLoaderValid = (
+            (Test-Path -LiteralPath $archiveLoader -PathType Leaf) -and
+            (Get-LibertixPreferredPathHash -Path $archiveLoader) -eq $espOriginalHash
+        )
+        if (-not $archiveLoaderValid) {
+            $espBackupValid = (
+                (Test-Path -LiteralPath $espBackup -PathType Leaf) -and
+                (Get-LibertixPreferredPathHash -Path $espBackup) -eq $espOriginalHash
+            )
+            if (-not $espBackupValid) {
+                throw "Windows loader archives are missing or corrupted."
+            }
+        }
+        if (-not $archiveLoaderValid) {
             if (Test-Path -LiteralPath $archiveLoader -PathType Leaf) {
                 $previousHash = Get-LibertixPreferredPathHash -Path $archiveLoader
                 $historyPath = Join-Path $archiveRoot "bootmgfw-history-$previousHash.efi"
@@ -458,25 +739,31 @@ function Restore-LibertixPreferredBootPath {
         -Destination $windowsLoader `
         -ExpectedSha256 $originalHash
 
-    $ownedFiles = @(
-        @{ RelativePath = $script:PreferredGrubRelativePath; Hash = [string]$manifest.preferred.grubSha256 },
-        @{ RelativePath = $script:PreferredMokManagerRelativePath; Hash = [string]$manifest.preferred.mokManagerSha256 },
-        @{ RelativePath = $script:PreferredGrubConfigRelativePath; Hash = [string]$manifest.preferred.grubConfigSha256 },
-        @{ RelativePath = $script:WindowsBackupRelativePath; Hash = $originalHash },
-        @{ RelativePath = $script:EspManifestRelativePath; Hash = "" }
-    )
-    foreach ($owned in $ownedFiles) {
-        $path = Join-Path $EspRoot $owned.RelativePath
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            continue
+    $restoredOriginalFiles = Restore-LibertixPreferredPathOriginalFiles `
+        -Manifest $manifest `
+        -ArchiveRoot $archiveRoot `
+        -EspRoot $EspRoot `
+        -WriteLog $WriteLog
+    if (-not $restoredOriginalFiles) {
+        $legacyOwnedFiles = @(
+            @{ RelativePath = $script:PreferredGrubRelativePath; Hash = [string]$manifest.preferred.grubSha256 },
+            @{ RelativePath = $script:PreferredMokManagerRelativePath; Hash = [string]$manifest.preferred.mokManagerSha256 },
+            @{ RelativePath = $script:PreferredGrubConfigRelativePath; Hash = [string]$manifest.preferred.grubConfigSha256 },
+            @{ RelativePath = $script:WindowsBackupRelativePath; Hash = $originalHash }
+        )
+        foreach ($owned in $legacyOwnedFiles) {
+            $path = Join-Path $EspRoot $owned.RelativePath
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                continue
+            }
+            if ((Get-LibertixPreferredPathHash -Path $path) -ne [string]$owned.Hash) {
+                throw "Preferred boot cleanup refused a file whose hash changed: $path"
+            }
+            [IO.File]::Delete($path)
         }
-        if (
-            $owned.Hash -and
-            (Get-LibertixPreferredPathHash -Path $path) -ne [string]$owned.Hash
-        ) {
-            throw "Preferred boot cleanup refused a file whose hash changed: $path"
-        }
-        [IO.File]::Delete($path)
+    }
+    if (Test-Path -LiteralPath $espManifestPath -PathType Leaf) {
+        [IO.File]::Delete($espManifestPath)
     }
     $manifest.status = "restored"
     $manifest | Add-Member `
@@ -489,4 +776,5 @@ function Restore-LibertixPreferredBootPath {
 }
 
 Export-ModuleMember -Function `
-    Install-LibertixPreferredBootPath, Restore-LibertixPreferredBootPath
+    Install-LibertixPreferredBootPath, Restore-LibertixPreferredBootPath, `
+    Copy-LibertixPreferredPathFileAtomic

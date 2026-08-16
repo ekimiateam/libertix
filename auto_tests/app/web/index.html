@@ -307,6 +307,14 @@
             <input id="forceOfflineNtfsResize" type="checkbox" />
             Forcer le redimensionnement NTFS hors ligne dans le mini-ISO
           </label>
+          <label class="field">
+            <span>Test de réparation du gardien de démarrage</span>
+            <select id="bootGuardianFault">
+              <option value="none">Aucun test</option>
+              <option value="boot-order">Altérer puis réparer BootOrder</option>
+              <option value="preferred-path">Altérer puis réparer le chemin EFI de secours</option>
+            </select>
+          </label>
           <p class="muted">
             Le mot de passe est envoyé uniquement à l'API locale au lancement. Cette page ne le
             conserve pas et l'aperçu le masque.
@@ -402,6 +410,7 @@
       const monitorIsoInput = document.getElementById("monitorIso");
       const simulateStaleFirmwareEntriesInput = document.getElementById("simulateStaleFirmwareEntries");
       const forceOfflineNtfsResizeInput = document.getElementById("forceOfflineNtfsResize");
+      const bootGuardianFaultInput = document.getElementById("bootGuardianFault");
       const vmList = document.getElementById("vmList");
       const statusBox = document.getElementById("status");
       const summaryBox = document.getElementById("summary");
@@ -445,6 +454,7 @@
         monitorIsoInput,
         simulateStaleFirmwareEntriesInput,
         forceOfflineNtfsResizeInput,
+        bootGuardianFaultInput,
       ].forEach((input) => {
         input.addEventListener("input", updateRequestPreview);
         input.addEventListener("change", updateRequestPreview);
@@ -492,6 +502,7 @@
           share_linux_files_in_windows: shareLinuxFilesInWindowsInput.checked,
           simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
           force_offline_ntfs_resize: forceOfflineNtfsResizeInput.checked,
+          boot_guardian_fault: bootGuardianFaultInput.value,
         };
       }
 
@@ -519,6 +530,7 @@
           share_linux_files_in_windows: shareLinuxFilesInWindowsInput.checked,
           simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
           force_offline_ntfs_resize: forceOfflineNtfsResizeInput.checked,
+          boot_guardian_fault: bootGuardianFaultInput.value,
         };
       }
 

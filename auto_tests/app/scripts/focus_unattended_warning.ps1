@@ -40,8 +40,12 @@ function Invoke-ScheduledTaskCommand {
     return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
 }
 
-function Set-UnattendedWarningFocus {
-    param([Parameter(Mandatory = $true)][int]$TargetProcessId)
+function Set-LibertixControlFocus {
+    param(
+        [Parameter(Mandatory = $true)][int]$TargetProcessId,
+        [Parameter(Mandatory = $true)][string]$TargetAutomationId,
+        [string]$RequiredSiblingAutomationId = ""
+    )
 
     Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
     Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
@@ -56,13 +60,13 @@ function Set-UnattendedWarningFocus {
 
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     $visibleWindowCount = 0
-    $buttonPairCount = 0
-    $noButtonFocused = $false
+    $matchingControlCount = 0
+    $targetFocused = $false
     $visibleTitles = @()
     do {
         $visibleWindowCount = 0
-        $buttonPairCount = 0
-        $noButtonFocused = $false
+        $matchingControlCount = 0
+        $targetFocused = $false
         $visibleTitles = @()
         $processCondition = New-Object Windows.Automation.PropertyCondition(
             [Windows.Automation.AutomationElement]::ProcessIdProperty,
@@ -80,53 +84,141 @@ function Set-UnattendedWarningFocus {
             }
             $visibleWindowCount++
             $visibleTitles += [string]$window.Current.Name
-            $noButtonCondition = New-Object Windows.Automation.PropertyCondition(
+            $targetCondition = New-Object Windows.Automation.PropertyCondition(
                 [Windows.Automation.AutomationElement]::AutomationIdProperty,
-                "UnattendedWarningNoButton"
+                $TargetAutomationId
             )
-            $yesButtonCondition = New-Object Windows.Automation.PropertyCondition(
-                [Windows.Automation.AutomationElement]::AutomationIdProperty,
-                "UnattendedWarningYesButton"
-            )
-            $noButton = $window.FindFirst(
+            $target = $window.FindFirst(
                 [Windows.Automation.TreeScope]::Descendants,
-                $noButtonCondition
+                $targetCondition
             )
-            $yesButton = $window.FindFirst(
-                [Windows.Automation.TreeScope]::Descendants,
-                $yesButtonCondition
-            )
-            if ($null -eq $noButton -or $null -eq $yesButton) {
+            if ($null -eq $target) {
                 continue
             }
-            $buttonPairCount++
+            if (-not [string]::IsNullOrWhiteSpace($RequiredSiblingAutomationId)) {
+                $siblingCondition = New-Object Windows.Automation.PropertyCondition(
+                    [Windows.Automation.AutomationElement]::AutomationIdProperty,
+                    $RequiredSiblingAutomationId
+                )
+                $sibling = $window.FindFirst(
+                    [Windows.Automation.TreeScope]::Descendants,
+                    $siblingCondition
+                )
+                if ($null -eq $sibling) {
+                    continue
+                }
+            }
+            $matchingControlCount++
             $window.SetFocus()
-            $noButton.SetFocus()
+            $target.SetFocus()
             Start-Sleep -Milliseconds 100
-            $noButtonFocused = [bool]$noButton.Current.HasKeyboardFocus
-            if (-not $noButtonFocused) {
+            $targetFocused = [bool]$target.Current.HasKeyboardFocus
+            if (-not $targetFocused) {
                 continue
             }
             return [ordered]@{
                 status = "ok"
                 window_handle = [int64]$window.Current.NativeWindowHandle
                 window_title = [string]$window.Current.Name
-                focused_control = "UnattendedWarningNoButton"
+                focused_control = $TargetAutomationId
             }
         }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
 
     throw (
-        "The visible Libertix unattended warning could not receive keyboard focus: " +
-        "visibleWindows=$visibleWindowCount buttonPairs=$buttonPairCount " +
-        "noButtonFocused=$noButtonFocused titles=$($visibleTitles -join '|')."
+        "The requested visible Libertix control could not receive keyboard focus: " +
+        "automationId=$TargetAutomationId visibleWindows=$visibleWindowCount " +
+        "matchingControls=$matchingControlCount focused=$targetFocused " +
+        "titles=$($visibleTitles -join '|')."
     )
+}
+
+function Resolve-PreferredPathUiProcess {
+    param([Parameter(Mandatory = $true)][string]$ExpectedPhase)
+
+    $recoveryRoot = Join-Path $env:ProgramData "Libertix\UefiRecovery"
+    $deadline = [DateTime]::UtcNow.AddSeconds(150)
+    do {
+        $statePath = Get-ChildItem `
+            -LiteralPath $recoveryRoot `
+            -Filter "state.json" `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+        if ($statePath) {
+            $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 |
+                ConvertFrom-Json -ErrorAction Stop
+            $phase = [string]$state.Phase
+            if ($phase -eq "PreferredPathPreparationFailed") {
+                throw "Preferred-path preparation reached a terminal failure."
+            }
+            if ($phase -eq $ExpectedPhase) {
+                $expectedExe = [IO.Path]::GetFullPath(
+                    (Join-Path ([string]$state.PayloadRoot) "Libertix.exe")
+                )
+                $processMatches = @(
+                    Get-CimInstance -ClassName Win32_Process -Filter "Name='Libertix.exe'" |
+                        Where-Object {
+                            $_.ExecutablePath -and
+                            [IO.Path]::GetFullPath([string]$_.ExecutablePath) -eq $expectedExe
+                        }
+                )
+                if ($processMatches.Count -eq 1) {
+                    return [pscustomobject]@{
+                        ProcessId = [int]$processMatches[0].ProcessId
+                        StatePath = [string]$statePath
+                        Phase = $phase
+                    }
+                }
+                if ($processMatches.Count -gt 1) {
+                    throw "More than one cached Libertix fallback UI process is running."
+                }
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "Timed out waiting for preferred-path phase '$ExpectedPhase' and its Libertix UI."
 }
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 |
     ConvertFrom-Json -ErrorAction Stop
-$targetProcessId = [int]$config.process_id
+$mode = if ($config.PSObject.Properties.Name -contains "mode") {
+    [string]$config.mode
+} else {
+    "unattended-warning"
+}
+$statePath = ""
+$statePhase = ""
+switch ($mode) {
+    "unattended-warning" {
+        $targetProcessId = [int]$config.process_id
+        $targetAutomationId = "UnattendedWarningNoButton"
+        $requiredSiblingAutomationId = "UnattendedWarningYesButton"
+    }
+    "preferred-accept" {
+        $resolved = Resolve-PreferredPathUiProcess -ExpectedPhase "PreferredPathPrompted"
+        $targetProcessId = [int]$resolved.ProcessId
+        $targetAutomationId = "UefiPreferredPathAcceptButton"
+        $requiredSiblingAutomationId = ""
+        $statePath = [string]$resolved.StatePath
+        $statePhase = [string]$resolved.Phase
+    }
+    "preferred-reboot" {
+        $resolved = Resolve-PreferredPathUiProcess -ExpectedPhase "AwaitingPreferredPathReboot"
+        $targetProcessId = [int]$resolved.ProcessId
+        $targetAutomationId = "UefiPreferredPathRebootButton"
+        $requiredSiblingAutomationId = ""
+        $statePath = [string]$resolved.StatePath
+        $statePhase = [string]$resolved.Phase
+    }
+    default {
+        throw "The Libertix UI focus mode is unsupported."
+    }
+}
 if ($targetProcessId -le 0) {
     throw "The Libertix process ID is invalid."
 }
@@ -140,7 +232,10 @@ if ($InteractiveWorker) {
         throw "The interactive focus result path is required."
     }
     try {
-        $workerResult = Set-UnattendedWarningFocus -TargetProcessId $targetProcessId
+        $workerResult = Set-LibertixControlFocus `
+            -TargetProcessId $targetProcessId `
+            -TargetAutomationId ([string]$config.target_automation_id) `
+            -RequiredSiblingAutomationId ([string]$config.required_sibling_automation_id)
         Write-AtomicJson -Path $ResultPath -Value $workerResult
         exit 0
     } catch {
@@ -165,6 +260,8 @@ Copy-Item -LiteralPath $PSCommandPath -Destination $workerScriptPath -Force
 Write-AtomicJson -Path $workerConfigPath -Value ([ordered]@{
         process_id = $targetProcessId
         result_path = $workerResultPath
+        target_automation_id = $targetAutomationId
+        required_sibling_automation_id = $requiredSiblingAutomationId
     })
 $taskName = "LibertixAutoFocus_{0}" -f $focusId.Substring(0, 12)
 $taskCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
@@ -212,6 +309,11 @@ try {
     Write-Output ("WINDOW_HANDLE={0}" -f [int64]$workerResult.window_handle)
     Write-Output ("WINDOW_TITLE={0}" -f [string]$workerResult.window_title)
     Write-Output ("FOCUSED_CONTROL={0}" -f [string]$workerResult.focused_control)
+    Write-Output ("PROCESS_ID={0}" -f $targetProcessId)
+    if (-not [string]::IsNullOrWhiteSpace($statePath)) {
+        Write-Output ("STATE_PATH={0}" -f $statePath)
+        Write-Output ("STATE_PHASE={0}" -f $statePhase)
+    }
     Write-Output "RESULT=OK"
 } finally {
     $null = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")

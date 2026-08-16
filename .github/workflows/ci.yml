@@ -264,8 +264,12 @@ jobs:
         run: |
           $outputDirectory = 'bin\Release'
           $executable = Join-Path $outputDirectory 'Libertix.exe'
+          $guardian = Join-Path $outputDirectory 'Libertix.BootGuardian.exe'
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
             throw "Expected WPF executable was not produced: $executable"
+          }
+          if (-not (Test-Path -LiteralPath $guardian -PathType Leaf)) {
+            throw "Expected boot guardian executable was not produced: $guardian"
           }
           Copy-Item -LiteralPath LICENSE, THIRD_PARTY.md -Destination $outputDirectory
           @(
@@ -275,7 +279,10 @@ jobs:
             "informational-version=$env:LIBERTIX_BUILD_VERSION"
           ) | Set-Content -LiteralPath (Join-Path $outputDirectory 'BUILD-INFO.txt') -Encoding utf8
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $executable
+          $guardianHash = Get-FileHash -Algorithm SHA256 -LiteralPath $guardian
           "Libertix.exe SHA-256: $($hash.Hash.ToLowerInvariant())" |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "Libertix.BootGuardian.exe SHA-256: $($guardianHash.Hash.ToLowerInvariant())" |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Upload WPF build

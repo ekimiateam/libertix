@@ -178,6 +178,9 @@ function Assert-LibertixPostInstallResult {
     if ([bool]$Session.Plan.features.shareLinuxFilesInWindows) {
         $expectedChecks += "explorer-integration"
     }
+    if ($ExpectedFirmware -eq "uefi") {
+        $expectedChecks += "boot-guardian"
+    }
     $actualChecks = @($result.checks | ForEach-Object { [string]$_.name })
     Assert-Condition ($actualChecks.Count -ge $expectedChecks.Count) `
         "The post-install verification check count is incomplete."
@@ -266,6 +269,27 @@ function Assert-LibertixPostInstallResult {
             "The verified UEFI BootCurrent or preferred Windows-path proof is missing."
         Assert-Condition (Test-Path -LiteralPath (Join-Path $root "uefi-transaction.json") -PathType Leaf) `
             "The permanent UEFI rollback transaction is missing."
+        $guardian = Get-CimInstance `
+            -ClassName Win32_Service `
+            -Filter "Name='LibertixBootGuardian'" `
+            -ErrorAction Stop
+        Assert-Condition (
+            $null -ne $guardian -and
+            [string]$guardian.State -eq "Running" -and
+            [string]$guardian.StartMode -eq "Auto"
+        ) "The boot guardian service is not running automatically."
+        $guardianConfigPath = "C:\ProgramData\Libertix\BootGuardian\config.json"
+        Assert-Condition (Test-Path -LiteralPath $guardianConfigPath -PathType Leaf) `
+            "The boot guardian configuration is missing."
+        $guardianConfig = Read-JsonFileWithRetry -LiteralPath $guardianConfigPath
+        Assert-Condition (
+            [int]$guardianConfig.version -eq 1 -and
+            [string]$guardianConfig.runId -eq [string]$Session.Plan.planId -and
+            [string]$guardianConfig.mode -in @(
+                "firmware-boot-order",
+                "preferred-windows-path"
+            )
+        ) "The boot guardian configuration identity or mode is invalid."
     } else {
         Assert-Condition ([string]$evidence.grub.bootChain.type -eq "bios-mbr") `
             "The BIOS MBR boot proof is missing."

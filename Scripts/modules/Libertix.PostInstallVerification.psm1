@@ -78,6 +78,18 @@ function Read-LibertixJsonObject {
     return $value
 }
 
+function Get-LibertixObjectPropertyValues {
+    param(
+        [Parameter(Mandatory = $true)]$InputObject,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -ne $property) {
+        @($property.Value)
+    }
+}
+
 function Get-LibertixScheduledTaskPrincipalSid {
     param([Parameter(Mandatory = $true)][string]$TaskName)
 
@@ -923,6 +935,92 @@ function Test-LibertixTemporaryBootFilesAbsent {
     return "temporary boot files absent"
 }
 
+function Test-LibertixBootGuardian {
+    param(
+        [Parameter(Mandatory = $true)]$Plan,
+        [Parameter(Mandatory = $true)][string]$RecoveryRoot
+    )
+
+    if ([string]$Plan.firmware -ne "uefi") {
+        return "not-required"
+    }
+    $guardianRoot = Join-Path $env:ProgramData "Libertix\BootGuardian"
+    $configPath = Join-Path $guardianRoot "config.json"
+    $archiveConfigPath = Join-Path $RecoveryRoot "boot-guardian\config.json"
+    $exePath = Join-Path $guardianRoot "Libertix.BootGuardian.exe"
+    foreach ($path in @($configPath, $archiveConfigPath, $exePath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Boot guardian file is missing: $path"
+        }
+    }
+    $config = Read-LibertixJsonObject `
+        -Path $configPath `
+        -Description "boot guardian configuration"
+    $archive = Read-LibertixJsonObject `
+        -Path $archiveConfigPath `
+        -Description "boot guardian archive"
+    $expectedMode = "firmware-boot-order"
+    $preferredManifestPath = Join-Path $RecoveryRoot "preferred-boot-path\manifest.json"
+    if (Test-Path -LiteralPath $preferredManifestPath -PathType Leaf) {
+        $preferredManifest = Read-LibertixJsonObject `
+            -Path $preferredManifestPath `
+            -Description "preferred boot path archive"
+        if (
+            [int]$preferredManifest.version -ne 1 -or
+            [string]$preferredManifest.runId -ne [string]$Plan.planId
+        ) {
+            throw "Preferred boot path archive identity is invalid."
+        }
+        if ([string]$preferredManifest.status -eq "installed") {
+            $expectedMode = "preferred-windows-path"
+        } elseif ([string]$preferredManifest.status -ne "restored") {
+            throw "Preferred boot path archive state is incomplete."
+        }
+    }
+    if (
+        [int]$config.version -ne 1 -or
+        [string]$config.runId -ne [string]$Plan.planId -or
+        [string]$config.mode -ne $expectedMode -or
+        [string]$archive.runId -ne [string]$config.runId -or
+        [string]$archive.mode -ne [string]$config.mode -or
+        (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash -ne `
+            (Get-FileHash -LiteralPath $archiveConfigPath -Algorithm SHA256).Hash -or
+        [string]$config.serviceSha256 -notmatch '^[0-9a-f]{64}$' -or
+        (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne `
+            [string]$config.serviceSha256
+    ) {
+        throw "Boot guardian configuration, archive, mode, or executable hash is invalid."
+    }
+    $service = Get-CimInstance `
+        -ClassName Win32_Service `
+        -Filter "Name='LibertixBootGuardian'" `
+        -ErrorAction Stop
+    if (
+        -not $service -or
+        [string]$service.StartMode -ne "Auto" -or
+        [string]$service.State -ne "Running" -or
+        [IO.Path]::GetFullPath(([string]$service.PathName).Trim('"')) -ne `
+            [IO.Path]::GetFullPath($exePath)
+    ) {
+        throw "Boot guardian Windows service is not installed and running as expected."
+    }
+    $serviceRegistry = Get-ItemProperty `
+        -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\LibertixBootGuardian" `
+        -ErrorAction Stop
+    $requiredPrivileges = @(
+        Get-LibertixObjectPropertyValues `
+            -InputObject $serviceRegistry `
+            -Name "RequiredPrivileges"
+    )
+    if (
+        [int]$serviceRegistry.PreshutdownTimeout -ne 10000 -or
+        $requiredPrivileges -notcontains "SeSystemEnvironmentPrivilege"
+    ) {
+        throw "Boot guardian preshutdown timeout or required privilege is invalid."
+    }
+    return "mode=$expectedMode service=running timeout=10000ms"
+}
+
 function Test-LibertixRecoveryArchive {
     param(
         [Parameter(Mandatory = $true)][object]$Plan,
@@ -940,8 +1038,11 @@ function Test-LibertixRecoveryArchive {
     }
     $runtimeFiles = if ([string]$Plan.firmware -eq "uefi") {
         @(
+            "payload\Libertix.BootGuardian.exe",
             "payload\Scripts\modules\Libertix.InstallationState.psm1",
             "payload\Scripts\modules\Libertix.PostInstallVerification.psm1",
+            "payload\Scripts\modules\Libertix.PreferredBootPath.psm1",
+            "payload\Scripts\modules\Libertix.BootGuardian.psm1",
             "payload\Scripts\libertix-uefi-recovery-agent.ps1",
             "payload\Scripts\libertix-post-install-result.ps1",
             "payload\Resources\Images\icon.ico"
@@ -1270,6 +1371,12 @@ function Invoke-LibertixPostInstallVerification {
             -Name "permanent-recovery-archive" -WriteLog $WriteLog -Test {
                 Test-LibertixRecoveryArchive -Plan $plan -RecoveryRoot $RecoveryRoot
             }
+        if ([string]$plan.firmware -eq "uefi") {
+            Add-LibertixPostInstallCheck -Result $result -ResultPath $resultPath `
+                -Name "boot-guardian" -WriteLog $WriteLog -Test {
+                    Test-LibertixBootGuardian -Plan $plan -RecoveryRoot $RecoveryRoot
+                }
+        }
     } catch {
         $primaryError = $_
         $result.status = "failed"

@@ -183,8 +183,11 @@ Describe "Permanent recovery archive" {
             "installation-plan.json",
             "installation-state.json",
             "installed-linux-boot.json",
+            "payload\Libertix.BootGuardian.exe",
             "payload\Scripts\modules\Libertix.InstallationState.psm1",
             "payload\Scripts\modules\Libertix.PostInstallVerification.psm1",
+            "payload\Scripts\modules\Libertix.PreferredBootPath.psm1",
+            "payload\Scripts\modules\Libertix.BootGuardian.psm1",
             "payload\Scripts\libertix-uefi-recovery-agent.ps1",
             "payload\Scripts\libertix-post-install-result.ps1",
             "payload\Resources\Images\icon.ico"
@@ -244,6 +247,38 @@ Describe "Scheduled task principal identity" {
 
             Get-LibertixScheduledTaskPrincipalSid -TaskName "LibertixLinuxReadOnly" |
                 Should -Be "S-1-5-18"
+        }
+    }
+}
+
+Describe "Optional service registry properties" {
+    InModuleScope Libertix.PostInstallVerification {
+        It "returns an empty array when RequiredPrivileges is absent under StrictMode" {
+            $registry = [pscustomobject]@{ PreshutdownTimeout = 10000 }
+
+            $values = @(Get-LibertixObjectPropertyValues `
+                    -InputObject $registry `
+                    -Name "RequiredPrivileges")
+
+            $values.Count | Should -Be 0
+        }
+
+        It "returns every configured RequiredPrivileges value" {
+            $registry = [pscustomobject]@{
+                RequiredPrivileges = @(
+                    "SeSystemEnvironmentPrivilege",
+                    "SeBackupPrivilege"
+                )
+            }
+
+            $values = @(Get-LibertixObjectPropertyValues `
+                    -InputObject $registry `
+                    -Name "RequiredPrivileges")
+
+            $values | Should -Be @(
+                "SeSystemEnvironmentPrivilege",
+                "SeBackupPrivilege"
+            )
         }
     }
 }

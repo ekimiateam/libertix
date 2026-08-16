@@ -207,7 +207,6 @@ class WizardAutomationMixin:
         progress_observation = 0
         previous_progress_signature: tuple[int, ...] | None = None
         last_visual_change_at = time.monotonic()
-        vision_disabled = False
         while time.monotonic() < deadline:
             response = self._run_unattended_control_command(
                 ssh,
@@ -286,15 +285,6 @@ class WizardAutomationMixin:
                 next_progress_observation = (
                     time.monotonic() + self.settings.automation_monitor_interval_seconds
                 )
-                if vision_disabled:
-                    result.ok(
-                        "automation.windows_preparation_without_vision",
-                        "Windows preparation remains under deterministic stage observation",
-                        vm=vm.name,
-                        target=vm.vnc,
-                        capture=str(capture),
-                    )
-                    continue
                 try:
                     verdict = self.vision_llm.analyze_install_progress(
                         capture,
@@ -302,20 +292,18 @@ class WizardAutomationMixin:
                         vm.os,
                     )
                 except WorkflowError as exc:
-                    http_status = exc.details.get("http_status")
-                    if http_status in (401, 402, 403):
-                        vision_disabled = True
-                    result.ok(
-                        "automation.windows_preparation_vision_unavailable",
-                        "Windows preparation vision is unavailable; "
-                        "deterministic stage observation continues",
-                        vm=vm.name,
-                        target=vm.vnc,
-                        capture=str(capture),
-                        http_status=http_status,
-                        vision_disabled=vision_disabled,
-                    )
-                    continue
+                    raise WorkflowError(
+                        "automation.windows_preparation_vision_required",
+                        "Windows preparation requires the configured vision provider",
+                        details={
+                            **exc.details,
+                            "vm": vm.name,
+                            "target": vm.vnc,
+                            "capture": str(capture),
+                            "provider_step": exc.step,
+                            "provider_message": exc.message,
+                        },
+                    ) from exc
 
                 context = {
                     "vm": vm.name,

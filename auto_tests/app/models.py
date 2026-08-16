@@ -27,6 +27,7 @@ STAGING_VOLUME_LABELS = (
 SourceMode = Literal["remote", "local", "published"]
 DistributionId = Literal["mint", "zorin"]
 FirstBoot = Literal["windows", "linux"]
+BootGuardianFault = Literal["none", "boot-order", "preferred-path"]
 
 
 class StepResult(BaseModel):
@@ -113,6 +114,10 @@ class AutomationRequest(ValidationRequest):
         description=(
             "Force the development-only live offline NTFS resize path for regression testing"
         ),
+    )
+    boot_guardian_fault: BootGuardianFault = Field(
+        default="none",
+        description=("Development-only fault injection used to prove preshutdown boot repair"),
     )
 
     @field_validator("linux_username")

@@ -316,6 +316,9 @@
     <Content Include="Scripts\modules\Libertix.PreferredBootPath.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\modules\Libertix.BootGuardian.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\modules\Libertix.Download.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -355,6 +358,13 @@
   </ItemGroup>
   <ItemGroup>
     <Resource Include="Resources\Images\icon.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="BootGuardian\Libertix.BootGuardian.csproj">
+      <Project>{A147B320-A380-4E00-B8FC-8DB44410C6F5}</Project>
+      <Name>Libertix.BootGuardian</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="CryptSharpOfficial" Version="2.1.0" />

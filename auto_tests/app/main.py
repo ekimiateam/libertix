@@ -5,6 +5,7 @@ import logging
 import multiprocessing
 import queue
 import threading
+import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from multiprocessing.connection import Connection
@@ -141,6 +142,7 @@ def _run_operation(
             share_linux_files_in_windows=request.share_linux_files_in_windows,
             simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
             force_offline_ntfs_resize=request.force_offline_ntfs_resize,
+            boot_guardian_fault=request.boot_guardian_fault,
             first_boot=request.first_boot,
             source=request.source,
             on_step=on_step,
@@ -287,6 +289,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         terminal_result_lock = threading.Lock()
         latest_steps: dict[str, str] = {}
         latest_steps_lock = threading.Lock()
+        automation_progress = threading.Event()
+        automation_progress_lock = threading.Lock()
+        automation_last_progress = [time.monotonic()]
 
         if not operation_lock.acquire(blocking=False):
             result = _operation_busy_result(operation)
@@ -324,6 +329,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return
                 event = projector.project_result(result)
                 terminal_result_seen.set()
+                automation_progress.set()
                 events.put(("data", projector.render(event, stream_format=stream_format)))
 
         process_context = multiprocessing.get_context("spawn")
@@ -339,6 +345,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     event_type, payload = process_events.recv()
                     if event_type == "step":
                         step = StepResult.model_validate(payload)
+                        with automation_progress_lock:
+                            automation_last_progress[0] = time.monotonic()
+                        automation_progress.set()
                         vm = str(step.context.get("vm") or step.context.get("target") or "global")
                         with latest_steps_lock:
                             latest_steps[vm] = step.step
@@ -392,10 +401,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         def enforce_automation_timeout() -> None:
             if operation != "automation":
                 return
-            if terminal_result_seen.wait(configured.automation_operation_timeout_seconds):
-                return
-            if not process.is_alive():
-                return
+            while True:
+                automation_progress.clear()
+                if terminal_result_seen.is_set() or not process.is_alive():
+                    return
+                with automation_progress_lock:
+                    idle_seconds = time.monotonic() - automation_last_progress[0]
+                remaining_seconds = configured.automation_operation_timeout_seconds - idle_seconds
+                if remaining_seconds <= 0:
+                    break
+                if automation_progress.wait(remaining_seconds):
+                    continue
+                if terminal_result_seen.is_set() or not process.is_alive():
+                    return
+                with automation_progress_lock:
+                    idle_seconds = time.monotonic() - automation_last_progress[0]
+                if idle_seconds >= configured.automation_operation_timeout_seconds:
+                    break
 
             captures, capture_errors = _capture_automation_timeout_screens(
                 configured,
@@ -409,14 +431,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             result = OperationResult(
                 status="error",
                 operation="automation",
-                message="error: automation exceeded its configured global timeout",
+                message="error: automation made no progress before its configured timeout",
                 steps=[
                     StepResult(
-                        step="automation.global_timeout",
+                        step="automation.inactivity_timeout",
                         status="error",
-                        message="Automation exceeded its configured global timeout",
+                        message="Automation made no progress before its configured timeout",
                         context={
-                            "timeout_seconds": configured.automation_operation_timeout_seconds,
+                            "inactivity_timeout_seconds": (
+                                configured.automation_operation_timeout_seconds
+                            ),
                             "active_steps": active_steps,
                             "captures": captures,
                             "capture_errors": capture_errors,

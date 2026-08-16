@@ -1857,6 +1857,10 @@ def test_preferred_windows_path_is_transactional_and_avoids_grub_recursion() -> 
         "MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH",
         "Restore-LibertixPreferredBootPath",
         "secure-boot-chain.json",
+        "PreferredPathOriginals",
+        'Join-Path $ArchiveRoot "original-files"',
+        'manifest["originalFiles"]',
+        "Restore-LibertixPreferredPathOriginalFiles",
     ):
         assert required in module
     assert module.index("PreferredGrubRelativePath") < module.index("-Destination $windowsLoader")
@@ -1995,7 +1999,8 @@ def test_unattended_warning_keyboard_action_requires_proven_ui_focus() -> None:
     )
     assert "UnattendedWarningNoButton" in focus_script
     assert "UnattendedWarningYesButton" in focus_script
-    assert "$noButton.Current.HasKeyboardFocus" in focus_script
+    assert "$target.Current.HasKeyboardFocus" in focus_script
+    assert "Set-LibertixControlFocus" in focus_script
     assert "$attempt -lt 450" in focus_script
     assert '"/Query", "/TN", $taskName, "/V", "/FO", "LIST"' in focus_script
     assert "timeout=60" in acceptance
@@ -3920,12 +3925,80 @@ def test_uefi_recovery_runtime_modules_are_packaged_with_the_wpf_application() -
     for relative_path in (
         r"Scripts\modules\Libertix.FirmwareRead.psm1",
         r"Scripts\modules\Libertix.PreferredBootPath.psm1",
+        r"Scripts\modules\Libertix.BootGuardian.psm1",
     ):
         entry = project.split(f'<Content Include="{relative_path}">', 1)[1].split("</Content>", 1)[
             0
         ]
         assert "<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>" in entry
         assert relative_path.rsplit("\\", 1)[-1] in apply_changes
+    assert "Libertix.BootGuardian.exe" in apply_changes
+    assert "Libertix.BootGuardian.csproj" in project
+
+
+def test_uefi_boot_guardian_is_armed_before_waiting_for_first_linux_boot() -> None:
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    waiting_branch = agent.split(
+        "if (-not (Test-Path -LiteralPath $linuxBootEvidence -PathType Leaf)) {", 1
+    )[1].split('Write-AgentLog "Live success found;', 1)[0]
+    preferred_action = agent.split('if ($Action -eq "InstallPreferredPath") {', 1)[1].split(
+        "$successRunId = Read-EnvValue", 1
+    )[0]
+
+    assert waiting_branch.index("Install-BootGuardianForCurrentBootPath") < waiting_branch.index(
+        "Set-LibertixPostInstallWaitingForLinux"
+    )
+    assert "firmwareBypassEvaluationSucceeded" in waiting_branch
+    assert preferred_action.index("Install-LibertixPreferredBootPath") < preferred_action.index(
+        "Install-BootGuardianForCurrentBootPath"
+    )
+    guardian_index = preferred_action.index("Install-BootGuardianForCurrentBootPath")
+    assert guardian_index < preferred_action.index('"AwaitingPreferredPathReboot"')
+
+
+def test_boot_guardian_uses_the_windows_preshutdown_contract_and_quiet_logs() -> None:
+    native = read("BootGuardian/NativeMethods.cs")
+    service = read("BootGuardian/ServiceHost.cs")
+    engine = read("BootGuardian/BootGuardianEngine.cs")
+    journal = read("BootGuardian/RepairJournal.cs")
+
+    assert "ServiceControlPreshutdown = 0x0000000F" in native
+    assert "ServiceConfigPreshutdownInfo = 7" in native
+    assert (
+        '[DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]\n'
+        "        [return: MarshalAs(UnmanagedType.Bool)]\n"
+        "        internal static extern bool ChangeServiceConfig2" in native
+    )
+    assert "PreshutdownTimeout = 10000" in service
+    assert "DateTime.UtcNow.AddMilliseconds(8500)" in service
+    assert "SeSystemEnvironmentPrivilege" in service
+    assert "ServiceAcceptPreshutdown" in service
+    firmware = read("BootGuardian/FirmwareEnvironment.cs")
+    assert "NativeMethods.SetLastError(0);" in firmware
+    assert firmware.index("NativeMethods.SetLastError(0);") < firmware.index(
+        "NativeMethods.AdjustTokenPrivileges("
+    )
+    assert 'Flush("repair")' in journal
+    healthy_completion = journal.split("internal void Complete()", 1)[1].split(
+        "internal void Fail", 1
+    )[0]
+    assert "if (_repairRequired)" in healthy_completion
+    assert "ArchiveUnexpected(config" in engine
+    assert "AtomicFile.CopyVerified" in engine
+
+
+def test_boot_guardian_is_removed_before_any_uefi_boot_restoration() -> None:
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    cancel = agent.split('if ($Action -eq "Cancel") {', 1)[1].split(
+        'if ($Action -eq "InstallPreferredPath") {', 1
+    )[0]
+
+    assert cancel.index("Remove-BootGuardianIfPresent") < cancel.index(
+        "Restore-PreferredBootPathIfPresent"
+    )
+    assert cancel.index("Remove-BootGuardianIfPresent") < cancel.index(
+        "Restore-UefiTransactionArchive"
+    )
 
 
 def test_uefi_recovery_mounts_a_letterless_esp_at_an_explicit_free_access_path() -> None:
@@ -4450,6 +4523,53 @@ def test_force_uefi_diagnostic_uses_a_unique_remote_script_and_finally_cleanup()
     assert "check=True" in tool
 
 
+def test_boot_guardian_fault_fixture_is_owned_bounded_and_verified() -> None:
+    fixture = read("auto_tests/app/scripts/test_boot_guardian_fault.ps1")
+    preferred_fixture = read("auto_tests/app/scripts/test_boot_guardian_preferred_path_fault.ps1")
+    automation = read("auto_tests/app/services/automation_postinstall.py")
+
+    for action in (
+        "plan-boot-order",
+        "inject-boot-order",
+        "verify-boot-order",
+        "plan-preferred-bypass",
+        "inject-preferred-bypass",
+    ):
+        assert f'"{action}"' in fixture
+    assert '"The active guardian configuration differs from its permanent archive."' in fixture
+    assert 'ExpectedPath "\\EFI\\Microsoft\\Boot\\bootmgfw.efi"' in fixture
+    assert '-Name "BootOrder" `\n            -Value (ConvertTo-BootOrderBytes' in fixture
+    assert '"Firmware did not retain the injected BootOrder fault."' in fixture
+    assert "REPAIR: BootOrder changed from" in fixture
+    assert 'Stop-Service -Name "LibertixBootGuardian"' in fixture
+    assert "WaitForStatus" not in fixture
+    assert "Win32_Service `\n                    -Filter \"Name='LibertixBootGuardian'\"" in fixture
+    assert '"The boot guardian service did not stop within 15 seconds."' in fixture
+    assert 'config={"action": "plan-boot-order"}' in automation
+    assert 'config={"action": "inject-boot-order"}' in automation
+    assert '"action": "verify-boot-order"' in automation
+    for action in ("plan-loader", "inject-loader", "verify-loader"):
+        assert f'"{action}"' in preferred_fixture
+    assert "Copy-LibertixPreferredPathFileAtomic" in preferred_fixture
+    assert "The permanent original Windows Boot Manager archive is missing." in preferred_fixture
+    assert "unexpected-efi\\shimx64.efi-$originalHash.bin" in preferred_fixture
+    assert 'config={"mode": "preferred-accept"}' in automation
+    assert 'config={"mode": "preferred-reboot"}' in automation
+    assert 'config={"action": "plan-loader"}' in automation
+    assert 'config={"action": "inject-loader"}' in automation
+    assert '"action": "verify-loader"' in automation
+
+
+def test_boot_guardian_commands_do_not_depend_on_last_exit_code_scope() -> None:
+    module = read("Scripts/modules/Libertix.BootGuardian.psm1")
+
+    assert "function Invoke-LibertixBootGuardianCommand" in module
+    assert "Start-Process `" in module
+    assert "-Wait `" in module
+    assert "-PassThru `" in module
+    assert "$LASTEXITCODE" not in module
+
+
 def test_compatibility_output_is_persisted_in_the_application_log() -> None:
     runner = read("Helpers/CompatibilityPreflightRunner.cs")
 
@@ -4684,6 +4804,22 @@ def test_postinstall_winre_and_bios_boot_checks_are_locale_independent() -> None
     assert '-Arguments @("/enable")' in recovery_check
     assert '-Arguments @("/info")' not in recovery_check
     assert "deshabilitado" not in recovery_check
+
+
+def test_boot_guardian_verification_handles_a_missing_service_privilege_value() -> None:
+    module = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+    helper = module.split("function Get-LibertixObjectPropertyValues", 1)[1].split("function ", 1)[
+        0
+    ]
+    guardian_check = module.split("function Test-LibertixBootGuardian", 1)[1].split(
+        "function Test-LibertixRecoveryArchive", 1
+    )[0]
+
+    assert "$InputObject.PSObject.Properties[$Name]" in helper
+    assert "@($property.Value)" in helper
+    assert '-Name "RequiredPrivileges"' in guardian_check
+    assert '$requiredPrivileges -notcontains "SeSystemEnvironmentPrivilege"' in guardian_check
+    assert "$serviceRegistry.RequiredPrivileges" not in guardian_check
 
 
 def test_live_failure_and_cleanup_guards_cover_confirmed_audit_paths() -> None:

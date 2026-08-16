@@ -90,6 +90,23 @@ def test_sync_publishes_a_complete_preferred_chain_with_shim_last(tmp_path: Path
     assert "export libertix_windows_loader" in preferred_config
 
 
+def test_sync_refreshes_existing_boot_guardian_repair_references(tmp_path: Path) -> None:
+    esp, verifier = fixture(tmp_path)
+    reference = esp / "EFI" / "Libertix" / "BootGuardianReference"
+    reference.mkdir()
+    (reference / ".libertix-owner").write_text("a" * 32 + "\n", encoding="utf-8")
+    for name in ("shimx64.efi", "grubx64.efi", "mmx64.efi", "grub.cfg"):
+        write(reference / name, b"stale")
+
+    synchronize(esp, verifier)
+
+    assert (reference / "shimx64.efi").read_bytes() == b"new-shim"
+    assert (reference / "grubx64.efi").read_bytes() == b"new-grub"
+    assert (reference / "mmx64.efi").read_bytes() == b"new-mm"
+    config = (reference / "grub.cfg").read_text(encoding="utf-8")
+    assert "bootmgfw.libertix-windows.efi" in config
+
+
 def test_sync_preserves_a_verified_windows_update_before_reinstalling_shim(
     tmp_path: Path,
 ) -> None:

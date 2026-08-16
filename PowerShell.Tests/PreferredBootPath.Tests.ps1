@@ -9,8 +9,9 @@ Describe "Preferred Windows boot path transaction" {
         $testDrivePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(
             $TestDrive
         )
-        $script:EspRoot = Join-Path $testDrivePath "esp"
-        $script:RecoveryRoot = Join-Path $testDrivePath "recovery"
+        $caseRoot = Join-Path $testDrivePath ([Guid]::NewGuid().ToString("N"))
+        $script:EspRoot = Join-Path $caseRoot "esp"
+        $script:RecoveryRoot = Join-Path $caseRoot "recovery"
         $script:LibertixDirectory = Join-Path $script:EspRoot "EFI\Libertix"
         $script:MicrosoftDirectory = Join-Path $script:EspRoot "EFI\Microsoft\Boot"
         New-Item -ItemType Directory -Path $script:LibertixDirectory -Force | Out-Null
@@ -131,5 +132,75 @@ Describe "Preferred Windows boot path transaction" {
         (Get-Content `
             -LiteralPath (Join-Path $script:MicrosoftDirectory "bootmgfw.efi") `
             -Raw) | Should -Be "original-windows-loader"
+    }
+
+    It "archives and restores every pre-existing preferred-path destination" {
+        $originalFiles = [ordered]@{
+            "bootmgfw.libertix-windows.efi" = "pre-existing-backup-slot"
+            "grubx64.efi" = "pre-existing-grub"
+            "mmx64.efi" = "pre-existing-mm"
+            "grub.cfg" = "pre-existing-config"
+        }
+        foreach ($entry in $originalFiles.GetEnumerator()) {
+            Set-Content `
+                -LiteralPath (Join-Path $script:MicrosoftDirectory $entry.Key) `
+                -Value $entry.Value `
+                -Encoding ASCII `
+                -NoNewline
+        }
+
+        $manifest = Install-LibertixPreferredBootPath `
+            -State $script:State `
+            -EspPartition $script:EspPartition `
+            -EspRoot $script:EspRoot `
+            -WriteLog $script:Log
+
+        @($manifest.originalFiles).Count | Should -Be 4
+        foreach ($entry in $originalFiles.GetEnumerator()) {
+            $archiveName = switch ($entry.Key) {
+                "bootmgfw.libertix-windows.efi" {
+                    "preexisting-bootmgfw.libertix-windows.efi"
+                }
+                "grubx64.efi" { "preexisting-grubx64.efi" }
+                "mmx64.efi" { "preexisting-mmx64.efi" }
+                "grub.cfg" { "preexisting-grub.cfg" }
+            }
+            (Get-Content `
+                -LiteralPath (Join-Path `
+                    $script:RecoveryRoot `
+                    "preferred-boot-path\original-files\$archiveName") `
+                -Raw) | Should -Be $entry.Value
+        }
+
+        # Reproduce a power loss after the manifests exist but before the Windows
+        # backup slot and first-stage loader have both been published.
+        Set-Content `
+            -LiteralPath (Join-Path $script:MicrosoftDirectory "bootmgfw.efi") `
+            -Value "original-windows-loader" `
+            -Encoding ASCII `
+            -NoNewline
+        Set-Content `
+            -LiteralPath (Join-Path `
+                $script:MicrosoftDirectory `
+                "bootmgfw.libertix-windows.efi") `
+            -Value "pre-existing-backup-slot" `
+            -Encoding ASCII `
+            -NoNewline
+
+        Restore-LibertixPreferredBootPath `
+            -State $script:State `
+            -EspRoot $script:EspRoot `
+            -WriteLog $script:Log | Should -BeTrue
+
+        foreach ($entry in $originalFiles.GetEnumerator()) {
+            (Get-Content `
+                -LiteralPath (Join-Path $script:MicrosoftDirectory $entry.Key) `
+                -Raw) | Should -Be $entry.Value
+        }
+        Test-Path `
+            -LiteralPath (Join-Path `
+                $script:RecoveryRoot `
+                "preferred-boot-path\original-files\preexisting-grubx64.efi") |
+            Should -BeTrue
     }
 }

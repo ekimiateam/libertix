@@ -471,11 +471,18 @@ try {
     if (-not (Test-Path -LiteralPath $stagedExe -PathType Leaf)) {
         throw "Libertix.exe is missing from Libertix-release after copying"
     }
+    $stagedGuardian = Join-Path $releaseStaging "Libertix.BootGuardian.exe"
+    if (-not (Test-Path -LiteralPath $stagedGuardian -PathType Leaf)) {
+        throw "Libertix.BootGuardian.exe is missing from Libertix-release after copying"
+    }
     $stagedRuntimeIcon = Join-Path $releaseStaging "Resources\Images\icon.ico"
     if (-not (Test-Path -LiteralPath $stagedRuntimeIcon -PathType Leaf)) {
         throw "The Libertix runtime icon is missing from Libertix-release after copying"
     }
     $finalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedExe).Hash.ToLowerInvariant()
+    $guardianHash = (
+        Get-FileHash -Algorithm SHA256 -LiteralPath $stagedGuardian
+    ).Hash.ToLowerInvariant()
 
     if (Test-Path -LiteralPath $releasePath) {
         $releaseBackup = "$releasePath.backup-$([Guid]::NewGuid().ToString('N'))"
@@ -497,6 +504,14 @@ try {
     if ($publishedHash -ne $finalHash) {
         throw "The Libertix.exe hash changed during publication"
     }
+    $finalGuardian = Join-Path $releasePath "Libertix.BootGuardian.exe"
+    if (
+        -not (Test-Path -LiteralPath $finalGuardian -PathType Leaf) -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $finalGuardian).Hash.ToLowerInvariant() -ne `
+            $guardianHash
+    ) {
+        throw "The Libertix.BootGuardian.exe hash changed during publication"
+    }
     if ($releaseBackup) {
         Remove-Item -LiteralPath $releaseBackup -Recurse -Force
         $releaseBackup = $null
@@ -511,6 +526,8 @@ try {
     Write-Result -Name "TEMP_BUILD_DIR" -Value $temp
     Write-Result -Name "FINAL_EXE" -Value $finalExe
     Write-Result -Name "FINAL_EXE_SHA256" -Value $publishedHash
+    Write-Result -Name "FINAL_BOOT_GUARDIAN" -Value $finalGuardian
+    Write-Result -Name "FINAL_BOOT_GUARDIAN_SHA256" -Value $guardianHash
 }
 finally {
     # Always remove copied sources and build caches, including after a failed
