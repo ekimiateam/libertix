@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Libertix.Tests", "Libertix.
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Libertix.BootGuardian", "BootGuardian\Libertix.BootGuardian.csproj", "{A147B320-A380-4E00-B8FC-8DB44410C6F5}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Libertix.Standalone", "Standalone\Libertix.Standalone.csproj", "{96270BAE-BF33-42EB-8DE7-F49713C12011}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,6 +28,10 @@ Global
 		{A147B320-A380-4E00-B8FC-8DB44410C6F5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A147B320-A380-4E00-B8FC-8DB44410C6F5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A147B320-A380-4E00-B8FC-8DB44410C6F5}.Release|Any CPU.Build.0 = Release|Any CPU
+		{96270BAE-BF33-42EB-8DE7-F49713C12011}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{96270BAE-BF33-42EB-8DE7-F49713C12011}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{96270BAE-BF33-42EB-8DE7-F49713C12011}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{96270BAE-BF33-42EB-8DE7-F49713C12011}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

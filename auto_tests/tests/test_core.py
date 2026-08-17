@@ -2874,6 +2874,58 @@ def test_reboot_request_uses_focused_default_controls_without_mouse_coordinates(
     assert result.steps[-1].step == "automation.reboot_requested"
 
 
+def test_reboot_request_tolerates_vnc_loss_only_after_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    keys: list[str] = []
+    captures: list[str] = []
+    client = SimpleNamespace(keyPress=keys.append, disconnect=lambda: None)
+
+    def capture(_client: object, _vm: object, label: str, _result: object) -> None:
+        captures.append(label)
+        if label == "reboot-accepted":
+            raise TimeoutError("VNC closed during reboot")
+
+    monkeypatch.setattr(service.vnc, "connect", lambda _address: client)
+    monkeypatch.setattr(service, "_capture_from_client", capture)
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    result = ResultBuilder("automation")
+
+    service._request_reboot_after_preparation(vm, result)  # noqa: SLF001
+
+    assert keys == ["enter", "enter"]
+    assert captures == ["reboot-ready", "reboot-confirm", "reboot-accepted"]
+    assert [step.step for step in result.steps[-2:]] == [
+        "automation.reboot_transition",
+        "automation.reboot_requested",
+    ]
+
+
+def test_client_capture_accepts_a_complete_image_written_before_vnc_timeout(
+    tmp_path: Path,
+) -> None:
+    service = AutomationService(settings())
+    service._capture_dir = tmp_path  # noqa: SLF001
+    vm = service.validation.select_vms(["vm3"])[0]
+
+    def write_then_timeout(path: str) -> None:
+        Image.new("RGB", (64, 48), (10, 20, 30)).save(path)
+        raise TimeoutError("VNC reply ended after framebuffer delivery")
+
+    client = SimpleNamespace(captureScreen=write_then_timeout)
+    result = ResultBuilder("automation")
+
+    capture = service._capture_from_client(  # noqa: SLF001
+        client, vm, "warning-ready", result
+    )
+
+    assert capture.is_file()
+    assert result.steps[-1].step == "automation.capture"
+    assert "after framebuffer delivery" in result.steps[-1].context["capture_transport_error"]
+
+
 def test_automation_monitor_retries_a_restart_prompt_instead_of_calling_it_linux(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4242,6 +4294,82 @@ def test_linux_graphical_session_retries_until_loginctl_proves_an_active_desktop
         "automation.linux_graphical_session",
     ]
     assert [step.context.get("attempt") for step in result.steps[:2]] == [1, 2]
+
+
+def test_linux_graphical_session_reconnects_after_a_blank_vnc_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    responses = iter(
+        (
+            CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
+            CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
+            CommandResult(stdout="LIBERTIX_DESKTOP_READY", stderr="", exit_code=0),
+        )
+    )
+    connections: list[SimpleNamespace] = []
+    capture_attempts = 0
+    typed: list[str] = []
+
+    def connect(_address: str) -> SimpleNamespace:
+        connection = SimpleNamespace(
+            keyPress=lambda _key: None,
+            keyDown=lambda _key: None,
+            keyUp=lambda _key: None,
+            disconnect=lambda: None,
+        )
+        connections.append(connection)
+        return connection
+
+    def capture(
+        _client: object,
+        _vm: object,
+        label: str,
+        _result: ResultBuilder,
+    ) -> Path:
+        nonlocal capture_attempts
+        capture_attempts += 1
+        if capture_attempts == 1:
+            raise WorkflowError(
+                "automation.capture",
+                "VNC capture is missing or empty",
+                details={"label": label},
+            )
+        return Path(f"{label}.png")
+
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"{label}.png"),
+    )
+    monkeypatch.setattr(service.vnc, "connect", connect)
+    monkeypatch.setattr(service, "_capture_from_client", capture)
+    monkeypatch.setattr(
+        service,
+        "_type_text",
+        lambda _client, text, _layout: typed.append(text),
+    )
+    linux_ssh = SimpleNamespace(run=lambda *_args, **_kwargs: next(responses))
+    result = ResultBuilder("automation")
+
+    service._prepare_linux_graphical_session(  # noqa: SLF001
+        linux_ssh,
+        vm,
+        result,
+        "test",
+        "test-passphrase",
+    )
+
+    assert len(connections) == 2
+    assert typed == ["test-passphrase"]
+    assert [step.step for step in result.steps] == [
+        "automation.linux_graphical_capture_retry",
+        "automation.linux_graphical_login",
+        "automation.linux_graphical_session",
+    ]
+    assert result.steps[0].context["attempt"] == 1
 
 
 def test_windows_post_install_checks_unlock_the_interactive_session(

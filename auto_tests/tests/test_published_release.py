@@ -43,7 +43,6 @@ def _wpf_archive() -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("Libertix.exe", b"published executable")
-        archive.writestr("BUILD-INFO.txt", "test")
     return buffer.getvalue()
 
 
@@ -55,7 +54,9 @@ def test_published_dev_release_is_signed_hashed_and_extracted(
     archive = _wpf_archive()
     tag = "a881918"
     commit = tag + "0" * 33
-    release_url = f"https://github.com/ekimiateam/libertix/releases/download/{tag}/Libertix-wpf.zip"
+    release_url = (
+        f"https://github.com/ekimiateam/libertix/releases/download/{tag}/Libertix-{tag}.zip"
+    )
     releases, releases_signature = _signed(
         private_key,
         {"schemaVersion": 1, "channel": "dev", "latest": {"tag": tag, "commit": commit}},
@@ -66,7 +67,7 @@ def test_published_dev_release_is_signed_hashed_and_extracted(
             "schemaVersion": 1,
             "artifacts": {
                 "wpf": {
-                    "fileName": "Libertix-wpf.zip",
+                    "fileName": f"Libertix-{tag}.zip",
                     "url": release_url,
                     "sha256": hashlib.sha256(archive).hexdigest(),
                     "sizeBytes": len(archive),
@@ -123,6 +124,66 @@ def test_published_dev_release_rejects_a_catalog_with_an_invalid_signature(
         "https://pages.test/dev/releases.json.sig": releases_signature,
         "https://pages.test/dev/catalog.json": b"{}\n",
         "https://pages.test/dev/catalog.json.sig": b"aW52YWxpZA==\n",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=responses[str(request.url)], request=request)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        "app.published_release.httpx.Client",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+
+    with pytest.raises(WorkflowError, match="latest signed dev build"):
+        download_published_dev_release(
+            metadata_base_url="https://pages.test/dev",
+            public_key_path=public_key,
+            work_directory=tmp_path / "work",
+            timeout_seconds=10,
+        )
+
+
+def test_published_dev_release_rejects_an_archive_with_exposed_sidecars(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key, public_key = _application_key(tmp_path)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive_file:
+        archive_file.writestr("Libertix.exe", b"published executable")
+        archive_file.writestr("unexpected.dll", b"sidecar")
+    archive = buffer.getvalue()
+    tag = "a881918"
+    commit = tag + "0" * 33
+    release_url = (
+        f"https://github.com/ekimiateam/libertix/releases/download/{tag}/Libertix-{tag}.zip"
+    )
+    releases, releases_signature = _signed(
+        private_key,
+        {"schemaVersion": 1, "channel": "dev", "latest": {"tag": tag, "commit": commit}},
+    )
+    catalog, catalog_signature = _signed(
+        private_key,
+        {
+            "schemaVersion": 1,
+            "artifacts": {
+                "wpf": {
+                    "fileName": f"Libertix-{tag}.zip",
+                    "url": release_url,
+                    "sha256": hashlib.sha256(archive).hexdigest(),
+                    "sizeBytes": len(archive),
+                }
+            },
+            "distributions": [],
+        },
+    )
+    responses = {
+        "https://pages.test/dev/releases.json": releases,
+        "https://pages.test/dev/releases.json.sig": releases_signature,
+        "https://pages.test/dev/catalog.json": catalog,
+        "https://pages.test/dev/catalog.json.sig": catalog_signature,
+        release_url: archive,
     }
 
     def handler(request: httpx.Request) -> httpx.Response:

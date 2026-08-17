@@ -27,7 +27,7 @@ namespace Libertix.BootGuardian
                 {
                     return new BootGuardianEngine().Execute(
                         ServiceHost.ConfigPath,
-                        DateTime.UtcNow.AddMinutes(1)) ? 0 : 2;
+                        TimeSpan.FromMinutes(1)) ? 0 : 2;
                 }
                 return 64;
             }

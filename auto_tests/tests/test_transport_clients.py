@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 from vncdotool.client import KEYMAP
 
 import app.clients.ssh as ssh_module
@@ -515,7 +516,7 @@ class FakeVncConnection:
         self.events.append(("capture", destination))
         if self.fail_capture:
             raise RuntimeError("capture failed")
-        Path(destination).write_bytes(b"png")
+        Image.new("RGB", (32, 24), (12, 24, 48)).save(destination)
 
     def disconnect(self) -> None:
         self.disconnected = True
@@ -538,7 +539,8 @@ def test_vnc_capture_wakes_the_display_and_always_disconnects(
     result = VNCClient().capture("192.0.2.10:12", destination)
 
     assert result == destination
-    assert destination.read_bytes() == b"png"
+    with Image.open(destination) as capture:
+        assert capture.size == (32, 24)
     assert addresses == ["192.0.2.10::5912|15"]
     assert connection.events[0] == ("move", 1, 1)
     assert connection.disconnected is True
@@ -574,7 +576,7 @@ def test_vnc_capture_retries_transient_network_failures(
             attempts += 1
             if attempts < 3:
                 raise OSError(101, "Network is unreachable")
-            Path(destination).write_bytes(b"png")
+            Image.new("RGB", (32, 24), (12, 24, 48)).save(destination)
 
     connections: list[TransientConnection] = []
 
@@ -590,9 +592,35 @@ def test_vnc_capture_retries_transient_network_failures(
 
     assert VNCClient().capture("192.0.2.10:12", destination) == destination
     assert attempts == 3
-    assert destination.read_bytes() == b"png"
+    with Image.open(destination) as capture:
+        assert capture.size == (32, 24)
     assert all(connection.disconnected for connection in connections)
     assert sleeps.count(vnc_module.CAPTURE_RETRY_SECONDS) == 2
+
+
+def test_vnc_capture_keeps_a_complete_image_written_before_transport_loss(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    attempts = 0
+
+    class RebootingConnection(FakeVncConnection):
+        def captureScreen(self, destination: str) -> None:  # noqa: N802
+            nonlocal attempts
+            attempts += 1
+            Image.new("RGB", (32, 24), (12, 24, 48)).save(destination)
+            raise TimeoutError("VNC disconnected during reboot")
+
+    connection = RebootingConnection()
+    monkeypatch.setattr(vnc_module.api, "connect", lambda _address, *, timeout: connection)
+    monkeypatch.setattr(vnc_module.time, "sleep", lambda _seconds: None)
+    destination = tmp_path / "capture.png"
+
+    assert VNCClient().capture("192.0.2.10:12", destination) == destination
+    assert attempts == 1
+    with Image.open(destination) as capture:
+        assert capture.size == (32, 24)
+    assert connection.disconnected is True
 
 
 @pytest.mark.parametrize("address", ["", "host", ":10", "host:not-a-display"])

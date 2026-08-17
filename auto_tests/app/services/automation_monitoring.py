@@ -505,7 +505,19 @@ class InstallationMonitoringMixin:
             self._press_key(client, "enter", REBOOT_DIALOG_DELAY_SECONDS)
             self._capture_from_client(client, vm, "reboot-confirm", result)
             self._press_key(client, "enter", REBOOT_ACCEPT_DELAY_SECONDS)
-            self._capture_from_client(client, vm, "reboot-accepted", result)
+            try:
+                self._capture_from_client(client, vm, "reboot-accepted", result)
+            except Exception as exc:
+                # A fast reboot can close VNC after the confirmation key was
+                # accepted but while captureScreen is waiting for its reply.
+                # The boot monitor still has to prove the following live boot.
+                result.ok(
+                    "automation.reboot_transition",
+                    "VNC became unavailable after reboot confirmation; boot verification continues",
+                    target=vm.vnc,
+                    vm=vm.name,
+                    error=str(exc),
+                )
             result.ok(
                 "automation.reboot_requested",
                 "Reboot requested from the focused default controls after the reboot-ready stage",

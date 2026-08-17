@@ -667,15 +667,28 @@ function Save-UefiTransactionArchive {
     param([Parameter(Mandatory = $true)]$State)
 
     $source = Join-Path $SystemDrive "LibertixTools\uefi-transaction.json"
+    $destination = Join-Path $State.RecoveryRoot "uefi-transaction.json"
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
-        throw "UEFI transaction state is missing before permanent archival."
+        if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+            throw "UEFI transaction state and its permanent archive are both missing."
+        }
+        $archivedTransaction = Get-Content `
+            -LiteralPath $destination `
+            -Raw `
+            -Encoding UTF8 `
+            -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if ([string]$archivedTransaction.RecoveryRunId -ne [string]$State.RunId) {
+            throw "Permanent UEFI transaction archive belongs to another recovery session."
+        }
+        Write-AgentLog "UEFI transaction state was already archived permanently."
+        return
     }
     $transaction = Get-Content -LiteralPath $source -Raw -Encoding UTF8 -ErrorAction Stop |
         ConvertFrom-Json -ErrorAction Stop
     if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
         throw "UEFI transaction state belongs to another recovery session."
     }
-    $destination = Join-Path $State.RecoveryRoot "uefi-transaction.json"
     $temporary = Join-Path $State.RecoveryRoot ".uefi-transaction.$([Guid]::NewGuid().ToString('N')).tmp"
     $backup = Join-Path $State.RecoveryRoot ".uefi-transaction.$([Guid]::NewGuid().ToString('N')).bak"
     try {
@@ -689,6 +702,55 @@ function Save-UefiTransactionArchive {
         if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
     }
     Write-AgentLog "UEFI transaction state archived permanently."
+}
+
+function Set-FinalizationStep {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(
+            "Started",
+            "TransactionArchived",
+            "BootGuardianInstalled",
+            "WindowsShareFinalized",
+            "HibernationRestored",
+            "TemporaryArtifactsRemoved",
+            "PostInstallVerified"
+        )]
+        [string]$Step
+    )
+
+    if ($State.PSObject.Properties.Name -contains "FinalizationStep") {
+        $State.FinalizationStep = $Step
+    } else {
+        $State | Add-Member -NotePropertyName FinalizationStep -NotePropertyValue $Step
+    }
+    Save-State -State $State
+    Write-AgentLog "Post-install finalization checkpoint persisted: $Step."
+}
+
+function Get-FinalizationStepRank {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $step = if ($State.PSObject.Properties.Name -contains "FinalizationStep") {
+        [string]$State.FinalizationStep
+    } else {
+        "NotStarted"
+    }
+    $rank = @{
+        NotStarted = 0
+        Started = 1
+        TransactionArchived = 2
+        BootGuardianInstalled = 3
+        WindowsShareFinalized = 4
+        HibernationRestored = 5
+        TemporaryArtifactsRemoved = 6
+        PostInstallVerified = 7
+    }
+    if (-not $rank.ContainsKey($step)) {
+        throw "Post-install finalization checkpoint is invalid: $step"
+    }
+    return [int]$rank[$step]
 }
 
 function Restore-UefiTransactionArchive {
@@ -943,32 +1005,69 @@ function Invoke-VerifiedInstallationSuccess {
             }
             return
         }
-        Save-UefiTransactionArchive -State $State
-        Invoke-WindowsShareFinalize
-        Remove-TemporaryRecoveryArtifacts -State $State
-        Restore-HibernationAfterInstallation -State $State
-        $null = Install-BootGuardianForCurrentBootPath -State $State
-        $null = Invoke-LibertixPostInstallVerification `
-            -RecoveryRoot ([string]$State.RecoveryRoot) `
-            -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
-            -WriteLog $writeLog
+        if ((Get-FinalizationStepRank -State $State) -lt 1) {
+            Set-FinalizationStep -State $State -Step "Started"
+        }
+        if ((Get-FinalizationStepRank -State $State) -lt 2) {
+            Save-UefiTransactionArchive -State $State
+            Set-FinalizationStep -State $State -Step "TransactionArchived"
+        }
+        if ((Get-FinalizationStepRank -State $State) -lt 3) {
+            $null = Install-BootGuardianForCurrentBootPath -State $State
+            Set-FinalizationStep -State $State -Step "BootGuardianInstalled"
+        }
+        if ((Get-FinalizationStepRank -State $State) -lt 4) {
+            Invoke-WindowsShareFinalize
+            Set-FinalizationStep -State $State -Step "WindowsShareFinalized"
+        }
+        if ((Get-FinalizationStepRank -State $State) -lt 5) {
+            Restore-HibernationAfterInstallation -State $State
+            Set-FinalizationStep -State $State -Step "HibernationRestored"
+        }
+        if ((Get-FinalizationStepRank -State $State) -lt 6) {
+            Remove-TemporaryRecoveryArtifacts -State $State
+            Set-FinalizationStep -State $State -Step "TemporaryArtifactsRemoved"
+        }
+        if ((Get-FinalizationStepRank -State $State) -lt 7) {
+            $null = Invoke-LibertixPostInstallVerification `
+                -RecoveryRoot ([string]$State.RecoveryRoot) `
+                -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
+                -WriteLog $writeLog
+            Set-FinalizationStep -State $State -Step "PostInstallVerified"
+        }
         $State.Phase = "Verified"
         Save-State -State $State
     } catch {
         $verificationFailure = $_
-        $State.Phase = "VerificationFailed"
-        Save-State -State $State
-        try {
-            $null = Set-LibertixPostInstallFailure `
-                -RecoveryRoot ([string]$State.RecoveryRoot) `
-                -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
-                -CheckName "post-install-controller" `
-                -ErrorMessage $verificationFailure.Exception.Message
-        } catch {
+        if ((Get-FinalizationStepRank -State $State) -ge 7) {
+            $State.Phase = "FinalizationPending"
+            try {
+                Save-State -State $State
+            } catch {
+                Write-AgentLog (
+                    "Could not persist the resumable finalization state: " +
+                    $_.Exception.Message
+                )
+            }
             Write-AgentLog (
-                "Could not persist the post-install controller failure: " +
-                $_.Exception.Message
+                "Post-install checks succeeded, but terminal state persistence was interrupted; " +
+                "startup recovery remains armed."
             )
+        } else {
+            $State.Phase = "VerificationFailed"
+            Save-State -State $State
+            try {
+                $null = Set-LibertixPostInstallFailure `
+                    -RecoveryRoot ([string]$State.RecoveryRoot) `
+                    -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
+                    -CheckName "post-install-controller" `
+                    -ErrorMessage $verificationFailure.Exception.Message
+            } catch {
+                Write-AgentLog (
+                    "Could not persist the post-install controller failure: " +
+                    $_.Exception.Message
+                )
+            }
         }
         throw $verificationFailure
     } finally {
@@ -982,7 +1081,14 @@ function Invoke-VerifiedInstallationSuccess {
                     -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop).status
             } catch { "unreadable" }
         } else { "missing" }
-        if ($verificationStatus -in @("succeeded", "failed")) {
+        $terminalResultIsCoherent = (
+            $verificationStatus -eq "failed" -or
+            (
+                $verificationStatus -eq "succeeded" -and
+                [string]$State.Phase -eq "Verified"
+            )
+        )
+        if ($terminalResultIsCoherent) {
             Start-PostInstallPromptTask -State $State
             # Start the interactive task before retiring the startup task. This
             # avoids losing the result if shutdown begins between both actions.
@@ -990,7 +1096,7 @@ function Invoke-VerifiedInstallationSuccess {
         } else {
             Write-AgentLog (
                 "Post-install verification was interrupted with status=" +
-                "$verificationStatus; startup recovery remains armed."
+                "$verificationStatus phase=$($State.Phase); startup recovery remains armed."
             )
         }
         Save-RecoveryLogs -State $State

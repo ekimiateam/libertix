@@ -9,6 +9,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from PIL import Image
+
 from app.clients.ssh import CommandResult, SSHClient, is_reconnectable_transport_error
 from app.config import VMConfig
 from app.errors import WorkflowError
@@ -486,13 +488,35 @@ class WizardAutomationMixin:
     ) -> Path:
         path = self._capture_path(vm, label)
         path.parent.mkdir(parents=True, exist_ok=True)
-        client.captureScreen(str(path))
+        capture_error: Exception | None = None
+        try:
+            client.captureScreen(str(path))
+        except Exception as exc:
+            capture_error = exc
         if not path.is_file() or path.stat().st_size == 0:
             raise WorkflowError(
                 "automation.capture",
                 "VNC capture is missing or empty",
-                details={"vm": vm.name, "path": str(path)},
+                details={
+                    "vm": vm.name,
+                    "path": str(path),
+                    "capture_error": str(capture_error) if capture_error else "",
+                },
             )
+        try:
+            with Image.open(path) as captured_image:
+                captured_image.verify()
+        except Exception as exc:
+            raise WorkflowError(
+                "automation.capture",
+                "VNC capture is not a valid image",
+                details={
+                    "vm": vm.name,
+                    "path": str(path),
+                    "capture_error": str(capture_error) if capture_error else "",
+                    "validation_error": str(exc),
+                },
+            ) from exc
         result.ok(
             "automation.capture",
             "UI capture saved",
@@ -501,6 +525,7 @@ class WizardAutomationMixin:
             label=label,
             path=str(path),
             size=path.stat().st_size,
+            capture_transport_error=str(capture_error) if capture_error else "",
         )
         return path
 

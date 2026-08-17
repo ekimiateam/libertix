@@ -829,6 +829,7 @@ class PostInstallValidationMixin:
                 continue
 
             client = None
+            capture_error: WorkflowError | None = None
             try:
                 client = self.vnc.connect(vm.vnc)
                 self._capture_from_client(
@@ -852,9 +853,24 @@ class PostInstallValidationMixin:
                     result,
                 )
                 client.keyPress("enter")
+            except WorkflowError as exc:
+                if exc.step != "automation.capture":
+                    raise
+                capture_error = exc
             finally:
                 if client is not None:
                     client.disconnect()
+            if capture_error is not None:
+                result.ok(
+                    "automation.linux_graphical_capture_retry",
+                    "The Linux login VNC capture failed; reconnecting before retry",
+                    vm=vm.name,
+                    target=vm.vnc,
+                    attempt=attempt,
+                    error=capture_error.message,
+                )
+                time.sleep(10)
+                continue
             result.ok(
                 "automation.linux_graphical_login",
                 "Linux graphical credentials were submitted after loginctl found no active desktop",
@@ -866,7 +882,7 @@ class PostInstallValidationMixin:
 
         raise WorkflowError(
             "automation.linux_graphical_session",
-            "The Linux graphical session did not become active after three attempts",
+            "The Linux graphical session did not become active after five attempts",
             details={"vm": vm.name, "target": vm.vnc},
         )
 

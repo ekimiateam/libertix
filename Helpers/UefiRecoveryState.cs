@@ -10,6 +10,7 @@ namespace Libertix.Helpers
         public string TaskName { get; set; }
         public string PromptTaskName { get; set; }
         public string Phase { get; set; }
+        public string FinalizationStep { get; set; }
         public string CreatedUtc { get; set; }
         public string LastCheckedUtc { get; set; }
         public int SystemDiskNumber { get; set; }

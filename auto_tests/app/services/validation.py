@@ -962,9 +962,11 @@ class ValidationService:
                 response.stdout,
                 prefixes=(
                     "PID",
+                    "LAUNCHER_PID",
                     "SESSION_ID",
                     "TASK_NAME",
                     "EXECUTABLE",
+                    "RUNTIME_EXECUTABLE",
                     "WINDOW_HANDLE",
                     "WINDOW_TITLE",
                     "WINDOW_VISIBLE",
@@ -984,9 +986,11 @@ class ValidationService:
                     confirmation.stdout,
                     prefixes=(
                         "PID",
+                        "LAUNCHER_PID",
                         "SESSION_ID",
                         "TASK_NAME",
                         "EXECUTABLE",
+                        "RUNTIME_EXECUTABLE",
                         "WINDOW_HANDLE",
                         "WINDOW_TITLE",
                         "WINDOW_VISIBLE",

@@ -82,37 +82,71 @@ function Invoke-InteractiveWorker {
             throw ("Local Libertix.exe was not found: " + $workerExecutable)
         }
 
-        $workerProcess = Start-Process `
+        $launcherProcess = Start-Process `
             -FilePath $workerExecutable `
             -ArgumentList ([string]$workerConfig.argument_string) `
             -PassThru
-        $windowDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        $runtimeRoot = [IO.Path]::GetFullPath(
+            (Join-Path $env:ProgramData "Libertix\Runtime")
+        ).TrimEnd('\') + '\'
+        $runtimeProcess = $null
+        $runtimeGraphicalProcess = $null
+        $windowDeadline = [DateTime]::UtcNow.AddSeconds(60)
         do {
-            $workerProcess.Refresh()
-            if (Test-VisibleMainWindow -Process $workerProcess) {
-                break
+            $launcherProcess.Refresh()
+            if ($launcherProcess.HasExited) {
+                throw ("Libertix launcher exited before starting the verified runtime; exit_code=" +
+                    $launcherProcess.ExitCode)
             }
-            if ($workerProcess.HasExited) {
-                throw ("Libertix exited before exposing its interactive main window; exit_code=" +
-                    $workerProcess.ExitCode)
+            if (Test-VisibleMainWindow -Process $launcherProcess) {
+                throw "Libertix launcher displayed an error before starting the verified runtime"
+            }
+            $runtimeProcess = Get-CimInstance Win32_Process `
+                -Filter "ParentProcessId=$($launcherProcess.Id)" `
+                -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Name -eq "Libertix.exe" -and
+                    $_.SessionId -eq $launcherProcess.SessionId -and
+                    -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+                    [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
+                        $runtimeRoot,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                } |
+                Sort-Object CreationDate -Descending |
+                Select-Object -First 1
+            if ($runtimeProcess) {
+                $runtimeGraphicalProcess = Get-Process `
+                    -Id $runtimeProcess.ProcessId `
+                    -ErrorAction SilentlyContinue
+            }
+            if ($runtimeGraphicalProcess) {
+                $runtimeGraphicalProcess.Refresh()
+            }
+            if ($runtimeGraphicalProcess -and
+                (Test-VisibleMainWindow -Process $runtimeGraphicalProcess)) {
+                break
             }
             Start-Sleep -Milliseconds 200
         } while ([DateTime]::UtcNow -lt $windowDeadline)
-        if (-not (Test-VisibleMainWindow -Process $workerProcess)) {
-            throw "Libertix did not expose its identified interactive main window"
+        if (-not $runtimeGraphicalProcess -or
+            -not (Test-VisibleMainWindow -Process $runtimeGraphicalProcess)) {
+            throw "The verified Libertix runtime did not expose its identified interactive main window"
         }
 
-        $workerProcess.Refresh()
+        $runtimeGraphicalProcess.Refresh()
         $element = [Windows.Automation.AutomationElement]::FromHandle(
-            $workerProcess.MainWindowHandle)
+            $runtimeGraphicalProcess.MainWindowHandle)
         $bounds = $element.Current.BoundingRectangle
         Write-AtomicJson -Path $WorkerResultPath -Value ([ordered]@{
                 status = "ok"
-                pid = $workerProcess.Id
-                session_id = $workerProcess.SessionId
+                pid = $runtimeGraphicalProcess.Id
+                launcher_pid = $launcherProcess.Id
+                session_id = $runtimeGraphicalProcess.SessionId
                 executable = $workerExecutable
-                window_handle = $workerProcess.MainWindowHandle.ToInt64()
-                window_title = $workerProcess.MainWindowTitle
+                runtime_executable = [string]$runtimeProcess.ExecutablePath
+                window_handle = $runtimeGraphicalProcess.MainWindowHandle.ToInt64()
+                window_title = $runtimeGraphicalProcess.MainWindowTitle
                 window_visible = $true
                 window_width = [int]$bounds.Width
                 window_height = [int]$bounds.Height
@@ -120,8 +154,8 @@ function Invoke-InteractiveWorker {
 
         # Keep the scheduled action alive with the installer. Some Task
         # Scheduler hosts terminate descendants when their action exits.
-        $workerProcess.WaitForExit()
-        exit $workerProcess.ExitCode
+        $launcherProcess.WaitForExit()
+        exit $launcherProcess.ExitCode
     }
     catch {
         Write-AtomicJson -Path $WorkerResultPath -Value ([ordered]@{
@@ -356,7 +390,7 @@ if ($runResult.ExitCode -ne 0) {
 }
 
 $workerResult = $null
-for ($i = 0; $i -lt 450 -and -not $workerResult; $i++) {
+for ($i = 0; $i -lt 700 -and -not $workerResult; $i++) {
     Start-Sleep -Milliseconds 100
     if (Test-Path -LiteralPath $workerResultPath -PathType Leaf) {
         try {
@@ -407,10 +441,28 @@ if ($unattendedConfigPath) {
 }
 
 $processInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction Stop
-if ($processInfo.ExecutablePath -ne $exe -or $processInfo.SessionId -ne $interactiveSession) {
+$runtimeRoot = [IO.Path]::GetFullPath(
+    (Join-Path $env:ProgramData "Libertix\Runtime")
+).TrimEnd('\') + '\'
+$runtimeExecutable = [IO.Path]::GetFullPath([string]$workerResult.runtime_executable)
+$launcherProcessInfo = Get-CimInstance Win32_Process `
+    -Filter "ProcessId=$([int]$workerResult.launcher_pid)" `
+    -ErrorAction Stop
+if (
+    [IO.Path]::GetFullPath([string]$launcherProcessInfo.ExecutablePath) -ne
+        [IO.Path]::GetFullPath($exe) -or
+    $launcherProcessInfo.SessionId -ne $interactiveSession -or
+    [IO.Path]::GetFullPath([string]$processInfo.ExecutablePath) -ne $runtimeExecutable -or
+    -not $runtimeExecutable.StartsWith(
+        $runtimeRoot,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -or
+    $processInfo.ParentProcessId -ne $launcherProcessInfo.ProcessId -or
+    $processInfo.SessionId -ne $interactiveSession
+) {
     Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `
         -Force -ErrorAction SilentlyContinue
-    throw "Libertix process identity does not match the deployed executable/session"
+    throw "Libertix launcher/runtime identity does not match the deployed executable/session"
 }
 
 $deleteResult = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")
@@ -426,9 +478,11 @@ Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath
     -Force -ErrorAction SilentlyContinue
 
 Write-Result -Name "PID" -Value $process.Id
+Write-Result -Name "LAUNCHER_PID" -Value ([int]$workerResult.launcher_pid)
 Write-Result -Name "SESSION_ID" -Value $process.SessionId
 Write-Result -Name "TASK_NAME" -Value $taskName
-Write-Result -Name "EXECUTABLE" -Value $processInfo.ExecutablePath
+Write-Result -Name "EXECUTABLE" -Value $launcherProcessInfo.ExecutablePath
+Write-Result -Name "RUNTIME_EXECUTABLE" -Value $runtimeExecutable
 Write-Result -Name "WINDOW_HANDLE" -Value ([long]$workerResult.window_handle)
 Write-Result -Name "WINDOW_TITLE" -Value ([string]$workerResult.window_title)
 Write-Result -Name "WINDOW_VISIBLE" -Value "True"

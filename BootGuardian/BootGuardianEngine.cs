@@ -9,39 +9,74 @@ namespace Libertix.BootGuardian
 {
     public sealed class BootGuardianEngine
     {
-        public bool Execute(string configPath, DateTime deadlineUtc)
+        public bool Execute(string configPath, TimeSpan timeout, Action<int> reportProgress = null)
         {
             RepairJournal journal = null;
+            GuardianAttemptState attempt = null;
             try
             {
+                var deadline = new RepairDeadline(timeout);
                 BootGuardianConfig config = BootGuardianConfig.Read(configPath);
+                VerifyServiceExecutable(config);
                 journal = new RepairJournal(config);
-                EnsureBeforeDeadline(deadlineUtc);
+                attempt = GuardianAttemptState.Begin(configPath, config);
+                if (attempt.PreviousInterrupted)
+                    journal.RecordInterruptedAttempt();
+                deadline.ThrowIfExpired();
+                reportProgress?.Invoke(deadline.RemainingMilliseconds);
                 if (config.Mode == "firmware-boot-order")
-                    RepairBootOrder(config, journal, deadlineUtc);
+                    RepairBootOrder(config, journal, deadline, reportProgress);
                 else
-                    RepairPreferredPath(config, journal, deadlineUtc);
+                    RepairPreferredPath(config, journal, deadline, reportProgress);
+                deadline.ThrowIfExpired();
                 journal.Complete();
+                attempt.Complete(journal.RepairRequired);
                 return true;
             }
             catch (Exception error)
             {
+                bool journaled = false;
                 try
                 {
                     if (journal == null)
+                    {
                         RepairJournal.WriteUncorrelatedError(error);
+                        journaled = true;
+                    }
                     else
+                    {
                         journal.Fail(error);
+                        journaled = true;
+                    }
                 }
+                catch { }
+                if (!journaled)
+                {
+                    try { RepairJournal.WriteUncorrelatedError(error); }
+                    catch { }
+                }
+                try { attempt?.Fail(error); }
                 catch { }
                 return false;
             }
         }
 
+        private static void VerifyServiceExecutable(BootGuardianConfig config)
+        {
+            string executable = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            if (!File.Exists(executable) ||
+                !string.Equals(
+                    Hashing.Sha256File(executable),
+                    config.ServiceSha256,
+                    StringComparison.Ordinal))
+                throw new InvalidDataException("Boot guardian executable does not match its verified configuration.");
+        }
+
         private static void RepairBootOrder(
             BootGuardianConfig config,
             RepairJournal journal,
-            DateTime deadlineUtc)
+            RepairDeadline deadline,
+            Action<int> reportProgress)
         {
             ushort owned = checked((ushort)config.BootOrder.BootNumber);
             string entryName = "Boot" + owned.ToString("X4", CultureInfo.InvariantCulture);
@@ -51,7 +86,7 @@ namespace Libertix.BootGuardian
                 byte[] observedEntry = firmware.Read(entryName, allowMissing: true);
                 if (observedEntry == null || Hashing.Sha256(observedEntry) != config.BootOrder.EntrySha256)
                 {
-                    EnsureBeforeDeadline(deadlineUtc);
+                    deadline.ThrowIfExpired();
                     string observedHash = observedEntry == null ? "missing" : Hashing.Sha256(observedEntry);
                     journal.Repair(
                         entryName + " is missing or changed; restoring the exact owned load option. " +
@@ -61,6 +96,8 @@ namespace Libertix.BootGuardian
                     byte[] verifiedEntry = firmware.Read(entryName);
                     if (Hashing.Sha256(verifiedEntry) != config.BootOrder.EntrySha256)
                         throw new InvalidOperationException(entryName + " did not retain the restored value.");
+                    deadline.ThrowIfExpired();
+                    reportProgress?.Invoke(deadline.RemainingMilliseconds);
                 }
 
                 byte[] currentBytes = firmware.Read("BootOrder", allowMissing: true);
@@ -70,7 +107,7 @@ namespace Libertix.BootGuardian
                 ushort[] desired = BuildDesiredBootOrder(owned, current);
                 if (!current.SequenceEqual(desired))
                 {
-                    EnsureBeforeDeadline(deadlineUtc);
+                    deadline.ThrowIfExpired();
                     journal.Repair(
                         "BootOrder changed from " + FormatOrder(current) + " to " + FormatOrder(desired) + ".");
                     byte[] desiredBytes = FirmwareEnvironment.EncodeBootOrder(desired);
@@ -78,15 +115,19 @@ namespace Libertix.BootGuardian
                     ushort[] verified = FirmwareEnvironment.ParseBootOrder(firmware.Read("BootOrder"));
                     if (!verified.SequenceEqual(desired))
                         throw new InvalidOperationException("Firmware did not retain the repaired BootOrder.");
+                    deadline.ThrowIfExpired();
                 }
+                reportProgress?.Invoke(deadline.RemainingMilliseconds);
             }
         }
 
         private static void RepairPreferredPath(
             BootGuardianConfig config,
             RepairJournal journal,
-            DateTime deadlineUtc)
+            RepairDeadline deadline,
+            Action<int> reportProgress)
         {
+            deadline.ThrowIfExpired();
             using (var mount = new EspMount(config.Esp.VolumePath))
             {
                 string ownerPath = ResolveUnderRoot(mount.Root, "EFI\\Libertix\\.libertix-owner");
@@ -118,16 +159,30 @@ namespace Libertix.BootGuardian
                         throw new InvalidDataException("Preferred boot repair reference is missing or corrupted: " + file.ReferenceName);
                     string observedHash = File.Exists(destination) ? Hashing.Sha256File(destination) : string.Empty;
                     if (observedHash == file.Hash)
+                    {
+                        reportProgress?.Invoke(deadline.RemainingMilliseconds);
                         continue;
-                    EnsureBeforeDeadline(deadlineUtc);
+                    }
+                    deadline.ThrowIfExpired();
                     string archive = File.Exists(destination)
-                        ? ArchiveUnexpected(config, destination, observedHash, file.ReferenceName)
+                        ? ArchiveUnexpected(
+                            config,
+                            destination,
+                            observedHash,
+                            file.ReferenceName,
+                            deadline)
                         : "not-required";
                     journal.Repair(
                         file.ActivePath + " differs from the verified reference; restoring it atomically. " +
                         "observedSha256=" + (string.IsNullOrEmpty(observedHash) ? "missing" : observedHash) +
                         " expectedSha256=" + file.Hash + " archive=" + archive + ".");
-                    AtomicFile.CopyVerified(source, destination, file.Hash);
+                    AtomicFile.CopyVerified(
+                        source,
+                        destination,
+                        file.Hash,
+                        deadline.ThrowIfExpired);
+                    deadline.ThrowIfExpired();
+                    reportProgress?.Invoke(deadline.RemainingMilliseconds);
                 }
             }
         }
@@ -136,7 +191,8 @@ namespace Libertix.BootGuardian
             BootGuardianConfig config,
             string source,
             string hash,
-            string name)
+            string name,
+            RepairDeadline deadline)
         {
             if (!Hashing.IsSha256(hash))
                 throw new InvalidDataException("Cannot archive an unhashable EFI file: " + source);
@@ -149,7 +205,7 @@ namespace Libertix.BootGuardian
                     throw new InvalidDataException("Existing unexpected-file archive has the wrong hash: " + destination);
                 return destination;
             }
-            AtomicFile.CopyVerified(source, destination, hash);
+            AtomicFile.CopyVerified(source, destination, hash, deadline.ThrowIfExpired);
             return destination;
         }
 
@@ -161,12 +217,6 @@ namespace Libertix.BootGuardian
             if (!path.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("Boot guardian EFI path escapes the recorded volume.");
             return path;
-        }
-
-        private static void EnsureBeforeDeadline(DateTime deadlineUtc)
-        {
-            if (DateTime.UtcNow >= deadlineUtc)
-                throw new TimeoutException("Boot guardian reached its preshutdown repair deadline.");
         }
 
         private static string FormatOrder(IEnumerable<ushort> order)

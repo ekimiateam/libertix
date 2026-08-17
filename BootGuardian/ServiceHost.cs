@@ -18,6 +18,7 @@ namespace Libertix.BootGuardian
         private static readonly ManualResetEvent StopEvent = new ManualResetEvent(false);
         private static IntPtr _statusHandle;
         private static int _stopping;
+        private static int _checkpoint;
 
         internal static string ConfigPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -185,6 +186,7 @@ namespace Libertix.BootGuardian
         private static void ServiceMain(uint argumentCount, IntPtr arguments)
         {
             Interlocked.Exchange(ref _stopping, 0);
+            Interlocked.Exchange(ref _checkpoint, 1);
             StopEvent.Reset();
             _statusHandle = NativeMethods.RegisterServiceCtrlHandlerEx(
                 ServiceName, HandlerDelegate, IntPtr.Zero);
@@ -213,7 +215,7 @@ namespace Libertix.BootGuardian
             {
                 if (Interlocked.Exchange(ref _stopping, 1) == 0)
                 {
-                    SetStatus(NativeMethods.ServiceStopPending, 0, 1, 10000);
+                    SetStatus(NativeMethods.ServiceStopPending, 0, (uint)_checkpoint, 10000);
                     var worker = new Thread(RunPreshutdown) { IsBackground = false };
                     worker.Start();
                 }
@@ -235,7 +237,13 @@ namespace Libertix.BootGuardian
         {
             bool succeeded = new BootGuardianEngine().Execute(
                 ConfigPath,
-                DateTime.UtcNow.AddMilliseconds(8500));
+                TimeSpan.FromMilliseconds(8500),
+                remainingMilliseconds =>
+                {
+                    uint checkpoint = (uint)Interlocked.Increment(ref _checkpoint);
+                    uint waitHint = (uint)Math.Max(1, Math.Min(10000, remainingMilliseconds));
+                    SetStatus(NativeMethods.ServiceStopPending, 0, checkpoint, waitHint);
+                });
             SetStatus(NativeMethods.ServiceStopped, 0, 0, 0, succeeded ? 0u : 1u);
             StopEvent.Set();
         }

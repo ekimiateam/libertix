@@ -286,6 +286,7 @@ function Install-LibertixBootGuardian {
     $logRoot = Join-Path $env:SystemDrive "LibertixInstallLogs\Windows\$($State.RunId)\BootGuardian"
     Protect-LibertixBootGuardianDirectory -Path $script:GuardianRoot
     Protect-LibertixBootGuardianDirectory -Path $archiveRoot
+    Protect-LibertixBootGuardianDirectory -Path $logRoot
 
     $destinationExe = Join-Path $script:GuardianRoot "Libertix.BootGuardian.exe"
     $sourceHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
@@ -370,16 +371,47 @@ function Install-LibertixBootGuardian {
             -not $service -or
             [string]$service.StartMode -ne "Auto" -or
             [string]$service.State -ne "Running" -or
+            [string]$service.StartName -ne "LocalSystem" -or
             [IO.Path]::GetFullPath(([string]$service.PathName).Trim('"')) -ne `
                 [IO.Path]::GetFullPath($destinationExe)
         ) {
             throw "Boot guardian service registration could not be verified."
+        }
+        $serviceRegistry = Get-ItemProperty `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$script:GuardianServiceName" `
+            -ErrorAction Stop
+        $requiredPrivileges = @($serviceRegistry.RequiredPrivileges)
+        if (
+            [int]$serviceRegistry.PreshutdownTimeout -ne 10000 -or
+            $requiredPrivileges -notcontains "SeSystemEnvironmentPrivilege"
+        ) {
+            throw "Boot guardian preshutdown contract could not be verified."
         }
         $repairExitCode = Invoke-LibertixBootGuardianCommand `
             -Executable $destinationExe `
             -Argument "--repair-now"
         if ($repairExitCode -ne 0) {
             throw "Boot guardian initial integrity check failed with rc=$repairExitCode."
+        }
+        $attemptPath = Join-Path $script:GuardianRoot "last-attempt.state"
+        if (-not (Test-Path -LiteralPath $attemptPath -PathType Leaf)) {
+            throw "Boot guardian initial integrity check did not publish its state."
+        }
+        $attempt = @{}
+        foreach ($line in @(Get-Content -LiteralPath $attemptPath -Encoding UTF8 -ErrorAction Stop)) {
+            if ([string]$line -match '^([^=]+)=(.*)$') {
+                $attempt[$Matches[1]] = $Matches[2]
+            }
+        }
+        $attemptRunId = [string]$attempt["runId"]
+        $attemptMode = [string]$attempt["mode"]
+        $attemptStatus = [string]$attempt["status"]
+        if (
+            $attemptRunId -ne [string]$State.RunId -or
+            $attemptMode -ne $Mode -or
+            $attemptStatus -notin @("healthy", "repaired")
+        ) {
+            throw "Boot guardian initial integrity state is invalid."
         }
     } catch {
         $setupError = $_

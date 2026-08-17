@@ -69,6 +69,9 @@ Assert-Condition ($action -in @(
         "plan-boot-order",
         "inject-boot-order",
         "verify-boot-order",
+        "inspect-boot-order",
+        "suspend-guardian",
+        "resume-guardian",
         "plan-preferred-bypass",
         "inject-preferred-bypass"
     )) `
@@ -147,6 +150,43 @@ Write-Output "OWNED_BOOT=$ownedName"
 Write-Output ("WINDOWS_BOOT=Boot{0:X4}" -f $windowsBootNumber)
 Write-Output "CURRENT_ORDER=$(Format-BootOrder -Order $currentOrder)"
 Write-Output "FAULT_ORDER=$(Format-BootOrder -Order $faultOrder)"
+
+if ($action -eq "inspect-boot-order") {
+    Write-Output "OWNED_FIRST=$(([uint16]$currentOrder[0] -eq $ownedBootNumber).ToString().ToLowerInvariant())"
+    Write-Output "SERVICE_STATE=$([string]$service.State)"
+    Write-Output "RESULT=OK"
+    exit 0
+}
+
+if ($action -in @("suspend-guardian", "resume-guardian")) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class LibertixFaultProcessControl
+{
+    [DllImport("ntdll.dll")]
+    public static extern int NtSuspendProcess(IntPtr processHandle);
+
+    [DllImport("ntdll.dll")]
+    public static extern int NtResumeProcess(IntPtr processHandle);
+}
+"@
+    $serviceProcess = Get-Process -Id ([int]$service.ProcessId) -ErrorAction Stop
+    if ($action -eq "suspend-guardian") {
+        $processStatus = [LibertixFaultProcessControl]::NtSuspendProcess($serviceProcess.Handle)
+        $failureMessage = "The fault fixture could not suspend the boot guardian process."
+        $resultName = "SUSPENDED_PROCESS_ID"
+    } else {
+        $processStatus = [LibertixFaultProcessControl]::NtResumeProcess($serviceProcess.Handle)
+        $failureMessage = "The fault fixture could not resume the boot guardian process."
+        $resultName = "RESUMED_PROCESS_ID"
+    }
+    Assert-Condition ($processStatus -eq 0) $failureMessage
+    Write-Output "$resultName=$([int]$service.ProcessId)"
+    Write-Output "RESULT=OK"
+    exit 0
+}
 
 if ($action -in @("plan-boot-order", "plan-preferred-bypass")) {
     Assert-Condition ($currentOrder[0] -eq $ownedBootNumber) `

@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Threading;
 using Libertix.BootGuardian;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -62,6 +63,53 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void ConfigurationRejectsAnInvalidServiceExecutableHash()
+        {
+            BootGuardianConfig config = NewBootOrderConfig();
+            config.ServiceSha256 = "not-a-hash";
+            Assert.ThrowsException<InvalidDataException>(() => config.Validate());
+        }
+
+        [TestMethod]
+        public void RepairDeadlineUsesElapsedTimeAndExpires()
+        {
+            var deadline = new RepairDeadline(TimeSpan.FromMilliseconds(10));
+            Assert.IsTrue(deadline.RemainingMilliseconds > 0);
+            Thread.Sleep(30);
+            Assert.ThrowsException<TimeoutException>(() => deadline.ThrowIfExpired());
+        }
+
+        [TestMethod]
+        public void AttemptStateDetectsAndClearsAnInterruptedAttempt()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "libertix-guardian-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                string configPath = Path.Combine(root, "config.json");
+                BootGuardianConfig config = NewBootOrderConfig();
+                GuardianAttemptState first = GuardianAttemptState.Begin(configPath, config);
+                Assert.IsFalse(first.PreviousInterrupted);
+
+                GuardianAttemptState resumed = GuardianAttemptState.Begin(configPath, config);
+                Assert.IsTrue(resumed.PreviousInterrupted);
+                resumed.Complete(false);
+
+                GuardianAttemptState next = GuardianAttemptState.Begin(configPath, config);
+                Assert.IsFalse(next.PreviousInterrupted);
+                next.Complete(true);
+                string state = File.ReadAllText(Path.Combine(root, "last-attempt.state"));
+                StringAssert.Contains(state, "status=repaired");
+                StringAssert.Contains(state, "runId=" + config.RunId);
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
+        [TestMethod]
         public void ConfigurationRejectsAlternateDataStreamInEfiPath()
         {
             BootGuardianConfig config = NewBootOrderConfig();
@@ -120,6 +168,30 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void RecoveredInterruptedAttemptCreatesOneDetailedLogWithoutInventingARepair()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "libertix-guardian-test-" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                BootGuardianConfig config = NewBootOrderConfig();
+                config.LogDirectory = Path.Combine(root, "logs");
+                var journal = new RepairJournal(config);
+                journal.RecordInterruptedAttempt();
+                journal.Complete();
+                string[] files = Directory.GetFiles(config.LogDirectory, "*.log");
+                Assert.AreEqual(1, files.Length);
+                string text = File.ReadAllText(files[0]);
+                StringAssert.Contains(text, "RECOVERY: the previous guardian attempt");
+                Assert.IsFalse(text.Contains("REPAIR:"));
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
+        [TestMethod]
         public void AtomicRepairReplacesTheDestinationAndLeavesNoTemporaryFile()
         {
             string root = Path.Combine(Path.GetTempPath(), "libertix-guardian-test-" + Guid.NewGuid().ToString("N"));
@@ -169,6 +241,38 @@ namespace Libertix.Tests
             }
         }
 
+        [TestMethod]
+        public void AtomicRepairDoesNotCommitAfterItsDeadline()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "libertix-guardian-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                string source = Path.Combine(root, "source.efi");
+                string destination = Path.Combine(root, "destination.efi");
+                File.WriteAllText(source, "verified");
+                File.WriteAllText(destination, "original");
+                string hash = Hashing.Sha256File(source);
+
+                Assert.ThrowsException<TimeoutException>(() =>
+                    AtomicFile.CopyVerified(
+                        source,
+                        destination,
+                        hash,
+                        () => { throw new TimeoutException("test deadline"); }));
+
+                Assert.AreEqual("original", File.ReadAllText(destination));
+                CollectionAssert.AreEquivalent(
+                    new[] { "destination.efi", "source.efi" },
+                    Array.ConvertAll(Directory.GetFiles(root), Path.GetFileName));
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
         private static BootGuardianConfig NewBootOrderConfig()
         {
             byte[] entry = Encoding.ASCII.GetBytes("test-entry");
@@ -186,6 +290,7 @@ namespace Libertix.Tests
                 },
                 LogDirectory = @"C:\LibertixInstallLogs\Windows\test\BootGuardian",
                 ArchiveDirectory = @"C:\ProgramData\Libertix\UefiRecovery\test\boot-guardian",
+                ServiceSha256 = new string('f', 64),
                 BootOrder = new BootOrderContract
                 {
                     BootNumber = 7,

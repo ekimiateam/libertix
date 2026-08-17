@@ -527,8 +527,10 @@ try {
                     Read-JsonFileWithRetry -LiteralPath $resultPath
                 } else { $null }
                 $startupTasks = @(Get-LibertixRecoveryTasks | Where-Object {
-                    $_.TaskName -eq "LibertixInstallRecovery" -or
-                    $_.TaskName -like "LibertixUefiRecovery_*"
+                    (
+                        $_.TaskName -eq "LibertixInstallRecovery" -or
+                        $_.TaskName -like "LibertixUefiRecovery_*"
+                    ) -and $_.TaskName -notmatch "Prompt"
                 })
                 $promptTasks = @(Get-LibertixRecoveryTasks | Where-Object {
                     $_.TaskName -eq "LibertixInstallRecoveryPrompt" -or
@@ -631,8 +633,10 @@ try {
                 } else { "missing" }
                 $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
                 $startupTasks = @(Get-LibertixRecoveryTasks | Where-Object {
-                    $_.TaskName -eq "LibertixInstallRecovery" -or
-                    $_.TaskName -like "LibertixUefiRecovery_*"
+                    (
+                        $_.TaskName -eq "LibertixInstallRecovery" -or
+                        $_.TaskName -like "LibertixUefiRecovery_*"
+                    ) -and $_.TaskName -notmatch "Prompt"
                 })
                 $interactiveCheckPassed = -not [bool]$config.share_linux_files_in_windows
                 if ($resultStatus -in @("failed", "rolled-back")) {
@@ -1095,6 +1099,49 @@ try {
             Assert-Condition ($runAs -eq "LocalSystem") "The ext4 launcher is not global to Windows sessions."
             Assert-Condition ($recovery -eq 1) "WinFsp mount recovery is disabled."
             Assert-Condition ($broadcast -eq 1) "WinFsp drive notifications are disabled."
+
+            $setupProcesses = @(
+                Get-CimInstance Win32_Process -ErrorAction Stop |
+                    Where-Object {
+                        [string]$_.Name -match '(?i)^ext4-win-driver.*setup\.exe$' -or
+                        [string]$_.ExecutablePath -match '(?i)\\ext4-win-driver[^\\]*setup\.exe$'
+                    }
+            )
+            $setupProcesses | Format-List ProcessId, Name, ExecutablePath, CommandLine
+            Assert-Condition ($setupProcesses.Count -eq 0) `
+                "The ext4 installer is still running and may display maintenance UI."
+
+            $runOncePath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+            $runOnce = Get-ItemProperty -LiteralPath $runOncePath -ErrorAction SilentlyContinue
+            $bundleRegistrations = @(
+                Get-ItemProperty `
+                    -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" `
+                    -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $displayName = $_.PSObject.Properties["DisplayName"]
+                        $bundleCachePath = $_.PSObject.Properties["BundleCachePath"]
+                        $null -ne $displayName -and
+                        [string]$displayName.Value -eq "ext4-win-driver" -and
+                        $null -ne $bundleCachePath -and
+                        -not [string]::IsNullOrWhiteSpace([string]$bundleCachePath.Value)
+                    }
+            )
+            $resumeEntries = @(
+                foreach ($registration in $bundleRegistrations) {
+                    $bundleCode = [string]$registration.PSChildName
+                    if ($null -eq $runOnce) { continue }
+                    $resumeProperty = $runOnce.PSObject.Properties[$bundleCode]
+                    if ($null -ne $resumeProperty) {
+                        [pscustomobject]@{
+                            BundleCode = $bundleCode
+                            Command = [string]$resumeProperty.Value
+                        }
+                    }
+                }
+            )
+            $resumeEntries | Format-List BundleCode, Command
+            Assert-Condition ($resumeEntries.Count -eq 0) `
+                "The ext4 installer has a pending RunOnce resume that can display maintenance UI."
         }
         "ext4_readonly_mount" {
             $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)

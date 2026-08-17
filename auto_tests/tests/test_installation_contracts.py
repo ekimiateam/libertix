@@ -29,6 +29,7 @@ def test_legacy_project_compiles_every_application_source_file() -> None:
         "auto_tests",
         "BootGuardian",
         "Libertix.Tests",
+        "Standalone",
         "bin",
         "obj",
         ".work",

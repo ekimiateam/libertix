@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+from PIL import Image
 from vncdotool import api
 
 from app.errors import WorkflowError
@@ -12,6 +13,17 @@ from app.errors import WorkflowError
 logger = logging.getLogger(__name__)
 CAPTURE_MAX_ATTEMPTS = 3
 CAPTURE_RETRY_SECONDS = 2
+
+
+def _is_valid_capture(path: Path) -> bool:
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        with Image.open(path) as capture:
+            capture.verify()
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 class VNCClient:
@@ -44,6 +56,7 @@ class VNCClient:
         last_error: Exception | None = None
         for attempt in range(1, CAPTURE_MAX_ATTEMPTS + 1):
             client = None
+            destination.unlink(missing_ok=True)
             try:
                 client = self.connect(address)
                 # Long downloads can let Windows blank the virtual display. A pointer move wakes
@@ -51,11 +64,21 @@ class VNCClient:
                 client.mouseMove(1, 1)
                 time.sleep(0.25)
                 client.captureScreen(str(destination))
+                if not _is_valid_capture(destination):
+                    raise ValueError("VNC capture is not a complete image")
                 last_error = None
                 break
             except Exception as exc:
+                # A reboot can close VNC after captureScreen has written the complete PNG but
+                # before its protocol request returns. The image remains valid evidence.
+                if _is_valid_capture(destination):
+                    logger.info(
+                        "VNC capture completed before the transport disconnected",
+                        extra={"step": "vnc.capture_transport_closed", "target": address},
+                    )
+                    last_error = None
+                    break
                 last_error = exc
-                destination.unlink(missing_ok=True)
                 if attempt < CAPTURE_MAX_ATTEMPTS:
                     logger.warning(
                         "Transient VNC capture failure; retrying",
@@ -81,9 +104,11 @@ class VNCClient:
                     "error": str(last_error),
                 },
             ) from last_error
-        if not destination.is_file() or destination.stat().st_size == 0:
+        if not _is_valid_capture(destination):
             raise WorkflowError(
-                "vnc.capture", "The VNC capture is missing or empty", details={"address": address}
+                "vnc.capture",
+                "The VNC capture is missing or invalid",
+                details={"address": address},
             )
         logger.info("VNC capture completed", extra={"step": "vnc.capture", "target": address})
         return destination

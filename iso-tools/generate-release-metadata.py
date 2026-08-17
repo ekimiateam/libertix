@@ -193,8 +193,11 @@ def generate_metadata(
     bios["fileName"] = "libertix-installer-bios.iso"
     uefi = _artifact(uefi_iso, f"{download_base}/libertix-installer-uefi.iso")
     uefi["fileName"] = "libertix-installer-uefi.iso"
-    wpf = _artifact(wpf_zip, f"{download_base}/Libertix-wpf.zip")
-    wpf["fileName"] = "Libertix-wpf.zip"
+    wpf_file_name = f"Libertix-{tag}.zip"
+    if wpf_zip.name != wpf_file_name:
+        raise ValueError(f"WPF archive must be named {wpf_file_name}")
+    wpf = _artifact(wpf_zip, f"{download_base}/{wpf_file_name}")
+    wpf["fileName"] = wpf_file_name
 
     configured_distributions = config["distributions"]
     assert isinstance(configured_distributions, list)

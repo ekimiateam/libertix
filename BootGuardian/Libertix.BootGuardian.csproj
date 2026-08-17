@@ -39,11 +39,13 @@
     <Compile Include="BootGuardianEngine.cs" />
     <Compile Include="EspMount.cs" />
     <Compile Include="FirmwareEnvironment.cs" />
+    <Compile Include="GuardianAttemptState.cs" />
     <Compile Include="Hashing.cs" />
     <Compile Include="NativeMethods.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="RepairJournal.cs" />
+    <Compile Include="RepairDeadline.cs" />
     <Compile Include="ServiceHost.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

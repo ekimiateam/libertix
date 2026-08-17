@@ -415,6 +415,7 @@ namespace Libertix.Pages
                 TaskName = UefiRecoveryTaskPrefix + runId,
                 PromptTaskName = UefiRecoveryPromptTaskPrefix + runId,
                 Phase = "Preparing",
+                FinalizationStep = "NotStarted",
                 CreatedUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
                 SystemDiskNumber = _storagePreflight.SystemDiskNumber,
                 SystemDiskUniqueId = _storagePreflight.SystemDiskUniqueId,

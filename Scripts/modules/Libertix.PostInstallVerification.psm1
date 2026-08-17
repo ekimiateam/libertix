@@ -948,7 +948,8 @@ function Test-LibertixBootGuardian {
     $configPath = Join-Path $guardianRoot "config.json"
     $archiveConfigPath = Join-Path $RecoveryRoot "boot-guardian\config.json"
     $exePath = Join-Path $guardianRoot "Libertix.BootGuardian.exe"
-    foreach ($path in @($configPath, $archiveConfigPath, $exePath)) {
+    $attemptPath = Join-Path $guardianRoot "last-attempt.state"
+    foreach ($path in @($configPath, $archiveConfigPath, $exePath, $attemptPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Boot guardian file is missing: $path"
         }
@@ -999,6 +1000,7 @@ function Test-LibertixBootGuardian {
         -not $service -or
         [string]$service.StartMode -ne "Auto" -or
         [string]$service.State -ne "Running" -or
+        [string]$service.StartName -ne "LocalSystem" -or
         [IO.Path]::GetFullPath(([string]$service.PathName).Trim('"')) -ne `
             [IO.Path]::GetFullPath($exePath)
     ) {
@@ -1018,7 +1020,23 @@ function Test-LibertixBootGuardian {
     ) {
         throw "Boot guardian preshutdown timeout or required privilege is invalid."
     }
-    return "mode=$expectedMode service=running timeout=10000ms"
+    $attempt = @{}
+    foreach ($line in @(Get-Content -LiteralPath $attemptPath -Encoding UTF8 -ErrorAction Stop)) {
+        if ([string]$line -match '^([^=]+)=(.*)$') {
+            $attempt[$Matches[1]] = $Matches[2]
+        }
+    }
+    $attemptRunId = [string]$attempt["runId"]
+    $attemptMode = [string]$attempt["mode"]
+    $attemptStatus = [string]$attempt["status"]
+    if (
+        $attemptRunId -ne [string]$Plan.planId -or
+        $attemptMode -ne $expectedMode -or
+        $attemptStatus -notin @("healthy", "repaired")
+    ) {
+        throw "Boot guardian has not published a successful integrity attempt."
+    }
+    return "mode=$expectedMode service=running timeout=10000ms state=$attemptStatus"
 }
 
 function Test-LibertixRecoveryArchive {

@@ -48,6 +48,82 @@ function Invoke-ProcessWithTimeout {
     return $process.ExitCode
 }
 
+function Remove-VerifiedExt4InstallerResume {
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $runOncePath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
+    $runOnce = Get-ItemProperty -LiteralPath $runOncePath -ErrorAction SilentlyContinue
+    if ($null -eq $runOnce) { return }
+
+    $registrations = @(
+        Get-ItemProperty `
+            -Path @(
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+                "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+            ) `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+                $displayName = $_.PSObject.Properties["DisplayName"]
+                $bundleCachePath = $_.PSObject.Properties["BundleCachePath"]
+                $null -ne $displayName -and
+                [string]$displayName.Value -eq "ext4-win-driver" -and
+                $null -ne $bundleCachePath -and
+                -not [string]::IsNullOrWhiteSpace([string]$bundleCachePath.Value)
+            }
+    )
+    $resumeRegistrations = @(
+        $registrations | Where-Object {
+            $null -ne $runOnce.PSObject.Properties[[string]$_.PSChildName]
+        }
+    )
+    if ($resumeRegistrations.Count -eq 0) {
+        $unownedExt4Resume = @(
+            $runOnce.PSObject.Properties | Where-Object {
+                $_.Name -notmatch '^PS' -and
+                [string]$_.Value -match '(?i)ext4-win-driver[^\"]*setup\.exe\"?\s+/burn\.runonce$'
+            }
+        )
+        if ($unownedExt4Resume.Count -ne 0) {
+            throw "An ext4 installer RunOnce resume exists without a matching bundle registration."
+        }
+        return
+    }
+    if ($resumeRegistrations.Count -ne 1) {
+        throw "Multiple ext4 installer RunOnce resume entries are registered."
+    }
+
+    $registration = $resumeRegistrations[0]
+    $bundleCode = [string]$registration.PSChildName
+    if ($bundleCode -notmatch '^\{[0-9A-Fa-f-]{36}\}$') {
+        throw "The trusted ext4 installer bundle registration code is malformed."
+    }
+    $cachePath = [string]$registration.BundleCachePath
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
+        throw "The cached ext4 installer referenced by RunOnce is missing."
+    }
+    $cacheHash = (Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $expectedHash = ([string]$Config.SetupSha256).ToLowerInvariant()
+    if ($cacheHash -ne $expectedHash) {
+        throw "The cached ext4 installer referenced by RunOnce is not trusted."
+    }
+
+    $resumeProperty = $runOnce.PSObject.Properties[$bundleCode]
+    $resumeCommand = [string]$resumeProperty.Value
+    $expectedCommand = '"{0}" /burn.runonce' -f $cachePath
+    if ($resumeCommand -ine $expectedCommand) {
+        throw "The ext4 installer RunOnce command does not match the trusted cached bundle."
+    }
+    Remove-ItemProperty `
+        -LiteralPath $runOncePath `
+        -Name $bundleCode `
+        -ErrorAction Stop
+    $verifiedRunOnce = Get-ItemProperty -LiteralPath $runOncePath -ErrorAction SilentlyContinue
+    if ($null -ne $verifiedRunOnce -and $null -ne $verifiedRunOnce.PSObject.Properties[$bundleCode]) {
+        throw "The verified ext4 installer RunOnce resume entry remains registered."
+    }
+    Write-ShareLog "Removed the verified ext4 installer RunOnce resume to prevent maintenance UI at user logon."
+}
+
 function Get-Config {
     $config = Get-Content -LiteralPath $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json
     if (-not $config.Enabled) { return $config }
@@ -589,6 +665,7 @@ try {
         Install-MountTask -Config $config
         Start-ReadOnlyMount -Config $config
         Install-ExplorerPinTasks
+        Remove-VerifiedExt4InstallerResume -Config $config
         Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $ConfigPath) "pending.marker") -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $setup -Force -ErrorAction SilentlyContinue
         Write-ShareLog "Read-only ext4 support installed and configured."

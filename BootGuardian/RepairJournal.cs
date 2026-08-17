@@ -11,6 +11,7 @@ namespace Libertix.BootGuardian
         private readonly BootGuardianConfig _config;
         private readonly List<string> _lines = new List<string>();
         private bool _repairRequired;
+        private bool _interruptedAttemptRecovered;
 
         internal RepairJournal(BootGuardianConfig config)
         {
@@ -39,10 +40,18 @@ namespace Libertix.BootGuardian
             Add("REPAIR: " + message);
         }
 
+        internal bool RepairRequired => _repairRequired;
+
+        internal void RecordInterruptedAttempt()
+        {
+            _interruptedAttemptRecovered = true;
+            Add("RECOVERY: the previous guardian attempt did not publish a terminal state; all boot invariants are being rechecked.");
+        }
+
         internal void Complete()
         {
             Add("Guardian check completed successfully.");
-            if (_repairRequired)
+            if (_repairRequired || _interruptedAttemptRecovered)
                 Flush("repair");
         }
 

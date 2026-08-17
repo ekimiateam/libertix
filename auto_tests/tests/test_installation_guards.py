@@ -1061,11 +1061,41 @@ def test_interrupted_post_install_verification_keeps_startup_recovery_armed() ->
     bios = read("Scripts/libertix-recovery-guard.ps1")
     uefi = read("Scripts/libertix-uefi-recovery-agent.ps1")
 
-    for script in (bios, uefi):
-        assert 'verificationStatus -in @("succeeded", "failed")' in script
-        assert "startup recovery remains armed" in script
+    assert 'verificationStatus -in @("succeeded", "failed")' in bios
+    assert "startup recovery remains armed" in bios
+    assert "$terminalResultIsCoherent" in uefi
+    assert '$verificationStatus -eq "succeeded"' in uefi
+    assert '[string]$State.Phase -eq "Verified"' in uefi
+    assert "startup recovery remains armed" in uefi
     assert "Remove-RecoveryTask -Required" in bios
     assert "Remove-StartupRecoveryTask -State $State" in uefi
+
+
+def test_uefi_finalization_is_checkpointed_before_destructive_cleanup() -> None:
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    finalization = agent.split("function Invoke-VerifiedInstallationSuccess", 1)[1].split(
+        "$executionState = Read-ValidatedExecutionState", 1
+    )[0]
+    archive = agent.split("function Save-UefiTransactionArchive", 1)[1].split(
+        "function Set-FinalizationStep", 1
+    )[0]
+
+    ordered_operations = (
+        "Save-UefiTransactionArchive -State $State",
+        "Install-BootGuardianForCurrentBootPath -State $State",
+        "Invoke-WindowsShareFinalize",
+        "Restore-HibernationAfterInstallation -State $State",
+        "Remove-TemporaryRecoveryArtifacts -State $State",
+        "Invoke-LibertixPostInstallVerification",
+        '$State.Phase = "Verified"',
+    )
+    positions = [finalization.index(operation) for operation in ordered_operations]
+    assert positions == sorted(positions)
+    assert '"Permanent UEFI transaction archive belongs to another recovery session."' in archive
+    assert '"UEFI transaction state was already archived permanently."' in archive
+    assert '"UEFI transaction state and its permanent archive are both missing."' in archive
+    assert '"FinalizationPending"' in finalization
+    assert "Set-FinalizationStep -State $State -Step" in finalization
 
 
 def test_post_install_tasks_retry_abnormal_system_verifier_exits() -> None:
@@ -1730,6 +1760,38 @@ def test_uefi_aria2_and_ext4_installer_timeouts_stop_their_processes() -> None:
     assert "process tree could not be proven stopped" in timeout
 
 
+def test_ext4_installer_cannot_reopen_maintenance_ui_at_user_logon() -> None:
+    windows_share = read("Scripts/libertix-configure-windows-share.ps1")
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    cleanup = windows_share.split("function Remove-VerifiedExt4InstallerResume", 1)[1].split(
+        "function Get-Config", 1
+    )[0]
+    assert "Microsoft\\Windows\\CurrentVersion\\RunOnce" in cleanup
+    assert '[string]$displayName.Value -eq "ext4-win-driver"' in cleanup
+    assert '$_.PSObject.Properties["DisplayName"]' in cleanup
+    assert '$_.PSObject.Properties["BundleCachePath"]' in cleanup
+    assert "[string]$_.DisplayName" not in cleanup
+    assert "[string]$_.BundleCachePath" not in cleanup
+    assert "BundleCachePath" in cleanup
+    assert "Get-FileHash" in cleanup
+    assert "SetupSha256" in cleanup
+    assert "PSChildName" in cleanup
+    assert "$expectedCommand = '\"{0}\" /burn.runonce' -f $cachePath" in cleanup
+    assert "Remove-ItemProperty" in cleanup
+    assert "PSObject.Properties[$bundleCode]" in cleanup
+    assert windows_share.index("Start-ReadOnlyMount -Config $config") < windows_share.index(
+        "Remove-VerifiedExt4InstallerResume -Config $config"
+    )
+
+    ext4_check = checks.split('"ext4_driver"', 1)[1].split('"ext4_readonly_mount"', 1)[0]
+    assert "ext4-win-driver.*setup\\.exe" in ext4_check
+    assert "The ext4 installer is still running" in ext4_check
+    assert "Microsoft\\Windows\\CurrentVersion\\RunOnce" in ext4_check
+    assert "BundleCachePath" in ext4_check
+    assert "The ext4 installer has a pending RunOnce resume" in ext4_check
+
+
 def test_all_download_transports_enforce_bounded_file_sizes() -> None:
     downloads = read("Pages/ApplyChanges.Downloads.cs")
     processes = read("Pages/ApplyChanges.Processes.cs")
@@ -2072,6 +2134,27 @@ def test_windows_postinstall_checks_all_libertix_recovery_tasks() -> None:
     ):
         assert pattern in helper
     assert checks.count("Get-LibertixRecoveryTasks") >= 4
+
+
+def test_windows_finalization_does_not_count_the_result_prompt_as_recovery() -> None:
+    checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    finalization = checks.split('"finalization" {', 1)[1].split('"final_state" {', 1)[0]
+
+    assert '$_.TaskName -like "LibertixUefiRecovery_*"' in finalization
+    assert '$_.TaskName -notmatch "Prompt"' in finalization
+
+
+def test_boot_guardian_timeout_fixture_is_limited_to_the_lab_helper() -> None:
+    fixture = read("auto_tests/app/scripts/test_boot_guardian_fault.ps1")
+    service = read("BootGuardian/ServiceHost.cs")
+
+    assert '"suspend-guardian"' in fixture
+    assert '"resume-guardian"' in fixture
+    assert "NtSuspendProcess" in fixture
+    assert "NtResumeProcess" in fixture
+    assert '"inspect-boot-order"' in fixture
+    assert "NtSuspendProcess" not in service
+    assert "NtResumeProcess" not in service
 
 
 def test_uefi_fallback_publishes_recovery_phase_atomically() -> None:
@@ -2588,6 +2671,9 @@ def test_windows_launch_requires_a_visible_uia_main_window() -> None:
         assert ".Current.IsOffscreen" in script
         assert "$bounds.Width -ge 100 -and $bounds.Height -ge 100" in script
         assert "WINDOW_VISIBLE" in script
+        assert "ParentProcessId=" in script
+        assert "RUNTIME_EXECUTABLE" in script
+    assert "launcher displayed an error" in launch
 
 
 def test_post_install_login_typing_requires_a_proven_guest_login_screen() -> None:
@@ -2732,7 +2818,7 @@ def test_libertix_launch_proves_the_identified_interactive_window() -> None:
     assert "[switch]$InteractiveWorker" in launch
     assert "function Invoke-InteractiveWorker" in launch
     assert "Start-Process" in launch
-    assert "$workerProcess.WaitForExit()" in launch
+    assert "$launcherProcess.WaitForExit()" in launch
     assert "window_width = [int]$bounds.Width" in launch
     assert "window_height = [int]$bounds.Height" in launch
     assert "The interactive Libertix worker did not report a result" in launch
@@ -3712,12 +3798,13 @@ def test_iso_build_defaults_do_not_embed_account_or_locale_fallbacks() -> None:
 def test_published_artifacts_are_traceable_and_include_notices() -> None:
     workflow = read(".github/workflows/ci.yml")
     assembly = read("Properties/AssemblyInfo.cs")
+    standalone_assembly = read("Standalone/AssemblyInfo.cs")
+    payload = read("Standalone/Create-Payload.ps1")
 
     assert 'AssemblyInformationalVersion("dev_0000000")' in assembly
+    assert 'AssemblyInformationalVersion("dev_0000000")' in standalone_assembly
     assert "Stamp source revision in the executable" in workflow
-    assert "Copy-Item -LiteralPath LICENSE, THIRD_PARTY.md" in workflow
-    assert "BUILD-INFO.txt" in workflow
-    assert "informational-version=$env:LIBERTIX_BUILD_VERSION" in workflow
+    assert '@("LICENSE", "THIRD_PARTY.md")' in payload
     assert "iso-tools/prepare-support-artifacts.py" in workflow
     for support_file in (
         "aria2-64.zip",
@@ -3728,6 +3815,39 @@ def test_published_artifacts_are_traceable_and_include_notices() -> None:
         assert f"release-assets/{support_file}" in workflow
         assert f"release-metadata/{support_file}" in workflow
     assert "release-assets/SHA256SUMS" not in workflow
+
+
+def test_standalone_release_contains_and_verifies_the_complete_runtime() -> None:
+    solution = read("Libertix.sln")
+    project = read("Standalone/Libertix.Standalone.csproj")
+    launcher = read("Standalone/Program.cs")
+    payload = read("Standalone/Create-Payload.ps1")
+    build = read("auto_tests/app/scripts/build_libertix.ps1")
+    workflow = read(".github/workflows/ci.yml")
+
+    assert '"Libertix.Standalone", "Standalone\\Libertix.Standalone.csproj"' in solution
+    assert "GenerateStandalonePayload" in project
+    assert "Libertix.Standalone.Payload.zip" in project
+    assert "Libertix.Standalone.PayloadManifest.json" in project
+    assert 'requestedExecutionLevel level="requireAdministrator"' in read("Standalone/app.manifest")
+    assert "ProtectDirectory(parent)" in launcher
+    assert 'Path.Combine(parent, ".extraction.lock")' in launcher
+    assert "FileShare.None" in launcher
+    assert "EnsureRuntimeLocked" in launcher
+    assert "ExtractVerifiedPayload" in launcher
+    assert "ValidateRuntime(destination, manifest)" in launcher
+    assert "Sha256File" in launcher
+    assert "NormalizeRelativePath(entry.FullName)" in launcher
+    assert "CopyAndHash(source, temporary" in launcher
+    assert 'seen.Contains("Libertix.exe")' in launcher
+    assert 'seen.Contains("Libertix.BootGuardian.exe")' in launcher
+    assert '"Libertix.BootGuardian.exe"' in payload
+    assert "Get-FileHash" in payload
+    assert "ZipArchive" in payload
+    assert "stagedEntries.Count -ne 1" in build
+    assert "publishedEntries.Count -ne 1" in build
+    assert "path: Standalone/bin/Release/Libertix.exe" in workflow
+    assert 'unzip -Z1 "release-assets/$wpf_archive"' in workflow
     assert "release-metadata/SHA256SUMS" not in workflow
 
 
@@ -3970,7 +4090,11 @@ def test_boot_guardian_uses_the_windows_preshutdown_contract_and_quiet_logs() ->
         "        internal static extern bool ChangeServiceConfig2" in native
     )
     assert "PreshutdownTimeout = 10000" in service
-    assert "DateTime.UtcNow.AddMilliseconds(8500)" in service
+    assert "TimeSpan.FromMilliseconds(8500)" in service
+    assert "last-attempt.state" in read("BootGuardian/GuardianAttemptState.cs")
+    assert "Stopwatch.StartNew()" in read("BootGuardian/RepairDeadline.cs")
+    assert "RepairJournal.WriteUncorrelatedError(error)" in engine
+    assert "if (!journaled)" in engine
     assert "SeSystemEnvironmentPrivilege" in service
     assert "ServiceAcceptPreshutdown" in service
     firmware = read("BootGuardian/FirmwareEnvironment.cs")
@@ -3982,8 +4106,9 @@ def test_boot_guardian_uses_the_windows_preshutdown_contract_and_quiet_logs() ->
     healthy_completion = journal.split("internal void Complete()", 1)[1].split(
         "internal void Fail", 1
     )[0]
-    assert "if (_repairRequired)" in healthy_completion
-    assert "ArchiveUnexpected(config" in engine
+    assert "if (_repairRequired || _interruptedAttemptRecovered)" in healthy_completion
+    assert "ArchiveUnexpected(" in engine
+    assert "config," in engine
     assert "AtomicFile.CopyVerified" in engine
 
 

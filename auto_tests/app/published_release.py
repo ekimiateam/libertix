@@ -110,9 +110,10 @@ def _validate_wpf_artifact(catalog: dict[str, object], tag: str) -> tuple[str, s
     sha256 = wpf.get("sha256")
     size_bytes = wpf.get("sizeBytes")
     parsed = urlsplit(url) if isinstance(url, str) else None
-    expected_path = f"/ekimiateam/libertix/releases/download/{tag}/Libertix-wpf.zip"
+    expected_name = f"Libertix-{tag}.zip"
+    expected_path = f"/ekimiateam/libertix/releases/download/{tag}/{expected_name}"
     if (
-        wpf.get("fileName") != "Libertix-wpf.zip"
+        wpf.get("fileName") != expected_name
         or parsed is None
         or parsed.scheme != "https"
         or parsed.netloc != "github.com"
@@ -133,8 +134,8 @@ def _extract_wpf_archive(payload: bytes, destination: Path) -> None:
     destination.mkdir(parents=True, exist_ok=False)
     with zipfile.ZipFile(BytesIO(payload)) as archive:
         members = archive.infolist()
-        if not members:
-            raise ValueError("published WPF archive is empty")
+        if len(members) != 1 or members[0].filename != "Libertix.exe":
+            raise ValueError("published WPF archive must contain only Libertix.exe")
         for member in members:
             path = PurePosixPath(member.filename)
             if path.is_absolute() or ".." in path.parts or not path.parts:

@@ -27,6 +27,9 @@ namespace Libertix.BootGuardian
         [DataMember(Name = "archiveDirectory", IsRequired = true)]
         public string ArchiveDirectory { get; set; }
 
+        [DataMember(Name = "serviceSha256", IsRequired = true)]
+        public string ServiceSha256 { get; set; }
+
         [DataMember(Name = "bootOrder", EmitDefaultValue = false)]
         public BootOrderContract BootOrder { get; set; }
 
@@ -57,6 +60,8 @@ namespace Libertix.BootGuardian
             Esp.Validate();
             RequireAbsolutePath(LogDirectory, "log directory");
             RequireAbsolutePath(ArchiveDirectory, "archive directory");
+            if (!Hashing.IsSha256(ServiceSha256))
+                throw new InvalidDataException("Boot guardian service hash is invalid.");
             if (Mode == "firmware-boot-order")
             {
                 if (BootOrder == null || PreferredPath != null)

@@ -34,7 +34,7 @@ For a push to `dev` or `main`, [the CI workflow](../.github/workflows/ci.yml) pe
 5. Generate `catalog.json` and `releases.json` from the one configuration and the built artifacts.
 6. Sign both JSON files with RSA/SHA-256 and verify that the private key matches the public key
    embedded in Libertix.
-7. Publish only `Libertix-wpf.zip` and both mini-ISO files in a GitHub Release.
+7. Publish only `Libertix-<version-or-sha7>.zip` and both mini-ISO files in a GitHub Release.
 8. Commit the JSON/signature files and the four runtime support files to only the selected channel
    on `gh-pages`, then request a GitHub Pages build. Every published SHA-256 is stored once in the
    signed catalogue.
@@ -80,7 +80,7 @@ uv run --project auto_tests --frozen python iso-tools/generate-release-metadata.
   --commit "$(git rev-parse HEAD)" \
   --bios-iso libertix-installer-bios.iso \
   --uefi-iso libertix-installer-uefi.iso \
-  --wpf-zip path/to/Libertix-wpf.zip \
+  --wpf-zip path/to/Libertix-<version-or-sha7>.zip \
   --aria2-archive auto_tests/app/filepool/aria2-64.zip \
   --ext4-driver auto_tests/app/filepool/ext4-win-driver.exe \
   --grub4dos-loader auto_tests/app/filepool/grldr \

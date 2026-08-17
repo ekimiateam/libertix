@@ -40,7 +40,7 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
     config = module.load_config(REPO_ROOT / "release-config.json")
     bios = tmp_path / "libertix-installer-bios.iso"
     uefi = tmp_path / "libertix-installer-uefi.iso"
-    wpf = tmp_path / "Libertix-wpf.zip"
+    wpf = tmp_path / "Libertix-a881918.zip"
     aria2 = tmp_path / "aria2-64.zip"
     ext4 = tmp_path / "ext4-win-driver.exe"
     grldr = tmp_path / "grldr"
@@ -69,6 +69,8 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
         grub4dos_mbr=grldr_mbr,
         published_at="2026-08-10T00:00:00Z",
     )
+    main_wpf = tmp_path / f"Libertix-{main_version}.zip"
+    main_wpf.write_bytes(wpf.read_bytes())
     main_catalog, main_releases = module.generate_metadata(
         config,
         channel="main",
@@ -76,7 +78,7 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
         commit=commit,
         bios_iso=bios,
         uefi_iso=uefi,
-        wpf_zip=wpf,
+        wpf_zip=main_wpf,
         aria2_archive=aria2,
         ext4_driver=ext4,
         grub4dos_loader=grldr,
@@ -85,6 +87,8 @@ def test_metadata_generator_separates_dev_and_main_channels(tmp_path: Path) -> N
     )
 
     assert dev_releases["latest"]["version"] == "dev_a881918"
+    assert dev_catalog["artifacts"]["wpf"]["fileName"] == "Libertix-a881918.zip"
+    assert main_catalog["artifacts"]["wpf"]["fileName"] == f"Libertix-{main_version}.zip"
     assert dev_releases["latest"]["notes"] == ("Automated Libertix alpha build for commit a881918.")
     assert main_releases["latest"]["version"] == main_version
     assert main_releases["latest"]["notes"] == config["mainRelease"]["notes"]

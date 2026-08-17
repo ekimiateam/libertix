@@ -80,7 +80,7 @@ namespace Libertix.Installation
                     "Distribution catalog JSON is empty or invalid.");
             }
 
-            ValidateArtifact(catalog.Artifacts.Wpf, "Libertix-wpf.zip");
+            ValidateWpfArtifact(catalog.Artifacts.Wpf);
             ValidateArtifact(
                 catalog.Artifacts.MiniIso.Bios,
                 "libertix-installer-bios.iso");
@@ -189,6 +189,22 @@ namespace Libertix.Installation
             {
                 throw new InvalidOperationException(
                     "Distribution catalog contains invalid artifact metadata.");
+            }
+        }
+
+        private static void ValidateWpfArtifact(CatalogArtifactJson artifact)
+        {
+            if (artifact == null ||
+                !Regex.IsMatch(
+                    artifact.FileName ?? string.Empty,
+                    "^Libertix-(?:wpf|[0-9a-f]{7}|(?:0|[1-9][0-9]*)(?:\\.(?:0|[1-9][0-9]*)){1,2}(?:-[0-9A-Za-z.-]+)?)\\.zip$") ||
+                string.IsNullOrWhiteSpace(artifact.Url) ||
+                !artifact.Url.EndsWith("/" + artifact.FileName, StringComparison.Ordinal) ||
+                !Regex.IsMatch(artifact.Sha256 ?? string.Empty, "^[0-9a-fA-F]{64}$") ||
+                artifact.SizeBytes <= 0)
+            {
+                throw new InvalidOperationException(
+                    "Distribution catalog contains invalid WPF artifact metadata.");
             }
         }
     }

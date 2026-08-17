@@ -222,20 +222,21 @@ jobs:
         env:
           LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
         run: |
-          $path = 'Properties\AssemblyInfo.cs'
-          $content = [IO.File]::ReadAllText($path)
-          $stamped = $content.Replace(
-            'AssemblyInformationalVersion("dev_0000000")',
-            "AssemblyInformationalVersion(`"$env:LIBERTIX_BUILD_VERSION`")"
-          )
-          if ($stamped -eq $content) {
-            throw 'Assembly informational version placeholder was not found.'
+          foreach ($path in @('Properties\AssemblyInfo.cs', 'Standalone\AssemblyInfo.cs')) {
+            $content = [IO.File]::ReadAllText($path)
+            $stamped = $content.Replace(
+              'AssemblyInformationalVersion("dev_0000000")',
+              "AssemblyInformationalVersion(`"$env:LIBERTIX_BUILD_VERSION`")"
+            )
+            if ($stamped -eq $content) {
+              throw "Assembly informational version placeholder was not found: $path"
+            }
+            [IO.File]::WriteAllText(
+              $path,
+              $stamped,
+              [Text.UTF8Encoding]::new($false)
+            )
           }
-          [IO.File]::WriteAllText(
-            $path,
-            $stamped,
-            [Text.UTF8Encoding]::new($false)
-          )
 
       - name: Build Libertix.exe
         shell: pwsh
@@ -262,34 +263,25 @@ jobs:
         env:
           LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
         run: |
-          $outputDirectory = 'bin\Release'
+          $outputDirectory = 'Standalone\bin\Release'
           $executable = Join-Path $outputDirectory 'Libertix.exe'
-          $guardian = Join-Path $outputDirectory 'Libertix.BootGuardian.exe'
           if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
-            throw "Expected WPF executable was not produced: $executable"
+            throw "Expected standalone executable was not produced: $executable"
           }
-          if (-not (Test-Path -LiteralPath $guardian -PathType Leaf)) {
-            throw "Expected boot guardian executable was not produced: $guardian"
+          $exposedFiles = @(Get-ChildItem -LiteralPath $outputDirectory -File -ErrorAction Stop |
+            Where-Object { $_.Extension -ne '.pdb' })
+          if ($exposedFiles.Count -ne 1 -or $exposedFiles[0].Name -ne 'Libertix.exe') {
+            throw 'Standalone output must expose exactly one Libertix.exe.'
           }
-          Copy-Item -LiteralPath LICENSE, THIRD_PARTY.md -Destination $outputDirectory
-          @(
-            "source-revision=$env:GITHUB_SHA"
-            "source-ref=$env:GITHUB_REF"
-            "workflow-run=$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-            "informational-version=$env:LIBERTIX_BUILD_VERSION"
-          ) | Set-Content -LiteralPath (Join-Path $outputDirectory 'BUILD-INFO.txt') -Encoding utf8
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $executable
-          $guardianHash = Get-FileHash -Algorithm SHA256 -LiteralPath $guardian
           "Libertix.exe SHA-256: $($hash.Hash.ToLowerInvariant())" |
-            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "Libertix.BootGuardian.exe SHA-256: $($guardianHash.Hash.ToLowerInvariant())" |
             Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: Upload WPF build
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: Libertix-wpf-${{ github.sha }}
-          path: bin/Release/**
+          path: Standalone/bin/Release/Libertix.exe
           if-no-files-found: error
           retention-days: 14
           compression-level: 9
@@ -402,15 +394,19 @@ jobs:
 
       - name: Prepare release assets
         shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.identity.outputs.tag }}
         run: |
           set -Eeuo pipefail
           test -d release-input/wpf
           test -s release-input/iso/libertix-installer-bios.iso
           test -s release-input/iso/libertix-installer-uefi.iso
           mkdir -p release-assets
+          test "$(find release-input/wpf -maxdepth 1 -type f -printf '%f\n' | sort)" = "Libertix.exe"
+          wpf_archive="Libertix-${RELEASE_TAG}.zip"
           (
             cd release-input/wpf
-            zip -9 -q -r "$GITHUB_WORKSPACE/release-assets/Libertix-wpf.zip" .
+            zip -9 -q "$GITHUB_WORKSPACE/release-assets/$wpf_archive" Libertix.exe
           )
           cp -- \
             release-input/iso/libertix-installer-bios.iso \
@@ -420,7 +416,8 @@ jobs:
             --catalog Scripts/config/Libertix.Artifacts.json \
             --source-dir auto_tests/app/filepool \
             --output-dir release-assets
-          test -s release-assets/Libertix-wpf.zip
+          test -s "release-assets/$wpf_archive"
+          test "$(unzip -Z1 "release-assets/$wpf_archive")" = "Libertix.exe"
 
       - name: Generate and sign channel metadata
         shell: bash
@@ -437,13 +434,14 @@ jobs:
           install -d -m 0700 release-work
           printf '%s\n' "$LIBERTIX_SIGNING_PRIVATE_KEY" > release-work/signing-private.pem
           chmod 0600 release-work/signing-private.pem
+          wpf_archive="Libertix-${RELEASE_TAG}.zip"
           uv run --project auto_tests --frozen python iso-tools/generate-release-metadata.py \
             --channel "$RELEASE_CHANNEL" \
             --tag "$RELEASE_TAG" \
             --commit "$GITHUB_SHA" \
             --bios-iso release-assets/libertix-installer-bios.iso \
             --uefi-iso release-assets/libertix-installer-uefi.iso \
-            --wpf-zip release-assets/Libertix-wpf.zip \
+            --wpf-zip "release-assets/$wpf_archive" \
             --aria2-archive release-assets/aria2-64.zip \
             --ext4-driver release-assets/ext4-win-driver.exe \
             --grub4dos-loader release-assets/grldr \
@@ -490,8 +488,9 @@ jobs:
           set -Eeuo pipefail
           title="$(jq -r '.latest.title' release-metadata/releases.json)"
           notes="$(jq -r '.latest.notes' release-metadata/releases.json)"
+          wpf_archive="Libertix-${RELEASE_TAG}.zip"
           assets=(
-            release-assets/Libertix-wpf.zip
+            "release-assets/$wpf_archive"
             release-assets/libertix-installer-bios.iso
             release-assets/libertix-installer-uefi.iso
           )

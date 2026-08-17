@@ -452,37 +452,27 @@ try {
         -FailureMessage "Libertix C# tests failed" |
         Out-Null
 
-    $exe = Get-ChildItem -LiteralPath $srcLocal -Recurse -Filter "Libertix.exe" |
-        Where-Object { -not $_.PSIsContainer -and $_.FullName -match "\\bin\\Release\\" } |
-        Sort-Object FullName |
-        Select-Object -First 1
-
-    if (-not $exe) {
-        throw "Libertix.exe is missing after the Release build"
+    $exePath = Join-Path $srcLocal "Standalone\bin\Release\Libertix.exe"
+    if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+        throw "The standalone Libertix.exe is missing after the Release build"
     }
 
     $releaseStaging = "$releasePath.staging-$([Guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $releaseStaging -Force | Out-Null
-
-    $buildDir = Split-Path -Parent $exe.FullName
-    Copy-WithRobocopy -Source $buildDir -Destination $releaseStaging
+    Copy-Item `
+        -LiteralPath $exePath `
+        -Destination (Join-Path $releaseStaging "Libertix.exe") `
+        -ErrorAction Stop
 
     $stagedExe = Join-Path $releaseStaging "Libertix.exe"
     if (-not (Test-Path -LiteralPath $stagedExe -PathType Leaf)) {
         throw "Libertix.exe is missing from Libertix-release after copying"
     }
-    $stagedGuardian = Join-Path $releaseStaging "Libertix.BootGuardian.exe"
-    if (-not (Test-Path -LiteralPath $stagedGuardian -PathType Leaf)) {
-        throw "Libertix.BootGuardian.exe is missing from Libertix-release after copying"
-    }
-    $stagedRuntimeIcon = Join-Path $releaseStaging "Resources\Images\icon.ico"
-    if (-not (Test-Path -LiteralPath $stagedRuntimeIcon -PathType Leaf)) {
-        throw "The Libertix runtime icon is missing from Libertix-release after copying"
+    $stagedEntries = @(Get-ChildItem -LiteralPath $releaseStaging -Force -ErrorAction Stop)
+    if ($stagedEntries.Count -ne 1 -or $stagedEntries[0].Name -ne "Libertix.exe") {
+        throw "Libertix-release must expose exactly one standalone Libertix.exe"
     }
     $finalHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedExe).Hash.ToLowerInvariant()
-    $guardianHash = (
-        Get-FileHash -Algorithm SHA256 -LiteralPath $stagedGuardian
-    ).Hash.ToLowerInvariant()
 
     if (Test-Path -LiteralPath $releasePath) {
         $releaseBackup = "$releasePath.backup-$([Guid]::NewGuid().ToString('N'))"
@@ -504,13 +494,9 @@ try {
     if ($publishedHash -ne $finalHash) {
         throw "The Libertix.exe hash changed during publication"
     }
-    $finalGuardian = Join-Path $releasePath "Libertix.BootGuardian.exe"
-    if (
-        -not (Test-Path -LiteralPath $finalGuardian -PathType Leaf) -or
-        (Get-FileHash -Algorithm SHA256 -LiteralPath $finalGuardian).Hash.ToLowerInvariant() -ne `
-            $guardianHash
-    ) {
-        throw "The Libertix.BootGuardian.exe hash changed during publication"
+    $publishedEntries = @(Get-ChildItem -LiteralPath $releasePath -Force -ErrorAction Stop)
+    if ($publishedEntries.Count -ne 1 -or $publishedEntries[0].Name -ne "Libertix.exe") {
+        throw "Published Libertix-release does not contain exactly one standalone executable"
     }
     if ($releaseBackup) {
         Remove-Item -LiteralPath $releaseBackup -Recurse -Force
@@ -526,8 +512,6 @@ try {
     Write-Result -Name "TEMP_BUILD_DIR" -Value $temp
     Write-Result -Name "FINAL_EXE" -Value $finalExe
     Write-Result -Name "FINAL_EXE_SHA256" -Value $publishedHash
-    Write-Result -Name "FINAL_BOOT_GUARDIAN" -Value $finalGuardian
-    Write-Result -Name "FINAL_BOOT_GUARDIAN_SHA256" -Value $guardianHash
 }
 finally {
     # Always remove copied sources and build caches, including after a failed

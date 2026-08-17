@@ -31,7 +31,7 @@ $interactiveSession = Get-Process -Name explorer -ErrorAction Stop |
     Sort-Object StartTime -Descending |
     Select-Object -First 1 -ExpandProperty SessionId
 
-$process = Get-CimInstance Win32_Process -Filter "Name='Libertix.exe'" -ErrorAction Stop |
+$launcher = Get-CimInstance Win32_Process -Filter "Name='Libertix.exe'" -ErrorAction Stop |
     Where-Object {
         $_.SessionId -eq $interactiveSession -and
         -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
@@ -40,9 +40,32 @@ $process = Get-CimInstance Win32_Process -Filter "Name='Libertix.exe'" -ErrorAct
     Sort-Object CreationDate -Descending |
     Select-Object -First 1
 
-if (-not $process) {
+if (-not $launcher) {
     $taskState = schtasks.exe /Query /TN $taskName /V /FO LIST 2>&1
-    throw ("Libertix is absent from the interactive session; task=" + ($taskState -join " | "))
+    throw ("Libertix launcher is absent from the interactive session; task=" +
+        ($taskState -join " | "))
+}
+
+$runtimeRoot = [IO.Path]::GetFullPath(
+    (Join-Path $env:ProgramData "Libertix\Runtime")
+).TrimEnd('\') + '\'
+$process = Get-CimInstance Win32_Process `
+    -Filter "ParentProcessId=$($launcher.ProcessId)" `
+    -ErrorAction Stop |
+    Where-Object {
+        $_.Name -eq "Libertix.exe" -and
+        $_.SessionId -eq $interactiveSession -and
+        -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+        [IO.Path]::GetFullPath($_.ExecutablePath).StartsWith(
+            $runtimeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    } |
+    Sort-Object CreationDate -Descending |
+    Select-Object -First 1
+
+if (-not $process) {
+    throw "The verified Libertix runtime is absent from the interactive session"
 }
 
 # Removing the task definition does not terminate its already-running process.
@@ -65,9 +88,11 @@ if (-not (Test-VisibleMainWindow -Process $graphicalProcess)) {
 }
 
 Write-Output ("PID={0}" -f $process.ProcessId)
+Write-Output ("LAUNCHER_PID={0}" -f $launcher.ProcessId)
 Write-Output ("SESSION_ID={0}" -f $process.SessionId)
 Write-Output ("TASK_NAME={0}" -f $taskName)
-Write-Output ("EXECUTABLE={0}" -f $process.ExecutablePath)
+Write-Output ("EXECUTABLE={0}" -f $launcher.ExecutablePath)
+Write-Output ("RUNTIME_EXECUTABLE={0}" -f $process.ExecutablePath)
 Write-Output ("WINDOW_HANDLE={0}" -f $graphicalProcess.MainWindowHandle.ToInt64())
 Write-Output ("WINDOW_TITLE={0}" -f $graphicalProcess.MainWindowTitle)
 Write-Output "WINDOW_VISIBLE=True"
