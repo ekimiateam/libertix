@@ -3842,7 +3842,8 @@ def test_standalone_release_contains_and_verifies_the_complete_runtime() -> None
     assert 'seen.Contains("Libertix.exe")' in launcher
     assert 'seen.Contains("Libertix.BootGuardian.exe")' in launcher
     assert '"Libertix.BootGuardian.exe"' in payload
-    assert "Get-FileHash" in payload
+    assert "Get-PayloadFileSha256" in payload
+    assert "[Security.Cryptography.SHA256]::Create()" in payload
     assert "ZipArchive" in payload
     assert "stagedEntries.Count -ne 1" in build
     assert "publishedEntries.Count -ne 1" in build

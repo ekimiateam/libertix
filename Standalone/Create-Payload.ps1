@@ -11,6 +11,19 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+function Get-PayloadFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($LiteralPath)
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 $inputRoot = [IO.Path]::GetFullPath($InputDirectory).TrimEnd('\') + '\'
 $projectRootPath = [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\') + '\'
 if (-not (Test-Path -LiteralPath (Join-Path $inputRoot "Libertix.exe") -PathType Leaf)) {
@@ -52,7 +65,7 @@ foreach ($file in $files) {
     $entries += [ordered]@{
         path = [string]$file.RelativePath
         size = [int64]$info.Length
-        sha256 = (Get-FileHash -LiteralPath $info.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        sha256 = Get-PayloadFileSha256 -LiteralPath $info.FullName
     }
 }
 $manifest = [ordered]@{
