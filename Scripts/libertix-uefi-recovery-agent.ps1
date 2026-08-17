@@ -1,8 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$StatePath,
     [ValidateSet("Check", "Prompt", "Cancel", "InstallPreferredPath")]
-    [string]$Action = "Check",
-    [ValidateRange(0, 2147483647)][int]$WaitForProcessId = 0
+    [string]$Action = "Check"
 )
 
 Set-StrictMode -Version Latest
@@ -551,31 +550,44 @@ function Import-BootGuardianModule {
     Import-Module -Name $modulePath -Force -ErrorAction Stop
 }
 
+function Get-InstalledPreferredBootPathManifest {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $manifestPath = Join-Path `
+        $State.RecoveryRoot `
+        "preferred-boot-path\manifest.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return $null
+    }
+    $manifest = Get-Content `
+        -LiteralPath $manifestPath `
+        -Raw `
+        -Encoding UTF8 `
+        -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if (
+        [int]$manifest.version -ne 1 -or
+        [string]$manifest.runId -ne [string]$State.RunId
+    ) {
+        throw "Preferred boot path archive identity is invalid."
+    }
+    if ([string]$manifest.status -eq "installed") {
+        return $manifest
+    }
+    if ([string]$manifest.status -eq "restored") {
+        return $null
+    }
+    throw "Preferred boot path archive has an incomplete state."
+}
+
 function Install-BootGuardianForCurrentBootPath {
     param([Parameter(Mandatory = $true)]$State)
 
     Import-BootGuardianModule -State $State
-    $preferredManifest = Join-Path `
-        $State.RecoveryRoot `
-        "preferred-boot-path\manifest.json"
+    $preferredState = Get-InstalledPreferredBootPathManifest -State $State
     $mode = "firmware-boot-order"
-    if (Test-Path -LiteralPath $preferredManifest -PathType Leaf) {
-        $preferredState = Get-Content `
-            -LiteralPath $preferredManifest `
-            -Raw `
-            -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
-        if (
-            [int]$preferredState.version -ne 1 -or
-            [string]$preferredState.runId -ne [string]$State.RunId
-        ) {
-            throw "Preferred boot path archive identity is invalid before guardian installation."
-        }
-        if ([string]$preferredState.status -eq "installed") {
-            Import-PreferredBootPathModule -State $State
-            $mode = "preferred-windows-path"
-        } elseif ([string]$preferredState.status -ne "restored") {
-            throw "Preferred boot path archive has an incomplete state before guardian installation."
-        }
+    if ($null -ne $preferredState) {
+        Import-PreferredBootPathModule -State $State
+        $mode = "preferred-windows-path"
     }
     $writeLog = { param($Message) Write-AgentLog -Message $Message }
     return Invoke-WithVerifiedEsp -State $State -Action {
@@ -869,9 +881,17 @@ function Restore-HibernationAfterInstallation {
 
     $expected = [bool]$transaction.OriginalHibernateEnabled
     $argument = if ($expected) { "on" } else { "off" }
-    $output = & "$env:SystemRoot\System32\powercfg.exe" /hibernate $argument 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Hibernation finalization failed with rc=$LASTEXITCODE output=$($output -join ' ')"
+    $processModule = Resolve-VerifiedPayloadPath -State $State -RelativePath (
+        "Scripts\modules\Libertix.Process.psm1"
+    )
+    Import-Module -Name $processModule -Force -ErrorAction Stop
+    $powercfg = Invoke-LibertixNativeCommand `
+        -FilePath "$env:SystemRoot\System32\powercfg.exe" `
+        -ArgumentList @("/hibernate", $argument) `
+        -TimeoutSeconds 60
+    $output = ($powercfg.StandardOutput + [Environment]::NewLine + $powercfg.StandardError).Trim()
+    if ($powercfg.ExitCode -ne 0) {
+        throw "Hibernation finalization failed with rc=$($powercfg.ExitCode) output=$output"
     }
     $observed = [int](Get-ItemProperty `
         -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
@@ -910,6 +930,20 @@ function Remove-WindowsShareAfterRollback {
     Write-AgentLog "Removed Windows read-only Linux sharing after rollback."
 }
 
+function Test-LibertixApplicationMutex {
+    $mutex = $null
+    try {
+        $mutex = [System.Threading.Mutex]::OpenExisting("Global\Libertix.Installation")
+        return $true
+    } catch [System.Threading.WaitHandleCannotBeOpenedException] {
+        return $false
+    } finally {
+        if ($null -ne $mutex) {
+            $mutex.Dispose()
+        }
+    }
+}
+
 function Start-FallbackUi {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -935,11 +969,54 @@ function Start-FallbackUi {
             "BootNext returned to Windows without a live marker; opening the firmware fallback prompt."
         )
     }
-    Start-Process -FilePath $exe -ArgumentList @(
-        "--uefi-bootnext-failed",
-        "--uefi-recovery-state",
-        $StatePath
-    )
+    $runId = [string]$State.RunId
+    if ($runId -notmatch '^[A-Za-z0-9-]{1,64}$') {
+        throw "Recovery run identifier cannot be used for prompt synchronization."
+    }
+    $launchMutex = $null
+    $ownsLaunchMutex = $false
+    try {
+        $createdNew = $false
+        $launchMutex = [System.Threading.Mutex]::new(
+            $true,
+            "Global\Libertix.UefiRecoveryPrompt.$runId",
+            [ref]$createdNew
+        )
+        $ownsLaunchMutex = $createdNew
+        if (-not $createdNew) {
+            Write-AgentLog "The recovery prompt is already being launched by another task."
+            return
+        }
+        if (Test-LibertixApplicationMutex) {
+            Write-AgentLog "A Libertix recovery window is already active; no duplicate was launched."
+            return
+        }
+
+        $process = Start-Process -FilePath $exe -ArgumentList @(
+            "--uefi-bootnext-failed",
+            "--uefi-recovery-state",
+            $StatePath
+        ) -PassThru
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-LibertixApplicationMutex) {
+                Write-AgentLog "The Libertix recovery window acquired its application mutex."
+                return
+            }
+            if ($process.HasExited) {
+                throw "Libertix recovery UI exited before acquiring its application mutex."
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        throw "Libertix recovery UI did not acquire its application mutex within 30 seconds."
+    } finally {
+        if ($ownsLaunchMutex) {
+            $launchMutex.ReleaseMutex()
+        }
+        if ($null -ne $launchMutex) {
+            $launchMutex.Dispose()
+        }
+    }
 }
 
 function Start-PostInstallResultUi {
@@ -1139,6 +1216,22 @@ try {
                 -LiteralPath $linuxBootEvidence `
                 -PathType Leaf
             if (-not $linuxBootEvidencePresent) {
+                $preferredPathAlreadyInstalled = $null -ne (
+                    Get-InstalledPreferredBootPathManifest -State $state
+                )
+                if ($preferredPathAlreadyInstalled) {
+                    $null = Install-BootGuardianForCurrentBootPath -State $state
+                    $state.Phase = "AwaitingPreferredPathReboot"
+                    Save-State -State $state
+                    $null = Set-LibertixPostInstallWaitingForLinux `
+                        -RecoveryRoot ([string]$state.RecoveryRoot) `
+                        -LogPath (Join-Path $state.RecoveryRoot "recovery-agent.log")
+                    Write-AgentLog (
+                        "Preferred Windows boot path is installed; waiting for the installed " +
+                        "Linux system to publish its verified first-boot evidence."
+                    )
+                    exit 0
+                }
                 $preferredPathRequired = [string]$state.Phase -in @(
                     "InstalledBootBypassed",
                     "PreferredPathPrompted",
@@ -1211,11 +1304,41 @@ try {
             $null = Restore-PreferredBootPathIfPresent -State $state
             Restore-UefiTransactionArchive -State $state
             $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
-                -Revert `
-                -ExpectedRecoveryRunId ([string]$state.RunId)
-            if ($LASTEXITCODE -ne 0) {
-                throw "UEFI revert failed with rc=$LASTEXITCODE."
+            $processModulePath = Join-Path `
+                $state.PayloadRoot `
+                "Scripts\modules\Libertix.Process.psm1"
+            if (-not (Test-Path -LiteralPath $processModulePath -PathType Leaf)) {
+                throw "Process execution module is missing from the recovery payload."
+            }
+            Import-Module -Name $processModulePath -Force -ErrorAction Stop
+            $revertArguments = @(
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                $installerScript,
+                "-Revert",
+                "-ExpectedRecoveryRunId",
+                ([string]$state.RunId)
+            ) | ForEach-Object { ConvertTo-LibertixNativeArgument -Value ([string]$_) }
+            $logRevertOutput = {
+                param($Line)
+                Write-AgentLog "UEFI revert: $Line"
+            }
+            $revertResult = Invoke-LibertixNativeProcess `
+                -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") `
+                -Arguments ($revertArguments -join " ") `
+                -TimeoutSeconds 900 `
+                -OnStandardOutputLine $logRevertOutput `
+                -OnStandardErrorLine $logRevertOutput
+            $revertExitCode = [int]$revertResult.ExitCode
+            Write-AgentLog "UEFI revert process completed with rc=$revertExitCode."
+            if ($revertExitCode -ne 0) {
+                $stderr = ([string]$revertResult.StandardError).Trim()
+                if ($stderr.Length -gt 2000) {
+                    $stderr = $stderr.Substring($stderr.Length - 2000)
+                }
+                throw "UEFI revert failed with rc=$revertExitCode. stderr=$stderr"
             }
             Write-AgentLog "Fallback was declined; UEFI transaction reverted."
         } else {
@@ -1283,13 +1406,22 @@ try {
     ) {
         $linuxBootEvidence = Join-Path $state.RecoveryRoot "installed-linux-boot.json"
         if (-not (Test-Path -LiteralPath $linuxBootEvidence -PathType Leaf)) {
+            $preferredPathDecisionPending = [string]$state.Phase -in @(
+                "InstalledBootBypassed",
+                "PreferredPathPrompted",
+                "PreferredPathPreparationFailed"
+            )
+            if ($preferredPathDecisionPending) {
+                Write-AgentLog (
+                    "The preferred Windows boot path decision is still pending; preserving " +
+                    "the fallback prompt across this reboot."
+                )
+                Start-PostInstallPromptTask -State $state
+                exit 0
+            }
             $firmwareBypassEvidence = $null
-            $preferredManifest = Join-Path `
-                $state.RecoveryRoot `
-                "preferred-boot-path\manifest.json"
-            $preferredPathAlreadyInstalled = (
-                [string]$state.Phase -eq "AwaitingPreferredPathReboot" -and
-                (Test-Path -LiteralPath $preferredManifest -PathType Leaf)
+            $preferredPathAlreadyInstalled = $null -ne (
+                Get-InstalledPreferredBootPathManifest -State $state
             )
             $firmwareBypassEvaluationSucceeded = $preferredPathAlreadyInstalled
             if (-not $preferredPathAlreadyInstalled) {

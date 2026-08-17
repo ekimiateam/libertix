@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
 from typing import Literal
@@ -23,7 +23,7 @@ from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
 from app.distributions import load_distribution_profile
 from app.errors import WorkflowError
-from app.models import OperationResult, SourceMode, StepResult
+from app.models import STAGING_VOLUME_LABELS, OperationResult, SourceMode, StepResult
 from app.services.automation_monitoring import InstallationMonitoringMixin
 from app.services.automation_postinstall import PostInstallValidationMixin
 from app.services.automation_preflight import AutomationPreflight
@@ -85,7 +85,13 @@ class AutomationService(
         share_linux_files_in_windows: bool = True,
         simulate_stale_firmware_entries: bool = False,
         force_offline_ntfs_resize: bool = False,
-        boot_guardian_fault: Literal["none", "boot-order", "preferred-path"] = "none",
+        boot_guardian_fault: Literal[
+            "none",
+            "boot-order",
+            "bootnext-rollback",
+            "preferred-path",
+            "preferred-path-rollback",
+        ] = "none",
         first_boot: Literal["windows", "linux"] = "windows",
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
@@ -276,6 +282,15 @@ class AutomationService(
         failure: WorkflowError | None = None
         try:
             self._prepare_windows_test_vm(vm, result)
+            vm_options = options
+            if options.boot_guardian_fault in {
+                "bootnext-rollback",
+                "preferred-path-rollback",
+            }:
+                vm_options = replace(
+                    options,
+                    rollback_baseline=self._capture_rollback_baseline(vm, result),
+                )
             local_executable = self.validation.deploy_to_documents(vm, executable)
             result.ok(
                 "automation.deploy",
@@ -290,8 +305,8 @@ class AutomationService(
             launch = self._launch_elevated(
                 vm,
                 local_executable,
-                options,
-                use_default_filepool=options.use_default_filepool,
+                vm_options,
+                use_default_filepool=vm_options.use_default_filepool,
             )
             result.ok(
                 "automation.launch_elevated",
@@ -300,8 +315,8 @@ class AutomationService(
                 vm=vm.name,
                 **launch,
             )
-            monitor_outcome = self._run_unattended_wizard(vm, options, result, launch)
-            self._run_post_install_validation(vm, options, result, monitor_outcome)
+            monitor_outcome = self._run_unattended_wizard(vm, vm_options, result, launch)
+            self._run_post_install_validation(vm, vm_options, result, monitor_outcome)
         except WorkflowError as exc:
             failure = exc
         except Exception as exc:
@@ -338,6 +353,64 @@ class AutomationService(
         if failure is not None:
             return result.failure(failure)
         return result.success(f"Automation completed on {vm.name}")
+
+    def _capture_rollback_baseline(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> dict[str, str]:
+        with self.validation.ssh(
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
+        ) as ssh:
+            response = self.validation.run_windows_script(
+                ssh,
+                script_name="inspect_installation_rollback_state.ps1",
+                config={"staging_volume_labels": list(STAGING_VOLUME_LABELS)},
+                step="automation.rollback_baseline",
+                timeout=90,
+            )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "SYSTEM_DISK_NUMBER",
+                "SYSTEM_PARTITION_NUMBER",
+                "SYSTEM_PARTITION_OFFSET",
+                "SYSTEM_PARTITION_SIZE",
+                "INSTALLER_PARTITION_COUNT",
+                "LIBERTIX_PROCESS_COUNT",
+                "RECOVERY_TASK_COUNT",
+                "RESULT",
+            ),
+        )
+        required = (
+            "SYSTEM_DISK_NUMBER",
+            "SYSTEM_PARTITION_NUMBER",
+            "SYSTEM_PARTITION_OFFSET",
+            "SYSTEM_PARTITION_SIZE",
+        )
+        if (
+            values.get("RESULT") != "OK"
+            or any(not values.get(name) for name in required)
+            or values.get("INSTALLER_PARTITION_COUNT") != "0"
+            or values.get("LIBERTIX_PROCESS_COUNT") != "0"
+            or values.get("RECOVERY_TASK_COUNT") != "0"
+        ):
+            raise WorkflowError(
+                "automation.rollback_baseline",
+                "The clean Windows rollback baseline could not be proven",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        result.ok(
+            "automation.rollback_baseline",
+            "The exact pre-installation Windows geometry and clean recovery state were captured",
+            vm=vm.name,
+            target=vm.host,
+            **values,
+        )
+        return values
 
     def _start_serial_capture(
         self,

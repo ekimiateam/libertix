@@ -27,7 +27,13 @@ STAGING_VOLUME_LABELS = (
 SourceMode = Literal["remote", "local", "published"]
 DistributionId = Literal["mint", "zorin"]
 FirstBoot = Literal["windows", "linux"]
-BootGuardianFault = Literal["none", "boot-order", "preferred-path"]
+BootGuardianFault = Literal[
+    "none",
+    "boot-order",
+    "bootnext-rollback",
+    "preferred-path",
+    "preferred-path-rollback",
+]
 
 
 class StepResult(BaseModel):

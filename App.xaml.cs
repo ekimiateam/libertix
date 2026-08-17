@@ -32,6 +32,11 @@ namespace Libertix
             {
                 _singleInstanceMutex.Dispose();
                 _singleInstanceMutex = null;
+                if (IsRecoveryUiInvocation(e.Args))
+                {
+                    Shutdown(0);
+                    return;
+                }
                 MessageBox.Show(
                     Localization.GetBootstrapString(
                         "SingleInstanceRequired",
@@ -66,12 +71,47 @@ namespace Libertix
 
             string recoveryStatePath = TryGetUefiRecoveryStatePath(RuntimeOptions);
             if (!string.IsNullOrWhiteSpace(recoveryStatePath))
+            {
                 InstallationState.UefiRecoveryStatePath = recoveryStatePath;
-
-            if (!await ValidatePublishedVersionAsync())
+                ApplicationLogger.Write(
+                    "Published version check skipped for the protected cached recovery UI.");
+            }
+            else if (!await ValidatePublishedVersionAsync())
+            {
                 return;
+            }
 
             base.OnStartup(e);
+        }
+
+        private static bool IsRecoveryUiInvocation(string[] args)
+        {
+            if (args == null)
+                return false;
+
+            bool hasFailureMarker = false;
+            bool hasStatePath = false;
+            for (int index = 0; index < args.Length; index++)
+            {
+                if (string.Equals(
+                    args[index],
+                    "--uefi-bootnext-failed",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    hasFailureMarker = true;
+                }
+                else if (string.Equals(
+                    args[index],
+                    "--uefi-recovery-state",
+                    StringComparison.OrdinalIgnoreCase) &&
+                    index + 1 < args.Length &&
+                    !string.IsNullOrWhiteSpace(args[index + 1]))
+                {
+                    hasStatePath = true;
+                    index++;
+                }
+            }
+            return hasFailureMarker && hasStatePath;
         }
 
         private bool TryConfigureStartupOptions(string[] args)
@@ -83,14 +123,23 @@ namespace Libertix
             }
 
             FilepoolConfig filepool = FilepoolConfig.ForBuild(Build);
-            if (!string.IsNullOrWhiteSpace(options.FilepoolBaseUrlOverride) &&
-                !FilepoolConfig.TryCreate(
+            if (!string.IsNullOrWhiteSpace(options.FilepoolBaseUrlOverride))
+            {
+                if (!Build.AllowsDevelopmentFilepoolOverride)
+                {
+                    RejectInvalidStartupOptions(
+                        "The filepool override is available only in development builds.");
+                    return false;
+                }
+
+                if (!FilepoolConfig.TryCreate(
                     options.FilepoolBaseUrlOverride,
                     out filepool,
                     out error))
-            {
-                RejectInvalidStartupOptions(error);
-                return false;
+                {
+                    RejectInvalidStartupOptions(error);
+                    return false;
+                }
             }
 
             Filepool = filepool;
@@ -224,6 +273,13 @@ namespace Libertix
                 _ownsSingleInstanceMutex = false;
             }
             base.OnExit(e);
+        }
+
+        protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
+        {
+            if (MainWindow is MainWindow window)
+                window.PrepareForSystemRestart();
+            base.OnSessionEnding(e);
         }
 
         private void RegisterApplicationErrorLogging()

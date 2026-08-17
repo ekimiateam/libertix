@@ -68,6 +68,15 @@ public static class LibertixFirmwareReadApi {
         UInt32 nSize
     );
 
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern bool SetFirmwareEnvironmentVariableEx(
+        string lpName,
+        string lpGuid,
+        byte[] pValue,
+        UInt32 nSize,
+        UInt32 dwAttributes
+    );
+
     public static void EnableSystemEnvironmentPrivilege() {
         IntPtr token;
         if (!OpenProcessToken(
@@ -146,4 +155,29 @@ function Get-LibertixFirmwareVariableBytes {
     return [byte[]]$result
 }
 
-Export-ModuleMember -Function Get-LibertixFirmwareVariableBytes
+function Set-LibertixFirmwareVariableBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][byte[]]$Bytes
+    )
+
+    if ($Bytes.Length -eq 0) {
+        throw "Firmware variable value must not be empty."
+    }
+    Enable-LibertixFirmwareReadAccess
+    $globalVariableGuid = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
+    $attributes = [uint32]0x00000007
+    if (-not [LibertixFirmwareReadApi]::SetFirmwareEnvironmentVariableEx(
+        $Name,
+        $globalVariableGuid,
+        $Bytes,
+        [uint32]$Bytes.Length,
+        $attributes
+    )) {
+        $errorCode = [LibertixFirmwareReadApi]::LastError()
+        throw "SetFirmwareEnvironmentVariableEx failed for ${Name}: Win32 error ${errorCode}"
+    }
+}
+
+Export-ModuleMember -Function `
+    Get-LibertixFirmwareVariableBytes, Set-LibertixFirmwareVariableBytes

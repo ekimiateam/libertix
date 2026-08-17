@@ -93,6 +93,30 @@ namespace Libertix.Pages
                 if (!File.Exists(sourceScript))
                     throw new FileNotFoundException("Windows sharing script is missing.", sourceScript);
                 File.Copy(sourceScript, targetScript, true);
+                string processModuleSource = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "Scripts",
+                    "modules",
+                    "Libertix.Process.psm1");
+                string processModuleTarget = Path.Combine(
+                    WindowsShareRoot,
+                    "Libertix.Process.psm1");
+                if (!File.Exists(processModuleSource))
+                    throw new FileNotFoundException(
+                        "The native-process module is missing.",
+                        processModuleSource);
+                File.Copy(processModuleSource, processModuleTarget, true);
+                string hiddenHostSource = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "Libertix.BootGuardian.exe");
+                string hiddenHostTarget = Path.Combine(
+                    WindowsShareRoot,
+                    "Libertix.BootGuardian.exe");
+                if (!File.Exists(hiddenHostSource))
+                    throw new FileNotFoundException(
+                        "The console-free scheduled-task host is missing.",
+                        hiddenHostSource);
+                File.Copy(hiddenHostSource, hiddenHostTarget, true);
 
                 string setupPath = Path.Combine(WindowsShareRoot, Artifacts.Ext4Driver.FileName);
                 if (options.ShareLinuxFilesInWindows)
@@ -373,6 +397,9 @@ namespace Libertix.Pages
                         Path.Combine("Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
                         "Libertix.PostInstallVerification.psm1");
                     CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
+                        "Libertix.Process.psm1");
+                    CopyRequiredRecoveryFile(
                         Path.Combine("Scripts", "libertix-post-install-result.ps1"),
                         "libertix-post-install-result.ps1");
                     CopyRequiredRecoveryFile(
@@ -381,6 +408,9 @@ namespace Libertix.Pages
                     CopyRequiredRecoveryFile(
                         Path.Combine("Resources", "Images", "icon.ico"),
                         Path.Combine("Images", "icon.ico"));
+                    CopyRequiredRecoveryFile(
+                        "Libertix.BootGuardian.exe",
+                        "Libertix.BootGuardian.exe");
 
                     if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
                     {
@@ -453,6 +483,7 @@ namespace Libertix.Pages
                         $"{QuoteArgument(registrationScript)} " +
                         $"-TaskName {QuoteArgument(RuntimeNames.BiosRecoveryTask)} " +
                         $"-RecoveryScriptPath {QuoteArgument(targetScript)} " +
+                        $"-HiddenHostPath {QuoteArgument(Path.Combine(RecoveryRoot, "Libertix.BootGuardian.exe"))} " +
                         $"-PromptTaskName {QuoteArgument(RuntimeNames.BiosRecoveryPromptTask)} " +
                         $"-ResultScriptPath {QuoteArgument(Path.Combine(RecoveryRoot, "libertix-post-install-result.ps1"))} " +
                         $"-ResultStatePath {QuoteArgument(Path.Combine(RecoveryRoot, "post-install-verification.json"))} " +

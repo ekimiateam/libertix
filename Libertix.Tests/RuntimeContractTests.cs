@@ -30,6 +30,7 @@ namespace Libertix.Tests
                 "https://ekimiateam.github.io/libertix/main/catalog.json.sig",
                 filepool.CatalogSignatureUrl);
             Assert.IsTrue(build.RequiresPublishedVersionCheck);
+            Assert.IsFalse(build.AllowsDevelopmentFilepoolOverride);
         }
 
         [TestMethod]
@@ -46,6 +47,7 @@ namespace Libertix.Tests
             Assert.IsTrue(filepool.RequiresCatalogSignature);
             Assert.IsFalse(filepool.IsDevelopmentMode);
             Assert.IsFalse(build.RequiresPublishedVersionCheck);
+            Assert.IsTrue(build.AllowsDevelopmentFilepoolOverride);
         }
 
         [TestMethod]

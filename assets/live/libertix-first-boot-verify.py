@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -397,6 +399,7 @@ def parse_efi_load_option(value: bytes) -> dict[str, object]:
         "partitionNumber": partition_number,
         "partitionGuid": partition_guid,
         "loaderPath": loader_path,
+        "optionalDataLength": len(payload) - device_end,
     }
 
 
@@ -432,6 +435,8 @@ def verify_uefi_boot_current(
         preferred_path is not None
         and entry["description"] == "Windows Boot Manager"
         and str(entry["loaderPath"]).casefold() == r"\EFI\Microsoft\Boot\bootmgfw.efi".casefold()
+        and entry["optionalDataLength"] == 0
+        and boot_number == str(preferred_path.get("bootNumber", "")).casefold()
     )
     if not normal_libertix_path and not preferred_windows_path:
         raise VerificationError("UEFI BootCurrent does not identify the installed Libertix shim")
@@ -477,12 +482,27 @@ def verify_preferred_uefi_boot_path(
         raise VerificationError("preferred UEFI boot manifest identity or status is invalid")
     esp = require_mapping(manifest, "esp")
     windows_loader = require_mapping(manifest, "windowsLoader")
+    windows_boot_entry = require_mapping(manifest, "windowsBootEntry")
     preferred = require_mapping(manifest, "preferred")
+    entry_name = windows_boot_entry.get("name")
+    preferred_entry_hash = windows_boot_entry.get("preferredSha256")
+    preferred_entry_base64 = windows_boot_entry.get("preferredBytesBase64")
+    try:
+        preferred_entry_bytes = base64.b64decode(str(preferred_entry_base64), validate=True)
+    except (ValueError, TypeError, binascii.Error) as error:
+        raise VerificationError("preferred Windows boot entry encoding is invalid") from error
     if (
         esp.get("partitionNumber") != uefi_owner["partitionNumber"]
         or str(esp.get("partitionGuid", "")).casefold() != uefi_owner["partitionGuid"]
         or windows_loader.get("activePath") != r"\EFI\Microsoft\Boot\bootmgfw.efi"
         or windows_loader.get("backupPath") != r"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi"
+        or not isinstance(entry_name, str)
+        or re.fullmatch(r"Boot[0-9A-F]{4}", entry_name) is None
+        or not isinstance(preferred_entry_hash, str)
+        or re.fullmatch(r"[0-9a-f]{64}", preferred_entry_hash) is None
+        or hashlib.sha256(preferred_entry_bytes).hexdigest() != preferred_entry_hash
+        or parse_efi_load_option(b"\x07\x00\x00\x00" + preferred_entry_bytes)["optionalDataLength"]
+        != 0
     ):
         raise VerificationError("preferred UEFI boot manifest targets a different ESP or path")
 
@@ -544,6 +564,8 @@ def verify_preferred_uefi_boot_path(
         "manifestSha256": sha256(manifest_path),
         "secureBootEvidencePath": str(efi_root / "secure-boot-chain.json"),
         "verifiedHashes": verified_hashes,
+        "bootNumber": entry_name[4:].casefold(),
+        "bootEntrySha256": preferred_entry_hash,
     }
 
 

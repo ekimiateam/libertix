@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -142,6 +143,37 @@ namespace Libertix.Tests
         {
             Assert.ThrowsException<InvalidOperationException>(
                 () => PowerShellJsonResult.ParseFinalObject("CHECK=storage\r\nnot json\r\n"));
+        }
+
+        [TestMethod]
+        public void RedirectedStreamDrainRefusesAnUnclosedPipe()
+        {
+            var incomplete = new TaskCompletionSource<bool>();
+
+            Assert.ThrowsException<InvalidOperationException>(() =>
+                WindowsProcessRunner.WaitForRedirectedStreams(
+                    TimeSpan.FromMilliseconds(20),
+                    incomplete.Task));
+        }
+
+        [TestMethod]
+        public void UefiRecoveryStatePreservesFieldsOwnedByANewerAgent()
+        {
+            const string json = "{\"RunId\":\"0123456789abcdef0123456789abcdef\"," +
+                "\"Phase\":\"Preparing\",\"FutureCheckpoint\":{\"revision\":7}}";
+
+            UefiRecoveryState state = JsonSerializer.Deserialize<UefiRecoveryState>(json);
+            state.Phase = "FallbackNeeded";
+            string rewritten = JsonSerializer.Serialize(state);
+            using (JsonDocument document = JsonDocument.Parse(rewritten))
+            {
+                Assert.AreEqual(
+                    7,
+                    document.RootElement
+                        .GetProperty("FutureCheckpoint")
+                        .GetProperty("revision")
+                        .GetInt32());
+            }
         }
 
         [TestMethod]

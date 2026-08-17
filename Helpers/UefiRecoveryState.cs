@@ -1,3 +1,7 @@
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace Libertix.Helpers
 {
     public sealed class UefiRecoveryState
@@ -23,6 +27,9 @@ namespace Libertix.Helpers
         public long ExpectedLinuxPartitionOffset { get; set; }
         public long ExpectedLinuxPartitionSize { get; set; }
         public bool SecureBootEnabled { get; set; }
+
+        [JsonExtensionData]
+        public IDictionary<string, JsonElement> AdditionalFields { get; set; }
     }
 
     public sealed class UefiRecoveryManifestFile

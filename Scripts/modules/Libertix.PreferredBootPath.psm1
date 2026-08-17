@@ -88,6 +88,42 @@ function Get-LibertixPreferredPathHash {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
 }
 
+function Get-LibertixPreferredPathByteHash {
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Import-LibertixPreferredPathFirmwareModules {
+    foreach ($name in @("Libertix.Firmware.psm1", "Libertix.FirmwareRead.psm1")) {
+        $path = Join-Path $PSScriptRoot $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Preferred boot firmware dependency is missing: $path"
+        }
+        Import-Module -Name $path -Force -ErrorAction Stop
+    }
+}
+
+function Get-LibertixPreferredPathFirmwareVariableBytes {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    return Get-LibertixFirmwareVariableBytes -Name $Name
+}
+
+function Set-LibertixPreferredPathFirmwareVariableBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][byte[]]$Bytes
+    )
+
+    Set-LibertixFirmwareVariableBytes -Name $Name -Bytes $Bytes
+}
+
 function Resolve-LibertixPreferredPathFileSystemPath {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -123,6 +159,170 @@ function Write-LibertixPreferredPathJsonAtomic {
         if ([IO.File]::Exists($temporary)) {
             [IO.File]::Delete($temporary)
         }
+    }
+}
+
+function Write-LibertixPreferredPathBytesAtomic {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][byte[]]$Bytes,
+        [Parameter(Mandatory = $true)][string]$ExpectedSha256
+    )
+
+    if ((Get-LibertixPreferredPathByteHash -Bytes $Bytes) -ne $ExpectedSha256) {
+        throw "Preferred boot byte archive source hash mismatch."
+    }
+    $Path = Resolve-LibertixPreferredPathFileSystemPath -Path $Path
+    $directory = Split-Path -Parent $Path
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    $temporary = Join-Path `
+        $directory `
+        ".$([IO.Path]::GetFileName($Path)).$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllBytes($temporary, $Bytes)
+        if ((Get-LibertixPreferredPathHash -Path $temporary) -ne $ExpectedSha256) {
+            throw "Preferred boot byte archive staged hash mismatch."
+        }
+        Move-LibertixPreferredPathFileAtomic -Source $temporary -Destination $Path
+        if ((Get-LibertixPreferredPathHash -Path $Path) -ne $ExpectedSha256) {
+            throw "Preferred boot byte archive destination hash mismatch."
+        }
+    } finally {
+        if ([IO.File]::Exists($temporary)) {
+            [IO.File]::Delete($temporary)
+        }
+    }
+}
+
+function Get-LibertixPreferredPathWindowsBootEntry {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$ArchiveRoot,
+        $ExistingManifest
+    )
+
+    Import-LibertixPreferredPathFirmwareModules
+    $evidencePath = Join-Path $State.RecoveryRoot "firmware-boot-bypass.json"
+    if (-not (Test-Path -LiteralPath $evidencePath -PathType Leaf)) {
+        throw "Firmware bypass evidence is missing before preferred-path installation."
+    }
+    $evidence = Get-Content -LiteralPath $evidencePath -Raw -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    $entryName = [string]$evidence.windowsBootNumber
+    if (
+        [int]$evidence.schemaVersion -ne 1 -or
+        [string]$evidence.runId -ne [string]$State.RunId -or
+        $entryName -notmatch '^Boot[0-9A-Fa-f]{4}$' -or
+        [string]$evidence.windowsLoaderPath -ne "\EFI\Microsoft\Boot\bootmgfw.efi"
+    ) {
+        throw "Firmware bypass evidence does not identify the expected Windows boot entry."
+    }
+    $entryName = "Boot" + $entryName.Substring(4).ToUpperInvariant()
+    $observed = Get-LibertixPreferredPathFirmwareVariableBytes -Name $entryName
+    if (
+        -not $observed -or
+        -not (Test-EfiLoadOptionLoaderPath `
+            -Bytes $observed `
+            -ExpectedPath "\EFI\Microsoft\Boot\bootmgfw.efi")
+    ) {
+        throw "The recorded Windows boot entry is missing or no longer targets bootmgfw.efi."
+    }
+
+    $archiveName = "windows-boot-entry.original.bin"
+    $archivePath = Join-Path $ArchiveRoot $archiveName
+    $hasExistingEntry = (
+        $null -ne $ExistingManifest -and
+        $ExistingManifest.PSObject.Properties.Name -contains "windowsBootEntry"
+    )
+    if ($null -ne $ExistingManifest -and -not $hasExistingEntry) {
+        throw "Existing preferred boot manifest does not protect the Windows boot entry."
+    }
+
+    if ($hasExistingEntry) {
+        $record = $ExistingManifest.windowsBootEntry
+        $originalHash = [string]$record.originalSha256
+        $preferredHash = [string]$record.preferredSha256
+        try {
+            $preferredBytes = [Convert]::FromBase64String([string]$record.preferredBytesBase64)
+        } catch [FormatException] {
+            throw "Preferred Windows boot entry encoding is invalid."
+        }
+        if (
+            [string]$record.name -ne $entryName -or
+            [string]$record.originalArchiveName -ne $archiveName -or
+            $originalHash -notmatch '^[0-9a-f]{64}$' -or
+            $preferredHash -notmatch '^[0-9a-f]{64}$' -or
+            (Get-LibertixPreferredPathByteHash -Bytes $preferredBytes) -ne $preferredHash -or
+            (Get-EfiLoadOptionOptionalDataLength -Bytes $preferredBytes) -ne 0 -or
+            -not (Test-Path -LiteralPath $archivePath -PathType Leaf) -or
+            (Get-LibertixPreferredPathHash -Path $archivePath) -ne $originalHash
+        ) {
+            throw "Existing preferred Windows boot entry archive is invalid."
+        }
+        $observedHash = Get-LibertixPreferredPathByteHash -Bytes ([byte[]]$observed)
+        if ($observedHash -notin @($originalHash, $preferredHash)) {
+            throw "The Windows boot entry changed outside the preferred-path transaction."
+        }
+        return [pscustomobject]@{
+            Name = $entryName
+            OriginalSha256 = $originalHash
+            PreferredBytes = [byte[]]$preferredBytes
+            PreferredSha256 = $preferredHash
+            ArchiveName = $archiveName
+            RemovedByteCount = [int]$record.optionalDataRemovedBytes
+        }
+    }
+
+    $optionalLength = Get-EfiLoadOptionOptionalDataLength -Bytes $observed
+    if ($optionalLength -lt 0) {
+        throw "The recorded Windows boot entry has an invalid EFI_LOAD_OPTION layout."
+    }
+    $preferredBytes = Remove-EfiLoadOptionOptionalData -Bytes $observed
+    if ((Get-EfiLoadOptionOptionalDataLength -Bytes $preferredBytes) -ne 0) {
+        throw "The preferred Windows boot entry still contains optional data."
+    }
+    $originalHash = Get-LibertixPreferredPathByteHash -Bytes ([byte[]]$observed)
+    $preferredHash = Get-LibertixPreferredPathByteHash -Bytes ([byte[]]$preferredBytes)
+    Write-LibertixPreferredPathBytesAtomic `
+        -Path $archivePath `
+        -Bytes ([byte[]]$observed) `
+        -ExpectedSha256 $originalHash
+    return [pscustomobject]@{
+        Name = $entryName
+        OriginalSha256 = $originalHash
+        PreferredBytes = [byte[]]$preferredBytes
+        PreferredSha256 = $preferredHash
+        ArchiveName = $archiveName
+        RemovedByteCount = $optionalLength
+    }
+}
+
+function Set-LibertixPreferredPathWindowsBootEntry {
+    param([Parameter(Mandatory = $true)]$Entry)
+
+    Import-LibertixPreferredPathFirmwareModules
+    $observed = Get-LibertixPreferredPathFirmwareVariableBytes -Name ([string]$Entry.Name)
+    $observedHash = if ($observed) {
+        Get-LibertixPreferredPathByteHash -Bytes ([byte[]]$observed)
+    } else {
+        ""
+    }
+    if ($observedHash -eq [string]$Entry.PreferredSha256) {
+        return
+    }
+    if ($observedHash -ne [string]$Entry.OriginalSha256) {
+        throw "Windows boot entry changed before preferred optional-data removal."
+    }
+    Set-LibertixPreferredPathFirmwareVariableBytes `
+        -Name ([string]$Entry.Name) `
+        -Bytes ([byte[]]$Entry.PreferredBytes)
+    $verified = Get-LibertixPreferredPathFirmwareVariableBytes -Name ([string]$Entry.Name)
+    if (
+        -not $verified -or
+        (Get-LibertixPreferredPathByteHash -Bytes ([byte[]]$verified)) -ne `
+            [string]$Entry.PreferredSha256
+    ) {
+        throw "Firmware did not retain the preferred Windows boot entry."
     }
 }
 
@@ -433,6 +633,10 @@ function Install-LibertixPreferredBootPath {
         -EspRoot $EspRoot `
         -ArchiveRoot $archiveRoot `
         -ExistingManifest $existingManifest
+    $windowsBootEntry = Get-LibertixPreferredPathWindowsBootEntry `
+        -State $State `
+        -ArchiveRoot $archiveRoot `
+        -ExistingManifest $existingManifest
 
     $grubConfigSource = Join-Path $EspRoot "EFI\Libertix\grub.cfg"
     $stagedGrubConfig = Join-Path $archiveRoot ".grub.cfg.$([Guid]::NewGuid().ToString('N')).tmp"
@@ -456,6 +660,16 @@ function Install-LibertixPreferredBootPath {
                 activePath = "\EFI\Microsoft\Boot\bootmgfw.efi"
                 backupPath = "\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi"
                 sha256 = $windowsLoaderHash
+            }
+            windowsBootEntry = [ordered]@{
+                name = [string]$windowsBootEntry.Name
+                originalSha256 = [string]$windowsBootEntry.OriginalSha256
+                originalArchiveName = [string]$windowsBootEntry.ArchiveName
+                preferredBytesBase64 = [Convert]::ToBase64String(
+                    [byte[]]$windowsBootEntry.PreferredBytes
+                )
+                preferredSha256 = [string]$windowsBootEntry.PreferredSha256
+                optionalDataRemovedBytes = [int]$windowsBootEntry.RemovedByteCount
             }
             preferred = [ordered]@{
                 shimSha256 = [string]$secureBoot.Files.shim.sha256
@@ -494,12 +708,16 @@ function Install-LibertixPreferredBootPath {
             -Source ([string]$secureBoot.Files.shim.path) `
             -Destination $windowsLoader `
             -ExpectedSha256 ([string]$secureBoot.Files.shim.sha256)
+        Set-LibertixPreferredPathWindowsBootEntry -Entry $windowsBootEntry
 
         $manifest.status = "installed"
         $manifest.installedUtc = [DateTime]::UtcNow.ToString("o")
         Write-LibertixPreferredPathJsonAtomic -Path $archiveManifest -Value $manifest
         Write-LibertixPreferredPathJsonAtomic -Path $espManifest -Value $manifest
-        & $WriteLog "Preferred Windows boot path installed and hash-verified."
+        & $WriteLog (
+            "Preferred Windows boot path installed and hash-verified; " +
+            "Windows boot-entry optional data removed=$($windowsBootEntry.RemovedByteCount) bytes."
+        )
         return $manifest
     } finally {
         if ([IO.File]::Exists($stagedGrubConfig)) {
@@ -640,6 +858,70 @@ function Restore-LibertixPreferredPathOriginalFiles {
     return $true
 }
 
+function Restore-LibertixPreferredPathWindowsBootEntry {
+    param(
+        [Parameter(Mandatory = $true)]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ArchiveRoot,
+        [Parameter(Mandatory = $true)][scriptblock]$WriteLog
+    )
+
+    if ($Manifest.PSObject.Properties.Name -notcontains "windowsBootEntry") {
+        throw "Preferred boot manifest does not protect the original Windows boot entry."
+    }
+    Import-LibertixPreferredPathFirmwareModules
+    $record = $Manifest.windowsBootEntry
+    $name = [string]$record.name
+    $originalHash = [string]$record.originalSha256
+    $preferredHash = [string]$record.preferredSha256
+    $archiveName = [string]$record.originalArchiveName
+    if (
+        $name -notmatch '^Boot[0-9A-F]{4}$' -or
+        $originalHash -notmatch '^[0-9a-f]{64}$' -or
+        $preferredHash -notmatch '^[0-9a-f]{64}$' -or
+        $archiveName -ne "windows-boot-entry.original.bin"
+    ) {
+        throw "Preferred Windows boot entry restoration contract is invalid."
+    }
+    $archivePath = Join-Path $ArchiveRoot $archiveName
+    if (
+        -not (Test-Path -LiteralPath $archivePath -PathType Leaf) -or
+        (Get-LibertixPreferredPathHash -Path $archivePath) -ne $originalHash
+    ) {
+        throw "Original Windows boot entry archive is missing or corrupted."
+    }
+    $originalBytes = [IO.File]::ReadAllBytes($archivePath)
+    $observed = Get-LibertixPreferredPathFirmwareVariableBytes -Name $name
+    $observedHash = if ($observed) {
+        Get-LibertixPreferredPathByteHash -Bytes ([byte[]]$observed)
+    } else {
+        ""
+    }
+    if ($observedHash -eq $originalHash) {
+        return
+    }
+    if ($observedHash -and $observedHash -ne $preferredHash) {
+        $unexpected = Join-Path `
+            $ArchiveRoot `
+            "unexpected-windows-boot-entry-$observedHash.bin"
+        if (-not (Test-Path -LiteralPath $unexpected -PathType Leaf)) {
+            Write-LibertixPreferredPathBytesAtomic `
+                -Path $unexpected `
+                -Bytes ([byte[]]$observed) `
+                -ExpectedSha256 $observedHash
+        }
+        & $WriteLog "Unexpected Windows boot entry was archived before exact restoration."
+    }
+    Set-LibertixPreferredPathFirmwareVariableBytes -Name $name -Bytes $originalBytes
+    $verified = Get-LibertixPreferredPathFirmwareVariableBytes -Name $name
+    if (
+        -not $verified -or
+        (Get-LibertixPreferredPathByteHash -Bytes ([byte[]]$verified)) -ne $originalHash
+    ) {
+        throw "Firmware did not retain the restored Windows boot entry."
+    }
+    & $WriteLog "Original Windows boot entry restored exactly from the permanent archive."
+}
+
 function Restore-LibertixPreferredBootPath {
     param(
         [Parameter(Mandatory = $true)]$State,
@@ -663,6 +945,10 @@ function Restore-LibertixPreferredBootPath {
     ) {
         throw "Permanent preferred boot manifest is invalid."
     }
+    Restore-LibertixPreferredPathWindowsBootEntry `
+        -Manifest $manifest `
+        -ArchiveRoot $archiveRoot `
+        -WriteLog $WriteLog
     $archiveLoader = Join-Path $archiveRoot "bootmgfw.efi"
     $espManifestPath = Join-Path $EspRoot $script:EspManifestRelativePath
     if (Test-Path -LiteralPath $espManifestPath -PathType Leaf) {

@@ -1,5 +1,33 @@
 Set-StrictMode -Version Latest
 
+function Get-LibertixNativeSystemExecutable {
+    param([Parameter(Mandatory = $true)][string]$FileName)
+
+    if (
+        [string]::IsNullOrWhiteSpace($FileName) -or
+        $FileName.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or
+        $FileName -match '[\\/]'
+    ) {
+        throw "Native system executable name is invalid."
+    }
+    $candidates = @()
+    if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        $candidates += (Join-Path $env:SystemRoot "Sysnative\$FileName")
+    }
+    $candidates += (Join-Path $env:SystemRoot "System32\$FileName")
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
+    }
+    $command = Get-Command -Name $FileName -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -ne $command -and -not [string]::IsNullOrWhiteSpace([string]$command.Source)) {
+        return [IO.Path]::GetFullPath([string]$command.Source)
+    }
+    throw "$FileName is unavailable through the native Windows system directory and PATH."
+}
+
 function ConvertTo-LibertixNativeArgument {
     param([AllowEmptyString()][string]$Value)
 
@@ -33,13 +61,42 @@ function Stop-LibertixNativeProcessTree {
 
     try {
         $taskKill = Join-Path $env:SystemRoot "System32\taskkill.exe"
-        & $taskKill /PID $Process.Id /T /F 2>&1 | Out-Null
-        $taskkillExitCode = $LASTEXITCODE
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & $taskKill /PID $Process.Id /T /F 2>&1 | Out-Null
+            $taskkillExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
         $Process.WaitForExit(10000) | Out-Null
         return ($taskkillExitCode -eq 0 -and $Process.HasExited)
     } catch {
         return $false
     }
+}
+
+function Invoke-LibertixNativeCommand {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
+        [scriptblock]$OnStandardOutputLine = $null,
+        [scriptblock]$OnStandardErrorLine = $null
+    )
+
+    $arguments = @(
+        $ArgumentList | ForEach-Object {
+            ConvertTo-LibertixNativeArgument -Value ([string]$_)
+        }
+    ) -join " "
+    return Invoke-LibertixNativeProcess `
+        -FilePath $FilePath `
+        -Arguments $arguments `
+        -TimeoutSeconds $TimeoutSeconds `
+        -OnStandardOutputLine $OnStandardOutputLine `
+        -OnStandardErrorLine $OnStandardErrorLine
 }
 
 function Invoke-LibertixNativeProcess {
@@ -153,4 +210,8 @@ function Invoke-LibertixNativeProcess {
     }
 }
 
-Export-ModuleMember -Function Invoke-LibertixNativeProcess, ConvertTo-LibertixNativeArgument
+Export-ModuleMember -Function `
+    Get-LibertixNativeSystemExecutable, `
+    Invoke-LibertixNativeProcess, `
+    Invoke-LibertixNativeCommand, `
+    ConvertTo-LibertixNativeArgument

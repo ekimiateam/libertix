@@ -1,5 +1,8 @@
 BeforeAll {
     Import-Module `
+        "$PSScriptRoot/../Scripts/modules/Libertix.Firmware.psm1" `
+        -Force
+    Import-Module `
         "$PSScriptRoot/../Scripts/modules/Libertix.PreferredBootPath.psm1" `
         -Force
 }
@@ -68,6 +71,46 @@ Describe "Preferred Windows boot path transaction" {
             RecoveryRoot = $script:RecoveryRoot
             SecureBootEnabled = $false
         }
+        [ordered]@{
+            schemaVersion = 1
+            runId = $script:State.RunId
+            windowsBootNumber = "Boot0001"
+            windowsLoaderPath = "\EFI\Microsoft\Boot\bootmgfw.efi"
+        } | ConvertTo-Json -Depth 4 | Set-Content `
+            -LiteralPath (Join-Path $script:RecoveryRoot "firmware-boot-bypass.json") `
+            -Encoding UTF8
+
+        $devicePath = [System.Collections.Generic.List[byte]]::new()
+        foreach ($value in (New-EfiFilePathNode -Path "\EFI\Microsoft\Boot\bootmgfw.efi")) {
+            $devicePath.Add($value)
+        }
+        foreach ($value in (New-EfiEndNode)) {
+            $devicePath.Add($value)
+        }
+        $description = [Text.Encoding]::Unicode.GetBytes("Windows Boot Manager" + [char]0)
+        $entry = [System.Collections.Generic.List[byte]]::new()
+        foreach ($value in [BitConverter]::GetBytes([uint32]1)) { $entry.Add($value) }
+        foreach ($value in [BitConverter]::GetBytes([uint16]$devicePath.Count)) {
+            $entry.Add($value)
+        }
+        foreach ($value in $description) { $entry.Add($value) }
+        foreach ($value in $devicePath) { $entry.Add($value) }
+        foreach ($value in [Text.Encoding]::ASCII.GetBytes("WINDOWS")) { $entry.Add($value) }
+        $env:LIBERTIX_TEST_PREFERRED_BOOT_ENTRY = [Convert]::ToBase64String(
+            [byte[]]$entry.ToArray()
+        )
+        $script:OriginalWindowsBootEntry = [byte[]]$entry.ToArray()
+
+        Mock Import-LibertixPreferredPathFirmwareModules {} `
+            -ModuleName Libertix.PreferredBootPath
+        Mock Get-LibertixPreferredPathFirmwareVariableBytes {
+            return ,([Convert]::FromBase64String($env:LIBERTIX_TEST_PREFERRED_BOOT_ENTRY))
+        } -ModuleName Libertix.PreferredBootPath
+        Mock Set-LibertixPreferredPathFirmwareVariableBytes {
+            param($Name, $Bytes)
+            $null = $Name
+            $env:LIBERTIX_TEST_PREFERRED_BOOT_ENTRY = [Convert]::ToBase64String([byte[]]$Bytes)
+        } -ModuleName Libertix.PreferredBootPath
         $script:EspPartition = [pscustomobject]@{
             DiskNumber = 0
             PartitionNumber = 1
@@ -76,6 +119,10 @@ Describe "Preferred Windows boot path transaction" {
             Guid = "11111111-2222-3333-4444-555555555555"
         }
         $script:Log = { param($Message) $null = $Message }
+    }
+
+    AfterEach {
+        Remove-Item Env:\LIBERTIX_TEST_PREFERRED_BOOT_ENTRY -ErrorAction SilentlyContinue
     }
 
     It "backs up Windows, publishes shim last, and restores the exact original" {
@@ -98,6 +145,15 @@ Describe "Preferred Windows boot path transaction" {
         (Get-Content `
             -LiteralPath (Join-Path $script:MicrosoftDirectory "grub.cfg") `
             -Raw) | Should -Match "bootmgfw\.libertix-windows\.efi"
+        (Get-EfiLoadOptionOptionalDataLength `
+            -Bytes ([Convert]::FromBase64String(
+                $env:LIBERTIX_TEST_PREFERRED_BOOT_ENTRY
+            ))) | Should -Be 0
+        Test-Path `
+            -LiteralPath (Join-Path `
+                $script:RecoveryRoot `
+                "preferred-boot-path\windows-boot-entry.original.bin") |
+            Should -BeTrue
 
         Restore-LibertixPreferredBootPath `
             -State $script:State `
@@ -107,6 +163,8 @@ Describe "Preferred Windows boot path transaction" {
         (Get-FileHash `
             -LiteralPath (Join-Path $script:MicrosoftDirectory "bootmgfw.efi") `
             -Algorithm SHA256).Hash | Should -Be $originalHash
+        $env:LIBERTIX_TEST_PREFERRED_BOOT_ENTRY |
+            Should -Be ([Convert]::ToBase64String($script:OriginalWindowsBootEntry))
         Test-Path `
             -LiteralPath (Join-Path $script:MicrosoftDirectory "grubx64.efi") |
             Should -BeFalse

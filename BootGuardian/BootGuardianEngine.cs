@@ -128,6 +128,39 @@ namespace Libertix.BootGuardian
             Action<int> reportProgress)
         {
             deadline.ThrowIfExpired();
+            ushort windowsBootNumber = checked((ushort)config.PreferredPath.BootNumber);
+            string windowsEntryName =
+                "Boot" + windowsBootNumber.ToString("X4", CultureInfo.InvariantCulture);
+            byte[] expectedWindowsEntry = config.PreferredPath.GetEntryBytes();
+            using (var firmware = new FirmwareEnvironment())
+            {
+                byte[] observedEntry = firmware.Read(windowsEntryName, allowMissing: true);
+                string observedHash = observedEntry == null
+                    ? "missing"
+                    : Hashing.Sha256(observedEntry);
+                if (!string.Equals(
+                    observedHash,
+                    config.PreferredPath.EntrySha256,
+                    StringComparison.Ordinal))
+                {
+                    deadline.ThrowIfExpired();
+                    journal.Repair(
+                        windowsEntryName +
+                        " optional data changed; restoring the exact preferred load option. " +
+                        "observedSha256=" + observedHash + " expectedSha256=" +
+                        config.PreferredPath.EntrySha256 + ".");
+                    firmware.Write(windowsEntryName, expectedWindowsEntry);
+                    byte[] verifiedEntry = firmware.Read(windowsEntryName);
+                    if (!string.Equals(
+                        Hashing.Sha256(verifiedEntry),
+                        config.PreferredPath.EntrySha256,
+                        StringComparison.Ordinal))
+                        throw new InvalidOperationException(
+                            windowsEntryName + " did not retain the preferred load option.");
+                    deadline.ThrowIfExpired();
+                    reportProgress?.Invoke(deadline.RemainingMilliseconds);
+                }
+            }
             using (var mount = new EspMount(config.Esp.VolumePath))
             {
                 string ownerPath = ResolveUnderRoot(mount.Root, "EFI\\Libertix\\.libertix-owner");

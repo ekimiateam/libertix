@@ -7,6 +7,11 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
 Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+$nativeProgramFiles = if ([string]::IsNullOrWhiteSpace($env:ProgramW6432)) {
+    $env:ProgramFiles
+} else {
+    $env:ProgramW6432
+}
 
 function Assert-Condition {
     param(
@@ -462,12 +467,28 @@ function Invoke-NativeCommandDecoded {
         [Parameter(Mandatory = $true)][string[]]$Arguments
     )
 
+    $resolvedFilePath = $FilePath
+    if (-not [IO.Path]::IsPathRooted($FilePath) -and $FilePath -notmatch '[\\/]') {
+        $candidates = @()
+        if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+            $candidates += (Join-Path $env:SystemRoot "Sysnative\$FilePath")
+        }
+        $candidates += (Join-Path $env:SystemRoot "System32\$FilePath")
+        $resolvedFilePath = @($candidates | Where-Object {
+            Test-Path -LiteralPath $_ -PathType Leaf
+        } | Select-Object -First 1)
+        if ($resolvedFilePath.Count -eq 1) {
+            $resolvedFilePath = [string]$resolvedFilePath[0]
+        } else {
+            $resolvedFilePath = $FilePath
+        }
+    }
     $temporaryPrefix = Join-Path $env:TEMP ("libertix-native-" + [Guid]::NewGuid().ToString("N"))
     $stdoutPath = "$temporaryPrefix.out"
     $stderrPath = "$temporaryPrefix.err"
     try {
         $process = Start-Process `
-            -FilePath $FilePath `
+            -FilePath $resolvedFilePath `
             -ArgumentList $Arguments `
             -Wait `
             -PassThru `
@@ -907,6 +928,10 @@ try {
             )
             $uefiTransaction = Test-Path -LiteralPath "C:\LibertixTools\uefi-transaction.json"
             $biosPending = Test-Path -LiteralPath "C:\LibertixInstallRecovery\pending.env"
+            $session = Get-LibertixRecoverySession `
+                -ExpectedFirmware ([string]$config.expected_firmware)
+            $accountSecretPath = [string]$session.Plan.account.passwordHashWindowsPath
+            $accountSecretPresent = Test-Path -LiteralPath $accountSecretPath
             $recoveryTasks = @(Get-LibertixRecoveryTasks)
             $startupRecoveryTasks = @($recoveryTasks | Where-Object {
                 $_.TaskName -notmatch "Prompt"
@@ -917,10 +942,13 @@ try {
             Write-Output ("INSTALLER_VOLUMES={0}" -f $installerVolumes.Count)
             Write-Output ("UEFI_TRANSACTION={0}" -f $uefiTransaction)
             Write-Output ("BIOS_PENDING={0}" -f $biosPending)
+            Write-Output ("ACCOUNT_SECRET_PRESENT={0}" -f $accountSecretPresent)
             Write-Output ("STARTUP_RECOVERY_TASKS={0}" -f $startupRecoveryTasks.Count)
             Write-Output ("RESULT_PROMPT_TASKS={0}" -f $promptTasks.Count)
             Assert-Condition ($installerVolumes.Count -eq 0) "The temporary installer volume still exists."
             Assert-Condition (-not $uefiTransaction) "The UEFI transaction file still exists."
+            Assert-Condition (-not $accountSecretPresent) `
+                "The protected Linux account hash was not retired after installation."
             if ([string]$config.expected_firmware -eq "bios") {
                 Assert-Condition $biosPending `
                     "The durable BIOS rollback metadata is missing."
@@ -1083,7 +1111,7 @@ try {
             }
         }
         "ext4_driver" {
-            $ext4 = "$env:ProgramFiles\ext4-win-driver\ext4.exe"
+            $ext4 = Join-Path $nativeProgramFiles "ext4-win-driver\ext4.exe"
             $launcher = "HKLM:\SOFTWARE\WOW6432Node\WinFsp\Services\ext4-mount"
             Write-Output ("EXT4={0}" -f $ext4)
             Assert-Condition (Test-Path -LiteralPath $ext4 -PathType Leaf) "ext4.exe is missing."
@@ -1147,7 +1175,7 @@ try {
             $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)
             $driveRoot = $drive
             $identity = Get-ExpectedLinuxMountIdentity
-            $expectedExecutable = "$env:ProgramFiles\ext4-win-driver\ext4.exe"
+            $expectedExecutable = Join-Path $nativeProgramFiles "ext4-win-driver\ext4.exe"
             $processes = @(Get-CimInstance Win32_Process -Filter "Name='ext4.exe'")
             Write-Output ("LINUX_DRIVE={0}" -f $drive)
             $processes | Format-List ProcessId, ExecutablePath, CommandLine
@@ -1273,10 +1301,15 @@ try {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $resultPath = Join-Path $session.Root "post-install-verification.json"
-            $savedResult = Read-JsonFileWithRetry -LiteralPath $resultPath
-            $checks = @($savedResult.checks | Where-Object {
-                [string]$_.name -eq "explorer-integration"
-            })
+            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            do {
+                $savedResult = Read-JsonFileWithRetry -LiteralPath $resultPath
+                $checks = @($savedResult.checks | Where-Object {
+                    [string]$_.name -eq "explorer-integration"
+                })
+                if ($checks.Count -eq 1 -or [DateTime]::UtcNow -ge $deadline) { break }
+                Start-Sleep -Seconds 2
+            } while ($true)
             Assert-Condition ($checks.Count -eq 1) `
                 "Explorer integration was not verified in the interactive user session."
             Assert-Condition ([bool]$checks[0].passed) `

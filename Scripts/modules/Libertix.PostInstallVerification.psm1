@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 
 Import-Module (Join-Path $PSScriptRoot "Libertix.AtomicFile.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.InstallationState.psm1") -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.Process.psm1") -Force -ErrorAction Stop
 
 function Set-LibertixShutdownVerificationPriority {
     if (-not ("LibertixShutdownControl" -as [type])) {
@@ -30,6 +31,34 @@ function Test-LibertixProperty {
     )
 
     return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
+}
+
+function Get-LibertixNativeProgramFilesPath {
+    $path = [Environment]::GetEnvironmentVariable("ProgramW6432", "Process")
+    if ([string]::IsNullOrWhiteSpace($path) -and [Environment]::Is64BitOperatingSystem) {
+        $baseKey = $null
+        $currentVersion = $null
+        try {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                [Microsoft.Win32.RegistryView]::Registry64
+            )
+            $currentVersion = $baseKey.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion")
+            if ($null -ne $currentVersion) {
+                $path = [string]$currentVersion.GetValue("ProgramFilesDir", "")
+            }
+        } finally {
+            if ($null -ne $currentVersion) { $currentVersion.Dispose() }
+            if ($null -ne $baseKey) { $baseKey.Dispose() }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        $path = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    }
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Container)) {
+        throw "The native Program Files directory could not be resolved."
+    }
+    return $path.TrimEnd([IO.Path]::DirectorySeparatorChar)
 }
 
 function Write-LibertixPostInstallErrorDiagnostic {
@@ -881,9 +910,18 @@ function Test-LibertixWindowsHealth {
     }
     # REAgentC localizes every /info status value. /enable is idempotent and its
     # exit code is the stable contract already used during BIOS preparation.
-    $reagent = @(& reagentc.exe /enable 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "reagentc.exe could not enable Windows Recovery Environment with rc=$LASTEXITCODE output=$($reagent -join ' ')"
+    $reagentcPath = Get-LibertixNativeSystemExecutable -FileName "reagentc.exe"
+    $reagent = Invoke-LibertixNativeCommand `
+        -FilePath $reagentcPath `
+        -ArgumentList @("/enable") `
+        -TimeoutSeconds 120
+    if ($reagent.ExitCode -ne 0) {
+        $reagentOutput = (
+            $reagent.StandardOutput +
+            [Environment]::NewLine +
+            $reagent.StandardError
+        ).Trim()
+        throw "reagentc.exe could not enable Windows Recovery Environment with rc=$($reagent.ExitCode) output=$reagentOutput"
     }
     return "filesystem=$($volume.FileSystem) health=$($volume.HealthStatus) winre=enabled"
 }
@@ -891,11 +929,15 @@ function Test-LibertixWindowsHealth {
 function Test-LibertixWindowsBootConfiguration {
     param([Parameter(Mandatory = $true)][object]$Plan)
 
-    $entries = @(& bcdedit.exe /enum all 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "bcdedit.exe failed with rc=$LASTEXITCODE."
+    $bcdeditPath = Get-LibertixNativeSystemExecutable -FileName "bcdedit.exe"
+    $bcdedit = Invoke-LibertixNativeCommand `
+        -FilePath $bcdeditPath `
+        -ArgumentList @("/enum", "all") `
+        -TimeoutSeconds 120
+    if ($bcdedit.ExitCode -ne 0) {
+        throw "bcdedit.exe failed with rc=$($bcdedit.ExitCode)."
     }
-    $text = $entries -join "`n"
+    $text = ($bcdedit.StandardOutput + [Environment]::NewLine + $bcdedit.StandardError).Trim()
     if ($text -notmatch '(?i)winload[.]e(?:xe|fi)') {
         throw "Windows loader is absent from BCD."
     }
@@ -961,6 +1003,7 @@ function Test-LibertixBootGuardian {
         -Path $archiveConfigPath `
         -Description "boot guardian archive"
     $expectedMode = "firmware-boot-order"
+    $preferredManifest = $null
     $preferredManifestPath = Join-Path $RecoveryRoot "preferred-boot-path\manifest.json"
     if (Test-Path -LiteralPath $preferredManifestPath -PathType Leaf) {
         $preferredManifest = Read-LibertixJsonObject `
@@ -991,6 +1034,44 @@ function Test-LibertixBootGuardian {
             [string]$config.serviceSha256
     ) {
         throw "Boot guardian configuration, archive, mode, or executable hash is invalid."
+    }
+    if ($expectedMode -eq "preferred-windows-path") {
+        if (
+            $null -eq $preferredManifest -or
+            $preferredManifest.PSObject.Properties.Name -notcontains "windowsBootEntry" -or
+            $config.PSObject.Properties.Name -notcontains "preferredPath"
+        ) {
+            throw "Preferred Windows boot entry protection is missing."
+        }
+        $entry = $preferredManifest.windowsBootEntry
+        $entryName = [string]$entry.name
+        $entryBytesBase64 = [string]$entry.preferredBytesBase64
+        if (
+            $entryName -notmatch '^Boot[0-9A-F]{4}$' -or
+            [string]$config.preferredPath.entryBytesBase64 -ne $entryBytesBase64 -or
+            [string]$config.preferredPath.entrySha256 -ne [string]$entry.preferredSha256 -or
+            [int]$config.preferredPath.bootNumber -ne `
+                [int][Convert]::ToUInt16($entryName.Substring(4), 16)
+        ) {
+            throw "Boot guardian preferred Windows boot entry contract differs from its manifest."
+        }
+        $firmwareModule = Join-Path $PSScriptRoot "Libertix.Firmware.psm1"
+        $firmwareReadModule = Join-Path $PSScriptRoot "Libertix.FirmwareRead.psm1"
+        Import-Module -Name $firmwareModule -Force -ErrorAction Stop
+        Import-Module -Name $firmwareReadModule -Force -ErrorAction Stop
+        try {
+            $expectedEntryBytes = [Convert]::FromBase64String($entryBytesBase64)
+        } catch [FormatException] {
+            throw "Preferred Windows boot entry encoding is invalid."
+        }
+        $observedEntryBytes = Get-LibertixFirmwareVariableBytes -Name $entryName
+        if (
+            (Get-EfiLoadOptionOptionalDataLength -Bytes $expectedEntryBytes) -ne 0 -or
+            -not $observedEntryBytes -or
+            [Convert]::ToBase64String([byte[]]$observedEntryBytes) -ne $entryBytesBase64
+        ) {
+            throw "Preferred Windows boot entry optional data was not removed or maintained."
+        }
     }
     $service = Get-CimInstance `
         -ClassName Win32_Service `
@@ -1230,7 +1311,7 @@ function Test-LibertixWindowsReadOnlyShare {
         throw "Linux home is not readable from the verified Windows drive."
     }
 
-    $ext4Exe = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+    $ext4Exe = Join-Path (Get-LibertixNativeProgramFilesPath) "ext4-win-driver\ext4.exe"
     $devicePattern = [regex]::Escape("\\.\PhysicalDrive$($config.SystemDiskNumber)")
     $drivePattern = [regex]::Escape($drive)
     $partitionPattern = [regex]::Escape([string]$partitions[0].PartitionNumber)

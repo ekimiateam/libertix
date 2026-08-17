@@ -228,7 +228,12 @@ $shareRoot = "C:\ProgramData\Libertix\WindowsShare"
 $shareConfigPath = Join-Path $shareRoot "config.json"
 $sharePendingPath = Join-Path $shareRoot "pending.marker"
 $shareLogPath = Join-Path $shareRoot "windows-share.log"
-$ext4Executable = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+$nativeProgramFiles = if ([string]::IsNullOrWhiteSpace($env:ProgramW6432)) {
+    $env:ProgramFiles
+} else {
+    $env:ProgramW6432
+}
+$ext4Executable = Join-Path $nativeProgramFiles "ext4-win-driver\ext4.exe"
 $launcherKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp\Services\ext4-mount"
 $mountTaskName = "LibertixLinuxReadOnly"
 

@@ -397,27 +397,36 @@ function Get-VerifiedTransactionPartition {
     if (
         $partitionMatches.Count -eq 0 -and
         $null -ne $installationPlan -and
-        [string]$installationPlan.disk.installer.resizeMode -eq "live-offline" -and
+        [string]$installationPlan.disk.installer.resizeMode -in @(
+            "windows-online",
+            "live-offline"
+        ) -and
         [string]$installationPlan.runtime.recoveryRunId -eq [string]$state.RecoveryRunId -and
         [int]$installationPlan.disk.number -eq $diskNumber
     ) {
         [int64]$finalOffset = [int64]$installationPlan.disk.installer.finalOffsetBytes
         [int64]$finalSize = [int64]$installationPlan.disk.installer.finalSizeBytes
+        [int64]$alignmentTolerance = [int64]$installationPolicy.storage.partitionAlignmentBytes
+        if ($alignmentTolerance -le 0) {
+            throw "Installation policy partition alignment is invalid during rollback."
+        }
         $partitionMatches = @(
             Get-Partition -DiskNumber $diskNumber -ErrorAction Stop |
                 Where-Object {
                     [int64]$_.Offset -eq $finalOffset -and
-                    [int64]$_.Size -eq $finalSize
+                    [int64]$_.Size -le $finalSize -and
+                    [int64]$_.Size -ge ($finalSize - $alignmentTolerance)
                 }
         )
         if ($partitionMatches.Count -eq 1) {
             $state.PartitionNumber = [int]$partitionMatches[0].PartitionNumber
             $state.PartitionOffset = $finalOffset
-            $state.PartitionSize = $finalSize
+            $state.PartitionSize = [int64]$partitionMatches[0].Size
             Save-LibertixTransactionStateAtomic -State $state
             Write-Log (
-                "Resolved the offline-resized UEFI partition from the durable plan: " +
-                "disk=$diskNumber offset=$finalOffset size=$finalSize."
+                "Resolved the live-expanded UEFI partition from the durable plan: " +
+                "disk=$diskNumber offset=$finalOffset " +
+                "plannedSize=$finalSize observedSize=$($state.PartitionSize)."
             ) "Yellow"
         }
     }
@@ -525,6 +534,14 @@ function Invoke-Revert {
         return
     }
     Restore-LibertixSystemDriveInitialSize -State $rollbackState
+    # Removing the owned Linux partition and its owned ESP files physically
+    # compensates every completed live/target mutation. Record those proofs
+    # only after the Windows partition has also been restored and verified.
+    Complete-LibertixTrackedCompensation -Step "target.bootloader-installed"
+    Complete-LibertixTrackedCompensation -Step "target.system-configured"
+    Complete-LibertixTrackedCompensation -Step "live.distribution-extracted"
+    Complete-LibertixTrackedCompensation -Step "live.target-filesystem-created"
+    Complete-LibertixTrackedCompensation -Step "live.installer-partition-expanded"
     Complete-LibertixTrackedCompensation -Step "windows.system-volume-shrunk"
 
     # Hibernation is switched off so that the installed Linux can safely mount

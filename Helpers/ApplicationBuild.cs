@@ -32,6 +32,8 @@ namespace Libertix.Helpers
             "dev",
             StringComparison.Ordinal);
 
+        public bool AllowsDevelopmentFilepoolOverride => IsDevelopment;
+
         public bool RequiresPublishedVersionCheck => !IsDevelopment;
 
         public string MetadataBaseUrl => GitHubPagesBaseUrl + "/" + Channel;

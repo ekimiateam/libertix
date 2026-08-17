@@ -183,6 +183,11 @@ function Complete-LibertixTrackedCompensation {
     }
     if ($Step -in @($state.completedSteps) -and $Step -notin @($state.compensatedSteps)) {
         $null = Complete-LibertixCompensation -Path $ExecutionStatePath -Step $Step
+        Write-Log "Execution ledger compensation recorded: $Step." "Gray"
+    } elseif ($Step -in @($state.compensatedSteps)) {
+        Write-Log "Execution ledger compensation already recorded: $Step." "Gray"
+    } else {
+        Write-Log "Execution ledger compensation is not applicable: $Step was not completed." "Gray"
     }
 }
 

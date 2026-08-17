@@ -262,6 +262,20 @@ class SSHClient:
             exit_code,
             extra={"step": step, "target": self.host},
         )
+        if exit_code < 0:
+            raise WorkflowError(
+                step,
+                "Remote command ended without an SSH exit status",
+                details={
+                    "host": self.host,
+                    "command": "[SENSITIVE COMMAND REDACTED]" if sensitive else command,
+                    "exit_code": exit_code,
+                    "stdout": out[-4000:],
+                    "stderr": err[-4000:],
+                    "exception_type": "MissingExitStatus",
+                    "transport_error": True,
+                },
+            )
         if check and exit_code != 0:
             raise WorkflowError(
                 step,

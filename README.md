@@ -166,16 +166,17 @@ Stable builds also verify signed `releases.json` metadata and refuse to start wh
 version has been published. Development builds deliberately skip only this freshness check; their
 distribution catalogue remains signed.
 
-Development and test runs can override it for one process without changing the production default:
+Development builds and test runs can override it for one process without changing the production
+default:
 
 ```powershell
 .\Libertix.exe --filepool-base-url "http://127.0.0.1:8000/filepool"
 ```
 
-The override must be an absolute HTTP or HTTPS URL without embedded credentials, query parameters or
-fragments. It is an explicit laboratory mode, displays a permanent warning, and disables catalogue
-signature verification for that process; it must not be used to trust an unverified third-party
-server.
+The override is rejected by stable builds. In a development build it must be an absolute HTTP or
+HTTPS URL without embedded credentials, query parameters or fragments. It is an explicit laboratory
+mode, displays a permanent warning, and disables catalogue signature verification for that process;
+it must not be used to trust an unverified third-party server.
 
 Automated development installations also use an explicit static-address option:
 

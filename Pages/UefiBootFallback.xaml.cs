@@ -300,12 +300,10 @@ namespace Libertix.Pages
                 "Scripts",
                 "libertix-uefi-recovery-agent.ps1");
             string powershell = WindowsProcessRunner.ResolvePowerShell();
-            int processId = Process.GetCurrentProcess().Id;
             return await RunProcessAsync(
                 powershell,
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agent)} " +
-                $"-StatePath {QuoteArgument(_statePath)} -Action Cancel " +
-                $"-WaitForProcessId {processId}");
+                $"-StatePath {QuoteArgument(_statePath)} -Action Cancel");
         }
 
         private async void SecureBootCloseButton_Click(object sender, RoutedEventArgs e)
@@ -385,15 +383,29 @@ namespace Libertix.Pages
                 };
                 using (var process = new Process { StartInfo = startInfo })
                 {
+                    var outputClosed = new TaskCompletionSource<bool>();
+                    var errorClosed = new TaskCompletionSource<bool>();
                     process.OutputDataReceived += (_, output) =>
                     {
-                        if (output.Data != null)
+                        if (output.Data == null)
+                        {
+                            outputClosed.TrySetResult(true);
+                        }
+                        else
+                        {
                             Dispatcher.BeginInvoke(new Action(() => Log(output.Data)));
+                        }
                     };
                     process.ErrorDataReceived += (_, output) =>
                     {
-                        if (output.Data != null)
+                        if (output.Data == null)
+                        {
+                            errorClosed.TrySetResult(true);
+                        }
+                        else
+                        {
                             Dispatcher.BeginInvoke(new Action(() => Log("ERROR: " + output.Data)));
+                        }
                     };
                     if (!process.Start())
                         throw new InvalidOperationException("The recovery process could not be started.");
@@ -420,7 +432,9 @@ namespace Libertix.Pages
                             Log(Localization.GetString("UefiFallbackTimeoutLog"))));
                         return -1;
                     }
-                    process.WaitForExit();
+                    WindowsProcessRunner.WaitForRedirectedStreams(
+                        outputClosed.Task,
+                        errorClosed.Task);
                     return process.ExitCode;
                 }
             });

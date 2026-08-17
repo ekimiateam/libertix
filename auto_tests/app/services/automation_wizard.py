@@ -35,7 +35,7 @@ class WizardAutomationMixin:
         options: AutomationOptions,
         result: ResultBuilder,
         launch: dict[str, object],
-    ) -> Literal["boot-menu", "linux-desktop"]:
+    ) -> Literal["boot-menu", "linux-desktop", "bootnext-fallback"]:
         unattended_status_path = launch.get("unattended_status_path")
         unattended_acknowledgement_path = launch.get("unattended_acknowledgement_path")
         if not unattended_status_path or not unattended_acknowledgement_path:
@@ -46,11 +46,14 @@ class WizardAutomationMixin:
             )
         self._observe_unattended_wizard(
             vm,
+            options,
             result,
             int(launch["pid"]),
             str(unattended_status_path),
             str(unattended_acknowledgement_path),
         )
+        if options.boot_guardian_fault == "bootnext-rollback":
+            return "bootnext-fallback"
         return self._monitor_until_live_boot(
             vm,
             result,
@@ -62,6 +65,7 @@ class WizardAutomationMixin:
     def _observe_unattended_wizard(
         self,
         vm: VMConfig,
+        options: AutomationOptions,
         result: ResultBuilder,
         process_id: int,
         status_path: str,
@@ -185,8 +189,53 @@ class WizardAutomationMixin:
                 quoted_acknowledgement,
                 observed,
             )
+            if options.boot_guardian_fault == "bootnext-rollback":
+                self._force_bootnext_failure(ssh, vm, result)
 
         self._request_reboot_after_preparation(vm, result)
+
+    def _force_bootnext_failure(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> None:
+        response = self.validation.run_windows_script(
+            ssh,
+            script_name="force_uefi_bootnext_failure.ps1",
+            config={"timeout_seconds": 120},
+            step="automation.bootnext_rollback.inject",
+            timeout=150,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "FORCED_BOOTNEXT_FAILURE",
+                "STATE_PATH",
+                "STATE_PHASE",
+                "WINDOWS_BOOT_ID",
+                "RESULT",
+            ),
+        )
+        if (
+            values.get("FORCED_BOOTNEXT_FAILURE") != "True"
+            or values.get("STATE_PHASE") != "AwaitingReboot"
+            or not values.get("WINDOWS_BOOT_ID")
+            or values.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                "automation.bootnext_rollback.inject",
+                "The controlled BootNext failure was not proven before reboot",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        result.ok(
+            "automation.bootnext_rollback.inject",
+            "The next firmware boot was redirected to Windows after the recovery state "
+            "reached AwaitingReboot",
+            vm=vm.name,
+            target=vm.host,
+            **values,
+        )
 
     def _wait_for_unattended_stage(
         self,

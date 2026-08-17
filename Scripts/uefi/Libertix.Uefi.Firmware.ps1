@@ -88,9 +88,12 @@ function Invoke-BcdeditCommand {
     )
 
     $bcdedit = Get-NativeSystemExecutable -FileName "bcdedit.exe"
-    $output = & $bcdedit @Arguments 2>&1
-    $text = $output | Out-String
-    if ($LASTEXITCODE -ne 0) {
+    $result = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList $Arguments `
+        -TimeoutSeconds 60
+    $text = ($result.StandardOutput + [Environment]::NewLine + $result.StandardError).Trim()
+    if ($result.ExitCode -ne 0) {
         throw "bcdedit failed ($($Arguments -join ' ')): $text"
     }
 

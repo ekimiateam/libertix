@@ -7,6 +7,9 @@ param(
     [string]$AgentPath,
 
     [Parameter(Mandatory = $true)]
+    [string]$HiddenHostPath,
+
+    [Parameter(Mandatory = $true)]
     [string]$PromptTaskName,
 
     [Parameter(Mandatory = $true)]
@@ -17,6 +20,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not (Test-Path -LiteralPath $HiddenHostPath -PathType Leaf)) {
+    throw "The console-free scheduled-task host is missing."
+}
 
 function Remove-RecoveryTask {
     param([Parameter(Mandatory = $true)][string]$TaskName)
@@ -44,10 +51,9 @@ try {
         -DisallowHardTerminate `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
-    $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $baseArguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -StatePath "{1}"' -f `
+    $baseArguments = '--run-hidden-powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -StatePath "{1}"' -f `
         $AgentPath, $StatePath
-    $startupAction = New-ScheduledTaskAction -Execute $powerShell -Argument $baseArguments
+    $startupAction = New-ScheduledTaskAction -Execute $HiddenHostPath -Argument $baseArguments
     $startupTrigger = New-ScheduledTaskTrigger -AtStartup
     $startupPrincipal = New-ScheduledTaskPrincipal `
         -UserId "SYSTEM" `
@@ -62,7 +68,7 @@ try {
         -Force | Out-Null
 
     $promptAction = New-ScheduledTaskAction `
-        -Execute $powerShell `
+        -Execute $HiddenHostPath `
         -Argument ($baseArguments + ' -Action Prompt')
     $promptTrigger = New-ScheduledTaskTrigger -AtLogOn -User $PromptUser
     $promptPrincipal = New-ScheduledTaskPrincipal `

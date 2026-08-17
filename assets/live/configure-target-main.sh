@@ -28,7 +28,8 @@ configure_user() {
     done
     usermod -s /bin/bash -a -G "$available_groups" "$USERNAME"
     [[ "$PASSWORD_HASH" == \$6\$* ]] || { echo "Invalid Linux password hash" >&2; exit 1; }
-    usermod --password "$PASSWORD_HASH" "$USERNAME"
+    command -v chpasswd >/dev/null 2>&1 || { echo "chpasswd is required" >&2; exit 1; }
+    printf '%s:%s\n' "$USERNAME" "$PASSWORD_HASH" | chpasswd -e
     passwd -S "$USERNAME" | grep -Eq "^[^ ]+ P "
     echo "$COMPUTER_NAME" > /etc/hostname
 }

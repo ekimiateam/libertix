@@ -580,6 +580,7 @@ namespace Libertix.Pages
                 $"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {QuoteArgument(taskRegistrationScript)} " +
                 $"-StartupTaskName {QuoteArgument(recovery.TaskName)} " +
                 $"-AgentPath {QuoteArgument(agent)} " +
+                $"-HiddenHostPath {QuoteArgument(bootGuardianExecutable)} " +
                 $"-PromptTaskName {QuoteArgument(recovery.PromptTaskName)} " +
                 $"-StatePath {QuoteArgument(Path.Combine(recovery.RecoveryRoot, "state.json"))} " +
                 $"-PromptUser {QuoteArgument(WindowsIdentity.GetCurrent().Name)}";

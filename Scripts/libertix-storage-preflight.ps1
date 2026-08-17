@@ -7,6 +7,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module `
+    (Join-Path $PSScriptRoot "modules\Libertix.Process.psm1") `
+    -Force `
+    -ErrorAction Stop
 & "$env:SystemRoot\System32\chcp.com" 65001 > $null
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
@@ -250,9 +254,18 @@ try {
     $initialBitLocker = $bitLocker
     if (-not $bitLocker.Safe -and $DecryptBitLocker) {
         Write-Output "BITLOCKER_ACTION=decrypting"
-        $disableOutput = & manage-bde.exe -off $systemDrive 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "manage-bde could not start decryption: $($disableOutput -join ' ')"
+        $manageBde = Get-Command manage-bde.exe -CommandType Application -ErrorAction Stop
+        $disableResult = Invoke-LibertixNativeCommand `
+            -FilePath $manageBde.Source `
+            -ArgumentList @("-off", $systemDrive) `
+            -TimeoutSeconds 120
+        $disableOutput = (
+            $disableResult.StandardOutput +
+            [Environment]::NewLine +
+            $disableResult.StandardError
+        ).Trim()
+        if ($disableResult.ExitCode -ne 0) {
+            throw "manage-bde could not start decryption: $disableOutput"
         }
         $timer = [Diagnostics.Stopwatch]::StartNew()
         $maximumWait = [TimeSpan]::FromHours(6)

@@ -7,6 +7,9 @@ param(
     [string]$RecoveryScriptPath,
 
     [Parameter(Mandatory = $true)]
+    [string]$HiddenHostPath,
+
+    [Parameter(Mandatory = $true)]
     [string]$PromptTaskName,
 
     [Parameter(Mandatory = $true)]
@@ -21,16 +24,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if (-not (Test-Path -LiteralPath $HiddenHostPath -PathType Leaf)) {
+    throw "The console-free scheduled-task host is missing."
+}
+
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false `
     -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName $PromptTaskName -Confirm:$false `
     -ErrorAction SilentlyContinue
 
 try {
-    $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f `
+    $arguments = '--run-hidden-powershell -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f `
         $RecoveryScriptPath
-    $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments
+    $action = New-ScheduledTaskAction -Execute $HiddenHostPath -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal `
         -UserId "SYSTEM" `
@@ -60,12 +66,12 @@ try {
         -Force | Out-Null
 
     $promptArguments = (
-        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" ' +
+        '--run-hidden-powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" ' +
         '-StatePath "{1}" -RecoveryScriptPath "{2}" ' +
         '-Firmware bios -PromptTaskName "{3}"'
     ) -f $ResultScriptPath, $ResultStatePath, $RecoveryScriptPath, $PromptTaskName
     $promptAction = New-ScheduledTaskAction `
-        -Execute $powerShell `
+        -Execute $HiddenHostPath `
         -Argument $promptArguments
     $promptTrigger = New-ScheduledTaskTrigger -AtLogOn -User $PromptUser
     $promptPrincipal = New-ScheduledTaskPrincipal `

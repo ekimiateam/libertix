@@ -14,6 +14,7 @@ namespace Libertix.Helpers
     public static class WindowsProcessTimeouts
     {
         public static readonly TimeSpan QuickCommand = TimeSpan.FromSeconds(30);
+        public static readonly TimeSpan RedirectedStreamDrain = TimeSpan.FromSeconds(10);
         public static readonly TimeSpan ServiceCommand = TimeSpan.FromMinutes(1);
         public static readonly TimeSpan DiskOperation = TimeSpan.FromMinutes(2);
         public static readonly TimeSpan DiskImageOperation = TimeSpan.FromMinutes(5);
@@ -209,10 +210,7 @@ namespace Libertix.Helpers
                     };
                 }
 
-                // The second wait lets asynchronous redirected streams flush after
-                // the process handle has been signalled.
-                process.WaitForExit();
-                Task.WaitAll(outputTask, errorTask);
+                WaitForRedirectedStreams(outputTask, errorTask);
                 return new WindowsProcessResult
                 {
                     ExitCode = process.ExitCode,
@@ -220,6 +218,24 @@ namespace Libertix.Helpers
                     StandardError = errorTask.Result,
                     TimedOut = false
                 };
+            }
+        }
+
+        internal static void WaitForRedirectedStreams(params Task[] streamTasks)
+        {
+            WaitForRedirectedStreams(WindowsProcessTimeouts.RedirectedStreamDrain, streamTasks);
+        }
+
+        internal static void WaitForRedirectedStreams(
+            TimeSpan timeout,
+            params Task[] streamTasks)
+        {
+            if (streamTasks == null || streamTasks.Length == 0)
+                return;
+            if (!Task.WaitAll(streamTasks, timeout))
+            {
+                throw new InvalidOperationException(
+                    "Redirected process streams did not close after the process exited.");
             }
         }
     }

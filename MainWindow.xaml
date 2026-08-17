@@ -12,18 +12,18 @@
         WindowStartupLocation="CenterScreen">
 
     <Grid>
-        <Frame x:Name="MainFrame"
-               NavigationUIVisibility="Hidden"
-               Background="{DynamicResource PrimaryBackground}"/>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
         <Border x:Name="DevelopmentModeBanner"
+                Grid.Row="0"
                 Height="32"
-                VerticalAlignment="Top"
                 Background="#3A2400"
                 BorderBrush="#FFF0A234"
                 BorderThickness="0,0,0,1"
                 IsHitTestVisible="False"
-                Panel.ZIndex="1000"
                 Visibility="Collapsed">
             <TextBlock x:Name="DevelopmentModeBannerText"
                        Text="DEVELOPMENT MODE - catalog signature verification is disabled."
@@ -33,5 +33,10 @@
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center"/>
         </Border>
+
+        <Frame x:Name="MainFrame"
+               Grid.Row="1"
+               NavigationUIVisibility="Hidden"
+               Background="{DynamicResource PrimaryBackground}"/>
     </Grid>
 </Window>

@@ -322,6 +322,52 @@ Describe "Installation state ordering" {
         $rolledBack.phase | Should -Be "rollback"
     }
 
+    It "completes a post-install rollback after every applicable compensation" {
+        $state = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
+        $state.status = "succeeded"
+        $state.phase = "complete"
+        $state.completedSteps = @(
+            "windows.preflight-verified",
+            "windows.artifacts-verified",
+            "windows.recovery-armed",
+            "windows.system-volume-shrunk",
+            "windows.installer-partition-created",
+            "windows.live-media-prepared",
+            "windows.temporary-boot-prepared",
+            "live.preflight-verified",
+            "live.installer-partition-expanded",
+            "live.target-filesystem-created",
+            "live.distribution-extracted",
+            "target.system-configured",
+            "target.bootloader-installed",
+            "target.installation-verified"
+        )
+        $state | ConvertTo-Json -Depth 8 | Set-Content `
+            -LiteralPath $script:StatePath `
+            -Encoding UTF8
+
+        $null = Start-LibertixRollback -Path $script:StatePath
+        foreach ($step in @(
+            "windows.recovery-armed",
+            "windows.system-volume-shrunk",
+            "windows.installer-partition-created",
+            "windows.live-media-prepared",
+            "windows.temporary-boot-prepared",
+            "live.installer-partition-expanded",
+            "live.target-filesystem-created",
+            "live.distribution-extracted",
+            "target.system-configured",
+            "target.bootloader-installed"
+        )) {
+            $null = Complete-LibertixCompensation -Path $script:StatePath -Step $step
+        }
+
+        $rolledBack = Complete-LibertixRollback -Path $script:StatePath
+
+        $rolledBack.status | Should -Be "rolled-back"
+        $rolledBack.compensatedSteps.Count | Should -Be 10
+    }
+
     It "rejects an unknown persisted state property" {
         $state = Get-Content -LiteralPath $script:StatePath -Raw | ConvertFrom-Json
         $state | Add-Member -NotePropertyName unexpected -NotePropertyValue $true

@@ -16,6 +16,7 @@ from app.clients.ssh import CommandResult, SSHClient, is_reconnectable_transport
 from app.config import VMConfig
 from app.distributions import DistributionProfile
 from app.errors import WorkflowError
+from app.models import STAGING_VOLUME_LABELS
 from app.services.automation_types import AutomationOptions
 from app.services.automation_windows_checks import (
     CrossOsArtifacts,
@@ -26,6 +27,7 @@ from app.services.common import ResultBuilder
 
 EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4
 REMOTE_CHECK_SSH_MAX_ATTEMPTS = 6
+WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS = 2
 LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 3
 
 
@@ -133,6 +135,7 @@ class PostInstallValidationMixin:
                     or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
                 ):
                     raise
+                time.sleep(WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS)
 
         assert last_error is not None
         raise last_error
@@ -146,6 +149,15 @@ class PostInstallValidationMixin:
     ) -> None:
         guardian_fault_injected_utc = ""
         preferred_loader_fault_injected_utc = ""
+        if options.boot_guardian_fault == "bootnext-rollback":
+            if monitor_outcome != "bootnext-fallback":
+                raise WorkflowError(
+                    "automation.bootnext_rollback",
+                    "The controlled BootNext failure did not return the expected monitor outcome",
+                    details={"vm": vm.name, "monitor_outcome": monitor_outcome},
+                )
+            self._rollback_bootnext_failure(vm, options, result)
+            return
         if monitor_outcome != "boot-menu":
             raise WorkflowError(
                 "automation.windows_before_linux",
@@ -207,7 +219,10 @@ class PostInstallValidationMixin:
                         vm,
                         result,
                     )
-                elif options.boot_guardian_fault == "preferred-path":
+                elif options.boot_guardian_fault in {
+                    "preferred-path",
+                    "preferred-path-rollback",
+                }:
                     self._inject_boot_guardian_preferred_bypass(
                         waiting_windows_ssh,
                         vm,
@@ -218,6 +233,9 @@ class PostInstallValidationMixin:
                 waiting_windows_ssh.__exit__(None, None, None)
             if options.boot_guardian_fault == "preferred-path":
                 self._accept_preferred_path_fallback(vm, options, result)
+            elif options.boot_guardian_fault == "preferred-path-rollback":
+                self._rollback_preferred_path_fallback(vm, options, result)
+                return
 
         result.ok(
             "automation.post_install_phase",
@@ -893,7 +911,7 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
     ) -> None:
         password = self.settings.windows_ssh_password.get_secret_value()
-        for attempt in range(1, 4):
+        for attempt in range(1, 6):
             inspection = self._run_windows_script_resiliently(
                 windows_ssh,
                 script_name="inspect_windows_graphical_session.ps1",
@@ -1799,7 +1817,13 @@ class PostInstallValidationMixin:
         test_name: str = "linux.windows_reboot",
     ) -> None:
         entry = "Windows" if vm.firmware == "bios" else "Windows Boot Manager"
-        reboot_script = f"grub-reboot {shlex.quote(entry)} && systemctl reboot"
+        reboot_unit = f"libertix-auto-test-reboot-{uuid.uuid4().hex}"
+        reboot_script = (
+            f"grub-reboot {shlex.quote(entry)} && "
+            f"systemd-run --quiet --unit={shlex.quote(reboot_unit)} "
+            "--on-active=5s /usr/bin/systemctl reboot && "
+            "printf LIBERTIX_REBOOT_ARMED"
+        )
         command = f"sudo -S -p '' sh -c {shlex.quote(reboot_script)}"
         try:
             response = ssh.run(
@@ -1820,7 +1844,7 @@ class PostInstallValidationMixin:
                 **exc.details,
             )
             return
-        if response.exit_code not in {0, -1}:
+        if response.exit_code != 0 or response.stdout != "LIBERTIX_REBOOT_ARMED":
             result.error(
                 "automation.test.linux",
                 f"{test_name}: FAILED",
@@ -2102,11 +2126,127 @@ class PostInstallValidationMixin:
         )
         try:
             self._prepare_windows_graphical_session(ssh, vm, result)
+            first_prompt = self._run_windows_script_resiliently(
+                ssh,
+                script_name="focus_unattended_warning.ps1",
+                config={"mode": "preferred-accept"},
+                step="automation.preferred_path_prompt.focus_before_reboot",
+                timeout=210,
+            )
+            first_prompt_values = self.validation.parse_powershell_results(
+                first_prompt.stdout,
+                prefixes=(
+                    "PROCESS_ID",
+                    "WINDOW_HANDLE",
+                    "FOCUSED_CONTROL",
+                    "STATE_PATH",
+                    "STATE_PHASE",
+                    "RESULT",
+                ),
+            )
+            if (
+                first_prompt_values.get("FOCUSED_CONTROL") != "UefiFallbackAcceptButton"
+                or first_prompt_values.get("STATE_PHASE") != "PreferredPathPrompted"
+                or first_prompt_values.get("RESULT") != "OK"
+            ):
+                raise WorkflowError(
+                    "automation.preferred_path_prompt.focus_before_reboot",
+                    "The initial translated preferred-path consent was not proven visible",
+                    details={"vm": vm.name, "target": vm.host, **first_prompt_values},
+                )
+            first_capture = self._capture_with_name(
+                vm,
+                "preferred-path-consent-before-unanswered-reboot",
+            )
+            result.ok(
+                "automation.preferred_path_prompt.visible_before_reboot",
+                "The preferred-path consent was left unanswered before a Windows reboot",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(first_capture),
+                **first_prompt_values,
+            )
+            self._request_unanswered_prompt_reboot(ssh, vm, result)
+        finally:
+            ssh.__exit__(None, None, None)
+
+        ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="preferred_path_prompt_after_reboot",
+            grub_entry="windows",
+            distribution=options.distribution,
+        )
+        try:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            restored = self._run_windows_script_resiliently(
+                ssh,
+                script_name="focus_unattended_warning.ps1",
+                config={"mode": "preferred-accept"},
+                step="automation.preferred_path_prompt.focus_restored_after_reboot",
+                timeout=210,
+            )
+            restored_values = self.validation.parse_powershell_results(
+                restored.stdout,
+                prefixes=(
+                    "PROCESS_ID",
+                    "WINDOW_HANDLE",
+                    "FOCUSED_CONTROL",
+                    "STATE_PATH",
+                    "STATE_PHASE",
+                    "RESULT",
+                ),
+            )
+            if (
+                restored_values.get("FOCUSED_CONTROL") != "UefiFallbackAcceptButton"
+                or restored_values.get("STATE_PHASE") != "PreferredPathPrompted"
+                or restored_values.get("RESULT") != "OK"
+            ):
+                raise WorkflowError(
+                    "automation.preferred_path_prompt.focus_restored_after_reboot",
+                    "The unanswered preferred-path consent did not return after reboot",
+                    details={"vm": vm.name, "target": vm.host, **restored_values},
+                )
+            restored_capture = self._capture_with_name(
+                vm,
+                "preferred-path-consent-restored-after-reboot",
+            )
+            result.ok(
+                "automation.preferred_path_prompt.restored_after_reboot",
+                "The unanswered translated preferred-path consent returned after reboot",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(restored_capture),
+                **restored_values,
+            )
+            self._inject_boot_guardian_preferred_bypass(ssh, vm, result)
+            self._request_unanswered_prompt_reboot(ssh, vm, result)
+        finally:
+            ssh.__exit__(None, None, None)
+
+        ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="preferred_path_prompt_after_proven_bypass",
+            distribution=options.distribution,
+        )
+        try:
+            self._prepare_windows_graphical_session(ssh, vm, result)
             accept = self._run_windows_script_resiliently(
                 ssh,
                 script_name="focus_unattended_warning.ps1",
                 config={"mode": "preferred-accept"},
-                step="automation.preferred_path_prompt.focus_accept",
+                step="automation.preferred_path_prompt.focus_accept_after_proven_bypass",
                 timeout=210,
             )
             accept_values = self.validation.parse_powershell_results(
@@ -2121,20 +2261,24 @@ class PostInstallValidationMixin:
                 ),
             )
             if (
-                accept_values.get("FOCUSED_CONTROL") != "UefiPreferredPathAcceptButton"
+                accept_values.get("FOCUSED_CONTROL") != "UefiFallbackAcceptButton"
                 or accept_values.get("STATE_PHASE") != "PreferredPathPrompted"
                 or accept_values.get("RESULT") != "OK"
             ):
                 raise WorkflowError(
-                    "automation.preferred_path_prompt.focus_accept",
-                    "The translated preferred-path consent button was not proven focused",
+                    "automation.preferred_path_prompt.focus_accept_after_proven_bypass",
+                    "The preferred-path consent did not return after the proven firmware bypass",
                     details={"vm": vm.name, "target": vm.host, **accept_values},
                 )
-            accept_capture = self._capture_with_name(vm, "preferred-path-consent-ready")
+            accept_capture = self._capture_with_name(
+                vm,
+                "preferred-path-consent-after-proven-bypass",
+            )
             self._send_focused_enter(vm)
             result.ok(
-                "automation.preferred_path_prompt.accepted",
-                "The translated preferred-path consent was accepted by keyboard",
+                "automation.preferred_path_prompt.accepted_after_proven_bypass",
+                "The translated preferred-path consent was accepted after "
+                "direct Windows firmware boot",
                 vm=vm.name,
                 target=vm.vnc,
                 capture=str(accept_capture),
@@ -2153,7 +2297,7 @@ class PostInstallValidationMixin:
                 prefixes=("FOCUSED_CONTROL", "STATE_PHASE", "RESULT"),
             )
             if (
-                reboot_values.get("FOCUSED_CONTROL") != "UefiPreferredPathRebootButton"
+                reboot_values.get("FOCUSED_CONTROL") != "UefiFallbackRebootButton"
                 or reboot_values.get("STATE_PHASE") != "AwaitingPreferredPathReboot"
                 or reboot_values.get("RESULT") != "OK"
             ):
@@ -2174,6 +2318,267 @@ class PostInstallValidationMixin:
             )
         finally:
             ssh.__exit__(None, None, None)
+
+    def _rollback_preferred_path_fallback(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        baseline = options.rollback_baseline
+        if baseline is None:
+            raise WorkflowError(
+                "automation.preferred_path_rollback",
+                "The pre-installation rollback baseline was not retained",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="preferred_path_rollback_prompt",
+            distribution=options.distribution,
+        )
+        try:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            focus = self._run_windows_script_resiliently(
+                ssh,
+                script_name="focus_unattended_warning.ps1",
+                config={"mode": "preferred-rollback"},
+                step="automation.preferred_path_rollback.focus",
+                timeout=210,
+            )
+            values = self.validation.parse_powershell_results(
+                focus.stdout,
+                prefixes=(
+                    "PROCESS_ID",
+                    "WINDOW_HANDLE",
+                    "FOCUSED_CONTROL",
+                    "STATE_PATH",
+                    "STATE_PHASE",
+                    "RESULT",
+                ),
+            )
+            if (
+                values.get("FOCUSED_CONTROL") != "UefiFallbackRollbackButton"
+                or values.get("STATE_PHASE") != "PreferredPathPrompted"
+                or values.get("RESULT") != "OK"
+            ):
+                raise WorkflowError(
+                    "automation.preferred_path_rollback.focus",
+                    "The translated preferred-path rollback button was not proven focused",
+                    details={"vm": vm.name, "target": vm.host, **values},
+                )
+            capture = self._capture_with_name(vm, "preferred-path-rollback-ready")
+            self._send_focused_enter(vm)
+            result.ok(
+                "automation.preferred_path_rollback.requested",
+                "The preferred-path fallback was declined through its translated UI",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(capture),
+                **values,
+            )
+
+            self._verify_exact_windows_rollback(
+                ssh,
+                vm,
+                baseline,
+                result,
+                step="automation.preferred_path_rollback.verify",
+                failure_message=(
+                    "The preferred-path rollback did not restore the exact Windows baseline"
+                ),
+            )
+        finally:
+            ssh.__exit__(None, None, None)
+
+    def _rollback_bootnext_failure(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        baseline = options.rollback_baseline
+        if baseline is None:
+            raise WorkflowError(
+                "automation.bootnext_rollback",
+                "The pre-installation rollback baseline was not retained",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="bootnext_rollback_prompt",
+            distribution=options.distribution,
+        )
+        try:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            focus = self._run_windows_script_resiliently(
+                ssh,
+                script_name="focus_unattended_warning.ps1",
+                config={"mode": "bootnext-rollback"},
+                step="automation.bootnext_rollback.focus",
+                timeout=210,
+            )
+            values = self.validation.parse_powershell_results(
+                focus.stdout,
+                prefixes=(
+                    "PROCESS_ID",
+                    "WINDOW_HANDLE",
+                    "FOCUSED_CONTROL",
+                    "STATE_PATH",
+                    "STATE_PHASE",
+                    "SECURE_BOOT_FLOW",
+                    "RESULT",
+                ),
+            )
+            secure_boot_flow = values.get("SECURE_BOOT_FLOW", "").casefold() == "true"
+            expected_control = (
+                "UefiFallbackSecureBootCloseButton"
+                if secure_boot_flow
+                else "UefiFallbackRollbackButton"
+            )
+            if (
+                values.get("FOCUSED_CONTROL") != expected_control
+                or values.get("STATE_PHASE") != "FallbackPrompted"
+                or values.get("RESULT") != "OK"
+            ):
+                raise WorkflowError(
+                    "automation.bootnext_rollback.focus",
+                    "The translated BootNext rollback button was not proven focused",
+                    details={"vm": vm.name, "target": vm.host, **values},
+                )
+            capture = self._capture_with_name(vm, "bootnext-failure-rollback-ready")
+            self._send_focused_enter(vm)
+            result.ok(
+                "automation.bootnext_rollback.requested",
+                (
+                    "Secure Boot restored Windows automatically and its translated result "
+                    "was acknowledged"
+                    if secure_boot_flow
+                    else "The firmware fallback was declined through its translated UI"
+                ),
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(capture),
+                **values,
+            )
+            self._verify_exact_windows_rollback(
+                ssh,
+                vm,
+                baseline,
+                result,
+                step="automation.bootnext_rollback.verify",
+                failure_message=(
+                    "The BootNext fallback rollback did not restore the exact Windows baseline"
+                ),
+            )
+        finally:
+            ssh.__exit__(None, None, None)
+
+    def _verify_exact_windows_rollback(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        baseline: dict[str, str],
+        result: ResultBuilder,
+        *,
+        step: str,
+        failure_message: str,
+    ) -> None:
+        verification = self._run_windows_script_resiliently(
+            ssh,
+            script_name="verify_installation_rollback.ps1",
+            config={
+                "staging_volume_labels": list(STAGING_VOLUME_LABELS),
+                "system_disk_number": int(baseline["SYSTEM_DISK_NUMBER"]),
+                "system_partition_number": int(baseline["SYSTEM_PARTITION_NUMBER"]),
+                "system_partition_offset": int(baseline["SYSTEM_PARTITION_OFFSET"]),
+                "system_partition_size": int(baseline["SYSTEM_PARTITION_SIZE"]),
+                "wait_timeout_seconds": 900,
+            },
+            step=step,
+            timeout=960,
+        )
+        verified = self.validation.parse_powershell_results(
+            verification.stdout,
+            prefixes=(
+                "ROLLBACK_GEOMETRY_MATCHES",
+                "ROLLBACK_INSTALLER_PARTITION_COUNT",
+                "ROLLBACK_RECOVERY_TASK_COUNT",
+                "ROLLBACK_TEMPORARY_BOOT_REFERENCE_COUNT",
+                "ROLLBACK_WINDOWS_BOOT_MANAGER_PRESENT",
+                "ROLLBACK_BOOT_GUARDIAN_PRESENT",
+                "ROLLBACK_VERIFIED",
+                "RESULT",
+            ),
+        )
+        if (
+            verified.get("ROLLBACK_VERIFIED") != "True"
+            or verified.get("ROLLBACK_BOOT_GUARDIAN_PRESENT") != "False"
+            or verified.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                step,
+                failure_message,
+                details={"vm": vm.name, "target": vm.host, **verified},
+            )
+        result.ok(
+            step,
+            "The exact Windows geometry, boot state, recovery tasks, and guardian "
+            "removal were proven",
+            vm=vm.name,
+            target=vm.host,
+            **verified,
+        )
+
+    def _request_unanswered_prompt_reboot(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> None:
+        try:
+            response = ssh.run(
+                "shutdown.exe /r /t 0 /d p:0:0",
+                step="automation.preferred_path_prompt.unanswered_reboot",
+                timeout=30,
+                check=False,
+            )
+        except WorkflowError as exc:
+            raise WorkflowError(
+                "automation.preferred_path_prompt.unanswered_reboot",
+                "Windows could not request the unanswered-consent reboot",
+                details={"vm": vm.name, "target": vm.host, **exc.details},
+            ) from exc
+        if response.exit_code not in {0, -1}:
+            raise WorkflowError(
+                "automation.preferred_path_prompt.unanswered_reboot",
+                "Windows rejected the unanswered-consent reboot request",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "exit_code": response.exit_code,
+                    "stdout": response.stdout,
+                    "stderr": response.stderr,
+                },
+            )
+        result.ok(
+            "automation.preferred_path_prompt.unanswered_reboot",
+            "Windows accepted a reboot while the preferred-path consent stayed unanswered",
+            vm=vm.name,
+            target=vm.host,
+        )
 
     def _send_focused_enter(self, vm: VMConfig) -> None:
         client = None

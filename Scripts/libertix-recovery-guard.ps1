@@ -33,6 +33,7 @@ $AtomicFileModulePath = Join-Path $Root "Libertix.AtomicFile.psm1"
 $InstallationPolicyPath = Join-Path $Root "Libertix.InstallationPolicy.json"
 $TemporaryArtifactsModulePath = Join-Path $Root "Libertix.TemporaryArtifacts.psm1"
 $PostInstallVerificationModulePath = Join-Path $Root "Libertix.PostInstallVerification.psm1"
+$ProcessModulePath = Join-Path $Root "Libertix.Process.psm1"
 $RecoveryOperationsPath = Join-Path $Root "recovery-operations.json"
 $TemporaryBootFiles = @(
     (Join-Path $SystemDrive "grldr"),
@@ -85,6 +86,22 @@ if (-not (Test-Path -LiteralPath $AtomicFileModulePath -PathType Leaf)) {
     throw "Atomic-file module is missing from the recovery payload."
 }
 Import-Module -Name $AtomicFileModulePath -Force -ErrorAction Stop
+if (-not (Test-Path -LiteralPath $ProcessModulePath -PathType Leaf)) {
+    throw "Native-process module is missing from the recovery payload."
+}
+Import-Module -Name $ProcessModulePath -Force -ErrorAction Stop
+
+function Import-RecoveryVerificationModules {
+    if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
+        throw "Post-install verification module is missing from the recovery payload."
+    }
+
+    # PostInstallVerification imports Process in its private module scope. A
+    # forced nested import removes the previous script-scope Process commands
+    # in Windows PowerShell 5.1, so restore the script-scope import last.
+    Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
+    Import-Module -Name $ProcessModulePath -Force -ErrorAction Stop
+}
 
 $script:RecoveryCorrelationId = "unknown"
 $script:RecoveryAttemptId = [Guid]::NewGuid().ToString("N")
@@ -511,9 +528,13 @@ function Restore-OriginalHibernationSetting {
     $originalHibernate = Read-EnvValue -Path $Pending -Name "ORIGINAL_HIBERNATE_ENABLED"
     if ($originalHibernate -eq "true") {
         Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
-        $hibernateOutput = & "$env:SystemRoot\System32\powercfg.exe" /hibernate on 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Hibernation restore failed with rc=$LASTEXITCODE output=$($hibernateOutput -join ' ')"
+        $hibernate = Invoke-LibertixNativeCommand `
+            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
+            -ArgumentList @("/hibernate", "on") `
+            -TimeoutSeconds 60
+        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
+        if ($hibernate.ExitCode -ne 0) {
+            throw "Hibernation restore failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
         }
         $hibernateEnabled = (
             Get-ItemProperty `
@@ -526,9 +547,13 @@ function Restore-OriginalHibernationSetting {
         }
     } elseif ($originalHibernate -eq "false") {
         Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
-        $hibernateOutput = & "$env:SystemRoot\System32\powercfg.exe" /hibernate off 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "Hibernation disable failed with rc=$LASTEXITCODE output=$($hibernateOutput -join ' ')"
+        $hibernate = Invoke-LibertixNativeCommand `
+            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
+            -ArgumentList @("/hibernate", "off") `
+            -TimeoutSeconds 60
+        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
+        if ($hibernate.ExitCode -ne 0) {
+            throw "Hibernation disable failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
         }
         $hibernateEnabled = (
             Get-ItemProperty `
@@ -580,15 +605,29 @@ function Restore-BcdState {
         return
     }
 
-    $output = & bcdedit.exe /import $BcdBackup /clean 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "BCD restore failed with rc=$LASTEXITCODE output=$($output -join ' ')"
+    $bcdedit = Get-LibertixNativeSystemExecutable -FileName "bcdedit.exe"
+    Write-RecoveryLog "Resolved native BCD editor: $bcdedit"
+    $restore = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @("/import", $BcdBackup, "/clean") `
+        -TimeoutSeconds 120
+    $output = ($restore.StandardOutput + [Environment]::NewLine + $restore.StandardError).Trim()
+    if ($restore.ExitCode -ne 0) {
+        throw "BCD restore failed with rc=$($restore.ExitCode) output=$output"
     }
-    $verification = & bcdedit.exe /enum "{bootmgr}" /v 2>&1
-    if ($LASTEXITCODE -ne 0 -or @($verification).Count -eq 0) {
+    $verification = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @("/enum", "{bootmgr}", "/v") `
+        -TimeoutSeconds 60
+    $verificationOutput = (
+        $verification.StandardOutput +
+        [Environment]::NewLine +
+        $verification.StandardError
+    ).Trim()
+    if ($verification.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($verificationOutput)) {
         throw (
             "BCD restore completed but Windows Boot Manager could not be " +
-            "verified (rc=$LASTEXITCODE output=$($verification -join ' '))."
+            "verified (rc=$($verification.ExitCode) output=$verificationOutput)."
         )
     }
     Write-RecoveryLog "BCD state restored from the pre-install backup."
@@ -683,10 +722,7 @@ function Invoke-WindowsShareFinalize {
 
 function Invoke-VerifiedInstallationSuccess {
     Write-RecoveryLog "Successful install marker found; starting cross-runtime verification."
-    if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
-        throw "Post-install verification module is missing from the recovery payload."
-    }
-    Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
+    Import-RecoveryVerificationModules
     try {
         $writeLog = { param($Message) Write-RecoveryLog -Message $Message }
         $filesystemRepair = Invoke-LibertixWindowsFilesystemRepairIfRequired `
@@ -971,10 +1007,7 @@ try {
     if ($Action -eq "Revert") {
         $script:RecoveryRollbackRequested = $true
     }
-    if (-not (Test-Path -LiteralPath $PostInstallVerificationModulePath -PathType Leaf)) {
-        throw "Post-install verification module is missing from the recovery payload."
-    }
-    Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
+    Import-RecoveryVerificationModules
     Set-LibertixShutdownVerificationPriority
     $script:TrackRecoveryExecutionState = $false
     $recoveryExecutionState = Read-RecoveryExecutionState
@@ -1383,6 +1416,22 @@ try {
     }
 
     if ($diskLayoutRestored) {
+        # Removing the owned Linux partition and restoring the Windows system
+        # volume physically compensates every mutation stored on that partition.
+        # Record those facts before asking the execution ledger to close.
+        foreach ($step in @(
+            "target.bootloader-installed",
+            "target.system-configured",
+            "live.distribution-extracted",
+            "live.target-filesystem-created",
+            "live.installer-partition-expanded"
+        )) {
+            $null = Invoke-RecoveryOperation `
+                -Name "ledger.$step.compensate" `
+                -Operation {
+                    Complete-RecoveryCompensation -Step $step
+                }
+        }
         $null = Invoke-RecoveryOperation `
             -Name "ledger.installer-partition.compensate" `
             -Operation {

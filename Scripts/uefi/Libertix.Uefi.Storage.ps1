@@ -97,9 +97,13 @@ function Set-HibernateEnabled {
 
     $argument = if ($Enabled) { "on" } else { "off" }
     $powercfg = Get-NativeSystemExecutable -FileName "powercfg.exe"
-    $output = & $powercfg /hibernate $argument 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "powercfg failed to turn hibernation $argument (rc=$LASTEXITCODE): $($output -join ' ')"
+    $result = Invoke-LibertixNativeCommand `
+        -FilePath $powercfg `
+        -ArgumentList @("/hibernate", $argument) `
+        -TimeoutSeconds 60
+    $output = ($result.StandardOutput + [Environment]::NewLine + $result.StandardError).Trim()
+    if ($result.ExitCode -ne 0) {
+        throw "powercfg failed to turn hibernation $argument (rc=$($result.ExitCode)): $output"
     }
 
     $observed = Get-HibernateEnabled
@@ -562,14 +566,22 @@ function Request-BitLockerDecryption {
         $cmdletError = $_.Exception.Message
     }
 
-    $manageOutput = & $ManageBdePath -off $MountPoint 2>&1
-    $manageExitCode = $LASTEXITCODE
+    $manageResult = Invoke-LibertixNativeCommand `
+        -FilePath $ManageBdePath `
+        -ArgumentList @("-off", $MountPoint) `
+        -TimeoutSeconds 120
+    $manageOutput = (
+        $manageResult.StandardOutput +
+        [Environment]::NewLine +
+        $manageResult.StandardError
+    ).Trim()
+    $manageExitCode = $manageResult.ExitCode
     if ($manageExitCode -ne 0) {
         $cmdletStatus = if ($cmdletError) { $cmdletError } else { "no terminating error" }
         throw (
             "BitLocker decryption request failed for ${MountPoint}: " +
             "Disable-BitLocker=$cmdletStatus; " +
-            "manage-bde rc=$manageExitCode output=$($manageOutput -join ' ')"
+            "manage-bde rc=$manageExitCode output=$manageOutput"
         )
     }
     if ($cmdletError) {
@@ -644,6 +656,14 @@ function Set-WindowsVolumeReadableFromLinux {
 
     }
     $decryptionTimer.Stop()
-    $finalStatus = & $manageBde -status $SystemDrive 2>&1 | Out-String
+    $finalStatusResult = Invoke-LibertixNativeCommand `
+        -FilePath $manageBde `
+        -ArgumentList @("-status", $SystemDrive) `
+        -TimeoutSeconds 60
+    $finalStatus = (
+        $finalStatusResult.StandardOutput +
+        [Environment]::NewLine +
+        $finalStatusResult.StandardError
+    ).Trim()
     throw "Timed out waiting for $SystemDrive BitLocker decryption. Final status: $finalStatus"
 }

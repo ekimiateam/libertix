@@ -253,7 +253,12 @@ def test_offline_ntfs_resize_fixture_is_opt_in() -> None:
 
 def test_boot_guardian_fault_accepts_only_explicit_fixture_modes() -> None:
     assert AutomationRequest(apply=True, linux_password="pass").boot_guardian_fault == "none"
-    for mode in ("boot-order", "preferred-path"):
+    for mode in (
+        "boot-order",
+        "bootnext-rollback",
+        "preferred-path",
+        "preferred-path-rollback",
+    ):
         assert (
             AutomationRequest(
                 apply=True,

@@ -11,7 +11,7 @@
 
         <TextBlock x:Name="PageTitleText"
                    Grid.Row="0"
-                   Margin="32,28,32,12"
+                   Margin="32,20,32,8"
                    HorizontalAlignment="Center"
                    Text="{DynamicResource UefiFallbackTitle}"
                    Foreground="{DynamicResource TextPrimary}"
@@ -20,7 +20,10 @@
                    TextAlignment="Center"
                    TextWrapping="Wrap"/>
 
-        <StackPanel Grid.Row="1" Width="680" VerticalAlignment="Center">
+        <StackPanel Grid.Row="1"
+                    Width="680"
+                    Margin="0,4"
+                    VerticalAlignment="Top">
             <TextBlock x:Name="DescriptionText"
                        Text="{DynamicResource UefiFallbackDescription}"
                        Foreground="{DynamicResource TextPrimary}"
@@ -64,7 +67,7 @@
                                  Foreground="{DynamicResource AccentColor}"
                                  Background="{DynamicResource PanelBorder}"/>
                     <TextBox x:Name="LogOutput"
-                             Height="180"
+                             Height="160"
                              Margin="0,16,0,0"
                              Background="{DynamicResource DeepBackground}"
                              Foreground="{DynamicResource TextSecondary}"
@@ -81,6 +84,7 @@
 
         <Grid Grid.Row="2" Margin="24">
             <Button x:Name="CancelButton"
+                    AutomationProperties.AutomationId="UefiFallbackRollbackButton"
                     Content="{DynamicResource UefiFallbackCancel}"
                     Style="{StaticResource ModernButton}"
                     Width="330"
@@ -89,7 +93,7 @@
                     HorizontalAlignment="Left"
                     Click="CancelButton_Click"/>
             <Button x:Name="FallbackButton"
-                    AutomationProperties.AutomationId="UefiPreferredPathAcceptButton"
+                    AutomationProperties.AutomationId="UefiFallbackAcceptButton"
                     Content="{DynamicResource UefiFallbackUseFirmware}"
                     Style="{StaticResource ModernButton}"
                     Width="330"
@@ -98,7 +102,7 @@
                     HorizontalAlignment="Right"
                     Click="FallbackButton_Click"/>
             <Button x:Name="RebootButton"
-                    AutomationProperties.AutomationId="UefiPreferredPathRebootButton"
+                    AutomationProperties.AutomationId="UefiFallbackRebootButton"
                     Content="{DynamicResource UefiFallbackReboot}"
                     Style="{StaticResource ModernButton}"
                     Width="330"
@@ -108,6 +112,7 @@
                     Visibility="Collapsed"
                     Click="RebootButton_Click"/>
             <Button x:Name="SecureBootCloseButton"
+                    AutomationProperties.AutomationId="UefiFallbackSecureBootCloseButton"
                     Content="{DynamicResource UefiFallbackSecureBootClose}"
                     Style="{StaticResource ModernButton}"
                     Width="330"

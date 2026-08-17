@@ -95,6 +95,9 @@ function Set-LibertixControlFocus {
             if ($null -eq $target) {
                 continue
             }
+            if (-not $target.Current.IsEnabled -or $target.Current.IsOffscreen) {
+                continue
+            }
             if (-not [string]::IsNullOrWhiteSpace($RequiredSiblingAutomationId)) {
                 $siblingCondition = New-Object Windows.Automation.PropertyCondition(
                     [Windows.Automation.AutomationElement]::AutomationIdProperty,
@@ -134,7 +137,7 @@ function Set-LibertixControlFocus {
     )
 }
 
-function Resolve-PreferredPathUiProcess {
+function Resolve-RecoveryUiProcess {
     param([Parameter(Mandatory = $true)][string]$ExpectedPhase)
 
     $recoveryRoot = Join-Path $env:ProgramData "Libertix\UefiRecovery"
@@ -152,8 +155,8 @@ function Resolve-PreferredPathUiProcess {
             $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 |
                 ConvertFrom-Json -ErrorAction Stop
             $phase = [string]$state.Phase
-            if ($phase -eq "PreferredPathPreparationFailed") {
-                throw "Preferred-path preparation reached a terminal failure."
+            if ($phase -in @("FallbackProcessStateUnknown", "VerificationFailed")) {
+                throw "The UEFI recovery UI reached terminal phase '$phase'."
             }
             if ($phase -eq $ExpectedPhase) {
                 $expectedExe = [IO.Path]::GetFullPath(
@@ -171,6 +174,7 @@ function Resolve-PreferredPathUiProcess {
                         ProcessId = [int]$processMatches[0].ProcessId
                         StatePath = [string]$statePath
                         Phase = $phase
+                        SecureBootEnabled = [bool]$state.SecureBootEnabled
                     }
                 }
                 if ($processMatches.Count -gt 1) {
@@ -181,7 +185,7 @@ function Resolve-PreferredPathUiProcess {
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "Timed out waiting for preferred-path phase '$ExpectedPhase' and its Libertix UI."
+    throw "Timed out waiting for UEFI recovery phase '$ExpectedPhase' and its Libertix UI."
 }
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 |
@@ -193,6 +197,7 @@ $mode = if ($config.PSObject.Properties.Name -contains "mode") {
 }
 $statePath = ""
 $statePhase = ""
+$secureBootFlow = $false
 switch ($mode) {
     "unattended-warning" {
         $targetProcessId = [int]$config.process_id
@@ -200,20 +205,42 @@ switch ($mode) {
         $requiredSiblingAutomationId = "UnattendedWarningYesButton"
     }
     "preferred-accept" {
-        $resolved = Resolve-PreferredPathUiProcess -ExpectedPhase "PreferredPathPrompted"
+        $resolved = Resolve-RecoveryUiProcess -ExpectedPhase "PreferredPathPrompted"
         $targetProcessId = [int]$resolved.ProcessId
-        $targetAutomationId = "UefiPreferredPathAcceptButton"
+        $targetAutomationId = "UefiFallbackAcceptButton"
         $requiredSiblingAutomationId = ""
         $statePath = [string]$resolved.StatePath
         $statePhase = [string]$resolved.Phase
     }
-    "preferred-reboot" {
-        $resolved = Resolve-PreferredPathUiProcess -ExpectedPhase "AwaitingPreferredPathReboot"
+    "preferred-rollback" {
+        $resolved = Resolve-RecoveryUiProcess -ExpectedPhase "PreferredPathPrompted"
         $targetProcessId = [int]$resolved.ProcessId
-        $targetAutomationId = "UefiPreferredPathRebootButton"
+        $targetAutomationId = "UefiFallbackRollbackButton"
+        $requiredSiblingAutomationId = "UefiFallbackAcceptButton"
+        $statePath = [string]$resolved.StatePath
+        $statePhase = [string]$resolved.Phase
+    }
+    "preferred-reboot" {
+        $resolved = Resolve-RecoveryUiProcess -ExpectedPhase "AwaitingPreferredPathReboot"
+        $targetProcessId = [int]$resolved.ProcessId
+        $targetAutomationId = "UefiFallbackRebootButton"
         $requiredSiblingAutomationId = ""
         $statePath = [string]$resolved.StatePath
         $statePhase = [string]$resolved.Phase
+    }
+    "bootnext-rollback" {
+        $resolved = Resolve-RecoveryUiProcess -ExpectedPhase "FallbackPrompted"
+        $targetProcessId = [int]$resolved.ProcessId
+        if ([bool]$resolved.SecureBootEnabled) {
+            $targetAutomationId = "UefiFallbackSecureBootCloseButton"
+            $requiredSiblingAutomationId = ""
+        } else {
+            $targetAutomationId = "UefiFallbackRollbackButton"
+            $requiredSiblingAutomationId = "UefiFallbackAcceptButton"
+        }
+        $statePath = [string]$resolved.StatePath
+        $statePhase = [string]$resolved.Phase
+        $secureBootFlow = [bool]$resolved.SecureBootEnabled
     }
     default {
         throw "The Libertix UI focus mode is unsupported."
@@ -313,6 +340,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($statePath)) {
         Write-Output ("STATE_PATH={0}" -f $statePath)
         Write-Output ("STATE_PHASE={0}" -f $statePhase)
+        Write-Output ("SECURE_BOOT_FLOW={0}" -f $secureBootFlow)
     }
     Write-Output "RESULT=OK"
 } finally {

@@ -867,6 +867,19 @@ def test_failed_installation_requires_account_secret_reentry() -> None:
     assert "account.ClearPassword();" in read("Pages/ApplyChanges.Plan.cs")
 
 
+def test_apply_changes_loaded_runs_once_and_contains_async_startup_failures() -> None:
+    apply_page = read("Pages/ApplyChanges.xaml.cs")
+    handler = apply_page.split("private async void ApplyChanges_Loaded", 1)[1].split(
+        "private void LoadSummary", 1
+    )[0]
+
+    assert "Loaded -= ApplyChanges_Loaded;" in handler
+    assert "try" in handler
+    assert "catch (Exception ex)" in handler
+    assert 'PublishUnattendedFailure("installation-start-failed", ex.Message);' in handler
+    assert "FinishInstallation(enableBackButton: true);" in handler
+
+
 def test_windows_download_and_bios_boot_temporary_state_is_transaction_scoped() -> None:
     bios = read("Pages/ApplyChanges.Bios.cs")
     downloads = read("Pages/ApplyChanges.Downloads.cs")
@@ -934,6 +947,13 @@ def test_all_blocking_windows_operations_use_the_named_timeout_policy() -> None:
     assert "WindowsProcessTimeouts.LiveIsoDownload" in downloads
     assert "WindowsProcessTimeouts.DistributionIsoDownload" in downloads
     assert "WindowsProcessTimeouts.BootArtifactDownload" in processes
+    assert "TimeSpan RedirectedStreamDrain" in policy
+    assert "WaitForRedirectedStreams(outputTask, errorTask);" in policy
+    assert "Task.WaitAll(outputTask, errorTask);" not in policy
+    assert "process.WaitForExit();" not in processes
+    assert "WaitForRedirectedStreams(" in processes
+    assert "WaitForRedirectedStreams(" in read("Helpers/CompatibilityPreflightRunner.cs")
+    assert "WaitForRedirectedStreams(" in read("Pages/UefiBootFallback.xaml.cs")
 
 
 def test_live_target_disk_requires_cross_platform_partition_table_identity() -> None:
@@ -963,7 +983,8 @@ def test_uefi_bitlocker_decryption_requests_surface_initial_and_retry_failures()
     workflow = storage.split("function Set-WindowsVolumeReadableFromLinux", 1)[1]
 
     assert "Disable-BitLocker -MountPoint $MountPoint -ErrorAction Stop" in helper
-    assert "$manageExitCode = $LASTEXITCODE" in helper
+    assert "Invoke-LibertixNativeCommand" in helper
+    assert "$manageExitCode = $manageResult.ExitCode" in helper
     assert "if ($manageExitCode -ne 0)" in helper
     assert "BitLocker decryption request failed" in helper
     assert (
@@ -1172,6 +1193,23 @@ def test_windows_recovery_waits_durably_for_the_first_installed_linux_boot() -> 
     assert "Start-RecoveryPromptTask" in bios
     assert "Start-PostInstallPromptTask -State $state" in uefi
     assert "waitingTitle" in result_ui
+
+
+def test_uefi_preferred_path_consent_survives_an_unanswered_reboot() -> None:
+    recovery = read("Scripts/libertix-uefi-recovery-agent.ps1")
+
+    decision_guard = recovery.split(
+        "$preferredPathDecisionPending = [string]$state.Phase -in @(", 1
+    )[1].split("$firmwareBypassEvidence = $null", 1)[0]
+    for phase in (
+        "InstalledBootBypassed",
+        "PreferredPathPrompted",
+        "PreferredPathPreparationFailed",
+    ):
+        assert f'"{phase}"' in decision_guard
+    assert "Start-PostInstallPromptTask -State $state" in decision_guard
+    assert "Set-LibertixPostInstallWaitingForLinux" not in decision_guard
+    assert "exit 0" in decision_guard
 
 
 def test_offline_ntfs_resize_schedules_a_verified_windows_boot_repair() -> None:
@@ -1493,7 +1531,11 @@ def test_uefi_firmware_fallback_is_blocked_by_secure_boot_after_verified_restore
         "_secureBootRestored = true"
     )
     assert "-Action Cancel" in fallback
-    assert "-WaitForProcessId {processId}" in fallback
+    assert "-StatePath {QuoteArgument(_statePath)} -Action Cancel" in fallback
+    assert "WaitForProcessId" not in fallback
+    assert "WaitForProcessId" not in recovery_agent
+    assert "Invoke-LibertixNativeProcess" in recovery_agent
+    assert "UEFI revert process completed with rc=$revertExitCode." in recovery_agent
     assert "Remove-TemporaryRecoveryArtifacts" in recovery_agent
     assert "Remove-RecoveryTasks" in recovery_agent
     assert "Remove-Item -LiteralPath $root -Recurse" not in recovery_agent
@@ -1755,9 +1797,66 @@ def test_uefi_aria2_and_ext4_installer_timeouts_stop_their_processes() -> None:
         "function Get-Config", 1
     )[0]
     assert 'taskkill.exe"' in timeout
-    assert "/T /F" in timeout
+    assert '"/PID", [string]$process.Id, "/T", "/F"' in timeout
+    assert "Invoke-LibertixNativeCommand" in timeout
     assert "$taskkillExitCode -ne 0 -or -not $process.HasExited" in timeout
     assert "process tree could not be proven stopped" in timeout
+
+
+def test_native_stderr_is_never_merged_under_stop_error_policy() -> None:
+    scripts = sorted((ROOT / "Scripts").rglob("*.ps1")) + sorted((ROOT / "Scripts").rglob("*.psm1"))
+    offenders = []
+    for path in scripts:
+        text = path.read_text(encoding="utf-8-sig")
+        if "2>&1" in text and path.name != "Libertix.Process.psm1":
+            offenders.append(str(path.relative_to(ROOT)))
+
+    assert offenders == []
+    process_module = read("Scripts/modules/Libertix.Process.psm1")
+    guarded_taskkill = process_module.split("function Stop-LibertixNativeProcessTree", 1)[1].split(
+        "function Invoke-LibertixNativeCommand", 1
+    )[0]
+    assert '$ErrorActionPreference = "Continue"' in guarded_taskkill
+    assert "$taskkillExitCode = $LASTEXITCODE" in guarded_taskkill
+    assert "$ErrorActionPreference = $previousErrorActionPreference" in guarded_taskkill
+
+
+def test_native_process_module_is_packaged_for_every_standalone_consumer() -> None:
+    apply_changes = read("Pages/ApplyChanges.Windows.cs")
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+    sharing = read("Scripts/libertix-configure-windows-share.ps1")
+    preflight = read("Scripts/libertix-storage-preflight.ps1")
+    postinstall = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+
+    assert apply_changes.count('"Libertix.Process.psm1"') >= 4
+    assert 'Join-Path $Root "Libertix.Process.psm1"' in recovery
+    assert 'Join-Path $PSScriptRoot "Libertix.Process.psm1"' in sharing
+    assert 'Join-Path $PSScriptRoot "modules\\Libertix.Process.psm1"' in preflight
+    assert 'Join-Path $PSScriptRoot "Libertix.Process.psm1"' in postinstall
+
+
+def test_bios_recovery_resolves_bcdedit_without_relying_on_task_path() -> None:
+    process_module = read("Scripts/modules/Libertix.Process.psm1")
+    recovery = read("Scripts/libertix-recovery-guard.ps1")
+
+    resolver = process_module.split("function Get-LibertixNativeSystemExecutable", 1)[1].split(
+        "function ConvertTo-LibertixNativeArgument", 1
+    )[0]
+    assert 'Join-Path $env:SystemRoot "Sysnative\\$FileName"' in resolver
+    assert 'Join-Path $env:SystemRoot "System32\\$FileName"' in resolver
+    assert resolver.index("Sysnative") < resolver.index("System32")
+    assert 'Get-LibertixNativeSystemExecutable -FileName "bcdedit.exe"' in recovery
+    assert "Get-Command bcdedit.exe" not in recovery
+    imports = recovery.split("function Import-RecoveryVerificationModules", 1)[1].split(
+        "function Write-RecoveryLog", 1
+    )[0]
+    assert imports.index("$PostInstallVerificationModulePath") < imports.index("$ProcessModulePath")
+    assert recovery.count("Import-RecoveryVerificationModules") == 3
+    assert 'Write-RecoveryLog "Resolved native BCD editor: $bcdedit"' in recovery
+    assert (
+        "Get-LibertixNativeSystemExecutable"
+        in process_module.split("Export-ModuleMember -Function", 1)[1]
+    )
 
 
 def test_ext4_installer_cannot_reopen_maintenance_ui_at_user_logon() -> None:
@@ -1790,6 +1889,29 @@ def test_ext4_installer_cannot_reopen_maintenance_ui_at_user_logon() -> None:
     assert "Microsoft\\Windows\\CurrentVersion\\RunOnce" in ext4_check
     assert "BundleCachePath" in ext4_check
     assert "The ext4 installer has a pending RunOnce resume" in ext4_check
+
+
+def test_windows_share_uses_native_program_files_from_32_bit_powershell() -> None:
+    windows_share = read("Scripts/libertix-configure-windows-share.ps1")
+    verification = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+    post_install = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    integrity = read("auto_tests/app/scripts/check_windows_integrity.ps1")
+
+    resolver = windows_share.split("function Get-NativeProgramFilesPath", 1)[1].split(
+        "function Get-LinuxPartition", 1
+    )[0]
+    assert 'GetEnvironmentVariable("ProgramW6432", "Process")' in resolver
+    assert "[Microsoft.Win32.RegistryView]::Registry64" in resolver
+    assert 'GetValue("ProgramFilesDir", "")' in resolver
+    assert "The native Program Files directory could not be resolved" in resolver
+    assert windows_share.count("Join-Path (Get-NativeProgramFilesPath)") == 4
+    assert 'Join-Path $env:ProgramFiles "ext4-win-driver' not in windows_share
+    assert 'GetEnvironmentVariable("ProgramW6432", "Process")' in verification
+    assert "[Microsoft.Win32.RegistryView]::Registry64" in verification
+    assert "Join-Path (Get-LibertixNativeProgramFilesPath)" in verification
+    assert 'Join-Path $env:ProgramFiles "ext4-win-driver' not in verification
+    assert "$env:ProgramW6432" in post_install
+    assert "$env:ProgramW6432" in integrity
 
 
 def test_all_download_transports_enforce_bounded_file_sizes() -> None:
@@ -1845,6 +1967,9 @@ def test_uefi_recovery_retires_only_the_exact_transaction_partition() -> None:
     creation = read("Pages/ApplyChanges.Uefi.cs")
     agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
 
+    assert "[JsonExtensionData]" in state
+    assert "IDictionary<string, JsonElement> AdditionalFields" in state
+
     for field in (
         "PlanId",
         "SystemDiskUniqueId",
@@ -1894,7 +2019,8 @@ def test_uefi_recovery_proves_firmware_bypass_before_offering_preferred_path() -
     assert 'Phase = "InstalledBootBypassed"' in agent
     assert "Get-EfiLoadOptionHardDriveNodes" in firmware
     assert "GetFirmwareEnvironmentVariable" in firmware_read
-    assert "SetFirmwareEnvironmentVariable" not in firmware_read
+    assert "Set-LibertixFirmwareVariableBytes" in firmware_read
+    assert "Set-LibertixFirmwareVariableBytes" not in evidence
     prompt_flow = agent.split('if ($Action -eq "Prompt")', 1)[1].split(
         'if ($Action -eq "Cancel")', 1
     )[0]
@@ -1923,6 +2049,11 @@ def test_preferred_windows_path_is_transactional_and_avoids_grub_recursion() -> 
         'Join-Path $ArchiveRoot "original-files"',
         'manifest["originalFiles"]',
         "Restore-LibertixPreferredPathOriginalFiles",
+        "Get-LibertixPreferredPathWindowsBootEntry",
+        "Set-LibertixPreferredPathWindowsBootEntry",
+        "preferredBytesBase64",
+        "originalArchiveName",
+        "Restore-LibertixPreferredPathWindowsBootEntry",
     ):
         assert required in module
     assert module.index("PreferredGrubRelativePath") < module.index("-Destination $windowsLoader")
@@ -2070,11 +2201,13 @@ def test_unattended_warning_keyboard_action_requires_proven_ui_focus() -> None:
     assert 'AutomationProperties.AutomationId="UnattendedWarningYesButton"' in dialog
 
 
-def test_bios_post_install_prompt_hides_its_powershell_console() -> None:
+def test_bios_post_install_prompt_uses_the_console_free_task_host() -> None:
     registration = read("Scripts/libertix-register-bios-recovery-task.ps1")
     prompt_arguments = registration.split("$promptArguments =", 1)[1].split("$promptAction =", 1)[0]
 
-    assert "-WindowStyle Hidden" in prompt_arguments
+    assert "--run-hidden-powershell" in prompt_arguments
+    assert "-Execute $HiddenHostPath" in registration
+    assert "powershell.exe" not in registration
 
 
 def test_local_build_runs_the_same_powershell_quality_gates_as_ci() -> None:
@@ -2197,6 +2330,21 @@ def test_uefi_fallback_buttons_fit_long_localized_labels() -> None:
         assert 'Padding="20,8"' in button
 
 
+def test_uefi_fallback_content_cannot_extend_under_the_title() -> None:
+    fallback = read("Pages/UefiBootFallback.xaml")
+    content = fallback.split('<StackPanel Grid.Row="1"', 1)[1].split(">", 1)[0]
+
+    assert 'VerticalAlignment="Top"' in content
+    assert 'Margin="0,4"' in content
+    assert 'Height="160"' in fallback.split('x:Name="LogOutput"', 1)[1].split("/>", 1)[0]
+
+
+def test_uefi_fallback_secure_boot_close_button_has_stable_automation_id() -> None:
+    fallback = read("Pages/UefiBootFallback.xaml")
+
+    assert 'AutomationProperties.AutomationId="UefiFallbackSecureBootCloseButton"' in fallback
+
+
 def test_bios_copy_preserves_live_boot_case_sensitive_names() -> None:
     apply_changes = read_apply_changes()
 
@@ -2309,7 +2457,8 @@ def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
     assert "-RunLevel Highest" in windows_share
     assert "Install-ExplorerPinTasks" in windows_share
     assert "[switch]$Pin" in windows_share
-    assert "cmd.exe /d /c mklink /J" in windows_share
+    assert '"/d", "/c", "mklink", "/J", $junctionPath, $LinuxHome' in windows_share
+    assert "Invoke-LibertixNativeCommand" in windows_share
     assert '$junctionShellItem.Self.InvokeVerb("pintohome")' in windows_share
     assert "$quickAccess.Items()" in windows_share
     assert "Linux shortcut was not visible in Explorer Home/Quick Access" in windows_share
@@ -2322,7 +2471,8 @@ def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
     assert "Get-CimInstance Win32_UserProfile" in windows_share
     assert "Install-ExplorerShortcuts" in windows_share
     assert "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" in windows_share
-    assert '& $launchCtl start "ext4-mount"' in windows_share
+    assert '"start",' in windows_share
+    assert '"ext4-mount",' in windows_share
     assert "SECURITY ERROR: the Linux volume accepted a write despite --ro" in windows_share
     assert "Set-Service -Name ExtFsWatcher -StartupType Disabled" in windows_share
 
@@ -2744,11 +2894,18 @@ def test_windows_boot_tasks_do_not_launch_visible_command_windows() -> None:
     apply_changes = read("Pages/ApplyChanges.xaml.cs")
     recovery_tasks = read("Scripts/libertix-register-uefi-recovery-tasks.ps1")
     share = read("Scripts/libertix-configure-windows-share.ps1")
+    host = read("BootGuardian/Program.cs")
 
     assert "run-recovery-agent.cmd" not in apply_changes
     assert "run-recovery-prompt.cmd" not in apply_changes
-    assert "-WindowStyle Hidden -ExecutionPolicy Bypass -File" in recovery_tasks
-    assert "-WindowStyle Hidden -ExecutionPolicy Bypass -File" in share
+    assert "--run-hidden-powershell" in recovery_tasks
+    assert "-Execute $HiddenHostPath" in recovery_tasks
+    assert "powershell.exe" not in recovery_tasks
+    assert "--run-hidden-powershell" in share
+    assert "-Execute $hiddenHost" in share
+    assert "New-ScheduledTaskAction -Execute $powerShell" not in share
+    assert "CreateNoWindow = true" in host
+    assert "WindowStyle = ProcessWindowStyle.Hidden" in host
     assert "New-ScheduledTaskTrigger -AtStartup" in share
     assert 'UserId "SYSTEM"' in share
 
@@ -2776,6 +2933,8 @@ def test_filepool_defaults_to_a_signed_build_channel_and_supports_an_override() 
     assert 'DevelopmentSshGatewayOption = "--dev-ssh-gateway"' in startup
     assert 'DevelopmentSshDnsOption = "--dev-ssh-dns"' in startup
     assert "FilepoolConfig.TryCreate(" in app
+    assert "if (!Build.AllowsDevelopmentFilepoolOverride)" in app
+    assert "public bool AllowsDevelopmentFilepoolOverride => IsDevelopment;" in build
     assert "public sealed class FilepoolConfig" in filepool
     assert "public string BaseUrl { get; }" in filepool
     assert "public bool RequiresCatalogSignature => _requiresCatalogSignature;" in filepool
@@ -2786,10 +2945,13 @@ def test_filepool_defaults_to_a_signed_build_channel_and_supports_an_override() 
     )
     main_window = read("MainWindow.xaml")
     main_window_code = read("MainWindow.xaml.cs")
-    assert 'Panel.ZIndex="1000"' in main_window
-    assert 'VerticalAlignment="Top"' in main_window
     assert 'IsHitTestVisible="False"' in main_window
-    assert 'Grid.Row="1"' not in main_window
+    assert '<RowDefinition Height="Auto"/>' in main_window
+    assert '<RowDefinition Height="*"/>' in main_window
+    banner = main_window.split('<Border x:Name="DevelopmentModeBanner"', 1)[1].split(">", 1)[0]
+    frame = main_window.split('<Frame x:Name="MainFrame"', 1)[1].split("/>", 1)[0]
+    assert 'Grid.Row="0"' in banner
+    assert 'Grid.Row="1"' in frame
     assert "Height += DevelopmentModeBanner.Height" not in main_window_code
     assert "MinHeight += DevelopmentModeBanner.Height" not in main_window_code
     assert "application.Filepool.IsDevelopmentMode" in read("MainWindow.xaml.cs")
@@ -3285,6 +3447,14 @@ def test_bios_recovery_guard_persists_and_aggregates_independent_compensations()
     assert "$atomicFileModule = Import-Module" in save_state
     assert "-PassThru `" in save_state
     assert "& $atomicFileModule {" in save_state
+    for step in (
+        "target.bootloader-installed",
+        "target.system-configured",
+        "live.distribution-extracted",
+        "live.target-filesystem-created",
+        "live.installer-partition-expanded",
+    ):
+        assert f'"{step}"' in rollback
 
 
 def test_bios_recovery_retries_transient_storage_capacity_refresh_failures() -> None:
@@ -3306,11 +3476,12 @@ def test_bios_recovery_cleanup_verifies_files_share_tasks_bcd_and_hibernation() 
     assert "Temporary boot payload remains:" in recovery
     assert "Pending Windows sharing payload still exists after removal." in recovery
     assert "Windows read-only Linux sharing cleanup could not be verified." in recovery
-    assert 'bcdedit.exe /enum "{bootmgr}" /v' in recovery
+    assert '-ArgumentList @("/enum", "{bootmgr}", "/v")' in recovery
+    assert "Invoke-LibertixNativeCommand" in recovery
     assert '"BCD restore completed but Windows Boot Manager could not be "' in recovery
-    assert "\"verified (rc=$LASTEXITCODE output=$($verification -join ' ')).\"" in recovery
-    assert 'powercfg.exe" /hibernate on' in recovery
-    assert 'powercfg.exe" /hibernate off' in recovery
+    assert '"verified (rc=$($verification.ExitCode) output=$verificationOutput)."' in recovery
+    assert '-ArgumentList @("/hibernate", "on")' in recovery
+    assert '-ArgumentList @("/hibernate", "off")' in recovery
     assert "Hibernation restore did not enable HibernateEnabled." in recovery
     assert "Hibernation restore did not disable HibernateEnabled." in recovery
 
@@ -4077,6 +4248,48 @@ def test_uefi_boot_guardian_is_armed_before_waiting_for_first_linux_boot() -> No
     assert guardian_index < preferred_action.index('"AwaitingPreferredPathReboot"')
 
 
+def test_recovery_prompt_is_single_instance_fast_and_restart_resilient() -> None:
+    app = read("App.xaml.cs")
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    main_window = read("MainWindow.xaml.cs")
+
+    assert "IsRecoveryUiInvocation" in app
+    assert "Published version check skipped for the protected cached recovery UI." in app
+    assert "OnSessionEnding" in app
+    assert "PrepareForSystemRestart" in app
+    assert "Global\\Libertix.UefiRecoveryPrompt." in agent
+    assert "Test-LibertixApplicationMutex" in agent
+    assert "[DateTime]::UtcNow.AddSeconds(30)" in agent
+    assert "Libertix recovery UI did not acquire its application mutex within 30 seconds." in agent
+    assert "public void PrepareForSystemRestart()" in main_window
+
+    prompt_flow = agent.split('if ($Action -eq "Prompt")', 1)[1].split(
+        'if ($Action -eq "Cancel")', 1
+    )[0]
+    installed_check = prompt_flow.index("Get-InstalledPreferredBootPathManifest -State $state")
+    fallback_prompt = prompt_flow.index("Start-FallbackUi -State $state -Mode PreferredPath")
+    assert installed_check < fallback_prompt
+    assert 'state.Phase = "AwaitingPreferredPathReboot"' in prompt_flow
+    assert "Preferred Windows boot path is installed; waiting for the installed" in prompt_flow
+
+
+def test_preferred_path_guardian_repairs_the_exact_clean_windows_boot_entry() -> None:
+    module = read("Scripts/modules/Libertix.BootGuardian.psm1")
+    config = read("BootGuardian/BootGuardianConfig.cs")
+    engine = read("BootGuardian/BootGuardianEngine.cs")
+    verifier = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+
+    for required in ("bootNumber", "entryBytesBase64", "entrySha256"):
+        assert required in module
+        assert required[0].upper() + required[1:] in config
+    preferred_repair = engine.split("private static void RepairPreferredPath", 1)[1]
+    assert "config.PreferredPath.GetEntryBytes()" in preferred_repair
+    assert "firmware.Read(windowsEntryName, allowMissing: true)" in preferred_repair
+    assert "firmware.Write(windowsEntryName, expectedWindowsEntry)" in preferred_repair
+    assert "Get-EfiLoadOptionOptionalDataLength -Bytes $windowsEntryBytes" in module
+    assert "Get-EfiLoadOptionOptionalDataLength -Bytes $expectedEntryBytes" in verifier
+
+
 def test_boot_guardian_uses_the_windows_preshutdown_contract_and_quiet_logs() -> None:
     native = read("BootGuardian/NativeMethods.cs")
     service = read("BootGuardian/ServiceHost.cs")
@@ -4534,7 +4747,9 @@ def test_compatibility_runner_drains_async_output_before_parsing_final_fields() 
         "process.WaitForExit((int)WindowsProcessTimeouts.CompatibilityPreflight.TotalMilliseconds)"
     )
     timeout_position = runner.index(timeout_wait)
-    drain_position = runner.index("process.WaitForExit();", timeout_position)
+    drain_position = runner.index(
+        "WindowsProcessRunner.WaitForRedirectedStreams(", timeout_position
+    )
     diagnostics_position = runner.index("string diagnostics =", drain_position)
 
     assert timeout_position < drain_position < diagnostics_position
@@ -4587,9 +4802,32 @@ def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
 
 def test_protected_account_hash_uses_a_posix_line_ending() -> None:
     plan = read("Pages/ApplyChanges.Plan.cs")
+    installer = read("assets/live/libertix-install-main.sh")
 
     assert 'WriteProtectedInstallerFile(passwordHashWindowsPath, passwordHash + "\\n")' in plan
     assert "passwordHash + Environment.NewLine" not in plan
+    assert "retire_account_secret_or_die" in installer
+    verified = installer.index('complete_installation_state_step "target.installation-verified"')
+    retired = installer.index("retire_account_secret_or_die", verified)
+    succeeded = installer.index("complete_installation_state", retired)
+    assert verified < retired < succeeded
+    retirement = installer.split("retire_account_secret_or_die()", 1)[1].split("\n}\n", 1)[0]
+    assert 'mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint"' in retirement
+    assert 'rm -f -- "$secret_path"' in retirement
+    assert '[ ! -e "$secret_path" ]' in retirement
+    assert "unset PASSWORD_HASH" in retirement
+
+    target = read("assets/live/configure-target-main.sh")
+    assert "usermod --password" not in target
+    assert 'printf \'%s:%s\\n\' "$USERNAME" "$PASSWORD_HASH" | chpasswd -e' in target
+
+    windows_check = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+    temporary_artifacts = windows_check.split('"temporary_artifacts" {', 1)[1].split(
+        '\n        "network" {', 1
+    )[0]
+    assert "passwordHashWindowsPath" in temporary_artifacts
+    assert "ACCOUNT_SECRET_PRESENT" in temporary_artifacts
+    assert "Assert-Condition (-not $accountSecretPresent)" in temporary_artifacts
 
 
 def test_live_context_exports_the_validated_plan_for_target_configuration() -> None:
@@ -4681,6 +4919,32 @@ def test_boot_guardian_fault_fixture_is_owned_bounded_and_verified() -> None:
     assert "unexpected-efi\\shimx64.efi-$originalHash.bin" in preferred_fixture
     assert 'config={"mode": "preferred-accept"}' in automation
     assert 'config={"mode": "preferred-reboot"}' in automation
+    assert 'config={"mode": "preferred-rollback"}' in automation
+    assert '"preferred-path-rollback-ready"' in automation
+    assert 'script_name="verify_installation_rollback.ps1"' in automation
+    assert '"wait_timeout_seconds": 900' in automation
+    assert '"preferred-path-consent-before-unanswered-reboot"' in automation
+    assert '"preferred-path-consent-restored-after-reboot"' in automation
+    assert '"preferred-path-consent-after-proven-bypass"' in automation
+    assert automation.index("self._request_unanswered_prompt_reboot") < automation.index(
+        '"automation.preferred_path_prompt.accepted_after_proven_bypass"'
+    )
+    restored_prompt_wait = automation.split('phase="preferred_path_prompt_after_reboot"', 1)[
+        1
+    ].split(")", 1)[0]
+    assert 'grub_entry="windows"' in restored_prompt_wait
+    restored_prompt_flow = automation.split('phase="preferred_path_prompt_after_reboot"', 1)[1]
+    assert (
+        restored_prompt_flow.index(
+            'step="automation.preferred_path_prompt.focus_restored_after_reboot"'
+        )
+        < restored_prompt_flow.index("self._inject_boot_guardian_preferred_bypass(ssh, vm, result)")
+        < restored_prompt_flow.index("self._request_unanswered_prompt_reboot")
+    )
+    proven_bypass_flow = automation.split('phase="preferred_path_prompt_after_proven_bypass"', 1)[1]
+    assert 'step="automation.preferred_path_prompt.focus_accept_after_proven_bypass"' in (
+        proven_bypass_flow
+    )
     assert 'config={"action": "plan-loader"}' in automation
     assert 'config={"action": "inject-loader"}' in automation
     assert '"action": "verify-loader"' in automation
@@ -4906,12 +5170,21 @@ def test_long_windows_native_checks_emit_structured_utf8_safe_summaries() -> Non
 
 def test_postinstall_winre_and_bios_boot_checks_are_locale_independent() -> None:
     module = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+    process_module = read("Scripts/modules/Libertix.Process.psm1")
     checks = read("auto_tests/app/scripts/post_install_windows_check.ps1")
+
+    assert "function Get-LibertixNativeSystemExecutable" in process_module
+    assert 'Import-Module (Join-Path $PSScriptRoot "Libertix.Process.psm1")' in module
+    assert 'Get-LibertixNativeSystemExecutable -FileName "bcdedit.exe"' in module
+    assert 'Get-LibertixNativeSystemExecutable -FileName "reagentc.exe"' in module
+    assert 'Join-Path $env:SystemRoot "Sysnative\\$FileName"' in process_module
+    assert 'Join-Path $env:SystemRoot "Sysnative\\$FilePath"' in checks
 
     windows_health = module.split("function Test-LibertixWindowsHealth", 1)[1].split(
         "function Test-LibertixWindowsBootConfiguration", 1
     )[0]
-    assert "reagentc.exe /enable" in windows_health
+    assert "Invoke-LibertixNativeCommand" in windows_health
+    assert '-ArgumentList @("/enable")' in windows_health
     assert "reagentc.exe /info" not in windows_health
     assert "deshabilitado" not in windows_health
 

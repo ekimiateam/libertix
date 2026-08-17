@@ -38,9 +38,15 @@ namespace Libertix.Pages
 
                 using (var process = new Process { StartInfo = psi, EnableRaisingEvents = true })
                 {
+                    var outputClosed = new TaskCompletionSource<bool>();
+                    var errorClosed = new TaskCompletionSource<bool>();
                     process.OutputDataReceived += (_, e) =>
                     {
-                        if (e.Data != null)
+                        if (e.Data == null)
+                        {
+                            outputClosed.TrySetResult(true);
+                        }
+                        else
                         {
                             captureStandardOutput?.Invoke(e.Data);
                             Dispatcher.BeginInvoke(new Action(() => onLine(e.Data)));
@@ -48,8 +54,14 @@ namespace Libertix.Pages
                     };
                     process.ErrorDataReceived += (_, e) =>
                     {
-                        if (e.Data != null)
+                        if (e.Data == null)
+                        {
+                            errorClosed.TrySetResult(true);
+                        }
+                        else
+                        {
                             Dispatcher.BeginInvoke(new Action(() => onLine($"ERROR: {e.Data}")));
+                        }
                     };
 
                     if (!process.Start())
@@ -102,7 +114,9 @@ namespace Libertix.Pages
                             }
                         }
 
-                        process.WaitForExit();
+                        WindowsProcessRunner.WaitForRedirectedStreams(
+                            outputClosed.Task,
+                            errorClosed.Task);
                         return new StreamingProcessResult
                         {
                             ExitCode = process.ExitCode,

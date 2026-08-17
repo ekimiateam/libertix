@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -26,6 +28,21 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def efi_optional_data_length(value: bytes) -> int:
+    if len(value) < 8:
+        raise PreferredBootPathError("preferred Windows boot entry is too short")
+    file_path_length = int.from_bytes(value[4:6], "little")
+    description_end = -1
+    for offset in range(6, len(value) - 1, 2):
+        if value[offset : offset + 2] == b"\0\0":
+            description_end = offset + 2
+            break
+    optional_start = description_end + file_path_length
+    if description_end < 0 or optional_start > len(value):
+        raise PreferredBootPathError("preferred Windows boot entry layout is invalid")
+    return len(value) - optional_start
+
+
 def read_manifest(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -37,8 +54,13 @@ def read_manifest(path: Path) -> dict[str, object]:
     if not isinstance(run_id, str) or len(run_id) != 32:
         raise PreferredBootPathError("preferred boot manifest run identifier is invalid")
     windows = value.get("windowsLoader")
+    windows_entry = value.get("windowsBootEntry")
     preferred = value.get("preferred")
-    if not isinstance(windows, dict) or not isinstance(preferred, dict):
+    if (
+        not isinstance(windows, dict)
+        or not isinstance(windows_entry, dict)
+        or not isinstance(preferred, dict)
+    ):
         raise PreferredBootPathError("preferred boot manifest payload is invalid")
     if (
         windows.get("activePath") != r"\EFI\Microsoft\Boot\bootmgfw.efi"
@@ -55,6 +77,23 @@ def read_manifest(path: Path) -> dict[str, object]:
         digest = parent.get(name)
         if not isinstance(digest, str) or len(digest) != 64:
             raise PreferredBootPathError(f"preferred boot manifest hash is invalid: {name}")
+    entry_name = windows_entry.get("name")
+    entry_hash = windows_entry.get("preferredSha256")
+    entry_base64 = windows_entry.get("preferredBytesBase64")
+    try:
+        entry_bytes = base64.b64decode(str(entry_base64), validate=True)
+    except (ValueError, TypeError, binascii.Error) as error:
+        raise PreferredBootPathError("preferred Windows boot entry encoding is invalid") from error
+    if (
+        not isinstance(entry_name, str)
+        or len(entry_name) != 8
+        or not entry_name.startswith("Boot")
+        or any(character not in "0123456789ABCDEF" for character in entry_name[4:])
+        or not isinstance(entry_hash, str)
+        or hashlib.sha256(entry_bytes).hexdigest() != entry_hash
+        or efi_optional_data_length(entry_bytes) != 0
+    ):
+        raise PreferredBootPathError("preferred Windows boot entry contract is invalid")
     return value
 
 

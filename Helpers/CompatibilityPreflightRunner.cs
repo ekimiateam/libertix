@@ -99,16 +99,26 @@ namespace Libertix.Helpers
 
             using (var process = new Process { StartInfo = startInfo })
             {
+                var outputClosed = new TaskCompletionSource<bool>();
+                var errorClosed = new TaskCompletionSource<bool>();
                 process.OutputDataReceived += (_, args) =>
                 {
-                    if (args.Data == null) return;
+                    if (args.Data == null)
+                    {
+                        outputClosed.TrySetResult(true);
+                        return;
+                    }
                     output.AppendLine(args.Data);
                     ApplicationLogger.Write("COMPATIBILITY STDOUT: " + args.Data);
                     onOutput?.Invoke(args.Data);
                 };
                 process.ErrorDataReceived += (_, args) =>
                 {
-                    if (args.Data == null) return;
+                    if (args.Data == null)
+                    {
+                        errorClosed.TrySetResult(true);
+                        return;
+                    }
                     error.AppendLine(args.Data);
                     ApplicationLogger.Write("COMPATIBILITY STDERR: " + args.Data);
                     onOutput?.Invoke(args.Data);
@@ -145,11 +155,9 @@ namespace Libertix.Helpers
                         output + error.ToString());
                 }
 
-                // WaitForExit(timeout) only confirms that the process ended. The
-                // parameterless call also waits for the asynchronous stdout/stderr
-                // handlers to drain, so the final JSON object cannot be parsed
-                // intermittently as an incomplete result.
-                process.WaitForExit();
+                WindowsProcessRunner.WaitForRedirectedStreams(
+                    outputClosed.Task,
+                    errorClosed.Task);
 
                 string diagnostics = output.ToString() + error;
                 PowerShellJsonResult values;

@@ -263,6 +263,26 @@ def test_ssh_transport_eof_becomes_a_workflow_error(monkeypatch: pytest.MonkeyPa
     assert caught.value.details["exception_type"] == "EOFError"
 
 
+def test_ssh_missing_exit_status_is_a_reconnectable_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeParamikoClient(FakeChannel(exit_code=-1))
+    monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)
+
+    with (
+        SSHClient(
+            "example.test", "oem", "secret", known_hosts_path="/tmp/test-known-hosts"
+        ) as client,
+        pytest.raises(WorkflowError) as caught,
+    ):
+        client.run("hostname", step="ssh.missing_exit_status", timeout=5)
+
+    assert caught.value.step == "ssh.missing_exit_status"
+    assert caught.value.details["exit_code"] == -1
+    assert caught.value.details["exception_type"] == "MissingExitStatus"
+    assert caught.value.details["transport_error"] is True
+
+
 def test_ssh_client_writes_sensitive_input_to_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
     transport = FakeParamikoClient()
     monkeypatch.setattr(ssh_module.paramiko, "SSHClient", lambda: transport)

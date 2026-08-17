@@ -2,6 +2,26 @@ $modulePath = Join-Path $PSScriptRoot "..\Scripts\modules\Libertix.Process.psm1"
 Import-Module -Name $modulePath -Force
 
 Describe "Libertix native process output" {
+    It "restores script-scope process commands after a forced nested module import" {
+        $processModulePath = Join-Path `
+            $PSScriptRoot `
+            "..\Scripts\modules\Libertix.Process.psm1"
+        $postInstallModulePath = Join-Path `
+            $PSScriptRoot `
+            "..\Scripts\modules\Libertix.PostInstallVerification.psm1"
+
+        Import-Module -Name $processModulePath -Force -ErrorAction Stop
+        Import-Module -Name $postInstallModulePath -Force -ErrorAction Stop
+        Import-Module -Name $processModulePath -Force -ErrorAction Stop
+
+        Get-Command Get-LibertixNativeSystemExecutable -ErrorAction Stop |
+            Select-Object -ExpandProperty CommandType |
+            Should -Be "Function"
+        Get-Command Invoke-LibertixNativeCommand -ErrorAction Stop |
+            Select-Object -ExpandProperty CommandType |
+            Should -Be "Function"
+    }
+
     It "delivers stdout lines while the process is still running" {
         $markerPath = Join-Path $TestDrive "callback.received"
         $childPath = Join-Path $TestDrive "streaming-child.ps1"

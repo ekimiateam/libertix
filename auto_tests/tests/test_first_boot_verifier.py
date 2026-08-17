@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
 import uuid
@@ -12,7 +14,12 @@ ROOT = Path(__file__).resolve().parents[2]
 ESP_GUID = "11111111-2222-3333-4444-555555555555"
 
 
-def efi_boot_variable(description: str, loader_path: str, partition_number: int = 1) -> bytes:
+def efi_boot_variable(
+    description: str,
+    loader_path: str,
+    partition_number: int = 1,
+    optional_data: bytes = b"",
+) -> bytes:
     hard_drive_node = (
         bytes((0x04, 0x01, 0x2A, 0x00))
         + partition_number.to_bytes(4, "little")
@@ -32,6 +39,7 @@ def efi_boot_variable(description: str, loader_path: str, partition_number: int 
         + len(device_path).to_bytes(2, "little")
         + (description + "\0").encode("utf-16le")
         + device_path
+        + optional_data
     )
     return bytes((0x07, 0x00, 0x00, 0x00)) + load_option
 
@@ -139,12 +147,32 @@ def test_uefi_boot_chain_accepts_verified_preferred_windows_path(
         expected_boot_number="0007",
         expected_partition_number=1,
         expected_partition_guid=ESP_GUID,
-        preferred_path={"manifestSha256": "a" * 64},
+        preferred_path={"manifestSha256": "a" * 64, "bootNumber": "0001"},
     )
 
     assert proof["verified"] is True
     assert proof["type"] == "uefi-preferred-windows-path"
     assert proof["bootNumber"] == "0001"
+
+
+def test_uefi_boot_chain_rejects_windows_optional_data_on_preferred_path(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    guid = verifier.EFI_GLOBAL_VARIABLE_GUID
+    (tmp_path / f"BootCurrent-{guid}").write_bytes(b"\x07\x00\x00\x00" + (1).to_bytes(2, "little"))
+    (tmp_path / f"Boot0001-{guid}").write_bytes(
+        efi_boot_variable(
+            "Windows Boot Manager",
+            r"\EFI\Microsoft\Boot\bootmgfw.efi",
+            optional_data="WINDOWS".encode("utf-16le"),
+        )
+    )
+
+    with pytest.raises(verifier.VerificationError, match="does not identify"):
+        verifier.verify_uefi_boot_current(
+            tmp_path,
+            preferred_path={"manifestSha256": "a" * 64, "bootNumber": "0001"},
+        )
 
 
 def test_preferred_uefi_boot_path_requires_manifest_and_file_hashes(
@@ -180,6 +208,9 @@ def test_preferred_uefi_boot_path_requires_manifest_and_file_hashes(
         encoding="utf-8",
     )
     plan_id = "0123456789abcdef0123456789abcdef"
+    preferred_entry = efi_boot_variable(
+        "Windows Boot Manager", r"\EFI\Microsoft\Boot\bootmgfw.efi"
+    )[4:]
     (efi_root / "preferred-boot-path.json").write_text(
         json.dumps(
             {
@@ -192,6 +223,11 @@ def test_preferred_uefi_boot_path_requires_manifest_and_file_hashes(
                     "activePath": r"\EFI\Microsoft\Boot\bootmgfw.efi",
                     "backupPath": r"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi",
                     "sha256": hashes["bootmgfw.libertix-windows.efi"],
+                },
+                "windowsBootEntry": {
+                    "name": "Boot0001",
+                    "preferredBytesBase64": base64.b64encode(preferred_entry).decode("ascii"),
+                    "preferredSha256": hashlib.sha256(preferred_entry).hexdigest(),
                 },
                 "preferred": {
                     "shimSha256": hashes["bootmgfw.efi"],

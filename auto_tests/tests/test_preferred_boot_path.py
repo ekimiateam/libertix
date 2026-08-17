@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import subprocess
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "assets/live/libertix-preferred-boot-path.py"
+ESP_GUID = "11111111-2222-3333-4444-555555555555"
 
 
 def digest(value: bytes) -> str:
@@ -16,6 +19,28 @@ def digest(value: bytes) -> str:
 def write(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(value)
+
+
+def efi_load_option(description: str, loader_path: str) -> bytes:
+    hard_drive_node = (
+        bytes((0x04, 0x01, 0x2A, 0x00))
+        + (1).to_bytes(4, "little")
+        + (0x800).to_bytes(8, "little")
+        + (0x32000).to_bytes(8, "little")
+        + uuid.UUID(ESP_GUID).bytes_le
+        + bytes((0x02, 0x02))
+    )
+    loader_bytes = (loader_path + "\0").encode("utf-16le")
+    file_path_node = (
+        bytes((0x04, 0x04)) + (4 + len(loader_bytes)).to_bytes(2, "little") + loader_bytes
+    )
+    device_path = hard_drive_node + file_path_node + bytes((0x7F, 0xFF, 0x04, 0x00))
+    return (
+        (1).to_bytes(4, "little")
+        + len(device_path).to_bytes(2, "little")
+        + (description + "\0").encode("utf-16le")
+        + device_path
+    )
 
 
 def fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -30,6 +55,7 @@ def fixture(tmp_path: Path) -> tuple[Path, Path]:
     write(libertix / "grub.cfg", b"configfile /boot/grub/grub.cfg\n")
     write(microsoft / "bootmgfw.efi", old_shim)
     write(microsoft / "bootmgfw.libertix-windows.efi", windows)
+    preferred_entry = efi_load_option("Windows Boot Manager", r"\EFI\Microsoft\Boot\bootmgfw.efi")
     manifest = {
         "version": 1,
         "runId": "a" * 32,
@@ -38,6 +64,11 @@ def fixture(tmp_path: Path) -> tuple[Path, Path]:
             "activePath": r"\EFI\Microsoft\Boot\bootmgfw.efi",
             "backupPath": r"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi",
             "sha256": digest(windows),
+        },
+        "windowsBootEntry": {
+            "name": "Boot0001",
+            "preferredBytesBase64": base64.b64encode(preferred_entry).decode("ascii"),
+            "preferredSha256": digest(preferred_entry),
         },
         "preferred": {
             "shimSha256": digest(old_shim),

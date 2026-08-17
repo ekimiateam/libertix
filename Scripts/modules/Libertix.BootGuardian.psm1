@@ -309,11 +309,11 @@ function Install-LibertixBootGuardian {
         archiveDirectory = $archiveRoot
         serviceSha256 = $sourceHash
     }
+    $firmware = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.Firmware.psm1"
+    Import-Module -Name $firmware -Force -ErrorAction Stop
     if ($Mode -eq "firmware-boot-order") {
         $firmwareRead = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.FirmwareRead.psm1"
-        $firmware = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.Firmware.psm1"
         Import-Module -Name $firmwareRead -Force -ErrorAction Stop
-        Import-Module -Name $firmware -Force -ErrorAction Stop
         $entryName = "Boot{0:X4}" -f [uint16]$owner.BootNumber
         $entryBytes = Get-LibertixFirmwareVariableBytes -Name $entryName
         if (
@@ -340,9 +340,31 @@ function Install-LibertixBootGuardian {
         if (
             [int]$manifest.version -ne 1 -or
             [string]$manifest.runId -ne [string]$State.RunId -or
-            [string]$manifest.status -ne "installed"
+            [string]$manifest.status -ne "installed" -or
+            $manifest.PSObject.Properties.Name -notcontains "windowsBootEntry"
         ) {
             throw "The preferred boot manifest is not installed for this recovery run."
+        }
+        $windowsEntry = $manifest.windowsBootEntry
+        $windowsEntryName = [string]$windowsEntry.name
+        try {
+            $windowsEntryBytes = [Convert]::FromBase64String(
+                [string]$windowsEntry.preferredBytesBase64
+            )
+        } catch [FormatException] {
+            throw "The preferred Windows boot entry encoding is invalid."
+        }
+        $windowsEntryHash = Get-LibertixBootGuardianByteHash `
+            -Bytes ([byte[]]$windowsEntryBytes)
+        if (
+            $windowsEntryName -notmatch '^Boot[0-9A-F]{4}$' -or
+            $windowsEntryHash -ne [string]$windowsEntry.preferredSha256 -or
+            (Get-EfiLoadOptionOptionalDataLength -Bytes $windowsEntryBytes) -ne 0 -or
+            -not (Test-EfiLoadOptionLoaderPath `
+                -Bytes $windowsEntryBytes `
+                -ExpectedPath "\EFI\Microsoft\Boot\bootmgfw.efi")
+        ) {
+            throw "The preferred Windows boot entry contract is invalid."
         }
         Initialize-LibertixBootGuardianReference `
             -EspRoot $EspRoot `
@@ -350,6 +372,9 @@ function Install-LibertixBootGuardian {
         $config["preferredPath"] = [ordered]@{
             manifestPath = "EFI\Libertix\preferred-boot-path.json"
             referenceRoot = $script:GuardianReferenceRelativePath
+            bootNumber = [int][Convert]::ToUInt16($windowsEntryName.Substring(4), 16)
+            entryBytesBase64 = [Convert]::ToBase64String([byte[]]$windowsEntryBytes)
+            entrySha256 = $windowsEntryHash
         }
     }
 
@@ -485,7 +510,7 @@ function Remove-LibertixBootGuardian {
                 ([IO.File]::ReadAllText($referenceOwner, [Text.Encoding]::UTF8)).Trim() -ne `
                     [string]$State.RunId -or
                 @($entries | Sort-Object).Count -ne $expectedEntries.Count -or
-                (Compare-Object `
+                @(Compare-Object `
                     -ReferenceObject ($expectedEntries | Sort-Object) `
                     -DifferenceObject ($entries | Sort-Object)).Count -ne 0
             ) {

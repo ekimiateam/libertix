@@ -1248,6 +1248,7 @@ def test_windows_script_reconnects_after_transport_failure(
             self.reconnections += 1
 
     calls = 0
+    delays: list[float] = []
 
     def fake_run_windows_script(*_args: object, **_kwargs: object) -> CommandResult:
         nonlocal calls
@@ -1255,12 +1256,17 @@ def test_windows_script_reconnects_after_transport_failure(
         if calls == 1:
             raise WorkflowError(
                 "automation.test.windows",
-                "Remote command execution failed",
-                details={"exception_type": "SSHException", "error": "session inactive"},
+                "Remote command ended without an SSH exit status",
+                details={
+                    "exception_type": "MissingExitStatus",
+                    "error": "session closed during reboot",
+                    "transport_error": True,
+                },
             )
         return CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
 
     monkeypatch.setattr(service.validation, "run_windows_script", fake_run_windows_script)
+    monkeypatch.setattr("app.services.automation_postinstall.time.sleep", delays.append)
     ssh = ReconnectingSsh()
 
     response = service._run_windows_script_resiliently(  # noqa: SLF001
@@ -1273,6 +1279,7 @@ def test_windows_script_reconnects_after_transport_failure(
 
     assert response == CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
     assert (calls, ssh.reconnections) == (2, 1)
+    assert delays == [2]
 
 
 def test_linux_script_reconnects_after_transport_failure(
@@ -1398,6 +1405,7 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
 
     service._observe_unattended_wizard(  # noqa: SLF001
         vm,
+        AutomationOptions("test", "test-passphrase", True),
         result,
         4321,
         r"C:\ProgramData\Libertix\Automation\run.status.json",
@@ -1430,6 +1438,77 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
             ("disconnect", None),
         ]
     )
+
+
+def test_bootnext_rollback_injection_is_proven_before_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service.validation,
+        "run_windows_script",
+        lambda _ssh, **kwargs: (
+            calls.append(kwargs)
+            or CommandResult(
+                stdout=(
+                    "FORCED_BOOTNEXT_FAILURE=True\n"
+                    "STATE_PATH=C:\\state.json\n"
+                    "STATE_PHASE=AwaitingReboot\n"
+                    "WINDOWS_BOOT_ID=2026-08-17T12:00:00Z\n"
+                    "RESULT=OK\n"
+                ),
+                stderr="",
+                exit_code=0,
+            )
+        ),
+    )
+    result = ResultBuilder("automation")
+
+    service._force_bootnext_failure(object(), vm, result)  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert calls == [
+        {
+            "script_name": "force_uefi_bootnext_failure.ps1",
+            "config": {"timeout_seconds": 120},
+            "step": "automation.bootnext_rollback.inject",
+            "timeout": 150,
+        }
+    ]
+    assert result.steps[-1].step == "automation.bootnext_rollback.inject"
+
+
+def test_bootnext_rollback_skips_live_monitor_after_controlled_windows_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        boot_guardian_fault="bootnext-rollback",
+    )
+    monkeypatch.setattr(service, "_observe_unattended_wizard", lambda *_args: None)
+    monkeypatch.setattr(
+        service,
+        "_monitor_until_live_boot",
+        lambda *_args, **_kwargs: pytest.fail("the live monitor must not run"),
+    )
+
+    outcome = service._run_unattended_wizard(  # noqa: SLF001
+        vm,
+        options,
+        ResultBuilder("automation"),
+        {
+            "pid": 42,
+            "unattended_status_path": r"C:\status.json",
+            "unattended_acknowledgement_path": r"C:\ack.json",
+        },
+    )
+
+    assert outcome == "bootnext-fallback"
 
 
 def test_unattended_warning_is_captured_before_keyboard_acceptance(
@@ -3699,7 +3778,7 @@ def test_linux_windows_reboot_password_is_sent_only_on_stdin() -> None:
         def run(self, command: str, **kwargs) -> CommandResult:
             self.command = command
             self.stdin_data = kwargs["stdin_data"]
-            return CommandResult(stdout="", stderr="", exit_code=0)
+            return CommandResult(stdout="LIBERTIX_REBOOT_ARMED", stderr="", exit_code=0)
 
     ssh = FakeSSH()
     options = AutomationOptions("test", "test-passphrase", True)
@@ -3720,11 +3799,16 @@ def test_final_windows_reboot_uses_a_distinct_result_name() -> None:
     result = ResultBuilder("automation")
 
     class FakeSSH:
-        def run(self, _command: str, **_kwargs) -> CommandResult:
-            return CommandResult(stdout="", stderr="", exit_code=0)
+        def __init__(self) -> None:
+            self.command = ""
 
+        def run(self, command: str, **_kwargs) -> CommandResult:
+            self.command = command
+            return CommandResult(stdout="LIBERTIX_REBOOT_ARMED", stderr="", exit_code=0)
+
+    ssh = FakeSSH()
     service._request_windows_boot(  # type: ignore[arg-type]  # noqa: SLF001
-        FakeSSH(),
+        ssh,
         vm,
         AutomationOptions("test", "test-passphrase", True),
         result,
@@ -3733,6 +3817,9 @@ def test_final_windows_reboot_uses_a_distinct_result_name() -> None:
 
     assert result.steps[-1].context["test"] == "linux.final_windows_reboot"
     assert result.steps[-1].message == "linux.final_windows_reboot: OK"
+    assert "systemd-run" in ssh.command
+    assert "--on-active=5s" in ssh.command
+    assert "LIBERTIX_REBOOT_ARMED" in ssh.command
 
 
 def test_windows_post_install_checks_continue_after_one_failure(
@@ -4390,6 +4477,14 @@ def test_windows_post_install_checks_unlock_the_interactive_session(
             CommandResult(
                 stdout=(
                     "EXPLORER_SESSION_READY=False\nSETUP_EXPERIENCE_PRESENT=False\n"
+                    "LOGIN_SCREEN_PRESENT=False\nSESSION_ID=-1\n"
+                ),
+                stderr="",
+                exit_code=0,
+            ),
+            CommandResult(
+                stdout=(
+                    "EXPLORER_SESSION_READY=False\nSETUP_EXPERIENCE_PRESENT=False\n"
                     "LOGIN_SCREEN_PRESENT=True\nSESSION_ID=2\n"
                 ),
                 stderr="",
@@ -4443,6 +4538,7 @@ def test_windows_post_install_checks_unlock_the_interactive_session(
     ]
     assert disconnects == [True]
     assert [step.step for step in result.steps] == [
+        "automation.windows_graphical_session_wait",
         "automation.windows_graphical_session_wait",
         "automation.windows_graphical_login",
         "automation.windows_graphical_session",

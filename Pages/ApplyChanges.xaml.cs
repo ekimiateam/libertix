@@ -91,8 +91,19 @@ namespace Libertix.Pages
 
         private async void ApplyChanges_Loaded(object sender, RoutedEventArgs e)
         {
-            await UnattendedWorkflow.PublishStageAndWaitAsync("installation-started");
-            await StartInstallationAsync();
+            Loaded -= ApplyChanges_Loaded;
+            try
+            {
+                await UnattendedWorkflow.PublishStageAndWaitAsync("installation-started");
+                await StartInstallationAsync();
+            }
+            catch (Exception ex)
+            {
+                Log($"ERROR: Installation startup failed: {ex.Message}");
+                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+                PublishUnattendedFailure("installation-start-failed", ex.Message);
+                FinishInstallation(enableBackButton: true);
+            }
         }
 
         private void LoadSummary()

@@ -13,6 +13,11 @@ Set-StrictMode -Version Latest
 $script:LinuxReadOnlyTaskName = "LibertixLinuxReadOnly"
 $script:LinuxReadOnlyPinTaskPrefix = "LibertixLinuxReadOnlyPin_"
 $script:QuickAccessNamespace = "shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}"
+$processModulePath = Join-Path $PSScriptRoot "Libertix.Process.psm1"
+if (-not (Test-Path -LiteralPath $processModulePath -PathType Leaf)) {
+    throw "Native-process module is missing from the Windows sharing payload."
+}
+Import-Module -Name $processModulePath -Force -ErrorAction Stop
 
 function Write-ShareLog {
     param([string]$Message)
@@ -37,8 +42,11 @@ function Invoke-ProcessWithTimeout {
         -PassThru
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
-        & $taskkill /PID $process.Id /T /F 2>&1 | Out-Null
-        $taskkillExitCode = $LASTEXITCODE
+        $taskkillResult = Invoke-LibertixNativeCommand `
+            -FilePath $taskkill `
+            -ArgumentList @("/PID", [string]$process.Id, "/T", "/F") `
+            -TimeoutSeconds 15
+        $taskkillExitCode = $taskkillResult.ExitCode
         $process.WaitForExit(10000) | Out-Null
         if ($taskkillExitCode -ne 0 -or -not $process.HasExited) {
             throw "$FilePath timed out and its process tree could not be proven stopped."
@@ -147,6 +155,34 @@ function Get-Config {
     return $config
 }
 
+function Get-NativeProgramFilesPath {
+    $path = [Environment]::GetEnvironmentVariable("ProgramW6432", "Process")
+    if ([string]::IsNullOrWhiteSpace($path) -and [Environment]::Is64BitOperatingSystem) {
+        $baseKey = $null
+        $currentVersion = $null
+        try {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                [Microsoft.Win32.RegistryView]::Registry64
+            )
+            $currentVersion = $baseKey.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion")
+            if ($null -ne $currentVersion) {
+                $path = [string]$currentVersion.GetValue("ProgramFilesDir", "")
+            }
+        } finally {
+            if ($null -ne $currentVersion) { $currentVersion.Dispose() }
+            if ($null -ne $baseKey) { $baseKey.Dispose() }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        $path = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    }
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Container)) {
+        throw "The native Program Files directory could not be resolved."
+    }
+    return $path.TrimEnd([IO.Path]::DirectorySeparatorChar)
+}
+
 function Get-LinuxPartition {
     param([Parameter(Mandatory = $true)]$Config)
     $disk = Get-Disk -Number ([int]$Config.SystemDiskNumber) -ErrorAction Stop
@@ -247,7 +283,7 @@ function Get-ExpectedExt4MountProcesses {
         [Parameter(Mandatory = $true)][string]$Drive
     )
 
-    $ext4Exe = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+    $ext4Exe = Join-Path (Get-NativeProgramFilesPath) "ext4-win-driver\ext4.exe"
     $device = "\\.\PhysicalDrive$($Config.SystemDiskNumber)"
     $devicePattern = [regex]::Escape($device)
     $drivePattern = [regex]::Escape($Drive)
@@ -344,7 +380,10 @@ function Install-WinFspRuntimeForExt4 {
         throw "WinFsp x64 runtime DLL is missing."
     }
 
-    $ext4Directory = Join-Path $env:ProgramFiles "ext4-win-driver"
+    $ext4Directory = Join-Path (Get-NativeProgramFilesPath) "ext4-win-driver"
+    if (-not (Test-Path -LiteralPath $ext4Directory -PathType Container)) {
+        throw "The native ext4 driver directory is missing."
+    }
     $destination = Join-Path $ext4Directory "winfsp-x64.dll"
     Copy-Item -LiteralPath $runtime -Destination $destination -Force -ErrorAction Stop
     Write-ShareLog "WinFsp x64 runtime copied next to ext4.exe: $runtime"
@@ -359,10 +398,13 @@ function Install-MountTask {
     }
 
     $taskName = $script:LinuxReadOnlyTaskName
-    $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Mount' -f `
+    $hiddenHost = Join-Path $root "Libertix.BootGuardian.exe"
+    if (-not (Test-Path -LiteralPath $hiddenHost -PathType Leaf)) {
+        throw "The console-free scheduled-task host is missing."
+    }
+    $arguments = '--run-hidden-powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Mount' -f `
         $mountScript, $ConfigPath
-    $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments
+    $action = New-ScheduledTaskAction -Execute $hiddenHost -Argument $arguments
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $principal = New-ScheduledTaskPrincipal `
         -UserId "SYSTEM" `
@@ -394,8 +436,11 @@ function Install-ExplorerPinTasks {
         throw "Read-only mount launcher is missing."
     }
 
-    $powerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-    $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Pin' -f `
+    $hiddenHost = Join-Path $root "Libertix.BootGuardian.exe"
+    if (-not (Test-Path -LiteralPath $hiddenHost -PathType Leaf)) {
+        throw "The console-free scheduled-task host is missing."
+    }
+    $arguments = '--run-hidden-powershell -NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Pin' -f `
         $mountScript, $ConfigPath
     $profiles = @(Get-RealWindowsProfiles)
     if ($profiles.Count -eq 0) {
@@ -406,7 +451,7 @@ function Install-ExplorerPinTasks {
         $sid = [Security.Principal.SecurityIdentifier]::new([string]$userProfile.SID)
         $userId = $sid.Translate([Security.Principal.NTAccount]).Value
         $taskName = "$($script:LinuxReadOnlyPinTaskPrefix)$(([string]$userProfile.SID).Replace('-', '_'))"
-        $action = New-ScheduledTaskAction -Execute $powerShell -Argument $arguments
+        $action = New-ScheduledTaskAction -Execute $hiddenHost -Argument $arguments
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
         $principal = New-ScheduledTaskPrincipal `
             -UserId $userId `
@@ -473,9 +518,18 @@ function Install-ExplorerShortcuts {
                 throw "Refusing to replace a non-junction path: $junctionPath"
             }
         } else {
-            $junctionOutput = @(& cmd.exe /d /c mklink /J $junctionPath $LinuxHome 2>&1)
-            if ($LASTEXITCODE -ne 0) {
-                throw "Explorer junction creation failed with rc=$LASTEXITCODE`: $($junctionOutput -join ' ')"
+            $cmdPath = Join-Path $env:SystemRoot "System32\cmd.exe"
+            $junctionResult = Invoke-LibertixNativeCommand `
+                -FilePath $cmdPath `
+                -ArgumentList @("/d", "/c", "mklink", "/J", $junctionPath, $LinuxHome) `
+                -TimeoutSeconds 30
+            $junctionOutput = (
+                $junctionResult.StandardOutput +
+                [Environment]::NewLine +
+                $junctionResult.StandardError
+            ).Trim()
+            if ($junctionResult.ExitCode -ne 0) {
+                throw "Explorer junction creation failed with rc=$($junctionResult.ExitCode)`: $junctionOutput"
             }
         }
 
@@ -510,7 +564,7 @@ function Install-ExplorerShortcuts {
 function Start-ReadOnlyMount {
     param([Parameter(Mandatory = $true)]$Config)
     $partition = Get-LinuxPartition -Config $Config
-    $ext4Exe = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+    $ext4Exe = Join-Path (Get-NativeProgramFilesPath) "ext4-win-driver\ext4.exe"
     if (-not (Test-Path -LiteralPath $ext4Exe -PathType Leaf)) {
         throw "ext4.exe is missing after driver installation."
     }
@@ -557,12 +611,28 @@ function Start-ReadOnlyMount {
     $launched = $false
     try {
         if (-not $existingDrive) {
-            & $launchCtl stop "ext4-mount" $instance 2>&1 | Out-Null
-            $launchOutput = @(
-                & $launchCtl start "ext4-mount" $instance $drive $device ([string]$partition.PartitionNumber) 2>&1
-            )
-            if ($LASTEXITCODE -ne 0) {
-                throw "WinFsp launcher failed with rc=$LASTEXITCODE`: $($launchOutput -join ' ')"
+            $null = Invoke-LibertixNativeCommand `
+                -FilePath $launchCtl `
+                -ArgumentList @("stop", "ext4-mount", $instance) `
+                -TimeoutSeconds 30
+            $launchResult = Invoke-LibertixNativeCommand `
+                -FilePath $launchCtl `
+                -ArgumentList @(
+                    "start",
+                    "ext4-mount",
+                    $instance,
+                    $drive,
+                    $device,
+                    [string]$partition.PartitionNumber
+                ) `
+                -TimeoutSeconds 60
+            $launchOutput = (
+                $launchResult.StandardOutput +
+                [Environment]::NewLine +
+                $launchResult.StandardError
+            ).Trim()
+            if ($launchResult.ExitCode -ne 0) {
+                throw "WinFsp launcher failed with rc=$($launchResult.ExitCode)`: $launchOutput"
             }
             $launched = $true
             Write-ShareLog "WinFsp launcher started ext4-mount instance $instance on $drive."
@@ -614,7 +684,10 @@ function Start-ReadOnlyMount {
         Write-ShareLog "Linux mounted read-only on $drive."
     } catch {
         if ($launched) {
-            & $launchCtl stop "ext4-mount" $instance 2>&1 | Out-Null
+            $null = Invoke-LibertixNativeCommand `
+                -FilePath $launchCtl `
+                -ArgumentList @("stop", "ext4-mount", $instance) `
+                -TimeoutSeconds 30
         }
         throw
     }
@@ -640,7 +713,7 @@ try {
     }
     if ($Finalize) {
         $setup = [string]$config.SetupPath
-        $ext4Exe = Join-Path $env:ProgramFiles "ext4-win-driver\ext4.exe"
+        $ext4Exe = Join-Path (Get-NativeProgramFilesPath) "ext4-win-driver\ext4.exe"
         $winFspKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
         if (Test-Path -LiteralPath $setup -PathType Leaf) {
             $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()

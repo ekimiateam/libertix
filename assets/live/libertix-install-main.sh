@@ -253,6 +253,32 @@ esac
     die "protected account secret contains an invalid control character"
 export PASSWORD_HASH
 
+retire_account_secret_or_die() {
+    local mountpoint="/mnt/libertix-account-secret-retirement"
+    local secret_path result=0
+
+    mkdir -p "$mountpoint"
+    findmnt -rn -S "$WINDOWS_PART" | grep -q . && \
+        die "Windows partition is already mounted during account secret retirement"
+    mount -t ntfs-3g -o rw "$WINDOWS_PART" "$mountpoint" || \
+        die "Windows partition could not be mounted to retire the account secret"
+
+    secret_path="$mountpoint/$PASSWORD_HASH_WINDOWS_REL"
+    if [ -L "$secret_path" ] || { [ -e "$secret_path" ] && [ ! -f "$secret_path" ]; }; then
+        result=1
+    elif [ -f "$secret_path" ]; then
+        rm -f -- "$secret_path" || result=1
+    fi
+    [ ! -e "$secret_path" ] || result=1
+    sync "$(dirname "$secret_path")" 2>/dev/null || sync
+    umount "$mountpoint" || result=1
+    [ "$result" -eq 0 ] || die "protected account secret could not be retired"
+
+    PASSWORD_HASH=""
+    unset PASSWORD_HASH
+    echo "Protected account secret retired after target verification."
+}
+
 # Keep Windows NTFS unmounted while changing the MBR table. Any mounted
 # partition on the target disk can make BLKRRPART/partprobe keep the old view.
 mark "035-umount-windows"
@@ -388,6 +414,7 @@ assert_recovery_unchanged_or_die
 start_installation_state_step "target.installation-verified"
 final_verify_or_die
 complete_installation_state_step "target.installation-verified"
+retire_account_secret_or_die
 complete_installation_state
 
 echo ""

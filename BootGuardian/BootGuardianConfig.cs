@@ -150,10 +150,31 @@ namespace Libertix.BootGuardian
         [DataMember(Name = "referenceRoot", IsRequired = true)]
         public string ReferenceRoot { get; set; }
 
+        [DataMember(Name = "bootNumber", IsRequired = true)]
+        public int BootNumber { get; set; }
+
+        [DataMember(Name = "entryBytesBase64", IsRequired = true)]
+        public string EntryBytesBase64 { get; set; }
+
+        [DataMember(Name = "entrySha256", IsRequired = true)]
+        public string EntrySha256 { get; set; }
+
+        public byte[] GetEntryBytes()
+        {
+            try { return Convert.FromBase64String(EntryBytesBase64 ?? string.Empty); }
+            catch (FormatException error) { throw new InvalidDataException("Boot guardian preferred UEFI entry encoding is invalid.", error); }
+        }
+
         public void Validate()
         {
             ValidateRelative(ManifestPath, "manifest");
             ValidateRelative(ReferenceRoot, "reference root");
+            if (BootNumber < 0 || BootNumber > ushort.MaxValue)
+                throw new InvalidDataException("Boot guardian preferred UEFI boot number is invalid.");
+            byte[] entry = GetEntryBytes();
+            if (entry.Length < 8 || !Hashing.IsSha256(EntrySha256) ||
+                !string.Equals(Hashing.Sha256(entry), EntrySha256, StringComparison.Ordinal))
+                throw new InvalidDataException("Boot guardian preferred UEFI entry hash is invalid.");
         }
 
         internal static void ValidateRelative(string value, string name)

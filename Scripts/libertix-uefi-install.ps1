@@ -357,25 +357,35 @@ if ($RecoverPreviousTransaction) {
 }
 
 if ($Revert) {
-    Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $ExpectedRecoveryRunId
-    $rollbackContext = Get-LibertixDurableRecoveryContext -RunId $ExpectedRecoveryRunId
-    if ([string]$rollbackContext.ExecutionState.status -eq "pending") {
-        throw "UEFI recovery execution state is pending; no rollback is active."
+    try {
+        Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $ExpectedRecoveryRunId
+        $rollbackContext = Get-LibertixDurableRecoveryContext -RunId $ExpectedRecoveryRunId
+        if ([string]$rollbackContext.ExecutionState.status -eq "pending") {
+            throw "UEFI recovery execution state is pending; no rollback is active."
+        }
+        if ([string]$rollbackContext.ExecutionState.status -eq "rolled-back") {
+            # The ledger is already terminal. Keep the physical cleanup idempotent
+            # without trying to record a second rollback transition.
+            $installationPlan = $null
+            $InstallationPlanPath = ""
+            $ExecutionStatePath = ""
+        } else {
+            $installationPlan = $rollbackContext.Plan
+            $InstallationPlanPath = $rollbackContext.PlanPath
+            $ExecutionStatePath = $rollbackContext.StatePath
+        }
+        Start-LibertixTrackedRollback
+        Invoke-Revert
+        exit 0
+    } catch {
+        $rollbackError = $_
+        Write-ExceptionDiagnostics `
+            -ErrorRecord $rollbackError `
+            -Kind "Rollback" `
+            -CorrelationId $ExpectedRecoveryRunId `
+            -Stage "rollback"
+        exit 1
     }
-    if ([string]$rollbackContext.ExecutionState.status -eq "rolled-back") {
-        # The ledger is already terminal. Keep the physical cleanup idempotent
-        # without trying to record a second rollback transition.
-        $installationPlan = $null
-        $InstallationPlanPath = ""
-        $ExecutionStatePath = ""
-    } else {
-        $installationPlan = $rollbackContext.Plan
-        $InstallationPlanPath = $rollbackContext.PlanPath
-        $ExecutionStatePath = $rollbackContext.StatePath
-    }
-    Start-LibertixTrackedRollback
-    Invoke-Revert
-    exit 0
 }
 
 if ($RestoreWindowsSettings) {
