@@ -155,7 +155,7 @@ embedded build version:
 
 ```text
 dev_<sha7>  -> https://ekimiateam.github.io/libertix/dev
-0.1        -> https://ekimiateam.github.io/libertix/main
+0.3         -> https://ekimiateam.github.io/libertix/main
 ```
 
 Reusing local ISO files does not remove the catalogue requirement. Libertix first downloads

@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "mainRelease": {
-    "version": "0.2",
-    "title": "Libertix 0.2",
-    "notes": "Improves account validation, installation recovery, post-install verification, file sharing, downloads, and automated testing."
+    "version": "0.3",
+    "title": "Libertix 0.3",
+    "notes": "Adds unattended installation, offline NTFS resize fallback, persistent UEFI boot repair, stronger rollback and post-install verification, safer file sharing, standalone delivery, and expanded automated validation."
   },
   "distributions": [
     {
