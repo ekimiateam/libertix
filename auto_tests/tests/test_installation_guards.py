@@ -74,7 +74,7 @@ def test_compatibility_preflight_checks_download_access_and_one_disk_before_layo
     assert "Filepool.CatalogUrl" in page
 
 
-def test_compatibility_blocks_only_confirmed_battery_powered_portables() -> None:
+def test_compatibility_blocks_an_explicitly_disconnected_ac_line() -> None:
     runner = read("Helpers/CompatibilityPreflightRunner.cs")
     probe = read("Helpers/SystemPowerProbe.cs")
     catalogue = json.loads(read("Resources/Libertix.Translations.json"))
@@ -83,18 +83,21 @@ def test_compatibility_blocks_only_confirmed_battery_powered_portables() -> None
     assert runner.index("EnsureAcPowerIfPortable(onOutput);") < runner.index(
         "CompatibilityInfo result = await Task.Run"
     )
-    assert "power.State != SystemPowerState.OnBattery" in runner
+    assert "power.State != SystemPowerState.AcDisconnected" in runner
     assert '"COMPAT_E_AC_POWER_REQUIRED"' in runner
-    assert "batteryFlag == byte.MaxValue" in probe
-    assert probe.index("batteryFlag == byte.MaxValue") < probe.index(
-        "(batteryFlag & noSystemBattery)"
-    )
+    assert "if (acLineStatus == 0)" in probe
+    assert probe.index("if (acLineStatus == 0)") < probe.index("if (batteryFlag != byte.MaxValue")
     assert "SystemPowerState.NoSystemBattery" in probe
-    assert "SystemPowerState.OnBattery" in probe
+    assert "SystemPowerState.AcDisconnected" in probe
+    assert 'DllImport("PowrProf.dll")' in probe
+    assert "ClassifySystemBatteryState(" in probe
+    assert "batteryStateStatus == 0" in probe
+    expected_power_terms = {"en": "AC power", "fr": "secteur", "es": "corriente"}
     for language in ("en", "fr", "es"):
         messages = catalogue["languages"][language]["wpf"]
         assert messages["CompatibilityPowerCheck"].strip()
         assert messages["CompatibilityAcPowerRequired"].strip()
+        assert expected_power_terms[language] in messages["CompatibilityAcPowerRequired"]
 
 
 def test_live_boot_mode_function_is_fail_closed(

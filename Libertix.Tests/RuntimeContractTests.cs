@@ -13,26 +13,47 @@ namespace Libertix.Tests
     public sealed class RuntimeContractTests
     {
         [TestMethod]
-        public void SystemPowerProbeBlocksOnlyAConfirmedBatteryPoweredSystem()
+        public void SystemPowerProbeTrustsTheExplicitAcLineStatus()
         {
             Assert.AreEqual(
-                SystemPowerState.OnBattery,
+                SystemPowerState.AcDisconnected,
                 SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: 0));
             Assert.AreEqual(
-                SystemPowerState.OnBattery,
+                SystemPowerState.AcDisconnected,
                 SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: 4));
+            Assert.AreEqual(
+                SystemPowerState.AcDisconnected,
+                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: 128));
+            Assert.AreEqual(
+                SystemPowerState.AcDisconnected,
+                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: byte.MaxValue));
             Assert.AreEqual(
                 SystemPowerState.AcConnected,
                 SystemPowerProbe.Classify(acLineStatus: 1, batteryFlag: 8));
             Assert.AreEqual(
-                SystemPowerState.NoSystemBattery,
-                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: 128));
+                SystemPowerState.AcConnected,
+                SystemPowerProbe.Classify(acLineStatus: 1, batteryFlag: byte.MaxValue));
             Assert.AreEqual(
-                SystemPowerState.Unknown,
-                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: byte.MaxValue));
+                SystemPowerState.NoSystemBattery,
+                SystemPowerProbe.Classify(acLineStatus: byte.MaxValue, batteryFlag: 128));
             Assert.AreEqual(
                 SystemPowerState.Unknown,
                 SystemPowerProbe.Classify(acLineStatus: byte.MaxValue, batteryFlag: 0));
+            Assert.AreEqual(
+                SystemPowerState.Unknown,
+                SystemPowerProbe.Classify(
+                    acLineStatus: byte.MaxValue,
+                    batteryFlag: byte.MaxValue));
+
+            Assert.AreEqual(
+                SystemPowerState.AcConnected,
+                SystemPowerProbe.ClassifySystemBatteryState(acOnline: 1, batteryPresent: 1));
+            Assert.AreEqual(
+                SystemPowerState.AcDisconnected,
+                SystemPowerProbe.ClassifySystemBatteryState(acOnline: 0, batteryPresent: 1));
+            Assert.AreEqual(
+                SystemPowerState.NoSystemBattery,
+                SystemPowerProbe.ClassifySystemBatteryState(acOnline: 0, batteryPresent: 0));
         }
 
         [TestMethod]

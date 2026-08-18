@@ -80,18 +80,22 @@ namespace Libertix.Helpers
                 "COMPATIBILITY: power state=" + power.State +
                 "; acLineStatus=" + power.AcLineStatus +
                 "; batteryFlag=" + power.BatteryFlag +
-                "; nativeError=" + power.NativeErrorCode + ".");
-            if (power.State != SystemPowerState.OnBattery)
+                "; getSystemPowerStatusError=" + power.GetSystemPowerStatusErrorCode +
+                "; systemBatteryStateStatus=" + power.SystemBatteryStateStatus +
+                "; usedSystemBatteryState=" + power.UsedSystemBatteryState + ".");
+            if (power.State != SystemPowerState.AcDisconnected)
                 return;
 
             throw new CompatibilityPreflightException(
                 "COMPAT_E_AC_POWER_REQUIRED",
                 Localization.GetString(
                     "CompatibilityAcPowerRequired",
-                    "This laptop is running on battery power. Connect it to AC power, then choose Try again."),
+                    "This computer is not connected to AC power. Connect it to AC power, then choose Try again."),
                 "powerState=" + power.State +
                 "; acLineStatus=" + power.AcLineStatus +
-                "; batteryFlag=" + power.BatteryFlag + ".");
+                "; batteryFlag=" + power.BatteryFlag +
+                "; systemBatteryStateStatus=" + power.SystemBatteryStateStatus +
+                "; usedSystemBatteryState=" + power.UsedSystemBatteryState + ".");
         }
 
         private static CompatibilityInfo RunProcess(
