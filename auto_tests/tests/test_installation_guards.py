@@ -74,6 +74,29 @@ def test_compatibility_preflight_checks_download_access_and_one_disk_before_layo
     assert "Filepool.CatalogUrl" in page
 
 
+def test_compatibility_blocks_only_confirmed_battery_powered_portables() -> None:
+    runner = read("Helpers/CompatibilityPreflightRunner.cs")
+    probe = read("Helpers/SystemPowerProbe.cs")
+    catalogue = json.loads(read("Resources/Libertix.Translations.json"))
+
+    assert "EnsureAcPowerIfPortable(onOutput);" in runner
+    assert runner.index("EnsureAcPowerIfPortable(onOutput);") < runner.index(
+        "CompatibilityInfo result = await Task.Run"
+    )
+    assert "power.State != SystemPowerState.OnBattery" in runner
+    assert '"COMPAT_E_AC_POWER_REQUIRED"' in runner
+    assert "batteryFlag == byte.MaxValue" in probe
+    assert probe.index("batteryFlag == byte.MaxValue") < probe.index(
+        "(batteryFlag & noSystemBattery)"
+    )
+    assert "SystemPowerState.NoSystemBattery" in probe
+    assert "SystemPowerState.OnBattery" in probe
+    for language in ("en", "fr", "es"):
+        messages = catalogue["languages"][language]["wpf"]
+        assert messages["CompatibilityPowerCheck"].strip()
+        assert messages["CompatibilityAcPowerRequired"].strip()
+
+
 def test_live_boot_mode_function_is_fail_closed(
     run_shell_function: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:

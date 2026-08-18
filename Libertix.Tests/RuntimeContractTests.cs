@@ -13,6 +13,29 @@ namespace Libertix.Tests
     public sealed class RuntimeContractTests
     {
         [TestMethod]
+        public void SystemPowerProbeBlocksOnlyAConfirmedBatteryPoweredSystem()
+        {
+            Assert.AreEqual(
+                SystemPowerState.OnBattery,
+                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: 0));
+            Assert.AreEqual(
+                SystemPowerState.OnBattery,
+                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: 4));
+            Assert.AreEqual(
+                SystemPowerState.AcConnected,
+                SystemPowerProbe.Classify(acLineStatus: 1, batteryFlag: 8));
+            Assert.AreEqual(
+                SystemPowerState.NoSystemBattery,
+                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: 128));
+            Assert.AreEqual(
+                SystemPowerState.Unknown,
+                SystemPowerProbe.Classify(acLineStatus: 0, batteryFlag: byte.MaxValue));
+            Assert.AreEqual(
+                SystemPowerState.Unknown,
+                SystemPowerProbe.Classify(acLineStatus: byte.MaxValue, batteryFlag: 0));
+        }
+
+        [TestMethod]
         public void StableBuildUsesTheSignedMainPagesChannel()
         {
             ApplicationBuild build = ApplicationBuild.Parse("0.1");

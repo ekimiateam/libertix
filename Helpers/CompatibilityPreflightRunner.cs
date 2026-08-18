@@ -51,6 +51,7 @@ namespace Libertix.Helpers
                 $"COMPATIBILITY: preflight started; skipNvramWriteProbe={skipNvramWriteProbe}.");
             try
             {
+                EnsureAcPowerIfPortable(onOutput);
                 CompatibilityInfo result = await Task.Run(() => RunProcess(
                     scriptPath,
                     languageCode,
@@ -65,6 +66,32 @@ namespace Libertix.Helpers
                 ApplicationLogger.WriteException("COMPATIBILITY: preflight failed.", ex);
                 throw;
             }
+        }
+
+        private static void EnsureAcPowerIfPortable(Action<string> onOutput)
+        {
+            string checkMessage = Localization.GetString(
+                "CompatibilityPowerCheck",
+                "Checking the power source");
+            onOutput?.Invoke("CHECK=COMPAT_025_POWER: " + checkMessage);
+
+            SystemPowerSnapshot power = SystemPowerProbe.Read();
+            ApplicationLogger.Write(
+                "COMPATIBILITY: power state=" + power.State +
+                "; acLineStatus=" + power.AcLineStatus +
+                "; batteryFlag=" + power.BatteryFlag +
+                "; nativeError=" + power.NativeErrorCode + ".");
+            if (power.State != SystemPowerState.OnBattery)
+                return;
+
+            throw new CompatibilityPreflightException(
+                "COMPAT_E_AC_POWER_REQUIRED",
+                Localization.GetString(
+                    "CompatibilityAcPowerRequired",
+                    "This laptop is running on battery power. Connect it to AC power, then choose Try again."),
+                "powerState=" + power.State +
+                "; acLineStatus=" + power.AcLineStatus +
+                "; batteryFlag=" + power.BatteryFlag + ".");
         }
 
         private static CompatibilityInfo RunProcess(
