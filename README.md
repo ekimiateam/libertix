@@ -12,6 +12,11 @@ Read the project's position on AI-assisted development and contributions in the
 > Libertix modifies disk partitions and boot configuration. Back up important data before using it.
 > The compatibility checks deliberately reject layouts that cannot be handled safely.
 
+
+## Demo
+
+https://github.com/user-attachments/assets/d0b94e3b-0c9c-406e-9ee4-da1cb0888cdc
+
 ## Architecture overview
 
 Libertix is split into three execution environments: the Windows application prepares the machine,
