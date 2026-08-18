@@ -29,7 +29,9 @@ DistributionId = Literal["mint", "zorin"]
 FirstBoot = Literal["windows", "linux"]
 BootGuardianFault = Literal[
     "none",
+    "bios-rollback",
     "boot-order",
+    "bootnext-fallback",
     "bootnext-rollback",
     "preferred-path",
     "preferred-path-rollback",
@@ -123,7 +125,7 @@ class AutomationRequest(ValidationRequest):
     )
     boot_guardian_fault: BootGuardianFault = Field(
         default="none",
-        description=("Development-only fault injection used to prove preshutdown boot repair"),
+        description=("Development-only recovery scenario used to prove rollback or boot repair"),
     )
 
     @field_validator("linux_username")

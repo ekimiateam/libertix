@@ -311,8 +311,12 @@
             <span>Test de réparation du gardien de démarrage</span>
             <select id="bootGuardianFault">
               <option value="none">Aucun test</option>
+              <option value="bios-rollback">Annuler après mutation BIOS et vérifier le rollback</option>
               <option value="boot-order">Altérer puis réparer BootOrder</option>
+              <option value="bootnext-fallback">Échec BootNext puis accepter BootOrder</option>
+              <option value="bootnext-rollback">Échec BootNext puis restaurer Windows</option>
               <option value="preferred-path">Altérer puis réparer le chemin EFI de secours</option>
+              <option value="preferred-path-rollback">Refuser le chemin EFI et restaurer Windows</option>
             </select>
           </label>
           <p class="muted">

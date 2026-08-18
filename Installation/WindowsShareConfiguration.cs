@@ -20,6 +20,11 @@ namespace Libertix.Installation
         public string ShortcutDescription { get; set; }
         public string SetupPath { get; set; }
         public string SetupSha256 { get; set; }
+        public long SetupAttachedContainerSize { get; set; }
+        public string WinFspPayloadName { get; set; }
+        public string WinFspPayloadSha256 { get; set; }
+        public string DriverPayloadName { get; set; }
+        public string DriverPayloadSha256 { get; set; }
     }
 
     internal static class WindowsShareConfigurationStore
@@ -46,7 +51,13 @@ namespace Libertix.Installation
                 configuration.ExpectedLinuxPartitionSize <= 0 ||
                 configuration.PartitionSizeToleranceBytes <= 0 ||
                 configuration.PartitionSizeToleranceBytes >
-                    configuration.ExpectedLinuxPartitionSize)
+                    configuration.ExpectedLinuxPartitionSize ||
+                configuration.SetupAttachedContainerSize <= 0 ||
+                !IsSha256(configuration.SetupSha256) ||
+                !IsFileName(configuration.WinFspPayloadName) ||
+                !IsSha256(configuration.WinFspPayloadSha256) ||
+                !IsFileName(configuration.DriverPayloadName) ||
+                !IsSha256(configuration.DriverPayloadSha256))
             {
                 throw new InvalidOperationException(
                     "Windows share configuration has invalid partition identity.");
@@ -55,6 +66,24 @@ namespace Libertix.Installation
             AtomicJsonFile.Write(
                 path,
                 JsonSerializer.Serialize(configuration, SerializerOptions));
+        }
+
+        private static bool IsFileName(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                string.Equals(Path.GetFileName(value), value, StringComparison.Ordinal);
+        }
+
+        private static bool IsSha256(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.Length != 64)
+                return false;
+            foreach (char character in value)
+            {
+                if (!Uri.IsHexDigit(character))
+                    return false;
+            }
+            return true;
         }
     }
 }

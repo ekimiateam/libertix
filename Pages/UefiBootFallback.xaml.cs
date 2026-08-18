@@ -6,7 +6,6 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Navigation;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -27,8 +26,6 @@ namespace Libertix.Pages
         private UefiRecoveryState _state;
         private string _statePath;
         private bool _running;
-        private bool _secureBootFlow;
-        private bool _secureBootRestored;
         private bool _preferredPathFlow;
 
         public UefiBootFallback() : this(((App)Application.Current).InstallationState)
@@ -40,7 +37,6 @@ namespace Libertix.Pages
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             LoadRecoveryState();
-            Loaded += UefiBootFallback_Loaded;
         }
 
         private void LoadRecoveryState()
@@ -56,10 +52,6 @@ namespace Libertix.Pages
                 if (IsPreferredPathPhase(_state.Phase))
                 {
                     ConfigurePreferredPathFlow();
-                }
-                else if (_state.SecureBootEnabled)
-                {
-                    ConfigureSecureBootFlow();
                 }
                 else
                 {
@@ -92,26 +84,6 @@ namespace Libertix.Pages
             CurrentStepText.Text = Localization.GetString("UefiPreferredPathReady");
             FallbackButton.Content = Localization.GetString("UefiPreferredPathUse");
             Log(Localization.GetString("UefiPreferredPathDetectedLog"));
-        }
-
-        private void ConfigureSecureBootFlow()
-        {
-            _secureBootFlow = true;
-            PageTitleText.Text = Localization.GetString("UefiFallbackSecureBootTitle");
-            DescriptionText.Text = Localization.GetString("UefiFallbackSecureBootDescription");
-            SecureBootGuidancePanel.Visibility = Visibility.Visible;
-            FallbackButton.Visibility = Visibility.Collapsed;
-            CancelButton.Visibility = Visibility.Collapsed;
-            SecureBootCloseButton.Visibility = Visibility.Visible;
-            CurrentStepText.Text = Localization.GetString("UefiFallbackSecureBootRestoring");
-            Log(Localization.GetString("UefiFallbackSecureBootBlockedLog"));
-        }
-
-        private async void UefiBootFallback_Loaded(object sender, RoutedEventArgs e)
-        {
-            Loaded -= UefiBootFallback_Loaded;
-            if (_secureBootFlow && _state != null)
-                await RestoreWindowsForSecureBootAsync();
         }
 
         private async void FallbackButton_Click(object sender, RoutedEventArgs e)
@@ -252,47 +224,6 @@ namespace Libertix.Pages
             }
         }
 
-        private async Task RestoreWindowsForSecureBootAsync()
-        {
-            if (_running || _state == null)
-                return;
-
-            _running = true;
-            SecureBootCloseButton.IsEnabled = false;
-            SecureBootCloseButton.Content = Localization.GetString("UefiFallbackSecureBootClose");
-            CurrentStepText.Text = Localization.GetString("UefiFallbackSecureBootRestoring");
-            ProgressBar.Value = 35;
-            try
-            {
-                int exitCode = await RestoreWindowsAsync();
-                if (exitCode != 0)
-                    throw new InvalidOperationException(string.Format(
-                        Localization.GetString("UefiFallbackRestoreFailedFormat"), exitCode));
-
-                _secureBootRestored = true;
-                ProgressBar.Value = 100;
-                CurrentStepText.Text = Localization.GetString("UefiFallbackSecureBootWindowsRestored");
-                Log(Localization.GetString("UefiFallbackCancelledLog"));
-                SecureBootCloseButton.IsEnabled = true;
-            }
-            catch (ProcessTreeTerminationException ex)
-            {
-                CurrentStepText.Text = Localization.GetString("UefiFallbackTerminationFailed");
-                Log(Localization.GetString("UefiFallbackErrorPrefix") + ex.Message);
-            }
-            catch (Exception ex)
-            {
-                CurrentStepText.Text = Localization.GetString("UefiFallbackRestoreFailed");
-                Log(Localization.GetString("UefiFallbackErrorPrefix") + ex.Message);
-                SecureBootCloseButton.Content = Localization.GetString("UefiFallbackSecureBootRetry");
-                SecureBootCloseButton.IsEnabled = true;
-            }
-            finally
-            {
-                _running = false;
-            }
-        }
-
         private async Task<int> RestoreWindowsAsync()
         {
             string agent = Path.Combine(
@@ -304,36 +235,6 @@ namespace Libertix.Pages
                 powershell,
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agent)} " +
                 $"-StatePath {QuoteArgument(_statePath)} -Action Cancel");
-        }
-
-        private async void SecureBootCloseButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_running)
-                return;
-            if (!_secureBootRestored)
-            {
-                await RestoreWindowsForSecureBootAsync();
-                return;
-            }
-            Application.Current.Shutdown(0);
-        }
-
-        private void SecureBootHelpLink_RequestNavigate(
-            object sender,
-            RequestNavigateEventArgs e)
-        {
-            try
-            {
-                Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri)
-                {
-                    UseShellExecute = true
-                });
-                e.Handled = true;
-            }
-            catch (Exception ex)
-            {
-                Log(Localization.GetString("UefiFallbackErrorPrefix") + ex.Message);
-            }
         }
 
         private async void RebootButton_Click(object sender, RoutedEventArgs e)

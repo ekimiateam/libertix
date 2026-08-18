@@ -31,24 +31,6 @@
                        TextAlignment="Center"
                        TextWrapping="Wrap"
                        Margin="0,0,0,22"/>
-            <StackPanel x:Name="SecureBootGuidancePanel"
-                        Visibility="Collapsed"
-                        Margin="0,0,0,22">
-                <TextBlock Text="{DynamicResource UefiFallbackSecureBootGuidance}"
-                           Foreground="{DynamicResource TextPrimary}"
-                           FontSize="16"
-                           TextAlignment="Center"
-                           TextWrapping="Wrap"/>
-                <TextBlock Margin="0,14,0,0"
-                           FontSize="15"
-                           TextAlignment="Center"
-                           TextWrapping="Wrap">
-                    <Hyperlink NavigateUri="https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/disabling-secure-boot?view=windows-11"
-                               RequestNavigate="SecureBootHelpLink_RequestNavigate">
-                        <Run Text="{DynamicResource UefiFallbackSecureBootHelpLink}"/>
-                    </Hyperlink>
-                </TextBlock>
-            </StackPanel>
             <Border Background="{DynamicResource SecondaryBackground}" BorderBrush="{DynamicResource PanelBorder}" BorderThickness="1" CornerRadius="8" Padding="18">
                 <StackPanel>
                     <TextBlock x:Name="CurrentStepText"
@@ -111,17 +93,6 @@
                     HorizontalAlignment="Right"
                     Visibility="Collapsed"
                     Click="RebootButton_Click"/>
-            <Button x:Name="SecureBootCloseButton"
-                    AutomationProperties.AutomationId="UefiFallbackSecureBootCloseButton"
-                    Content="{DynamicResource UefiFallbackSecureBootClose}"
-                    Style="{StaticResource ModernButton}"
-                    Width="330"
-                    Height="56"
-                    Padding="20,8"
-                    HorizontalAlignment="Center"
-                    Visibility="Collapsed"
-                    IsEnabled="False"
-                    Click="SecureBootCloseButton_Click"/>
         </Grid>
     </Grid>
 </Page>

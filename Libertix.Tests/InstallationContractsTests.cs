@@ -1056,6 +1056,9 @@ namespace Libertix.Tests
 
             Assert.AreEqual("aria2-64.zip", catalogue.Aria2.ArchiveFileName);
             Assert.AreEqual("ext4-win-driver.exe", catalogue.Ext4Driver.FileName);
+            Assert.AreEqual(2426708L, catalogue.Ext4Driver.AttachedContainerSize);
+            Assert.AreEqual("a0", catalogue.Ext4Driver.WinFspPayloadName);
+            Assert.AreEqual("a1", catalogue.Ext4Driver.DriverPayloadName);
             Assert.AreEqual("grldr", catalogue.Grub4Dos.LoaderFileName);
             Assert.AreEqual("grldr.mbr", catalogue.Grub4Dos.MbrLoaderFileName);
         }

@@ -1503,11 +1503,10 @@ def test_uefi_firmware_fallback_reuses_verified_prepared_installer() -> None:
     assert "Firmware BootOrder fallback verified" in boot_setup
 
 
-def test_uefi_firmware_fallback_is_blocked_by_secure_boot_after_verified_restore() -> None:
+def test_uefi_firmware_fallback_uses_the_same_signed_image_with_secure_boot() -> None:
     state_model = read("Helpers/UefiRecoveryState.cs")
     apply_changes = read("Pages/ApplyChanges.Uefi.cs")
     fallback = read("Pages/UefiBootFallback.xaml.cs")
-    fallback_xaml = read("Pages/UefiBootFallback.xaml")
     recovery_agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
 
     assert "public bool SecureBootEnabled { get; set; }" in state_model
@@ -1515,21 +1514,11 @@ def test_uefi_firmware_fallback_is_blocked_by_secure_boot_after_verified_restore
         "SecureBootEnabled = _installationState.Compatibility?.SecureBootEnabled == true"
         in apply_changes
     )
-    assert "if (_state.SecureBootEnabled)" in fallback
-    secure_boot_flow = fallback.split("private void ConfigureSecureBootFlow()", 1)[1].split(
-        "private async void UefiBootFallback_Loaded", 1
-    )[0]
-    assert "FallbackButton.Visibility = Visibility.Collapsed" in secure_boot_flow
-    assert "CancelButton.Visibility = Visibility.Collapsed" in secure_boot_flow
-    assert "SecureBootCloseButton.Visibility = Visibility.Visible" in secure_boot_flow
-    restore_flow = fallback.split("private async Task RestoreWindowsForSecureBootAsync()", 1)[
-        1
-    ].split("private async Task<int> RestoreWindowsAsync()", 1)[0]
-    assert "await RestoreWindowsAsync()" in restore_flow
-    assert "_secureBootRestored = true" in restore_flow
-    assert restore_flow.index("await RestoreWindowsAsync()") < restore_flow.index(
-        "_secureBootRestored = true"
-    )
+    assert "if (_state.SecureBootEnabled)" not in fallback
+    assert "ConfigureSecureBootFlow" not in fallback
+    assert "SecureBootCloseButton" not in fallback
+    fallback_flow = fallback.split("FallbackButton_Click", 1)[1].split("CancelButton_Click", 1)[0]
+    assert "-BootStrategy FirmwareBootOrder -ReusePreparedInstaller" in fallback_flow
     assert "-Action Cancel" in fallback
     assert "-StatePath {QuoteArgument(_statePath)} -Action Cancel" in fallback
     assert "WaitForProcessId" not in fallback
@@ -1539,10 +1528,7 @@ def test_uefi_firmware_fallback_is_blocked_by_secure_boot_after_verified_restore
     assert "Remove-TemporaryRecoveryArtifacts" in recovery_agent
     assert "Remove-RecoveryTasks" in recovery_agent
     assert "Remove-Item -LiteralPath $root -Recurse" not in recovery_agent
-    assert (
-        "https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/"
-        "disabling-secure-boot?view=windows-11" in fallback_xaml
-    )
+    assert "UEFI revert process completed with rc=$revertExitCode." in recovery_agent
 
 
 def test_uefi_firmware_reads_and_deletions_fail_closed() -> None:
@@ -1766,7 +1752,7 @@ def test_linux_hostname_contract_is_identical_in_every_runtime() -> None:
     assert pattern in schema
 
 
-def test_uefi_aria2_and_ext4_installer_timeouts_stop_their_processes() -> None:
+def test_uefi_aria2_and_ext4_msi_timeouts_stop_their_processes() -> None:
     downloads = read("Scripts/uefi/Libertix.Uefi.Downloads.ps1")
     process_module = read("Scripts/modules/Libertix.Process.psm1")
     windows_share = read("Scripts/libertix-configure-windows-share.ps1")
@@ -1793,14 +1779,16 @@ def test_uefi_aria2_and_ext4_installer_timeouts_stop_their_processes() -> None:
     assert "PROCESS_TREE_NOT_STOPPED:" in process_module
     assert '$_.Exception.Message -like "PROCESS_TREE_NOT_STOPPED:*"' in downloads
 
-    timeout = windows_share.split("function Invoke-ProcessWithTimeout", 1)[1].split(
-        "function Get-Config", 1
+    installer = windows_share.split("function Install-VerifiedExt4Runtime", 1)[1].split(
+        "function Get-NativeProgramFilesPath", 1
     )[0]
-    assert 'taskkill.exe"' in timeout
-    assert '"/PID", [string]$process.Id, "/T", "/F"' in timeout
-    assert "Invoke-LibertixNativeCommand" in timeout
-    assert "$taskkillExitCode -ne 0 -or -not $process.HasExited" in timeout
-    assert "process tree could not be proven stopped" in timeout
+    assert "Invoke-LibertixNativeCommand" in installer
+    assert "-TimeoutSeconds 1800" in installer
+    assert 'Get-LibertixNativeSystemExecutable -FileName "msiexec.exe"' in installer
+    assert '"/qn"' in installer
+    assert '"/norestart"' in installer
+    assert "Start-Process" not in installer
+    assert "PROCESS_TREE_NOT_STOPPED:" in process_module
 
 
 def test_native_stderr_is_never_merged_under_stop_error_policy() -> None:
@@ -1882,6 +1870,21 @@ def test_ext4_installer_cannot_reopen_maintenance_ui_at_user_logon() -> None:
     assert windows_share.index("Start-ReadOnlyMount -Config $config") < windows_share.index(
         "Remove-VerifiedExt4InstallerResume -Config $config"
     )
+
+    installer = windows_share.split("function Install-VerifiedExt4Runtime", 1)[1].split(
+        "function Get-NativeProgramFilesPath", 1
+    )[0]
+    assert "Copy-FileTail" in installer
+    assert "SetupAttachedContainerSize" in installer
+    assert "WinFspPayloadSha256" in installer
+    assert "DriverPayloadSha256" in installer
+    assert 'Get-LibertixNativeSystemExecutable -FileName "expand.exe"' in installer
+    assert 'Get-LibertixNativeSystemExecutable -FileName "msiexec.exe"' in installer
+    assert '"/qn"' in installer
+    assert '"/norestart"' in installer
+    assert "Verified ext4 and WinFsp MSI payloads installed" in installer
+    assert "@('/quiet', '/norestart')" not in windows_share
+    assert "@(`/quiet`, `/norestart`)" not in windows_share
 
     ext4_check = checks.split('"ext4_driver"', 1)[1].split('"ext4_readonly_mount"', 1)[0]
     assert "ext4-win-driver.*setup\\.exe" in ext4_check
@@ -2322,7 +2325,6 @@ def test_uefi_fallback_buttons_fit_long_localized_labels() -> None:
         "CancelButton",
         "FallbackButton",
         "RebootButton",
-        "SecureBootCloseButton",
     ):
         button = fallback.split(f'x:Name="{button_name}"', 1)[1].split("/>", 1)[0]
         assert 'Width="330"' in button
@@ -2339,10 +2341,27 @@ def test_uefi_fallback_content_cannot_extend_under_the_title() -> None:
     assert 'Height="160"' in fallback.split('x:Name="LogOutput"', 1)[1].split("/>", 1)[0]
 
 
-def test_uefi_fallback_secure_boot_close_button_has_stable_automation_id() -> None:
+def test_bootnext_fallback_acceptance_controls_have_stable_automation_ids() -> None:
     fallback = read("Pages/UefiBootFallback.xaml")
+    focus = read("auto_tests/app/scripts/focus_unattended_warning.ps1")
 
-    assert 'AutomationProperties.AutomationId="UefiFallbackSecureBootCloseButton"' in fallback
+    assert 'AutomationProperties.AutomationId="UefiFallbackAcceptButton"' in fallback
+    assert 'AutomationProperties.AutomationId="UefiFallbackRollbackButton"' in fallback
+    assert 'AutomationProperties.AutomationId="UefiFallbackRebootButton"' in fallback
+    assert '"bootnext-accept"' in focus
+    assert '"bootnext-reboot"' in focus
+
+
+def test_bios_cancellation_waits_for_a_durable_mutation_checkpoint() -> None:
+    automation = read("auto_tests/app/services/automation_wizard.py")
+    cancellation = read("auto_tests/app/scripts/request_installation_cancellation.ps1")
+
+    assert '"windows.installer-partition-created"' in automation
+    assert '"WAITED_COMPLETED_STEP"' in automation
+    assert '"wait_for_completed_step"' in cancellation
+    assert "$waitedCompletedStep -in @($state.completedSteps)" in cancellation
+    assert '"ApplyChangesCancelButton"' in cancellation
+    assert '"LocalizedConfirmationYesButton"' in cancellation
 
 
 def test_bios_copy_preserves_live_boot_case_sensitive_names() -> None:
@@ -2508,6 +2527,23 @@ def test_ext4_setup_payload_matches_pinned_release_hash() -> None:
     assert setup.is_file()
     assert hashlib.sha256(setup.read_bytes()).hexdigest() == (
         "967a001e6bd80de0af44b085c73097a96ea4ab0f5dd4d766cca4959231891031"
+    )
+    artifacts = json.loads(read("Scripts/config/Libertix.Artifacts.json"))
+    ext4 = artifacts["ext4Driver"]
+    container_size = ext4["attachedContainerSize"]
+    assert container_size == 2_426_708
+    container = setup.read_bytes()[-container_size:]
+    assert container.startswith(b"MSCF")
+    assert hashlib.sha256(container).hexdigest() == (
+        "2be154ad6d8d743ec42cb2c82b6770f7ab177b6b05352baf0ca6aa2882532d31"
+    )
+    assert ext4["winFspPayloadName"] == "a0"
+    assert ext4["driverPayloadName"] == "a1"
+    assert ext4["winFspPayloadSha256"] == (
+        "073a70e00f77423e34bed98b86e600def93393ba5822204fac57a29324db9f7a"
+    )
+    assert ext4["driverPayloadSha256"] == (
+        "9023c0f96992c40ced28531f929e6e3ef2e555bf45b222709c14b83c4cc89f76"
     )
 
 

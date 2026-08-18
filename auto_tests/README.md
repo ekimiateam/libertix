@@ -147,7 +147,7 @@ GitHub Pages `dev` channel.
 | `share_linux_files_in_windows` | boolean, `true` | Validate the read-only Linux-to-Windows sharing path. |
 | `simulate_stale_firmware_entries` | boolean, `false` | Inject a stale UEFI Libertix entry to verify current-ESP ownership matching. |
 | `force_offline_ntfs_resize` | boolean, `false` | Force the development-only live offline NTFS resize path for regression testing. |
-| `boot_guardian_fault` | `none`, `boot-order`, or `preferred-path`, default `none` | Run one single-UEFI-VM preshutdown repair test. Requires `first_boot=windows`. |
+| `boot_guardian_fault` | `none`, `bios-rollback`, `boot-order`, `bootnext-fallback`, `bootnext-rollback`, `preferred-path`, or `preferred-path-rollback`, default `none` | Run one single-VM boot recovery or rollback test. Requires the matching firmware and `first_boot=windows`. |
 
 VM selectors can also be repeated as query parameters (`?vm=vm1&vm=vm2`). Body and query
 selectors are combined. The `source` query parameter overrides its body value.

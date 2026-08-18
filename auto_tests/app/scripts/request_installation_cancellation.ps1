@@ -172,6 +172,38 @@ function Request-InstallationCancellation {
 
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 |
     ConvertFrom-Json -ErrorAction Stop
+$waitedCompletedStep = ""
+if ($config.PSObject.Properties.Name -contains "wait_for_completed_step") {
+    $waitedCompletedStep = [string]$config.wait_for_completed_step
+    $statePath = [string]$config.wait_for_state_path
+    $waitTimeoutSeconds = [int]$config.wait_timeout_seconds
+    if ([string]::IsNullOrWhiteSpace($waitedCompletedStep) -or
+        [string]::IsNullOrWhiteSpace($statePath) -or
+        $waitTimeoutSeconds -lt 1) {
+        throw "The cancellation mutation checkpoint configuration is invalid."
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($waitTimeoutSeconds)
+    $checkpointReached = $false
+    do {
+        if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+            try {
+                $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 |
+                    ConvertFrom-Json -ErrorAction Stop
+                if ($waitedCompletedStep -in @($state.completedSteps)) {
+                    $checkpointReached = $true
+                }
+            } catch {
+                $checkpointReached = $false
+            }
+        }
+        if (-not $checkpointReached) {
+            Start-Sleep -Milliseconds 250
+        }
+    } while (-not $checkpointReached -and [DateTime]::UtcNow -lt $deadline)
+    if (-not $checkpointReached) {
+        throw "Timed out waiting for the installation mutation checkpoint."
+    }
+}
 $targetProcessId = [int]$config.process_id
 if ($targetProcessId -le 0) {
     throw "The Libertix process ID is invalid."
@@ -256,6 +288,7 @@ try {
     )
     Write-Output ("CANCELLATION_CONTROL={0}" -f [string]$workerResult.cancellation_control)
     Write-Output ("CONFIRMATION_CONTROL={0}" -f [string]$workerResult.confirmation_control)
+    Write-Output ("WAITED_COMPLETED_STEP={0}" -f $waitedCompletedStep)
     Write-Output "RESULT=OK"
 } finally {
     $null = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")

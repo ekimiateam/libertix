@@ -197,7 +197,6 @@ $mode = if ($config.PSObject.Properties.Name -contains "mode") {
 }
 $statePath = ""
 $statePhase = ""
-$secureBootFlow = $false
 switch ($mode) {
     "unattended-warning" {
         $targetProcessId = [int]$config.process_id
@@ -231,16 +230,26 @@ switch ($mode) {
     "bootnext-rollback" {
         $resolved = Resolve-RecoveryUiProcess -ExpectedPhase "FallbackPrompted"
         $targetProcessId = [int]$resolved.ProcessId
-        if ([bool]$resolved.SecureBootEnabled) {
-            $targetAutomationId = "UefiFallbackSecureBootCloseButton"
-            $requiredSiblingAutomationId = ""
-        } else {
-            $targetAutomationId = "UefiFallbackRollbackButton"
-            $requiredSiblingAutomationId = "UefiFallbackAcceptButton"
-        }
+        $targetAutomationId = "UefiFallbackRollbackButton"
+        $requiredSiblingAutomationId = "UefiFallbackAcceptButton"
         $statePath = [string]$resolved.StatePath
         $statePhase = [string]$resolved.Phase
-        $secureBootFlow = [bool]$resolved.SecureBootEnabled
+    }
+    "bootnext-accept" {
+        $resolved = Resolve-RecoveryUiProcess -ExpectedPhase "FallbackPrompted"
+        $targetProcessId = [int]$resolved.ProcessId
+        $targetAutomationId = "UefiFallbackAcceptButton"
+        $requiredSiblingAutomationId = "UefiFallbackRollbackButton"
+        $statePath = [string]$resolved.StatePath
+        $statePhase = [string]$resolved.Phase
+    }
+    "bootnext-reboot" {
+        $resolved = Resolve-RecoveryUiProcess -ExpectedPhase "AwaitingFallbackReboot"
+        $targetProcessId = [int]$resolved.ProcessId
+        $targetAutomationId = "UefiFallbackRebootButton"
+        $requiredSiblingAutomationId = ""
+        $statePath = [string]$resolved.StatePath
+        $statePhase = [string]$resolved.Phase
     }
     default {
         throw "The Libertix UI focus mode is unsupported."
@@ -340,7 +349,6 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($statePath)) {
         Write-Output ("STATE_PATH={0}" -f $statePath)
         Write-Output ("STATE_PHASE={0}" -f $statePhase)
-        Write-Output ("SECURE_BOOT_FLOW={0}" -f $secureBootFlow)
     }
     Write-Output "RESULT=OK"
 } finally {

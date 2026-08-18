@@ -82,6 +82,18 @@ Assert-Condition ((Get-Sha256 -Path $originalLoaderPath) -eq $originalHash) `
 $service = Get-Service -Name "LibertixBootGuardian" -ErrorAction Stop
 Assert-Condition ([string]$service.Status -eq "Running") `
     "The preferred-path guardian service is not running."
+$repairLogsBefore = @(
+    Get-ChildItem -LiteralPath ([string]$guardian.logDirectory) -Filter "*-repair-*.log" -File
+)
+$matchingRepairLogsBefore = @(
+    $repairLogsBefore | Where-Object {
+        (Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) -match
+            'EFI\\Microsoft\\Boot\\bootmgfw\.efi differs from the verified reference'
+    }
+)
+$repairLogBaselineNames = @(
+    $repairLogsBefore | ForEach-Object { $_.Name }
+) -join "|"
 
 $volumePath = [string]$guardian.esp.volumePath
 Assert-Condition (
@@ -140,24 +152,37 @@ try {
             "The controlled Windows Boot Manager restoration was not retained."
         Write-Output "INJECTED_UTC=$([DateTime]::UtcNow.ToString('o'))"
         Write-Output "INJECTED_HASH=$originalHash"
+        Write-Output "REPAIR_LOG_BASELINE_COUNT=$($repairLogsBefore.Count)"
+        Write-Output "MATCHING_REPAIR_LOG_BASELINE_COUNT=$($matchingRepairLogsBefore.Count)"
+        Write-Output "REPAIR_LOG_BASELINE_NAMES=$repairLogBaselineNames"
         Write-Output "RESULT=OK"
         exit 0
     }
 
-    $injectedAfterUtc = [DateTime]::Parse(
-        [string]$request.injected_after_utc,
-        [Globalization.CultureInfo]::InvariantCulture,
-        [Globalization.DateTimeStyles]::RoundtripKind
-    ).ToUniversalTime()
+    $repairLogBaselineCount = [int]$request.repair_log_baseline_count
+    $matchingRepairLogBaselineCount = [int]$request.matching_repair_log_baseline_count
+    $repairLogBaselineNames = @(
+        if ([string]$request.repair_log_baseline_names) {
+            [string]$request.repair_log_baseline_names -split '\|'
+        }
+    )
     Assert-Condition ($activeHash -eq $preferredHash) `
         "The guardian did not restore the preferred shim at the Windows EFI path."
     $repairLogs = @(
         Get-ChildItem -LiteralPath ([string]$guardian.logDirectory) -Filter "*-repair-*.log" -File |
-            Where-Object { $_.LastWriteTimeUtc -ge $injectedAfterUtc.AddSeconds(-2) } |
             Sort-Object LastWriteTimeUtc
     )
+    Assert-Condition ($repairLogs.Count -gt $repairLogBaselineCount) `
+        "The guardian restored the preferred shim without creating a new repair journal."
+    Assert-Condition ($matchingRepairLogsBefore.Count -gt $matchingRepairLogBaselineCount) `
+        "The preferred-path repair journal count did not increase."
+    $newRepairLogs = @(
+        $repairLogs | Where-Object { $_.Name -notin $repairLogBaselineNames }
+    )
+    Assert-Condition ($newRepairLogs.Count -ge 1) `
+        "The preferred-path repair journal set changed without a new unique file."
     $matchingLogs = @(
-        $repairLogs | Where-Object {
+        $newRepairLogs | Where-Object {
             (Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) -match
                 'EFI\\Microsoft\\Boot\\bootmgfw\.efi differs from the verified reference'
         }

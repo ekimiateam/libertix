@@ -388,6 +388,53 @@ class ProxmoxClient:
             raise WorkflowError("proxmox.rollback", "Invalid Proxmox UPID", details={"vmid": vmid})
         self._wait_task(node, data, vmid, action="rollback")
 
+    def start_vm(self, node: str, vmid: int) -> None:
+        data = self._request(
+            "POST",
+            f"/nodes/{node}/qemu/{vmid}/status/start",
+            step="proxmox.start_vm",
+        )
+        if not isinstance(data, str) or not data.startswith("UPID:"):
+            raise WorkflowError("proxmox.start_vm", "Invalid Proxmox UPID", details={"vmid": vmid})
+        self._wait_task(node, data, vmid, action="start")
+
+    def wait_for_vm_status(
+        self,
+        node: str,
+        vmid: int,
+        expected_status: str,
+        *,
+        timeout: float,
+        step: str,
+    ) -> dict[str, object]:
+        if expected_status not in {"running", "stopped"}:
+            raise ValueError("expected_status must be running or stopped")
+
+        deadline = time.monotonic() + timeout
+        last_status: dict[str, object] = {}
+        while time.monotonic() < deadline:
+            last_status = self.get_vm_status(node, vmid, step=step)
+            status = str(last_status.get("status") or "")
+            qmpstatus = str(last_status.get("qmpstatus") or "")
+            if status == expected_status and (
+                expected_status == "stopped" or qmpstatus == "running"
+            ):
+                return last_status
+            time.sleep(1)
+
+        raise WorkflowError(
+            step,
+            "Timed out waiting for the VM power state",
+            details={
+                "vmid": vmid,
+                "node": node,
+                "expected_status": expected_status,
+                "timeout_seconds": timeout,
+                "last_status": str(last_status.get("status") or ""),
+                "last_qmpstatus": str(last_status.get("qmpstatus") or ""),
+            },
+        )
+
     def _wait_task(self, node: str, upid: str, vmid: int, *, action: str) -> None:
         deadline = time.monotonic() + self.task_timeout
         encoded = quote(upid, safe="")

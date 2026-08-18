@@ -87,7 +87,9 @@ class AutomationService(
         force_offline_ntfs_resize: bool = False,
         boot_guardian_fault: Literal[
             "none",
+            "bios-rollback",
             "boot-order",
+            "bootnext-fallback",
             "bootnext-rollback",
             "preferred-path",
             "preferred-path-rollback",
@@ -119,10 +121,11 @@ class AutomationService(
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
             if boot_guardian_fault != "none":
-                if len(selected_vms) != 1 or selected_vms[0].firmware != "uefi":
+                expected_firmware = "bios" if boot_guardian_fault == "bios-rollback" else "uefi"
+                if len(selected_vms) != 1 or selected_vms[0].firmware != expected_firmware:
                     raise WorkflowError(
                         "automation.boot_guardian_fault_scope",
-                        "A boot guardian fault test requires exactly one UEFI test VM",
+                        "The selected recovery test requires exactly one matching firmware VM",
                         details={
                             "selected_vms": [vm.name for vm in selected_vms],
                             "fault": boot_guardian_fault,
@@ -284,6 +287,7 @@ class AutomationService(
             self._prepare_windows_test_vm(vm, result)
             vm_options = options
             if options.boot_guardian_fault in {
+                "bios-rollback",
                 "bootnext-rollback",
                 "preferred-path-rollback",
             }:

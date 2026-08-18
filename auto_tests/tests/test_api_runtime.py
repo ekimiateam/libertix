@@ -221,6 +221,23 @@ def test_stream_publishes_only_one_terminal_result_when_timeout_races_completion
     assert len(terminal_events) == 1
 
 
+def test_worker_fatal_diagnostics_keep_the_last_bounded_stack_lines(tmp_path: Path) -> None:
+    workspace = tmp_path / "automation-run"
+    workspace.mkdir()
+    fatal_log = workspace / "worker-fatal.log"
+    fatal_log.write_text(
+        "\n".join(f"frame-{index}" for index in range(100)),
+        encoding="utf-8",
+    )
+
+    context = main_module._worker_fatal_diagnostic_context(workspace)  # noqa: SLF001
+
+    assert context["fatal_log"] == str(fatal_log)
+    assert "frame-19" not in context["fatal_diagnostics"]
+    assert "frame-20" in context["fatal_diagnostics"]
+    assert context["fatal_diagnostics"].endswith("frame-99")
+
+
 def test_automation_password_accepts_four_characters_and_rejects_three() -> None:
     assert AutomationRequest(apply=True, linux_password="test").linux_password == "test"
 
@@ -254,7 +271,9 @@ def test_offline_ntfs_resize_fixture_is_opt_in() -> None:
 def test_boot_guardian_fault_accepts_only_explicit_fixture_modes() -> None:
     assert AutomationRequest(apply=True, linux_password="pass").boot_guardian_fault == "none"
     for mode in (
+        "bios-rollback",
         "boot-order",
+        "bootnext-fallback",
         "bootnext-rollback",
         "preferred-path",
         "preferred-path-rollback",

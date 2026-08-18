@@ -183,7 +183,12 @@ namespace Libertix.Tests
                         LinuxUsername = "test",
                         ShortcutDescription = "Linux files",
                         SetupPath = @"C:\setup.exe",
-                        SetupSha256 = new string('a', 64)
+                        SetupSha256 = new string('a', 64),
+                        SetupAttachedContainerSize = 4096,
+                        WinFspPayloadName = "a0",
+                        WinFspPayloadSha256 = new string('b', 64),
+                        DriverPayloadName = "a1",
+                        DriverPayloadSha256 = new string('c', 64)
                     });
 
                 WindowsShareConfiguration configuration =

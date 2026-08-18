@@ -179,7 +179,13 @@ namespace Libertix.Pages
                             "WindowsShareShortcutDescription",
                             "Linux files (read-only)"),
                         SetupPath = setupPath,
-                        SetupSha256 = Artifacts.Ext4Driver.Sha256
+                        SetupSha256 = Artifacts.Ext4Driver.Sha256,
+                        SetupAttachedContainerSize =
+                            Artifacts.Ext4Driver.AttachedContainerSize,
+                        WinFspPayloadName = Artifacts.Ext4Driver.WinFspPayloadName,
+                        WinFspPayloadSha256 = Artifacts.Ext4Driver.WinFspPayloadSha256,
+                        DriverPayloadName = Artifacts.Ext4Driver.DriverPayloadName,
+                        DriverPayloadSha256 = Artifacts.Ext4Driver.DriverPayloadSha256
                     });
                 File.WriteAllText(
                     Path.Combine(WindowsShareRoot, "pending.marker"),

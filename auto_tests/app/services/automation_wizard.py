@@ -35,7 +35,7 @@ class WizardAutomationMixin:
         options: AutomationOptions,
         result: ResultBuilder,
         launch: dict[str, object],
-    ) -> Literal["boot-menu", "linux-desktop", "bootnext-fallback"]:
+    ) -> Literal["boot-menu", "linux-desktop", "bootnext-fallback", "installation-rollback"]:
         unattended_status_path = launch.get("unattended_status_path")
         unattended_acknowledgement_path = launch.get("unattended_acknowledgement_path")
         if not unattended_status_path or not unattended_acknowledgement_path:
@@ -52,7 +52,9 @@ class WizardAutomationMixin:
             str(unattended_status_path),
             str(unattended_acknowledgement_path),
         )
-        if options.boot_guardian_fault == "bootnext-rollback":
+        if options.boot_guardian_fault == "bios-rollback":
+            return "installation-rollback"
+        if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
             return "bootnext-fallback"
         return self._monitor_until_live_boot(
             vm,
@@ -172,6 +174,53 @@ class WizardAutomationMixin:
                             extra={"step": "automation.vnc_close", "target": vm.vnc},
                         )
 
+            if options.boot_guardian_fault == "bios-rollback":
+                cancellation = self.validation.run_windows_script(
+                    ssh,
+                    script_name="request_installation_cancellation.ps1",
+                    config={
+                        "process_id": process_id,
+                        "wait_for_state_path": (
+                            r"C:\LibertixInstallRecovery\installation-state.json"
+                        ),
+                        "wait_for_completed_step": "windows.installer-partition-created",
+                        "wait_timeout_seconds": 900,
+                    },
+                    step="automation.bios_rollback.request",
+                    timeout=960,
+                )
+                values = self.validation.parse_powershell_results(
+                    cancellation.stdout,
+                    prefixes=(
+                        "MAIN_WINDOW_HANDLE",
+                        "CONFIRMATION_WINDOW_HANDLE",
+                        "CANCELLATION_CONTROL",
+                        "CONFIRMATION_CONTROL",
+                        "WAITED_COMPLETED_STEP",
+                        "RESULT",
+                    ),
+                )
+                if (
+                    values.get("CANCELLATION_CONTROL") != "ApplyChangesCancelButton"
+                    or values.get("CONFIRMATION_CONTROL") != "LocalizedConfirmationYesButton"
+                    or values.get("WAITED_COMPLETED_STEP") != "windows.installer-partition-created"
+                    or values.get("RESULT") != "OK"
+                ):
+                    raise WorkflowError(
+                        "automation.bios_rollback.request",
+                        "The BIOS cancellation was not requested after proven disk mutation",
+                        details={"vm": vm.name, "target": vm.host, **values},
+                    )
+                result.ok(
+                    "automation.bios_rollback.request",
+                    "The translated cancellation was confirmed after the installer "
+                    "partition existed",
+                    vm=vm.name,
+                    target=vm.host,
+                    **values,
+                )
+                return
+
             observed = self._wait_for_unattended_stage(
                 ssh,
                 vm,
@@ -189,7 +238,7 @@ class WizardAutomationMixin:
                 quoted_acknowledgement,
                 observed,
             )
-            if options.boot_guardian_fault == "bootnext-rollback":
+            if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
                 self._force_bootnext_failure(ssh, vm, result)
 
         self._request_reboot_after_preparation(vm, result)

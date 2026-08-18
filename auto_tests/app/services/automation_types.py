@@ -22,7 +22,9 @@ class AutomationOptions:
     force_offline_ntfs_resize: bool = False
     boot_guardian_fault: Literal[
         "none",
+        "bios-rollback",
         "boot-order",
+        "bootnext-fallback",
         "bootnext-rollback",
         "preferred-path",
         "preferred-path-rollback",

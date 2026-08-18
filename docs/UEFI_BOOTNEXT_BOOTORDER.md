@@ -42,6 +42,9 @@ copy and asks whether the user wants the validated fallback: a firmware entry cr
 and placed temporarily at the start of `BootOrder`. Windows Boot Manager does not directly
 chainload the live system. The live installer removes its BCD and EFI artifacts before changing the
 disk, and `-Revert` restores the saved firmware order, ESP files, and temporary partition.
+Secure Boot validates the selected EFI image in the same way whether its `Boot####` entry was
+selected through `BootNext` or `BootOrder`; it does not by itself disable this fallback. Libertix
+therefore keeps enforcing the same signed-loader and firmware-authority checks in both paths.
 
 Disk-imaging systems can restore the ESP without recreating motherboard NVRAM entries.
 The installed-system phase therefore matches both Windows and Libertix entries against the current

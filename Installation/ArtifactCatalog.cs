@@ -11,7 +11,7 @@ namespace Libertix.Installation
         public Aria2Artifact Aria2 { get; set; }
 
         [JsonPropertyName("ext4Driver")]
-        public FileArtifact Ext4Driver { get; set; }
+        public Ext4DriverArtifact Ext4Driver { get; set; }
 
         [JsonPropertyName("grub4Dos")]
         public Grub4DosArtifact Grub4Dos { get; set; }
@@ -44,6 +44,13 @@ namespace Libertix.Installation
             ValidateHash(Aria2.ExecutableSha256, "aria2.executableSha256");
             ValidateFileName(Ext4Driver.FileName, "ext4Driver.fileName");
             ValidateHash(Ext4Driver.Sha256, "ext4Driver.sha256");
+            if (Ext4Driver.AttachedContainerSize <= 0)
+                throw new InvalidDataException(
+                    "Artifact field 'ext4Driver.attachedContainerSize' must be positive.");
+            ValidateFileName(Ext4Driver.WinFspPayloadName, "ext4Driver.winFspPayloadName");
+            ValidateHash(Ext4Driver.WinFspPayloadSha256, "ext4Driver.winFspPayloadSha256");
+            ValidateFileName(Ext4Driver.DriverPayloadName, "ext4Driver.driverPayloadName");
+            ValidateHash(Ext4Driver.DriverPayloadSha256, "ext4Driver.driverPayloadSha256");
             ValidateFileName(Grub4Dos.LoaderFileName, "grub4Dos.loaderFileName");
             ValidateHash(Grub4Dos.LoaderSha256, "grub4Dos.loaderSha256");
             ValidateFileName(Grub4Dos.MbrLoaderFileName, "grub4Dos.mbrLoaderFileName");
@@ -83,13 +90,31 @@ namespace Libertix.Installation
         public string ExecutableSha256 { get; set; }
     }
 
-    public sealed class FileArtifact
+    public class FileArtifact
     {
         [JsonPropertyName("fileName")]
         public string FileName { get; set; }
 
         [JsonPropertyName("sha256")]
         public string Sha256 { get; set; }
+    }
+
+    public sealed class Ext4DriverArtifact : FileArtifact
+    {
+        [JsonPropertyName("attachedContainerSize")]
+        public long AttachedContainerSize { get; set; }
+
+        [JsonPropertyName("winFspPayloadName")]
+        public string WinFspPayloadName { get; set; }
+
+        [JsonPropertyName("winFspPayloadSha256")]
+        public string WinFspPayloadSha256 { get; set; }
+
+        [JsonPropertyName("driverPayloadName")]
+        public string DriverPayloadName { get; set; }
+
+        [JsonPropertyName("driverPayloadSha256")]
+        public string DriverPayloadSha256 { get; set; }
     }
 
     public sealed class Grub4DosArtifact

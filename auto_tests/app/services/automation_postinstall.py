@@ -40,6 +40,14 @@ class RemoteCheck:
     requires_sudo: bool = False
 
 
+@dataclass(frozen=True)
+class BootGuardianFaultEvidence:
+    injected_utc: str
+    repair_log_baseline_count: int
+    matching_repair_log_baseline_count: int
+    repair_log_baseline_names: str
+
+
 class PostInstallValidationMixin:
     """Validate both installed operating systems after the installer exits."""
 
@@ -147,17 +155,65 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
         monitor_outcome: str,
     ) -> None:
-        guardian_fault_injected_utc = ""
-        preferred_loader_fault_injected_utc = ""
-        if options.boot_guardian_fault == "bootnext-rollback":
+        guardian_fault_evidence: BootGuardianFaultEvidence | None = None
+        preferred_loader_fault_evidence: BootGuardianFaultEvidence | None = None
+        if options.boot_guardian_fault == "bios-rollback":
+            if monitor_outcome != "installation-rollback":
+                raise WorkflowError(
+                    "automation.bios_rollback",
+                    "The controlled BIOS cancellation did not return the expected outcome",
+                    details={"vm": vm.name, "monitor_outcome": monitor_outcome},
+                )
+            baseline = options.rollback_baseline
+            if baseline is None:
+                raise WorkflowError(
+                    "automation.bios_rollback",
+                    "The pre-installation rollback baseline was not retained",
+                    details={"vm": vm.name, "target": vm.host},
+                )
+            ssh = self._wait_for_ssh(
+                vm,
+                result=result,
+                username=vm.username,
+                password=self.settings.windows_ssh_password.get_secret_value(),
+                trust_on_first_use=False,
+                probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+                expected="LIBERTIX_WINDOWS_READY",
+                phase="bios_rollback_verify",
+                distribution=options.distribution,
+            )
+            try:
+                self._verify_exact_windows_rollback(
+                    ssh,
+                    vm,
+                    baseline,
+                    result,
+                    step="automation.bios_rollback.verify",
+                    failure_message=(
+                        "The BIOS cancellation did not restore the exact Windows baseline"
+                    ),
+                )
+            finally:
+                ssh.__exit__(None, None, None)
+            return
+        if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
             if monitor_outcome != "bootnext-fallback":
                 raise WorkflowError(
                     "automation.bootnext_rollback",
                     "The controlled BootNext failure did not return the expected monitor outcome",
                     details={"vm": vm.name, "monitor_outcome": monitor_outcome},
                 )
-            self._rollback_bootnext_failure(vm, options, result)
-            return
+            if options.boot_guardian_fault == "bootnext-rollback":
+                self._rollback_bootnext_failure(vm, options, result)
+                return
+            self._accept_bootnext_firmware_fallback(vm, options, result)
+            monitor_outcome = self._monitor_until_live_boot(
+                vm,
+                result,
+                vm.firmware,
+                options.distribution,
+                reboot_requested=True,
+            )
         if monitor_outcome != "boot-menu":
             raise WorkflowError(
                 "automation.windows_before_linux",
@@ -214,7 +270,7 @@ class PostInstallValidationMixin:
                     stderr=response.stderr,
                 )
                 if options.boot_guardian_fault == "boot-order":
-                    guardian_fault_injected_utc = self._inject_boot_guardian_boot_order_fault(
+                    guardian_fault_evidence = self._inject_boot_guardian_boot_order_fault(
                         waiting_windows_ssh,
                         vm,
                         result,
@@ -343,7 +399,7 @@ class PostInstallValidationMixin:
                         windows_ssh,
                         vm,
                         result,
-                        guardian_fault_injected_utc,
+                        guardian_fault_evidence,
                     )
                 self._capture_and_dismiss_post_install_result(
                     vm,
@@ -352,7 +408,7 @@ class PostInstallValidationMixin:
                     windows_ssh,
                 )
                 if options.boot_guardian_fault == "preferred-path":
-                    preferred_loader_fault_injected_utc = (
+                    preferred_loader_fault_evidence = (
                         self._inject_boot_guardian_preferred_loader_fault(
                             windows_ssh,
                             vm,
@@ -478,7 +534,14 @@ class PostInstallValidationMixin:
                     final_windows_ssh,
                     vm,
                     result,
-                    preferred_loader_fault_injected_utc,
+                    preferred_loader_fault_evidence,
+                )
+            if options.boot_guardian_fault in {"boot-order", "preferred-path"}:
+                self._exercise_boot_guardian_shutdown_repair(
+                    final_windows_ssh,
+                    vm,
+                    options,
+                    result,
                 )
         finally:
             final_windows_ssh.__exit__(None, None, None)
@@ -1914,7 +1977,7 @@ class PostInstallValidationMixin:
         ssh: SSHClient,
         vm: VMConfig,
         result: ResultBuilder,
-    ) -> str:
+    ) -> BootGuardianFaultEvidence:
         plan = self._run_windows_script_resiliently(
             ssh,
             script_name="test_boot_guardian_fault.ps1",
@@ -1965,11 +2028,24 @@ class PostInstallValidationMixin:
                 "INJECTED_UTC",
                 "VERIFIED_FAULT_ORDER",
                 "WINDOWS_BOOT",
+                "REPAIR_LOG_BASELINE_COUNT",
+                "MATCHING_REPAIR_LOG_BASELINE_COUNT",
+                "REPAIR_LOG_BASELINE_NAMES",
                 "RESULT",
             ),
         )
         injected_utc = injection_values.get("INJECTED_UTC", "")
-        if not injected_utc or injection_values.get("RESULT") != "OK":
+        repair_log_count = injection_values.get("REPAIR_LOG_BASELINE_COUNT", "")
+        matching_log_count = injection_values.get("MATCHING_REPAIR_LOG_BASELINE_COUNT", "")
+        repair_log_names = injection_values.get("REPAIR_LOG_BASELINE_NAMES", "")
+        if (
+            not injected_utc
+            or not repair_log_count.isascii()
+            or not repair_log_count.isdigit()
+            or not matching_log_count.isascii()
+            or not matching_log_count.isdigit()
+            or injection_values.get("RESULT") != "OK"
+        ):
             raise WorkflowError(
                 "automation.boot_guardian_fault.inject",
                 "The BootOrder fault was not verified after injection",
@@ -1982,16 +2058,21 @@ class PostInstallValidationMixin:
             target=vm.host,
             **injection_values,
         )
-        return injected_utc
+        return BootGuardianFaultEvidence(
+            injected_utc=injected_utc,
+            repair_log_baseline_count=int(repair_log_count),
+            matching_repair_log_baseline_count=int(matching_log_count),
+            repair_log_baseline_names=repair_log_names,
+        )
 
     def _verify_boot_guardian_boot_order_repair(
         self,
         ssh: SSHClient,
         vm: VMConfig,
         result: ResultBuilder,
-        injected_utc: str,
+        evidence: BootGuardianFaultEvidence | None,
     ) -> None:
-        if not injected_utc:
+        if evidence is None or not evidence.injected_utc:
             raise WorkflowError(
                 "automation.boot_guardian_fault.verify",
                 "The BootOrder fault injection timestamp was not retained",
@@ -2002,7 +2083,10 @@ class PostInstallValidationMixin:
             script_name="test_boot_guardian_fault.ps1",
             config={
                 "action": "verify-boot-order",
-                "injected_after_utc": injected_utc,
+                "injected_after_utc": evidence.injected_utc,
+                "repair_log_baseline_count": evidence.repair_log_baseline_count,
+                "matching_repair_log_baseline_count": (evidence.matching_repair_log_baseline_count),
+                "repair_log_baseline_names": evidence.repair_log_baseline_names,
             },
             step="automation.boot_guardian_fault.verify",
             timeout=90,
@@ -2438,18 +2522,11 @@ class PostInstallValidationMixin:
                     "FOCUSED_CONTROL",
                     "STATE_PATH",
                     "STATE_PHASE",
-                    "SECURE_BOOT_FLOW",
                     "RESULT",
                 ),
             )
-            secure_boot_flow = values.get("SECURE_BOOT_FLOW", "").casefold() == "true"
-            expected_control = (
-                "UefiFallbackSecureBootCloseButton"
-                if secure_boot_flow
-                else "UefiFallbackRollbackButton"
-            )
             if (
-                values.get("FOCUSED_CONTROL") != expected_control
+                values.get("FOCUSED_CONTROL") != "UefiFallbackRollbackButton"
                 or values.get("STATE_PHASE") != "FallbackPrompted"
                 or values.get("RESULT") != "OK"
             ):
@@ -2462,12 +2539,7 @@ class PostInstallValidationMixin:
             self._send_focused_enter(vm)
             result.ok(
                 "automation.bootnext_rollback.requested",
-                (
-                    "Secure Boot restored Windows automatically and its translated result "
-                    "was acknowledged"
-                    if secure_boot_flow
-                    else "The firmware fallback was declined through its translated UI"
-                ),
+                "The firmware fallback was declined through its translated UI",
                 vm=vm.name,
                 target=vm.vnc,
                 capture=str(capture),
@@ -2485,6 +2557,146 @@ class PostInstallValidationMixin:
             )
         finally:
             ssh.__exit__(None, None, None)
+
+    def _accept_bootnext_firmware_fallback(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="bootnext_fallback_prompt",
+            distribution=options.distribution,
+        )
+        try:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            initial = self._focus_bootnext_fallback_control(
+                ssh,
+                vm,
+                result,
+                mode="bootnext-accept",
+                expected_control="UefiFallbackAcceptButton",
+                expected_phase="FallbackPrompted",
+                step="automation.bootnext_fallback.focus_before_reboot",
+            )
+            capture = self._capture_with_name(
+                vm,
+                "bootnext-fallback-before-unanswered-reboot",
+            )
+            result.ok(
+                "automation.bootnext_fallback.visible_before_reboot",
+                "The translated firmware fallback was left unanswered before a Windows reboot",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(capture),
+                **initial,
+            )
+            self._request_unanswered_prompt_reboot(ssh, vm, result)
+        finally:
+            ssh.__exit__(None, None, None)
+
+        ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="bootnext_fallback_prompt_after_reboot",
+            grub_entry="windows",
+            distribution=options.distribution,
+        )
+        try:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            restored = self._focus_bootnext_fallback_control(
+                ssh,
+                vm,
+                result,
+                mode="bootnext-accept",
+                expected_control="UefiFallbackAcceptButton",
+                expected_phase="FallbackPrompted",
+                step="automation.bootnext_fallback.focus_after_reboot",
+            )
+            capture = self._capture_with_name(vm, "bootnext-fallback-restored-after-reboot")
+            self._send_focused_enter(vm)
+            result.ok(
+                "automation.bootnext_fallback.accepted",
+                "The translated firmware BootOrder fallback was accepted after its prompt returned",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(capture),
+                **restored,
+            )
+            ready = self._focus_bootnext_fallback_control(
+                ssh,
+                vm,
+                result,
+                mode="bootnext-reboot",
+                expected_control="UefiFallbackRebootButton",
+                expected_phase="AwaitingFallbackReboot",
+                step="automation.bootnext_fallback.focus_reboot",
+            )
+            capture = self._capture_with_name(vm, "bootnext-fallback-reboot-ready")
+            self._send_focused_enter(vm)
+            result.ok(
+                "automation.bootnext_fallback.rebooted",
+                "The reused verified mini-ISO was requested through the firmware BootOrder UI",
+                vm=vm.name,
+                target=vm.vnc,
+                capture=str(capture),
+                **ready,
+            )
+        finally:
+            ssh.__exit__(None, None, None)
+
+    def _focus_bootnext_fallback_control(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        *,
+        mode: str,
+        expected_control: str,
+        expected_phase: str,
+        step: str,
+    ) -> dict[str, str]:
+        response = self._run_windows_script_resiliently(
+            ssh,
+            script_name="focus_unattended_warning.ps1",
+            config={"mode": mode},
+            step=step,
+            timeout=210,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "PROCESS_ID",
+                "WINDOW_HANDLE",
+                "FOCUSED_CONTROL",
+                "STATE_PATH",
+                "STATE_PHASE",
+                "RESULT",
+            ),
+        )
+        if (
+            values.get("FOCUSED_CONTROL") != expected_control
+            or values.get("STATE_PHASE") != expected_phase
+            or values.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                step,
+                "The expected translated BootNext fallback control was not proven focused",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        return values
 
     def _verify_exact_windows_rollback(
         self,
@@ -2599,7 +2811,7 @@ class PostInstallValidationMixin:
         ssh: SSHClient,
         vm: VMConfig,
         result: ResultBuilder,
-    ) -> str:
+    ) -> BootGuardianFaultEvidence:
         plan = self._run_windows_script_resiliently(
             ssh,
             script_name="test_boot_guardian_preferred_path_fault.ps1",
@@ -2645,10 +2857,27 @@ class PostInstallValidationMixin:
         )
         values = self.validation.parse_powershell_results(
             injection.stdout,
-            prefixes=("INJECTED_UTC", "INJECTED_HASH", "RESULT"),
+            prefixes=(
+                "INJECTED_UTC",
+                "INJECTED_HASH",
+                "REPAIR_LOG_BASELINE_COUNT",
+                "MATCHING_REPAIR_LOG_BASELINE_COUNT",
+                "REPAIR_LOG_BASELINE_NAMES",
+                "RESULT",
+            ),
         )
         injected_utc = values.get("INJECTED_UTC", "")
-        if not injected_utc or values.get("RESULT") != "OK":
+        repair_log_count = values.get("REPAIR_LOG_BASELINE_COUNT", "")
+        matching_log_count = values.get("MATCHING_REPAIR_LOG_BASELINE_COUNT", "")
+        repair_log_names = values.get("REPAIR_LOG_BASELINE_NAMES", "")
+        if (
+            not injected_utc
+            or not repair_log_count.isascii()
+            or not repair_log_count.isdigit()
+            or not matching_log_count.isascii()
+            or not matching_log_count.isdigit()
+            or values.get("RESULT") != "OK"
+        ):
             raise WorkflowError(
                 "automation.preferred_path_guardian.inject",
                 "The original Windows loader was not restored for the controlled repair test",
@@ -2661,16 +2890,21 @@ class PostInstallValidationMixin:
             target=vm.host,
             **values,
         )
-        return injected_utc
+        return BootGuardianFaultEvidence(
+            injected_utc=injected_utc,
+            repair_log_baseline_count=int(repair_log_count),
+            matching_repair_log_baseline_count=int(matching_log_count),
+            repair_log_baseline_names=repair_log_names,
+        )
 
     def _verify_boot_guardian_preferred_loader_repair(
         self,
         ssh: SSHClient,
         vm: VMConfig,
         result: ResultBuilder,
-        injected_utc: str,
+        evidence: BootGuardianFaultEvidence | None,
     ) -> None:
-        if not injected_utc:
+        if evidence is None or not evidence.injected_utc:
             raise WorkflowError(
                 "automation.preferred_path_guardian.verify",
                 "The preferred-loader fault injection timestamp was not retained",
@@ -2679,7 +2913,13 @@ class PostInstallValidationMixin:
         verification = self._run_windows_script_resiliently(
             ssh,
             script_name="test_boot_guardian_preferred_path_fault.ps1",
-            config={"action": "verify-loader", "injected_after_utc": injected_utc},
+            config={
+                "action": "verify-loader",
+                "injected_after_utc": evidence.injected_utc,
+                "repair_log_baseline_count": evidence.repair_log_baseline_count,
+                "matching_repair_log_baseline_count": (evidence.matching_repair_log_baseline_count),
+                "repair_log_baseline_names": evidence.repair_log_baseline_names,
+            },
             step="automation.preferred_path_guardian.verify",
             timeout=90,
         )
@@ -2706,6 +2946,148 @@ class PostInstallValidationMixin:
             target=vm.host,
             **values,
         )
+
+    def _exercise_boot_guardian_shutdown_repair(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        mode = options.boot_guardian_fault
+        if mode == "boot-order":
+            evidence = self._inject_boot_guardian_boot_order_fault(ssh, vm, result)
+        elif mode == "preferred-path":
+            evidence = self._inject_boot_guardian_preferred_loader_fault(ssh, vm, result)
+        else:
+            raise ValueError("shutdown repair requires a BootGuardian fault mode")
+
+        try:
+            response = ssh.run(
+                "shutdown.exe /s /t 0 /d p:0:0",
+                step="automation.boot_guardian_shutdown.request",
+                timeout=30,
+                check=False,
+            )
+        except WorkflowError as exc:
+            raise WorkflowError(
+                "automation.boot_guardian_shutdown.request",
+                "Windows could not request the BootGuardian shutdown test",
+                details={"vm": vm.name, "target": vm.host, **exc.details},
+            ) from exc
+        if response.exit_code not in {0, -1}:
+            raise WorkflowError(
+                "automation.boot_guardian_shutdown.request",
+                "Windows rejected the BootGuardian shutdown test",
+                details={
+                    "vm": vm.name,
+                    "target": vm.host,
+                    "exit_code": response.exit_code,
+                    "stdout": response.stdout,
+                    "stderr": response.stderr,
+                },
+            )
+
+        with self._proxmox() as proxmox:
+            node = proxmox.locate_vm(vm.vmid)
+            stopped = proxmox.wait_for_vm_status(
+                node,
+                vm.vmid,
+                "stopped",
+                timeout=180,
+                step="automation.boot_guardian_shutdown.stopped",
+            )
+            result.ok(
+                "automation.boot_guardian_shutdown.stopped",
+                "Windows completed a real shutdown after the preshutdown repair window",
+                vm=vm.name,
+                target=vm.host,
+                status=str(stopped.get("status") or ""),
+                qmpstatus=str(stopped.get("qmpstatus") or ""),
+            )
+            proxmox.start_vm(node, vm.vmid)
+            started = proxmox.wait_for_vm_status(
+                node,
+                vm.vmid,
+                "running",
+                timeout=180,
+                step="automation.boot_guardian_shutdown.started",
+            )
+            result.ok(
+                "automation.boot_guardian_shutdown.started",
+                "The powered-off VM was started again after the shutdown repair",
+                vm=vm.name,
+                target=vm.host,
+                status=str(started.get("status") or ""),
+                qmpstatus=str(started.get("qmpstatus") or ""),
+            )
+
+        linux_ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=options.linux_username,
+            password=options.linux_password,
+            trust_on_first_use=True,
+            probe="test -e /var/lib/libertix/development-ssh-ready && printf LIBERTIX_LINUX_READY",
+            expected="LIBERTIX_LINUX_READY",
+            phase="boot_guardian_shutdown_linux",
+            grub_entry="linux",
+            distribution=options.distribution,
+        )
+        try:
+            result.ok(
+                "automation.boot_guardian_shutdown.linux",
+                "The repaired boot path reached the installed Linux system after power-on",
+                vm=vm.name,
+                target=vm.host,
+                server_key_sha256=linux_ssh.server_key_sha256,
+            )
+            self._request_windows_boot(
+                linux_ssh,
+                vm,
+                options,
+                result,
+                test_name="linux.boot_guardian_shutdown_windows_reboot",
+            )
+        finally:
+            linux_ssh.__exit__(None, None, None)
+
+        windows_ssh = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="boot_guardian_shutdown_windows",
+            grub_entry="windows",
+            distribution=options.distribution,
+        )
+        try:
+            if mode == "boot-order":
+                self._verify_boot_guardian_boot_order_repair(
+                    windows_ssh,
+                    vm,
+                    result,
+                    evidence,
+                )
+            else:
+                self._verify_boot_guardian_preferred_loader_repair(
+                    windows_ssh,
+                    vm,
+                    result,
+                    evidence,
+                )
+            result.ok(
+                "automation.boot_guardian_shutdown.windows",
+                "Windows returned after the shutdown repair and retained the guardian state",
+                vm=vm.name,
+                target=vm.host,
+                server_key_sha256=windows_ssh.server_key_sha256,
+            )
+        finally:
+            windows_ssh.__exit__(None, None, None)
 
     def _run_windows_checks(
         self,

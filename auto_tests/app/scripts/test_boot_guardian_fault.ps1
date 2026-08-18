@@ -142,6 +142,18 @@ $windowsBootNumber = Get-WindowsBootNumber `
 [uint16[]]$faultOrder = @($windowsBootNumber) + @(
     $currentOrder | Where-Object { [uint16]$_ -ne $windowsBootNumber }
 )
+$repairLogsBefore = @(
+    Get-ChildItem -LiteralPath ([string]$guardian.logDirectory) -Filter "*-repair-*.log" -File
+)
+$matchingRepairLogsBefore = @(
+    $repairLogsBefore | Where-Object {
+        (Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) -match
+            'REPAIR: BootOrder changed from .+ to .+'
+    }
+)
+$repairLogBaselineNames = @(
+    $repairLogsBefore | ForEach-Object { $_.Name }
+) -join "|"
 
 Write-Output "ACTION=$action"
 Write-Output "RUN_ID=$($guardian.runId)"
@@ -254,6 +266,9 @@ if ($action -in @("inject-boot-order", "inject-preferred-bypass")) {
         $injectedUtc = [DateTime]::UtcNow.ToString("o")
         Write-Output "INJECTED_UTC=$injectedUtc"
         Write-Output "VERIFIED_FAULT_ORDER=$(Format-BootOrder -Order $verifiedFaultOrder)"
+        Write-Output "REPAIR_LOG_BASELINE_COUNT=$($repairLogsBefore.Count)"
+        Write-Output "MATCHING_REPAIR_LOG_BASELINE_COUNT=$($matchingRepairLogsBefore.Count)"
+        Write-Output "REPAIR_LOG_BASELINE_NAMES=$repairLogBaselineNames"
         if ($action -eq "inject-preferred-bypass") {
             Assert-Condition (
                 [string](Get-Service -Name "LibertixBootGuardian" -ErrorAction Stop).Status -eq "Stopped"
@@ -270,22 +285,30 @@ if ($action -in @("inject-boot-order", "inject-preferred-bypass")) {
     }
 }
 
-$injectedAfterUtc = [DateTime]::Parse(
-    [string]$request.injected_after_utc,
-    [Globalization.CultureInfo]::InvariantCulture,
-    [Globalization.DateTimeStyles]::RoundtripKind
-).ToUniversalTime()
+$repairLogBaselineCount = [int]$request.repair_log_baseline_count
+$matchingRepairLogBaselineCount = [int]$request.matching_repair_log_baseline_count
+$repairLogBaselineNames = @(
+    if ([string]$request.repair_log_baseline_names) {
+        [string]$request.repair_log_baseline_names -split '\|'
+    }
+)
 Assert-Condition ($currentOrder[0] -eq $ownedBootNumber) `
     "The guardian did not restore Libertix to the front of BootOrder."
 $repairLogs = @(
     Get-ChildItem -LiteralPath ([string]$guardian.logDirectory) -Filter "*-repair-*.log" -File |
-        Where-Object { $_.LastWriteTimeUtc -ge $injectedAfterUtc.AddSeconds(-2) } |
         Sort-Object LastWriteTimeUtc
 )
-Assert-Condition ($repairLogs.Count -ge 1) `
-    "The guardian repaired BootOrder without producing its required repair journal."
+Assert-Condition ($repairLogs.Count -gt $repairLogBaselineCount) `
+    "The guardian repaired BootOrder without creating a new repair journal."
+Assert-Condition ($matchingRepairLogsBefore.Count -gt $matchingRepairLogBaselineCount) `
+    "The BootOrder repair journal count did not increase."
+$newRepairLogs = @(
+    $repairLogs | Where-Object { $_.Name -notin $repairLogBaselineNames }
+)
+Assert-Condition ($newRepairLogs.Count -ge 1) `
+    "The BootOrder repair journal set changed without a new unique file."
 $matchingLogs = @(
-    $repairLogs | Where-Object {
+    $newRepairLogs | Where-Object {
         (Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8) -match
             'REPAIR: BootOrder changed from .+ to .+'
     }

@@ -23,7 +23,11 @@ from app.distributions import load_distribution_profile
 from app.errors import WorkflowError
 from app.models import ValidationRequest
 from app.services.automation import AutomationService
-from app.services.automation_postinstall import CrossOsArtifacts, RemoteCheck
+from app.services.automation_postinstall import (
+    BootGuardianFaultEvidence,
+    CrossOsArtifacts,
+    RemoteCheck,
+)
 from app.services.automation_types import AutomationOptions
 from app.services.automation_windows_checks import (
     build_windows_validation_plan,
@@ -36,6 +40,7 @@ from app.services.source_tree import LocalSourceTree
 from app.services.validation import ValidationService
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+TEST_RUNTIME_ROOT = REPO_ROOT / "auto_tests" / "runtime" / "test-harness"
 
 
 def test_distribution_profiles_are_loaded_from_the_versioned_catalog() -> None:
@@ -184,6 +189,9 @@ def settings(**overrides: object) -> Settings:
         "proxmox_url": "https://192.0.2.166:8006",
         "proxmox_token_id": "root@pam!eki",
         "proxmox_token_secret": "secret",
+        "runtime_dir": TEST_RUNTIME_ROOT,
+        "capture_dir": TEST_RUNTIME_ROOT / "captures",
+        "operation_log_dir": TEST_RUNTIME_ROOT / "logs",
         "vms": (
             {
                 "name": "vm1",
@@ -271,6 +279,15 @@ def test_capture_directory_must_be_confined_to_runtime_directory(tmp_path: Path)
             runtime_dir=tmp_path / "runtime",
             capture_dir=tmp_path / "outside" / "captures",
         )
+
+
+def test_settings_helper_never_targets_laboratory_runtime_artifacts() -> None:
+    configured = settings()
+
+    assert configured.runtime_dir == TEST_RUNTIME_ROOT
+    assert configured.capture_dir == TEST_RUNTIME_ROOT / "captures"
+    assert configured.operation_log_dir == TEST_RUNTIME_ROOT / "logs"
+    assert configured.capture_dir != REPO_ROOT / "auto_tests" / "runtime" / "captures"
 
 
 def test_local_filepool_sync_uploads_changed_artifacts_atomically(
@@ -1511,6 +1528,38 @@ def test_bootnext_rollback_skips_live_monitor_after_controlled_windows_reboot(
     assert outcome == "bootnext-fallback"
 
 
+def test_bootnext_fallback_acceptance_defers_live_monitor_until_after_consent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        boot_guardian_fault="bootnext-fallback",
+    )
+    monkeypatch.setattr(service, "_observe_unattended_wizard", lambda *_args: None)
+    monkeypatch.setattr(
+        service,
+        "_monitor_until_live_boot",
+        lambda *_args, **_kwargs: pytest.fail("consent must be handled before live monitoring"),
+    )
+
+    outcome = service._run_unattended_wizard(  # noqa: SLF001
+        vm,
+        options,
+        ResultBuilder("automation"),
+        {
+            "pid": 42,
+            "unattended_status_path": r"C:\status.json",
+            "unattended_acknowledgement_path": r"C:\ack.json",
+        },
+    )
+
+    assert outcome == "bootnext-fallback"
+
+
 def test_unattended_warning_is_captured_before_keyboard_acceptance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1970,7 +2019,9 @@ def test_boot_guardian_boot_order_fixture_requires_dry_run_and_repair_proof(
             "inject-boot-order": (
                 "INJECTED_UTC=2026-08-16T10:00:00.0000000Z\n"
                 "VERIFIED_FAULT_ORDER=Boot0001,Boot0007\n"
-                "WINDOWS_BOOT=Boot0001\nRESULT=OK\n"
+                "WINDOWS_BOOT=Boot0001\nREPAIR_LOG_BASELINE_COUNT=2\n"
+                "MATCHING_REPAIR_LOG_BASELINE_COUNT=1\n"
+                "REPAIR_LOG_BASELINE_NAMES=first.log|second.log\nRESULT=OK\n"
             ),
             "verify-boot-order": (
                 "REPAIR_LOG=C:\\LibertixInstallLogs\\Windows\\run\\BootGuardian\\repair.log\n"
@@ -1994,9 +2045,143 @@ def test_boot_guardian_boot_order_fixture_requires_dry_run_and_repair_proof(
     )
 
     assert actions == ["plan-boot-order", "inject-boot-order", "verify-boot-order"]
-    assert injected == "2026-08-16T10:00:00.0000000Z"
+    assert injected == BootGuardianFaultEvidence(
+        injected_utc="2026-08-16T10:00:00.0000000Z",
+        repair_log_baseline_count=2,
+        matching_repair_log_baseline_count=1,
+        repair_log_baseline_names="first.log|second.log",
+    )
     assert result.steps[-1].status == "ok"
     assert result.steps[-1].context["REPAIRED_ORDER"] == "Boot0007,Boot0001"
+
+
+@pytest.mark.parametrize("mode", ["boot-order", "preferred-path"])
+def test_boot_guardian_fault_is_repaired_during_a_real_shutdown_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    calls: list[str] = []
+
+    class FakeSSH:
+        server_key_sha256 = "sha256:test"
+
+        def run(self, command: str, **_kwargs: object) -> CommandResult:
+            assert command == "shutdown.exe /s /t 0 /d p:0:0"
+            calls.append("shutdown")
+            return CommandResult(stdout="", stderr="", exit_code=-1)
+
+        def __exit__(self, *_args: object) -> None:
+            calls.append("ssh-close")
+
+    class FakeProxmox:
+        def __enter__(self) -> "FakeProxmox":
+            calls.append("proxmox-open")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            calls.append("proxmox-close")
+
+        def locate_vm(self, vmid: int) -> str:
+            assert vmid == vm.vmid
+            return "node-a"
+
+        def wait_for_vm_status(
+            self,
+            node: str,
+            vmid: int,
+            expected_status: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            assert node == "node-a"
+            assert vmid == vm.vmid
+            calls.append(f"wait-{expected_status}")
+            return {
+                "status": expected_status,
+                "qmpstatus": "running" if expected_status == "running" else "stopped",
+            }
+
+        def start_vm(self, node: str, vmid: int) -> None:
+            assert (node, vmid) == ("node-a", vm.vmid)
+            calls.append("start")
+
+    injected = BootGuardianFaultEvidence(
+        injected_utc="2026-08-18T01:02:03.0000000Z",
+        repair_log_baseline_count=2,
+        matching_repair_log_baseline_count=1,
+        repair_log_baseline_names="first.log|second.log",
+    )
+    monkeypatch.setattr(service, "_proxmox", lambda: FakeProxmox())
+    monkeypatch.setattr(
+        service,
+        "_wait_for_ssh",
+        lambda *_args, **kwargs: calls.append(f"ssh-{kwargs['phase']}") or FakeSSH(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_request_windows_boot",
+        lambda *_args, **_kwargs: calls.append("request-windows"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_inject_boot_guardian_boot_order_fault",
+        lambda *_args: calls.append("inject-boot-order") or injected,
+    )
+    monkeypatch.setattr(
+        service,
+        "_inject_boot_guardian_preferred_loader_fault",
+        lambda *_args: calls.append("inject-preferred-path") or injected,
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_boot_guardian_boot_order_repair",
+        lambda *_args: calls.append("verify-boot-order"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_boot_guardian_preferred_loader_repair",
+        lambda *_args: calls.append("verify-preferred-path"),
+    )
+
+    service._exercise_boot_guardian_shutdown_repair(  # noqa: SLF001
+        FakeSSH(),
+        vm,
+        AutomationOptions(
+            "test",
+            "test-passphrase",
+            True,
+            boot_guardian_fault=mode,  # type: ignore[arg-type]
+        ),
+        ResultBuilder("automation"),
+    )
+
+    expected_fixture = "boot-order" if mode == "boot-order" else "preferred-path"
+    assert calls == [
+        f"inject-{expected_fixture}",
+        "shutdown",
+        "proxmox-open",
+        "wait-stopped",
+        "start",
+        "wait-running",
+        "proxmox-close",
+        "ssh-boot_guardian_shutdown_linux",
+        "request-windows",
+        "ssh-close",
+        "ssh-boot_guardian_shutdown_windows",
+        f"verify-{expected_fixture}",
+        "ssh-close",
+    ]
+
+
+def test_boot_guardian_fault_fixtures_enumerate_empty_log_sets_under_strict_mode() -> None:
+    for relative_path in (
+        "auto_tests/app/scripts/test_boot_guardian_fault.ps1",
+        "auto_tests/app/scripts/test_boot_guardian_preferred_path_fault.ps1",
+    ):
+        source = (REPO_ROOT / relative_path).read_text(encoding="utf-8-sig")
+        assert "$repairLogsBefore | ForEach-Object { $_.Name }" in source
+        assert "$repairLogsBefore.Name" not in source
 
 
 def test_automation_scope_rejects_unvalidated_vm() -> None:

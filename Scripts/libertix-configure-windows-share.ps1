@@ -30,32 +30,6 @@ function Write-ShareLog {
     Add-Content -LiteralPath (Join-Path $archiveRoot "windows-share.log") -Value $line
 }
 
-function Invoke-ProcessWithTimeout {
-    param(
-        [Parameter(Mandatory = $true)][string]$FilePath,
-        [string[]]$ArgumentList = @(),
-        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
-    )
-    $process = Start-Process `
-        -FilePath $FilePath `
-        -ArgumentList $ArgumentList `
-        -PassThru
-    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-        $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
-        $taskkillResult = Invoke-LibertixNativeCommand `
-            -FilePath $taskkill `
-            -ArgumentList @("/PID", [string]$process.Id, "/T", "/F") `
-            -TimeoutSeconds 15
-        $taskkillExitCode = $taskkillResult.ExitCode
-        $process.WaitForExit(10000) | Out-Null
-        if ($taskkillExitCode -ne 0 -or -not $process.HasExited) {
-            throw "$FilePath timed out and its process tree could not be proven stopped."
-        }
-        throw "$FilePath timed out after $TimeoutSeconds seconds."
-    }
-    return $process.ExitCode
-}
-
 function Remove-VerifiedExt4InstallerResume {
     param([Parameter(Mandatory = $true)]$Config)
 
@@ -152,7 +126,166 @@ function Get-Config {
     if ([string]::IsNullOrWhiteSpace([string]$config.ShortcutDescription)) {
         throw "Windows share configuration has no localized shortcut description."
     }
+    foreach ($propertyName in @(
+        "SetupAttachedContainerSize",
+        "WinFspPayloadName",
+        "WinFspPayloadSha256",
+        "DriverPayloadName",
+        "DriverPayloadSha256"
+    )) {
+        if ($null -eq $config.PSObject.Properties[$propertyName]) {
+            throw "Windows share configuration is missing $propertyName."
+        }
+    }
+    if (
+        [int64]$config.SetupAttachedContainerSize -le 0 -or
+        [string]$config.WinFspPayloadName -notmatch '^[A-Za-z0-9._-]+$' -or
+        [string]$config.DriverPayloadName -notmatch '^[A-Za-z0-9._-]+$' -or
+        [string]$config.WinFspPayloadSha256 -notmatch '^[0-9A-Fa-f]{64}$' -or
+        [string]$config.DriverPayloadSha256 -notmatch '^[0-9A-Fa-f]{64}$'
+    ) {
+        throw "Windows share configuration has invalid ext4 installer payload metadata."
+    }
     return $config
+}
+
+function Copy-FileTail {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath,
+        [Parameter(Mandatory = $true)][int64]$ByteCount
+    )
+
+    $source = [IO.File]::OpenRead($SourcePath)
+    try {
+        if ($ByteCount -le 0 -or $source.Length -le $ByteCount) {
+            throw "The ext4 installer attached-container boundary is invalid."
+        }
+        $source.Position = $source.Length - $ByteCount
+        $destination = [IO.File]::Create($DestinationPath)
+        try {
+            $buffer = New-Object byte[] 1048576
+            [int64]$remaining = $ByteCount
+            while ($remaining -gt 0) {
+                $read = $source.Read(
+                    $buffer,
+                    0,
+                    [int][Math]::Min([int64]$buffer.Length, $remaining)
+                )
+                if ($read -le 0) {
+                    throw "The ext4 installer attached container ended unexpectedly."
+                }
+                $destination.Write($buffer, 0, $read)
+                $remaining -= $read
+            }
+            $destination.Flush()
+        } finally {
+            $destination.Dispose()
+        }
+    } finally {
+        $source.Dispose()
+    }
+}
+
+function Install-VerifiedExt4Runtime {
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $setup = [string]$Config.SetupPath
+    $ext4Exe = Join-Path (Get-NativeProgramFilesPath) "ext4-win-driver\ext4.exe"
+    $winFspKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
+    if (
+        (Test-Path -LiteralPath $ext4Exe -PathType Leaf) -and
+        (Test-Path -LiteralPath $winFspKey)
+    ) {
+        Write-ShareLog "Existing ext4 and WinFsp runtime detected; installation does not need to rerun."
+        return
+    }
+    if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) {
+        throw "ext4 setup payload is missing and the installed runtime is incomplete."
+    }
+    $setupHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($setupHash -ne ([string]$Config.SetupSha256).ToLowerInvariant()) {
+        throw "ext4 setup SHA-256 mismatch."
+    }
+
+    $workingRoot = Join-Path `
+        (Split-Path -Parent $ConfigPath) `
+        ("installer-payload-" + [Guid]::NewGuid().ToString("N"))
+    $payloadRoot = Join-Path $workingRoot "payload"
+    $containerPath = Join-Path $workingRoot "attached-container.cab"
+    try {
+        New-Item -ItemType Directory -Path $payloadRoot -Force -ErrorAction Stop | Out-Null
+        Copy-FileTail `
+            -SourcePath $setup `
+            -DestinationPath $containerPath `
+            -ByteCount ([int64]$Config.SetupAttachedContainerSize)
+
+        $expand = Get-LibertixNativeSystemExecutable -FileName "expand.exe"
+        $expandResult = Invoke-LibertixNativeCommand `
+            -FilePath $expand `
+            -ArgumentList @("-F:*", $containerPath, $payloadRoot) `
+            -TimeoutSeconds 120
+        if ($expandResult.ExitCode -ne 0) {
+            throw "The ext4 installer payload extraction failed with rc=$($expandResult.ExitCode)."
+        }
+
+        $winFspMsi = Join-Path $payloadRoot ([string]$Config.WinFspPayloadName)
+        $driverMsi = Join-Path $payloadRoot ([string]$Config.DriverPayloadName)
+        foreach ($payload in @(
+            @($winFspMsi, [string]$Config.WinFspPayloadSha256, "WinFsp"),
+            @($driverMsi, [string]$Config.DriverPayloadSha256, "ext4 driver")
+        )) {
+            if (-not (Test-Path -LiteralPath $payload[0] -PathType Leaf)) {
+                throw "$($payload[2]) MSI is missing from the verified bundle container."
+            }
+            $payloadHash = (Get-FileHash -LiteralPath $payload[0] -Algorithm SHA256).Hash
+            if ($payloadHash -ine $payload[1]) {
+                throw "$($payload[2]) MSI SHA-256 mismatch."
+            }
+        }
+
+        $archiveRoot = Join-Path $env:SystemDrive "LibertixInstallLogs\Windows"
+        New-Item -ItemType Directory -Path $archiveRoot -Force -ErrorAction Stop | Out-Null
+        $logSuffix = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssfffZ")
+        $msiexec = Get-LibertixNativeSystemExecutable -FileName "msiexec.exe"
+        foreach ($installer in @(
+            @($winFspMsi, (Join-Path $archiveRoot "winfsp-msi-$logSuffix.log"), "WinFsp"),
+            @($driverMsi, (Join-Path $archiveRoot "ext4-driver-msi-$logSuffix.log"), "ext4 driver")
+        )) {
+            $installResult = Invoke-LibertixNativeCommand `
+                -FilePath $msiexec `
+                -ArgumentList @(
+                    "/i",
+                    $installer[0],
+                    "/qn",
+                    "/norestart",
+                    "ARPSYSTEMCOMPONENT=1",
+                    "MSIFASTINSTALL=7",
+                    "/L*v",
+                    $installer[1]
+                ) `
+                -TimeoutSeconds 1800
+            if ($installResult.ExitCode -notin @(0, 3010)) {
+                throw "$($installer[2]) MSI failed with rc=$($installResult.ExitCode)."
+            }
+            Write-ShareLog "$($installer[2]) MSI completed with rc=$($installResult.ExitCode)."
+        }
+    } finally {
+        if (Test-Path -LiteralPath $workingRoot -PathType Container) {
+            Remove-Item -LiteralPath $workingRoot -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $workingRoot) {
+                Write-ShareLog "Temporary ext4 installer payload cleanup did not complete: $workingRoot"
+            }
+        }
+    }
+
+    if (
+        -not (Test-Path -LiteralPath $ext4Exe -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $winFspKey)
+    ) {
+        throw "The verified MSI installation did not produce the complete ext4 and WinFsp runtime."
+    }
+    Write-ShareLog "Verified ext4 and WinFsp MSI payloads installed without the interactive bundle."
 }
 
 function Get-NativeProgramFilesPath {
@@ -713,26 +846,7 @@ try {
     }
     if ($Finalize) {
         $setup = [string]$config.SetupPath
-        $ext4Exe = Join-Path (Get-NativeProgramFilesPath) "ext4-win-driver\ext4.exe"
-        $winFspKey = "HKLM:\SOFTWARE\WOW6432Node\WinFsp"
-        if (Test-Path -LiteralPath $setup -PathType Leaf) {
-            $hash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($hash -ne [string]$config.SetupSha256) { throw "ext4 setup SHA-256 mismatch." }
-            $installerExitCode = Invoke-ProcessWithTimeout `
-                -FilePath $setup `
-                -ArgumentList @("/quiet", "/norestart") `
-                -TimeoutSeconds 1800
-            if ($installerExitCode -notin @(0, 3010, 1641)) {
-                throw "ext4 setup failed with rc=$installerExitCode."
-            }
-        } elseif (
-            -not (Test-Path -LiteralPath $ext4Exe -PathType Leaf) -or
-            -not (Test-Path -LiteralPath $winFspKey)
-        ) {
-            throw "ext4 setup payload is missing and the installed runtime is incomplete."
-        } else {
-            Write-ShareLog "Existing ext4 and WinFsp runtime detected; setup does not need to rerun."
-        }
+        Install-VerifiedExt4Runtime -Config $config
         Install-WinFspRuntimeForExt4
         Set-ReadOnlyDriverPolicy
         Install-MountTask -Config $config

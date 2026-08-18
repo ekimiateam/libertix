@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import multiprocessing
 import queue
@@ -42,6 +43,21 @@ from app.stream_events import StreamEventProjector
 
 logger = logging.getLogger(__name__)
 OperationName = Literal["validation", "reset", "automation"]
+
+
+def _worker_fatal_diagnostic_context(run_workspace: Path) -> dict[str, str]:
+    path = run_workspace / "worker-fatal.log"
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return {}
+    if not content:
+        return {}
+    lines = content.splitlines()
+    return {
+        "fatal_log": str(path),
+        "fatal_diagnostics": "\n".join(lines[-80:])[-12000:],
+    }
 
 
 def _operation_busy_result(operation: OperationName) -> OperationResult:
@@ -160,6 +176,12 @@ def _stream_operation_worker(
     run_workspace: Path,
 ) -> None:
     mark_capture_workspace_owned(run_workspace)
+    fatal_output = (run_workspace / "worker-fatal.log").open(
+        "a",
+        encoding="utf-8",
+        buffering=1,
+    )
+    faulthandler.enable(file=fatal_output, all_threads=True)
     event_stream_available = True
     publish_lock = threading.Lock()
 
@@ -209,6 +231,8 @@ def _stream_operation_worker(
         logger.exception("VNC runtime shutdown failed after %s", operation)
     publish("result", result.model_dump(mode="json"))
     process_events.close()
+    faulthandler.disable()
+    fatal_output.close()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -460,6 +484,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if not terminal_result_seen.is_set():
                     exit_code = process.exitcode if process.exitcode is not None else -1
                     forced = exit_code < 0
+                    diagnostic_context = (
+                        _worker_fatal_diagnostic_context(run_workspace) if forced else {}
+                    )
                     result = OperationResult(
                         status="error",
                         operation=operation,
@@ -481,7 +508,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                     if forced
                                     else "Operation process exited without a terminal result"
                                 ),
-                                context={"exit_code": exit_code},
+                                context={"exit_code": exit_code, **diagnostic_context},
                             )
                         ],
                     )
