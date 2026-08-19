@@ -99,7 +99,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Verify Developer Certificate of Origin sign-off
+      - name: Check for DCO sign-off (advisory)
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -111,20 +111,22 @@ jobs:
             printf 'No prior commit to compare against; skipping DCO check for this event.\n'
             exit 0
           fi
+          # ponytail: reports, does not gate. AI_POLICY.md recommends Signed-off-by
+          # rather than requiring it; a human reviewer judges each PR, not this job.
           unsigned=0
           while IFS= read -r commit; do
             # Presence check only: this does not verify the trailer's name/email
             # matches the commit author, the way stricter DCO bots do.
             if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+>$'; then
-              printf 'Missing Signed-off-by trailer: %s %s\n' \
-                "$commit" "$(git log -1 --format=%s "$commit")" >&2
+              subject="$(git log -1 --format=%s "$commit")"
+              printf '::warning::Commit %s is missing a Signed-off-by trailer: %s\n' \
+                "$commit" "$subject"
               unsigned=1
             fi
           done < <(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
           if [ "$unsigned" -ne 0 ]; then
-            printf 'One or more commits are missing a DCO sign-off. Run: git commit --amend -s\n' >&2
-            printf 'See https://developercertificate.org/ and AI_POLICY.md.\n' >&2
-            exit 1
+            printf 'One or more commits are missing a DCO sign-off (see warnings above).\n'
+            printf 'This is a recommendation, not a gate: see AI_POLICY.md.\n'
           fi
 
       - name: Set up uv
