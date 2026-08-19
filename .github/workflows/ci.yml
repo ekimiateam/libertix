@@ -120,8 +120,10 @@ jobs:
             # matches the commit author, the way stricter DCO bots do.
             if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+>$'; then
               subject="$(git log -1 --format=%s "$commit")"
+              # GitHub workflow commands interpret % and newlines; escape before annotating.
               printf '::warning::Commit %s is missing a Signed-off-by trailer: %s\n' \
-                "$commit" "$subject"
+                "$commit" "${subject//%/%25}"
+              printf 'Missing Signed-off-by: %s %s\n' "$commit" "$subject"
               unsigned=1
             fi
           done < <(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
