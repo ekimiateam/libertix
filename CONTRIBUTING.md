@@ -65,7 +65,7 @@ the architecture diagram in `README.md`), plus the tooling that builds, tests, a
 - Development happens on the `dev` branch; `main` tracks stable releases.
 - Sign off commits (`git commit -s`). CI flags commits without the trailer as a warning, but does
   not block on it — `AI_POLICY.md` recommends the sign-off rather than requiring it, and a human
-  reviewer judges each pull request..
+  reviewer judges each pull request.
 - The pull request template lists the AI-assistance commit-trailer convention from `AI_POLICY.md`
   (`Assisted-by:` / `Generated-by:`, never `Co-authored-by:` for a tool).
 - Run the checks in `README.md`'s Tests section (`ruff`, `pytest`, ShellCheck, PSScriptAnalyzer,
