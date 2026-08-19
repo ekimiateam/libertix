@@ -101,6 +101,7 @@ jobs:
 
       - name: Check for DCO sign-off (advisory)
         shell: bash
+        continue-on-error: true
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
