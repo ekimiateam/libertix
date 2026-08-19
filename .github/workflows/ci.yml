@@ -112,7 +112,7 @@ jobs:
             printf 'No prior commit to compare against; skipping DCO check for this event.\n'
             exit 0
           fi
-          # ponytail: reports, does not gate. AI_POLICY.md recommends Signed-off-by
+          # Advisory: reports, does not gate. AI_POLICY.md recommends Signed-off-by
           # rather than requiring it; a human reviewer judges each PR, not this job.
           unsigned=0
           while IFS= read -r commit; do
