@@ -300,6 +300,9 @@ To help fund continued development and testing, visit the
 
 ## Contributing
 
+New to the codebase? [`CONTRIBUTING.md`](CONTRIBUTING.md) maps what each directory does and where
+the core code lives.
+
 Development takes place on the `dev` branch. Keep firmware-neutral behavior in the shared plan and
 runtime modules, and limit BIOS/UEFI adapters to operations that genuinely differ. Changes to disk
 or rollback behavior should include parity tests for both firmware paths and a replay of the
