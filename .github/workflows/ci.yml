@@ -97,6 +97,40 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check for DCO sign-off (advisory)
+        shell: bash
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "$zero_sha" ]; then
+            printf 'No prior commit to compare against; skipping DCO check for this event.\n'
+            exit 0
+          fi
+          # Advisory: reports, does not gate. AI_POLICY.md recommends Signed-off-by
+          # rather than requiring it; a human reviewer judges each PR, not this job.
+          unsigned=0
+          while IFS= read -r commit; do
+            # Presence check only: this does not verify the trailer's name/email
+            # matches the commit author, the way stricter DCO bots do.
+            if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+>$'; then
+              subject="$(git log -1 --format=%s "$commit")"
+              # GitHub workflow commands interpret % and newlines; escape before annotating.
+              printf '::warning::Commit %s is missing a Signed-off-by trailer: %s\n' \
+                "$commit" "${subject//%/%25}"
+              printf 'Missing Signed-off-by: %s %s\n' "$commit" "$subject"
+              unsigned=1
+            fi
+          done < <(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
+          if [ "$unsigned" -ne 0 ]; then
+            printf 'One or more commits are missing a DCO sign-off (see warnings above).\n'
+            printf 'This is a recommendation, not a gate: see AI_POLICY.md.\n'
+          fi
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0

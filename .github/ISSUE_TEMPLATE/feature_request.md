@@ -1,20 +1,29 @@
 ---
 name: Feature request
-about: Suggest an idea for this project
-title: ''
-labels: ''
+about: Suggest a distribution, workflow, or capability for libertix
+title: '[Feature] '
+labels: 'enhancement'
 assignees: ''
 
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+## Summary
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+Describe the idea in one or two sentences.
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+## Problem
 
-**Additional context**
-Add any other context or screenshots about the feature request here.
+what are you trying to do, and where does libertix currently fall short? include firmware
+(BIOS/Legacy or UEFI) and target distribution if relevant.
+
+## Proposed solution
+
+Describe what you'd like libertix to do better.
+
+## Alternatives considered
+
+Other approaches you've thought about, and why they don't fit as well.
+
+## Additional context
+
+Links, screenshots, or related issues.
