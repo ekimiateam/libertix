@@ -97,6 +97,35 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Verify Developer Certificate of Origin sign-off
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "$zero_sha" ]; then
+            printf 'No prior commit to compare against; skipping DCO check for this event.\n'
+            exit 0
+          fi
+          unsigned=0
+          while IFS= read -r commit; do
+            # Presence check only: this does not verify the trailer's name/email
+            # matches the commit author, the way stricter DCO bots do.
+            if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+>$'; then
+              printf 'Missing Signed-off-by trailer: %s %s\n' \
+                "$commit" "$(git log -1 --format=%s "$commit")" >&2
+              unsigned=1
+            fi
+          done < <(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
+          if [ "$unsigned" -ne 0 ]; then
+            printf 'One or more commits are missing a DCO sign-off. Run: git commit --amend -s\n' >&2
+            printf 'See https://developercertificate.org/ and AI_POLICY.md.\n' >&2
+            exit 1
+          fi
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
