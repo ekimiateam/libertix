@@ -41,24 +41,29 @@ namespace Libertix.Helpers
                 isDevelopmentOverride: false);
         }
 
+        private static bool HasAllowedScheme(Uri uri) =>
+            (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps) &&
+            !string.IsNullOrWhiteSpace(uri.Host);
+
+        // Credentials, query strings and fragments make URL resolution ambiguous
+        // and may leak secrets into installer logs.
+        private static bool HasDisallowedUrlComponents(Uri uri) =>
+            !string.IsNullOrEmpty(uri.UserInfo) ||
+            !string.IsNullOrEmpty(uri.Query) ||
+            !string.IsNullOrEmpty(uri.Fragment);
+
         public static bool TryCreate(string value, out FilepoolConfig config, out string error)
         {
             config = null;
             error = null;
 
-            if (!Uri.TryCreate(value, UriKind.Absolute, out Uri uri) ||
-                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) ||
-                string.IsNullOrWhiteSpace(uri.Host))
+            if (!Uri.TryCreate(value, UriKind.Absolute, out Uri uri) || !HasAllowedScheme(uri))
             {
                 error = "The filepool base URL must be an absolute HTTP or HTTPS URL.";
                 return false;
             }
 
-            // Credentials, query strings and fragments make URL resolution ambiguous
-            // and may leak secrets into installer logs.
-            if (!string.IsNullOrEmpty(uri.UserInfo) ||
-                !string.IsNullOrEmpty(uri.Query) ||
-                !string.IsNullOrEmpty(uri.Fragment))
+            if (HasDisallowedUrlComponents(uri))
             {
                 error = "The filepool base URL cannot contain credentials, a query or a fragment.";
                 return false;
@@ -78,12 +83,7 @@ namespace Libertix.Helpers
 
             if (Uri.TryCreate(value, UriKind.Absolute, out Uri absoluteUri))
             {
-                if ((absoluteUri.Scheme != Uri.UriSchemeHttp &&
-                     absoluteUri.Scheme != Uri.UriSchemeHttps) ||
-                    string.IsNullOrWhiteSpace(absoluteUri.Host) ||
-                    !string.IsNullOrEmpty(absoluteUri.UserInfo) ||
-                    !string.IsNullOrEmpty(absoluteUri.Query) ||
-                    !string.IsNullOrEmpty(absoluteUri.Fragment))
+                if (!HasAllowedScheme(absoluteUri) || HasDisallowedUrlComponents(absoluteUri))
                 {
                     throw new ArgumentException(
                         "Artifact URLs must be public absolute HTTP(S) URLs.",
