@@ -342,10 +342,10 @@ try {
     }
     [long]$memoryBytes = [long]$os.TotalVisibleMemorySize * 1024L
     [long]$memoryMB = [math]::Floor($memoryBytes / 1MB)
-    if ($memoryMB -lt $MinimumMemoryMB) {
-        Stop-Compatibility "COMPAT_E_RAM_TOO_LOW" @($MinimumMemoryMB, $memoryMB)
+    if ($memoryMB -lt $minimumMemoryMB) {
+        Stop-Compatibility "COMPAT_E_RAM_TOO_LOW" @($minimumMemoryMB, $memoryMB)
     }
-    $lowMemory = $memoryMB -lt $LowMemoryThresholdMB
+    $lowMemory = $memoryMB -lt $lowMemoryThresholdMB
     if ($lowMemory) {
         Write-LocalizedWarning "LOW_MEMORY" @($memoryMB)
     }
@@ -515,7 +515,7 @@ try {
         $shrinkAvailable -= Get-LibertixPartitionAlignmentBytes
     }
     [long]$requiredShrink =
-        ([long]$MinimumLinuxSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
+        ([long]$minimumLinuxSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
     if ($shrinkAvailable -lt $requiredShrink) {
         Stop-Compatibility "COMPAT_E_SHRINK_SPACE" @([math]::Round($shrinkAvailable / 1GB, 1), [math]::Round($requiredShrink / 1GB, 1))
     }
