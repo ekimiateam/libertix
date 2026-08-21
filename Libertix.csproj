@@ -204,7 +204,6 @@
       <DependentUpon>ErrorPanel.xaml</DependentUpon>
     </Compile>
     <Compile Include="Converters\StringToVisibilityConverter.cs" />
-    <Compile Include="Converters\BoolToVisibilityConverter.cs" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Pages\ResizeDisk.xaml.cs">
