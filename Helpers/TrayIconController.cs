@@ -10,6 +10,8 @@ namespace Libertix.Helpers
     /// </summary>
     internal sealed class TrayIconController : IDisposable
     {
+        private const int BalloonTipDisplayMilliseconds = 8000;
+
         private readonly Icon _icon;
         private readonly NotifyIcon _notifyIcon;
         private readonly ToolStripMenuItem _openMenuItem;
@@ -49,7 +51,7 @@ namespace Libertix.Helpers
             _notifyIcon.BalloonTipTitle = title ?? "Libertix";
             _notifyIcon.BalloonTipText = message ?? string.Empty;
             _notifyIcon.BalloonTipIcon = ToolTipIcon.Info;
-            _notifyIcon.ShowBalloonTip(8000);
+            _notifyIcon.ShowBalloonTip(BalloonTipDisplayMilliseconds);
         }
 
         public void Hide()
