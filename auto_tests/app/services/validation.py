@@ -485,11 +485,8 @@ class ValidationService:
                 for path in self._local_source_files(root):
                     tar.add(path, arcname=path.relative_to(root), recursive=False)
 
-            digest = hashlib.sha256()
             with archive.open("rb") as archive_stream:
-                for chunk in iter(lambda: archive_stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            archive_sha256 = digest.hexdigest()
+                archive_sha256 = hashlib.file_digest(archive_stream, "sha256").hexdigest()
 
             remote_archive = str(PurePosixPath(s.smb_root) / f".{archive.name}")
             ssh.upload_file(archive, remote_archive, step="server.copy_local_source.upload")
@@ -595,11 +592,8 @@ class ValidationService:
         reused = 0
         manifest: dict[str, dict[str, object]] = {}
         for name, local_path in sorted(artifacts.items()):
-            digest = hashlib.sha256()
             with local_path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            sha256 = digest.hexdigest()
+                sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
             size = local_path.stat().st_size
             remote_path = remote_root / name
             remote_digest = ssh.run(
