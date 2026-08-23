@@ -993,7 +993,7 @@ try {
                     ForEach-Object { [string]$_ }
             )
             $supportedUiLanguage = switch ($uiCulture.TwoLetterISOLanguageName.ToLowerInvariant()) {
-                { $_ -in @("en", "fr", "es") } { $_; break }
+                { $_ -in @("en", "fr", "es", "ko") } { $_; break }
                 default { "en" }
             }
             $exactKeyboardMappings = @{
@@ -1001,14 +1001,14 @@ try {
                 "00030409" = "us|dvorak-l"; "00040409" = "us|dvorak-r"; "00000809" = "gb|"
                 "0000040C" = "fr|"; "0000080C" = "be|"; "00000C0C" = "ca|fr-legacy"
                 "00001009" = "ca|"; "00011009" = "ca|multix"; "0000100C" = "ch|fr"
-                "0000040A" = "es|winkeys"; "0000080A" = "latam|"
+                "0000040A" = "es|winkeys"; "0000080A" = "latam|"; "00000412" = "kr|"
             }
             $languageKeyboardMappings = @{
                 "0409" = "us|"; "0809" = "gb|"; "040C" = "fr|"; "080C" = "be|"
                 "0C0C" = "ca|fr-legacy"; "1009" = "ca|"; "1109" = "ca|multix"
-                "100C" = "ch|fr"; "040A" = "es|winkeys"; "080A" = "latam|"
+                "100C" = "ch|fr"; "040A" = "es|winkeys"; "080A" = "latam|"; "0412" = "kr|"
             }
-            $uiKeyboardFallbacks = @{ "en" = "us|"; "fr" = "fr|"; "es" = "es|" }
+            $uiKeyboardFallbacks = @{ "en" = "us|"; "fr" = "fr|"; "es" = "es|"; "ko" = "kr|" }
             $windowsKeyboardMappings = @(
                 foreach ($tip in $inputMethodTips) {
                     $identifier = (($tip -split ":")[-1]).ToUpperInvariant()

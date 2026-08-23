@@ -1089,6 +1089,7 @@ namespace Libertix.Tests
         [DataRow("0000100C", "ch", "fr", false)]
         [DataRow("0000040A", "es", "winkeys", false)]
         [DataRow("0000080A", "latam", "", false)]
+        [DataRow("00000412", "kr", "", false)]
         [DataRow("A000040C", "fr", "", true)]
         [DataRow("not-a-klid", "us", "", true)]
         public void WindowsKeyboardIdentifiersResolveToExpectedXkbConfiguration(
