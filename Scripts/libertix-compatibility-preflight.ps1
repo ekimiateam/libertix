@@ -163,7 +163,7 @@ function Get-BitLockerState {
 function Format-DiskDescriptions {
     param([object[]]$Disks)
     ($Disks | ForEach-Object {
-        if ([string]::IsNullOrWhiteSpace($_.FriendlyName)) { "Unknown disk" } else { [string]$_.FriendlyName }
+        if ([string]::IsNullOrWhiteSpace($_.FriendlyName)) { "#$($_.Number)" } else { [string]$_.FriendlyName }
     }) -join ", "
 }
 
