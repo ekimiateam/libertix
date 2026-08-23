@@ -29,6 +29,7 @@ jobs:
       channel: ${{ steps.identity.outputs.channel }}
       tag: ${{ steps.identity.outputs.tag }}
       build_version: ${{ steps.identity.outputs.build_version }}
+      publish_release: ${{ steps.identity.outputs.publish_release }}
 
     steps:
       - name: Check out source
@@ -40,9 +41,12 @@ jobs:
         id: identity
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
         run: |
           set -Eeuo pipefail
+          publish_release=true
           case "$TARGET_BRANCH" in
             dev)
               channel=dev
@@ -53,6 +57,20 @@ jobs:
               channel=main
               tag="$(python3 -c 'import json; print(json.load(open("release-config.json", encoding="utf-8"))["mainRelease"]["version"])')"
               build_version="$tag"
+              if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
+                comparison_status="$(
+                  gh api "repos/$GH_REPO/compare/$tag...$GITHUB_SHA" --jq '.status'
+                )"
+                case "$comparison_status" in
+                  identical) ;;
+                  ahead) publish_release=false ;;
+                  *)
+                    printf 'Stable tag %s is not an ancestor of commit %s (status=%s).\n' \
+                      "$tag" "$GITHUB_SHA" "$comparison_status" >&2
+                    exit 1
+                    ;;
+                esac
+              fi
               ;;
             *)
               printf 'Unsupported release branch: %s\n' "$TARGET_BRANCH" >&2
@@ -63,9 +81,11 @@ jobs:
             printf 'channel=%s\n' "$channel"
             printf 'tag=%s\n' "$tag"
             printf 'build_version=%s\n' "$build_version"
+            printf 'publish_release=%s\n' "$publish_release"
           } >> "$GITHUB_OUTPUT"
-          printf 'Channel: %s; tag: %s; WPF version: %s\n' \
-            "$channel" "$tag" "$build_version" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Channel: %s; tag: %s; WPF version: %s; publish release: %s\n' \
+            "$channel" "$tag" "$build_version" "$publish_release" \
+            >> "$GITHUB_STEP_SUMMARY"
 
   quality:
     name: Python tests and source quality
@@ -77,6 +97,40 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check for DCO sign-off (advisory)
+        shell: bash
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -Eeuo pipefail
+          zero_sha="0000000000000000000000000000000000000000"
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "$zero_sha" ]; then
+            printf 'No prior commit to compare against; skipping DCO check for this event.\n'
+            exit 0
+          fi
+          # Advisory: reports, does not gate. AI_POLICY.md recommends Signed-off-by
+          # rather than requiring it; a human reviewer judges each PR, not this job.
+          unsigned=0
+          while IFS= read -r commit; do
+            # Presence check only: this does not verify the trailer's name/email
+            # matches the commit author, the way stricter DCO bots do.
+            if ! git log -1 --format=%B "$commit" | grep -qE '^Signed-off-by: .+ <.+>$'; then
+              subject="$(git log -1 --format=%s "$commit")"
+              # GitHub workflow commands interpret % and newlines; escape before annotating.
+              printf '::warning::Commit %s is missing a Signed-off-by trailer: %s\n' \
+                "$commit" "${subject//%/%25}"
+              printf 'Missing Signed-off-by: %s %s\n' "$commit" "$subject"
+              unsigned=1
+            fi
+          done < <(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
+          if [ "$unsigned" -ne 0 ]; then
+            printf 'One or more commits are missing a DCO sign-off (see warnings above).\n'
+            printf 'This is a recommendation, not a gate: see AI_POLICY.md.\n'
+          fi
 
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -356,7 +410,8 @@ jobs:
       - iso
     if: >-
       (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.identity.outputs.publish_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -557,6 +612,66 @@ jobs:
           retention-days: 7
           compression-level: 9
 
+  existing-stable:
+    name: Validate existing stable publication
+    needs:
+      - identity
+      - quality
+      - wpf
+      - iso
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.identity.outputs.publish_release == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Verify the immutable stable release and Pages metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.identity.outputs.tag }}
+        run: |
+          set -Eeuo pipefail
+          tag_sha="$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          comparison_status="$(
+            gh api "repos/$GH_REPO/compare/$RELEASE_TAG...$GITHUB_SHA" --jq '.status'
+          )"
+          test "$comparison_status" = ahead
+
+          release="$(
+            gh release view "$RELEASE_TAG" --repo "$GH_REPO" \
+              --json tagName,isDraft,isPrerelease,assets
+          )"
+          test "$(jq -r '.tagName' <<<"$release")" = "$RELEASE_TAG"
+          test "$(jq -r '.isDraft' <<<"$release")" = false
+          test "$(jq -r '.isPrerelease' <<<"$release")" = false
+          expected_assets="$(printf '%s\n' \
+            "Libertix-$RELEASE_TAG.zip" \
+            libertix-installer-bios.iso \
+            libertix-installer-uefi.iso | sort)"
+          actual_assets="$(jq -r '.assets[].name' <<<"$release" | sort)"
+          test "$actual_assets" = "$expected_assets"
+
+          metadata="$(
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-all-errors \
+              "https://ekimiateam.github.io/libertix/main/releases.json?commit=$GITHUB_SHA"
+          )"
+          test "$(jq -r '.latest.version' <<<"$metadata")" = "$RELEASE_TAG"
+          test "$(jq -r '.latest.tag' <<<"$metadata")" = "$RELEASE_TAG"
+          test "$(jq -r '.latest.commit' <<<"$metadata")" = "$tag_sha"
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors \
+            "https://ekimiateam.github.io/libertix/main/releases.json.sig?commit=$GITHUB_SHA" \
+            --output /dev/null
+          printf 'Stable release %s remains published from immutable commit %s.\n' \
+            "$RELEASE_TAG" "$tag_sha" >> "$GITHUB_STEP_SUMMARY"
+
   pages:
     name: Publish ${{ needs.identity.outputs.channel }} metadata to GitHub Pages
     needs:
@@ -564,7 +679,8 @@ jobs:
       - release
     if: >-
       (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main') &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.identity.outputs.publish_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:

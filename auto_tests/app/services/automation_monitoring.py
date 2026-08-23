@@ -432,42 +432,9 @@ class InstallationMonitoringMixin:
         windows_entry_visible = "windows boot manager" in text or bool(
             re.search(r"(?:^|\n)\s*windows\s*(?:\n|$)", text)
         )
-        if distribution_entry_visible and localized_menu_labels_visible and windows_entry_visible:
-            return True
-
-        if any(
-            blocker in text
-            for blocker in (
-                "no libertix installer",
-                "aucune fenêtre d'installateur",
-                "aucun installateur",
-                "windows desktop wallpaper",
-                "windows boot manager",
-                "gestionnaire de démarrage windows",
-                "windows n'a pas pu démarrer",
-                "could not start",
-                "couldn't load",
-                "lock screen",
-                "écran de verrouillage",
-                "appliquer les modifications",
-                "creating uefi installer partition",
-                "downloading linux installer iso",
-                "downloading distribution iso",
-                "downloading uefi installer",
-                "copying uefi installer",
-                "copying iso contents",
-                "mounting iso",
-                "configuring uefi boot",
-                "libertixtools",
-                f"c:\\{distribution.installer_iso_file_name.casefold()}",
-                f"c:/{distribution.installer_iso_file_name.casefold()}",
-                "c:\\libertixtools",
-                "c:/libertixtools",
-            )
-        ):
-            return False
-
-        return False
+        return (
+            distribution_entry_visible and localized_menu_labels_visible and windows_entry_visible
+        )
 
     @staticmethod
     def _installed_linux_desktop_seen(

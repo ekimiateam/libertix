@@ -551,6 +551,13 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
     lock = FakeOperationLock()
     monkeypatch.setattr(main_module, "operation_lock", lock)
     captured: list[tuple[list[str] | None, Path]] = []
+    relayed_step = threading.Event()
+    original_project_step = main_module.StreamEventProjector.project_step
+
+    def project_step_and_signal(self, step):
+        event = original_project_step(self, step)
+        relayed_step.set()
+        return event
 
     class HangingAutomationService:
         def __init__(self, _settings) -> None:
@@ -569,6 +576,7 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
             raise AssertionError("the timed-out worker must be terminated")
 
     def capture_timeout_screens(_settings, selectors, workspace):
+        assert relayed_step.wait(timeout=5)
         captured.append((selectors, workspace))
         destination = workspace / "captures" / "timeout-vm2.png"
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -576,6 +584,11 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
         return {"vm2": str(destination)}, {}
 
     monkeypatch.setattr(main_module, "AutomationService", HangingAutomationService)
+    monkeypatch.setattr(
+        main_module.StreamEventProjector,
+        "project_step",
+        project_step_and_signal,
+    )
     monkeypatch.setattr(
         main_module,
         "_capture_automation_timeout_screens",
@@ -599,8 +612,10 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
         )
 
     events = [json.loads(line) for line in response.text.splitlines()]
-    assert [event["event"] for event in events] == ["step", "result"]
-    result = events[-1]["data"]
+    assert [event["event"] for event in events].count("step") == 1
+    result_events = [event for event in events if event["event"] == "result"]
+    assert len(result_events) == 1
+    result = result_events[0]["data"]
     assert result["status"] == "error"
     assert result["steps"][0]["step"] == "automation.inactivity_timeout"
     assert result["steps"][0]["context"]["inactivity_timeout_seconds"] == 0.05

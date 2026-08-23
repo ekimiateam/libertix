@@ -4110,6 +4110,18 @@ def test_release_metadata_is_generated_signed_and_isolated_by_channel() -> None:
     assert "private_key.public_key().public_numbers()" in signer
 
 
+def test_follow_up_main_commits_keep_the_existing_stable_release_immutable() -> None:
+    workflow = read(".github/workflows/ci.yml")
+
+    assert "publish_release: ${{ steps.identity.outputs.publish_release }}" in workflow
+    assert 'gh api "repos/$GH_REPO/compare/$tag...$GITHUB_SHA"' in workflow
+    assert "ahead) publish_release=false ;;" in workflow
+    assert "needs.identity.outputs.publish_release == 'true'" in workflow
+    assert "name: Validate existing stable publication" in workflow
+    assert 'test "$comparison_status" = ahead' in workflow
+    assert "Stable release %s remains published from immutable commit %s" in workflow
+
+
 def test_offline_documentation_preserves_the_catalogue_requirement() -> None:
     readme = read("README.md")
     architecture = read("docs/ARCHITECTURE.md")

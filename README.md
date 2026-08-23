@@ -12,6 +12,11 @@ Read the project's position on AI-assisted development and contributions in the
 > Libertix modifies disk partitions and boot configuration. Back up important data before using it.
 > The compatibility checks deliberately reject layouts that cannot be handled safely.
 
+
+## Demo
+
+https://github.com/user-attachments/assets/d0b94e3b-0c9c-406e-9ee4-da1cb0888cdc
+
 ## Architecture overview
 
 Libertix is split into three execution environments: the Windows application prepares the machine,
@@ -155,7 +160,7 @@ embedded build version:
 
 ```text
 dev_<sha7>  -> https://ekimiateam.github.io/libertix/dev
-0.1        -> https://ekimiateam.github.io/libertix/main
+0.3         -> https://ekimiateam.github.io/libertix/main
 ```
 
 Reusing local ISO files does not remove the catalogue requirement. Libertix first downloads
@@ -294,6 +299,9 @@ To help fund continued development and testing, visit the
 [Libertix donation campaign](https://ekimia.fr/donations/campagne-libertix/).
 
 ## Contributing
+
+New to the codebase? [`CONTRIBUTING.md`](CONTRIBUTING.md) maps what each directory does and where
+the core code lives.
 
 Development takes place on the `dev` branch. Keep firmware-neutral behavior in the shared plan and
 runtime modules, and limit BIOS/UEFI adapters to operations that genuinely differ. Changes to disk
