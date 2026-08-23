@@ -160,6 +160,13 @@ function Get-BitLockerState {
     }
 }
 
+function Format-DiskDescriptions {
+    param([object[]]$Disks)
+    ($Disks | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.FriendlyName)) { "#$($_.Number)" } else { [string]$_.FriendlyName }
+    }) -join ", "
+}
+
 function Get-StorageControllerNames {
     $operationTimeoutSeconds = 15
     $names = @()
@@ -403,10 +410,10 @@ try {
     }
     $usbDisks = @($visibleDisks | Where-Object { [string]$_.BusType -eq "USB" })
     if ($usbDisks.Count -ne 0) {
-        Stop-Compatibility "COMPAT_E_USB_STORAGE" @($usbDisks.Count)
+        Stop-Compatibility "COMPAT_E_USB_STORAGE" @($usbDisks.Count, (Format-DiskDescriptions $usbDisks))
     }
     if ($visibleDisks.Count -ne 1) {
-        Stop-Compatibility "COMPAT_E_DISK_COUNT" @($visibleDisks.Count)
+        Stop-Compatibility "COMPAT_E_DISK_COUNT" @($visibleDisks.Count, (Format-DiskDescriptions $visibleDisks))
     }
 
     $systemDrive = [Environment]::GetEnvironmentVariable("SystemDrive").TrimEnd("\")
