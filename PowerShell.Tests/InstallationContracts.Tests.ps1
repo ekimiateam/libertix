@@ -34,7 +34,7 @@ BeforeAll {
   },
   "account": {
     "username": "oem",
-    "passwordHashWindowsPath": "C:\\ProgramData\\Libertix\\account-secret.env",
+    "passwordHashWindowsPath": "C:\\ProgramData\\Libertix\\Recovery\\account-secret.env",
     "computerName": "libertix-test"
   },
   "disk": {
@@ -230,12 +230,42 @@ Describe "Installation plan contract" {
             Should -Throw "*must be located on disk.systemDrive*"
     }
 
+    It "rejects mixed-separator traversal in recovery paths" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution.installerIsoWindowsPath = `
+            "C:\ProgramData\Libertix\Downloads\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\safe/../mint.iso"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*absolute safe Windows path*"
+
+        $plan = New-ValidInstallationPlan
+        $plan.account.passwordHashWindowsPath = `
+            "C:\ProgramData\Libertix\Recovery\safe/../../account-secret.env"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*absolute safe Windows path*"
+
+        $plan = New-ValidInstallationPlan
+        $plan.runtime.recoveryRootWindows = `
+            "C:\ProgramData\Libertix\Recovery\safe/../escaped"
+        $plan.account.passwordHashWindowsPath = `
+            "C:\ProgramData\Libertix\Recovery\safe/../escaped\account-secret.env"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*absolute safe Windows path*"
+    }
+
+    It "requires the account secret under the recovery root" {
+        $plan = New-ValidInstallationPlan
+        $plan.account.passwordHashWindowsPath = `
+            "C:\ProgramData\Libertix\Other\account-secret.env"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*under runtime.recoveryRootWindows*"
+    }
+
     It "accepts consistent Windows paths on a non-C system drive" {
         $plan = New-ValidInstallationPlan
         $plan.disk.systemDrive = "D:"
         $plan.distribution.installerIsoWindowsPath = `
             "D:\ProgramData\Libertix\Downloads\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\mint.iso"
-        $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\account-secret.env"
+        $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\Recovery\account-secret.env"
         $plan.runtime.recoveryRootWindows = "D:\ProgramData\Libertix\Recovery"
         { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
     }

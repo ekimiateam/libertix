@@ -262,7 +262,11 @@ function Get-NvramVariable {
     $buffer = New-Object byte[] 65536
     $size = [LibertixCompatibilityNvram]::GetFirmwareEnvironmentVariable($Name, $Guid, $buffer, [uint32]$buffer.Length)
     if ($size -eq 0) {
-        return [pscustomobject]@{ Exists = $false; Bytes = $null; Error = [LibertixCompatibilityNvram]::LastError() }
+        $errorCode = [LibertixCompatibilityNvram]::LastError()
+        if ($errorCode -ne 203) {
+            throw "GetFirmwareEnvironmentVariable($Name) failed with Win32 error $errorCode."
+        }
+        return [pscustomobject]@{ Exists = $false; Bytes = $null; Error = $errorCode }
     }
     $result = New-Object byte[] $size
     [Array]::Copy($buffer, $result, $size)
@@ -323,10 +327,10 @@ try {
     Import-Module -Name $geometryModule -Force -ErrorAction Stop
     Import-Module -Name $policyModulePath -Force -ErrorAction Stop
     $installationPolicy = Get-LibertixInstallationPolicy
-    [int]$minimumLinuxSizeGB = [int]$installationPolicy.storage.minimumFinalSizeGiB
     [int]$minimumMemoryMB = [int]$installationPolicy.memory.windowsMinimumMiB
     [int]$lowMemoryThresholdMB = [int]$installationPolicy.memory.lowMemoryThresholdMiB
     [int]$preflightShrinkSafetyGB = [int]$installationPolicy.storage.preflightShrinkSafetyGiB
+    [int]$stagingSizeGB = [int]$installationPolicy.storage.stagingSizeGiB
 
     Write-Check "COMPAT_010_PRIVILEGES"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -522,7 +526,7 @@ try {
         $shrinkAvailable -= Get-LibertixPartitionAlignmentBytes
     }
     [long]$requiredShrink =
-        ([long]$minimumLinuxSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
+        ([long]$stagingSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
     if ($shrinkAvailable -lt $requiredShrink) {
         Stop-Compatibility "COMPAT_E_SHRINK_SPACE" @([math]::Round($shrinkAvailable / 1GB, 1), [math]::Round($requiredShrink / 1GB, 1))
     }

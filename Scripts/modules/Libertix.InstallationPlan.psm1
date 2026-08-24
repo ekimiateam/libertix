@@ -97,6 +97,32 @@ function Assert-LibertixPlanProperty {
     return $Object.$Name
 }
 
+function Test-LibertixSafeAbsoluteWindowsPath {
+    param([AllowNull()][string]$Value)
+
+    if (
+        [string]::IsNullOrWhiteSpace($Value) -or
+        $Value -notmatch '^[A-Za-z]:\\[^/]+$'
+    ) {
+        return $false
+    }
+
+    try {
+        $canonical = [IO.Path]::GetFullPath($Value).TrimEnd('\')
+        $supplied = $Value.TrimEnd('\')
+        if (-not $canonical.Equals($supplied, [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    } catch {
+        return $false
+    }
+
+    $segments = @($Value.Substring(3) -split '\\')
+    return @($segments | Where-Object {
+        [string]::IsNullOrEmpty($_) -or $_ -in @('.', '..') -or $_.Contains(':')
+    }).Count -eq 0
+}
+
 function Assert-LibertixMicrosoftUefiAuthorities {
     param(
         [AllowNull()][object]$Value,
@@ -348,8 +374,8 @@ function Assert-LibertixInstallationPlan {
     if ([string]$distribution.installerIsoFileName -match '[/\\]') {
         throw "Installation plan distribution.installerIsoFileName must be a file name, not a path."
     }
-    if ([string]$distribution.installerIsoWindowsPath -notmatch '^[A-Za-z]:[\\/]') {
-        throw "Installation plan distribution.installerIsoWindowsPath must be an absolute Windows drive path."
+    if (-not (Test-LibertixSafeAbsoluteWindowsPath -Value ([string]$distribution.installerIsoWindowsPath))) {
+        throw "Installation plan distribution.installerIsoWindowsPath must be an absolute safe Windows path."
     }
     Assert-LibertixSha256 `
         -Value (Assert-LibertixPlanProperty -Object $distribution -Name "installerIsoSha256" -Path "distribution.installerIsoSha256") `
@@ -398,7 +424,7 @@ function Assert-LibertixInstallationPlan {
     if (@($script:InstallationPolicy.account.reservedUsernames) -icontains $username) {
         throw "Installation plan account.username is reserved by the operating system."
     }
-    if ($passwordHashWindowsPath -notmatch '^[A-Za-z]:\\' -or $passwordHashWindowsPath -match '(^|\\)\.\.(\\|$)') {
+    if (-not (Test-LibertixSafeAbsoluteWindowsPath -Value $passwordHashWindowsPath)) {
         throw "Installation plan account.passwordHashWindowsPath must be an absolute safe Windows path."
     }
     if ($computerName -notmatch '^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
@@ -659,8 +685,7 @@ function Assert-LibertixInstallationPlan {
     if (
         $hasRecoveryRoot -and
         (
-            [string]$recoveryRoot -notmatch '^[A-Za-z]:\\' -or
-            [string]$recoveryRoot -match '(^|\\)\.\.(\\|$)'
+            -not (Test-LibertixSafeAbsoluteWindowsPath -Value ([string]$recoveryRoot))
         )
     ) {
         throw "Installation plan runtime.recoveryRootWindows must be an absolute safe Windows path."
@@ -679,6 +704,18 @@ function Assert-LibertixInstallationPlan {
     foreach ($entry in $windowsPaths.GetEnumerator()) {
         if ($entry.Value.Substring(0, 2).ToUpperInvariant() -ne ([string]$disk.systemDrive)) {
             throw "Installation plan $($entry.Key) must be located on disk.systemDrive."
+        }
+    }
+    if ($hasRecoveryRoot) {
+        $expectedPasswordHashPath = Join-Path ([string]$recoveryRoot) "account-secret.env"
+        if (
+            [IO.Path]::GetFullPath($passwordHashWindowsPath) -ne
+            [IO.Path]::GetFullPath($expectedPasswordHashPath)
+        ) {
+            throw (
+                "Installation plan account.passwordHashWindowsPath must be the plan-owned " +
+                "account-secret.env under runtime.recoveryRootWindows."
+            )
         }
     }
     $expectedInstallerIsoPath = Join-Path `

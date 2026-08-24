@@ -163,18 +163,37 @@ function New-OrReuseInstallerPartition {
 
     # The shared budget applies the same bounded Windows free-space policy to
     # BIOS and UEFI for the allocation Windows is actually asked to reserve.
+    $verifiedDistributionIso = Get-Item `
+        -LiteralPath $DistributionIsoPath `
+        -ErrorAction Stop
+    $unsafeReclaimableAttributes =
+        [IO.FileAttributes]::Compressed -bor
+        [IO.FileAttributes]::SparseFile -bor
+        [IO.FileAttributes]::ReparsePoint
+    if (($verifiedDistributionIso.Attributes -band $unsafeReclaimableAttributes) -ne 0) {
+        throw "The verified installer ISO cannot be credited as reclaimable disk space."
+    }
+    [int64]$reclaimableArtifactBytes = [int64]$verifiedDistributionIso.Length
     $freeSpaceBudget = Wait-LibertixWindowsFreeSpaceBudget `
         -DriveLetter $SystemDriveLetter `
-        -AllocationBytes $shrinkBytes
+        -AllocationBytes $shrinkBytes `
+        -ReclaimableArtifactBytes $reclaimableArtifactBytes
     [int64]$remainingBytes = [int64]$freeSpaceBudget.AvailableBytes
     if (-not $freeSpaceBudget.Accepted) {
         throw (
             "Not enough free space on $SystemDrive " +
             "(available=$remainingBytes bytes, " +
+            "reclaimable=$($freeSpaceBudget.ReclaimableArtifactBytes) bytes, " +
+            "effective=$($freeSpaceBudget.EffectiveAvailableBytes) bytes, " +
             "required=$($freeSpaceBudget.RequiredBytes) bytes, " +
             "acceptedFloor=$($freeSpaceBudget.AcceptedFloorBytes) bytes)."
         )
     }
+    Write-Log (
+        "Windows free-space budget verified with transaction-owned ISO cleanup: " +
+        "available=$remainingBytes reclaimable=$reclaimableArtifactBytes " +
+        "effective=$($freeSpaceBudget.EffectiveAvailableBytes)."
+    ) "Gray"
     if ($freeSpaceBudget.WithinTolerance) {
         Write-Log (
             "Windows free space is within the bounded tolerance: " +

@@ -305,3 +305,27 @@ def test_efi_sync_refuses_2011_chain_on_2023_only_secure_boot_firmware(
     assert "No distribution shim" in result.stdout + result.stderr
     assert (efi / "shimx64.efi").read_text(encoding="ascii") == "old-shimx64.efi\n"
     assert not list((tmp_path / "history").iterdir())
+
+
+def test_efi_sync_propagates_installation_plan_parse_failure(tmp_path: Path) -> None:
+    environment, efi, _shim = create_efi_sync_fixture(
+        tmp_path,
+        secure_boot_enabled=False,
+        trusted=["2011"],
+        supported=["2011"],
+        firmware_authorities=["2011"],
+    )
+    Path(environment["LIBERTIX_PLAN_PATH"]).write_text("{invalid", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "assets/live/libertix-sync-efi.sh")],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "installation plan boot metadata could not be parsed" in result.stderr
+    assert (efi / "shimx64.efi").read_text(encoding="ascii") == "old-shimx64.efi\n"
+    assert not (tmp_path / "history").exists()

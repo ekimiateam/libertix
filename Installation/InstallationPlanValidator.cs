@@ -65,6 +65,7 @@ namespace Libertix.Installation
             ValidateDevelopment(plan.Development, errors);
             ValidateWindowsPathDrives(plan, errors);
             ValidateTransactionArtifactPath(plan, errors);
+            ValidateRecoveryArtifactPaths(plan, errors);
 
             if (errors.Count > 0)
                 throw new InstallationPlanValidationException(errors);
@@ -148,6 +149,68 @@ namespace Libertix.Installation
                 $"{pathName} must be located on disk.systemDrive.");
         }
 
+        private static void ValidateRecoveryArtifactPaths(
+            InstallationPlan plan,
+            ICollection<string> errors)
+        {
+            if (plan.Account == null || plan.Runtime == null ||
+                string.IsNullOrWhiteSpace(plan.Account.PasswordHashWindowsPath) ||
+                string.IsNullOrWhiteSpace(plan.Runtime.RecoveryRootWindows))
+            {
+                return;
+            }
+
+            try
+            {
+                string expected = Path.Combine(
+                    plan.Runtime.RecoveryRootWindows,
+                    "account-secret.env");
+                Require(
+                    string.Equals(
+                        Path.GetFullPath(plan.Account.PasswordHashWindowsPath),
+                        Path.GetFullPath(expected),
+                        StringComparison.OrdinalIgnoreCase),
+                    errors,
+                    "account.passwordHashWindowsPath must be the plan-owned " +
+                    "account-secret.env under runtime.recoveryRootWindows.");
+            }
+            catch (Exception)
+            {
+                errors.Add(
+                    "account.passwordHashWindowsPath must be the plan-owned " +
+                    "account-secret.env under runtime.recoveryRootWindows.");
+            }
+        }
+
+        private static bool IsSafeAbsoluteWindowsPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) ||
+                !Regex.IsMatch(path, @"^[A-Za-z]:\\[^/]+$", RegexOptions.CultureInvariant))
+            {
+                return false;
+            }
+
+            try
+            {
+                string canonical = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+                string supplied = path.TrimEnd(Path.DirectorySeparatorChar);
+                if (!string.Equals(canonical, supplied, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                return path.Substring(3)
+                    .Split(Path.DirectorySeparatorChar)
+                    .All(segment =>
+                        !string.IsNullOrEmpty(segment) &&
+                        segment != "." &&
+                        segment != ".." &&
+                        segment.IndexOf(':') < 0);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         private static void ValidateDistribution(
             InstallationDistribution distribution,
             ICollection<string> errors)
@@ -189,10 +252,9 @@ namespace Libertix.Installation
                 "distribution.installerIsoWindowsPath",
                 errors);
             Require(
-                AbsoluteWindowsPathPattern.IsMatch(
-                    distribution.InstallerIsoWindowsPath ?? string.Empty),
+                IsSafeAbsoluteWindowsPath(distribution.InstallerIsoWindowsPath),
                 errors,
-                "distribution.installerIsoWindowsPath must be an absolute Windows drive path.");
+                "distribution.installerIsoWindowsPath must be an absolute safe Windows path.");
             RequireSha256(
                 distribution.InstallerIsoSha256,
                 "distribution.installerIsoSha256",
@@ -266,11 +328,7 @@ namespace Libertix.Installation
             Require(AccountPolicy.IsValidUsername(account.Username), errors,
                 "account.username is not a valid Linux username.");
             Require(
-                !string.IsNullOrWhiteSpace(account.PasswordHashWindowsPath) &&
-                Regex.IsMatch(
-                    account.PasswordHashWindowsPath,
-                    @"^[A-Za-z]:\\(?!.*(?:^|\\)\.\.(?:\\|$)).+$",
-                    RegexOptions.CultureInvariant),
+                IsSafeAbsoluteWindowsPath(account.PasswordHashWindowsPath),
                 errors,
                 "account.passwordHashWindowsPath must be an absolute safe Windows path.");
             Require(AccountPolicy.IsValidComputerName(account.ComputerName), errors,
@@ -629,11 +687,7 @@ namespace Libertix.Installation
             {
                 RequireNotBlank(runtime.RecoveryRootWindows, "runtime.recoveryRootWindows", errors);
                 Require(
-                    !string.IsNullOrWhiteSpace(runtime.RecoveryRootWindows) &&
-                    Regex.IsMatch(
-                        runtime.RecoveryRootWindows,
-                        @"^[A-Za-z]:\\(?!.*(?:^|\\)\.\.(?:\\|$)).+$",
-                        RegexOptions.CultureInvariant),
+                    IsSafeAbsoluteWindowsPath(runtime.RecoveryRootWindows),
                     errors,
                     "runtime.recoveryRootWindows must be an absolute safe Windows path.");
             }

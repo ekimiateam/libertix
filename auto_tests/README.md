@@ -193,14 +193,15 @@ curl -fsS -N -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/v1/automation/stream
 ```
 
-Force-stop only the active streamed operation, leaving FastAPI running:
+Force-stop only the active isolated operation worker, leaving FastAPI running. This covers every
+stream endpoint and the JSON automation endpoint:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8000/api/v1/operation/kill
 ```
 
 This stop is intentionally immediate and does not clean up an operation already running inside a
-VM. It returns HTTP 409 when no streamed operation is active. A new installation should normally
+VM. It returns HTTP 409 when no isolated operation is active. A new installation should normally
 start from the configured reset snapshot.
 
 Reset the default VM scope and refresh the shared local source:

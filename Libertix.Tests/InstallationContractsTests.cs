@@ -743,6 +743,12 @@ namespace Libertix.Tests
             Assert.AreEqual(
                 0d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(10d, 35d, 3d));
+            Assert.AreEqual(
+                49d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 12d, 3d));
+            Assert.AreEqual(
+                0d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 7.99d, 3d));
             Assert.AreEqual(10, InstallationSizePolicy.TargetWindowsFreeSpaceGiB);
             Assert.AreEqual(2, InstallationSizePolicy.WindowsFreeSpaceToleranceGiB);
             Assert.AreEqual(8, InstallationSizePolicy.MinimumWindowsFreeSpaceGiB);
@@ -1025,7 +1031,7 @@ namespace Libertix.Tests
                     SystemLanguage = "en_US.UTF-8",
                     Timezone = "Etc/UTC",
                     SystemDriveRoot = @"C:\",
-                    PasswordHashWindowsPath = @"C:\ProgramData\Libertix\account-secret.env",
+                    PasswordHashWindowsPath = @"C:\ProgramData\Libertix\Recovery\account-secret.env",
                     WindowsProfilesJsonBase64 = "W10=",
                     RecoveryRootWindows = @"C:\ProgramData\Libertix\Recovery",
                     RecoveryRunId = new string('d', 32)
@@ -1136,13 +1142,52 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void InstallationPlanRejectsMixedSeparatorTraversalInRecoveryPaths()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Distribution.InstallerIsoWindowsPath =
+                @"C:\ProgramData\Libertix\Downloads\" + PlanId +
+                @"\safe/../mint.iso";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+
+            plan = CreateValidPlan();
+            plan.Account.PasswordHashWindowsPath =
+                @"C:\ProgramData\Libertix\Recovery\safe/../../account-secret.env";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+
+            plan = CreateValidPlan();
+            plan.Runtime.RecoveryRootWindows =
+                @"C:\ProgramData\Libertix\Recovery\safe/../escaped";
+            plan.Account.PasswordHashWindowsPath =
+                @"C:\ProgramData\Libertix\Recovery\safe/../escaped\account-secret.env";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        [TestMethod]
+        public void InstallationPlanRequiresTheSecretUnderItsRecoveryRoot()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Account.PasswordHashWindowsPath =
+                @"C:\ProgramData\Libertix\Other\account-secret.env";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        [TestMethod]
         public void InstallationPlanAcceptsConsistentNonCSystemDrivePaths()
         {
             InstallationPlan plan = CreateValidPlan();
             plan.Disk.SystemDrive = "D:";
             plan.Distribution.InstallerIsoWindowsPath =
                 @"D:\ProgramData\Libertix\Downloads\" + PlanId + @"\mint.iso";
-            plan.Account.PasswordHashWindowsPath = @"D:\ProgramData\Libertix\account-secret.env";
+            plan.Account.PasswordHashWindowsPath = @"D:\ProgramData\Libertix\Recovery\account-secret.env";
             plan.Runtime.RecoveryRootWindows = @"D:\ProgramData\Libertix\Recovery";
 
             InstallationPlanValidator.Validate(plan);

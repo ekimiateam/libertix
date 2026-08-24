@@ -151,8 +151,22 @@ namespace Libertix.Pages
 
             UpdateProgress(BiosProgress.ShrinkWindows, Localized("ApplyChangesStep1", "Shrinking Windows partition..."));
             Log($"Step 2: Shrinking Windows by {windowsShrinkMB / 1024:N0}GB for the reusable live/Linux partition...");
+            string installerIsoPath = _installationPlan.Distribution.InstallerIsoWindowsPath;
+            var installerIso = new FileInfo(installerIsoPath);
+            const FileAttributes unsafeReclaimableAttributes =
+                FileAttributes.Compressed |
+                FileAttributes.SparseFile |
+                FileAttributes.ReparsePoint;
+            if ((installerIso.Attributes & unsafeReclaimableAttributes) != 0)
+            {
+                throw new InvalidOperationException(
+                    "The verified installer ISO cannot be credited as reclaimable disk space.");
+            }
+            long reclaimableArtifactBytes = installerIso.Length;
             StartExecutionStep(InstallationStep.WindowsSystemVolumeShrunk);
-            bool shrinkSucceeded = await ShrinkWindowsPartitionAsync(windowsShrinkMB);
+            bool shrinkSucceeded = await ShrinkWindowsPartitionAsync(
+                windowsShrinkMB,
+                reclaimableArtifactBytes);
             ThrowIfCancellationRequested();
             if (!shrinkSucceeded)
             {

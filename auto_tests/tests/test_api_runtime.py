@@ -628,6 +628,74 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
     assert lock.held is False
 
 
+def test_json_automation_uses_isolated_timeout_and_captures_selected_vms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+    captured: list[tuple[list[str] | None, Path]] = []
+
+    class HangingAutomationService:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+            on_step(
+                StepResult(
+                    step="automation.installed_boot_menu_seen",
+                    status="ok",
+                    message="GRUB menu detected",
+                    context={"vm": "vm2"},
+                )
+            )
+            time.sleep(5)
+            raise AssertionError("the timed-out worker must be terminated")
+
+    def capture_timeout_screens(_settings, selectors, workspace):
+        captured.append((selectors, workspace))
+        destination = workspace / "captures" / "timeout-vm2.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"png")
+        return {"vm2": str(destination)}, {}
+
+    monkeypatch.setattr(main_module, "AutomationService", HangingAutomationService)
+    monkeypatch.setattr(
+        main_module,
+        "_capture_automation_timeout_screens",
+        capture_timeout_screens,
+    )
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=0.05,
+    )
+
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation",
+            json={
+                "vms": ["vm2"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test-passphrase",
+            },
+        )
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "error"
+    assert result["steps"][0]["step"] == "automation.inactivity_timeout"
+    assert result["steps"][0]["context"]["inactivity_timeout_seconds"] == 0.05
+    assert result["steps"][0]["context"]["active_steps"] == {
+        "vm2": "automation.installed_boot_menu_seen"
+    }
+    assert result["steps"][0]["context"]["captures"]["vm2"].endswith("timeout-vm2.png")
+    assert captured[0][0] == ["vm2"]
+    assert lock.release_calls == 1
+    assert lock.held is False
+
+
 def test_stream_inactivity_timeout_resets_after_each_progress_step(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

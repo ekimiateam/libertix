@@ -433,10 +433,22 @@ def test_live_plan_export_excludes_noninteractive_windows_profiles(
     [
         (("distribution", "installerIsoFileName"), "folder/mint.iso"),
         (("distribution", "installerIsoWindowsPath"), "C:mint.iso"),
+        (
+            ("distribution", "installerIsoWindowsPath"),
+            "C:\\ProgramData\\Libertix\\Downloads\\" + "a" * 32 + "\\safe/../mint.iso",
+        ),
         (("account", "passwordHashWindowsPath"), "..\\account-secret.env"),
+        (
+            ("account", "passwordHashWindowsPath"),
+            "C:\\ProgramData\\Libertix\\Recovery\\safe/../../account-secret.env",
+        ),
         (("account", "passwordHashWindowsPath"), "D:\\account-secret.env"),
         (("disk", "systemDrive"), "c:"),
         (("runtime", "recoveryRootWindows"), "relative\\Recovery"),
+        (
+            ("runtime", "recoveryRootWindows"),
+            "C:\\ProgramData\\Libertix\\Recovery\\safe/../escaped",
+        ),
         (("runtime", "recoveryRootWindows"), "D:\\Recovery"),
         (("features", "windowsProfilesJsonBase64"), ""),
         (("runtime", "recoveryRunId"), ""),
@@ -477,6 +489,18 @@ def test_shared_plan_accepts_all_windows_paths_on_a_non_c_system_drive(
     )
 
     plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_shared_plan_requires_the_account_secret_under_the_recovery_root(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 40)
+    plan["account"]["passwordHashWindowsPath"] = (  # type: ignore[index]
+        "C:\\ProgramData\\Libertix\\Other\\account-secret.env"
+    )
+
+    with pytest.raises(plan_module.PlanValidationError, match="under runtime.recoveryRootWindows"):
+        plan_module.validate_plan(plan, require_installer=True)
 
 
 def test_legacy_plan_without_keyboard_variant_uses_empty_variant(

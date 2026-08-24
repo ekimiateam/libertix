@@ -35,6 +35,19 @@ Describe "Windows free-space stabilization" {
             $budget.AcceptedFloorBytes | Should -Be ([int64](28GB))
         }
 
+        It "counts only a verified transaction artifact as reclaimable capacity" {
+            $budget = Get-LibertixWindowsFreeSpaceBudget `
+                -AvailableBytes ([int64](27.75GB)) `
+                -AllocationBytes ([int64](20GB)) `
+                -ReclaimableArtifactBytes ([int64](3.5GB))
+
+            $budget.Accepted | Should -BeTrue
+            $budget.AvailableBytes | Should -Be ([int64](27.75GB))
+            $budget.ReclaimableArtifactBytes | Should -Be ([int64](3.5GB))
+            $budget.EffectiveAvailableBytes | Should -Be ([int64](31.25GB))
+            $budget.RequiredBytes | Should -Be ([int64](30GB))
+        }
+
         It "rejects a material deficit immediately" {
             Mock Get-Volume { [pscustomobject]@{ SizeRemaining = [int64](25GB) } }
             Mock Start-Sleep {}

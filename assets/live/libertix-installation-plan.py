@@ -11,7 +11,7 @@ import json
 import ntpath
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -42,6 +42,20 @@ SAFE_GRUB_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$")
 
 class PlanValidationError(ValueError):
     """Raised when a plan cannot safely drive an installation."""
+
+
+def require_safe_absolute_windows_path(value: Any, path: str) -> str:
+    text = require_text(value, path)
+    windows_path = PureWindowsPath(text)
+    if (
+        "/" in text
+        or not windows_path.drive
+        or not windows_path.is_absolute()
+        or any(part in {"", ".", ".."} or ":" in part for part in windows_path.parts[1:])
+        or ntpath.normcase(ntpath.normpath(text)) != ntpath.normcase(text.rstrip("\\"))
+    ):
+        raise PlanValidationError(f"{path} must be an absolute safe Windows path")
+    return text
 
 
 def project_windows_profiles(encoded_profiles: str) -> str:
@@ -165,10 +179,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     )
     if "/" in distribution["installerIsoFileName"] or "\\" in distribution["installerIsoFileName"]:
         raise PlanValidationError("distribution.installerIsoFileName must not contain a path")
-    if not re.match(r"^[A-Za-z]:[\\/]", distribution["installerIsoWindowsPath"]):
-        raise PlanValidationError(
-            "distribution.installerIsoWindowsPath must be an absolute Windows drive path"
-        )
+    distribution["installerIsoWindowsPath"] = require_safe_absolute_windows_path(
+        distribution["installerIsoWindowsPath"],
+        "distribution.installerIsoWindowsPath",
+    )
     for name in ("installerIsoSha256", "liveIsoSha256"):
         if not SHA256_PATTERN.fullmatch(str(distribution.get(name, ""))):
             raise PlanValidationError(f"distribution.{name} must be a lowercase SHA-256 hash")
@@ -200,13 +214,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError("account.username is invalid")
     if username.casefold() in INSTALLATION_POLICY.account.reserved_usernames:
         raise PlanValidationError("account.username is reserved by the operating system")
-    password_hash_windows_path = str(account.get("passwordHashWindowsPath", ""))
-    if not re.fullmatch(r"[A-Za-z]:\\.+", password_hash_windows_path) or any(
-        part == ".." for part in password_hash_windows_path[3:].split("\\")
-    ):
-        raise PlanValidationError(
-            "account.passwordHashWindowsPath must be an absolute safe Windows path"
-        )
+    password_hash_windows_path = require_safe_absolute_windows_path(
+        account.get("passwordHashWindowsPath"),
+        "account.passwordHashWindowsPath",
+    )
     computer_name = require_text(account.get("computerName"), "account.computerName")
     if not re.fullmatch(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", computer_name):
         raise PlanValidationError("account.computerName is not a valid Linux hostname")
@@ -380,13 +391,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
             "recoveryRootWindows and recoveryRunId must both be set or both be null"
         )
     if recovery_root is not None:
-        require_text(recovery_root, "runtime.recoveryRootWindows")
-        if not re.fullmatch(r"[A-Za-z]:\\.+", recovery_root) or any(
-            part == ".." for part in recovery_root[3:].split("\\")
-        ):
-            raise PlanValidationError(
-                "runtime.recoveryRootWindows must be an absolute safe Windows path"
-            )
+        recovery_root = require_safe_absolute_windows_path(
+            recovery_root,
+            "runtime.recoveryRootWindows",
+        )
         if not HEX_ID_PATTERN.fullmatch(str(recovery_id)):
             raise PlanValidationError("runtime.recoveryRunId is invalid")
 
@@ -399,6 +407,13 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     for path_name, windows_path in windows_paths.items():
         if windows_path[:2].upper() != system_drive:
             raise PlanValidationError(f"{path_name} must be located on disk.systemDrive")
+    if recovery_root is not None and ntpath.normcase(password_hash_windows_path) != ntpath.normcase(
+        ntpath.join(recovery_root, "account-secret.env")
+    ):
+        raise PlanValidationError(
+            "account.passwordHashWindowsPath must be the plan-owned account-secret.env "
+            "under runtime.recoveryRootWindows"
+        )
 
     expected_installer_iso_path = ntpath.join(
         system_drive + "\\",

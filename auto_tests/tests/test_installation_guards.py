@@ -1560,6 +1560,7 @@ def test_uefi_firmware_fallback_uses_the_same_signed_image_with_secure_boot() ->
 def test_uefi_firmware_reads_and_deletions_fail_closed() -> None:
     firmware = read("Scripts/uefi/Libertix.Uefi.Firmware.ps1")
     staging = read("Scripts/uefi/Libertix.Uefi.Staging.ps1")
+    preflight = read("Scripts/libertix-compatibility-preflight.ps1")
 
     reader = firmware.split("function Get-FirmwareVariableReadResult", 1)[1].split(
         "function Test-FirmwareVariableExists", 1
@@ -1570,11 +1571,17 @@ def test_uefi_firmware_reads_and_deletions_fail_closed() -> None:
     fallback = staging.split("$fallbackEspDrive = $null", 1)[0].rsplit(
         'if ($BootStrategy -eq "BootNext")', 1
     )[1]
+    compatibility_reader = preflight.split("function Get-NvramVariable", 1)[1].split(
+        "function Set-NvramVariable", 1
+    )[0]
 
     assert "[LibertixFirmwareApi]::LastError()" in reader
     assert "$script:Win32ErrorEnvironmentVariableNotFound" in reader
     assert "$script:Win32ErrorNotFound" in reader
     assert "GetFirmwareEnvironmentVariable failed" in reader
+    assert "[LibertixCompatibilityNvram]::LastError()" in compatibility_reader
+    assert "if ($errorCode -ne 203)" in compatibility_reader
+    assert "GetFirmwareEnvironmentVariable($Name) failed" in compatibility_reader
     assert "DeleteFirmwareEnvironmentVariable" in deletion
     assert "if (-not $ok)" in deletion
     assert "still exists after deletion" in deletion
@@ -3336,7 +3343,8 @@ def test_bios_large_linux_partition_uses_fat32_staging_and_full_reservation() ->
 
     assert "InstallationSizePolicy.FromRequestedGigabytes" in apply_changes
     assert "installationSizes.StagingSizeMiB" in partitioning
-    assert "ShrinkWindowsPartitionAsync(windowsShrinkMB)" in partitioning
+    assert "ShrinkWindowsPartitionAsync(" in partitioning
+    assert "reclaimableArtifactBytes" in partitioning
     assert "useOfflineResize ? stagingMB : requestedLinuxMB" in partitioning
     assert "CreateFat32PartitionSimpleAsync(biosStagingMB)" in partitioning
     assert "the live will prepare the final" in partitioning
@@ -4693,6 +4701,14 @@ def test_windows_storage_waits_only_for_small_transient_free_space_deficits() ->
     assert "$stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds" in policy
     assert "Wait-LibertixWindowsFreeSpaceBudget" in bios
     assert "Wait-LibertixWindowsFreeSpaceBudget" in uefi
+    assert "-ReclaimableArtifactBytes $ReclaimableArtifactBytes" in bios
+    assert "-ReclaimableArtifactBytes $reclaimableArtifactBytes" in uefi
+    assert "FileAttributes.Compressed" in read("Pages/ApplyChanges.Bios.cs")
+    assert "[IO.FileAttributes]::Compressed" in uefi
+    assert "SparseFile" in uefi
+    assert "ReparsePoint" in uefi
+    assert "EffectiveAvailableBytes" in policy
+    assert "ReclaimableArtifactBytes" in policy
 
 
 def test_grub_generators_remain_nested_after_package_updates() -> None:
@@ -4852,6 +4868,9 @@ def test_compatibility_shrink_capacity_reserves_cloned_layout_alignment() -> Non
     assert '$firmware -eq "BIOS"' in script
     assert "$shrinkAvailable -= Get-LibertixPartitionAlignmentBytes" in script
     assert "$disk.PhysicalSectorSize % $disk.LogicalSectorSize -ne 0" in script
+    assert "[int]$stagingSizeGB = [int]$installationPolicy.storage.stagingSizeGiB" in script
+    assert "([long]$stagingSizeGB + [long]$preflightShrinkSafetyGB) * 1GB" in script
+    assert "([long]$MinimumLinuxSizeGB + [long]$preflightShrinkSafetyGB)" not in script
 
 
 def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
@@ -4872,6 +4891,8 @@ def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
     assert "targetWindowsFreeSpaceGiB" in storage_policy
     assert "windowsFreeSpaceToleranceGiB" in storage_policy
     assert "InstallationSizePolicy.MinimumWindowsFreeSpaceGiB" in page
+    assert "if (shrinkAvailableGiB < StagingSizeGiB)" in size_policy
+    assert "Math.Min(windowsBudget, shrinkAvailableGiB)" not in size_policy
 
 
 def test_protected_account_hash_uses_a_posix_line_ending() -> None:

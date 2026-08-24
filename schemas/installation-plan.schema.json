@@ -110,7 +110,7 @@
         },
         "installerIsoWindowsPath": {
           "type": "string",
-          "pattern": "^[A-Za-z]:[\\\\/]"
+          "pattern": "^[A-Za-z]:\\\\[^/]+$"
         },
         "installerIsoSha256": {
           "$ref": "#/$defs/sha256"
@@ -177,7 +177,7 @@
         },
         "passwordHashWindowsPath": {
           "type": "string",
-          "pattern": "^[A-Za-z]:\\\\"
+          "pattern": "^[A-Za-z]:\\\\[^/]+$"
         },
         "computerName": {
           "type": "string",
@@ -387,7 +387,7 @@
             "string",
             "null"
           ],
-          "pattern": "^[A-Za-z]:\\\\"
+          "pattern": "^[A-Za-z]:\\\\[^/]+$"
         },
         "recoveryRunId": {
           "type": [

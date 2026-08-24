@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
+import json
 import logging
 import multiprocessing
 import queue
@@ -537,6 +538,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return generator()
 
+    async def execute_isolated_automation(
+        selectors: list[str] | None,
+        request: AutomationRequest,
+    ) -> OperationResult:
+        terminal_result: OperationResult | None = None
+        async for payload in stream_operation(
+            "automation",
+            selectors,
+            request,
+            stream_format="ndjson",
+        ):
+            for line in payload.splitlines():
+                event = json.loads(line)
+                if event.get("event") == "result":
+                    terminal_result = OperationResult.model_validate(event.get("data"))
+        if terminal_result is None:
+            raise RuntimeError("Isolated automation ended without a terminal result")
+        return terminal_result
+
     @api.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -568,7 +588,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def kill_operation() -> dict[str, object]:
         killed = operation_process.kill_active()
         if killed is None:
-            raise HTTPException(status_code=409, detail="No streamed operation is currently active")
+            raise HTTPException(status_code=409, detail="No isolated operation is currently active")
         return {
             "status": "killing",
             "operation": killed.operation,
@@ -600,7 +620,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source: Annotated[SourceMode | None, Query()] = None,
     ) -> OperationResult:
         selectors, request = automation_request(body, vm, source)
-        return await execute("automation", selectors, request)
+        return await execute_isolated_automation(selectors, request)
 
     @api.post("/api/v1/validation/stream")
     async def validation_stream(

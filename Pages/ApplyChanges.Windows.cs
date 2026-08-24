@@ -571,12 +571,17 @@ namespace Libertix.Pages
                 return result.RootElement.GetProperty("MaximumShrinkBytes").GetInt64() / 1048576d;
         }
 
-        private async Task<bool> ShrinkWindowsPartitionAsync(double shrinkSizeMB)
+        private async Task<bool> ShrinkWindowsPartitionAsync(
+            double shrinkSizeMB,
+            long reclaimableArtifactBytes)
         {
             try
             {
                 long sizeBytes = checked((long)Math.Round(shrinkSizeMB * 1024d * 1024d));
-                using (await RunBiosStorageActionAsync("Shrink", sizeBytes)) { }
+                using (await RunBiosStorageActionAsync(
+                    "Shrink",
+                    sizeBytes,
+                    reclaimableArtifactBytes)) { }
                 return true;
             }
             catch (Exception ex)
@@ -634,7 +639,8 @@ namespace Libertix.Pages
 
         private async Task<JsonDocument> RunBiosStorageActionAsync(
             string action,
-            long sizeBytes = 0)
+            long sizeBytes = 0,
+            long reclaimableArtifactBytes = 0)
         {
             if (_storagePreflight == null)
                 throw new InvalidOperationException("Storage preflight is missing.");
@@ -655,7 +661,8 @@ namespace Libertix.Pages
                 $"-DiskUniqueId {QuoteArgument(_storagePreflight.SystemDiskUniqueId)} " +
                 $"-WindowsPartitionOffsetBytes {_storagePreflight.SystemPartitionOffset} " +
                 $"-RecoveryPartitionOffsetBytes {_storagePreflight.RecoveryPartitionOffset} " +
-                $"-SizeBytes {sizeBytes}";
+                $"-SizeBytes {sizeBytes} " +
+                $"-ReclaimableArtifactBytes {reclaimableArtifactBytes}";
             var processResult = await Task.Run(() => RunProcess(
                 powershell,
                 arguments,
