@@ -2,21 +2,21 @@
   "schemaVersion": 1,
   "artifacts": {
     "wpf": {
-      "url": "https://github.com/ekimiateam/libertix/releases/download/c764131/Libertix-c764131.zip",
-      "sha256": "3a5717e457e1410ba9c3d9c1ecb157ee0da85d95185bf0aa0def8c2ab609e9c1",
-      "sizeBytes": 3686463,
-      "fileName": "Libertix-c764131.zip"
+      "url": "https://github.com/ekimiateam/libertix/releases/download/366285d/Libertix-366285d.zip",
+      "sha256": "f8c0094de5df1a20768172c9d65ab84100a1972f13b211f2f84c606d6afa7e09",
+      "sizeBytes": 3687561,
+      "fileName": "Libertix-366285d.zip"
     },
     "miniIso": {
       "bios": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/c764131/libertix-installer-bios.iso",
-        "sha256": "c0ce7351534114b084a55ac1fcce465014a4e698b2fa59dfd47a41d777e3b6a9",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/366285d/libertix-installer-bios.iso",
+        "sha256": "446aa7bfaaf4807250be62981e3e399d09ded97251ea6172c2770fd4190d8aae",
         "sizeBytes": 524288000,
         "fileName": "libertix-installer-bios.iso"
       },
       "uefi": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/c764131/libertix-installer-uefi.iso",
-        "sha256": "598c1db783cc79b114deeb919022dd5ae39fc2ab3feb306d08452d1ff9e30ad2",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/366285d/libertix-installer-uefi.iso",
+        "sha256": "ca7799a08193fb1eeb03bcb1f80702108bcb6679c2291dbc1562c729b09dde3e",
         "sizeBytes": 558891008,
         "fileName": "libertix-installer-uefi.iso"
       }
