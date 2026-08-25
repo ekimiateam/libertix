@@ -24,7 +24,7 @@ def test_all_supported_languages_have_success_and_failure_messages(result_ui: Mo
     catalogue = json.loads(
         (ROOT / "Resources/Libertix.Translations.json").read_text(encoding="utf-8")
     )
-    assert catalogue["supportedLanguages"] == ["en", "fr", "es"]
+    assert catalogue["supportedLanguages"] == ["en", "fr", "es", "ko"]
     for language in catalogue["supportedLanguages"]:
         translation = result_ui.load_translations(language)
         assert all(translation[key].strip() for key in translation)

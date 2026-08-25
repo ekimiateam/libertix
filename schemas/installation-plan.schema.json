@@ -137,7 +137,7 @@
       "properties": {
         "languageCode": {
           "type": "string",
-          "enum": ["en", "fr", "es"]
+          "enum": ["en", "fr", "es", "ko"]
         },
         "systemLanguage": {
           "type": "string",

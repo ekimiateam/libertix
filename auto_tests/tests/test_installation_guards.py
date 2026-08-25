@@ -92,8 +92,8 @@ def test_compatibility_blocks_an_explicitly_disconnected_ac_line() -> None:
     assert 'DllImport("PowrProf.dll")' in probe
     assert "ClassifySystemBatteryState(" in probe
     assert "batteryStateStatus == 0" in probe
-    expected_power_terms = {"en": "AC power", "fr": "secteur", "es": "corriente"}
-    for language in ("en", "fr", "es"):
+    expected_power_terms = {"en": "AC power", "fr": "secteur", "es": "corriente", "ko": "전원"}
+    for language in ("en", "fr", "es", "ko"):
         messages = catalogue["languages"][language]["wpf"]
         assert messages["CompatibilityPowerCheck"].strip()
         assert messages["CompatibilityAcPowerRequired"].strip()
@@ -1447,7 +1447,7 @@ def test_failure_shortcut_does_not_offer_reboot_before_verified_rollback() -> No
 
     assert 'if [ "$rollback_status" = "completed" ]' in runner
     assert "$LIBERTIX_I18N_SHORTCUTS_FAILURE_BLOCKED" in runner
-    for language in ("en", "fr", "es"):
+    for language in ("en", "fr", "es", "ko"):
         translations = catalogue["languages"][language]["live"]
         blocked = translations["shortcuts_failure_blocked"]
         assert "[R]" in blocked

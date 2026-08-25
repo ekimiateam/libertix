@@ -12,7 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOGUE_PATH = ROOT / "Resources/Libertix.Translations.json"
-LANGUAGES = ("en", "fr", "es")
+LANGUAGES = ("en", "fr", "es", "ko")
 
 
 def translation_catalogue() -> dict[str, object]:
@@ -70,6 +70,7 @@ def test_supported_language_metadata_is_complete_and_exact() -> None:
         "en": ("English", "en_US.UTF-8", "us"),
         "fr": ("Français", "fr_FR.UTF-8", "fr"),
         "es": ("Español", "es_ES.UTF-8", "es"),
+        "ko": ("한국어", "ko_KR.UTF-8", "kr"),
     }
     for language, values in expected.items():
         entry = catalogue["languages"][language]
@@ -199,6 +200,7 @@ def test_linux_extraction_labels_are_concise_in_every_language() -> None:
         "en": ("Extracting the Linux system", "Extracting the Linux system:"),
         "fr": ("Extraction du système Linux", "Extraction du système Linux :"),
         "es": ("Extrayendo el sistema Linux", "Extrayendo el sistema Linux:"),
+        "ko": ("Linux 시스템 추출 중", "Linux 시스템 추출 중:"),
     }
 
     for language, (label, progress_prefix) in expected.items():
@@ -257,6 +259,7 @@ def test_live_translation_helper_loads_every_supported_language(language: str) -
         ("en", "Automatic installation"),
         ("fr", "Installation automatique"),
         ("es", "Instalación automática"),
+        ("ko", "자동 설치"),
     ),
 )
 def test_live_context_retry_preserves_language_exports(
@@ -347,7 +350,7 @@ def test_compatibility_preflight_uses_the_selected_language() -> None:
     assert "string languageCode = Localization.CurrentLanguage" in runner
     assert '" -LanguageCode " +' in runner
     assert "WindowsProcessRunner.QuoteArgument(languageCode)" in runner
-    assert '[ValidateSet("en", "fr", "es")]' in script
+    assert '[ValidateSet("en", "fr", "es", "ko")]' in script
     assert messages["checkMessages"]["COMPAT_010_PRIVILEGES"] == (
         "Checking administrator privileges"
     )
@@ -550,7 +553,7 @@ def test_unattended_warning_has_dedicated_localized_copy() -> None:
 
     assert "UnattendedWarningTitle" in dialog
     assert "UnattendedWarningMessage" in dialog
-    for language in ("en", "fr", "es"):
+    for language in LANGUAGES:
         strings = catalog["languages"][language]["wpf"]
         assert strings["UnattendedWarningTitle"].strip()
         assert strings["UnattendedWarningMessage"].strip()

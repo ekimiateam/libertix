@@ -193,8 +193,8 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
 
     locale = require_mapping(root.get("locale"), "locale")
     language_code = require_text(locale.get("languageCode"), "locale.languageCode")
-    if language_code not in {"en", "fr", "es"}:
-        raise PlanValidationError("locale.languageCode must be one of: en, fr, es")
+    if language_code not in {"en", "fr", "es", "ko"}:
+        raise PlanValidationError("locale.languageCode must be one of: en, fr, es, ko")
     for name in ("systemLanguage", "keyboardLayout", "keyboardModel", "timezone"):
         require_text(require_property(locale, name, "locale"), f"locale.{name}")
     for name in ("keyboardLayout", "keyboardModel"):

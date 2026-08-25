@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("en", "fr", "es")]
+    [ValidateSet("en", "fr", "es", "ko")]
     [string]$LanguageCode = "en",
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
