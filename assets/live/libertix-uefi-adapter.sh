@@ -293,10 +293,14 @@ wait_for_prereqs() {
         fi
 
         if [ "$config_ready" -eq 0 ]; then
+            # load_libertix_staging_volume_label() only runs from stage
+            # 010-read-config, after this stage returns, so the label is not
+            # yet set here. Under `set -u` an unguarded reference aborts the
+            # whole script rather than just failing this comparison.
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
                 [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = \
-                    "$LIBERTIX_STAGING_VOLUME_LABEL" ] && {
+                    "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ] && {
                     config_ready=1
                     break
                 }

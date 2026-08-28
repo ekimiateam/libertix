@@ -703,6 +703,52 @@ def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
     assert 'resize_end="100%"' not in rollback
 
 
+@pytest.mark.parametrize(
+    "adapter_path",
+    ["assets/live/libertix-uefi-adapter.sh", "assets/live/libertix-bios-adapter.sh"],
+)
+def test_wait_for_prereqs_survives_an_unset_staging_volume_label(adapter_path: str) -> None:
+    # LIBERTIX_STAGING_VOLUME_LABEL is only populated by
+    # load_libertix_staging_volume_label(), which runs from stage
+    # 010-read-config -- one stage after wait_for_prereqs (005-wait-prereqs).
+    # If the live medium isn't yet mounted at any well-known path and `find`
+    # hasn't located it either, wait_for_prereqs falls back to matching disks
+    # by blkid label against that still-unset variable. Under `set -Eeuo
+    # pipefail`, an unguarded reference there is an unbound-variable error
+    # that aborts the whole installer with a generic "unhandled shell exit at
+    # stage 005-wait-prereqs" instead of the intended prerequisite-timeout
+    # failure, matching ekimiateam/libertix#18.
+    adapter = ROOT / adapter_path
+    command = r"""
+set -Eeuo pipefail
+mark() { return 0; }
+candidate_disks() { return 0; }
+find() { return 1; }
+blkid() {
+    case "$1" in
+        -o) echo /dev/fake-live-medium ;;
+        -s) echo not-the-staging-label ;;
+    esac
+}
+sleep() { return 0; }
+die() { echo "DIE: $*"; exit 1; }
+source "$1"
+wait_for_prereqs
+echo "UNREACHABLE: wait_for_prereqs returned success with no disk or config ready"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "wait-for-prereqs-test", str(adapter)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "unbound variable" not in result.stderr
+    assert "UNREACHABLE" not in result.stdout
+    assert "DIE: live prerequisites not ready after 60s" in result.stdout
+
+
 def test_live_rollback_retries_disk_resolution_before_giving_up(tmp_path: Path) -> None:
     # An unhandled exit early in boot (e.g. during 005-wait-prereqs) can race
     # udev/blkid still probing the target disk's partition table. Rollback

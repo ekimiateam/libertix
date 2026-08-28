@@ -30,15 +30,13 @@ cleanup_live_mounts_best_effort() {
 }
 
 resolve_rollback_storage_best_effort() {
-    local attempt
-
     if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
         # Rollback can fire moments after boot (e.g. an unhandled exit during
         # 005-wait-prereqs), before udev has finished exposing the target
         # disk's partition table to blkid. Unlike every other resolution call
         # site in this codebase, give it a chance to settle instead of
         # concluding on the first pass that no disk matches the manifest.
-        for attempt in $(seq 1 10); do
+        for _ in $(seq 1 10); do
             udevadm settle --timeout=5 2>/dev/null || true
             DISK=$(resolve_target_disk_from_manifest || true)
             [ -n "$DISK" ] && [ -b "$DISK" ] && break
