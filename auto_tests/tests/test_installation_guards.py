@@ -703,6 +703,51 @@ def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
     assert 'resize_end="100%"' not in rollback
 
 
+def test_live_rollback_retries_disk_resolution_before_giving_up(tmp_path: Path) -> None:
+    # An unhandled exit early in boot (e.g. during 005-wait-prereqs) can race
+    # udev/blkid still probing the target disk's partition table. Rollback
+    # must retry settling and re-resolving instead of concluding on the very
+    # first pass that no disk in the manifest matches, since a disk that is
+    # genuinely unresolvable looks identical to one udev hasn't settled yet.
+    rollback = ROOT / "assets/live/libertix-rollback-common.sh"
+    # resolve_target_disk_from_manifest runs inside a command substitution
+    # subshell, so its call count is tallied through a file rather than a
+    # variable, which a subshell increment would not propagate back.
+    counter_path = tmp_path / "resolve-attempts"
+    command = r"""
+source "$1"
+COUNTER_PATH="$2"
+DISK=""
+WINDOWS_PART=""
+settle_calls=0
+resolve_target_disk_from_manifest() {
+    echo x >> "$COUNTER_PATH"
+    return 1
+}
+udevadm() { settle_calls=$((settle_calls + 1)); return 0; }
+sleep() { return 0; }
+resolve_rollback_storage_best_effort
+echo "rc=$?"
+echo "settle_calls=$settle_calls"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "rollback-retry-test", str(rollback), str(counter_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    resolve_attempts = counter_path.read_text(encoding="utf-8").count("x")
+
+    assert "rc=1" in result.stdout
+    assert "ROLLBACK: skipped because target disk is unknown" in result.stdout
+    # A single attempt would reproduce the reported bug (a disk that only
+    # needed a moment to settle gets permanently misreported as unmatched).
+    assert resolve_attempts == 10
+    assert "settle_calls=10" in result.stdout
+
+
 @pytest.mark.parametrize("failed_transition", ["begin", "compensate", "complete"])
 def test_live_rollback_rejects_success_when_state_persistence_fails(
     failed_transition: str,
