@@ -519,15 +519,19 @@ wait_for_prereqs() {
             [ -n "$found_config" ] && config_ready=1
         fi
 
-        if [ "$config_ready" -eq 0 ]; then
-            # load_libertix_staging_volume_label() only runs from stage
-            # 010-read-config, after this stage returns, so the label is not
-            # yet set here. Under `set -u` an unguarded reference aborts the
-            # whole script rather than just failing this comparison.
+        # load_libertix_staging_volume_label() only runs from stage
+        # 010-read-config, after this stage returns, so if this process was
+        # ever started without the runner having already exported the label,
+        # it is unset here. Skip the fallback entirely rather than comparing
+        # against it: under `set -u` an unguarded reference would abort the
+        # whole script, and blkid also reports an empty LABEL for an
+        # unlabeled partition, so an unguarded empty-string comparison would
+        # wrongly mark an unrelated partition as the staging volume.
+        if [ "$config_ready" -eq 0 ] && [ -n "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
                 [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = \
-                    "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ] && {
+                    "$LIBERTIX_STAGING_VOLUME_LABEL" ] && {
                     config_ready=1
                     break
                 }

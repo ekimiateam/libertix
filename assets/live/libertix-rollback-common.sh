@@ -30,9 +30,23 @@ cleanup_live_mounts_best_effort() {
 }
 
 resolve_rollback_storage_best_effort() {
+    if [ -z "${TARGET_DISK_SIZE_BYTES:-}" ]; then
+        # install-main clears the manifest-derived disk identity to
+        # rollback-safe empty defaults at bootstrap and only repopulates them
+        # at stage 010-read-config. If rollback fires from an earlier stage
+        # (e.g. an unhandled exit during 005-wait-prereqs),
+        # disk_matches_manifest would otherwise reject every disk against
+        # permanently blank expected values, no matter how many times
+        # resolution is retried. The runner already validated and cached the
+        # plan at this path before launching this process, so reloading it
+        # here is safe.
+        echo "ROLLBACK: installation plan not yet loaded in this process; reloading $LOG_DIR/installation-plan.json"
+        load_libertix_installation_plan "$LOG_DIR/installation-plan.json" || \
+            echo "ROLLBACK: could not reload installation plan"
+    fi
+
     if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
-        # Rollback can fire moments after boot (e.g. an unhandled exit during
-        # 005-wait-prereqs), before udev has finished exposing the target
+        # Rollback can also fire before udev has finished exposing the target
         # disk's partition table to blkid. Unlike every other resolution call
         # site in this codebase, give it a chance to settle instead of
         # concluding on the first pass that no disk matches the manifest.
