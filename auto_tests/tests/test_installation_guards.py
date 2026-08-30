@@ -707,17 +707,21 @@ def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
     "adapter_path",
     ["assets/live/libertix-uefi-adapter.sh", "assets/live/libertix-bios-adapter.sh"],
 )
-def test_wait_for_prereqs_skips_label_fallback_when_label_is_unset(adapter_path: str) -> None:
+def test_wait_for_prereqs_survives_an_unset_staging_volume_label(adapter_path: str) -> None:
     # load_libertix_staging_volume_label() only populates
     # LIBERTIX_STAGING_VOLUME_LABEL from stage 010-read-config, one stage
-    # after wait_for_prereqs (005-wait-prereqs). In the real runner flow
-    # (libertix-runner-main.sh) the label is already exported into this
-    # process's environment before it starts, so wait_for_prereqs never
-    # actually observes it unset -- this is defensive hardening for any path
-    # that invokes this function without going through the runner, not a
-    # reproduction of ekimiateam/libertix#18's reported crash. Confirms
-    # wait_for_prereqs neither aborts on the unset variable under `set -u`
-    # nor treats it as a match.
+    # after wait_for_prereqs (005-wait-prereqs). Its export() also cannot
+    # reach this process any earlier than that: it is only ever called from
+    # inside find_libertix_installation_plan(), a subshell-bodied function
+    # ("() (...)"), so the export is discarded the moment that call returns
+    # -- both when the runner probes for the plan before launching this
+    # process, and when stage 010 probes again from inside it. The label is
+    # therefore genuinely unset here every time this fallback is reached, in
+    # the real production runner flow, not just in some bypassed test path.
+    # Before this fix, an unguarded reference here was an unbound-variable
+    # error that aborted the whole installer with the generic "unhandled
+    # shell exit at stage 005-wait-prereqs" message instead of the intended
+    # prerequisite-timeout failure, matching ekimiateam/libertix#18 exactly.
     adapter = ROOT / adapter_path
     command = r"""
 set -Eeuo pipefail
