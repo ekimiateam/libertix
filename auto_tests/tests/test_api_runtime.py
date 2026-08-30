@@ -268,6 +268,16 @@ def test_offline_ntfs_resize_fixture_is_opt_in() -> None:
     assert request.force_offline_ntfs_resize is True
 
 
+def test_windows_preference_migration_fixture_is_opt_in() -> None:
+    assert AutomationRequest(apply=True, linux_password="pass").migrate_windows_preferences is False
+    request = AutomationRequest(
+        apply=True,
+        linux_password="pass",
+        migrate_windows_preferences=True,
+    )
+    assert request.migrate_windows_preferences is True
+
+
 def test_boot_guardian_fault_accepts_only_explicit_fixture_modes() -> None:
     assert AutomationRequest(apply=True, linux_password="pass").boot_guardian_fault == "none"
     for mode in (

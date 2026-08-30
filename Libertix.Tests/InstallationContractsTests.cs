@@ -60,6 +60,131 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void WindowsWifiParserAcceptsOpenOweWpa2AndWpa3PersonalProfiles()
+        {
+            WindowsWifiProfile open = WindowsWifiProfileReader.ParseProfile(
+                "Cafe",
+                WifiProfileXml("Cafe", "open", "none", null));
+            WindowsWifiProfile owe = WindowsWifiProfileReader.ParseProfile(
+                "Cafe Enhanced Open",
+                WifiProfileXml("Cafe Enhanced Open", "OWE", "AES", null));
+            WindowsWifiProfile wpa2 = WindowsWifiProfileReader.ParseProfile(
+                "Home WPA2",
+                WifiProfileXml("Home", "WPA2PSK", "AES", "test-password"));
+            WindowsWifiProfile wpa3 = WindowsWifiProfileReader.ParseProfile(
+                "Home WPA3",
+                WifiProfileXml("Home 3", "WPA3SAE", "AES", "sae-password"));
+
+            Assert.AreEqual("open", open.Security);
+            Assert.IsNull(open.Secret);
+            Assert.AreEqual("owe", owe.Security);
+            Assert.IsNull(owe.Secret);
+            Assert.AreEqual("wpa-psk", wpa2.Security);
+            Assert.AreEqual("test-password", wpa2.Secret);
+            Assert.AreEqual("sae", wpa3.Security);
+            Assert.AreEqual("sae-password", wpa3.Secret);
+        }
+
+        [TestMethod]
+        public void WindowsWifiParserExcludesWepAndEnterpriseProfiles()
+        {
+            Assert.IsNull(WindowsWifiProfileReader.ParseProfile(
+                "Legacy",
+                WifiProfileXml("Legacy", "open", "WEP", "abcde")));
+            Assert.IsNull(WindowsWifiProfileReader.ParseProfile(
+                "Enterprise",
+                WifiProfileXml("Enterprise", "WPA2", "AES", null)));
+            Assert.IsNull(WindowsWifiProfileReader.ParseProfile(
+                "Open 802.1X",
+                WifiProfileXml("Open 802.1X", "open", "none", null)
+                    .Replace("<useOneX>false</useOneX>", "<useOneX>true</useOneX>")));
+        }
+
+        [TestMethod]
+        public void WindowsWifiParserRequiresTheStoredPersonalSecret()
+        {
+            Assert.ThrowsException<InvalidOperationException>(() =>
+                WindowsWifiProfileReader.ParseProfile(
+                    "Home",
+                    WifiProfileXml("Home", "WPA2PSK", "AES", null)));
+        }
+
+        [TestMethod]
+        public void WindowsWifiParserRejectsEncryptedStoredPersonalSecret()
+        {
+            string encryptedProfile = WifiProfileXml(
+                "Home",
+                "WPA2PSK",
+                "AES",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .Replace("<protected>false</protected>", "<protected>true</protected>");
+
+            InvalidOperationException exception = Assert.ThrowsException<InvalidOperationException>(
+                () => WindowsWifiProfileReader.ParseProfile("Home", encryptedProfile));
+            StringAssert.Contains(exception.Message, "plaintext");
+        }
+
+        [TestMethod]
+        public void WindowsPreferenceCollectorCreatesAValidatedInMemoryBundle()
+        {
+            string json = WindowsPreferenceCollector.Serialize(PlanId, out int wifiProfileCount);
+            using (JsonDocument document = JsonDocument.Parse(json))
+            {
+                Assert.AreEqual(1, document.RootElement.GetProperty("schemaVersion").GetInt32());
+                Assert.AreEqual(PlanId, document.RootElement.GetProperty("planId").GetString());
+                Assert.AreEqual(
+                    wifiProfileCount,
+                    document.RootElement.GetProperty("wifiProfiles").GetArrayLength());
+                string primaryButton = document.RootElement
+                    .GetProperty("preferences")
+                    .GetProperty("primaryMouseButton")
+                    .GetString();
+                CollectionAssert.Contains(new[] { "left", "right" }, primaryButton);
+            }
+        }
+
+        [TestMethod]
+        public void KeyboardRepeatConversionPreservesWindowsRangeDirection()
+        {
+            Assert.AreEqual((uint)400, WindowsPreferenceCollector.ConvertKeyboardSpeedToInterval(0));
+            Assert.AreEqual((uint)33, WindowsPreferenceCollector.ConvertKeyboardSpeedToInterval(31));
+        }
+
+        [TestMethod]
+        public void InstallationPlanAcceptsASecretFreePreferenceMigrationManifest()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Features.WindowsPreferenceMigration = new InstallationPreferenceMigration
+            {
+                Enabled = true,
+                BundleFileName = WindowsPreferenceMigrationContract.BundleFileName,
+                BundleSha256 = new string('e', 64),
+                BundleSizeBytes = 4096,
+                WifiProfileCount = 3
+            };
+
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsAPreferenceMigrationBundleWithAnotherName()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Features.WindowsPreferenceMigration = new InstallationPreferenceMigration
+            {
+                Enabled = true,
+                BundleFileName = "other.json",
+                BundleSha256 = new string('e', 64),
+                BundleSizeBytes = 4096
+            };
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+            StringAssert.Contains(exception.Message, "fixed transaction bundle name");
+        }
+
+        [TestMethod]
         public void UefiRecoveryPayloadIncludesOnlyRequiredRuntimeFiles()
         {
             string root = Path.Combine(
@@ -1272,6 +1397,27 @@ namespace Libertix.Tests
                 "BIOS plan must not contain trusted Microsoft UEFI authorities");
         }
 
+        private static string WifiProfileXml(
+            string ssid,
+            string authentication,
+            string encryption,
+            string secret)
+        {
+            string sharedKey = secret == null
+                ? string.Empty
+                : "<sharedKey><keyType>passPhrase</keyType><protected>false</protected>" +
+                    "<keyMaterial>" + secret + "</keyMaterial></sharedKey>";
+            return
+                "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">" +
+                "<name>Test</name><SSIDConfig><SSID><name>" + ssid +
+                "</name></SSID><nonBroadcast>false</nonBroadcast></SSIDConfig>" +
+                "<connectionType>ESS</connectionType><connectionMode>auto</connectionMode>" +
+                "<MSM><security><authEncryption><authentication>" + authentication +
+                "</authentication><encryption>" + encryption +
+                "</encryption><useOneX>false</useOneX></authEncryption>" + sharedKey +
+                "</security></MSM></WLANProfile>";
+        }
+
         private static InstallationPlan CreateValidPlan()
         {
             const long GiB = InstallationSizePolicy.BytesPerGiB;
@@ -1349,7 +1495,11 @@ namespace Libertix.Tests
                 },
                 Features = new InstallationFeatures
                 {
-                    WindowsProfilesJsonBase64 = "W10="
+                    WindowsProfilesJsonBase64 = "W10=",
+                    WindowsPreferenceMigration = new InstallationPreferenceMigration
+                    {
+                        Enabled = false
+                    }
                 },
                 Runtime = new InstallationRuntime
                 {

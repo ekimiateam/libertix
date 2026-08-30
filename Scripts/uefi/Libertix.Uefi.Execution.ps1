@@ -271,6 +271,45 @@ function Publish-LibertixInstallationContext {
             Destination = Join-Path $PartitionDrive "installation-state.json"
         }
     )
+    $preferenceMigration = $installationPlan.features.windowsPreferenceMigration
+    $preferenceBundleSource = $null
+    if ([bool]$preferenceMigration.enabled) {
+        $preferenceBundleSource = Join-Path `
+            ([string]$installationPlan.runtime.recoveryRootWindows) `
+            ([string]$preferenceMigration.bundleFileName)
+        $preferenceBundleDestination = Join-Path `
+            $PartitionDrive `
+            ([string]$preferenceMigration.bundleFileName)
+        if ([IO.File]::Exists($preferenceBundleSource)) {
+            $sourceInfo = [IO.FileInfo]::new($preferenceBundleSource)
+            if ($sourceInfo.Length -ne [int64]$preferenceMigration.bundleSizeBytes) {
+                throw "Windows preference migration bundle size verification failed."
+            }
+            $sourceHash = (Get-FileHash -LiteralPath $preferenceBundleSource -Algorithm SHA256).Hash
+            if ($sourceHash -cne ([string]$preferenceMigration.bundleSha256).ToUpperInvariant()) {
+                throw "Windows preference migration bundle hash verification failed."
+            }
+            $contextFiles += [pscustomobject]@{
+                Source = $preferenceBundleSource
+                Destination = $preferenceBundleDestination
+            }
+        } elseif ([IO.File]::Exists($preferenceBundleDestination)) {
+            $publishedInfo = [IO.FileInfo]::new($preferenceBundleDestination)
+            $publishedHash = (
+                Get-FileHash -LiteralPath $preferenceBundleDestination -Algorithm SHA256
+            ).Hash
+            if (
+                $publishedInfo.Length -ne [int64]$preferenceMigration.bundleSizeBytes -or
+                $publishedHash -cne ([string]$preferenceMigration.bundleSha256).ToUpperInvariant()
+            ) {
+                throw "Published Windows preference migration bundle verification failed."
+            }
+            $preferenceBundleSource = $null
+            Write-Log "Published Windows preference migration bundle re-verified."
+        } else {
+            throw "The protected Windows preference migration bundle is missing."
+        }
+    }
     foreach ($contextFile in $contextFiles) {
         $source = [IO.Path]::GetFullPath([string]$contextFile.Source)
         $destination = [IO.Path]::GetFullPath([string]$contextFile.Destination)
@@ -324,6 +363,16 @@ function Publish-LibertixInstallationContext {
             if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
             if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
         }
+    }
+    if ($null -ne $preferenceBundleSource) {
+        [IO.File]::Delete($preferenceBundleSource)
+        if ([IO.File]::Exists($preferenceBundleSource)) {
+            throw "The Windows preference migration source bundle could not be retired."
+        }
+        Write-Log (
+            "Windows preference migration bundle published and source retired; Wi-Fi profiles={0}." -f
+            [int]$preferenceMigration.wifiProfileCount
+        )
     }
 }
 

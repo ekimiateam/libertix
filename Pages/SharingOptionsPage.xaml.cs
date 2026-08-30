@@ -22,6 +22,7 @@ namespace Libertix.Pages
             SharingOptions options = _installationState.Sharing;
             WindowsToLinuxCheckBox.IsChecked = options.ShareWindowsFilesInLinux;
             LinuxToWindowsCheckBox.IsChecked = options.ShareLinuxFilesInWindows;
+            MigrateWindowsPreferencesCheckBox.IsChecked = options.MigrateWindowsPreferences;
         }
 
         private void SaveOptions()
@@ -29,7 +30,8 @@ namespace Libertix.Pages
             _installationState.Sharing = new SharingOptions
             {
                 ShareWindowsFilesInLinux = WindowsToLinuxCheckBox.IsChecked == true,
-                ShareLinuxFilesInWindows = LinuxToWindowsCheckBox.IsChecked == true
+                ShareLinuxFilesInWindows = LinuxToWindowsCheckBox.IsChecked == true,
+                MigrateWindowsPreferences = MigrateWindowsPreferencesCheckBox.IsChecked == true
             };
         }
 

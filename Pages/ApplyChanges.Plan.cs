@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Security.Cryptography;
 using System.Threading.Tasks;
 using System.Windows;
 using Libertix.Helpers;
@@ -21,6 +22,7 @@ namespace Libertix.Pages
         private InstallationPlan _installationPlan;
         private InstallationExecutionLedger _executionLedger;
         private string _installationPlanPath;
+        private string _windowsPreferenceMigrationBundlePath;
 
         private void InitializeInstallationContext(
             FirmwareType firmware,
@@ -48,6 +50,9 @@ namespace Libertix.Pages
             string planId = !string.IsNullOrWhiteSpace(recoveryRunId)
                 ? recoveryRunId
                 : Guid.NewGuid().ToString("N");
+            ProtectDirectoryForInstallerAndSystem(persistenceRoot);
+            InstallationPreferenceMigration preferenceMigration =
+                PrepareWindowsPreferenceMigrationBundle(persistenceRoot, planId);
             LinuxKeyboardConfiguration keyboard = WindowsKeyboardLayout.ResolveActive(
                 Localization.GetKeyboardLayout());
             StartupOptions startupOptions = ((App)Application.Current).RuntimeOptions;
@@ -69,11 +74,11 @@ namespace Libertix.Pages
                 SystemDriveRoot = systemDriveRoot,
                 PasswordHashWindowsPath = passwordHashWindowsPath,
                 WindowsProfilesJsonBase64 = GetWindowsProfilesJsonBase64(),
+                WindowsPreferenceMigration = preferenceMigration,
                 RecoveryRootWindows = recoveryRoot,
                 RecoveryRunId = recoveryRunId
             });
 
-            ProtectDirectoryForInstallerAndSystem(persistenceRoot);
             // The live reads this file as a POSIX line. A Windows CRLF leaves
             // a carriage return in the crypt hash after Bash strips only LF.
             WriteProtectedInstallerFile(passwordHashWindowsPath, passwordHash + "\n");
@@ -175,6 +180,152 @@ namespace Libertix.Pages
                 Path.Combine(liveRoot, InstallationPlanFileName),
                 _installationPlan);
             _executionLedger.Publish(Path.Combine(liveRoot, InstallationStateFileName));
+            PublishWindowsPreferenceMigrationBundleToLive(liveRoot);
+        }
+
+        private InstallationPreferenceMigration PrepareWindowsPreferenceMigrationBundle(
+            string persistenceRoot,
+            string planId)
+        {
+            if (_installationState.Sharing?.MigrateWindowsPreferences != true)
+                return new InstallationPreferenceMigration { Enabled = false };
+
+            string bundlePath = Path.Combine(
+                persistenceRoot,
+                WindowsPreferenceMigrationContract.BundleFileName);
+            try
+            {
+                string bundleJson = WindowsPreferenceCollector.Serialize(
+                    planId,
+                    out int wifiProfileCount);
+                WriteProtectedInstallerFile(bundlePath, bundleJson);
+                var info = new FileInfo(bundlePath);
+                if (info.Length <= 0 ||
+                    info.Length > WindowsPreferenceMigrationContract.MaximumBundleBytes)
+                {
+                    throw new InvalidOperationException(
+                        "The Windows preference migration bundle size is invalid.");
+                }
+
+                _windowsPreferenceMigrationBundlePath = bundlePath;
+                return new InstallationPreferenceMigration
+                {
+                    Enabled = true,
+                    BundleFileName = WindowsPreferenceMigrationContract.BundleFileName,
+                    BundleSha256 = WindowsPreferenceMigrationContract.ComputeSha256(bundlePath),
+                    BundleSizeBytes = info.Length,
+                    WifiProfileCount = wifiProfileCount
+                };
+            }
+            catch (Exception exception)
+            {
+                try
+                {
+                    if (File.Exists(bundlePath))
+                        File.Delete(bundlePath);
+                }
+                catch
+                {
+                }
+                throw new InvalidOperationException(
+                    Localized(
+                        "WindowsPreferenceMigrationPreparationFailed",
+                        "Windows preferences and saved Wi-Fi networks could not be prepared for migration."),
+                    exception);
+            }
+        }
+
+        private void PublishWindowsPreferenceMigrationBundleToLive(string liveRoot)
+        {
+            InstallationPreferenceMigration migration =
+                _installationPlan?.Features?.WindowsPreferenceMigration;
+            if (migration?.Enabled != true)
+                return;
+            if (string.IsNullOrWhiteSpace(_windowsPreferenceMigrationBundlePath) ||
+                !File.Exists(_windowsPreferenceMigrationBundlePath))
+            {
+                throw new InvalidOperationException(
+                    "The protected Windows preference migration bundle is missing.");
+            }
+
+            string destination = Path.Combine(liveRoot, migration.BundleFileName);
+            string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                using (var input = new FileStream(
+                    _windowsPreferenceMigrationBundlePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read))
+                using (var output = new FileStream(
+                    temporary,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    4096,
+                    FileOptions.WriteThrough))
+                {
+                    input.CopyTo(output);
+                    output.Flush(true);
+                }
+
+                var stagedInfo = new FileInfo(temporary);
+                if (stagedInfo.Length != migration.BundleSizeBytes ||
+                    !string.Equals(
+                        WindowsPreferenceMigrationContract.ComputeSha256(temporary),
+                        migration.BundleSha256,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Windows preference migration bundle staging verification failed.");
+                }
+
+                File.Copy(temporary, destination, overwrite: true);
+                if (!string.Equals(
+                    WindowsPreferenceMigrationContract.ComputeSha256(destination),
+                    migration.BundleSha256,
+                    StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Windows preference migration bundle publication verification failed.");
+                }
+
+                File.Delete(_windowsPreferenceMigrationBundlePath);
+                if (File.Exists(_windowsPreferenceMigrationBundlePath))
+                {
+                    throw new InvalidOperationException(
+                        "The Windows preference migration source bundle could not be retired.");
+                }
+                _windowsPreferenceMigrationBundlePath = null;
+                Log(
+                    $"Windows preference migration bundle published and source retired; " +
+                    $"Wi-Fi profiles={migration.WifiProfileCount}.");
+            }
+            finally
+            {
+                if (File.Exists(temporary))
+                    File.Delete(temporary);
+            }
+        }
+
+        private void CleanupPendingWindowsPreferenceMigrationBundle()
+        {
+            string path = _windowsPreferenceMigrationBundlePath;
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+                if (File.Exists(path))
+                    throw new IOException("The bundle still exists after deletion.");
+                _windowsPreferenceMigrationBundlePath = null;
+                Log("Pending Windows preference migration bundle cleanup verified.");
+            }
+            catch (Exception exception)
+            {
+                Log($"Pending Windows preference migration bundle cleanup failed: {exception.Message}");
+            }
         }
 
         private void StartExecutionStep(string step)

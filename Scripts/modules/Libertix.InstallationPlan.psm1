@@ -33,7 +33,11 @@ $script:InstallationPlanPropertySets = [ordered]@{
     )
     features = @(
         "shareWindowsFilesInLinux", "shareLinuxFilesInWindows",
-        "windowsProfilesJsonBase64"
+        "windowsProfilesJsonBase64", "windowsPreferenceMigration"
+    )
+    windowsPreferenceMigration = @(
+        "enabled", "bundleFileName", "bundleSha256", "bundleSizeBytes",
+        "wifiProfileCount"
     )
     runtime = @(
         "windowsBitLockerState",
@@ -311,7 +315,7 @@ function Assert-LibertixInstallationPlan {
     Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
 
     $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
-    if ([int]$schemaVersion -ne 3) {
+    if ([int]$schemaVersion -ne 4) {
         throw "Unsupported installation plan schemaVersion: $schemaVersion."
     }
 
@@ -616,6 +620,71 @@ function Assert-LibertixInstallationPlan {
     }
     if ($decodedProfiles.Length -eq 0) {
         throw "Installation plan features.windowsProfilesJsonBase64 must not decode to an empty value."
+    }
+
+    $preferenceMigration = Assert-LibertixPlanProperty `
+        -Object $features `
+        -Name "windowsPreferenceMigration" `
+        -Path "features.windowsPreferenceMigration"
+    Assert-LibertixExactPlanProperties `
+        -Object $preferenceMigration `
+        -Path "features.windowsPreferenceMigration" `
+        -PropertySet "windowsPreferenceMigration"
+    $migrationEnabled = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "enabled" `
+        -Path "features.windowsPreferenceMigration.enabled"
+    if ($migrationEnabled -isnot [bool]) {
+        throw "Installation plan field features.windowsPreferenceMigration.enabled must be a boolean."
+    }
+    $bundleFileName = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleFileName" `
+        -Path "features.windowsPreferenceMigration.bundleFileName"
+    $bundleSha256 = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleSha256" `
+        -Path "features.windowsPreferenceMigration.bundleSha256"
+    $bundleSizeBytes = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleSizeBytes" `
+        -Path "features.windowsPreferenceMigration.bundleSizeBytes"
+    $wifiProfileCount = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "wifiProfileCount" `
+        -Path "features.windowsPreferenceMigration.wifiProfileCount"
+    [int64]$parsedBundleSize = 0
+    [int]$parsedWifiCount = 0
+    if (-not $migrationEnabled) {
+        if (
+            $null -ne $bundleFileName -or
+            $null -ne $bundleSha256 -or
+            [int64]$bundleSizeBytes -ne 0 -or
+            [int]$wifiProfileCount -ne 0
+        ) {
+            throw "Disabled Windows preference migration must not describe a bundle."
+        }
+    } else {
+        if ([string]$bundleFileName -cne "windows-preferences.secret.json") {
+            throw "Windows preference migration must use the fixed transaction bundle name."
+        }
+        if ([string]$bundleSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Windows preference migration bundle hash must be a lowercase SHA-256 value."
+        }
+        if (
+            -not [int64]::TryParse([string]$bundleSizeBytes, [ref]$parsedBundleSize) -or
+            $parsedBundleSize -le 0 -or
+            $parsedBundleSize -gt 134217728
+        ) {
+            throw "Windows preference migration bundle size is outside the supported range."
+        }
+        if (
+            -not [int]::TryParse([string]$wifiProfileCount, [ref]$parsedWifiCount) -or
+            $parsedWifiCount -lt 0 -or
+            $parsedWifiCount -gt 256
+        ) {
+            throw "Windows preference migration Wi-Fi profile count is outside the supported range."
+        }
     }
 
     $runtime = Assert-LibertixPlanProperty -Object $Plan -Name "runtime" -Path "runtime"

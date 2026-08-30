@@ -932,6 +932,10 @@ try {
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $accountSecretPath = [string]$session.Plan.account.passwordHashWindowsPath
             $accountSecretPresent = Test-Path -LiteralPath $accountSecretPath
+            $preferenceBundlePath = Join-Path `
+                ([string]$session.Plan.runtime.recoveryRootWindows) `
+                "windows-preferences.secret.json"
+            $preferenceBundlePresent = Test-Path -LiteralPath $preferenceBundlePath
             $recoveryTasks = @(Get-LibertixRecoveryTasks)
             $startupRecoveryTasks = @($recoveryTasks | Where-Object {
                 $_.TaskName -notmatch "Prompt"
@@ -943,12 +947,15 @@ try {
             Write-Output ("UEFI_TRANSACTION={0}" -f $uefiTransaction)
             Write-Output ("BIOS_PENDING={0}" -f $biosPending)
             Write-Output ("ACCOUNT_SECRET_PRESENT={0}" -f $accountSecretPresent)
+            Write-Output ("PREFERENCE_BUNDLE_PRESENT={0}" -f $preferenceBundlePresent)
             Write-Output ("STARTUP_RECOVERY_TASKS={0}" -f $startupRecoveryTasks.Count)
             Write-Output ("RESULT_PROMPT_TASKS={0}" -f $promptTasks.Count)
             Assert-Condition ($installerVolumes.Count -eq 0) "The temporary installer volume still exists."
             Assert-Condition (-not $uefiTransaction) "The UEFI transaction file still exists."
             Assert-Condition (-not $accountSecretPresent) `
                 "The protected Linux account hash was not retired after installation."
+            Assert-Condition (-not $preferenceBundlePresent) `
+                "The Windows preference migration source bundle was not retired."
             if ([string]$config.expected_firmware -eq "bios") {
                 Assert-Condition $biosPending `
                     "The durable BIOS rollback metadata is missing."

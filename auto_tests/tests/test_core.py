@@ -1057,6 +1057,7 @@ def test_full_automation_launch_passes_unattended_values_without_a_password_argu
         "computerName": "vm2-linux",
         "shareWindowsFilesInLinux": False,
         "shareLinuxFilesInWindows": True,
+        "migrateWindowsPreferences": False,
     }
     assert observed["force_offline_ntfs_resize"] is True
     assert "pass" not in " ".join(str(value) for value in launch.values())
@@ -1345,6 +1346,8 @@ def test_linux_script_reconnects_after_transport_failure(
 def test_unattended_wizard_captures_and_acknowledges_every_stage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    assert automation_wizard_module.UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS == 40
+    assert automation_wizard_module.UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS < 45
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
     reported_stages = (

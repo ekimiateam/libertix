@@ -21,6 +21,7 @@ namespace Libertix.Helpers
         public string ComputerName { get; set; }
         public bool ShareWindowsFilesInLinux { get; set; }
         public bool ShareLinuxFilesInWindows { get; set; }
+        public bool MigrateWindowsPreferences { get; set; }
         public string StatusPath { get; private set; }
         public string AcknowledgementPath { get; private set; }
 

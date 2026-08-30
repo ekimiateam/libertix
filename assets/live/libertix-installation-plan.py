@@ -102,6 +102,12 @@ def require_positive_integer(value: Any, path: str) -> int:
     return value
 
 
+def require_nonnegative_integer(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PlanValidationError(f"{path} must be a non-negative integer")
+    return value
+
+
 def require_microsoft_uefi_authorities(value: Any, path: str, *, allow_empty: bool) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise PlanValidationError(f"{path} must be a string array")
@@ -137,7 +143,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError(f"installation plan schema validation failed: {error}") from error
 
     root = require_mapping(plan, "plan")
-    if root.get("schemaVersion") != 3:
+    if root.get("schemaVersion") != 4:
         raise PlanValidationError("unsupported installation plan schemaVersion")
     if not HEX_ID_PATTERN.fullmatch(str(root.get("planId", ""))):
         raise PlanValidationError("planId must contain 32 lowercase hexadecimal characters")
@@ -359,6 +365,66 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         "features.windowsProfilesJsonBase64",
     )
     project_windows_profiles(profiles)
+    migration = require_mapping(
+        features.get("windowsPreferenceMigration"),
+        "features.windowsPreferenceMigration",
+    )
+    migration_enabled = migration.get("enabled")
+    if not isinstance(migration_enabled, bool):
+        raise PlanValidationError("features.windowsPreferenceMigration.enabled must be a boolean")
+    bundle_file_name = require_property(
+        migration,
+        "bundleFileName",
+        "features.windowsPreferenceMigration",
+    )
+    bundle_sha256 = require_property(
+        migration,
+        "bundleSha256",
+        "features.windowsPreferenceMigration",
+    )
+    bundle_size = require_nonnegative_integer(
+        require_property(
+            migration,
+            "bundleSizeBytes",
+            "features.windowsPreferenceMigration",
+        ),
+        "features.windowsPreferenceMigration.bundleSizeBytes",
+    )
+    wifi_profile_count = require_nonnegative_integer(
+        require_property(
+            migration,
+            "wifiProfileCount",
+            "features.windowsPreferenceMigration",
+        ),
+        "features.windowsPreferenceMigration.wifiProfileCount",
+    )
+    if not migration_enabled:
+        if (
+            bundle_file_name is not None
+            or bundle_sha256 is not None
+            or bundle_size != 0
+            or wifi_profile_count != 0
+        ):
+            raise PlanValidationError(
+                "disabled Windows preference migration must not describe a bundle"
+            )
+    else:
+        if bundle_file_name != "windows-preferences.secret.json":
+            raise PlanValidationError(
+                "Windows preference migration must use the fixed transaction bundle name"
+            )
+        if not SHA256_PATTERN.fullmatch(str(bundle_sha256 or "")):
+            raise PlanValidationError(
+                "Windows preference migration bundle hash must be a lowercase SHA-256 value"
+            )
+        if bundle_size <= 0 or bundle_size > 128 * 1024 * 1024:
+            raise PlanValidationError(
+                "Windows preference migration bundle size is outside the supported range"
+            )
+        if wifi_profile_count > 256:
+            raise PlanValidationError(
+                "Windows preference migration Wi-Fi profile count is outside the supported range"
+            )
 
     runtime = require_mapping(root.get("runtime"), "runtime")
     if runtime.get("windowsBitLockerState") not in {"FullyDecrypted", "NotEncryptable"}:
@@ -528,6 +594,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
     installer = disk["installer"]
     runtime = plan["runtime"]
     features = plan["features"]
+    migration = features["windowsPreferenceMigration"]
     development = plan.get("development")
 
     final_size = int(installer["finalSizeBytes"])
@@ -590,6 +657,11 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "WINDOWS_PROFILES_JSON_BASE64": project_windows_profiles(
             features["windowsProfilesJsonBase64"]
         ),
+        "WINDOWS_PREFERENCE_MIGRATION_ENABLED": str(migration["enabled"]).lower(),
+        "WINDOWS_PREFERENCE_BUNDLE_FILE_NAME": migration["bundleFileName"] or "",
+        "WINDOWS_PREFERENCE_BUNDLE_SHA256": migration["bundleSha256"] or "",
+        "WINDOWS_PREFERENCE_BUNDLE_SIZE_BYTES": str(migration["bundleSizeBytes"]),
+        "WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT": str(migration["wifiProfileCount"]),
         "DEVELOPMENT_SSH_ENABLED": str(development is not None).lower(),
         "DEVELOPMENT_STATIC_IPV4_ADDRESS": (
             development["staticIpv4Address"] if development else ""

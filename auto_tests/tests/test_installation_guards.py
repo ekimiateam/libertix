@@ -2226,6 +2226,7 @@ def test_unattended_warning_keyboard_action_requires_proven_ui_focus() -> None:
     assert observation.index("self._capture_and_acknowledge_unattended_stage") < observation.index(
         "warning_client.disconnect"
     )
+    assert "timeout_seconds=UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS" in observation
     assert "UnattendedWarningNoButton" in focus_script
     assert "UnattendedWarningYesButton" in focus_script
     assert "$target.Current.HasKeyboardFocus" in focus_script

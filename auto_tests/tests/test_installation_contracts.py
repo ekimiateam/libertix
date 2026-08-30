@@ -214,7 +214,7 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
     staging_size_gib = min(final_size_gib, 8)
     is_bios = firmware == "bios"
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "planId": "a" * 32,
         "createdAtUtc": "2026-07-15T12:00:00Z",
         "firmware": firmware,
@@ -277,6 +277,13 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             "shareWindowsFilesInLinux": True,
             "shareLinuxFilesInWindows": True,
             "windowsProfilesJsonBase64": "W10=",
+            "windowsPreferenceMigration": {
+                "enabled": False,
+                "bundleFileName": None,
+                "bundleSha256": None,
+                "bundleSizeBytes": 0,
+                "wifiProfileCount": 0,
+            },
         },
         "runtime": {
             "windowsBitLockerState": "FullyDecrypted",
@@ -1014,6 +1021,9 @@ def test_windows_plan_models_and_powershell_property_sets_match_schema() -> None
         "partition": set(schema["$defs"]["partitionIdentity"]["properties"]),
         "installer": set(schema["$defs"]["installerPartition"]["properties"]),
         "features": set(schema["$defs"]["features"]["properties"]),
+        "windowsPreferenceMigration": set(
+            schema["$defs"]["windowsPreferenceMigration"]["properties"]
+        ),
         "runtime": set(schema["$defs"]["runtime"]["properties"]),
         "development": set(schema["$defs"]["development"]["properties"]),
     }

@@ -83,6 +83,7 @@ class AutomationService(
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
+        migrate_windows_preferences: bool = False,
         simulate_stale_firmware_entries: bool = False,
         force_offline_ntfs_resize: bool = False,
         boot_guardian_fault: Literal[
@@ -155,6 +156,7 @@ class AutomationService(
                 distribution=load_distribution_profile(distribution),
                 share_windows_files_in_linux=share_windows_files_in_linux,
                 share_linux_files_in_windows=share_linux_files_in_windows,
+                migrate_windows_preferences=migrate_windows_preferences,
                 use_default_filepool=source == "published",
                 simulate_stale_firmware_entries=simulate_stale_firmware_entries,
                 force_offline_ntfs_resize=force_offline_ntfs_resize,
@@ -286,13 +288,18 @@ class AutomationService(
         try:
             self._prepare_windows_test_vm(vm, result)
             vm_options = options
+            if options.migrate_windows_preferences:
+                vm_options = replace(
+                    vm_options,
+                    preference_fixture=self._configure_windows_preference_fixture(vm, result),
+                )
             if options.boot_guardian_fault in {
                 "bios-rollback",
                 "bootnext-rollback",
                 "preferred-path-rollback",
             }:
                 vm_options = replace(
-                    options,
+                    vm_options,
                     rollback_baseline=self._capture_rollback_baseline(vm, result),
                 )
             local_executable = self.validation.deploy_to_documents(vm, executable)
@@ -357,6 +364,54 @@ class AutomationService(
         if failure is not None:
             return result.failure(failure)
         return result.success(f"Automation completed on {vm.name}")
+
+    def _configure_windows_preference_fixture(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> dict[str, str]:
+        with self.validation.ssh(
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
+        ) as ssh:
+            response = self.validation.run_windows_script(
+                ssh,
+                script_name="configure_windows_preference_fixture.ps1",
+                config={},
+                step="automation.windows_preference_fixture",
+                timeout=90,
+            )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "PREFERENCE_FIXTURE_READY",
+                "WALLPAPER_SHA256",
+                "ACCOUNT_IMAGE_SHA256",
+            ),
+        )
+        if values.get("PREFERENCE_FIXTURE_READY") != "True":
+            raise WorkflowError(
+                "automation.windows_preference_fixture",
+                "The Windows preference fixture was not verified",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        for name in ("WALLPAPER_SHA256", "ACCOUNT_IMAGE_SHA256"):
+            value = values.get(name, "")
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise WorkflowError(
+                    "automation.windows_preference_fixture",
+                    "The Windows preference fixture returned an invalid asset hash",
+                    details={"vm": vm.name, "target": vm.host, "field": name},
+                )
+        result.ok(
+            "automation.windows_preference_fixture",
+            "Windows preference migration fixture prepared",
+            vm=vm.name,
+            target=vm.host,
+        )
+        return values
 
     def _capture_rollback_baseline(
         self,
@@ -686,6 +741,7 @@ class AutomationService(
                 "computerName": f"{vm.name.lower()}-linux",
                 "shareWindowsFilesInLinux": options.share_windows_files_in_linux,
                 "shareLinuxFilesInWindows": options.share_linux_files_in_windows,
+                "migrateWindowsPreferences": options.migrate_windows_preferences,
             },
         )
         return {

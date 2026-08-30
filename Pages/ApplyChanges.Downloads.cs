@@ -410,6 +410,7 @@ namespace Libertix.Pages
 
         private void CleanupTransactionDownloadsBestEffort()
         {
+            CleanupPendingWindowsPreferenceMigrationBundle();
             if (_installationPlan == null ||
                 string.IsNullOrWhiteSpace(_installationPlan.PlanId))
             {

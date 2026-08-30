@@ -157,6 +157,7 @@ def _run_operation(
             monitor_iso=request.monitor_iso,
             share_windows_files_in_linux=request.share_windows_files_in_linux,
             share_linux_files_in_windows=request.share_linux_files_in_windows,
+            migrate_windows_preferences=request.migrate_windows_preferences,
             simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
             force_offline_ntfs_resize=request.force_offline_ntfs_resize,
             boot_guardian_fault=request.boot_guardian_fault,

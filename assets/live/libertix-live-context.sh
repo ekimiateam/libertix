@@ -13,7 +13,7 @@ load_libertix_staging_volume_label() {
 }
 
 copy_libertix_context_candidate() {
-    local plan="$1" candidate_dir="$2" state plan_hash state_hash context_id
+    local plan="$1" candidate_dir="$2" state plan_hash state_hash context_id source_bundle
 
     state="$(dirname "$plan")/installation-state.json"
     [ -f "$plan" ] && [ -f "$state" ] || return 0
@@ -22,10 +22,16 @@ copy_libertix_context_candidate() {
     context_id="$plan_hash-$state_hash"
     cp -f "$plan" "$candidate_dir/$context_id.plan.json"
     cp -f "$state" "$candidate_dir/$context_id.state.json"
+    source_bundle="$(dirname "$plan")/windows-preferences.secret.json"
+    if [ -f "$source_bundle" ]; then
+        cp -f "$source_bundle" "$candidate_dir/$context_id.preferences.secret.json"
+        chmod 0600 "$candidate_dir/$context_id.preferences.secret.json"
+    fi
 }
 
 find_libertix_installation_plan() (
     local candidate candidate_dir device label mount_dir plan state context_id plan_id state_plan_id
+    local plan_exports migration_enabled bundle_name bundle_hash bundle_size bundle_candidate
     local -A unique_contexts=()
 
     load_libertix_staging_volume_label || return $?
@@ -67,8 +73,8 @@ find_libertix_installation_plan() (
     while read -r candidate; do
         [ -f "$candidate" ] || continue
         state="${candidate%.plan.json}.state.json"
-        if /usr/local/lib/libertix/libertix-installation-plan.py \
-            export-shell "$candidate" >/dev/null 2>&1 \
+        if plan_exports="$(/usr/local/lib/libertix/libertix-installation-plan.py \
+            export-shell "$candidate" 2>/dev/null)" \
             && /usr/local/lib/libertix/libertix-installation-state.py \
                 validate "$state" >/dev/null 2>&1; then
             plan_id="$(/usr/local/lib/libertix/libertix-installation-plan.py \
@@ -77,6 +83,23 @@ find_libertix_installation_plan() (
                 plan-id "$state")"
             [ -n "$plan_id" ] && [ "$plan_id" = "$state_plan_id" ] || continue
             context_id="$(basename "${candidate%.plan.json}")"
+            migration_enabled="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                '$1 == "WINDOWS_PREFERENCE_MIGRATION_ENABLED" { print $2; exit }')"
+            if [ "$migration_enabled" = true ]; then
+                bundle_name="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                    '$1 == "WINDOWS_PREFERENCE_BUNDLE_FILE_NAME" { print $2; exit }')"
+                bundle_hash="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                    '$1 == "WINDOWS_PREFERENCE_BUNDLE_SHA256" { print $2; exit }')"
+                bundle_size="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                    '$1 == "WINDOWS_PREFERENCE_BUNDLE_SIZE_BYTES" { print $2; exit }')"
+                [ "$bundle_name" = windows-preferences.secret.json ] || continue
+                bundle_candidate="$candidate_dir/$context_id.preferences.secret.json"
+                [ -f "$bundle_candidate" ] || continue
+                [ "$(stat -c %s "$bundle_candidate" 2>/dev/null || echo invalid)" = \
+                    "$bundle_size" ] || continue
+                [ "$(sha256sum "$bundle_candidate" | awk '{print $1}')" = \
+                    "$bundle_hash" ] || continue
+            fi
             unique_contexts["$context_id"]="$candidate"
         fi
     done < <(find "$candidate_dir" -maxdepth 1 -type f -name '*.plan.json' -print)
@@ -88,8 +111,18 @@ find_libertix_installation_plan() (
 
     for candidate in "${unique_contexts[@]}"; do
         state="${candidate%.plan.json}.state.json"
+        context_id="$(basename "${candidate%.plan.json}")"
         cp -f "$candidate" "$LOG_DIR/installation-plan.json"
         cp -f "$state" "$LOG_DIR/installation-state.json"
+        plan_exports="$(/usr/local/lib/libertix/libertix-installation-plan.py \
+            export-shell "$candidate")" || return 2
+        migration_enabled="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+            '$1 == "WINDOWS_PREFERENCE_MIGRATION_ENABLED" { print $2; exit }')"
+        if [ "$migration_enabled" = true ]; then
+            bundle_candidate="$candidate_dir/$context_id.preferences.secret.json"
+            cp -f "$bundle_candidate" "$LOG_DIR/windows-preferences.secret.json"
+            chmod 0600 "$LOG_DIR/windows-preferences.secret.json"
+        fi
         printf '%s\n' "$LOG_DIR/installation-plan.json"
         return 0
     done

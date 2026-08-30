@@ -352,6 +352,7 @@ class PostInstallValidationMixin:
                 linux_ssh,
             )
             self._run_linux_checks(linux_ssh, vm, options, result)
+            self._verify_windows_preference_migration(linux_ssh, vm, options, result)
             artifacts = self._create_cross_os_artifacts(linux_ssh, vm, options, result)
             self._request_windows_boot(linux_ssh, vm, options, result)
         finally:
@@ -545,6 +546,56 @@ class PostInstallValidationMixin:
                 )
         finally:
             final_windows_ssh.__exit__(None, None, None)
+
+    def _verify_windows_preference_migration(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        if not options.migrate_windows_preferences:
+            return
+        fixture = options.preference_fixture
+        if fixture is None:
+            raise WorkflowError(
+                "automation.test.preference_migration",
+                "The Windows preference fixture evidence is missing",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        response = self._run_linux_script_resiliently(
+            ssh,
+            script_name="check_linux_preference_migration.py",
+            arguments=(
+                "--distribution",
+                options.distribution.id,
+                "--username",
+                options.linux_username,
+                "--wallpaper-sha256",
+                fixture["WALLPAPER_SHA256"],
+                "--account-image-sha256",
+                fixture["ACCOUNT_IMAGE_SHA256"],
+            ),
+            step="automation.test.preference_migration",
+            timeout=90,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=("MIGRATED_WIFI_PROFILE_COUNT", "PREFERENCE_MIGRATION_RESULT"),
+        )
+        if values.get("PREFERENCE_MIGRATION_RESULT") != "OK":
+            raise WorkflowError(
+                "automation.test.preference_migration",
+                "Windows preference migration verification did not return OK",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        result.ok(
+            "automation.test.preference_migration",
+            "Windows preferences and supported Wi-Fi profiles were migrated and verified",
+            vm=vm.name,
+            target=vm.host,
+            wifi_profile_count=values.get("MIGRATED_WIFI_PROFILE_COUNT", "0"),
+        )
 
     @staticmethod
     def _parse_windows_repair_state(stdout: str) -> dict[str, str]:

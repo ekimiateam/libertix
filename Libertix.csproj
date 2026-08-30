@@ -71,6 +71,8 @@
     <Compile Include="Helpers\UnattendedWorkflow.cs" />
     <Compile Include="Helpers\CompatibilityPreflightRunner.cs" />
     <Compile Include="Helpers\SystemPowerProbe.cs" />
+    <Compile Include="Helpers\WindowsPreferenceCollector.cs" />
+    <Compile Include="Helpers\WindowsWifiProfileReader.cs" />
     <Compile Include="Helpers\ApplicationLogger.cs" />
     <Compile Include="Helpers\WindowsProcessRunner.cs" />
     <Compile Include="Helpers\LinuxPasswordHasher.cs" />
@@ -105,6 +107,7 @@
     <Compile Include="Installation\RuntimeNames.cs" />
     <Compile Include="Installation\WindowsKeyboardLayout.cs" />
     <Compile Include="Installation\WindowsShareConfiguration.cs" />
+    <Compile Include="Installation\WindowsPreferenceMigrationContract.cs" />
     <Compile Include="Installation\StoragePreflightInfo.cs" />
     <Compile Include="Installation\FirmwareInterop.cs" />
     <Compile Include="Models\DistroInfo.cs" />

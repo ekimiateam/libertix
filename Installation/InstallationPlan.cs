@@ -13,7 +13,7 @@ namespace Libertix.Installation
     /// </summary>
     public sealed class InstallationPlan
     {
-        public const int CurrentSchemaVersion = 3;
+        public const int CurrentSchemaVersion = 4;
 
         [JsonPropertyName("schemaVersion")]
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
@@ -233,6 +233,27 @@ namespace Libertix.Installation
 
         [JsonPropertyName("windowsProfilesJsonBase64")]
         public string WindowsProfilesJsonBase64 { get; set; }
+
+        [JsonPropertyName("windowsPreferenceMigration")]
+        public InstallationPreferenceMigration WindowsPreferenceMigration { get; set; }
+    }
+
+    public sealed class InstallationPreferenceMigration
+    {
+        [JsonPropertyName("enabled")]
+        public bool Enabled { get; set; }
+
+        [JsonPropertyName("bundleFileName")]
+        public string BundleFileName { get; set; }
+
+        [JsonPropertyName("bundleSha256")]
+        public string BundleSha256 { get; set; }
+
+        [JsonPropertyName("bundleSizeBytes")]
+        public long BundleSizeBytes { get; set; }
+
+        [JsonPropertyName("wifiProfileCount")]
+        public int WifiProfileCount { get; set; }
     }
 
     public sealed class InstallationRuntime

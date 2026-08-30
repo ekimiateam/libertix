@@ -6,7 +6,7 @@ BeforeAll {
     function New-ValidInstallationPlan {
         return @'
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "planId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "createdAtUtc": "2026-07-15T12:00:00Z",
   "firmware": "uefi",
@@ -60,7 +60,14 @@ BeforeAll {
   "features": {
     "shareWindowsFilesInLinux": true,
     "shareLinuxFilesInWindows": true,
-    "windowsProfilesJsonBase64": "W10="
+    "windowsProfilesJsonBase64": "W10=",
+    "windowsPreferenceMigration": {
+      "enabled": false,
+      "bundleFileName": null,
+      "bundleSha256": null,
+      "bundleSizeBytes": 0,
+      "wifiProfileCount": 0
+    }
   },
   "runtime": {
     "windowsBitLockerState": "FullyDecrypted",
@@ -142,6 +149,27 @@ Describe "Installation plan contract" {
     It "accepts a complete valid plan" {
         $plan = New-ValidInstallationPlan
         { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It "accepts a validated Windows preference migration manifest without secrets" {
+        $plan = New-ValidInstallationPlan
+        $plan.features.windowsPreferenceMigration.enabled = $true
+        $plan.features.windowsPreferenceMigration.bundleFileName = `
+            "windows-preferences.secret.json"
+        $plan.features.windowsPreferenceMigration.bundleSha256 = ("e" * 64)
+        $plan.features.windowsPreferenceMigration.bundleSizeBytes = 4096
+        $plan.features.windowsPreferenceMigration.wifiProfileCount = 3
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It "rejects an enabled Windows preference migration with a variable bundle name" {
+        $plan = New-ValidInstallationPlan
+        $plan.features.windowsPreferenceMigration.enabled = $true
+        $plan.features.windowsPreferenceMigration.bundleFileName = "other.json"
+        $plan.features.windowsPreferenceMigration.bundleSha256 = ("e" * 64)
+        $plan.features.windowsPreferenceMigration.bundleSizeBytes = 4096
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*fixed transaction bundle name*"
     }
 
     It "accepts the staging geometry selected for live offline resize" {

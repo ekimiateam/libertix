@@ -609,6 +609,46 @@ namespace Libertix.Installation
             {
                 errors.Add("features.windowsProfilesJsonBase64 must be valid Base64.");
             }
+
+            InstallationPreferenceMigration migration = features.WindowsPreferenceMigration;
+            if (migration == null)
+            {
+                errors.Add("features.windowsPreferenceMigration is required.");
+                return;
+            }
+
+            if (!migration.Enabled)
+            {
+                Require(string.IsNullOrEmpty(migration.BundleFileName), errors,
+                    "Disabled Windows preference migration must not name a bundle.");
+                Require(string.IsNullOrEmpty(migration.BundleSha256), errors,
+                    "Disabled Windows preference migration must not contain a bundle hash.");
+                Require(migration.BundleSizeBytes == 0, errors,
+                    "Disabled Windows preference migration bundle size must be zero.");
+                Require(migration.WifiProfileCount == 0, errors,
+                    "Disabled Windows preference migration Wi-Fi profile count must be zero.");
+                return;
+            }
+
+            Require(
+                string.Equals(
+                    migration.BundleFileName,
+                    WindowsPreferenceMigrationContract.BundleFileName,
+                    StringComparison.Ordinal),
+                errors,
+                "Windows preference migration must use the fixed transaction bundle name.");
+            Require(Sha256Pattern.IsMatch(migration.BundleSha256 ?? string.Empty), errors,
+                "Windows preference migration bundle hash must be a lowercase SHA-256 value.");
+            Require(
+                migration.BundleSizeBytes > 0 &&
+                migration.BundleSizeBytes <= WindowsPreferenceMigrationContract.MaximumBundleBytes,
+                errors,
+                "Windows preference migration bundle size is outside the supported range.");
+            Require(
+                migration.WifiProfileCount >= 0 &&
+                migration.WifiProfileCount <= WindowsPreferenceMigrationContract.MaximumWifiProfiles,
+                errors,
+                "Windows preference migration Wi-Fi profile count is outside the supported range.");
         }
 
         private static void ValidateRuntime(

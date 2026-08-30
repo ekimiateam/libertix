@@ -193,6 +193,7 @@ install_live_installer_assets() {
         "0644|$ROOT_DIR/Resources/Libertix.Translations.json|/usr/local/lib/libertix/Libertix.Translations.json"
         "0644|$ROOT_DIR/Resources/Images/icon.ico|/usr/local/lib/libertix/Libertix.ico"
         "0755|$ROOT_DIR/assets/live/libertix-target-common.sh|/usr/local/lib/libertix/libertix-target-common.sh"
+        "0755|$ROOT_DIR/assets/live/libertix-apply-windows-preferences.py|/usr/local/lib/libertix/libertix-apply-windows-preferences.py"
         "0755|$ROOT_DIR/assets/live/libertix-apply-keyboard-once.sh|/usr/local/lib/libertix/libertix-apply-keyboard-once.sh"
         "0755|$ROOT_DIR/assets/live/libertix-rollback-common.sh|/usr/local/lib/libertix/libertix-rollback-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-runner-stage-common.sh|/usr/local/lib/libertix/libertix-runner-stage-common.sh"

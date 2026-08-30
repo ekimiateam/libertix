@@ -49,6 +49,7 @@ RECOVERY_PARTITION_SIZE_BYTES=""
 RECOVERY_ROOT_WINDOWS=""
 RECOVERY_RUN_ID=""
 PASSWORD_HASH=""
+WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH=""
 echo "$CURRENT_STAGE" > "$STAGE_FILE"
 
 mark() {
@@ -171,6 +172,20 @@ wait_for_prereqs
 # disk identities, sizes, hashes, locale, and recovery transaction.
 mark "010-read-config"
 load_libertix_live_context "$LIBERTIX_FIRMWARE_MODE" || die "installation plan could not be loaded"
+
+if [ "$WINDOWS_PREFERENCE_MIGRATION_ENABLED" = true ]; then
+    WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH="$LOG_DIR/$WINDOWS_PREFERENCE_BUNDLE_FILE_NAME"
+    [ -f "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" ] || \
+        die "Windows preference migration bundle is missing from the validated live context"
+    [ "$(stat -c %s "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" 2>/dev/null || echo invalid)" = \
+        "$WINDOWS_PREFERENCE_BUNDLE_SIZE_BYTES" ] || \
+        die "Windows preference migration bundle size verification failed"
+    [ "$(sha256sum "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" | awk '{print $1}')" = \
+        "$WINDOWS_PREFERENCE_BUNDLE_SHA256" ] || \
+        die "Windows preference migration bundle hash verification failed"
+    chmod 0600 "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH"
+    export WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH
+fi
 
 echo "Plan: Id=$INSTALLATION_PLAN_ID Lang=$SYSTEM_LANG Keyboard=$KEYBOARD_LAYOUT Variant=$KEYBOARD_VARIANT User=$USERNAME LinuxSize=${LINUX_SIZE_GB}GB"
 

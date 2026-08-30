@@ -25,7 +25,11 @@
                        Margin="0,10,0,0"/>
         </StackPanel>
 
-        <StackPanel Grid.Row="1" VerticalAlignment="Center" Margin="80,0">
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Margin="80,0">
+        <StackPanel VerticalAlignment="Center">
             <CheckBox x:Name="WindowsToLinuxCheckBox"
                       IsChecked="True"
                       TabIndex="0"
@@ -43,28 +47,42 @@
                       IsChecked="True"
                       TabIndex="1"
                       Foreground="{DynamicResource TextPrimary}"
-                      FontSize="19">
+                      FontSize="19"
+                      Margin="0,0,0,30">
                 <StackPanel Margin="10,0,0,0">
                     <TextBlock Text="{DynamicResource SharingLinuxToWindowsTitle}" FontWeight="SemiBold"/>
                     <TextBlock Text="{DynamicResource SharingLinuxToWindowsDescription}"
                                Foreground="{DynamicResource TextSecondary}" FontSize="14" TextWrapping="Wrap" Margin="0,6,0,0"/>
                 </StackPanel>
             </CheckBox>
+
+            <CheckBox x:Name="MigrateWindowsPreferencesCheckBox"
+                      IsChecked="False"
+                      TabIndex="2"
+                      Foreground="{DynamicResource TextPrimary}"
+                      FontSize="19">
+                <StackPanel Margin="10,0,0,0">
+                    <TextBlock Text="{DynamicResource SharingMigratePreferencesTitle}" FontWeight="SemiBold"/>
+                    <TextBlock Text="{DynamicResource SharingMigratePreferencesDescription}"
+                               Foreground="{DynamicResource TextSecondary}" FontSize="14" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                </StackPanel>
+            </CheckBox>
         </StackPanel>
+        </ScrollViewer>
 
         <Grid Grid.Row="2" Margin="0,30,0,10">
             <Button Content="{DynamicResource Back}"
                     Style="{StaticResource ModernButton}"
                     Width="180" Height="48"
                     HorizontalAlignment="Left"
-                    TabIndex="2"
+                    TabIndex="3"
                     Click="BackButton_Click"/>
             <Button x:Name="NextButton"
                     Content="{DynamicResource Next}"
                     Style="{StaticResource ModernButton}"
                     Width="180" Height="48"
                     HorizontalAlignment="Right"
-                    TabIndex="3"
+                    TabIndex="4"
                     IsDefault="True"
                     Click="NextButton_Click"/>
         </Grid>

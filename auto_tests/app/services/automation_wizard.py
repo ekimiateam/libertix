@@ -23,6 +23,7 @@ from tools.azerty_qwerty import azerty_to_qwerty
 logger = logging.getLogger(__name__)
 
 UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS = 3
+UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS = 40
 UNATTENDED_CONTROL_SSH_MAX_ATTEMPTS = 12
 
 
@@ -153,7 +154,7 @@ class WizardAutomationMixin:
                         quoted_status,
                         after_sequence,
                         ("warning-ready", "installation-started"),
-                        timeout_seconds=15,
+                        timeout_seconds=UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS,
                     )
                     if observed["stage"] == "installation-started":
                         after_sequence = self._capture_and_acknowledge_unattended_stage(

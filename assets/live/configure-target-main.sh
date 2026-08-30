@@ -113,6 +113,22 @@ configure_windows_readonly_request() {
     printf '%s\n' "$SHARE_LINUX_FILES_IN_WINDOWS" > /etc/libertix/share-linux-in-windows
 }
 
+configure_windows_preferences() {
+    [ "$WINDOWS_PREFERENCE_MIGRATION_ENABLED" = "true" ] || {
+        echo "Windows preference migration disabled by the user."
+        return 0
+    }
+    [ -f /tmp/windows-preferences.secret.json ] || {
+        echo "Windows preference migration bundle is missing" >&2
+        return 1
+    }
+    /tmp/libertix-apply-windows-preferences.py apply \
+        /tmp/windows-preferences.secret.json \
+        "$INSTALLATION_PLAN_ID" \
+        "$USERNAME" \
+        "$WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT"
+}
+
 configure_locale() {
     local supported_directory=/var/lib/locales/supported.d
     local supported_backup=/var/lib/locales/.libertix-supported.d.backup
@@ -491,6 +507,7 @@ main() {
     configure_windows_mount
     configure_windows_profile_shortcuts
     configure_windows_readonly_request
+    configure_windows_preferences
     configure_locale
     configure_keyboard
     configure_timezone

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v3.json",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v4.json",
   "title": "Libertix Installation Plan",
   "description": "Versioned contract shared by the Windows application, the live installer, the installed target and rollback tooling.",
   "type": "object",
@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 3
+      "const": 4
     },
     "planId": {
       "type": "string",
@@ -328,7 +328,8 @@
       "required": [
         "shareWindowsFilesInLinux",
         "shareLinuxFilesInWindows",
-        "windowsProfilesJsonBase64"
+        "windowsProfilesJsonBase64",
+        "windowsPreferenceMigration"
       ],
       "properties": {
         "shareWindowsFilesInLinux": {
@@ -340,6 +341,45 @@
         "windowsProfilesJsonBase64": {
           "type": "string",
           "minLength": 1
+        },
+        "windowsPreferenceMigration": {
+          "$ref": "#/$defs/windowsPreferenceMigration"
+        }
+      }
+    },
+    "windowsPreferenceMigration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "bundleFileName",
+        "bundleSha256",
+        "bundleSizeBytes",
+        "wifiProfileCount"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "bundleFileName": {
+          "type": ["string", "null"],
+          "pattern": "^windows-preferences\\.secret\\.json$"
+        },
+        "bundleSha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "bundleSizeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 134217728
+        },
+        "wifiProfileCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
         }
       }
     },

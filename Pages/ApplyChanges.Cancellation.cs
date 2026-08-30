@@ -157,6 +157,7 @@ namespace Libertix.Pages
             }
 
             CleanupPendingWindowsSharePayload();
+            CleanupPendingWindowsPreferenceMigrationBundle();
             CleanupTransactionDownloadsBestEffort();
             Log("Installation cancelled before any disk change.");
             UpdateProgress(

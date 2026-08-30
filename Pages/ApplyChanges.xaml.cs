@@ -233,6 +233,7 @@ namespace Libertix.Pages
                     InstallationPhase.Windows);
                 Log($"ERROR: {ex.Message}");
                 CleanupPendingWindowsSharePayload();
+                CleanupPendingWindowsPreferenceMigrationBundle();
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 PublishUnattendedFailure(
                     "windows-preparation-failed",
