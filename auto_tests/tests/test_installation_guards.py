@@ -708,23 +708,11 @@ def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
     ["assets/live/libertix-uefi-adapter.sh", "assets/live/libertix-bios-adapter.sh"],
 )
 def test_wait_for_prereqs_survives_an_unset_staging_volume_label(adapter_path: str) -> None:
-    # load_libertix_staging_volume_label() only populates
-    # LIBERTIX_STAGING_VOLUME_LABEL from stage 010-read-config, one stage
-    # after wait_for_prereqs (005-wait-prereqs). Its export() also cannot
-    # reach this process any earlier than that: it is only ever called from
-    # inside find_libertix_installation_plan(), a subshell-bodied function
-    # ("() (...)"), so the export is discarded the moment that call returns
-    # -- both when the runner probes for the plan before launching this
-    # process, and when stage 010 probes again from inside it. The label is
-    # therefore genuinely unset here every time this fallback is reached, in
-    # the real production runner flow, not just in some bypassed test path.
-    # Before this fix, an unguarded reference here was an unbound-variable
-    # error that aborted the whole installer with the generic "unhandled
-    # shell exit at stage 005-wait-prereqs" message instead of the intended
-    # prerequisite-timeout failure, matching ekimiateam/libertix#18 exactly.
+    # An unset inherited label must still reach the bounded missing-device timeout.
     adapter = ROOT / adapter_path
     command = r"""
 set -Eeuo pipefail
+load_libertix_staging_volume_label() { LIBERTIX_STAGING_VOLUME_LABEL=TESTLABEL; }
 mark() { return 0; }
 candidate_disks() { return 0; }
 find() { return 1; }

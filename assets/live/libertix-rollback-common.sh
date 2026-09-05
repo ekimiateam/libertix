@@ -214,10 +214,11 @@ rollback_windows_layout_best_effort() {
     [ "$INSTALL_SUCCESS" = false ] || return 0
     [ "$ROLLBACK_ATTEMPTED" = false ] || return 0
     ROLLBACK_ATTEMPTED=true
-    begin_installation_state_rollback || state_rollback_ok=false
 
     echo "=== ROLLBACK: best-effort Windows layout restore ==="
     resolve_rollback_storage_best_effort || return 1
+    # Beginning rollback mirrors the state to the resolved Windows partition.
+    begin_installation_state_rollback || state_rollback_ok=false
     cleanup_live_mounts_best_effort
     swapoff -a 2>/dev/null || true
 
