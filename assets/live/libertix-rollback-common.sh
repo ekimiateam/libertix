@@ -36,8 +36,32 @@ cleanup_live_mounts_best_effort() {
 }
 
 resolve_rollback_storage_best_effort() {
+    if [ -z "${TARGET_DISK_SIZE_BYTES:-}" ]; then
+        # install-main clears the manifest-derived disk identity to
+        # rollback-safe empty defaults at bootstrap and only repopulates them
+        # at stage 010-read-config. If rollback fires from an earlier stage
+        # (e.g. an unhandled exit during 005-wait-prereqs),
+        # disk_matches_manifest would otherwise reject every disk against
+        # permanently blank expected values, no matter how many times
+        # resolution is retried. The runner already validated and cached the
+        # plan at this path before launching this process, so reloading it
+        # here is safe.
+        echo "ROLLBACK: installation plan not yet loaded in this process; reloading $LOG_DIR/installation-plan.json"
+        load_libertix_installation_plan "$LOG_DIR/installation-plan.json" || \
+            echo "ROLLBACK: could not reload installation plan"
+    fi
+
     if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
-        DISK=$(resolve_target_disk_from_manifest || true)
+        # Rollback can also fire before udev has finished exposing the target
+        # disk's partition table to blkid. Unlike every other resolution call
+        # site in this codebase, give it a chance to settle instead of
+        # concluding on the first pass that no disk matches the manifest.
+        for _ in $(seq 1 10); do
+            udevadm settle --timeout=5 2>/dev/null || true
+            DISK=$(resolve_target_disk_from_manifest || true)
+            [ -n "$DISK" ] && [ -b "$DISK" ] && break
+            sleep 1
+        done
         # The target setup module consumes DISKNAME after rollback refreshes it.
         # shellcheck disable=SC2034
         [ -n "$DISK" ] && DISKNAME="$(basename "$DISK")"
@@ -196,10 +220,11 @@ rollback_windows_layout_best_effort() {
     [ "$INSTALL_SUCCESS" = false ] || return 0
     [ "$ROLLBACK_ATTEMPTED" = false ] || return 0
     ROLLBACK_ATTEMPTED=true
-    begin_installation_state_rollback || state_rollback_ok=false
 
     echo "=== ROLLBACK: best-effort Windows layout restore ==="
     resolve_rollback_storage_best_effort || return 1
+    # Beginning rollback mirrors the state to the resolved Windows partition.
+    begin_installation_state_rollback || state_rollback_ok=false
     cleanup_live_mounts_best_effort
     swapoff -a 2>/dev/null || true
 

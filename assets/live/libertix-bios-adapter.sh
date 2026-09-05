@@ -496,6 +496,8 @@ prepare_installer_partition_for_target_format_or_die() {
 
 wait_for_prereqs() {
     mark "005-wait-prereqs"
+    # Plan discovery exports the label only inside its probe subshell.
+    load_libertix_staging_volume_label || die "staging volume label could not be loaded"
     local i label_device
     for i in $(seq 1 60); do
         local disk_ready=0
@@ -519,7 +521,7 @@ wait_for_prereqs() {
             [ -n "$found_config" ] && config_ready=1
         fi
 
-        if [ "$config_ready" -eq 0 ]; then
+        if [ "$config_ready" -eq 0 ] && [ -n "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
                 [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = \

@@ -703,6 +703,182 @@ def test_live_rollback_restores_exact_windows_geometry_from_plan() -> None:
     assert 'resize_end="100%"' not in rollback
 
 
+@pytest.mark.parametrize(
+    "adapter_path",
+    ["assets/live/libertix-uefi-adapter.sh", "assets/live/libertix-bios-adapter.sh"],
+)
+def test_wait_for_prereqs_survives_an_unset_staging_volume_label(adapter_path: str) -> None:
+    # An unset inherited label must still reach the bounded missing-device timeout.
+    adapter = ROOT / adapter_path
+    command = r"""
+set -Eeuo pipefail
+load_libertix_staging_volume_label() { LIBERTIX_STAGING_VOLUME_LABEL=TESTLABEL; }
+mark() { return 0; }
+candidate_disks() { return 0; }
+find() { return 1; }
+blkid() {
+    case "$1" in
+        -o) echo /dev/fake-live-medium ;;
+        -s) echo "" ;;
+    esac
+}
+sleep() { return 0; }
+die() { echo "DIE: $*"; exit 1; }
+source "$1"
+unset LIBERTIX_STAGING_VOLUME_LABEL
+wait_for_prereqs
+echo "UNREACHABLE: wait_for_prereqs returned success with no disk or config ready"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "wait-for-prereqs-test", str(adapter)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "unbound variable" not in result.stderr
+    assert "UNREACHABLE" not in result.stdout
+    assert "DIE: live prerequisites not ready after 60s" in result.stdout
+
+
+def test_wait_for_prereqs_requires_a_nonempty_label_for_both_firmwares() -> None:
+    # blkid reports an empty LABEL for an unlabeled partition. If
+    # LIBERTIX_STAGING_VOLUME_LABEL were compared while unset (empty), that
+    # "" = "" would wrongly mark an unrelated, unlabeled partition as the
+    # staging volume. Both adapters must require a non-empty label before
+    # attempting the comparison at all.
+    for adapter_path in (
+        "assets/live/libertix-uefi-adapter.sh",
+        "assets/live/libertix-bios-adapter.sh",
+    ):
+        adapter = read(adapter_path)
+        assert (
+            'if [ "$config_ready" -eq 0 ] && [ -n "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then'
+            in adapter
+        )
+
+
+def test_live_rollback_retries_disk_resolution_before_giving_up(tmp_path: Path) -> None:
+    # Rollback can fire before udev has finished exposing the target disk's
+    # partition table to blkid. Rollback must retry settling and re-resolving
+    # instead of concluding on the very first pass that no disk in the
+    # manifest matches, since a disk that is genuinely unresolvable looks
+    # identical to one udev hasn't settled yet. TARGET_DISK_SIZE_BYTES is
+    # already populated here, so the plan-reload path (covered separately
+    # below) does not apply and this test isolates the settle/retry loop.
+    rollback = ROOT / "assets/live/libertix-rollback-common.sh"
+    # resolve_target_disk_from_manifest runs inside a command substitution
+    # subshell, so its call count is tallied through a file rather than a
+    # variable, which a subshell increment would not propagate back.
+    counter_path = tmp_path / "resolve-attempts"
+    command = r"""
+source "$1"
+COUNTER_PATH="$2"
+DISK=""
+WINDOWS_PART=""
+TARGET_DISK_SIZE_BYTES=256000000000
+settle_calls=0
+load_libertix_installation_plan() { echo "UNEXPECTED RELOAD"; return 1; }
+resolve_target_disk_from_manifest() {
+    echo x >> "$COUNTER_PATH"
+    return 1
+}
+udevadm() { settle_calls=$((settle_calls + 1)); return 0; }
+sleep() { return 0; }
+resolve_rollback_storage_best_effort
+echo "rc=$?"
+echo "settle_calls=$settle_calls"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "rollback-retry-test", str(rollback), str(counter_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    resolve_attempts = counter_path.read_text(encoding="utf-8").count("x")
+
+    assert "UNEXPECTED RELOAD" not in result.stdout
+    assert "rc=1" in result.stdout
+    assert "ROLLBACK: skipped because target disk is unknown" in result.stdout
+    # A single attempt would reproduce the reported bug (a disk that only
+    # needed a moment to settle gets permanently misreported as unmatched).
+    assert resolve_attempts == 10
+    assert "settle_calls=10" in result.stdout
+
+
+def test_live_rollback_reloads_the_plan_when_manifest_values_are_blank(tmp_path: Path) -> None:
+    # install-main clears TARGET_DISK_SIZE_BYTES and its sibling manifest
+    # variables (EXPECTED_PARTITION_STYLE, the partition offsets, etc.) to
+    # rollback-safe empty defaults at bootstrap, and only repopulates them at
+    # stage 010-read-config. If rollback fires from an earlier stage (e.g. an
+    # unhandled exit during 005-wait-prereqs), disk_matches_manifest rejects
+    # every disk against permanently blank expected values -- no amount of
+    # retrying resolve_target_disk_from_manifest can succeed without first
+    # reloading the plan. The runner already validated and cached it at
+    # $LOG_DIR/installation-plan.json before launching this process.
+    rollback = ROOT / "assets/live/libertix-rollback-common.sh"
+    command = r"""
+source "$1"
+LOG_DIR="$2"
+DISK=""
+WINDOWS_PART=""
+TARGET_DISK_SIZE_BYTES=""
+reload_calls=0
+load_libertix_installation_plan() {
+    reload_calls=$((reload_calls + 1))
+    [ "$1" = "$LOG_DIR/installation-plan.json" ] || { echo "WRONG PATH: $1"; return 1; }
+    TARGET_DISK_SIZE_BYTES=256000000000
+}
+resolve_target_disk_from_manifest() { return 1; }
+udevadm() { return 0; }
+sleep() { return 0; }
+resolve_rollback_storage_best_effort
+echo "reload_calls=$reload_calls"
+echo "TARGET_DISK_SIZE_BYTES=$TARGET_DISK_SIZE_BYTES"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "rollback-reload-test", str(rollback), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "WRONG PATH" not in result.stdout
+    assert "reload_calls=1" in result.stdout
+    assert "TARGET_DISK_SIZE_BYTES=256000000000" in result.stdout
+
+
+def test_live_rollback_does_not_reload_an_already_loaded_plan(tmp_path: Path) -> None:
+    rollback = ROOT / "assets/live/libertix-rollback-common.sh"
+    command = r"""
+source "$1"
+LOG_DIR="$2"
+DISK=""
+WINDOWS_PART=""
+TARGET_DISK_SIZE_BYTES=256000000000
+reload_calls=0
+load_libertix_installation_plan() { reload_calls=$((reload_calls + 1)); }
+resolve_target_disk_from_manifest() { return 1; }
+udevadm() { return 0; }
+sleep() { return 0; }
+resolve_rollback_storage_best_effort
+echo "reload_calls=$reload_calls"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", command, "rollback-no-reload-test", str(rollback), str(tmp_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "reload_calls=0" in result.stdout
+
+
 @pytest.mark.parametrize("failed_transition", ["begin", "compensate", "complete"])
 def test_live_rollback_rejects_success_when_state_persistence_fails(
     failed_transition: str,
