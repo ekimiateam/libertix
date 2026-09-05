@@ -496,6 +496,8 @@ prepare_installer_partition_for_target_format_or_die() {
 
 wait_for_prereqs() {
     mark "005-wait-prereqs"
+    # Plan discovery exports the label only inside its probe subshell.
+    load_libertix_staging_volume_label || die "staging volume label could not be loaded"
     local i label_device
     for i in $(seq 1 60); do
         local disk_ready=0
@@ -519,21 +521,6 @@ wait_for_prereqs() {
             [ -n "$found_config" ] && config_ready=1
         fi
 
-        # load_libertix_staging_volume_label() only runs from stage
-        # 010-read-config, one stage after this one returns. Its export()
-        # also cannot reach this process any earlier: it is only ever called
-        # from inside find_libertix_installation_plan(), which is a
-        # subshell-bodied function ("() (...)"), so the export is discarded
-        # the moment that call returns, both when the runner probes for the
-        # plan before launching this process and when stage 010 probes again
-        # here. The label is therefore genuinely unset at this point every
-        # time this fallback is reached. Skip it entirely rather than
-        # comparing against the unset variable: under `set -u` an unguarded
-        # reference would abort the whole script (matching the generic
-        # "unhandled shell exit at stage 005-wait-prereqs" in
-        # ekimiateam/libertix#18), and blkid also reports an empty LABEL for
-        # an unlabeled partition, so an unguarded empty-string comparison
-        # would wrongly mark an unrelated partition as the staging volume.
         if [ "$config_ready" -eq 0 ] && [ -n "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
