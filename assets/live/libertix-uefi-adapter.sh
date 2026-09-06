@@ -293,7 +293,7 @@ wait_for_prereqs() {
             [ -n "$found_config" ] && config_ready=1
         fi
 
-        if [ "$config_ready" -eq 0 ]; then
+        if [ "$config_ready" -eq 0 ] && [ -n "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
                 [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = \
