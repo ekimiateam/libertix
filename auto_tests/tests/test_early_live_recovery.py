@@ -78,7 +78,7 @@ blkid() {
 }
 find() {
     case "$1" in
-        "$LOG_DIR"/*) command find "$@" ;;
+        "$LOG_DIR"/*|"${LOG_DIR}-private"/*) command find "$@" ;;
         *) return 1 ;;
     esac
 }
@@ -97,7 +97,8 @@ sleep() { return 0; }
 mark() { echo "STAGE: $1"; }
 die() { echo "DIE: $*"; exit 1; }
 load_libertix_live_context "$FIRMWARE"
-[ -z "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]
+# Exercise installer entry without an inherited label even when the runner exports it.
+unset LIBERTIX_STAGING_VOLUME_LABEL
 echo CONTEXT_LOADED_WITHOUT_LABEL
 """
 
@@ -177,7 +178,7 @@ def test_prerequisites_find_staging_after_runner_context_load(
     if scenario in {"unlabeled", "wrong-label", "no-disk"}:
         assert "live prerequisites not ready after 60s" in result.stdout
     elif scenario == "no-policy":
-        assert "staging volume label could not be loaded" in result.stdout
+        assert "Invalid or unavailable staging volume label" in result.stdout
 
 
 @pytest.mark.parametrize("firmware", ["bios", "uefi"])
