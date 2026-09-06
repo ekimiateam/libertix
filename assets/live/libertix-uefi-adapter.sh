@@ -269,8 +269,7 @@ firmware_write_failure_marker_best_effort() {
 
 wait_for_prereqs() {
     mark "005-wait-prereqs"
-    # Plan discovery exports the label only inside its probe subshell.
-    load_libertix_staging_volume_label || die "staging volume label could not be loaded"
+    load_libertix_staging_volume_label || die "Invalid or unavailable staging volume label"
     local i label_device
     for i in $(seq 1 60); do
         local disk_ready=0
@@ -567,12 +566,6 @@ search --no-floppy --fs-uuid --set=root $root_uuid
 set prefix=(\$root)/boot/grub
 configfile /boot/grub/grub.cfg
 EOF
-
-    # Debian/Ubuntu signed GRUB normally reads the config beside the loaded EFI
-    # binary, but mirroring it under EFI/debian helps if the compiled prefix is
-    # distribution-specific.
-    mkdir -p "$esp_mount/EFI/debian"
-    cp -f "$efi_dir/grub.cfg" "$esp_mount/EFI/debian/grub.cfg"
 
     sync
 

@@ -41,7 +41,7 @@ namespace Libertix.Pages
             IsoSize);
         // WPF rejects a slider whose maximum is lower than its minimum. The
         // separate CanAllocateLinux flag still prevents an invalid install.
-        public double MaximumSize => Math.Max(MinimumSize, AvailableLinuxSize);
+        public double MaximumSize => Math.Max(MinimumSize, Math.Floor(AvailableLinuxSize));
         public bool CanAllocateLinux => AvailableLinuxSize >= MinimumSize;
 
         public double WindowsTotalSpace => _windowsUsedSpace + _windowsFreeSpace;
@@ -231,27 +231,38 @@ namespace Libertix.Pages
         {
         }
 
-        public ResizeDisk(InstallationState installationState)
+        public ResizeDisk(InstallationState installationState) : this(installationState, GetSystemDrive())
+        {
+        }
+
+        private ResizeDisk(InstallationState installationState, DriveInfo drive)
+            : this(installationState, drive.TotalSize, drive.AvailableFreeSpace)
+        {
+        }
+
+        private static DriveInfo GetSystemDrive()
+        {
+            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
+            return DriveInfo.GetDrives().FirstOrDefault(d => d.IsReady &&
+                string.Equals(d.Name, systemRoot, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException($"System drive not found: {systemRoot}");
+        }
+
+        internal ResizeDisk(InstallationState installationState, long totalBytes, long freeBytes)
         {
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
             DataContext = this;
 
-            // Use the actual Windows system drive instead of relying on DriveInfo enumeration order.
-            var systemRoot = Path.GetPathRoot(Environment.SystemDirectory);
-            var systemDrive = DriveInfo.GetDrives()
-                .FirstOrDefault(d => d.IsReady && string.Equals(d.Name, systemRoot, StringComparison.OrdinalIgnoreCase));
-            if (systemDrive == null)
-                throw new InvalidOperationException($"System drive not found: {systemRoot}");
-            _totalSpace = systemDrive.TotalSize / 1024.0 / 1024.0 / 1024.0;
+            _totalSpace = totalBytes / 1024.0 / 1024.0 / 1024.0;
             WindowsUsedSpace =
-                (systemDrive.TotalSize - systemDrive.AvailableFreeSpace) /
+                (totalBytes - freeBytes) /
                 1024.0 / 1024.0 / 1024.0;
             // Keep the exact byte-derived value for policy decisions. Rounding
             // up here can offer a Linux size that the storage layer must reject
             // later when the machine is close to the minimum Windows reserve.
             _initialFreeSpace =
-                systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0;
+                freeBytes / 1024.0 / 1024.0 / 1024.0;
             _shrinkAvailableSpace = Math.Max(
                 0,
                 (_installationState.Compatibility?.ShrinkAvailableBytes ?? 0) /
@@ -263,7 +274,6 @@ namespace Libertix.Pages
                 LoadState(distro);
             }
 
-            ManualSize = RecommendedSize.ToString("F0", CultureInfo.InvariantCulture);
         }
 
         private void ResizeDisk_Loaded(object sender, RoutedEventArgs e)
@@ -319,7 +329,7 @@ namespace Libertix.Pages
                 // moves unmovable files or consumes disk space. Clamp it to the
                 // current typed preflight result instead of displaying an
                 // allocation that the storage layer will later reject.
-                SelectedSize = Math.Min(savedSize, MaximumSize);
+                SelectedSize = Math.Max(MinimumSize, Math.Min(Math.Floor(savedSize), MaximumSize));
                 ManualSize = SelectedSize.ToString("F0", CultureInfo.InvariantCulture);
             }
             else
@@ -336,9 +346,9 @@ namespace Libertix.Pages
             double recommendedSize = Math.Max(
                 MinimumSize,
                 _initialFreeSpace * InstallationSizePolicy.RecommendedLinuxFractionOfFreeSpace);
-            return Math.Min(
+            return Math.Floor(Math.Min(
                 Math.Min(recommendedSize, InstallationSizePolicy.MaximumRecommendedLinuxSizeGiB),
-                AvailableLinuxSize);
+                AvailableLinuxSize));
         }
 
         private void CheckSpaceRequirements()

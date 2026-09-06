@@ -12,10 +12,15 @@ function Get-LibertixPartitionAlignmentBytes {
 function Get-LibertixWindowsFreeSpaceBudget {
     param(
         [Parameter(Mandatory = $true)][int64]$AvailableBytes,
-        [Parameter(Mandatory = $true)][int64]$AllocationBytes
+        [Parameter(Mandatory = $true)][int64]$AllocationBytes,
+        [int64]$ReclaimableArtifactBytes = 0
     )
 
-    if ($AvailableBytes -lt 0 -or $AllocationBytes -le 0) {
+    if (
+        $AvailableBytes -lt 0 -or
+        $AllocationBytes -le 0 -or
+        $ReclaimableArtifactBytes -lt 0
+    ) {
         throw "Windows free-space budget values are outside the supported range."
     }
     [int64]$reserveBytes =
@@ -27,22 +32,29 @@ function Get-LibertixWindowsFreeSpaceBudget {
     if ($AllocationBytes -gt [int64]::MaxValue - $reserveBytes) {
         throw "Windows free-space budget exceeds the supported integer range."
     }
+    if ($AvailableBytes -gt [int64]::MaxValue - $ReclaimableArtifactBytes) {
+        throw "Windows reclaimable-space budget exceeds the supported integer range."
+    }
 
     [int64]$requiredBytes = $AllocationBytes + $reserveBytes
     [int64]$acceptedFloorBytes = $requiredBytes - $toleranceBytes
+    [int64]$effectiveAvailableBytes = $AvailableBytes + $ReclaimableArtifactBytes
 
     # Windows can grow its page file and other managed files after the wizard
     # measures free space. The tolerance keeps that bounded drift from making
     # a valid minimum-size installation fail. The wizard still targets the
     # configured reserve, while the execution-time tolerance stays bounded and
-    # larger deficits fail closed.
+    # larger deficits fail closed. A verified transaction ISO is reclaimable
+    # because every success and rollback path removes its owned download root.
     return [pscustomobject]@{
-        Accepted = [bool]($AvailableBytes -ge $acceptedFloorBytes)
+        Accepted = [bool]($effectiveAvailableBytes -ge $acceptedFloorBytes)
         WithinTolerance = [bool](
-            $AvailableBytes -lt $requiredBytes -and
-            $AvailableBytes -ge $acceptedFloorBytes
+            $effectiveAvailableBytes -lt $requiredBytes -and
+            $effectiveAvailableBytes -ge $acceptedFloorBytes
         )
         AvailableBytes = $AvailableBytes
+        ReclaimableArtifactBytes = $ReclaimableArtifactBytes
+        EffectiveAvailableBytes = $effectiveAvailableBytes
         AllocationBytes = $AllocationBytes
         RequiredBytes = $requiredBytes
         AcceptedFloorBytes = $acceptedFloorBytes
@@ -58,6 +70,7 @@ function Wait-LibertixWindowsFreeSpaceBudget {
         [string]$DriveLetter,
         [Parameter(Mandatory = $true)]
         [int64]$AllocationBytes,
+        [int64]$ReclaimableArtifactBytes = 0,
         [ValidateRange(0, 300)]
         [int]$TimeoutSeconds = 60,
         [ValidateRange(1, 30)]
@@ -69,12 +82,14 @@ function Wait-LibertixWindowsFreeSpaceBudget {
         $volume = Get-Volume -DriveLetter $DriveLetter -ErrorAction Stop
         $budget = Get-LibertixWindowsFreeSpaceBudget `
             -AvailableBytes ([int64]$volume.SizeRemaining) `
-            -AllocationBytes $AllocationBytes
+            -AllocationBytes $AllocationBytes `
+            -ReclaimableArtifactBytes $ReclaimableArtifactBytes
         if ($budget.Accepted) {
             return $budget
         }
 
-        [int64]$deficitBytes = $budget.AcceptedFloorBytes - $budget.AvailableBytes
+        [int64]$deficitBytes =
+            $budget.AcceptedFloorBytes - $budget.EffectiveAvailableBytes
         [int64]$retryWindowBytes =
             [int]$script:InstallationPolicy.storage.windowsFreeSpaceRetryWindowGiB *
             $script:BytesPerGiB

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
+import json
 import logging
 import multiprocessing
 import queue
@@ -37,6 +38,7 @@ from app.models import (
     ValidationRequest,
 )
 from app.services.automation import AutomationService
+from app.services.automation_progress import OperationProgress
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
 from app.stream_events import StreamEventProjector
@@ -156,6 +158,7 @@ def _run_operation(
             monitor_iso=request.monitor_iso,
             share_windows_files_in_linux=request.share_windows_files_in_linux,
             share_linux_files_in_windows=request.share_linux_files_in_windows,
+            migrate_windows_preferences=request.migrate_windows_preferences,
             simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
             force_offline_ntfs_resize=request.force_offline_ntfs_resize,
             boot_guardian_fault=request.boot_guardian_fault,
@@ -315,7 +318,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         latest_steps_lock = threading.Lock()
         automation_progress = threading.Event()
         automation_progress_lock = threading.Lock()
-        automation_last_progress = [time.monotonic()]
+        progress_clock = OperationProgress(time.monotonic())
 
         if not operation_lock.acquire(blocking=False):
             result = _operation_busy_result(operation)
@@ -370,11 +373,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if event_type == "step":
                         step = StepResult.model_validate(payload)
                         with automation_progress_lock:
-                            automation_last_progress[0] = time.monotonic()
-                        automation_progress.set()
+                            advanced = progress_clock.observe(step, time.monotonic())
+                        if advanced:
+                            automation_progress.set()
                         vm = str(step.context.get("vm") or step.context.get("target") or "global")
                         with latest_steps_lock:
-                            latest_steps[vm] = step.step
+                            label = step.step
+                            if step.context.get("test"):
+                                label += ":" + str(step.context["test"])
+                            if advanced or step.status == "error":
+                                latest_steps[vm] = label
+                                if "vm" not in step.context:
+                                    latest_steps["global"] = label
                         event = projector.project_step(step)
                         if event is not None:
                             events.put(
@@ -430,50 +440,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if terminal_result_seen.is_set() or not process.is_alive():
                     return
                 with automation_progress_lock:
-                    idle_seconds = time.monotonic() - automation_last_progress[0]
+                    stalled_vm, last_progress = progress_clock.oldest()
+                    idle_seconds = time.monotonic() - last_progress
                 remaining_seconds = configured.automation_operation_timeout_seconds - idle_seconds
-                if remaining_seconds <= 0:
-                    break
-                if automation_progress.wait(remaining_seconds):
+                if remaining_seconds > 0 and automation_progress.wait(remaining_seconds):
                     continue
                 if terminal_result_seen.is_set() or not process.is_alive():
                     return
                 with automation_progress_lock:
-                    idle_seconds = time.monotonic() - automation_last_progress[0]
-                if idle_seconds >= configured.automation_operation_timeout_seconds:
-                    break
-
-            captures, capture_errors = _capture_automation_timeout_screens(
-                configured,
-                selectors,
-                run_workspace,
-            )
-            if terminal_result_seen.is_set() or not process.is_alive():
-                return
-            with latest_steps_lock:
-                active_steps = dict(latest_steps)
-            result = OperationResult(
-                status="error",
-                operation="automation",
-                message="error: automation made no progress before its configured timeout",
-                steps=[
-                    StepResult(
-                        step="automation.inactivity_timeout",
-                        status="error",
-                        message="Automation made no progress before its configured timeout",
-                        context={
-                            "inactivity_timeout_seconds": (
-                                configured.automation_operation_timeout_seconds
+                    stalled_vm, last_progress = progress_clock.oldest()
+                    idle_seconds = time.monotonic() - last_progress
+                if idle_seconds < configured.automation_operation_timeout_seconds:
+                    continue
+                captures, capture_errors = _capture_automation_timeout_screens(
+                    configured,
+                    selectors,
+                    run_workspace,
+                )
+                if terminal_result_seen.is_set() or not process.is_alive():
+                    return
+                with automation_progress_lock:
+                    stalled_vm, last_progress = progress_clock.oldest()
+                    if (
+                        time.monotonic() - last_progress
+                        < configured.automation_operation_timeout_seconds
+                    ):
+                        continue
+                with latest_steps_lock:
+                    active_steps = dict(latest_steps)
+                result = OperationResult(
+                    status="error",
+                    operation="automation",
+                    message="error: automation made no progress before its configured timeout",
+                    steps=[
+                        StepResult(
+                            step="automation.inactivity_timeout",
+                            status="error",
+                            message=(
+                                f"No progress on {stalled_vm}: "
+                                f"{active_steps.get(stalled_vm, 'global preparation')}"
                             ),
-                            "active_steps": active_steps,
-                            "captures": captures,
-                            "capture_errors": capture_errors,
-                        },
-                    )
-                ],
-            )
-            publish_result(result, stream_format)
-            process.terminate()
+                            context={
+                                "inactivity_timeout_seconds": (
+                                    configured.automation_operation_timeout_seconds
+                                ),
+                                "active_steps": active_steps,
+                                "stalled_vm": stalled_vm,
+                                "stalled_step": active_steps.get(stalled_vm, "global preparation"),
+                                "captures": captures,
+                                "capture_errors": capture_errors,
+                            },
+                        )
+                    ],
+                )
+                publish_result(result, stream_format)
+                process.terminate()
+                return
 
         threading.Thread(target=enforce_automation_timeout, daemon=True).start()
 
@@ -537,6 +559,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return generator()
 
+    async def execute_isolated_automation(
+        selectors: list[str] | None,
+        request: AutomationRequest,
+    ) -> OperationResult:
+        terminal_result: OperationResult | None = None
+        async for payload in stream_operation(
+            "automation",
+            selectors,
+            request,
+            stream_format="ndjson",
+        ):
+            for line in payload.splitlines():
+                event = json.loads(line)
+                if event.get("event") == "result":
+                    terminal_result = OperationResult.model_validate(event.get("data"))
+        if terminal_result is None:
+            raise RuntimeError("Isolated automation ended without a terminal result")
+        return terminal_result
+
     @api.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -568,7 +609,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def kill_operation() -> dict[str, object]:
         killed = operation_process.kill_active()
         if killed is None:
-            raise HTTPException(status_code=409, detail="No streamed operation is currently active")
+            raise HTTPException(status_code=409, detail="No isolated operation is currently active")
         return {
             "status": "killing",
             "operation": killed.operation,
@@ -600,7 +641,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         source: Annotated[SourceMode | None, Query()] = None,
     ) -> OperationResult:
         selectors, request = automation_request(body, vm, source)
-        return await execute("automation", selectors, request)
+        return await execute_isolated_automation(selectors, request)
 
     @api.post("/api/v1/validation/stream")
     async def validation_stream(

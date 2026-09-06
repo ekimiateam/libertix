@@ -16,7 +16,8 @@ param(
     [int64]$WindowsPartitionOffsetBytes,
     [Parameter(Mandatory = $true)]
     [int64]$RecoveryPartitionOffsetBytes,
-    [int64]$SizeBytes = 0
+    [int64]$SizeBytes = 0,
+    [int64]$ReclaimableArtifactBytes = 0
 )
 
 Set-StrictMode -Version Latest
@@ -99,11 +100,14 @@ switch ($Action) {
         $installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
         $freeSpaceBudget = Wait-LibertixWindowsFreeSpaceBudget `
             -DriveLetter $driveLetter `
-            -AllocationBytes ([int64]$shrinkGeometry.ShrinkBytes)
+            -AllocationBytes ([int64]$shrinkGeometry.ShrinkBytes) `
+            -ReclaimableArtifactBytes $ReclaimableArtifactBytes
         if (-not $freeSpaceBudget.Accepted) {
             throw (
                 "Not enough free space on $SystemDrive " +
                 "(available=$($freeSpaceBudget.AvailableBytes) bytes, " +
+                "reclaimable=$($freeSpaceBudget.ReclaimableArtifactBytes) bytes, " +
+                "effective=$($freeSpaceBudget.EffectiveAvailableBytes) bytes, " +
                 "required=$($freeSpaceBudget.RequiredBytes) bytes, " +
                 "acceptedFloor=$($freeSpaceBudget.AcceptedFloorBytes) bytes)."
             )

@@ -37,6 +37,8 @@
     <Compile Include="AtomicFile.cs" />
     <Compile Include="BootGuardianConfig.cs" />
     <Compile Include="BootGuardianEngine.cs" />
+    <Compile Include="PreferredSynchronization.cs" />
+    <Compile Include="WindowsBootLoaderTrust.cs" />
     <Compile Include="EspMount.cs" />
     <Compile Include="FirmwareEnvironment.cs" />
     <Compile Include="GuardianAttemptState.cs" />

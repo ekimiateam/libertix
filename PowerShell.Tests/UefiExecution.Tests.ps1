@@ -45,3 +45,17 @@ Describe "UEFI exception diagnostics" {
             )
     }
 }
+
+Describe "UEFI preference bundle publication" {
+    It "re-verifies the published bundle when the execution state is mirrored again" {
+        $source = Get-Content `
+            -LiteralPath "$PSScriptRoot/../Scripts/uefi/Libertix.Uefi.Execution.ps1" `
+            -Raw
+        $source | Should -Match `
+            '\} elseif \(\[IO\.File\]::Exists\(\$preferenceBundleDestination\)\) \{'
+        $source | Should -Match `
+            'Published Windows preference migration bundle re-verified\.'
+        $source | Should -Match `
+            'Published Windows preference migration bundle verification failed\.'
+    }
+}

@@ -36,12 +36,25 @@ namespace Libertix.Helpers
         public bool TimedOut { get; set; }
     }
 
+    public sealed class UnterminatedProcessException : InvalidOperationException
+    {
+        public UnterminatedProcessException(string message) : base(message) { }
+    }
+
     /// <summary>
     /// Executes a redirected Windows process without risking an infinite wait or
     /// a stdout/stderr pipe deadlock.
     /// </summary>
     public static class WindowsProcessRunner
     {
+        public const int UnverifiedTerminationExitCode = 173;
+
+        public static void AssertSafeExitCode(int exitCode)
+        {
+            if (exitCode == UnverifiedTerminationExitCode)
+                throw new UnterminatedProcessException(
+                    "The child reported an unverified process-tree termination. Rollback is blocked.");
+        }
         private const int ProcessTreeTerminationWaitMilliseconds = 10000;
         private static readonly Regex TerminalEscapeSequence = new Regex(
             @"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))",
@@ -105,8 +118,10 @@ namespace Libertix.Helpers
             bool treeTerminationProven = false;
             try
             {
-                if (process == null || process.HasExited)
+                if (process == null)
                     return true;
+                if (process.HasExited)
+                    return false;
                 processId = process.Id;
             }
             catch
@@ -198,7 +213,7 @@ namespace Libertix.Helpers
                     Task.WaitAll(new Task[] { outputTask, errorTask }, 2000);
                     if (!stopped)
                     {
-                        throw new InvalidOperationException(
+                        throw new UnterminatedProcessException(
                             $"Timed-out process tree could not be proven stopped: {startInfo.FileName}.");
                     }
                     return new WindowsProcessResult
@@ -211,6 +226,7 @@ namespace Libertix.Helpers
                 }
 
                 WaitForRedirectedStreams(outputTask, errorTask);
+                AssertSafeExitCode(process.ExitCode);
                 return new WindowsProcessResult
                 {
                     ExitCode = process.ExitCode,
@@ -234,7 +250,7 @@ namespace Libertix.Helpers
                 return;
             if (!Task.WaitAll(streamTasks, timeout))
             {
-                throw new InvalidOperationException(
+                throw new UnterminatedProcessException(
                     "Redirected process streams did not close after the process exited.");
             }
         }

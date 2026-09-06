@@ -171,11 +171,17 @@ namespace Libertix.Pages
             int waitMs,
             Encoding encoding = null)
         {
-            WindowsProcessResult result = WindowsProcessRunner.Run(
-                fileName,
-                arguments,
-                TimeSpan.FromMilliseconds(waitMs),
-                encoding);
+            WindowsProcessResult result;
+            try
+            {
+                result = WindowsProcessRunner.Run(
+                    fileName, arguments, TimeSpan.FromMilliseconds(waitMs), encoding);
+            }
+            catch (UnterminatedProcessException)
+            {
+                _processTerminationUnverified = true;
+                throw;
+            }
             string error = result.TimedOut
                 ? $"Process timed out after {waitMs} ms. {result.StandardError}".Trim()
                 : result.StandardError;

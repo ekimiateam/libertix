@@ -82,6 +82,33 @@ function Save-TransactionPreparationState {
     Save-LibertixTransactionStateAtomic -State $state
 }
 
+function Save-TransactionPartitionCreationIntent {
+    param(
+        [Parameter(Mandatory = $true)][int]$DiskNumber,
+        [Parameter(Mandatory = $true)][int64]$Offset,
+        [Parameter(Mandatory = $true)][int64]$Size
+    )
+
+    $state = Get-TransactionPartitionState
+    $disk = Get-Disk -Number $DiskNumber -ErrorAction Stop
+    if (-not $state -or [int]$state.DiskNumber -ne $DiskNumber -or
+        ([string]$disk.UniqueId).Trim() -ne ([string]$state.DiskUniqueId).Trim() -or
+        [string]$state.RecoveryRunId -ne $RecoveryRunId -or
+        $Offset -le 0 -or $Size -le 0 -or $Size -gt [int64]$disk.Size -or
+        $Offset -gt ([int64]$disk.Size - $Size)) {
+        throw "Cannot persist an unverified UEFI partition creation intent."
+    }
+    $overlaps = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop | Where-Object {
+        [int64]$_.Offset -lt ($Offset + $Size) -and
+        ([int64]$_.Offset + [int64]$_.Size) -gt $Offset
+    })
+    if ($overlaps.Count -ne 0) { throw "UEFI partition creation intent overlaps an existing partition." }
+    $state.PartitionNumber = 0
+    $state.PartitionOffset = $Offset
+    $state.PartitionSize = $Size
+    Save-LibertixTransactionStateAtomic -State $state
+}
+
 function Save-TransactionPartitionState {
     param([Parameter(Mandatory = $true)]$Partition)
 
@@ -378,7 +405,7 @@ function Get-VerifiedTransactionPartition {
     if (-not $state) {
         return $null
     }
-    if ([int]$state.PartitionNumber -le 0) {
+    if ([int64]$state.PartitionOffset -le 0 -or [int64]$state.PartitionSize -le 0) {
         return $null
     }
     $diskNumber = [int]$state.DiskNumber
@@ -526,10 +553,10 @@ function Invoke-Revert {
         Remove-LibertixTransactionDownloads `
             -SystemDrive $SystemDrive `
             -PlanId $RecoveryRunId
-        Remove-LibertixRecoveryTasksForRunId -RunId $RecoveryRunId
         Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
         Complete-LibertixTrackedCompensation -Step "windows.recovery-armed"
         Complete-LibertixTrackedRollback
+        Remove-LibertixRecoveryTasksForRunId -RunId $RecoveryRunId
         Write-Log "Revert complete." "Green"
         return
     }
@@ -557,7 +584,6 @@ function Invoke-Revert {
         }
     }
 
-    Remove-LibertixRecoveryTasksForRunId -RunId $RecoveryRunId
     Remove-LibertixTransactionDownloads `
         -SystemDrive $SystemDrive `
         -PlanId $RecoveryRunId
@@ -571,6 +597,7 @@ function Invoke-Revert {
     # execution ledger are terminal. A later retry can then finish archival if
     # power is lost at any preceding boundary.
     Save-LibertixRollbackTransactionArchive -ExpectedRecoveryRunId $RecoveryRunId
+    Remove-LibertixRecoveryTasksForRunId -RunId $RecoveryRunId
     Remove-Item -LiteralPath $TransactionStatePath -Force -ErrorAction Stop
     Remove-LibertixUefiToolArtifacts -SystemDrive $SystemDrive
 

@@ -8,9 +8,11 @@ import binascii
 import hashlib
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -22,6 +24,7 @@ PLAN_PATH = Path("/etc/libertix/installation-plan.json")
 POLICY_PATH = Path("/etc/libertix/Libertix.InstallationPolicy.json")
 GRUB_CONFIG_PATH = Path("/boot/grub/grub.cfg")
 WINDOWS_MOUNT_PATH = Path("/run/libertix-first-boot-windows")
+WINDOWS_SHARED_MOUNT_PATH = Path("/mnt/windows")
 EVIDENCE_FILE_NAME = "installed-linux-boot.json"
 LOCAL_STATUS_PATH = Path("/var/lib/libertix/first-boot-verification.json")
 SERVICE_STATE_PATH = Path("/var/lib/libertix/first-boot-service-state.json")
@@ -689,6 +692,65 @@ def verify_grub(plan: dict[str, object], firmware: str, disk_device: Path) -> di
     }
 
 
+def verify_windows_sharing(plan: dict[str, object], windows_device: Path) -> dict[str, object]:
+    features = require_mapping(plan, "features")
+    if features.get("shareWindowsFilesInLinux") is not True:
+        return {"enabled": False}
+    mount = WINDOWS_SHARED_MOUNT_PATH
+    try:
+        filesystems = json.loads(
+            run("findmnt", "-J", "-M", str(mount), "-o", "SOURCE,FSTYPE,OPTIONS")
+        )["filesystems"]
+        if len(filesystems) != 1:
+            raise VerificationError("Windows sharing mount is ambiguous")
+        filesystem = filesystems[0]
+        source = Path(filesystem["source"])
+        actual = source.stat()
+        expected = windows_device.stat()
+        if (
+            not stat.S_ISBLK(actual.st_mode)
+            or not stat.S_ISBLK(expected.st_mode)
+            or actual.st_rdev != expected.st_rdev
+        ):
+            raise VerificationError("Windows sharing is mounted from another partition")
+        if filesystem["fstype"] not in {"fuseblk", "ntfs3", "ntfs"} or "rw" not in filesystem[
+            "options"
+        ].split(","):
+            raise VerificationError("Windows sharing is not a writable NTFS mount")
+        profiles = json.loads(
+            base64.b64decode(require_text(features, "windowsProfilesJsonBase64"), validate=True)
+        )
+        if not isinstance(profiles, list) or not all(
+            isinstance(profile, str)
+            and profile not in {"", ".", ".."}
+            and not any(character in profile for character in "/\\\r\n\0")
+            for profile in profiles
+        ):
+            raise VerificationError("Windows profile names are invalid")
+        username = require_text(require_mapping(plan, "account"), "username")
+        account = pwd.getpwnam(username)
+        home = Path(account.pw_dir)
+        bookmarks = (home / ".config/gtk-3.0/bookmarks").read_text(encoding="utf-8").splitlines()
+        for profile in profiles:
+            shortcut = home / f"User_{profile}"
+            target = mount / "Users" / profile
+            if not shortcut.is_symlink() or os.readlink(shortcut) != str(target):
+                raise VerificationError("A Linux Windows-profile shortcut has the wrong target")
+            if shortcut.lstat().st_uid != account.pw_uid or not target.is_dir():
+                raise VerificationError(
+                    "A Linux Windows-profile shortcut is inaccessible or has the wrong owner"
+                )
+            if f"{shortcut.as_uri()} User_{profile}" not in bookmarks:
+                raise VerificationError(
+                    "A Linux Windows-profile bookmark is missing or incorrectly encoded"
+                )
+            run("runuser", "-u", username, "--", "test", "-r", str(shortcut))
+            run("runuser", "-u", username, "--", "test", "-x", str(shortcut))
+        return {"enabled": True, "device": str(source), "profileCount": len(profiles)}
+    except (OSError, KeyError, TypeError, ValueError, binascii.Error) as error:
+        raise VerificationError("Windows sharing evidence is incomplete") from error
+
+
 def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str, object], Path]:
     plan_id = require_text(plan, "planId")
     if not HEX_ID.fullmatch(plan_id):
@@ -771,6 +833,7 @@ def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str
         },
         "system": verify_installed_system(plan, root_uuid),
         "localization": verify_localization(plan),
+        "windowsSharing": verify_windows_sharing(plan, windows_device),
         "grub": verify_grub(plan, firmware, Path("/dev") / parent_name),
     }
     return evidence, windows_device
@@ -899,6 +962,10 @@ def write_local_status(
         "logPath": str(VERIFICATION_LOG_PATH),
         "error": error,
     }
+    service = read_optional_json(SERVICE_STATE_PATH)
+    attempts = service.get("attempts") if service else None
+    if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict):
+        value["attemptId"] = attempts[-1].get("attemptId")
     if service_stage:
         value["serviceStage"] = service_stage
     if evidence is not None:
@@ -1055,6 +1122,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 2 and sys.argv[1] == "--verify-windows-sharing":
+        try:
+            sharing_plan = read_json(PLAN_PATH)
+            print(
+                json.dumps(
+                    verify_windows_sharing(sharing_plan, resolve_windows_device(sharing_plan))
+                )
+            )
+        except (VerificationError, OSError) as error:
+            print(f"WINDOWS_SHARING_VERIFICATION_ERROR={error}", file=sys.stderr)
+            raise SystemExit(1) from error
+        raise SystemExit(0)
     if len(sys.argv) == 3 and sys.argv[1] == "--record-service-start":
         print(record_service_start(sys.argv[2]))
         raise SystemExit(0)

@@ -147,7 +147,7 @@ GitHub Pages `dev` channel.
 | `share_linux_files_in_windows` | boolean, `true` | Validate the read-only Linux-to-Windows sharing path. |
 | `simulate_stale_firmware_entries` | boolean, `false` | Inject a stale UEFI Libertix entry to verify current-ESP ownership matching. |
 | `force_offline_ntfs_resize` | boolean, `false` | Force the development-only live offline NTFS resize path for regression testing. |
-| `boot_guardian_fault` | `none`, `bios-rollback`, `boot-order`, `bootnext-fallback`, `bootnext-rollback`, `preferred-path`, or `preferred-path-rollback`, default `none` | Run one single-VM boot recovery or rollback test. Requires the matching firmware and `first_boot=windows`. |
+| `boot_guardian_fault` | `none`, `bios-rollback`, `bios-controller-disconnect`, `bios-postinstall-rollback`, `boot-order`, `bootnext-fallback`, `bootnext-rollback`, `preferred-path`, or `preferred-path-rollback`, default `none` | Run one single-VM boot recovery or rollback test. `bios-rollback` cancels Windows preparation; `bios-controller-disconnect` withholds the final `reboot-ready` acknowledgement and verifies the automatic rollback after the controller timeout; `bios-postinstall-rollback` first completes Linux and Windows validation, then restores the original disk layout and verifies every durable compensation. Requires the matching firmware and `first_boot=windows`. |
 
 VM selectors can also be repeated as query parameters (`?vm=vm1&vm=vm2`). Body and query
 selectors are combined. The `source` query parameter overrides its body value.
@@ -193,14 +193,15 @@ curl -fsS -N -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/v1/automation/stream
 ```
 
-Force-stop only the active streamed operation, leaving FastAPI running:
+Force-stop only the active isolated operation worker, leaving FastAPI running. This covers every
+stream endpoint and the JSON automation endpoint:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8000/api/v1/operation/kill
 ```
 
 This stop is intentionally immediate and does not clean up an operation already running inside a
-VM. It returns HTTP 409 when no streamed operation is active. A new installation should normally
+VM. It returns HTTP 409 when no isolated operation is active. A new installation should normally
 start from the configured reset snapshot.
 
 Reset the default VM scope and refresh the shared local source:
@@ -266,7 +267,7 @@ For local and remote development builds, the automation launches Libertix with i
 unattended contract. The application itself validates the requested distribution, partition size,
 account and sharing options. The destructive warning is still acknowledged through the visible
 keyboard workflow and proven before disk writes begin. A published `dev_<sha7>` build enables this
-development contract; a stable production build refuses it unless an explicit development filepool
+development contract; a stable production build refuses it even when an explicit development filepool
 override is also supplied.
 
 For full installations, the service launches Libertix with a complete development network profile:
@@ -285,7 +286,7 @@ Build and verify both generic mini-ISOs from the repository root:
 ```
 
 Use `bios` or `uefi` instead of `all` for one image. The builder stores its large work tree in the
-Docker volume `libertix-iso-work`, writes logs under `build-logs/`, verifies the image contents, and
+Docker volume `libertix-iso-work-<checkout-hash>`, writes logs under `build-logs/`, verifies the image contents, and
 publishes the resulting ISO into `auto_tests/app/filepool/`.
 
 Build the WPF application from a Visual Studio Developer PowerShell on Windows:

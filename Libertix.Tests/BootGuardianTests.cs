@@ -11,6 +11,79 @@ namespace Libertix.Tests
     public sealed class BootGuardianTests
     {
         [TestMethod]
+        public void PreferredWindowsUpdateResumesAtEveryCommitBoundary()
+        {
+            for (int interruptAt = 1; interruptAt <= 18; interruptAt++)
+            {
+                string root = Path.Combine(Path.GetTempPath(), "libertix-sync-test-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(root);
+                try
+                {
+                    string efi = Path.Combine(root, @"EFI\Libertix");
+                    string microsoft = Path.Combine(root, @"EFI\Microsoft\Boot");
+                    string reference = Path.Combine(efi, "BootGuardianReference");
+                    Directory.CreateDirectory(reference);
+                    Directory.CreateDirectory(microsoft);
+                    File.WriteAllText(Path.Combine(reference, ".libertix-owner"), new string('a', 32));
+                    foreach (string name in new[] { "shimx64.efi", "grubx64.efi", "mmx64.efi", "grub.cfg" })
+                        File.WriteAllText(Path.Combine(reference, name), name);
+                    string active = Path.Combine(microsoft, "bootmgfw.efi");
+                    string backup = Path.Combine(microsoft, "bootmgfw.libertix-windows.efi");
+                    File.WriteAllText(active, "new-windows-loader");
+                    File.WriteAllText(backup, "old-windows-loader");
+                    string expectedWindows = Hashing.Sha256File(active);
+                    var manifest = new PreferredManifest { Version = 1, RunId = new string('a', 32), Status = "installed",
+                        WindowsLoader = new PreferredWindowsLoader { ActivePath = @"\EFI\Microsoft\Boot\bootmgfw.efi",
+                            BackupPath = @"\EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi", Sha256 = Hashing.Sha256File(backup) },
+                        Preferred = new PreferredHashes { ShimSha256 = Hashing.Sha256File(Path.Combine(reference, "shimx64.efi")),
+                            GrubSha256 = Hashing.Sha256File(Path.Combine(reference, "grubx64.efi")),
+                            MokManagerSha256 = Hashing.Sha256File(Path.Combine(reference, "mmx64.efi")),
+                            GrubConfigSha256 = Hashing.Sha256File(Path.Combine(reference, "grub.cfg")) } };
+                    string manifestPath = Path.Combine(efi, "preferred-boot-path.json");
+                    string json = manifest.ToJson();
+                    File.WriteAllText(manifestPath, json.Substring(0, json.Length - 1) +
+                        ",\"windowsBootEntry\":{\"name\":\"Boot0001\"},\"futureField\":{\"value\":42}}");
+                    manifest = PreferredManifest.Read(manifestPath);
+                    manifest.WindowsLoader.Sha256 = expectedWindows;
+                    int calls = 0;
+                    try
+                    {
+                        PreferredSynchronization.PublishWindowsLoaderUpdate(root, manifest, active, reference, () => {
+                            if (++calls == interruptAt) throw new TimeoutException("simulated shutdown deadline");
+                        });
+                    }
+                    catch (TimeoutException) { }
+                    if (File.Exists(Path.Combine(efi, "preferred-boot-path.sync.json")))
+                        PreferredSynchronization.Replay(root, manifest.RunId, () => { });
+                    else
+                        PreferredSynchronization.PublishWindowsLoaderUpdate(root, manifest, active, reference, () => { });
+                    Assert.AreEqual(expectedWindows, Hashing.Sha256File(backup));
+                    Assert.AreEqual(manifest.Preferred.ShimSha256, Hashing.Sha256File(active));
+                    Assert.AreEqual(expectedWindows, PreferredManifest.Read(manifestPath).WindowsLoader.Sha256);
+                    StringAssert.Contains(File.ReadAllText(manifestPath), "windowsBootEntry");
+                    StringAssert.Contains(File.ReadAllText(manifestPath), "futureField");
+                }
+                finally { Directory.Delete(root, true); }
+            }
+        }
+
+        [TestMethod]
+        public void CurrentWindowsLoaderTrustRejectsUnrelatedFiles()
+        {
+            string candidate = typeof(BootGuardianTests).Assembly.Location;
+            Assert.IsFalse(WindowsBootLoaderTrust.IsCurrentWindowsLoader(candidate, Hashing.Sha256File(candidate)));
+        }
+
+        [TestMethod]
+        public void CurrentWindowsLoaderTrustAcceptsTheInstalledSignedLoader()
+        {
+            string candidate = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                @"Boot\EFI\bootmgfw.efi");
+            Assert.IsTrue(File.Exists(candidate), "The Windows build host must expose its EFI boot loader.");
+            Assert.IsTrue(WindowsBootLoaderTrust.IsCurrentWindowsLoader(candidate, Hashing.Sha256File(candidate)));
+        }
+
+        [TestMethod]
         public void BootOrderEncodingRoundTripsWithoutChangingOrder()
         {
             ushort[] expected = { 0x0007, 0x0001, 0xABCD };

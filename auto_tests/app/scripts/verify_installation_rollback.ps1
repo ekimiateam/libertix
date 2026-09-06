@@ -27,6 +27,20 @@ $waitTimeoutSeconds = if ($config.PSObject.Properties.Name -contains "wait_timeo
     0
 }
 
+function Test-RollbackPartitionLayout {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Actual,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Expected
+    )
+    if ($Actual.Count -eq 0 -or $Actual.Count -ne $Expected.Count) { return $false }
+    # MSFT_Partition numbers can retain the pre-removal enumeration until reboot.
+    # Compare every physical extent and type, not that volatile Windows identifier.
+    $actualLayout = @($Actual | Sort-Object Offset | Select-Object Offset, Size, GptType, MbrType)
+    $expectedLayout = @($Expected | Sort-Object Offset | Select-Object Offset, Size, GptType, MbrType)
+    return (ConvertTo-Json -InputObject $actualLayout -Compress) -ceq
+        (ConvertTo-Json -InputObject $expectedLayout -Compress)
+}
+
 function Get-RollbackState {
     $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
     $systemDisk = $systemPartition | Get-Disk -ErrorAction Stop
@@ -38,10 +52,12 @@ function Get-RollbackState {
         }
     }
     $recoveryTasks = @(
-        Get-ScheduledTask -ErrorAction SilentlyContinue |
+        Get-ScheduledTask -ErrorAction Stop |
             Where-Object {
                 $_.TaskName -like "LibertixUefiRecovery_*" -or
-                $_.TaskName -like "LibertixUefiRecoveryPrompt_*"
+                $_.TaskName -like "LibertixUefiRecoveryPrompt_*" -or
+                $_.TaskName -in @("LibertixInstallRecovery", "LibertixInstallRecoveryPrompt", "LibertixLinuxReadOnly") -or
+                $_.TaskName -like "LibertixLinuxReadOnlyPin_*"
             }
     )
     $firmwareEntries = @(bcdedit.exe /enum firmware 2>&1)
@@ -57,6 +73,22 @@ function Get-RollbackState {
         throw "Windows Boot Manager could not be enumerated after rollback."
     }
     $bootGuardian = Get-Service -Name "LibertixBootGuardian" -ErrorAction SilentlyContinue
+    $layout = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop |
+        Sort-Object PartitionNumber | Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
+    $expectedLayout = @($config.partition_layout | Sort-Object PartitionNumber |
+        Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
+    $layoutMatches = Test-RollbackPartitionLayout -Actual $layout -Expected $expectedLayout
+    $ledgerPaths = @()
+    $biosLedger = Join-Path $env:SystemDrive "LibertixInstallRecovery\installation-state.json"
+    if (Test-Path -LiteralPath $biosLedger) { $ledgerPaths += $biosLedger }
+    $uefiRoot = Join-Path $env:ProgramData "Libertix\UefiRecovery"
+    if (Test-Path -LiteralPath $uefiRoot) {
+        foreach ($directory in @(Get-ChildItem -LiteralPath $uefiRoot -Directory -ErrorAction Stop)) {
+            $path = Join-Path $directory.FullName "installation-state.json"
+            if (Test-Path -LiteralPath $path) { $ledgerPaths += $path }
+        }
+    }
+    $ledger = Get-RollbackLedgerEvidence -Paths $ledgerPaths -ExcludedPlanIds @($config.baseline_plan_ids)
     $geometryMatches =
         [int]$systemDisk.Number -eq $expectedDiskNumber -and
         [int]$systemPartition.PartitionNumber -eq $expectedPartitionNumber -and
@@ -64,12 +96,16 @@ function Get-RollbackState {
         [int64]$systemPartition.Size -eq $expectedPartitionSize
     $verified =
         $geometryMatches -and
+        $layoutMatches -and $ledger.Verified -and
         $installerPartitions.Count -eq 0 -and
         $recoveryTasks.Count -eq 0 -and
         $temporaryBootReferences.Count -eq 0 -and
         $null -eq $bootGuardian
     return [pscustomobject]@{
         GeometryMatches = [bool]$geometryMatches
+        PartitionLayoutMatches = [bool]$layoutMatches
+        LedgerVerified = [bool]$ledger.Verified
+        PlanId = [string]$ledger.PlanId
         InstallerPartitionCount = [int]$installerPartitions.Count
         RecoveryTaskCount = [int]$recoveryTasks.Count
         TemporaryBootReferenceCount = [int]$temporaryBootReferences.Count
@@ -77,6 +113,29 @@ function Get-RollbackState {
         BootGuardianPresent = [bool]($null -ne $bootGuardian)
         Verified = [bool]$verified
     }
+}
+
+function Get-RollbackLedgerEvidence {
+    param(
+        [AllowEmptyCollection()][string[]]$Paths,
+        [AllowEmptyCollection()][string[]]$ExcludedPlanIds
+    )
+    $candidates = @($Paths | Where-Object {
+        $document = Get-Content -LiteralPath $_ -Raw -Encoding UTF8 | ConvertFrom-Json
+        [string]$document.planId -notin $ExcludedPlanIds
+    })
+    if ($candidates.Count -ne 1) {
+        throw "Exactly one new installation ledger is required to prove this rollback."
+    }
+    $directory = Split-Path -Parent $candidates[0]
+    $modulePaths = @(@(
+        (Join-Path $directory "Libertix.InstallationState.psm1"),
+        (Join-Path $directory "payload\Scripts\modules\Libertix.InstallationState.psm1")
+    ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+    if (@($modulePaths).Count -ne 1) { throw "The rollback ledger validator is missing or ambiguous." }
+    Import-Module -Name $modulePaths[0] -Force -ErrorAction Stop
+    $state = Read-LibertixExecutionState -Path $candidates[0]
+    return [pscustomobject]@{ Verified = ([string]$state.status -eq "rolled-back"); PlanId = [string]$state.planId }
 }
 
 $deadline = [DateTime]::UtcNow.AddSeconds($waitTimeoutSeconds)
@@ -89,6 +148,9 @@ do {
 } while ($true)
 
 Write-Output ("ROLLBACK_GEOMETRY_MATCHES={0}" -f $rollbackState.GeometryMatches)
+Write-Output ("ROLLBACK_PARTITION_LAYOUT_MATCHES={0}" -f $rollbackState.PartitionLayoutMatches)
+Write-Output ("ROLLBACK_LEDGER_VERIFIED={0}" -f $rollbackState.LedgerVerified)
+Write-Output ("ROLLBACK_PLAN_ID={0}" -f $rollbackState.PlanId)
 Write-Output ("ROLLBACK_INSTALLER_PARTITION_COUNT={0}" -f $rollbackState.InstallerPartitionCount)
 Write-Output ("ROLLBACK_RECOVERY_TASK_COUNT={0}" -f $rollbackState.RecoveryTaskCount)
 Write-Output (
@@ -98,8 +160,7 @@ Write-Output (
 Write-Output ("ROLLBACK_WINDOWS_BOOT_MANAGER_PRESENT={0}" -f $rollbackState.WindowsBootManagerPresent)
 Write-Output ("ROLLBACK_BOOT_GUARDIAN_PRESENT={0}" -f $rollbackState.BootGuardianPresent)
 Write-Output ("ROLLBACK_VERIFIED={0}" -f $rollbackState.Verified)
-Write-Output "RESULT=OK"
-
 if (-not $rollbackState.Verified) {
     throw "The Windows disk or boot state does not match the pre-installation baseline."
 }
+Write-Output "RESULT=OK"

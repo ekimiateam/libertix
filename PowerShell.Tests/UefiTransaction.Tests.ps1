@@ -19,6 +19,7 @@ BeforeAll {
     Import-Module `
         (Join-Path $PSScriptRoot "../Scripts/modules/Libertix.TemporaryArtifacts.psm1") `
         -Force
+    Import-Module (Join-Path $PSScriptRoot "../Scripts/modules/Libertix.AtomicFile.psm1") -Force
     foreach ($component in @(
         "Libertix.Uefi.Execution.ps1",
         "Libertix.Uefi.Firmware.ps1",
@@ -190,6 +191,53 @@ Describe "UEFI transaction partition resolution" {
 
         { Get-VerifiedTransactionPartition } | Should -Throw "*matches=0*"
         Should -Invoke Save-LibertixTransactionStateAtomic -Times 0
+    }
+}
+
+Describe "UEFI durable partition creation intent" {
+    BeforeEach {
+        $script:TransactionStatePath = Join-Path $TestDrive "transaction.json"
+        $script:installationPlan = $null
+        $state = [ordered]@{
+            Version = 1; DiskNumber = 0; DiskUniqueId = "disk-identity"
+            PartitionNumber = 0; PartitionOffset = 0; PartitionSize = 0
+            RecoveryRunId = "0123456789abcdef0123456789abcdef"
+        }
+        $state | ConvertTo-Json | Set-Content -LiteralPath $script:TransactionStatePath -Encoding UTF8
+        Mock Get-Disk { [pscustomobject]@{ Number = 0; UniqueId = "disk-identity"; Size = 100GB } }
+        Mock Get-Partition { @() }
+        Mock Write-Log {}
+    }
+
+    It "finds a committed partition even when New-Partition never returned its number" {
+        Save-TransactionPartitionCreationIntent -DiskNumber 0 -Offset 40GB -Size 8GB
+        (Get-TransactionPartitionState).PartitionNumber | Should -Be 0
+        Mock Get-Partition { @([pscustomobject]@{ DiskNumber = 0; PartitionNumber = 4; Offset = 40GB; Size = 8GB }) }
+        $partition = Get-VerifiedTransactionPartition
+        $partition.PartitionNumber | Should -Be 4
+        (Get-TransactionPartitionState).PartitionNumber | Should -Be 4
+    }
+
+    It "allows rollback when interruption occurred before partition creation" {
+        Save-TransactionPartitionCreationIntent -DiskNumber 0 -Offset 40GB -Size 8GB
+        Get-VerifiedTransactionPartition -AllowMissing | Should -BeNullOrEmpty
+    }
+
+    It "refuses an extent that already contains another partition" {
+        Mock Get-Partition { @([pscustomobject]@{ Offset = 41GB; Size = 1GB }) }
+        { Save-TransactionPartitionCreationIntent -DiskNumber 0 -Offset 40GB -Size 8GB } | Should -Throw '*overlaps*'
+        (Get-TransactionPartitionState).PartitionOffset | Should -Be 0
+    }
+
+    It "refuses another disk identity without persisting an intent" {
+        Mock Get-Disk { [pscustomobject]@{ Number = 0; UniqueId = "another-disk"; Size = 100GB } }
+        { Save-TransactionPartitionCreationIntent -DiskNumber 0 -Offset 40GB -Size 8GB } | Should -Throw '*unverified*'
+        (Get-TransactionPartitionState).PartitionOffset | Should -Be 0
+    }
+
+    It "refuses an extent outside the disk without persisting an intent" {
+        { Save-TransactionPartitionCreationIntent -DiskNumber 0 -Offset 99GB -Size 8GB } | Should -Throw '*unverified*'
+        (Get-TransactionPartitionState).PartitionOffset | Should -Be 0
     }
 }
 

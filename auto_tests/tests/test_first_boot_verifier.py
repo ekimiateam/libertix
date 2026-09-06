@@ -470,6 +470,9 @@ def test_local_success_status_retains_detailed_proofs(
 ) -> None:
     status_path = tmp_path / "first-boot-verification.json"
     monkeypatch.setattr(verifier, "LOCAL_STATUS_PATH", status_path)
+    service_path = tmp_path / "service.json"
+    service_path.write_text(json.dumps({"attempts": [{"attemptId": "a" * 32}]}))
+    monkeypatch.setattr(verifier, "SERVICE_STATE_PATH", service_path)
     evidence = {
         "distribution": {"id": "zorin"},
         "root": {"filesystem": "ext4"},
@@ -486,6 +489,7 @@ def test_local_success_status_retains_detailed_proofs(
 
     status = verifier.read_json(status_path)
     assert status["status"] == "succeeded"
+    assert status["attemptId"] == "a" * 32
     assert status["root"]["filesystem"] == "ext4"
     assert status["system"]["dpkgAuditClean"] is True
     assert status["grub"]["syntaxValid"] is True

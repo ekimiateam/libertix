@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -24,7 +24,7 @@ def test_all_supported_languages_have_success_and_failure_messages(result_ui: Mo
     catalogue = json.loads(
         (ROOT / "Resources/Libertix.Translations.json").read_text(encoding="utf-8")
     )
-    assert catalogue["supportedLanguages"] == ["en", "fr", "es"]
+    assert catalogue["supportedLanguages"] == ["en", "fr", "es", "ko"]
     for language in catalogue["supportedLanguages"]:
         translation = result_ui.load_translations(language)
         assert all(translation[key].strip() for key in translation)
@@ -40,6 +40,62 @@ def test_acknowledgement_fingerprint_changes_with_terminal_result(result_ui: Mod
     failure = dict(success, status="failed", error="GRUB invalid")
 
     assert result_ui.status_fingerprint(success) != result_ui.status_fingerprint(failure)
+    assert result_ui.status_fingerprint(success) != result_ui.status_fingerprint(
+        dict(success, attemptId="new-attempt")
+    )
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "failed"])
+def test_result_waits_for_the_current_service_attempt(
+    result_ui: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    status_path = tmp_path / "status.json"
+    service_path = tmp_path / "service.json"
+    monkeypatch.setattr(result_ui, "STATUS_PATH", status_path)
+    monkeypatch.setattr(result_ui, "SERVICE_STATE_PATH", service_path)
+    now = [0.0]
+    result = {"planId": "plan", "status": outcome, "attemptId": "new"}
+    service = {"status": "running", "attempts": [{"attemptId": "new", "outcome": "running"}]}
+    service_path.write_text(json.dumps(service))
+    status_path.write_text(json.dumps({**result, "attemptId": "old"}))
+
+    def sleep(seconds: float) -> None:
+        now[0] += seconds
+        if now[0] == 2:
+            status_path.write_text(json.dumps({**result, "status": "running"}))
+        if now[0] == 4:
+            status_path.write_text(json.dumps(result))
+        if now[0] == 6:
+            service["status"] = outcome
+            service["attempts"][0]["outcome"] = outcome
+            service_path.write_text(json.dumps(service))
+
+    monkeypatch.setattr(result_ui, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=sleep))
+    assert result_ui.wait_for_terminal_status("plan") == result
+    assert now[0] == 6
+
+
+@pytest.mark.parametrize(
+    "status",
+    [None, {"planId": "other", "status": "succeeded"}, {"planId": "plan", "status": "running"}],
+)
+def test_result_wait_is_bounded_without_a_matching_terminal_result(
+    result_ui: ModuleType, monkeypatch: pytest.MonkeyPatch, status: object
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(result_ui, "WAIT_SECONDS", 5)
+    monkeypatch.setattr(
+        result_ui, "read_json", lambda path: status if path == result_ui.STATUS_PATH else None
+    )
+    monkeypatch.setattr(
+        result_ui,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0] + seconds)
+        ),
+    )
+    assert result_ui.wait_for_terminal_status("plan") is None
+    assert now[0] == 5
 
 
 def test_dialog_uses_a_modal_provider_before_notifications(

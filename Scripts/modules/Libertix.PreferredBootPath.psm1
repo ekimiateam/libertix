@@ -929,6 +929,10 @@ function Restore-LibertixPreferredBootPath {
         [Parameter(Mandatory = $true)][scriptblock]$WriteLog
     )
 
+    $pendingSync = Join-Path $EspRoot "EFI\Libertix\preferred-boot-path.sync.json"
+    if (Test-Path -LiteralPath $pendingSync) {
+        throw "An interrupted Linux EFI synchronization is pending. Resume Linux before restoring this boot path."
+    }
     $archiveRoot = Join-Path $State.RecoveryRoot "preferred-boot-path"
     $archiveManifest = Join-Path $archiveRoot "manifest.json"
     if (-not (Test-Path -LiteralPath $archiveManifest -PathType Leaf)) {

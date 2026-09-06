@@ -178,7 +178,7 @@ if ([string]::IsNullOrWhiteSpace($translationsPath)) {
     throw "Libertix translation catalogue is missing."
 }
 $translations = Read-JsonFile -Path $translationsPath
-if ($language -notin @("en", "fr", "es")) {
+if ($language -notin @("en", "fr", "es", "ko")) {
     $language = "en"
 }
 $text = $translations.languages.$language.postInstall

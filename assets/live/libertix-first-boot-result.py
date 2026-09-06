@@ -16,6 +16,7 @@ from pathlib import Path
 
 PLAN_PATH = Path("/etc/libertix/installation-plan.json")
 STATUS_PATH = Path("/var/lib/libertix/first-boot-verification.json")
+SERVICE_STATE_PATH = Path("/var/lib/libertix/first-boot-service-state.json")
 WAIT_SECONDS = 600
 SESSION_SETTLE_SECONDS = 10
 SESSION_LOCALIZATION_WAIT_SECONDS = 60
@@ -72,8 +73,37 @@ def status_fingerprint(status: dict[str, object]) -> str:
         "status": status.get("status"),
         "updatedAtUtc": status.get("updatedAtUtc"),
         "error": status.get("error"),
+        "attemptId": status.get("attemptId"),
     }
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def wait_for_terminal_status(plan_id: object) -> dict[str, object] | None:
+    deadline = time.monotonic() + WAIT_SECONDS
+    while True:
+        service = read_json(SERVICE_STATE_PATH)
+        status = read_json(STATUS_PATH)
+        terminal = (
+            status is not None
+            and status.get("planId") == plan_id
+            and status.get("status") in ("succeeded", "failed")
+        )
+        if service is not None:
+            attempts = service.get("attempts")
+            latest = attempts[-1] if isinstance(attempts, list) and attempts else None
+            terminal = (
+                terminal
+                and isinstance(latest, dict)
+                and bool(latest.get("attemptId"))
+                and status.get("attemptId") == latest["attemptId"]
+                and latest.get("outcome") == status.get("status")
+                and service.get("status") == status.get("status")
+            )
+        if terminal and read_json(SERVICE_STATE_PATH) == service:
+            return status
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
 def show_gtk_dialog(
@@ -357,14 +387,8 @@ def main() -> int:
     if account.get("username") != pwd.getpwuid(os.getuid()).pw_name:
         return 0
 
-    deadline = time.monotonic() + WAIT_SECONDS
-    status = read_json(STATUS_PATH)
-    while status is None and time.monotonic() < deadline:
-        time.sleep(2)
-        status = read_json(STATUS_PATH)
-    if status is None or status.get("status") not in ("succeeded", "failed"):
-        return 0
-    if status.get("planId") != plan.get("planId"):
+    status = wait_for_terminal_status(plan.get("planId"))
+    if status is None:
         return 0
 
     state_root = Path.home() / ".local" / "state" / "libertix"

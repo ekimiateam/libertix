@@ -2,7 +2,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("en", "fr", "es")]
+    [ValidateSet("en", "fr", "es", "ko")]
     [string]$LanguageCode = "en",
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
@@ -160,6 +160,13 @@ function Get-BitLockerState {
     }
 }
 
+function Format-DiskDescriptions {
+    param([object[]]$Disks)
+    ($Disks | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.FriendlyName)) { "#$($_.Number)" } else { [string]$_.FriendlyName }
+    }) -join ", "
+}
+
 function Get-StorageControllerNames {
     $operationTimeoutSeconds = 15
     $names = @()
@@ -255,7 +262,11 @@ function Get-NvramVariable {
     $buffer = New-Object byte[] 65536
     $size = [LibertixCompatibilityNvram]::GetFirmwareEnvironmentVariable($Name, $Guid, $buffer, [uint32]$buffer.Length)
     if ($size -eq 0) {
-        return [pscustomobject]@{ Exists = $false; Bytes = $null; Error = [LibertixCompatibilityNvram]::LastError() }
+        $errorCode = [LibertixCompatibilityNvram]::LastError()
+        if ($errorCode -ne 203) {
+            throw "GetFirmwareEnvironmentVariable($Name) failed with Win32 error $errorCode."
+        }
+        return [pscustomobject]@{ Exists = $false; Bytes = $null; Error = $errorCode }
     }
     $result = New-Object byte[] $size
     [Array]::Copy($buffer, $result, $size)
@@ -316,10 +327,10 @@ try {
     Import-Module -Name $geometryModule -Force -ErrorAction Stop
     Import-Module -Name $policyModulePath -Force -ErrorAction Stop
     $installationPolicy = Get-LibertixInstallationPolicy
-    [int]$minimumLinuxSizeGB = [int]$installationPolicy.storage.minimumFinalSizeGiB
     [int]$minimumMemoryMB = [int]$installationPolicy.memory.windowsMinimumMiB
     [int]$lowMemoryThresholdMB = [int]$installationPolicy.memory.lowMemoryThresholdMiB
     [int]$preflightShrinkSafetyGB = [int]$installationPolicy.storage.preflightShrinkSafetyGiB
+    [int]$stagingSizeGB = [int]$installationPolicy.storage.stagingSizeGiB
 
     Write-Check "COMPAT_010_PRIVILEGES"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -342,10 +353,10 @@ try {
     }
     [long]$memoryBytes = [long]$os.TotalVisibleMemorySize * 1024L
     [long]$memoryMB = [math]::Floor($memoryBytes / 1MB)
-    if ($memoryMB -lt $MinimumMemoryMB) {
-        Stop-Compatibility "COMPAT_E_RAM_TOO_LOW" @($MinimumMemoryMB, $memoryMB)
+    if ($memoryMB -lt $minimumMemoryMB) {
+        Stop-Compatibility "COMPAT_E_RAM_TOO_LOW" @($minimumMemoryMB, $memoryMB)
     }
-    $lowMemory = $memoryMB -lt $LowMemoryThresholdMB
+    $lowMemory = $memoryMB -lt $lowMemoryThresholdMB
     if ($lowMemory) {
         Write-LocalizedWarning "LOW_MEMORY" @($memoryMB)
     }
@@ -403,10 +414,10 @@ try {
     }
     $usbDisks = @($visibleDisks | Where-Object { [string]$_.BusType -eq "USB" })
     if ($usbDisks.Count -ne 0) {
-        Stop-Compatibility "COMPAT_E_USB_STORAGE" @($usbDisks.Count)
+        Stop-Compatibility "COMPAT_E_USB_STORAGE" @($usbDisks.Count, (Format-DiskDescriptions $usbDisks))
     }
     if ($visibleDisks.Count -ne 1) {
-        Stop-Compatibility "COMPAT_E_DISK_COUNT" @($visibleDisks.Count)
+        Stop-Compatibility "COMPAT_E_DISK_COUNT" @($visibleDisks.Count, (Format-DiskDescriptions $visibleDisks))
     }
 
     $systemDrive = [Environment]::GetEnvironmentVariable("SystemDrive").TrimEnd("\")
@@ -515,7 +526,7 @@ try {
         $shrinkAvailable -= Get-LibertixPartitionAlignmentBytes
     }
     [long]$requiredShrink =
-        ([long]$MinimumLinuxSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
+        ([long]$stagingSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
     if ($shrinkAvailable -lt $requiredShrink) {
         Stop-Compatibility "COMPAT_E_SHRINK_SPACE" @([math]::Round($shrinkAvailable / 1GB, 1), [math]::Round($requiredShrink / 1GB, 1))
     }

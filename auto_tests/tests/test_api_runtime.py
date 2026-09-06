@@ -8,6 +8,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -60,6 +61,145 @@ class FakeOperationLock:
         assert self.held is True
         self.held = False
         self.release_calls += 1
+
+
+def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+    relayed = multiprocessing.Barrier(2)
+    now = [0.0]
+    monkeypatch.setattr(main_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    original = main_module.StreamEventProjector.project_step
+
+    def project(self, step):
+        event = original(self, step)
+        if step.context.get("test", "").startswith("working-"):
+            now[0] += 0.4
+        relayed.wait(timeout=5)
+        return event
+
+    class Service:
+        def __init__(self, _settings):
+            pass
+
+        def run(self, _selectors, *, on_step, **_kwargs):
+            def send(name, vm, **context):
+                on_step(
+                    StepResult(
+                        step=name, status="ok", message="progress", context={"vm": vm, **context}
+                    )
+                )
+                relayed.wait(timeout=5)
+
+            send("automation.vm_started", "vm1")
+            send("automation.vm_started", "vm2")
+            send("automation.check_started", "vm1", test="linux.blocked")
+            for index in range(3):
+                send("automation.check_started", "vm2", test=f"working-{index}")
+                send("automation.capture", "vm1", label=f"heartbeat-{index}")
+            time.sleep(5)
+            raise AssertionError("the timed-out worker must be terminated")
+
+    captures = []
+
+    def capture(_settings, _selectors, workspace):
+        destination = workspace / "stalled-vm1.png"
+        destination.write_bytes(b"test capture")
+        captures.append(destination)
+        return {"vm1": str(destination)}, {}
+
+    monkeypatch.setattr(main_module, "AutomationService", Service)
+    monkeypatch.setattr(main_module.StreamEventProjector, "project_step", project)
+    monkeypatch.setattr(main_module, "_capture_automation_timeout_screens", capture)
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=1,
+    )
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation/stream?format=ndjson",
+            json={
+                "vms": ["vm1", "vm2"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test-passphrase",
+            },
+        )
+    events = [json.loads(line) for line in response.text.splitlines()]
+    terminal = [event for event in events if event["event"] == "result"]
+    assert len(terminal) == 1
+    failure = terminal[0]["data"]["steps"][0]
+    assert failure["step"] == "automation.inactivity_timeout"
+    assert failure["context"]["stalled_vm"] == "vm1"
+    assert failure["context"]["stalled_step"] == "automation.check_started:linux.blocked"
+    assert failure["context"]["captures"]["vm1"] == str(captures[0])
+    assert "working-" in failure["context"]["active_steps"]["vm2"]
+    assert lock.release_calls == 1
+
+
+def test_progress_during_timeout_capture_rearms_the_watchdog(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(main_module, "operation_lock", FakeOperationLock())
+    resume = multiprocessing.Event()
+    captured = multiprocessing.Event()
+    progress_seen = threading.Event()
+    now = [0.0]
+    monkeypatch.setattr(main_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    original = main_module.StreamEventProjector.project_step
+
+    def project(self, step):
+        event = original(self, step)
+        if step.step == "first":
+            now[0] = 1
+        if step.step == "second":
+            progress_seen.set()
+        return event
+
+    class Service:
+        def __init__(self, _settings):
+            pass
+
+        def run(self, _selectors, *, on_step, **_kwargs):
+            on_step(StepResult(step="first", status="ok", message="first"))
+            assert resume.wait(5)
+            on_step(StepResult(step="second", status="ok", message="second"))
+            assert captured.wait(5)
+            return OperationResult(
+                status="ok", operation="automation", message="completed", steps=[]
+            )
+
+    def capture(*_args):
+        resume.set()
+        assert progress_seen.wait(5)
+        captured.set()
+        return {}, {}
+
+    monkeypatch.setattr(main_module, "AutomationService", Service)
+    monkeypatch.setattr(main_module.StreamEventProjector, "project_step", project)
+    monkeypatch.setattr(main_module, "_capture_automation_timeout_screens", capture)
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=0.05,
+    )
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation/stream?format=ndjson",
+            json={
+                "vms": ["vm1"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test-passphrase",
+            },
+        )
+    events = [json.loads(line) for line in response.text.splitlines()]
+    assert events[-1]["data"]["status"] == "ok"
 
 
 def test_process_operation_lock_can_be_reused_without_network(tmp_path: Path) -> None:
@@ -268,10 +408,22 @@ def test_offline_ntfs_resize_fixture_is_opt_in() -> None:
     assert request.force_offline_ntfs_resize is True
 
 
+def test_windows_preference_migration_fixture_is_opt_in() -> None:
+    assert AutomationRequest(apply=True, linux_password="pass").migrate_windows_preferences is False
+    request = AutomationRequest(
+        apply=True,
+        linux_password="pass",
+        migrate_windows_preferences=True,
+    )
+    assert request.migrate_windows_preferences is True
+
+
 def test_boot_guardian_fault_accepts_only_explicit_fixture_modes() -> None:
     assert AutomationRequest(apply=True, linux_password="pass").boot_guardian_fault == "none"
     for mode in (
         "bios-rollback",
+        "bios-controller-disconnect",
+        "bios-postinstall-rollback",
         "boot-order",
         "bootnext-fallback",
         "bootnext-rollback",
@@ -552,11 +704,16 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
     monkeypatch.setattr(main_module, "operation_lock", lock)
     captured: list[tuple[list[str] | None, Path]] = []
     relayed_step = threading.Event()
+    monotonic_seconds = [0.0]
+    monkeypatch.setattr(
+        main_module, "time", SimpleNamespace(monotonic=lambda: monotonic_seconds[0])
+    )
     original_project_step = main_module.StreamEventProjector.project_step
 
     def project_step_and_signal(self, step):
         event = original_project_step(self, step)
         relayed_step.set()
+        monotonic_seconds[0] = 1.0
         return event
 
     class HangingAutomationService:
@@ -628,12 +785,106 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
     assert lock.held is False
 
 
+def test_json_automation_uses_isolated_timeout_and_captures_selected_vms(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+    captured: list[tuple[list[str] | None, Path]] = []
+    monotonic_seconds = [0.0]
+    monkeypatch.setattr(
+        main_module, "time", SimpleNamespace(monotonic=lambda: monotonic_seconds[0])
+    )
+    original_project_step = main_module.StreamEventProjector.project_step
+
+    def project_step_and_advance(self, step):
+        event = original_project_step(self, step)
+        monotonic_seconds[0] = 1.0
+        return event
+
+    monkeypatch.setattr(main_module.StreamEventProjector, "project_step", project_step_and_advance)
+
+    class HangingAutomationService:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+            on_step(
+                StepResult(
+                    step="automation.installed_boot_menu_seen",
+                    status="ok",
+                    message="GRUB menu detected",
+                    context={"vm": "vm2"},
+                )
+            )
+            time.sleep(5)
+            raise AssertionError("the timed-out worker must be terminated")
+
+    def capture_timeout_screens(_settings, selectors, workspace):
+        captured.append((selectors, workspace))
+        destination = workspace / "captures" / "timeout-vm2.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"png")
+        return {"vm2": str(destination)}, {}
+
+    monkeypatch.setattr(main_module, "AutomationService", HangingAutomationService)
+    monkeypatch.setattr(
+        main_module,
+        "_capture_automation_timeout_screens",
+        capture_timeout_screens,
+    )
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=0.05,
+    )
+
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation",
+            json={
+                "vms": ["vm2"],
+                "apply": True,
+                "source": "local",
+                "linux_password": "test-passphrase",
+            },
+        )
+
+    result = response.json()
+    assert response.status_code == 200
+    assert result["status"] == "error"
+    assert result["steps"][0]["step"] == "automation.inactivity_timeout"
+    assert result["steps"][0]["context"]["inactivity_timeout_seconds"] == 0.05
+    assert result["steps"][0]["context"]["active_steps"] == {
+        "vm2": "automation.installed_boot_menu_seen"
+    }
+    assert result["steps"][0]["context"]["captures"]["vm2"].endswith("timeout-vm2.png")
+    assert captured[0][0] == ["vm2"]
+    assert lock.release_calls == 1
+    assert lock.held is False
+
+
 def test_stream_inactivity_timeout_resets_after_each_progress_step(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     lock = FakeOperationLock()
     monkeypatch.setattr(main_module, "operation_lock", lock)
+    relayed_step = multiprocessing.Barrier(2)
+    monotonic_seconds = [0.0]
+    monkeypatch.setattr(
+        main_module, "time", SimpleNamespace(monotonic=lambda: monotonic_seconds[0])
+    )
+    original_project_step = main_module.StreamEventProjector.project_step
+
+    def project_step_and_advance(self, step):
+        event = original_project_step(self, step)
+        monotonic_seconds[0] += 0.03
+        relayed_step.wait(timeout=5)
+        return event
+
+    monkeypatch.setattr(main_module.StreamEventProjector, "project_step", project_step_and_advance)
 
     class ProgressingAutomationService:
         def __init__(self, _settings) -> None:
@@ -650,7 +901,7 @@ def test_stream_inactivity_timeout_resets_after_each_progress_step(
                 )
                 steps.append(step)
                 on_step(step)
-                time.sleep(0.03)
+                relayed_step.wait(timeout=5)
             return OperationResult(
                 status="ok",
                 operation="automation",

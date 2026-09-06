@@ -360,6 +360,7 @@ namespace Libertix.Pages
             string continueDownload = supportsByteRanges ? "true" : "false";
             return new[]
             {
+                "--no-conf=true",
                 "--allow-overwrite=true",
                 "--auto-file-renaming=false",
                 $"--continue={continueDownload}",
@@ -410,6 +411,7 @@ namespace Libertix.Pages
 
         private void CleanupTransactionDownloadsBestEffort()
         {
+            CleanupPendingWindowsPreferenceMigrationBundle();
             if (_installationPlan == null ||
                 string.IsNullOrWhiteSpace(_installationPlan.PlanId))
             {

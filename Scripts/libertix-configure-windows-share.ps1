@@ -611,16 +611,18 @@ function Install-ExplorerPinTasks {
 function Install-ExplorerShortcuts {
     param(
         [Parameter(Mandatory = $true)]$Config,
-        [Parameter(Mandatory = $true)][string]$LinuxHome
+        [Parameter(Mandatory = $true)][string]$LinuxHome,
+        [switch]$CurrentUserOnly
     )
 
-    $profileRoots = @(
-        Get-RealWindowsProfiles | ForEach-Object { [string]$_.LocalPath }
-    )
-    if ($env:USERPROFILE -like "$env:SystemDrive\Users\*" -and
-        (Test-Path -LiteralPath $env:USERPROFILE -PathType Container)) {
-        $profileRoots += $env:USERPROFILE
+    $profiles = @(Get-RealWindowsProfiles)
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $currentProfiles = @($profiles | Where-Object { [string]$_.SID -eq $currentSid })
+    if ($currentProfiles.Count -gt 1 -or ($CurrentUserOnly -and $currentProfiles.Count -ne 1)) {
+        throw "The current Windows user profile identity is missing or ambiguous."
     }
+    $selectedProfiles = if ($CurrentUserOnly) { $currentProfiles } else { $profiles }
+    $profileRoots = @($selectedProfiles | ForEach-Object { [string]$_.LocalPath })
     $profileRoots = @($profileRoots | Sort-Object -Unique)
     if ($profileRoots.Count -eq 0) {
         throw "No real Windows user profile is available for the Linux shortcut."
@@ -642,9 +644,9 @@ function Install-ExplorerShortcuts {
         Write-ShareLog "Explorer shortcut created: $shortcutPath"
     }
 
-    if ($env:USERPROFILE -like "$env:SystemDrive\Users\*") {
+    if ($currentProfiles.Count -eq 1) {
         $shellApplication = New-Object -ComObject Shell.Application
-        $junctionPath = Join-Path $env:USERPROFILE "Linux_$($Config.LinuxUsername)_read-only"
+        $junctionPath = Join-Path ([string]$currentProfiles[0].LocalPath) "Linux_$($Config.LinuxUsername)_read-only"
         if (Test-Path -LiteralPath $junctionPath) {
             $junction = Get-Item -LiteralPath $junctionPath -Force
             if (-not ($junction.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
@@ -877,7 +879,7 @@ try {
         if (-not $linuxHome) {
             throw "The Linux read-only home did not become available for Explorer pinning."
         }
-        Install-ExplorerShortcuts -Config $config -LinuxHome $linuxHome
+        Install-ExplorerShortcuts -Config $config -LinuxHome $linuxHome -CurrentUserOnly
         Write-ShareLog "Explorer pinning completed for $env:USERNAME."
         exit 0
     }

@@ -33,7 +33,11 @@ $script:InstallationPlanPropertySets = [ordered]@{
     )
     features = @(
         "shareWindowsFilesInLinux", "shareLinuxFilesInWindows",
-        "windowsProfilesJsonBase64"
+        "windowsProfilesJsonBase64", "windowsPreferenceMigration"
+    )
+    windowsPreferenceMigration = @(
+        "enabled", "bundleFileName", "bundleSha256", "bundleSizeBytes",
+        "wifiProfileCount"
     )
     runtime = @(
         "windowsBitLockerState",
@@ -95,6 +99,32 @@ function Assert-LibertixPlanProperty {
     }
 
     return $Object.$Name
+}
+
+function Test-LibertixSafeAbsoluteWindowsPath {
+    param([AllowNull()][string]$Value)
+
+    if (
+        [string]::IsNullOrWhiteSpace($Value) -or
+        $Value -notmatch '^[A-Za-z]:\\[^/]+$'
+    ) {
+        return $false
+    }
+
+    try {
+        $canonical = [IO.Path]::GetFullPath($Value).TrimEnd('\')
+        $supplied = $Value.TrimEnd('\')
+        if (-not $canonical.Equals($supplied, [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    } catch {
+        return $false
+    }
+
+    $segments = @($Value.Substring(3) -split '\\')
+    return @($segments | Where-Object {
+        [string]::IsNullOrEmpty($_) -or $_ -in @('.', '..') -or $_.Contains(':')
+    }).Count -eq 0
 }
 
 function Assert-LibertixMicrosoftUefiAuthorities {
@@ -285,7 +315,7 @@ function Assert-LibertixInstallationPlan {
     Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
 
     $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
-    if ([int]$schemaVersion -ne 3) {
+    if ([int]$schemaVersion -ne 4) {
         throw "Unsupported installation plan schemaVersion: $schemaVersion."
     }
 
@@ -348,8 +378,8 @@ function Assert-LibertixInstallationPlan {
     if ([string]$distribution.installerIsoFileName -match '[/\\]') {
         throw "Installation plan distribution.installerIsoFileName must be a file name, not a path."
     }
-    if ([string]$distribution.installerIsoWindowsPath -notmatch '^[A-Za-z]:[\\/]') {
-        throw "Installation plan distribution.installerIsoWindowsPath must be an absolute Windows drive path."
+    if (-not (Test-LibertixSafeAbsoluteWindowsPath -Value ([string]$distribution.installerIsoWindowsPath))) {
+        throw "Installation plan distribution.installerIsoWindowsPath must be an absolute safe Windows path."
     }
     Assert-LibertixSha256 `
         -Value (Assert-LibertixPlanProperty -Object $distribution -Name "installerIsoSha256" -Path "distribution.installerIsoSha256") `
@@ -361,8 +391,8 @@ function Assert-LibertixInstallationPlan {
     $locale = Assert-LibertixPlanProperty -Object $Plan -Name "locale" -Path "locale"
     Assert-LibertixExactPlanProperties -Object $locale -Path "locale" -PropertySet "locale"
     $languageCode = [string](Assert-LibertixPlanProperty -Object $locale -Name "languageCode" -Path "locale.languageCode")
-    if ($languageCode -notin @("en", "fr", "es")) {
-        throw "Installation plan field locale.languageCode must be one of: en, fr, es."
+    if ($languageCode -notin @("en", "fr", "es", "ko")) {
+        throw "Installation plan field locale.languageCode must be one of: en, fr, es, ko."
     }
     foreach ($name in @("systemLanguage", "keyboardLayout", "keyboardModel", "timezone")) {
         $value = [string](Assert-LibertixPlanProperty -Object $locale -Name $name -Path "locale.$name")
@@ -398,7 +428,7 @@ function Assert-LibertixInstallationPlan {
     if (@($script:InstallationPolicy.account.reservedUsernames) -icontains $username) {
         throw "Installation plan account.username is reserved by the operating system."
     }
-    if ($passwordHashWindowsPath -notmatch '^[A-Za-z]:\\' -or $passwordHashWindowsPath -match '(^|\\)\.\.(\\|$)') {
+    if (-not (Test-LibertixSafeAbsoluteWindowsPath -Value $passwordHashWindowsPath)) {
         throw "Installation plan account.passwordHashWindowsPath must be an absolute safe Windows path."
     }
     if ($computerName -notmatch '^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
@@ -592,6 +622,71 @@ function Assert-LibertixInstallationPlan {
         throw "Installation plan features.windowsProfilesJsonBase64 must not decode to an empty value."
     }
 
+    $preferenceMigration = Assert-LibertixPlanProperty `
+        -Object $features `
+        -Name "windowsPreferenceMigration" `
+        -Path "features.windowsPreferenceMigration"
+    Assert-LibertixExactPlanProperties `
+        -Object $preferenceMigration `
+        -Path "features.windowsPreferenceMigration" `
+        -PropertySet "windowsPreferenceMigration"
+    $migrationEnabled = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "enabled" `
+        -Path "features.windowsPreferenceMigration.enabled"
+    if ($migrationEnabled -isnot [bool]) {
+        throw "Installation plan field features.windowsPreferenceMigration.enabled must be a boolean."
+    }
+    $bundleFileName = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleFileName" `
+        -Path "features.windowsPreferenceMigration.bundleFileName"
+    $bundleSha256 = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleSha256" `
+        -Path "features.windowsPreferenceMigration.bundleSha256"
+    $bundleSizeBytes = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleSizeBytes" `
+        -Path "features.windowsPreferenceMigration.bundleSizeBytes"
+    $wifiProfileCount = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "wifiProfileCount" `
+        -Path "features.windowsPreferenceMigration.wifiProfileCount"
+    [int64]$parsedBundleSize = 0
+    [int]$parsedWifiCount = 0
+    if (-not $migrationEnabled) {
+        if (
+            $null -ne $bundleFileName -or
+            $null -ne $bundleSha256 -or
+            [int64]$bundleSizeBytes -ne 0 -or
+            [int]$wifiProfileCount -ne 0
+        ) {
+            throw "Disabled Windows preference migration must not describe a bundle."
+        }
+    } else {
+        if ([string]$bundleFileName -cne "windows-preferences.secret.json") {
+            throw "Windows preference migration must use the fixed transaction bundle name."
+        }
+        if ([string]$bundleSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Windows preference migration bundle hash must be a lowercase SHA-256 value."
+        }
+        if (
+            -not [int64]::TryParse([string]$bundleSizeBytes, [ref]$parsedBundleSize) -or
+            $parsedBundleSize -le 0 -or
+            $parsedBundleSize -gt 134217728
+        ) {
+            throw "Windows preference migration bundle size is outside the supported range."
+        }
+        if (
+            -not [int]::TryParse([string]$wifiProfileCount, [ref]$parsedWifiCount) -or
+            $parsedWifiCount -lt 0 -or
+            $parsedWifiCount -gt 256
+        ) {
+            throw "Windows preference migration Wi-Fi profile count is outside the supported range."
+        }
+    }
+
     $runtime = Assert-LibertixPlanProperty -Object $Plan -Name "runtime" -Path "runtime"
     Assert-LibertixExactPlanProperties `
         -Object $runtime `
@@ -659,8 +754,7 @@ function Assert-LibertixInstallationPlan {
     if (
         $hasRecoveryRoot -and
         (
-            [string]$recoveryRoot -notmatch '^[A-Za-z]:\\' -or
-            [string]$recoveryRoot -match '(^|\\)\.\.(\\|$)'
+            -not (Test-LibertixSafeAbsoluteWindowsPath -Value ([string]$recoveryRoot))
         )
     ) {
         throw "Installation plan runtime.recoveryRootWindows must be an absolute safe Windows path."
@@ -679,6 +773,18 @@ function Assert-LibertixInstallationPlan {
     foreach ($entry in $windowsPaths.GetEnumerator()) {
         if ($entry.Value.Substring(0, 2).ToUpperInvariant() -ne ([string]$disk.systemDrive)) {
             throw "Installation plan $($entry.Key) must be located on disk.systemDrive."
+        }
+    }
+    if ($hasRecoveryRoot) {
+        $expectedPasswordHashPath = Join-Path ([string]$recoveryRoot) "account-secret.env"
+        if (
+            [IO.Path]::GetFullPath($passwordHashWindowsPath) -ne
+            [IO.Path]::GetFullPath($expectedPasswordHashPath)
+        ) {
+            throw (
+                "Installation plan account.passwordHashWindowsPath must be the plan-owned " +
+                "account-secret.env under runtime.recoveryRootWindows."
+            )
         }
     }
     $expectedInstallerIsoPath = Join-Path `

@@ -49,6 +49,8 @@ namespace Libertix.Pages
                 _state = JsonSerializer.Deserialize<UefiRecoveryState>(File.ReadAllText(_statePath));
                 if (_state == null || string.IsNullOrWhiteSpace(_state.PayloadRoot) || string.IsNullOrWhiteSpace(_state.ConfigPath))
                     throw new InvalidOperationException(Localization.GetString("UefiFallbackStateIncomplete"));
+                if (_state.Phase == "FallbackProcessStateUnknown")
+                    throw new InvalidOperationException(Localization.GetString("UefiFallbackTerminationFailed"));
                 if (IsPreferredPathPhase(_state.Phase))
                 {
                     ConfigurePreferredPathFlow();
@@ -88,19 +90,20 @@ namespace Libertix.Pages
 
         private async void FallbackButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_running || _state == null)
+            if (_running || _state == null || _state.Phase == "FallbackProcessStateUnknown")
                 return;
 
             _running = true;
+            _installationState.SetInstallationRunning(true);
             FallbackButton.IsEnabled = false;
             CancelButton.IsEnabled = false;
             CurrentStepText.Text = Localization.GetString("UefiFallbackPreparingFirmware");
             ProgressBar.Value = 20;
 
-            string script = Path.Combine(_state.PayloadRoot, "Scripts", "libertix-uefi-install.ps1");
-            string powershell = WindowsProcessRunner.ResolvePowerShell();
             try
             {
+                string script = Path.Combine(_state.PayloadRoot, "Scripts", "libertix-uefi-install.ps1");
+                string powershell = WindowsProcessRunner.ResolvePowerShell();
                 int exitCode;
                 if (_preferredPathFlow)
                 {
@@ -181,15 +184,17 @@ namespace Libertix.Pages
             finally
             {
                 _running = false;
+                _installationState.SetInstallationRunning(false);
             }
         }
 
         private async void CancelButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_running || _state == null)
+            if (_running || _state == null || _state.Phase == "FallbackProcessStateUnknown")
                 return;
 
             _running = true;
+            _installationState.SetInstallationRunning(true);
             FallbackButton.IsEnabled = false;
             CancelButton.IsEnabled = false;
             CurrentStepText.Text = Localization.GetString("UefiFallbackRestoring");
@@ -204,10 +209,21 @@ namespace Libertix.Pages
                 CurrentStepText.Text = Localization.GetString("UefiFallbackWindowsRestored");
                 Log(Localization.GetString("UefiFallbackCancelledLog"));
                 await Task.Delay(1200);
+                _installationState.SetInstallationRunning(false);
+                (Application.Current.MainWindow as MainWindow)?.PrepareForSystemRestart();
                 Application.Current.Shutdown(0);
             }
             catch (ProcessTreeTerminationException ex)
             {
+                _state.Phase = "FallbackProcessStateUnknown";
+                try
+                {
+                    SaveState();
+                }
+                catch (Exception stateError)
+                {
+                    Log(Localization.GetString("UefiFallbackErrorPrefix") + stateError.Message);
+                }
                 CurrentStepText.Text = Localization.GetString("UefiFallbackTerminationFailed");
                 Log(Localization.GetString("UefiFallbackErrorPrefix") + ex.Message);
             }
@@ -221,6 +237,7 @@ namespace Libertix.Pages
             finally
             {
                 _running = false;
+                _installationState.SetInstallationRunning(false);
             }
         }
 
@@ -333,9 +350,17 @@ namespace Libertix.Pages
                             Log(Localization.GetString("UefiFallbackTimeoutLog"))));
                         return -1;
                     }
-                    WindowsProcessRunner.WaitForRedirectedStreams(
-                        outputClosed.Task,
-                        errorClosed.Task);
+                    try
+                    {
+                        WindowsProcessRunner.WaitForRedirectedStreams(
+                            outputClosed.Task, errorClosed.Task);
+                        WindowsProcessRunner.AssertSafeExitCode(process.ExitCode);
+                    }
+                    catch (UnterminatedProcessException)
+                    {
+                        throw new ProcessTreeTerminationException(
+                            Localization.GetString("UefiFallbackTerminationFailed"));
+                    }
                     return process.ExitCode;
                 }
             });

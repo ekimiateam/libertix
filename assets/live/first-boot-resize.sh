@@ -122,4 +122,4 @@ trap - ERR TERM INT HUP
 rm -f /etc/systemd/system/first-boot-resize.service \
     /usr/local/bin/first-boot-resize.sh \
     >> "$LOG" 2>&1 || echo "One-shot service files could not be fully retired." >> "$LOG"
-rm -f "$VERIFIER" >> "$LOG" 2>&1 || echo "Verifier could not be retired." >> "$LOG"
+# The read-only sharing verifier remains available for later cross-OS checks.

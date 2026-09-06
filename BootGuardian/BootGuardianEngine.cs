@@ -169,12 +169,33 @@ namespace Libertix.BootGuardian
                     throw new InvalidOperationException("ESP ownership marker differs from the recorded installation.");
 
                 string manifestPath = ResolveUnderRoot(mount.Root, config.PreferredPath.ManifestPath);
+                PreferredSynchronization.Replay(mount.Root, config.RunId, deadline.ThrowIfExpired);
                 PreferredManifest manifest = PreferredManifest.Read(manifestPath);
                 if (manifest == null || manifest.Version != 1 || manifest.RunId != config.RunId ||
                     manifest.Status != "installed" || manifest.Preferred == null)
                     throw new InvalidDataException("Preferred boot manifest identity or status is invalid.");
 
                 string referenceRoot = ResolveUnderRoot(mount.Root, config.PreferredPath.ReferenceRoot);
+                string activeLoader = ResolveUnderRoot(mount.Root, @"EFI\Microsoft\Boot\bootmgfw.efi");
+                string backupLoader = ResolveUnderRoot(mount.Root, @"EFI\Microsoft\Boot\bootmgfw.libertix-windows.efi");
+                if (manifest.WindowsLoader == null || !Hashing.IsSha256(manifest.WindowsLoader.Sha256) ||
+                    !File.Exists(backupLoader) || Hashing.Sha256File(backupLoader) != manifest.WindowsLoader.Sha256)
+                    throw new InvalidDataException("The preserved Windows Boot Manager does not match its manifest.");
+                string activeHash = File.Exists(activeLoader) ? Hashing.Sha256File(activeLoader) : null;
+                if (activeHash != null && activeHash != manifest.Preferred.ShimSha256 &&
+                    activeHash != manifest.WindowsLoader.Sha256 &&
+                    WindowsBootLoaderTrust.IsCurrentWindowsLoader(activeLoader, activeHash))
+                {
+                    deadline.ThrowIfExpired();
+                    ArchiveUnexpected(config, backupLoader, manifest.WindowsLoader.Sha256,
+                        "previous-windows-bootmgfw.efi", deadline);
+                    ArchiveUnexpected(config, activeLoader, activeHash, "updated-windows-bootmgfw.efi", deadline);
+                    manifest.WindowsLoader.Sha256 = activeHash;
+                    journal.Repair("Preserving the verified Windows Boot Manager update before restoring shim. sha256=" + activeHash);
+                    PreferredSynchronization.PublishWindowsLoaderUpdate(mount.Root, manifest,
+                        activeLoader, referenceRoot, deadline.ThrowIfExpired);
+                    manifest = PreferredManifest.Read(manifestPath);
+                }
                 var files = new[]
                 {
                     new RepairFile("grubx64.efi", @"EFI\Microsoft\Boot\grubx64.efi", manifest.Preferred.GrubSha256),

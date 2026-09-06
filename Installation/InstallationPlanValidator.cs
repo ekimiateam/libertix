@@ -65,6 +65,7 @@ namespace Libertix.Installation
             ValidateDevelopment(plan.Development, errors);
             ValidateWindowsPathDrives(plan, errors);
             ValidateTransactionArtifactPath(plan, errors);
+            ValidateRecoveryArtifactPaths(plan, errors);
 
             if (errors.Count > 0)
                 throw new InstallationPlanValidationException(errors);
@@ -148,6 +149,68 @@ namespace Libertix.Installation
                 $"{pathName} must be located on disk.systemDrive.");
         }
 
+        private static void ValidateRecoveryArtifactPaths(
+            InstallationPlan plan,
+            ICollection<string> errors)
+        {
+            if (plan.Account == null || plan.Runtime == null ||
+                string.IsNullOrWhiteSpace(plan.Account.PasswordHashWindowsPath) ||
+                string.IsNullOrWhiteSpace(plan.Runtime.RecoveryRootWindows))
+            {
+                return;
+            }
+
+            try
+            {
+                string expected = Path.Combine(
+                    plan.Runtime.RecoveryRootWindows,
+                    "account-secret.env");
+                Require(
+                    string.Equals(
+                        Path.GetFullPath(plan.Account.PasswordHashWindowsPath),
+                        Path.GetFullPath(expected),
+                        StringComparison.OrdinalIgnoreCase),
+                    errors,
+                    "account.passwordHashWindowsPath must be the plan-owned " +
+                    "account-secret.env under runtime.recoveryRootWindows.");
+            }
+            catch (Exception)
+            {
+                errors.Add(
+                    "account.passwordHashWindowsPath must be the plan-owned " +
+                    "account-secret.env under runtime.recoveryRootWindows.");
+            }
+        }
+
+        private static bool IsSafeAbsoluteWindowsPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) ||
+                !Regex.IsMatch(path, @"^[A-Za-z]:\\[^/]+$", RegexOptions.CultureInvariant))
+            {
+                return false;
+            }
+
+            try
+            {
+                string canonical = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar);
+                string supplied = path.TrimEnd(Path.DirectorySeparatorChar);
+                if (!string.Equals(canonical, supplied, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                return path.Substring(3)
+                    .Split(Path.DirectorySeparatorChar)
+                    .All(segment =>
+                        !string.IsNullOrEmpty(segment) &&
+                        segment != "." &&
+                        segment != ".." &&
+                        segment.IndexOf(':') < 0);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         private static void ValidateDistribution(
             InstallationDistribution distribution,
             ICollection<string> errors)
@@ -189,10 +252,9 @@ namespace Libertix.Installation
                 "distribution.installerIsoWindowsPath",
                 errors);
             Require(
-                AbsoluteWindowsPathPattern.IsMatch(
-                    distribution.InstallerIsoWindowsPath ?? string.Empty),
+                IsSafeAbsoluteWindowsPath(distribution.InstallerIsoWindowsPath),
                 errors,
-                "distribution.installerIsoWindowsPath must be an absolute Windows drive path.");
+                "distribution.installerIsoWindowsPath must be an absolute safe Windows path.");
             RequireSha256(
                 distribution.InstallerIsoSha256,
                 "distribution.installerIsoSha256",
@@ -266,11 +328,7 @@ namespace Libertix.Installation
             Require(AccountPolicy.IsValidUsername(account.Username), errors,
                 "account.username is not a valid Linux username.");
             Require(
-                !string.IsNullOrWhiteSpace(account.PasswordHashWindowsPath) &&
-                Regex.IsMatch(
-                    account.PasswordHashWindowsPath,
-                    @"^[A-Za-z]:\\(?!.*(?:^|\\)\.\.(?:\\|$)).+$",
-                    RegexOptions.CultureInvariant),
+                IsSafeAbsoluteWindowsPath(account.PasswordHashWindowsPath),
                 errors,
                 "account.passwordHashWindowsPath must be an absolute safe Windows path.");
             Require(AccountPolicy.IsValidComputerName(account.ComputerName), errors,
@@ -341,11 +399,12 @@ namespace Libertix.Installation
             ValidatePartition(disk.Boot, "disk.boot", disk.LogicalSectorSizeBytes, errors);
             ValidatePartition(disk.Recovery, "disk.recovery", disk.LogicalSectorSizeBytes, errors);
             ValidateInstallerPartition(disk.Installer, disk.LogicalSectorSizeBytes, errors);
-            ValidateDiskGeometry(disk, errors);
+            ValidateDiskGeometry(disk, isBios, errors);
         }
 
         private static void ValidateDiskGeometry(
             InstallationDisk disk,
+            bool isBios,
             ICollection<string> errors)
         {
             if (disk.Windows == null || disk.Boot == null || disk.Recovery == null ||
@@ -377,7 +436,11 @@ namespace Libertix.Installation
                     bool overlap =
                         fixedPartitions[left].OffsetBytes < ends[right] &&
                         fixedPartitions[right].OffsetBytes < ends[left];
-                    Require(!overlap, errors,
+                    bool sameBiosWindowsBootPartition = isBios && left == 0 && right == 1 &&
+                        disk.Windows.Number == disk.Boot.Number &&
+                        disk.Windows.OffsetBytes == disk.Boot.OffsetBytes &&
+                        disk.Windows.SizeBytes == disk.Boot.SizeBytes;
+                    Require(!overlap || sameBiosWindowsBootPartition, errors,
                         $"{fixedPartitionNames[left]} and {fixedPartitionNames[right]} overlap.");
                 }
             }
@@ -551,6 +614,46 @@ namespace Libertix.Installation
             {
                 errors.Add("features.windowsProfilesJsonBase64 must be valid Base64.");
             }
+
+            InstallationPreferenceMigration migration = features.WindowsPreferenceMigration;
+            if (migration == null)
+            {
+                errors.Add("features.windowsPreferenceMigration is required.");
+                return;
+            }
+
+            if (!migration.Enabled)
+            {
+                Require(string.IsNullOrEmpty(migration.BundleFileName), errors,
+                    "Disabled Windows preference migration must not name a bundle.");
+                Require(string.IsNullOrEmpty(migration.BundleSha256), errors,
+                    "Disabled Windows preference migration must not contain a bundle hash.");
+                Require(migration.BundleSizeBytes == 0, errors,
+                    "Disabled Windows preference migration bundle size must be zero.");
+                Require(migration.WifiProfileCount == 0, errors,
+                    "Disabled Windows preference migration Wi-Fi profile count must be zero.");
+                return;
+            }
+
+            Require(
+                string.Equals(
+                    migration.BundleFileName,
+                    WindowsPreferenceMigrationContract.BundleFileName,
+                    StringComparison.Ordinal),
+                errors,
+                "Windows preference migration must use the fixed transaction bundle name.");
+            Require(Sha256Pattern.IsMatch(migration.BundleSha256 ?? string.Empty), errors,
+                "Windows preference migration bundle hash must be a lowercase SHA-256 value.");
+            Require(
+                migration.BundleSizeBytes > 0 &&
+                migration.BundleSizeBytes <= WindowsPreferenceMigrationContract.MaximumBundleBytes,
+                errors,
+                "Windows preference migration bundle size is outside the supported range.");
+            Require(
+                migration.WifiProfileCount >= 0 &&
+                migration.WifiProfileCount <= WindowsPreferenceMigrationContract.MaximumWifiProfiles,
+                errors,
+                "Windows preference migration Wi-Fi profile count is outside the supported range.");
         }
 
         private static void ValidateRuntime(
@@ -572,16 +675,14 @@ namespace Libertix.Installation
                     runtime.WindowsBitLockerState,
                     InstallationBitLockerState.NotEncryptable,
                     StringComparison.Ordinal);
-            bool pendingUefiDecryption = string.Equals(
-                    firmware,
-                    InstallationFirmware.Uefi,
-                    StringComparison.Ordinal) &&
-                string.Equals(
+            // The Windows preparation plan exists before recovery is armed and
+            // decryption starts. The live validator still requires full decryption.
+            bool pendingWindowsDecryption = string.Equals(
                     runtime.WindowsBitLockerState,
                     InstallationBitLockerState.EncryptedOrProtected,
                     StringComparison.Ordinal);
             Require(
-                safeBitLockerState || pendingUefiDecryption,
+                safeBitLockerState || pendingWindowsDecryption,
                 errors,
                 "runtime.windowsBitLockerState is invalid for the selected firmware.");
 
@@ -629,11 +730,7 @@ namespace Libertix.Installation
             {
                 RequireNotBlank(runtime.RecoveryRootWindows, "runtime.recoveryRootWindows", errors);
                 Require(
-                    !string.IsNullOrWhiteSpace(runtime.RecoveryRootWindows) &&
-                    Regex.IsMatch(
-                        runtime.RecoveryRootWindows,
-                        @"^[A-Za-z]:\\(?!.*(?:^|\\)\.\.(?:\\|$)).+$",
-                        RegexOptions.CultureInvariant),
+                    IsSafeAbsoluteWindowsPath(runtime.RecoveryRootWindows),
                     errors,
                     "runtime.recoveryRootWindows must be an absolute safe Windows path.");
             }

@@ -79,7 +79,7 @@ configure_windows_mount() {
 
 configure_windows_profile_shortcuts() {
     [ "$SHARE_WINDOWS_FILES_IN_LINUX" = "true" ] || return 0
-    local home_dir bookmarks profile shortcut profiles_output
+    local home_dir bookmarks profile shortcut profiles_output bookmark_uri
     home_dir="/home/$USERNAME"
     bookmarks="$home_dir/.config/gtk-3.0/bookmarks"
     mkdir -p "$(dirname "$bookmarks")"
@@ -102,7 +102,8 @@ PY
         case "$profile" in .|..|*/*) echo "Invalid Windows profile name: $profile" >&2; exit 1 ;; esac
         shortcut="User_$profile"
         ln -sfn "/mnt/windows/Users/$profile" "$home_dir/$shortcut"
-        printf 'file://%s/%s %s\n' "$home_dir" "$shortcut" "$shortcut" >> "$bookmarks"
+        bookmark_uri=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).as_uri())' "$home_dir/$shortcut") || return 1
+        printf '%s %s\n' "$bookmark_uri" "$shortcut" >> "$bookmarks"
     done <<< "$profiles_output"
     chown -h "$USERNAME:$USERNAME" "$home_dir"/User_* 2>/dev/null || true
     chown -R "$USERNAME:$USERNAME" "$home_dir/.config"
@@ -111,6 +112,22 @@ PY
 configure_windows_readonly_request() {
     mkdir -p /etc/libertix
     printf '%s\n' "$SHARE_LINUX_FILES_IN_WINDOWS" > /etc/libertix/share-linux-in-windows
+}
+
+configure_windows_preferences() {
+    [ "$WINDOWS_PREFERENCE_MIGRATION_ENABLED" = "true" ] || {
+        echo "Windows preference migration disabled by the user."
+        return 0
+    }
+    [ -f /tmp/windows-preferences.secret.json ] || {
+        echo "Windows preference migration bundle is missing" >&2
+        return 1
+    }
+    /tmp/libertix-apply-windows-preferences.py apply \
+        /tmp/windows-preferences.secret.json \
+        "$INSTALLATION_PLAN_ID" \
+        "$USERNAME" \
+        "$WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT"
 }
 
 configure_locale() {
@@ -491,6 +508,7 @@ main() {
     configure_windows_mount
     configure_windows_profile_shortcuts
     configure_windows_readonly_request
+    configure_windows_preferences
     configure_locale
     configure_keyboard
     configure_timezone

@@ -33,6 +33,24 @@ namespace Libertix.Tests
             CollectionAssert.Contains(arguments, "--continue=false");
             CollectionAssert.Contains(arguments, "--max-connection-per-server=1");
             CollectionAssert.Contains(arguments, "--split=1");
+            CollectionAssert.Contains(arguments, "--no-conf=true");
+        }
+
+        [DataTestMethod]
+        [DataRow("0.3", false)]
+        [DataRow("0.4-alpha", false)]
+        [DataRow("dev_123abcd", true)]
+        public void DevelopmentSshRequiresADevelopmentBuild(string version, bool allowed)
+        {
+            Assert.IsTrue(StartupOptions.TryParse(new[] {
+                "--dev-ssh-static-ip", "198.51.100.20",
+                "--dev-ssh-prefix-length", "24",
+                "--dev-ssh-gateway", "198.51.100.1",
+                "--dev-ssh-dns", "198.51.100.1"
+            }, out StartupOptions options, out string error), error);
+            Assert.AreEqual(allowed, options.TryValidateBuild(ApplicationBuild.Parse(version), out error));
+            Assert.AreEqual(allowed, error == null);
+            Assert.IsTrue(new StartupOptions().TryValidateBuild(ApplicationBuild.Parse(version), out error));
         }
 
         [TestMethod]
@@ -57,6 +75,171 @@ namespace Libertix.Tests
             Assert.AreEqual(
                 "[ERROR] Problème réseau",
                 WindowsProcessRunner.NormalizeTerminalText(diagnostic));
+        }
+
+        [TestMethod]
+        public void WindowsWifiParserAcceptsOpenOweWpa2AndWpa3PersonalProfiles()
+        {
+            WindowsWifiProfile open = WindowsWifiProfileReader.ParseProfile(
+                "Cafe",
+                WifiProfileXml("Cafe", "open", "none", null));
+            WindowsWifiProfile owe = WindowsWifiProfileReader.ParseProfile(
+                "Cafe Enhanced Open",
+                WifiProfileXml("Cafe Enhanced Open", "OWE", "AES", null));
+            WindowsWifiProfile wpa2 = WindowsWifiProfileReader.ParseProfile(
+                "Home WPA2",
+                WifiProfileXml("Home", "WPA2PSK", "AES", "test-password"));
+            WindowsWifiProfile wpa3 = WindowsWifiProfileReader.ParseProfile(
+                "Home WPA3",
+                WifiProfileXml("Home 3", "WPA3SAE", "AES", "sae-password"));
+
+            Assert.AreEqual("open", open.Security);
+            Assert.IsNull(open.Secret);
+            Assert.AreEqual("owe", owe.Security);
+            Assert.IsNull(owe.Secret);
+            Assert.AreEqual("wpa-psk", wpa2.Security);
+            Assert.AreEqual("test-password", wpa2.Secret);
+            Assert.AreEqual("sae", wpa3.Security);
+            Assert.AreEqual("sae-password", wpa3.Secret);
+        }
+
+        [TestMethod]
+        public void WifiServiceFailureIsNotReportedAsAnEmptyProfileList()
+        {
+            WindowsWifiProfileReader.AssertClientOpened(0);
+            foreach (int errorCode in new[] { 1062, 5, 1722 })
+            {
+                var error = Assert.ThrowsException<System.ComponentModel.Win32Exception>(
+                    () => WindowsWifiProfileReader.AssertClientOpened(errorCode));
+                Assert.AreEqual(errorCode, error.NativeErrorCode);
+            }
+        }
+
+        [DataTestMethod]
+        [DataRow("true", "wpa-psk")]
+        [DataRow("1", "wpa-psk")]
+        [DataRow("false", "sae")]
+        [DataRow("0", "sae")]
+        public void WifiWpa3TransitionModePreservesAllowedAuthentication(string transition, string expected)
+        {
+            string xml = WifiProfileXml("Home", "WPA3SAE", "AES", "test-password")
+                .Replace("</authEncryption>",
+                    "<transitionMode xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v4\">" +
+                    transition + "</transitionMode></authEncryption>");
+            WindowsWifiProfile profile = WindowsWifiProfileReader.ParseProfile("Home", xml);
+            Assert.AreEqual(expected, profile.Security);
+            Assert.AreEqual("test-password", profile.Secret);
+        }
+
+        [TestMethod]
+        public void WifiWpa3InvalidTransitionModeIsNotSilentlyDowngraded()
+        {
+            string xml = WifiProfileXml("Home", "WPA3SAE", "AES", "test-password")
+                .Replace("</authEncryption>", "<transitionMode>invalid</transitionMode></authEncryption>");
+            Assert.ThrowsException<InvalidOperationException>(
+                () => WindowsWifiProfileReader.ParseProfile("Home", xml));
+        }
+
+        [TestMethod]
+        public void WindowsWifiParserExcludesWepAndEnterpriseProfiles()
+        {
+            Assert.IsNull(WindowsWifiProfileReader.ParseProfile(
+                "Legacy",
+                WifiProfileXml("Legacy", "open", "WEP", "abcde")));
+            Assert.IsNull(WindowsWifiProfileReader.ParseProfile(
+                "Enterprise",
+                WifiProfileXml("Enterprise", "WPA2", "AES", null)));
+            Assert.IsNull(WindowsWifiProfileReader.ParseProfile(
+                "Open 802.1X",
+                WifiProfileXml("Open 802.1X", "open", "none", null)
+                    .Replace("<useOneX>false</useOneX>", "<useOneX>true</useOneX>")));
+        }
+
+        [TestMethod]
+        public void WindowsWifiParserRequiresTheStoredPersonalSecret()
+        {
+            Assert.ThrowsException<InvalidOperationException>(() =>
+                WindowsWifiProfileReader.ParseProfile(
+                    "Home",
+                    WifiProfileXml("Home", "WPA2PSK", "AES", null)));
+        }
+
+        [TestMethod]
+        public void WindowsWifiParserRejectsEncryptedStoredPersonalSecret()
+        {
+            string encryptedProfile = WifiProfileXml(
+                "Home",
+                "WPA2PSK",
+                "AES",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .Replace("<protected>false</protected>", "<protected>true</protected>");
+
+            InvalidOperationException exception = Assert.ThrowsException<InvalidOperationException>(
+                () => WindowsWifiProfileReader.ParseProfile("Home", encryptedProfile));
+            StringAssert.Contains(exception.Message, "plaintext");
+        }
+
+        [TestMethod]
+        public void WindowsPreferenceCollectorCreatesAValidatedInMemoryBundle()
+        {
+            var profiles = new[] { WindowsWifiProfileReader.ParseProfile("Home",
+                WifiProfileXml("Home", "WPA2PSK", "AES", "test-password")) };
+            string json = WindowsPreferenceCollector.Serialize(PlanId, profiles, out int wifiProfileCount);
+            using (JsonDocument document = JsonDocument.Parse(json))
+            {
+                Assert.AreEqual(1, document.RootElement.GetProperty("schemaVersion").GetInt32());
+                Assert.AreEqual(PlanId, document.RootElement.GetProperty("planId").GetString());
+                Assert.AreEqual(1, wifiProfileCount);
+                Assert.AreEqual(
+                    wifiProfileCount,
+                    document.RootElement.GetProperty("wifiProfiles").GetArrayLength());
+                string primaryButton = document.RootElement
+                    .GetProperty("preferences")
+                    .GetProperty("primaryMouseButton")
+                    .GetString();
+                CollectionAssert.Contains(new[] { "left", "right" }, primaryButton);
+            }
+        }
+
+        [TestMethod]
+        public void KeyboardRepeatConversionPreservesWindowsRangeDirection()
+        {
+            Assert.AreEqual((uint)400, WindowsPreferenceCollector.ConvertKeyboardSpeedToInterval(0));
+            Assert.AreEqual((uint)33, WindowsPreferenceCollector.ConvertKeyboardSpeedToInterval(31));
+        }
+
+        [TestMethod]
+        public void InstallationPlanAcceptsASecretFreePreferenceMigrationManifest()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Features.WindowsPreferenceMigration = new InstallationPreferenceMigration
+            {
+                Enabled = true,
+                BundleFileName = WindowsPreferenceMigrationContract.BundleFileName,
+                BundleSha256 = new string('e', 64),
+                BundleSizeBytes = 4096,
+                WifiProfileCount = 3
+            };
+
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsAPreferenceMigrationBundleWithAnotherName()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Features.WindowsPreferenceMigration = new InstallationPreferenceMigration
+            {
+                Enabled = true,
+                BundleFileName = "other.json",
+                BundleSha256 = new string('e', 64),
+                BundleSizeBytes = 4096
+            };
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+            StringAssert.Contains(exception.Message, "fixed transaction bundle name");
         }
 
         [TestMethod]
@@ -150,10 +333,24 @@ namespace Libertix.Tests
         {
             var incomplete = new TaskCompletionSource<bool>();
 
-            Assert.ThrowsException<InvalidOperationException>(() =>
+            Assert.ThrowsException<UnterminatedProcessException>(() =>
                 WindowsProcessRunner.WaitForRedirectedStreams(
                     TimeSpan.FromMilliseconds(20),
                     incomplete.Task));
+        }
+
+        [TestMethod]
+        public void ChildProcessTerminationFailureCannotBecomeAnOrdinaryExitCode()
+        {
+            WindowsProcessRunner.AssertSafeExitCode(0);
+            WindowsProcessRunner.AssertSafeExitCode(1);
+            Assert.ThrowsException<UnterminatedProcessException>(() =>
+                WindowsProcessRunner.AssertSafeExitCode(173));
+            Assert.ThrowsException<UnterminatedProcessException>(() =>
+                WindowsProcessRunner.Run(
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+                    "/d /c exit 173",
+                    TimeSpan.FromSeconds(30)));
         }
 
         [TestMethod]
@@ -495,7 +692,7 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
-        public void InstallationPlanValidatorRejectsPendingBiosBitLockerDecryption()
+        public void InstallationPlanValidatorAcceptsPendingBiosBitLockerDecryptionBeforePreparation()
         {
             InstallationPlan plan = CreateValidPlan();
             plan.Firmware = InstallationFirmware.Bios;
@@ -507,11 +704,7 @@ namespace Libertix.Tests
             plan.Runtime.WindowsBitLockerState =
                 InstallationBitLockerState.EncryptedOrProtected;
 
-            InstallationPlanValidationException exception =
-                Assert.ThrowsException<InstallationPlanValidationException>(
-                    () => InstallationPlanValidator.Validate(plan));
-
-            StringAssert.Contains(exception.Message, "windowsBitLockerState is invalid");
+            InstallationPlanValidator.Validate(plan);
         }
 
         [TestMethod]
@@ -525,6 +718,33 @@ namespace Libertix.Tests
                     () => InstallationPlanValidator.Validate(plan));
 
             StringAssert.Contains(exception.Message, "UEFI plan requires a GPT disk");
+        }
+
+        [DataTestMethod]
+        [DataRow(true, true)]
+        [DataRow(true, false)]
+        [DataRow(false, true)]
+        public void SharedWindowsBootPartitionRequiresExactBiosIdentity(bool bios, bool sameNumber)
+        {
+            InstallationPlan plan = CreateValidPlan();
+            if (bios)
+            {
+                plan.Firmware = InstallationFirmware.Bios;
+                plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+                plan.Disk.PartitionTableId = "mbr:12345678";
+                plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+                plan.Runtime.SecureBootEnabled = false;
+                plan.Runtime.TrustedMicrosoftUefiAuthorities = new string[0];
+            }
+            plan.Disk.Boot = new PartitionIdentity {
+                Number = plan.Disk.Windows.Number + (sameNumber ? 0 : 1),
+                OffsetBytes = plan.Disk.Windows.OffsetBytes,
+                SizeBytes = plan.Disk.Windows.SizeBytes
+            };
+            if (bios && sameNumber)
+                InstallationPlanValidator.Validate(plan);
+            else
+                Assert.ThrowsException<InstallationPlanValidationException>(() => InstallationPlanValidator.Validate(plan));
         }
 
         [TestMethod]
@@ -743,6 +963,12 @@ namespace Libertix.Tests
             Assert.AreEqual(
                 0d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(10d, 35d, 3d));
+            Assert.AreEqual(
+                49d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 12d, 3d));
+            Assert.AreEqual(
+                0d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 7.99d, 3d));
             Assert.AreEqual(10, InstallationSizePolicy.TargetWindowsFreeSpaceGiB);
             Assert.AreEqual(2, InstallationSizePolicy.WindowsFreeSpaceToleranceGiB);
             Assert.AreEqual(8, InstallationSizePolicy.MinimumWindowsFreeSpaceGiB);
@@ -1025,7 +1251,7 @@ namespace Libertix.Tests
                     SystemLanguage = "en_US.UTF-8",
                     Timezone = "Etc/UTC",
                     SystemDriveRoot = @"C:\",
-                    PasswordHashWindowsPath = @"C:\ProgramData\Libertix\account-secret.env",
+                    PasswordHashWindowsPath = @"C:\ProgramData\Libertix\Recovery\account-secret.env",
                     WindowsProfilesJsonBase64 = "W10=",
                     RecoveryRootWindows = @"C:\ProgramData\Libertix\Recovery",
                     RecoveryRunId = new string('d', 32)
@@ -1089,6 +1315,7 @@ namespace Libertix.Tests
         [DataRow("0000100C", "ch", "fr", false)]
         [DataRow("0000040A", "es", "winkeys", false)]
         [DataRow("0000080A", "latam", "", false)]
+        [DataRow("00000412", "kr", "", false)]
         [DataRow("A000040C", "fr", "", true)]
         [DataRow("not-a-klid", "us", "", true)]
         public void WindowsKeyboardIdentifiersResolveToExpectedXkbConfiguration(
@@ -1136,13 +1363,52 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void InstallationPlanRejectsMixedSeparatorTraversalInRecoveryPaths()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Distribution.InstallerIsoWindowsPath =
+                @"C:\ProgramData\Libertix\Downloads\" + PlanId +
+                @"\safe/../mint.iso";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+
+            plan = CreateValidPlan();
+            plan.Account.PasswordHashWindowsPath =
+                @"C:\ProgramData\Libertix\Recovery\safe/../../account-secret.env";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+
+            plan = CreateValidPlan();
+            plan.Runtime.RecoveryRootWindows =
+                @"C:\ProgramData\Libertix\Recovery\safe/../escaped";
+            plan.Account.PasswordHashWindowsPath =
+                @"C:\ProgramData\Libertix\Recovery\safe/../escaped\account-secret.env";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        [TestMethod]
+        public void InstallationPlanRequiresTheSecretUnderItsRecoveryRoot()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Account.PasswordHashWindowsPath =
+                @"C:\ProgramData\Libertix\Other\account-secret.env";
+
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        [TestMethod]
         public void InstallationPlanAcceptsConsistentNonCSystemDrivePaths()
         {
             InstallationPlan plan = CreateValidPlan();
             plan.Disk.SystemDrive = "D:";
             plan.Distribution.InstallerIsoWindowsPath =
                 @"D:\ProgramData\Libertix\Downloads\" + PlanId + @"\mint.iso";
-            plan.Account.PasswordHashWindowsPath = @"D:\ProgramData\Libertix\account-secret.env";
+            plan.Account.PasswordHashWindowsPath = @"D:\ProgramData\Libertix\Recovery\account-secret.env";
             plan.Runtime.RecoveryRootWindows = @"D:\ProgramData\Libertix\Recovery";
 
             InstallationPlanValidator.Validate(plan);
@@ -1226,6 +1492,59 @@ namespace Libertix.Tests
                 "BIOS plan must not contain trusted Microsoft UEFI authorities");
         }
 
+        [TestMethod]
+        public void WifiSsidUsesExactHexBytesInsteadOfTheDisplayName()
+        {
+            string xml = WifiProfileXml("display", "open", "none", null)
+                .Replace("<SSID><name>", "<SSID><hex>00FF8041</hex><name>");
+            WindowsWifiProfile profile = WindowsWifiProfileReader.ParseProfile("saved network", xml);
+            Assert.AreEqual("00ff8041", profile.SsidHex);
+            Assert.AreEqual("display", profile.Ssid);
+            profile = WindowsWifiProfileReader.ParseProfile("saved network", xml.Replace("<name>display</name>", ""));
+            Assert.AreEqual("00ff8041", profile.SsidHex);
+        }
+
+        [TestMethod]
+        public void WifiSsidRejectsInvalidHexWithoutFallingBackToTheName()
+        {
+            foreach (string hex in new[] { "", "0", "zz", "41 42", new string('a', 66) })
+            {
+                string xml = WifiProfileXml("display", "open", "none", null)
+                    .Replace("<SSID><name>", "<SSID><hex>" + hex + "</hex><name>");
+                Assert.ThrowsException<InvalidOperationException>(() => WindowsWifiProfileReader.ParseProfile("test", xml));
+            }
+        }
+
+        [TestMethod]
+        public void WifiSsidRetainsAsciiProfilesWithoutHexAndRejectsLossyConversion()
+        {
+            Assert.AreEqual("43616665", WindowsWifiProfileReader.ParseProfile("test",
+                WifiProfileXml("Cafe", "open", "none", null)).SsidHex);
+            Assert.ThrowsException<InvalidOperationException>(() => WindowsWifiProfileReader.ParseProfile("test",
+                WifiProfileXml("caf\u00e9", "open", "none", null)));
+        }
+
+        private static string WifiProfileXml(
+            string ssid,
+            string authentication,
+            string encryption,
+            string secret)
+        {
+            string sharedKey = secret == null
+                ? string.Empty
+                : "<sharedKey><keyType>passPhrase</keyType><protected>false</protected>" +
+                    "<keyMaterial>" + secret + "</keyMaterial></sharedKey>";
+            return
+                "<WLANProfile xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v1\">" +
+                "<name>Test</name><SSIDConfig><SSID><name>" + ssid +
+                "</name></SSID><nonBroadcast>false</nonBroadcast></SSIDConfig>" +
+                "<connectionType>ESS</connectionType><connectionMode>auto</connectionMode>" +
+                "<MSM><security><authEncryption><authentication>" + authentication +
+                "</authentication><encryption>" + encryption +
+                "</encryption><useOneX>false</useOneX></authEncryption>" + sharedKey +
+                "</security></MSM></WLANProfile>";
+        }
+
         private static InstallationPlan CreateValidPlan()
         {
             const long GiB = InstallationSizePolicy.BytesPerGiB;
@@ -1303,7 +1622,11 @@ namespace Libertix.Tests
                 },
                 Features = new InstallationFeatures
                 {
-                    WindowsProfilesJsonBase64 = "W10="
+                    WindowsProfilesJsonBase64 = "W10=",
+                    WindowsPreferenceMigration = new InstallationPreferenceMigration
+                    {
+                        Enabled = false
+                    }
                 },
                 Runtime = new InstallationRuntime
                 {

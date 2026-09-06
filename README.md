@@ -137,12 +137,22 @@ flowchart TB
 - .NET Framework 4.8
 - Administrator privileges
 - Linux Mint 22.3 Cinnamon or Zorin OS 18.1 Core
-- At least 20 GiB of shrinkable space on the Windows system disk
+- Enough free space for at least 20 GiB of Linux, the installer media and the Windows free-space reserve
+- At least 10 GiB reported shrinkable by Windows for initial preparation
 - A storage layout accepted by the compatibility preflight
 
 Libertix supports one local SATA, ATA, NVMe, SAS, SCSI, or MMC system disk. It refuses ambiguous or
 unsafe topologies such as Windows dynamic disks, Storage Spaces, USB system disks, VHD/iSCSI system
 disks, unsupported RAID controllers and unsupported Intel RST/VMD or AMD RAID configurations.
+
+Free space and immediately shrinkable space are different. Libertix first tries to shrink Windows
+by the full requested Linux size. If unmovable NTFS files prevent that, it can create an 8 GiB
+temporary partition and finish the NTFS reduction from the live Linux environment. The initial
+compatibility check requires 10 GiB shrinkable, including a 2 GiB safety margin; it does not require
+the full Linux allocation to be shrinkable online. The temporary partition holds installation media
+before becoming the final Linux partition. It is not sized only for the mini-ISO download.
+The current free-space reserve is 8 GiB after accounting for installer media and Linux, with a
+10 GiB target. The validated plan and storage checks remain authoritative for each machine.
 
 BitLocker or Device Encryption must be fully decrypted before the live installer boots. Libertix
 can request decryption and waits for it to finish. The detected Windows Recovery partition is kept
@@ -219,7 +229,8 @@ From a Developer PowerShell prompt:
 msbuild .\Libertix.sln /restore /m /p:Configuration=Release "/p:Platform=Any CPU"
 ```
 
-The executable is written to `bin\Release\Libertix.exe`.
+The internal WPF executable is written to `bin\Release\Libertix.exe`. The distributable, standalone
+executable is `Standalone\bin\Release\Libertix.exe`; it bundles the required internal runtime.
 
 ## Build the live ISO images
 
@@ -263,8 +274,9 @@ PSScriptAnalyzer, runs the Pester contract suite, builds `Libertix.exe` on Windo
 ISO images on trusted `dev` and `main` branch runs. Successful runs publish the WPF archive, both ISO
 images in a GitHub Release. The CI then generates and signs one artifact and distribution catalogue
 and publishes it, its detached signature, and the verified support files only in the corresponding
-`dev/` or `main/` directory on GitHub Pages. The WPF archive contains
-`BUILD-INFO.txt`, `LICENSE` and `THIRD_PARTY.md`.
+`dev/` or `main/` directory on GitHub Pages. The versioned Windows ZIP contains exactly one
+standalone `Libertix.exe`. Build identity is embedded in the executable; licensing and third-party
+notices are documented in this repository.
 
 The complete versioning, signing, release and Pages workflow is documented in
 [`docs/RELEASES.md`](docs/RELEASES.md).

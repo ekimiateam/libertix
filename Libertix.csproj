@@ -71,6 +71,8 @@
     <Compile Include="Helpers\UnattendedWorkflow.cs" />
     <Compile Include="Helpers\CompatibilityPreflightRunner.cs" />
     <Compile Include="Helpers\SystemPowerProbe.cs" />
+    <Compile Include="Helpers\WindowsPreferenceCollector.cs" />
+    <Compile Include="Helpers\WindowsWifiProfileReader.cs" />
     <Compile Include="Helpers\ApplicationLogger.cs" />
     <Compile Include="Helpers\WindowsProcessRunner.cs" />
     <Compile Include="Helpers\LinuxPasswordHasher.cs" />
@@ -99,12 +101,14 @@
     <Compile Include="Installation\InstallationSizePolicy.cs" />
     <Compile Include="Installation\UnattendedInstallationConfigurator.cs" />
     <Compile Include="Installation\InstallationTemporaryArtifacts.cs" />
+    <Compile Include="Installation\BiosBootPayload.cs" />
     <Compile Include="Installation\InstallationStateMachine.cs" />
     <Compile Include="Installation\InstallationStateStore.cs" />
     <Compile Include="Installation\LiveBootArguments.cs" />
     <Compile Include="Installation\RuntimeNames.cs" />
     <Compile Include="Installation\WindowsKeyboardLayout.cs" />
     <Compile Include="Installation\WindowsShareConfiguration.cs" />
+    <Compile Include="Installation\WindowsPreferenceMigrationContract.cs" />
     <Compile Include="Installation\StoragePreflightInfo.cs" />
     <Compile Include="Installation\FirmwareInterop.cs" />
     <Compile Include="Models\DistroInfo.cs" />
@@ -204,7 +208,6 @@
       <DependentUpon>ErrorPanel.xaml</DependentUpon>
     </Compile>
     <Compile Include="Converters\StringToVisibilityConverter.cs" />
-    <Compile Include="Converters\BoolToVisibilityConverter.cs" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Pages\ResizeDisk.xaml.cs">
@@ -306,6 +309,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.Process.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.BiosMbr.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.Firmware.psm1">

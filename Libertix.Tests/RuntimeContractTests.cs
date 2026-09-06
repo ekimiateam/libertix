@@ -12,6 +12,73 @@ namespace Libertix.Tests
     [TestClass]
     public sealed class RuntimeContractTests
     {
+        [DataTestMethod]
+        [DataRow(@"C:\Windows\Web\Wallpaper\Windows\img0.jpg", 0)]
+        [DataRow(@"c:\WINDOWS\Web\4K\Wallpaper\Windows\img0_1920x1080.jpg", 0)]
+        [DataRow(@"C:\Windows\Web\Wallpaper\Windows\img19.jpg", 0)]
+        [DataRow(@"C:\Windows\Resources\Themes\aero\wallpaper.jpg", 0)]
+        [DataRow(@"C:\Users\test\AppData\Local\Packages\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\LocalCache\Microsoft\IrisService\image.jpg", 0)]
+        [DataRow(@"C:\Users\test\AppData\Local\Packages\Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy\LocalState\Assets\image", 0)]
+        [DataRow(@"C:\Users\test\AppData\Roaming\Microsoft\Windows\Themes\TranscodedWallpaper", 0)]
+        [DataRow(@"C:\Users\test\Pictures\custom.jpg", 3)]
+        [DataRow(@"C:\Users\test\Pictures\old-picture.jpg", 1)]
+        public void AutomaticWallpapersAreNotMigrated(string path, int backgroundType)
+        {
+            Assert.IsNull(SelectWallpaper(path, backgroundType));
+        }
+
+        [DataTestMethod]
+        [DataRow(@"C:\Users\test\Pictures\my-photo.jpg", 0)]
+        [DataRow(@"C:\Users\test\Pictures\slideshow\my-photo.jpg", 2)]
+        [DataRow(@"C:\Windows\Web-personal\my-photo.jpg", 0)]
+        [DataRow(@"C:\ProgramData\Libertix\Automation\preference-fixture\wallpaper.jpg", 0)]
+        public void PersonalWallpapersAreMigrated(string path, int backgroundType)
+        {
+            Assert.AreEqual(path, SelectWallpaper(path, backgroundType));
+        }
+
+        [TestMethod]
+        public void MissingOrUnknownWallpaperDoesNotFallBackToAnUnidentifiedCachedImage()
+        {
+            Assert.IsNull(SelectWallpaper(null, null));
+            Assert.IsNull(SelectWallpaper("", 0));
+            Assert.IsNull(SelectWallpaper(@"C:\Users\test\Pictures\missing.jpg", 0, false));
+            Assert.AreEqual(@"C:\Users\test\Pictures\my-photo.jpg",
+                SelectWallpaper(@"C:\Users\test\Pictures\my-photo.jpg", null));
+        }
+
+        private static string SelectWallpaper(string path, int? backgroundType, bool exists = true)
+        {
+            return WindowsPreferenceCollector.SelectPersonalizedWallpaperPath(
+                path, backgroundType, @"C:\Windows", @"C:\Users\test\AppData\Local",
+                @"C:\Users\test\AppData\Roaming", _ => exists);
+        }
+
+        [TestMethod]
+        public void RetryRequiresBothStoppedProcessesAndVerifiedRollback()
+        {
+            foreach (bool requested in new[] { false, true })
+            foreach (bool processUnknown in new[] { false, true })
+            foreach (bool rollbackPending in new[] { false, true })
+            {
+                Assert.AreEqual(requested && !processUnknown && !rollbackPending,
+                    Pages.ApplyChanges.CanRetryAfterFailure(requested, processUnknown, rollbackPending));
+            }
+        }
+
+        [TestMethod]
+        public void InactivityLockCombinesMachineAndEffectiveScreenSaverRequirements()
+        {
+            Assert.AreEqual((uint?)300, WindowsPreferenceCollector.ResolveInactivityLockTimeout(0, 0, null, 300));
+            Assert.AreEqual((uint?)120, WindowsPreferenceCollector.ResolveInactivityLockTimeout(1, 1, 120, 300));
+            Assert.AreEqual((uint?)60, WindowsPreferenceCollector.ResolveInactivityLockTimeout(1, 1, 120, 60));
+            Assert.AreEqual((uint?)120, WindowsPreferenceCollector.ResolveInactivityLockTimeout(1, 1, 120, null));
+            Assert.IsNull(WindowsPreferenceCollector.ResolveInactivityLockTimeout(null, null, null, null));
+            Assert.IsNull(WindowsPreferenceCollector.ResolveInactivityLockTimeout(0, 0, 0, 0));
+            Assert.IsNull(WindowsPreferenceCollector.ResolveInactivityLockTimeout(1, 0, 120, null));
+            Assert.IsNull(WindowsPreferenceCollector.ResolveInactivityLockTimeout(1, 1, 0, null));
+        }
+
         [TestMethod]
         public void SystemPowerProbeTrustsTheExplicitAcLineStatus()
         {

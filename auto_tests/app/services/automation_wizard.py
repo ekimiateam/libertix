@@ -14,6 +14,7 @@ from PIL import Image
 from app.clients.ssh import CommandResult, SSHClient, is_reconnectable_transport_error
 from app.config import VMConfig
 from app.errors import WorkflowError
+from app.services.automation_progress import InstallationProgress, assert_installation_progress
 from app.services.automation_types import (
     AutomationOptions,
 )
@@ -23,6 +24,7 @@ from tools.azerty_qwerty import azerty_to_qwerty
 logger = logging.getLogger(__name__)
 
 UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS = 3
+UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS = 40
 UNATTENDED_CONTROL_SSH_MAX_ATTEMPTS = 12
 
 
@@ -52,7 +54,7 @@ class WizardAutomationMixin:
             str(unattended_status_path),
             str(unattended_acknowledgement_path),
         )
-        if options.boot_guardian_fault == "bios-rollback":
+        if options.boot_guardian_fault in {"bios-rollback", "bios-controller-disconnect"}:
             return "installation-rollback"
         if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
             return "bootnext-fallback"
@@ -153,7 +155,7 @@ class WizardAutomationMixin:
                         quoted_status,
                         after_sequence,
                         ("warning-ready", "installation-started"),
-                        timeout_seconds=15,
+                        timeout_seconds=UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS,
                     )
                     if observed["stage"] == "installation-started":
                         after_sequence = self._capture_and_acknowledge_unattended_stage(
@@ -231,6 +233,18 @@ class WizardAutomationMixin:
                 observe_installation_progress=True,
                 result=result,
             )
+            if options.boot_guardian_fault == "bios-controller-disconnect":
+                capture = self._capture_with_name(vm, "bios-controller-disconnect-reboot-ready")
+                result.ok(
+                    "automation.bios_controller_disconnect",
+                    "Withholding reboot-ready acknowledgement to reproduce controller loss; "
+                    "the product must time out and restore Windows",
+                    vm=vm.name,
+                    target=vm.host,
+                    sequence=int(observed["sequence"]),
+                    capture=str(capture),
+                )
+                return
             self._capture_and_acknowledge_unattended_stage(
                 ssh,
                 vm,
@@ -305,8 +319,8 @@ class WizardAutomationMixin:
         observed: dict[str, object] | None = None
         next_progress_observation = time.monotonic()
         progress_observation = 0
-        previous_progress_signature: tuple[int, ...] | None = None
-        last_visual_change_at = time.monotonic()
+        last_progress_at = time.monotonic()
+        progress = InstallationProgress()
         while time.monotonic() < deadline:
             response = self._run_unattended_control_command(
                 ssh,
@@ -361,27 +375,6 @@ class WizardAutomationMixin:
                     vm,
                     f"windows-preparation-progress-{progress_observation:03d}",
                 )
-                signature = self._capture_signature(capture)
-                if signature is not None and signature == previous_progress_signature:
-                    stalled_seconds = time.monotonic() - last_visual_change_at
-                    if stalled_seconds >= self.settings.automation_stall_timeout_seconds:
-                        raise WorkflowError(
-                            "automation.progress_stalled",
-                            "No visible progress during Windows installation preparation",
-                            details={
-                                "vm": vm.name,
-                                "target": vm.vnc,
-                                "phase": "windows-preparation",
-                                "capture": str(capture),
-                                "stalled_seconds": round(stalled_seconds, 3),
-                                "stall_timeout_seconds": (
-                                    self.settings.automation_stall_timeout_seconds
-                                ),
-                            },
-                        )
-                else:
-                    previous_progress_signature = signature
-                    last_visual_change_at = time.monotonic()
                 next_progress_observation = (
                     time.monotonic() + self.settings.automation_monitor_interval_seconds
                 )
@@ -405,11 +398,24 @@ class WizardAutomationMixin:
                         },
                     ) from exc
 
+                if progress.observe(verdict.visible_text):
+                    last_progress_at = time.monotonic()
+                assert_installation_progress(
+                    time.monotonic(),
+                    last_progress_at,
+                    self.settings.automation_stall_timeout_seconds,
+                    vm=vm.name,
+                    target=vm.vnc,
+                    phase="windows-preparation",
+                    capture=str(capture),
+                )
                 context = {
                     "vm": vm.name,
                     "target": vm.vnc,
                     "capture": str(capture),
                     **verdict.model_dump(),
+                    "progress_generation": progress.generation,
+                    "progress_phase": progress.phase,
                 }
                 result.ok(
                     "automation.windows_preparation_progress",

@@ -257,11 +257,14 @@ function Start-LibertixPostInstallAttempt {
         $Result.interruptionCount = [int]$Result.interruptionCount + $interruptedAttempts
         & $WriteLog (
             "Resuming post-install verification after $interruptedAttempts " +
-            "interrupted attempt(s); durable successful checks will not be repeated."
+            "interrupted attempt(s); current system state will be checked again."
         )
     }
 
     $attemptId = [Guid]::NewGuid().ToString("N")
+    $previousChecks = if (Test-LibertixProperty -Object $Result -Name "checks") {
+        @($Result.checks)
+    } else { @() }
     $Result.attempts = @($Result.attempts) + @(
         [pscustomobject][ordered]@{
             attemptId = $attemptId
@@ -269,8 +272,10 @@ function Start-LibertixPostInstallAttempt {
             startedAtUtc = $now
             completedAtUtc = $null
             outcome = "running"
+            previousChecks = @($previousChecks)
         }
     )
+    $Result | Add-Member -NotePropertyName checks -NotePropertyValue @() -Force
     $Result | Add-Member `
         -NotePropertyName activeAttemptId `
         -NotePropertyValue $attemptId `
@@ -499,45 +504,23 @@ function Register-LibertixWindowsBootVolumeCheck {
     if (-not (Test-Path -LiteralPath $chkdskPath -PathType Leaf)) {
         throw "Windows CHKDSK executable is missing."
     }
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $chkdskPath
-    $startInfo.Arguments = "$SystemDrive /F"
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $startInfo
-    try {
-        if (-not $process.Start()) {
-            throw "CHKDSK process could not start."
+    # CHKDSK localizes its confirmation; these letters cover all product languages.
+    $result = Invoke-LibertixNativeCommand -FilePath $chkdskPath `
+        -ArgumentList @($SystemDrive, "/F") -TimeoutSeconds 120 `
+        -StandardInputText "Y`r`nO`r`nS`r`n"
+    $stdout = $result.StandardOutput
+    $stderr = $result.StandardError
+    foreach ($line in @($stdout -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            & $WriteLog "CHKDSK stdout: $line"
         }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        # CHKDSK localizes its boot-volume confirmation. These are the accepted
-        # first letters for the product languages: English, French and Spanish.
-        foreach ($answer in @("Y", "O", "S")) {
-            $process.StandardInput.WriteLine($answer)
-        }
-        $process.StandardInput.Close()
-        $process.WaitForExit()
-        $stdout = $stdoutTask.Result
-        $stderr = $stderrTask.Result
-        foreach ($line in @($stdout -split "`r?`n")) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                & $WriteLog "CHKDSK stdout: $line"
-            }
-        }
-        foreach ($line in @($stderr -split "`r?`n")) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                & $WriteLog "CHKDSK stderr: $line"
-            }
-        }
-        & $WriteLog "CHKDSK scheduling process exited with rc=$($process.ExitCode)."
-    } finally {
-        $process.Dispose()
     }
+    foreach ($line in @($stderr -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            & $WriteLog "CHKDSK stderr: $line"
+        }
+    }
+    & $WriteLog "CHKDSK scheduling process exited with rc=$($result.ExitCode)."
 
     $bootExecute = @(
         (Get-ItemProperty `
@@ -1386,6 +1369,7 @@ function Invoke-LibertixPostInstallVerification {
         throw "Installation plan identifier is invalid."
     }
     [int64]$alignmentBytes = Get-LibertixPartitionAlignmentBytes -RecoveryRoot $RecoveryRoot
+    $windowsBootId = Get-LibertixWindowsBootIdentity
     $result = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
         $saved = Read-LibertixJsonObject `
             -Path $resultPath `
@@ -1400,7 +1384,9 @@ function Invoke-LibertixPostInstallVerification {
         if ([string]$saved.status -eq "rolled-back") {
             throw "Post-install verification cannot resume after rollback."
         }
-        if ([string]$saved.status -eq "succeeded") {
+        if ([string]$saved.status -eq "succeeded" -and
+            (Test-LibertixProperty -Object $saved -Name "windowsBootId") -and
+            [string]$saved.windowsBootId -eq $windowsBootId) {
             return $saved
         }
         $saved.status = "in-progress"
@@ -1414,6 +1400,7 @@ function Invoke-LibertixPostInstallVerification {
             -Firmware ([string]$plan.firmware) `
             -LogPath $LogPath
     }
+    $result | Add-Member -NotePropertyName windowsBootId -NotePropertyValue $windowsBootId -Force
     $attemptId = Start-LibertixPostInstallAttempt `
         -Result $result `
         -ResultPath $resultPath `

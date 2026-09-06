@@ -4,16 +4,17 @@
 # from RAM or from a loop device, so its mount point does not reliably expose
 # the FAT staging volume that carries the plan.
 load_libertix_staging_volume_label() {
-    [ -z "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ] || return 0
-    LIBERTIX_STAGING_VOLUME_LABEL="$(
-        /usr/local/lib/libertix/libertix_installation_policy.py staging-volume-label
-    )" || return 2
-    [ -n "$LIBERTIX_STAGING_VOLUME_LABEL" ] || return 2
+    if [ -z "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then
+        LIBERTIX_STAGING_VOLUME_LABEL="$(
+            /usr/local/lib/libertix/libertix_installation_policy.py staging-volume-label
+        )" || return 2
+    fi
+    [[ "$LIBERTIX_STAGING_VOLUME_LABEL" =~ ^[A-Z0-9]{1,11}$ ]] || return 2
     export LIBERTIX_STAGING_VOLUME_LABEL
 }
 
 copy_libertix_context_candidate() {
-    local plan="$1" candidate_dir="$2" state plan_hash state_hash context_id
+    local plan="$1" candidate_dir="$2" state plan_hash state_hash context_id source_bundle
 
     state="$(dirname "$plan")/installation-state.json"
     [ -f "$plan" ] && [ -f "$state" ] || return 0
@@ -22,10 +23,16 @@ copy_libertix_context_candidate() {
     context_id="$plan_hash-$state_hash"
     cp -f "$plan" "$candidate_dir/$context_id.plan.json"
     cp -f "$state" "$candidate_dir/$context_id.state.json"
+    source_bundle="$(dirname "$plan")/windows-preferences.secret.json"
+    if [ -f "$source_bundle" ]; then
+        cp -f "$source_bundle" "$candidate_dir/$context_id.preferences.secret.json"
+        chmod 0600 "$candidate_dir/$context_id.preferences.secret.json"
+    fi
 }
 
 find_libertix_installation_plan() (
     local candidate candidate_dir device label mount_dir plan state context_id plan_id state_plan_id
+    local plan_exports migration_enabled bundle_name bundle_hash bundle_size bundle_candidate
     local -A unique_contexts=()
 
     load_libertix_staging_volume_label || return $?
@@ -37,8 +44,10 @@ find_libertix_installation_plan() (
 
     # A retry must never inherit candidates from an earlier probe. A fresh
     # directory makes the uniqueness check describe this scan only.
-    candidate_dir="$(mktemp -d "$LOG_DIR/plan-candidates.XXXXXX")" || return 2
-    mount_dir="$LOG_DIR/plan-medium"
+    local private_dir="${LOG_DIR}-private"
+    install -d -m 0700 "$private_dir" || return 2
+    candidate_dir="$(mktemp -d "$private_dir/plan-candidates.XXXXXX")" || return 2
+    mount_dir="$private_dir/plan-medium"
     trap cleanup_plan_probe EXIT
     mkdir -p "$candidate_dir" "$mount_dir"
 
@@ -67,8 +76,8 @@ find_libertix_installation_plan() (
     while read -r candidate; do
         [ -f "$candidate" ] || continue
         state="${candidate%.plan.json}.state.json"
-        if /usr/local/lib/libertix/libertix-installation-plan.py \
-            export-shell "$candidate" >/dev/null 2>&1 \
+        if plan_exports="$(/usr/local/lib/libertix/libertix-installation-plan.py \
+            export-shell "$candidate" 2>/dev/null)" \
             && /usr/local/lib/libertix/libertix-installation-state.py \
                 validate "$state" >/dev/null 2>&1; then
             plan_id="$(/usr/local/lib/libertix/libertix-installation-plan.py \
@@ -77,6 +86,23 @@ find_libertix_installation_plan() (
                 plan-id "$state")"
             [ -n "$plan_id" ] && [ "$plan_id" = "$state_plan_id" ] || continue
             context_id="$(basename "${candidate%.plan.json}")"
+            migration_enabled="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                '$1 == "WINDOWS_PREFERENCE_MIGRATION_ENABLED" { print $2; exit }')"
+            if [ "$migration_enabled" = true ]; then
+                bundle_name="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                    '$1 == "WINDOWS_PREFERENCE_BUNDLE_FILE_NAME" { print $2; exit }')"
+                bundle_hash="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                    '$1 == "WINDOWS_PREFERENCE_BUNDLE_SHA256" { print $2; exit }')"
+                bundle_size="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+                    '$1 == "WINDOWS_PREFERENCE_BUNDLE_SIZE_BYTES" { print $2; exit }')"
+                [ "$bundle_name" = windows-preferences.secret.json ] || continue
+                bundle_candidate="$candidate_dir/$context_id.preferences.secret.json"
+                [ -f "$bundle_candidate" ] || continue
+                [ "$(stat -c %s "$bundle_candidate" 2>/dev/null || echo invalid)" = \
+                    "$bundle_size" ] || continue
+                [ "$(sha256sum "$bundle_candidate" | awk '{print $1}')" = \
+                    "$bundle_hash" ] || continue
+            fi
             unique_contexts["$context_id"]="$candidate"
         fi
     done < <(find "$candidate_dir" -maxdepth 1 -type f -name '*.plan.json' -print)
@@ -88,8 +114,17 @@ find_libertix_installation_plan() (
 
     for candidate in "${unique_contexts[@]}"; do
         state="${candidate%.plan.json}.state.json"
+        context_id="$(basename "${candidate%.plan.json}")"
         cp -f "$candidate" "$LOG_DIR/installation-plan.json"
         cp -f "$state" "$LOG_DIR/installation-state.json"
+        plan_exports="$(/usr/local/lib/libertix/libertix-installation-plan.py \
+            export-shell "$candidate")" || return 2
+        migration_enabled="$(printf '%s\n' "$plan_exports" | awk -F '\t' \
+            '$1 == "WINDOWS_PREFERENCE_MIGRATION_ENABLED" { print $2; exit }')"
+        if [ "$migration_enabled" = true ]; then
+            bundle_candidate="$candidate_dir/$context_id.preferences.secret.json"
+            install -m 0600 "$bundle_candidate" "$private_dir/windows-preferences.secret.json"
+        fi
         printf '%s\n' "$LOG_DIR/installation-plan.json"
         return 0
     done
@@ -98,6 +133,9 @@ find_libertix_installation_plan() (
 load_libertix_live_context() {
     local plan_path expected_firmware="$1"
 
+    # Export in the runner itself; exports in the plan-probe subshell cannot
+    # reach the installer process that the runner starts later.
+    load_libertix_staging_volume_label || return $?
     plan_path="$(find_libertix_installation_plan)" || return $?
     load_libertix_installation_plan "$plan_path" || return $?
     if [ "$INSTALLATION_FIRMWARE" != "$expected_firmware" ]; then

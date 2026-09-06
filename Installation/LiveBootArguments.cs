@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Libertix.Installation
 {
@@ -34,8 +35,13 @@ namespace Libertix.Installation
                 "Libertix.BootArguments.json"));
         }
 
-        public string CreateGrub4DosMenu()
+        public string CreateGrub4DosMenu(bool lowMemoryMode = false)
         {
+            string kernelArguments = lowMemoryMode
+                ? Regex.Replace(Normal, @"(?i)(^|\s)toram(?=\s|$)", "$1toram=filesystem.squashfs")
+                : Normal;
+            if (lowMemoryMode && !Regex.IsMatch(kernelArguments, @"(^|\s)toram=filesystem\.squashfs(?=\s|$)"))
+                throw new InvalidDataException("Low-memory BIOS boot requires SquashFS-only RAM loading.");
             return string.Join("\n", new[]
             {
                 "timeout 0",
@@ -47,7 +53,7 @@ namespace Libertix.Installation
                 // The plan is unique to the prepared staging volume, so finding
                 // it also selects the volume that owns the live kernel.
                 "find --set-root /installation-plan.json",
-                $"kernel /live/vmlinuz {Normal}",
+                $"kernel /live/vmlinuz {kernelArguments}",
                 "initrd /live/initrd.img",
                 string.Empty
             });

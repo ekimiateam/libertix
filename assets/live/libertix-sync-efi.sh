@@ -27,7 +27,7 @@ if [ ! -s "$plan" ]; then
     exit 1
 fi
 
-mapfile -t plan_values < <(python3 - "$plan" <<'PY'
+if ! plan_values_output="$(python3 - "$plan" <<'PY'
 import json
 import sys
 
@@ -61,7 +61,11 @@ if not isinstance(secure_boot_enabled, bool):
 print("true" if secure_boot_enabled else "false")
 print(";".join(supported))
 PY
-)
+)"; then
+    echo "Libertix installation plan boot metadata could not be parsed" >&2
+    exit 1
+fi
+mapfile -t plan_values <<< "$plan_values_output"
 [ "${plan_values[0]:-}" = uefi ] || exit 0
 recovery_run_id="${plan_values[1]:-}"
 secure_boot_enabled="${plan_values[2]:-}"

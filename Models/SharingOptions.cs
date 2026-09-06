@@ -4,5 +4,6 @@ namespace Libertix.Models
     {
         public bool ShareWindowsFilesInLinux { get; set; } = true;
         public bool ShareLinuxFilesInWindows { get; set; } = true;
+        public bool MigrateWindowsPreferences { get; set; }
     }
 }

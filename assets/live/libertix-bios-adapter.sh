@@ -496,8 +496,7 @@ prepare_installer_partition_for_target_format_or_die() {
 
 wait_for_prereqs() {
     mark "005-wait-prereqs"
-    # Plan discovery exports the label only inside its probe subshell.
-    load_libertix_staging_volume_label || die "staging volume label could not be loaded"
+    load_libertix_staging_volume_label || die "Invalid or unavailable staging volume label"
     local i label_device
     for i in $(seq 1 60); do
         local disk_ready=0
@@ -582,7 +581,8 @@ cleanup_windows_live_boot_artifacts() {
     windows_mnt="/mnt/libertix-windows-cleanup"
     echo "Removing temporary GRUB4DOS files from $windows_part"
     mount_ntfs_rw_or_die "$windows_part" "$windows_mnt"
-    rm -f "$windows_mnt/grldr" "$windows_mnt/grldr.mbr" "$windows_mnt/menu.lst"
+    python3 /usr/local/lib/libertix/libertix-bios-boot-payload.py \
+        "$windows_mnt" "$INSTALLATION_PLAN_ID" || die "BIOS boot payload ownership verification failed"
     sync
     umount "$windows_mnt"
 }

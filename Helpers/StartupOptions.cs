@@ -30,6 +30,18 @@ namespace Libertix.Helpers
         public string UefiRecoveryStatePath { get; private set; }
         public UnattendedOptions Unattended { get; private set; }
         public bool ForceOfflineNtfsResize { get; private set; }
+
+        internal bool TryValidateBuild(ApplicationBuild build, out string error)
+        {
+            error = null;
+            if (!build.IsDevelopment && !string.IsNullOrEmpty(DevelopmentSshStaticIpv4Address))
+            {
+                error = "Development SSH networking is available only in development builds.";
+                return false;
+            }
+            return true;
+        }
+
         private bool UnattendedRequested { get; set; }
         private string UnattendedConfigPath { get; set; }
 

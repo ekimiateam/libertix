@@ -24,6 +24,7 @@ namespace Libertix.Installation
         public string SystemDriveRoot { get; set; }
         public string PasswordHashWindowsPath { get; set; }
         public string WindowsProfilesJsonBase64 { get; set; }
+        public InstallationPreferenceMigration WindowsPreferenceMigration { get; set; }
         public string RecoveryRootWindows { get; set; }
         public string RecoveryRunId { get; set; }
     }
@@ -126,7 +127,9 @@ namespace Libertix.Installation
                 {
                     ShareWindowsFilesInLinux = options.Sharing.ShareWindowsFilesInLinux,
                     ShareLinuxFilesInWindows = options.Sharing.ShareLinuxFilesInWindows,
-                    WindowsProfilesJsonBase64 = options.WindowsProfilesJsonBase64
+                    WindowsProfilesJsonBase64 = options.WindowsProfilesJsonBase64,
+                    WindowsPreferenceMigration = options.WindowsPreferenceMigration ??
+                        new InstallationPreferenceMigration { Enabled = false }
                 },
                 Runtime = new InstallationRuntime
                 {

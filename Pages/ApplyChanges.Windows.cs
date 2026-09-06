@@ -406,6 +406,9 @@ namespace Libertix.Pages
                         Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
                         "Libertix.Process.psm1");
                     CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.BiosMbr.psm1"),
+                        "Libertix.BiosMbr.psm1");
+                    CopyRequiredRecoveryFile(
                         Path.Combine("Scripts", "libertix-post-install-result.ps1"),
                         "libertix-post-install-result.ps1");
                     CopyRequiredRecoveryFile(
@@ -571,16 +574,22 @@ namespace Libertix.Pages
                 return result.RootElement.GetProperty("MaximumShrinkBytes").GetInt64() / 1048576d;
         }
 
-        private async Task<bool> ShrinkWindowsPartitionAsync(double shrinkSizeMB)
+        private async Task<bool> ShrinkWindowsPartitionAsync(
+            double shrinkSizeMB,
+            long reclaimableArtifactBytes)
         {
             try
             {
                 long sizeBytes = checked((long)Math.Round(shrinkSizeMB * 1024d * 1024d));
-                using (await RunBiosStorageActionAsync("Shrink", sizeBytes)) { }
+                using (await RunBiosStorageActionAsync(
+                    "Shrink",
+                    sizeBytes,
+                    reclaimableArtifactBytes)) { }
                 return true;
             }
             catch (Exception ex)
             {
+                if (ex is UnterminatedProcessException) throw;
                 Log($"ERROR: Windows shrink failed: {ex.Message}");
                 return false;
             }
@@ -627,6 +636,7 @@ namespace Libertix.Pages
             }
             catch (Exception ex)
             {
+                if (ex is UnterminatedProcessException) throw;
                 Log($"ERROR: FAT32 staging partition creation failed: {ex.Message}");
                 return null;
             }
@@ -634,7 +644,8 @@ namespace Libertix.Pages
 
         private async Task<JsonDocument> RunBiosStorageActionAsync(
             string action,
-            long sizeBytes = 0)
+            long sizeBytes = 0,
+            long reclaimableArtifactBytes = 0)
         {
             if (_storagePreflight == null)
                 throw new InvalidOperationException("Storage preflight is missing.");
@@ -655,7 +666,8 @@ namespace Libertix.Pages
                 $"-DiskUniqueId {QuoteArgument(_storagePreflight.SystemDiskUniqueId)} " +
                 $"-WindowsPartitionOffsetBytes {_storagePreflight.SystemPartitionOffset} " +
                 $"-RecoveryPartitionOffsetBytes {_storagePreflight.RecoveryPartitionOffset} " +
-                $"-SizeBytes {sizeBytes}";
+                $"-SizeBytes {sizeBytes} " +
+                $"-ReclaimableArtifactBytes {reclaimableArtifactBytes}";
             var processResult = await Task.Run(() => RunProcess(
                 powershell,
                 arguments,

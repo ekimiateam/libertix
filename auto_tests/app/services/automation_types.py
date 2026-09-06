@@ -17,12 +17,15 @@ class AutomationOptions:
     )
     share_windows_files_in_linux: bool = True
     share_linux_files_in_windows: bool = True
+    migrate_windows_preferences: bool = False
     use_default_filepool: bool = False
     simulate_stale_firmware_entries: bool = False
     force_offline_ntfs_resize: bool = False
     boot_guardian_fault: Literal[
         "none",
         "bios-rollback",
+        "bios-controller-disconnect",
+        "bios-postinstall-rollback",
         "boot-order",
         "bootnext-fallback",
         "bootnext-rollback",
@@ -30,6 +33,7 @@ class AutomationOptions:
         "preferred-path-rollback",
     ] = "none"
     rollback_baseline: dict[str, str] | None = None
+    preference_fixture: dict[str, str] | None = None
     first_boot: Literal["windows", "linux"] = "windows"
 
 

@@ -31,6 +31,7 @@ namespace Libertix.Installation
                 new CancellationTokenSource(TimeSpan.FromSeconds(30)))
             using (var response = await SharedHttpClient.GetAsync(
                 filepool.CatalogUrl,
+                HttpCompletionOption.ResponseHeadersRead,
                 timeoutCancellation.Token))
             {
                 response.EnsureSuccessStatusCode();
@@ -42,6 +43,7 @@ namespace Libertix.Installation
                 {
                     using (var signatureResponse = await SharedHttpClient.GetAsync(
                         filepool.CatalogSignatureUrl,
+                        HttpCompletionOption.ResponseHeadersRead,
                         timeoutCancellation.Token))
                     {
                         signatureResponse.EnsureSuccessStatusCode();

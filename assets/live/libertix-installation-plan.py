@@ -11,7 +11,7 @@ import json
 import ntpath
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -42,6 +42,20 @@ SAFE_GRUB_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$")
 
 class PlanValidationError(ValueError):
     """Raised when a plan cannot safely drive an installation."""
+
+
+def require_safe_absolute_windows_path(value: Any, path: str) -> str:
+    text = require_text(value, path)
+    windows_path = PureWindowsPath(text)
+    if (
+        "/" in text
+        or not windows_path.drive
+        or not windows_path.is_absolute()
+        or any(part in {"", ".", ".."} or ":" in part for part in windows_path.parts[1:])
+        or ntpath.normcase(ntpath.normpath(text)) != ntpath.normcase(text.rstrip("\\"))
+    ):
+        raise PlanValidationError(f"{path} must be an absolute safe Windows path")
+    return text
 
 
 def project_windows_profiles(encoded_profiles: str) -> str:
@@ -88,6 +102,12 @@ def require_positive_integer(value: Any, path: str) -> int:
     return value
 
 
+def require_nonnegative_integer(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PlanValidationError(f"{path} must be a non-negative integer")
+    return value
+
+
 def require_microsoft_uefi_authorities(value: Any, path: str, *, allow_empty: bool) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise PlanValidationError(f"{path} must be a string array")
@@ -123,7 +143,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError(f"installation plan schema validation failed: {error}") from error
 
     root = require_mapping(plan, "plan")
-    if root.get("schemaVersion") != 3:
+    if root.get("schemaVersion") != 4:
         raise PlanValidationError("unsupported installation plan schemaVersion")
     if not HEX_ID_PATTERN.fullmatch(str(root.get("planId", ""))):
         raise PlanValidationError("planId must contain 32 lowercase hexadecimal characters")
@@ -165,10 +185,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     )
     if "/" in distribution["installerIsoFileName"] or "\\" in distribution["installerIsoFileName"]:
         raise PlanValidationError("distribution.installerIsoFileName must not contain a path")
-    if not re.match(r"^[A-Za-z]:[\\/]", distribution["installerIsoWindowsPath"]):
-        raise PlanValidationError(
-            "distribution.installerIsoWindowsPath must be an absolute Windows drive path"
-        )
+    distribution["installerIsoWindowsPath"] = require_safe_absolute_windows_path(
+        distribution["installerIsoWindowsPath"],
+        "distribution.installerIsoWindowsPath",
+    )
     for name in ("installerIsoSha256", "liveIsoSha256"):
         if not SHA256_PATTERN.fullmatch(str(distribution.get(name, ""))):
             raise PlanValidationError(f"distribution.{name} must be a lowercase SHA-256 hash")
@@ -179,8 +199,8 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
 
     locale = require_mapping(root.get("locale"), "locale")
     language_code = require_text(locale.get("languageCode"), "locale.languageCode")
-    if language_code not in {"en", "fr", "es"}:
-        raise PlanValidationError("locale.languageCode must be one of: en, fr, es")
+    if language_code not in {"en", "fr", "es", "ko"}:
+        raise PlanValidationError("locale.languageCode must be one of: en, fr, es, ko")
     for name in ("systemLanguage", "keyboardLayout", "keyboardModel", "timezone"):
         require_text(require_property(locale, name, "locale"), f"locale.{name}")
     for name in ("keyboardLayout", "keyboardModel"):
@@ -200,13 +220,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError("account.username is invalid")
     if username.casefold() in INSTALLATION_POLICY.account.reserved_usernames:
         raise PlanValidationError("account.username is reserved by the operating system")
-    password_hash_windows_path = str(account.get("passwordHashWindowsPath", ""))
-    if not re.fullmatch(r"[A-Za-z]:\\.+", password_hash_windows_path) or any(
-        part == ".." for part in password_hash_windows_path[3:].split("\\")
-    ):
-        raise PlanValidationError(
-            "account.passwordHashWindowsPath must be an absolute safe Windows path"
-        )
+    password_hash_windows_path = require_safe_absolute_windows_path(
+        account.get("passwordHashWindowsPath"),
+        "account.passwordHashWindowsPath",
+    )
     computer_name = require_text(account.get("computerName"), "account.computerName")
     if not re.fullmatch(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", computer_name):
         raise PlanValidationError("account.computerName is not a valid Linux hostname")
@@ -261,7 +278,17 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     ):
         left_start, left_end = fixed_extents[left]
         right_start, right_end = fixed_extents[right]
-        if left_start < right_end and right_start < left_end:
+        same_bios_windows_boot_partition = (
+            firmware == "bios"
+            and (left, right) == ("windows", "boot")
+            and fixed_partitions[left]["number"] == fixed_partitions[right]["number"]
+            and (left_start, left_end) == (right_start, right_end)
+        )
+        if (
+            left_start < right_end
+            and right_start < left_end
+            and not same_bios_windows_boot_partition
+        ):
             raise PlanValidationError(f"disk.{left} and disk.{right} overlap")
     windows_end = fixed_extents["windows"][1]
     recovery_offset = fixed_extents["recovery"][0]
@@ -348,6 +375,66 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         "features.windowsProfilesJsonBase64",
     )
     project_windows_profiles(profiles)
+    migration = require_mapping(
+        features.get("windowsPreferenceMigration"),
+        "features.windowsPreferenceMigration",
+    )
+    migration_enabled = migration.get("enabled")
+    if not isinstance(migration_enabled, bool):
+        raise PlanValidationError("features.windowsPreferenceMigration.enabled must be a boolean")
+    bundle_file_name = require_property(
+        migration,
+        "bundleFileName",
+        "features.windowsPreferenceMigration",
+    )
+    bundle_sha256 = require_property(
+        migration,
+        "bundleSha256",
+        "features.windowsPreferenceMigration",
+    )
+    bundle_size = require_nonnegative_integer(
+        require_property(
+            migration,
+            "bundleSizeBytes",
+            "features.windowsPreferenceMigration",
+        ),
+        "features.windowsPreferenceMigration.bundleSizeBytes",
+    )
+    wifi_profile_count = require_nonnegative_integer(
+        require_property(
+            migration,
+            "wifiProfileCount",
+            "features.windowsPreferenceMigration",
+        ),
+        "features.windowsPreferenceMigration.wifiProfileCount",
+    )
+    if not migration_enabled:
+        if (
+            bundle_file_name is not None
+            or bundle_sha256 is not None
+            or bundle_size != 0
+            or wifi_profile_count != 0
+        ):
+            raise PlanValidationError(
+                "disabled Windows preference migration must not describe a bundle"
+            )
+    else:
+        if bundle_file_name != "windows-preferences.secret.json":
+            raise PlanValidationError(
+                "Windows preference migration must use the fixed transaction bundle name"
+            )
+        if not SHA256_PATTERN.fullmatch(str(bundle_sha256 or "")):
+            raise PlanValidationError(
+                "Windows preference migration bundle hash must be a lowercase SHA-256 value"
+            )
+        if bundle_size <= 0 or bundle_size > 128 * 1024 * 1024:
+            raise PlanValidationError(
+                "Windows preference migration bundle size is outside the supported range"
+            )
+        if wifi_profile_count > 256:
+            raise PlanValidationError(
+                "Windows preference migration Wi-Fi profile count is outside the supported range"
+            )
 
     runtime = require_mapping(root.get("runtime"), "runtime")
     if runtime.get("windowsBitLockerState") not in {"FullyDecrypted", "NotEncryptable"}:
@@ -380,13 +467,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
             "recoveryRootWindows and recoveryRunId must both be set or both be null"
         )
     if recovery_root is not None:
-        require_text(recovery_root, "runtime.recoveryRootWindows")
-        if not re.fullmatch(r"[A-Za-z]:\\.+", recovery_root) or any(
-            part == ".." for part in recovery_root[3:].split("\\")
-        ):
-            raise PlanValidationError(
-                "runtime.recoveryRootWindows must be an absolute safe Windows path"
-            )
+        recovery_root = require_safe_absolute_windows_path(
+            recovery_root,
+            "runtime.recoveryRootWindows",
+        )
         if not HEX_ID_PATTERN.fullmatch(str(recovery_id)):
             raise PlanValidationError("runtime.recoveryRunId is invalid")
 
@@ -399,6 +483,13 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     for path_name, windows_path in windows_paths.items():
         if windows_path[:2].upper() != system_drive:
             raise PlanValidationError(f"{path_name} must be located on disk.systemDrive")
+    if recovery_root is not None and ntpath.normcase(password_hash_windows_path) != ntpath.normcase(
+        ntpath.join(recovery_root, "account-secret.env")
+    ):
+        raise PlanValidationError(
+            "account.passwordHashWindowsPath must be the plan-owned account-secret.env "
+            "under runtime.recoveryRootWindows"
+        )
 
     expected_installer_iso_path = ntpath.join(
         system_drive + "\\",
@@ -513,6 +604,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
     installer = disk["installer"]
     runtime = plan["runtime"]
     features = plan["features"]
+    migration = features["windowsPreferenceMigration"]
     development = plan.get("development")
 
     final_size = int(installer["finalSizeBytes"])
@@ -575,6 +667,11 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "WINDOWS_PROFILES_JSON_BASE64": project_windows_profiles(
             features["windowsProfilesJsonBase64"]
         ),
+        "WINDOWS_PREFERENCE_MIGRATION_ENABLED": str(migration["enabled"]).lower(),
+        "WINDOWS_PREFERENCE_BUNDLE_FILE_NAME": migration["bundleFileName"] or "",
+        "WINDOWS_PREFERENCE_BUNDLE_SHA256": migration["bundleSha256"] or "",
+        "WINDOWS_PREFERENCE_BUNDLE_SIZE_BYTES": str(migration["bundleSizeBytes"]),
+        "WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT": str(migration["wifiProfileCount"]),
         "DEVELOPMENT_SSH_ENABLED": str(development is not None).lower(),
         "DEVELOPMENT_STATIC_IPV4_ADDRESS": (
             development["staticIpv4Address"] if development else ""

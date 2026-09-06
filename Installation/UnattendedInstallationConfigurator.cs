@@ -44,7 +44,8 @@ namespace Libertix.Installation
             state.Sharing = new SharingOptions
             {
                 ShareWindowsFilesInLinux = options.ShareWindowsFilesInLinux,
-                ShareLinuxFilesInWindows = options.ShareLinuxFilesInWindows
+                ShareLinuxFilesInWindows = options.ShareLinuxFilesInWindows,
+                MigrateWindowsPreferences = options.MigrateWindowsPreferences
             };
             await UnattendedWorkflow.PublishStageAndWaitAsync(
                 "configuration-sharing-applied");

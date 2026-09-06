@@ -446,12 +446,28 @@ function ConvertFrom-NativeOutputBytes {{
 }}
 
 function Read-NativeOutputText {{
-    param([string]$LiteralPath)
+    param(
+        [string]$LiteralPath,
+        [Diagnostics.Stopwatch]$DrainClock,
+        [int]$DrainTimeoutMilliseconds = 10000
+    )
 
     if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {{
         return ''
     }}
-    return ConvertFrom-NativeOutputBytes ([IO.File]::ReadAllBytes($LiteralPath))
+    # Timed WaitForExit does not wait for Start-Process output handlers to close files.
+    while ($true) {{
+        try {{
+            return ConvertFrom-NativeOutputBytes ([IO.File]::ReadAllBytes($LiteralPath))
+        }} catch [IO.IOException] {{
+            $nativeError = $_.Exception.HResult -band 0xFFFF
+            if ($nativeError -notin @(32, 33)) {{ throw }}
+            if ($DrainClock.ElapsedMilliseconds -ge $DrainTimeoutMilliseconds) {{
+                throw "SSH output drain timed out: $LiteralPath remained locked."
+            }}
+            Start-Sleep -Milliseconds 25
+        }}
+    }}
 }}
 
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))
@@ -501,11 +517,14 @@ try {{
             $exitCode = $reportedExitCode
         }}
     }}
+    $outputDrainClock = [Diagnostics.Stopwatch]::StartNew()
     if (Test-Path -LiteralPath $stdoutPath) {{
-        [Console]::Out.Write((Read-NativeOutputText -LiteralPath $stdoutPath))
+        [Console]::Out.Write((Read-NativeOutputText -LiteralPath $stdoutPath `
+            -DrainClock $outputDrainClock))
     }}
     if (Test-Path -LiteralPath $stderrPath) {{
-        [Console]::Error.Write((Read-NativeOutputText -LiteralPath $stderrPath))
+        [Console]::Error.Write((Read-NativeOutputText -LiteralPath $stderrPath `
+            -DrainClock $outputDrainClock))
     }}
 }} finally {{
     $temporaryPaths = @($commandPath, $stdoutPath, $stderrPath, $statusPath)

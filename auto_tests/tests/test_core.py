@@ -1,6 +1,9 @@
+import ast
 import base64
 import hashlib
+import json
 import re
+import runpy
 import shlex
 import subprocess
 import threading
@@ -1057,6 +1060,7 @@ def test_full_automation_launch_passes_unattended_values_without_a_password_argu
         "computerName": "vm2-linux",
         "shareWindowsFilesInLinux": False,
         "shareLinuxFilesInWindows": True,
+        "migrateWindowsPreferences": False,
     }
     assert observed["force_offline_ntfs_resize"] is True
     assert "pass" not in " ".join(str(value) for value in launch.values())
@@ -1342,9 +1346,13 @@ def test_linux_script_reconnects_after_transport_failure(
     assert retry_delays == [3]
 
 
+@pytest.mark.parametrize("disconnect_controller", [False, True])
 def test_unattended_wizard_captures_and_acknowledges_every_stage(
     monkeypatch: pytest.MonkeyPatch,
+    disconnect_controller: bool,
 ) -> None:
+    assert automation_wizard_module.UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS == 40
+    assert automation_wizard_module.UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS < 45
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
     reported_stages = (
@@ -1422,26 +1430,48 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
 
     service._observe_unattended_wizard(  # noqa: SLF001
         vm,
-        AutomationOptions("test", "test-passphrase", True),
+        AutomationOptions(
+            "test",
+            "test-passphrase",
+            True,
+            boot_guardian_fault="bios-controller-disconnect" if disconnect_controller else "none",
+        ),
         result,
         4321,
         r"C:\ProgramData\Libertix\Automation\run.status.json",
         r"C:\ProgramData\Libertix\Automation\run.ack",
     )
 
-    assert captures == [
+    expected_stage_captures = [
         f"wizard-{index:02d}-{stage}"
         if stage != "warning-ready"
         else f"wizard-{index:02d}-warning-ready-keyboard-{index - 6}"
         for index, stage in enumerate(reported_stages, 1)
-    ] + ["reboot-ready", "reboot-confirm", "reboot-accepted"]
-    assert len(acknowledgements) == len(reported_stages)
+    ]
+    if disconnect_controller:
+        assert captures == expected_stage_captures[:-1] + [
+            "bios-controller-disconnect-reboot-ready"
+        ]
+        assert len(acknowledgements) == len(reported_stages) - 1
+    else:
+        assert captures == expected_stage_captures + [
+            "reboot-ready",
+            "reboot-confirm",
+            "reboot-accepted",
+        ]
+        assert len(acknowledgements) == len(reported_stages)
     assert len(focus_calls) == 2
     assert all(call["script_name"] == "focus_unattended_warning.ps1" for call in focus_calls)
     assert all(call["config"] == {"process_id": 4321} for call in focus_calls)
     assert [
         step.context["stage"] for step in result.steps if step.step == "automation.unattended_stage"
-    ] == list(reported_stages)
+    ] == list(reported_stages[:-1] if disconnect_controller else reported_stages)
+    if disconnect_controller:
+        assert keyboard_events == [("press", "tab"), ("press", "enter")] * 2 + [
+            ("disconnect", None)
+        ]
+        assert result.steps[-1].step == "automation.bios_controller_disconnect"
+        return
     assert keyboard_events == (
         [
             ("press", "tab"),
@@ -1455,6 +1485,57 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
             ("disconnect", None),
         ]
     )
+
+
+def test_postinstall_bios_rollback_requests_guard_then_checks_the_original_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    calls = []
+    baseline = {"SYSTEM_DISK_NUMBER": "0"}
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        boot_guardian_fault="bios-postinstall-rollback",
+        rollback_baseline=baseline,
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_windows_script_resiliently",
+        lambda *_args, **kwargs: calls.append(("request", kwargs)),
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_exact_windows_rollback",
+        lambda _ssh, _vm, original, _result, **_kwargs: calls.append(("verify", original)),
+    )
+    service._rollback_completed_bios_installation(  # noqa: SLF001
+        object(), vm, options, ResultBuilder("automation")
+    )
+    assert calls[0][0] == "request"
+    assert calls[0][1]["script_name"] == "request_bios_postinstall_rollback.ps1"
+    assert calls[0][1]["timeout"] == 960
+    assert calls[1] == ("verify", baseline)
+
+
+@pytest.mark.parametrize("reason", ["uefi", "no-baseline", "failed-check"])
+def test_postinstall_bios_rollback_refuses_unproved_prerequisites(reason: str) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2" if reason == "uefi" else "vm1"])[0]
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        boot_guardian_fault="bios-postinstall-rollback",
+        rollback_baseline=None if reason == "no-baseline" else {"SYSTEM_DISK_NUMBER": "0"},
+    )
+    result = ResultBuilder("automation")
+    if reason == "failed-check":
+        result.error("automation.test.windows", "failed")
+    with pytest.raises(WorkflowError, match="requires successful checks"):
+        service._rollback_completed_bios_installation(object(), vm, options, result)  # noqa: SLF001
 
 
 def test_bootnext_rollback_injection_is_proven_before_reboot(
@@ -1681,9 +1762,11 @@ def test_unattended_windows_preparation_stops_on_a_visible_error(
     assert raised.value.details["error_visible"] is True
 
 
+@pytest.mark.parametrize("animated", [False, True])
 def test_unattended_windows_preparation_reports_a_visual_stall(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    animated: bool,
 ) -> None:
     service = AutomationService(
         settings(
@@ -1704,11 +1787,15 @@ def test_unattended_windows_preparation_reports_a_visual_stall(
                 exit_code=0,
             )
 
-    monkeypatch.setattr(
-        service,
-        "_capture_with_name",
-        lambda *_args: capture,
-    )
+    frames = [0]
+
+    def capture_preparation(*_args: object) -> Path:
+        frames[0] += 1
+        if animated:
+            Image.new("RGB", (320, 200), (255 * (frames[0] % 2), 20, 30)).save(capture)
+        return capture
+
+    monkeypatch.setattr(service, "_capture_with_name", capture_preparation)
     monkeypatch.setattr(
         service.vision_llm,
         "analyze_install_progress",
@@ -3042,9 +3129,11 @@ def test_installation_monitor_skips_three_identical_ai_analyses_then_rechecks(
     assert len([step for step in result.steps if step.step == "automation.monitor_unchanged"]) == 3
 
 
+@pytest.mark.parametrize("animated", [False, True])
 def test_installation_monitor_reports_a_visual_stall_with_its_capture(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    animated: bool,
 ) -> None:
     service = AutomationService(
         settings(
@@ -3061,6 +3150,8 @@ def test_installation_monitor_reports_a_visual_stall_with_its_capture(
 
     def capture_screen(_vm: object, label: str) -> Path:
         labels.append(label)
+        if animated:
+            Image.new("RGB", (320, 200), (255 * (len(labels) % 2), 20, 30)).save(capture)
         return capture
 
     monkeypatch.setattr(service, "_capture_with_name", capture_screen)
@@ -3607,6 +3698,9 @@ def test_bios_recovery_payload_includes_atomic_state_dependency() -> None:
 
     assert '"Libertix.InstallationState.psm1"' in method
     assert method.count('"Libertix.AtomicFile.psm1"') == 2
+    assert method.count('"Libertix.BiosMbr.psm1"') == 2
+    project = read_repo("Libertix.csproj")
+    assert 'Include="Scripts\\modules\\Libertix.BiosMbr.psm1"' in project
 
 
 def test_bios_live_ledger_is_detached_before_drive_letter_removal() -> None:
@@ -3676,7 +3770,7 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
 
     service._run_linux_checks(ssh, vm, options, result)  # type: ignore[arg-type]  # noqa: SLF001
 
-    tests = [step.context["test"] for step in result.steps]
+    tests = [step.context["test"] for step in result.steps if step.step == "automation.test.linux"]
     assert {
         "linux.hostname",
         "linux.locale",
@@ -3701,12 +3795,17 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     assert "linux.name_resolution" in tests
     assert tests[-1] == "linux.name_resolution"
     assert (
-        next(step for step in result.steps if step.context["test"] == "linux.time_sync").status
+        next(
+            step
+            for step in result.steps
+            if step.step == "automation.test.linux" and step.context["test"] == "linux.time_sync"
+        ).status
         == "error"
     )
     assert len(ssh.calls) == len(tests)
     sudo_calls = [(command, kwargs) for command, kwargs in ssh.calls if command.startswith("sudo ")]
-    assert len(sudo_calls) == 11
+    assert len(sudo_calls) == 12
+    assert any("--verify-windows-sharing" in command for command, _ in sudo_calls)
     assert all(
         command.startswith("sh -eu -c ") or command.startswith("sudo -S -p '' sh -eu -c ")
         for command, _kwargs in ssh.calls
@@ -3739,6 +3838,50 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     assert "default via 192.0.2.1" in commands
     assert "8.8.8.8" in commands
     assert "1.1.1.1" in commands
+
+
+@pytest.mark.parametrize("attempt_id", [None, "first-attempt", "second-attempt"])
+def test_linux_post_install_ack_matches_real_result_producer(
+    monkeypatch: pytest.MonkeyPatch, attempt_id: str | None
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    checks: list[RemoteCheck] = []
+    monkeypatch.setattr(
+        service,
+        "_run_remote_check",
+        lambda _ssh, _vm, _result, _os, check, **_kw: checks.append(check),
+    )
+    service._run_linux_checks(  # noqa: SLF001
+        None, vm, AutomationOptions("test", "test-passphrase", True), ResultBuilder("automation")
+    )
+    check = next(check for check in checks if check.name == "linux.first_boot_verification")
+    script = shlex.split(check.command)[2]
+    statements = ast.parse(script).body
+    start = next(
+        index
+        for index, node in enumerate(statements)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "fields"
+    )
+    fingerprint_check = compile(
+        ast.Module(body=statements[start:], type_ignores=[]), "<ack>", "exec"
+    )
+    producer = runpy.run_path(str(REPO_ROOT / "assets/live/libertix-first-boot-result.py"))
+    status = {
+        "planId": "a" * 32,
+        "status": "succeeded",
+        "updatedAtUtc": "2026-09-05T12:00:00Z",
+        "error": None,
+        "attemptId": attempt_id,
+    }
+    acknowledgement = {"fingerprint": producer["status_fingerprint"](status)}
+    namespace = {"s": status, "a": acknowledgement, "hashlib": hashlib, "json": json}
+    exec(fingerprint_check, namespace)
+    namespace["s"] = dict(status, attemptId="different-attempt")
+    with pytest.raises(AssertionError):
+        exec(fingerprint_check, namespace)
 
 
 def test_linux_post_install_check_requires_selected_distribution_identity() -> None:
@@ -4046,11 +4189,21 @@ def test_windows_post_install_checks_continue_after_one_failure(
     assert "bitlocker" in called
     assert called[-1] == "chkdsk_scan"
     assert (
-        next(step for step in result.steps if step.context["test"] == "windows.bitlocker").status
+        next(
+            step
+            for step in result.steps
+            if step.step == "automation.test.windows"
+            and step.context["test"] == "windows.bitlocker"
+        ).status
         == "error"
     )
     assert (
-        next(step for step in result.steps if step.context["test"] == "windows.chkdsk_scan").status
+        next(
+            step
+            for step in result.steps
+            if step.step == "automation.test.windows"
+            and step.context["test"] == "windows.chkdsk_scan"
+        ).status
         == "ok"
     )
     assert timeouts["identity"] == 300
@@ -4882,7 +5035,12 @@ def test_windows_result_dialog_dismissal_requires_process_and_task_cleanup(
     def fake_run_windows_script(_ssh: object, **kwargs: object) -> CommandResult:
         observed.append(dict(kwargs))
         if kwargs["script_name"] == "focus_post_install_result.ps1":
-            return CommandResult(stdout="RESULT=OK\n", stderr="", exit_code=0)
+            return CommandResult(
+                stdout="ACTIVE_KEYBOARD_IDENTIFIER=0000040C\nINTERACTIVE_UI_CULTURE=fr-FR\n"
+                "INTERACTIVE_SESSION_ID=1\nRESULT=OK\n",
+                stderr="",
+                exit_code=0,
+            )
         if kwargs["config"]["check"] == "post_install_result_ui":
             return CommandResult(
                 stdout="POST_INSTALL_RESULT_UI_PROCESS_ID=4567\nRESULT=OK\n",
@@ -4908,6 +5066,7 @@ def test_windows_result_dialog_dismissal_requires_process_and_task_cleanup(
         "post_install_windows_check.ps1",
         "focus_post_install_result.ps1",
         "post_install_windows_check.ps1",
+        "post_install_windows_check.ps1",
     ]
     assert observed[0]["config"] == {
         "check": "post_install_result_ui",
@@ -4917,10 +5076,18 @@ def test_windows_result_dialog_dismissal_requires_process_and_task_cleanup(
     assert observed[1]["config"] == {"process_id": 4567}
     assert observed[1]["step"] == "automation.windows_post_install_result_focused"
     assert observed[2]["config"] == {
+        "check": "locale",
+        "expected_firmware": "uefi",
+        "interactive_keyboard_identifier": "0000040C",
+        "interactive_ui_culture": "fr-FR",
+        "interactive_session_id": "1",
+    }
+    assert observed[2]["step"] == "automation.windows_interactive_locale"
+    assert observed[3]["config"] == {
         "check": "post_install_result_ui_dismissed",
         "expected_firmware": "uefi",
     }
-    assert observed[2]["step"] == "automation.windows_post_install_result_dismissed"
+    assert observed[3]["step"] == "automation.windows_post_install_result_dismissed"
 
 
 def test_windows_validation_plan_keeps_conditional_sharing_checks_declarative() -> None:

@@ -47,9 +47,12 @@ namespace Libertix.Installation
             double shrinkAvailableGiB,
             double installerIsoGiB)
         {
+            if (shrinkAvailableGiB < StagingSizeGiB)
+                return 0;
+
             double windowsBudget =
                 initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB;
-            return Math.Max(0, Math.Min(windowsBudget, shrinkAvailableGiB));
+            return Math.Max(0, windowsBudget);
         }
 
         public static double RemainingWindowsFreeSpaceGiB(

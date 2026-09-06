@@ -7,6 +7,8 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges
     {
+        private volatile bool _processTerminationUnverified;
+        private bool _rollbackVerificationPending;
         private enum StreamingProcessCompletion
         {
             Exited,
@@ -19,14 +21,6 @@ namespace Libertix.Pages
         private sealed class DownloadSizeLimitExceededException : IOException
         {
             public DownloadSizeLimitExceededException(string message)
-                : base(message)
-            {
-            }
-        }
-
-        private sealed class UnterminatedProcessException : InvalidOperationException
-        {
-            public UnterminatedProcessException(string message)
                 : base(message)
             {
             }
