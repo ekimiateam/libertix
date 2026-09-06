@@ -378,12 +378,33 @@ def test_offline_resize_rejects_unexpected_staging_offset(plan_module: ModuleTyp
         plan_module.validate_plan(plan, require_installer=True)
 
 
-def test_plan_rejects_non_decrypted_bitlocker_state(plan_module: ModuleType) -> None:
-    plan = make_plan("uefi", 40)
-    plan["runtime"]["windowsBitLockerState"] = "FullyEncrypted"  # type: ignore[index]
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+@pytest.mark.parametrize("state", ["FullyEncrypted", "EncryptedOrProtected"])
+def test_plan_rejects_non_decrypted_bitlocker_state(
+    plan_module: ModuleType, firmware: str, state: str
+) -> None:
+    plan = make_plan(firmware, 40)
+    plan["runtime"]["windowsBitLockerState"] = state  # type: ignore[index]
 
     with pytest.raises(plan_module.PlanValidationError, match="windowsBitLockerState"):
         plan_module.validate_plan(plan, require_installer=True)
+
+
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+@pytest.mark.parametrize("difference", [None, "number", "offsetBytes", "sizeBytes"])
+def test_shared_windows_boot_partition_requires_exact_bios_identity(
+    plan_module: ModuleType, firmware: str, difference: str | None
+) -> None:
+    plan = make_plan(firmware, 40)
+    disk = plan["disk"]
+    disk["boot"] = dict(disk["windows"])
+    if difference is not None:
+        disk["boot"][difference] += 1 if difference == "number" else 1048576
+    if firmware == "bios" and difference is None:
+        plan_module.validate_plan(plan, require_installer=True)
+    else:
+        with pytest.raises(plan_module.PlanValidationError, match="overlap"):
+            plan_module.validate_plan(plan, require_installer=True)
 
 
 @pytest.mark.parametrize("state", ["FullyDecrypted", "NotEncryptable"])

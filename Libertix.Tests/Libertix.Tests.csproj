@@ -41,6 +41,11 @@
     <Compile Include="InstallationContractsTests.cs" />
     <Compile Include="RuntimeContractTests.cs" />
     <Compile Include="BootGuardianTests.cs" />
+    <Compile Include="BiosBootPayloadTests.cs" />
+    <Compile Include="LiveBootArgumentsTests.cs" />
+    <Compile Include="FallbackLifecycleTests.cs" />
+    <Compile Include="HttpCatalogTests.cs" />
+    <Compile Include="StartupValidationTests.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />

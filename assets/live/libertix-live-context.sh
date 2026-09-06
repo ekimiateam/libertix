@@ -4,11 +4,12 @@
 # from RAM or from a loop device, so its mount point does not reliably expose
 # the FAT staging volume that carries the plan.
 load_libertix_staging_volume_label() {
-    [ -z "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ] || return 0
-    LIBERTIX_STAGING_VOLUME_LABEL="$(
-        /usr/local/lib/libertix/libertix_installation_policy.py staging-volume-label
-    )" || return 2
-    [ -n "$LIBERTIX_STAGING_VOLUME_LABEL" ] || return 2
+    if [ -z "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then
+        LIBERTIX_STAGING_VOLUME_LABEL="$(
+            /usr/local/lib/libertix/libertix_installation_policy.py staging-volume-label
+        )" || return 2
+    fi
+    [[ "$LIBERTIX_STAGING_VOLUME_LABEL" =~ ^[A-Z0-9]{1,11}$ ]] || return 2
     export LIBERTIX_STAGING_VOLUME_LABEL
 }
 
@@ -43,8 +44,10 @@ find_libertix_installation_plan() (
 
     # A retry must never inherit candidates from an earlier probe. A fresh
     # directory makes the uniqueness check describe this scan only.
-    candidate_dir="$(mktemp -d "$LOG_DIR/plan-candidates.XXXXXX")" || return 2
-    mount_dir="$LOG_DIR/plan-medium"
+    local private_dir="${LOG_DIR}-private"
+    install -d -m 0700 "$private_dir" || return 2
+    candidate_dir="$(mktemp -d "$private_dir/plan-candidates.XXXXXX")" || return 2
+    mount_dir="$private_dir/plan-medium"
     trap cleanup_plan_probe EXIT
     mkdir -p "$candidate_dir" "$mount_dir"
 
@@ -120,8 +123,7 @@ find_libertix_installation_plan() (
             '$1 == "WINDOWS_PREFERENCE_MIGRATION_ENABLED" { print $2; exit }')"
         if [ "$migration_enabled" = true ]; then
             bundle_candidate="$candidate_dir/$context_id.preferences.secret.json"
-            cp -f "$bundle_candidate" "$LOG_DIR/windows-preferences.secret.json"
-            chmod 0600 "$LOG_DIR/windows-preferences.secret.json"
+            install -m 0600 "$bundle_candidate" "$private_dir/windows-preferences.secret.json"
         fi
         printf '%s\n' "$LOG_DIR/installation-plan.json"
         return 0
@@ -131,6 +133,9 @@ find_libertix_installation_plan() (
 load_libertix_live_context() {
     local plan_path expected_firmware="$1"
 
+    # Export in the runner itself; exports in the plan-probe subshell cannot
+    # reach the installer process that the runner starts later.
+    load_libertix_staging_volume_label || return $?
     plan_path="$(find_libertix_installation_plan)" || return $?
     load_libertix_installation_plan "$plan_path" || return $?
     if [ "$INSTALLATION_FIRMWARE" != "$expected_firmware" ]; then

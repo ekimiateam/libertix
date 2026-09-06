@@ -40,6 +40,10 @@ compare_rootfs_file usr/local/lib/libertix/libertix-runner-main.sh \
     /workspace/assets/live/libertix-runner-main.sh
 compare_rootfs_file usr/local/sbin/libertix-gui /workspace/assets/live/libertix-gui.py
 compare_rootfs_file usr/local/sbin/libertix-copy-logs /workspace/assets/live/libertix-copy-logs.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-log-archive.py \
+    /workspace/assets/live/libertix-log-archive.py
+compare_rootfs_file usr/local/lib/libertix/libertix-bios-boot-payload.py \
+    /workspace/assets/live/libertix-bios-boot-payload.py
 compare_rootfs_file usr/local/lib/libertix/libertix-install-platform-common.sh \
     /workspace/assets/live/libertix-install-platform-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-storage-common.sh \
@@ -118,6 +122,12 @@ compare_rootfs_file usr/local/lib/libertix/configure-target.sh \
     "$source_dir/target/configure-target.sh"
 compare_rootfs_file usr/local/lib/libertix/configure-target-main.sh \
     /workspace/assets/live/configure-target-main.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-apply-windows-preferences.py \
+    /workspace/assets/live/libertix-apply-windows-preferences.py
+compare_rootfs_file usr/local/lib/libertix/libertix-preferred-boot-path.py \
+    /workspace/assets/live/libertix-preferred-boot-path.py
+compare_rootfs_file usr/local/lib/libertix/libertix-secure-boot-chain.py \
+    /workspace/assets/live/libertix-secure-boot-chain.py
 compare_rootfs_file usr/local/lib/libertix/first-boot-resize.sh \
     /workspace/assets/live/first-boot-resize.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-first-boot-verify.py \

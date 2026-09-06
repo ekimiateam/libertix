@@ -3,9 +3,6 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILDER_DIR="$ROOT_DIR/docker/iso-builder"
-IMAGE_NAME="libertix-iso-builder:trixie"
-APT_CACHE_VOLUME="libertix-iso-apt-cache"
-WORK_VOLUME="libertix-iso-work"
 MODE="${1:-all}"
 FILEPOOL_DIR="${LIBERTIX_ISO_FILEPOOL_DIR:-$ROOT_DIR/auto_tests/app/filepool}"
 LOG_DIR="${LIBERTIX_ISO_BUILD_LOG_DIR:-$ROOT_DIR/build-logs}"
@@ -13,6 +10,9 @@ LOG_FILE="$LOG_DIR/iso-build-$(date -u +%Y%m%dT%H%M%SZ)-$MODE.log"
 LOCK_DIR="$ROOT_DIR/.work"
 LOCK_FILE="$LOCK_DIR/iso-build.lock"
 WORKSPACE_ID="$(printf '%s' "$ROOT_DIR" | sha256sum | awk '{print $1}')"
+IMAGE_NAME="libertix-iso-builder:$WORKSPACE_ID"
+APT_CACHE_VOLUME="libertix-iso-apt-cache-$WORKSPACE_ID"
+WORK_VOLUME="libertix-iso-work-$WORKSPACE_ID"
 
 # One version file pins the base image digest and the Debian package archive.
 source "$BUILDER_DIR/versions.env"

@@ -212,8 +212,12 @@ jobs:
           msbuild -version
 
       - name: Validate PowerShell syntax
-        shell: pwsh
+        shell: powershell
         run: |
+          if ($PSVersionTable.PSEdition -ne 'Desktop' -or
+              $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw 'Windows PowerShell 5.1 is required for product compatibility validation.'
+          }
           $failures = [System.Collections.Generic.List[string]]::new()
           Get-ChildItem -Path Scripts, auto_tests/app/scripts, PowerShell.Tests -Recurse -File |
             Where-Object { $_.Extension -in '.ps1', '.psm1' } |
@@ -234,7 +238,7 @@ jobs:
           }
 
       - name: Analyze PowerShell
-        shell: pwsh
+        shell: powershell
         run: |
           Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 `
             -Scope CurrentUser -Force -Repository PSGallery
@@ -261,8 +265,12 @@ jobs:
           }
 
       - name: Run PowerShell contract tests
-        shell: pwsh
+        shell: powershell
         run: |
+          if ($PSVersionTable.PSEdition -ne 'Desktop' -or
+              $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw 'Windows PowerShell 5.1 is required for product compatibility validation.'
+          }
           Install-Module -Name Pester -RequiredVersion 6.0.1 `
             -Scope CurrentUser -Force -Repository PSGallery
           $configuration = New-PesterConfiguration

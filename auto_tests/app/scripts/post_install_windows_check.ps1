@@ -33,6 +33,49 @@ function Test-ObjectProperty {
     return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
 }
 
+function Assert-RecoveryLocation {
+    param(
+        [Parameter(Mandatory = $true)][string]$ReagentOutput,
+        [Parameter(Mandatory = $true)][object]$Plan
+    )
+    $locations = @([regex]::Matches($ReagentOutput,
+        '(?i)\\\\\?\\GLOBALROOT\\device\\harddisk(\d+)\\partition(\d+)\\Recovery\\WindowsRE'))
+    Assert-Condition ($locations.Count -eq 1) "Windows RE has no unique configured location."
+    $diskNumber = [int]$locations[0].Groups[1].Value
+    $partitionNumber = [int]$locations[0].Groups[2].Value
+    $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
+    $partition = Get-Partition -DiskNumber $diskNumber -PartitionNumber $partitionNumber -ErrorAction Stop
+    Assert-Condition (
+        ([string]$disk.UniqueId).Trim() -eq ([string]$Plan.disk.uniqueId).Trim() -and
+        [int64]$partition.Offset -eq [int64]$Plan.disk.recovery.offsetBytes -and
+        [int64]$partition.Size -eq [int64]$Plan.disk.recovery.sizeBytes
+    ) "Windows RE points outside the preserved recovery partition."
+}
+
+function Assert-RecoveryBootEnabled {
+    # Numeric BCD element IDs avoid interpreting localized REAgentC status values.
+    $storeClass = [wmiclass]'root\wmi:BcdStore'
+    $storeClass.psbase.Scope.Options.EnablePrivileges = $true
+    $opened = $storeClass.OpenStore('')
+    Assert-Condition ([bool]$opened.ReturnValue) "The system BCD store could not be opened."
+    $store = [wmi]("root\wmi:" + $opened.Store.__RELPATH)
+    $store.psbase.Scope.Options.EnablePrivileges = $true
+    $current = $store.OpenObject('{fa926493-6f1c-4193-a414-58f0b2456d1e}')
+    Assert-Condition ([bool]$current.ReturnValue) "The running Windows BCD object is unavailable."
+    $loader = [wmi]("root\wmi:" + $current.Object.__RELPATH)
+    $loader.psbase.Scope.Options.EnablePrivileges = $true
+    $enabled = $loader.GetElement([uint32]0x16000009)
+    Assert-Condition ([bool]$enabled.ReturnValue -and [bool]$enabled.Element.Boolean) `
+        "Automatic Windows recovery is not enabled in the running Windows boot entry."
+    $sequence = $loader.GetElement([uint32]0x14000008)
+    Assert-Condition ([bool]$sequence.ReturnValue -and @($sequence.Element.Ids).Count -gt 0) `
+        "The running Windows boot entry has no recovery sequence."
+    foreach ($identifier in @($sequence.Element.Ids)) {
+        $entry = $store.OpenObject([string]$identifier)
+        Assert-Condition ([bool]$entry.ReturnValue) "A configured Windows recovery entry is missing."
+    }
+}
+
 function Read-JsonFileWithRetry {
     param(
         [Parameter(Mandatory = $true)][string]$LiteralPath,
@@ -900,17 +943,13 @@ try {
             Assert-Condition ($text -notmatch "(?i)Libertix Installer|$installerIsoPattern|grldr") "A temporary Libertix boot entry remains in BCD."
         }
         "recovery" {
-            $recoveryPartitions = @(Get-Partition | Where-Object {
-                $_.Type -match "Recovery" -or
-                $_.GptType -eq "{de94bba4-06d1-4d40-a16a-bfd50179d6ac}" -or
-                [int]$_.MbrType -eq 39
-            })
-            $recoveryPartitions | Format-Table DiskNumber, PartitionNumber, Type, GptType, MbrType, Size -AutoSize
-            Assert-Condition ($recoveryPartitions.Count -ge 1) "No Windows recovery partition was found."
-            $reagentResult = Invoke-NativeCommandDecoded -FilePath "reagentc.exe" -Arguments @("/enable")
+            $session = Get-LibertixRecoverySession -ExpectedFirmware ([string]$config.expected_firmware)
+            $reagentResult = Invoke-NativeCommandDecoded -FilePath "reagentc.exe" -Arguments @("/info")
             Write-Output $reagentResult.CombinedOutput
             Assert-Condition ($reagentResult.ExitCode -eq 0) `
-                "reagentc.exe failed to enable Windows Recovery Environment."
+                "reagentc.exe failed to inspect Windows Recovery Environment."
+            Assert-RecoveryLocation -ReagentOutput $reagentResult.CombinedOutput -Plan $session.Plan
+            Assert-RecoveryBootEnabled
         }
         "bitlocker" {
             $volume = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
@@ -999,6 +1038,15 @@ try {
                     ForEach-Object { @($_.InputMethodTips) } |
                     ForEach-Object { [string]$_ }
             )
+            if (Test-ObjectProperty $config "interactive_keyboard_identifier") {
+                $identifier = [string]$config.interactive_keyboard_identifier
+                Assert-Condition ($identifier -match '^[0-9A-Fa-f]{8}$') `
+                    "The interactive keyboard identifier is invalid."
+                $inputMethodTips = @($identifier)
+                $uiCulture = [Globalization.CultureInfo]::GetCultureInfo([string]$config.interactive_ui_culture)
+                Assert-Condition ([int]$config.interactive_session_id -gt 0) `
+                    "The keyboard evidence was not collected in an interactive session."
+            }
             $supportedUiLanguage = switch ($uiCulture.TwoLetterISOLanguageName.ToLowerInvariant()) {
                 { $_ -in @("en", "fr", "es", "ko") } { $_; break }
                 default { "en" }

@@ -20,6 +20,21 @@ if ($stagingVolumeLabels.Count -eq 0) {
 
 $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
 $systemDisk = $systemPartition | Get-Disk -ErrorAction Stop
+$partitionLayout = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop |
+    Sort-Object PartitionNumber | Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
+$ledgerPaths = @()
+$biosLedger = Join-Path $env:SystemDrive "LibertixInstallRecovery\installation-state.json"
+if (Test-Path -LiteralPath $biosLedger) { $ledgerPaths += $biosLedger }
+$uefiRoot = Join-Path $env:ProgramData "Libertix\UefiRecovery"
+if (Test-Path -LiteralPath $uefiRoot) {
+    foreach ($directory in @(Get-ChildItem -LiteralPath $uefiRoot -Directory -ErrorAction Stop)) {
+        $path = Join-Path $directory.FullName "installation-state.json"
+        if (Test-Path -LiteralPath $path) { $ledgerPaths += $path }
+    }
+}
+$baselinePlanIds = @($ledgerPaths | ForEach-Object {
+    [string](Get-Content -LiteralPath $_ -Raw | ConvertFrom-Json).planId
+})
 $installerPartitions = @()
 foreach ($partition in @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop)) {
     $volume = $partition | Get-Volume -ErrorAction SilentlyContinue
@@ -49,6 +64,8 @@ Write-Output ("SYSTEM_DISK_NUMBER={0}" -f [int]$systemDisk.Number)
 Write-Output ("SYSTEM_PARTITION_NUMBER={0}" -f [int]$systemPartition.PartitionNumber)
 Write-Output ("SYSTEM_PARTITION_OFFSET={0}" -f [int64]$systemPartition.Offset)
 Write-Output ("SYSTEM_PARTITION_SIZE={0}" -f [int64]$systemPartition.Size)
+Write-Output ("PARTITION_LAYOUT_JSON={0}" -f (ConvertTo-Json -InputObject $partitionLayout -Compress))
+Write-Output ("EXECUTION_PLAN_IDS_JSON={0}" -f (ConvertTo-Json -InputObject $baselinePlanIds -Compress))
 Write-Output ("INSTALLER_PARTITION_COUNT={0}" -f [int]$installerPartitions.Count)
 Write-Output (
     "INSTALLER_PARTITION_NUMBERS={0}" -f `

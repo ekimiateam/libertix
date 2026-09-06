@@ -406,6 +406,9 @@ namespace Libertix.Pages
                         Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
                         "Libertix.Process.psm1");
                     CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.BiosMbr.psm1"),
+                        "Libertix.BiosMbr.psm1");
+                    CopyRequiredRecoveryFile(
                         Path.Combine("Scripts", "libertix-post-install-result.ps1"),
                         "libertix-post-install-result.ps1");
                     CopyRequiredRecoveryFile(
@@ -586,6 +589,7 @@ namespace Libertix.Pages
             }
             catch (Exception ex)
             {
+                if (ex is UnterminatedProcessException) throw;
                 Log($"ERROR: Windows shrink failed: {ex.Message}");
                 return false;
             }
@@ -632,6 +636,7 @@ namespace Libertix.Pages
             }
             catch (Exception ex)
             {
+                if (ex is UnterminatedProcessException) throw;
                 Log($"ERROR: FAT32 staging partition creation failed: {ex.Message}");
                 return null;
             }

@@ -69,7 +69,8 @@ latest_staging="$log_root/.latest-$RUN_ID"
 latest_backup="$log_root/.latest-previous"
 mkdir -p "$log_dir" || fail "cannot create $log_dir"
 printf 'copying: %s\n' "$log_dir" > "$STATUS_FILE"
-cp -a "$LOG_DIR/." "$log_dir/" || fail "cannot copy complete log directory"
+python3 /usr/local/lib/libertix/libertix-log-archive.py "$LOG_DIR" "$log_dir" || \
+    fail "cannot copy public diagnostics"
 
 printf 'success: %s\n' "$log_dir" > "$STATUS_FILE"
 cp -f "$STATUS_FILE" "$log_dir/log-copy-status.txt"
@@ -78,7 +79,8 @@ cp -f "$LOG_DIR/install.log" "$log_dir/install.log"
 
 rm -rf -- "$latest_staging" || fail "cannot clear latest log staging directory"
 mkdir -p "$latest_staging" || fail "cannot create latest log staging directory"
-cp -a "$log_dir/." "$latest_staging/" || fail "cannot stage latest log directory"
+python3 /usr/local/lib/libertix/libertix-log-archive.py "$log_dir" "$latest_staging" || \
+    fail "cannot stage latest public diagnostics"
 if [ ! -e "$latest_dir" ] && [ -d "$latest_backup" ]; then
     mv -- "$latest_backup" "$latest_dir" || fail "cannot recover previous latest log directory"
 fi

@@ -399,11 +399,12 @@ namespace Libertix.Installation
             ValidatePartition(disk.Boot, "disk.boot", disk.LogicalSectorSizeBytes, errors);
             ValidatePartition(disk.Recovery, "disk.recovery", disk.LogicalSectorSizeBytes, errors);
             ValidateInstallerPartition(disk.Installer, disk.LogicalSectorSizeBytes, errors);
-            ValidateDiskGeometry(disk, errors);
+            ValidateDiskGeometry(disk, isBios, errors);
         }
 
         private static void ValidateDiskGeometry(
             InstallationDisk disk,
+            bool isBios,
             ICollection<string> errors)
         {
             if (disk.Windows == null || disk.Boot == null || disk.Recovery == null ||
@@ -435,7 +436,11 @@ namespace Libertix.Installation
                     bool overlap =
                         fixedPartitions[left].OffsetBytes < ends[right] &&
                         fixedPartitions[right].OffsetBytes < ends[left];
-                    Require(!overlap, errors,
+                    bool sameBiosWindowsBootPartition = isBios && left == 0 && right == 1 &&
+                        disk.Windows.Number == disk.Boot.Number &&
+                        disk.Windows.OffsetBytes == disk.Boot.OffsetBytes &&
+                        disk.Windows.SizeBytes == disk.Boot.SizeBytes;
+                    Require(!overlap || sameBiosWindowsBootPartition, errors,
                         $"{fixedPartitionNames[left]} and {fixedPartitionNames[right]} overlap.");
                 }
             }
@@ -670,16 +675,14 @@ namespace Libertix.Installation
                     runtime.WindowsBitLockerState,
                     InstallationBitLockerState.NotEncryptable,
                     StringComparison.Ordinal);
-            bool pendingUefiDecryption = string.Equals(
-                    firmware,
-                    InstallationFirmware.Uefi,
-                    StringComparison.Ordinal) &&
-                string.Equals(
+            // The Windows preparation plan exists before recovery is armed and
+            // decryption starts. The live validator still requires full decryption.
+            bool pendingWindowsDecryption = string.Equals(
                     runtime.WindowsBitLockerState,
                     InstallationBitLockerState.EncryptedOrProtected,
                     StringComparison.Ordinal);
             Require(
-                safeBitLockerState || pendingUefiDecryption,
+                safeBitLockerState || pendingWindowsDecryption,
                 errors,
                 "runtime.windowsBitLockerState is invalid for the selected firmware.");
 

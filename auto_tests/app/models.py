@@ -30,6 +30,8 @@ FirstBoot = Literal["windows", "linux"]
 BootGuardianFault = Literal[
     "none",
     "bios-rollback",
+    "bios-controller-disconnect",
+    "bios-postinstall-rollback",
     "boot-order",
     "bootnext-fallback",
     "bootnext-rollback",

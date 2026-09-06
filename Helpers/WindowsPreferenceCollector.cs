@@ -26,7 +26,7 @@ namespace Libertix.Helpers
         public WindowsPreferenceAsset Wallpaper { get; set; }
         public bool? DarkMode { get; set; }
         public WindowsPreferenceAsset AccountImage { get; set; }
-        public bool AutoLockAfterInactivity { get; set; }
+        public bool? AutoLockAfterInactivity { get; set; }
         public uint? AutoLockTimeoutSeconds { get; set; }
         public bool? LockOnWakeAc { get; set; }
         public bool? LockOnWakeBattery { get; set; }
@@ -113,10 +113,17 @@ namespace Libertix.Helpers
 
         public static string Serialize(string planId, out int wifiProfileCount)
         {
+            return Serialize(planId, WindowsWifiProfileReader.ReadAll(), out wifiProfileCount);
+        }
+
+        internal static string Serialize(string planId, IReadOnlyList<WindowsWifiProfile> wifiProfiles,
+            out int wifiProfileCount)
+        {
             if (string.IsNullOrWhiteSpace(planId))
                 throw new ArgumentException("A plan identifier is required.", nameof(planId));
 
-            IReadOnlyList<WindowsWifiProfile> wifiProfiles = WindowsWifiProfileReader.ReadAll();
+            if (wifiProfiles == null)
+                throw new ArgumentNullException(nameof(wifiProfiles));
             wifiProfileCount = wifiProfiles.Count;
             var bundle = new WindowsPreferenceBundle
             {
@@ -152,22 +159,15 @@ namespace Libertix.Helpers
                     @"Control Panel\Keyboard",
                     "KeyboardSpeed") ??
                 ReadSystemParameter(SpiGetKeyboardSpeed);
-            bool autoLock = ReadRegistryBoolean(
-                    Registry.CurrentUser,
-                    @"Control Panel\Desktop",
-                    "ScreenSaveActive",
-                    defaultValue: false) &&
-                ReadRegistryBoolean(
-                    Registry.CurrentUser,
-                    @"Control Panel\Desktop",
-                    "ScreenSaverIsSecure",
-                    defaultValue: false);
-            uint? autoLockTimeout = autoLock
-                ? ReadRegistryUInt32(
-                    Registry.CurrentUser,
-                    @"Control Panel\Desktop",
-                    "ScreenSaveTimeOut")
-                : null;
+            uint? autoLockTimeout;
+            using (RegistryKey machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64))
+            {
+                autoLockTimeout = ResolveInactivityLockTimeout(
+                    ReadScreenSaverSetting("ScreenSaveActive"),
+                    ReadScreenSaverSetting("ScreenSaverIsSecure"),
+                    ReadScreenSaverSetting("ScreenSaveTimeOut"),
+                    ReadRegistryUInt32(machine, @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "InactivityTimeoutSecs"));
+            }
 
             using (var powerScheme = ActivePowerScheme.TryOpen())
             {
@@ -179,7 +179,7 @@ namespace Libertix.Helpers
                         ResolveAccountImagePath(),
                         "account-image",
                         MaximumAccountImageBytes),
-                    AutoLockAfterInactivity = autoLock,
+                    AutoLockAfterInactivity = autoLockTimeout.HasValue ? true : (bool?)null,
                     AutoLockTimeoutSeconds = autoLockTimeout,
                     LockOnWakeAc = powerScheme?.ReadAc(NoSubgroup, ConsoleLock) is uint lockAc
                         ? lockAc != 0
@@ -215,18 +215,52 @@ namespace Libertix.Helpers
         {
             using (RegistryKey desktop = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
             {
-                string path = desktop?.GetValue("WallPaper") as string;
-                if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
-                    return path;
+                return SelectPersonalizedWallpaperPath(
+                    desktop?.GetValue("WallPaper") as string,
+                    ReadRegistryInt32(Registry.CurrentUser,
+                        @"Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers",
+                        "BackgroundType"),
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                    File.Exists);
             }
+        }
 
-            string transcoded = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Microsoft",
-                "Windows",
-                "Themes",
-                "TranscodedWallpaper");
-            return File.Exists(transcoded) ? transcoded : null;
+        internal static string SelectPersonalizedWallpaperPath(
+            string path, int? backgroundType, string windowsDirectory,
+            string localApplicationData, string applicationData, Func<string, bool> fileExists)
+        {
+            // A cached image does not prove a personal choice: Spotlight and stock themes use it too.
+            // BackgroundType is advisory; the source paths also identify Spotlight on older Windows.
+            if (string.IsNullOrWhiteSpace(path) || backgroundType == 1 || backgroundType == 3)
+                return null;
+            try
+            {
+                path = Path.GetFullPath(Environment.ExpandEnvironmentVariables(path));
+                string[] automaticRoots =
+                {
+                    Path.Combine(windowsDirectory, "Web"),
+                    Path.Combine(windowsDirectory, "Resources", "Themes"),
+                    Path.Combine(windowsDirectory, "SystemApps", "MicrosoftWindows.Client.CBS_cw5n1h2txyewy"),
+                    Path.Combine(localApplicationData, "Packages", "MicrosoftWindows.Client.CBS_cw5n1h2txyewy"),
+                    Path.Combine(localApplicationData, "Packages", "Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy"),
+                    Path.Combine(applicationData, "Microsoft", "Windows", "Themes")
+                };
+                foreach (string root in automaticRoots)
+                {
+                    string prefix = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) +
+                        Path.DirectorySeparatorChar;
+                    if (path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                        return null;
+                }
+                return fileExists(path) ? path : null;
+            }
+            catch (Exception exception) when (exception is ArgumentException ||
+                exception is NotSupportedException || exception is PathTooLongException)
+            {
+                return null;
+            }
         }
 
         private static bool? ReadDarkMode()
@@ -423,14 +457,25 @@ namespace Libertix.Helpers
             return SystemParametersInfo(action, 0, out uint value, 0) ? value : (uint?)null;
         }
 
-        private static bool ReadRegistryBoolean(
-            RegistryKey root,
-            string path,
-            string name,
-            bool defaultValue)
+        internal static uint? ResolveInactivityLockTimeout(
+            uint? screenSaverActive, uint? screenSaverSecure, uint? screenSaverTimeout, uint? machineTimeout)
         {
-            int? value = ReadRegistryInt32(root, path, name);
-            return value.HasValue ? value.Value != 0 : defaultValue;
+            uint? timeout = machineTimeout > 0 ? machineTimeout : null;
+            if (screenSaverActive == 1 && screenSaverSecure == 1 && screenSaverTimeout > 0)
+                timeout = timeout.HasValue ? Math.Min(timeout.Value, screenSaverTimeout.Value) : screenSaverTimeout;
+            // An inactive screen saver does not prove that Windows Hello or another lock provider is disabled.
+            return timeout;
+        }
+
+        private static uint? ReadScreenSaverSetting(string name)
+        {
+            using (RegistryKey policy = Registry.CurrentUser.OpenSubKey(
+                @"Software\Policies\Microsoft\Windows\Control Panel\Desktop"))
+            using (RegistryKey desktop = Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop"))
+            {
+                int? value = ConvertRegistryInt32(policy?.GetValue(name) ?? desktop?.GetValue(name));
+                return value >= 0 ? (uint?)value : null;
+            }
         }
 
         private static uint? ReadRegistryUInt32(RegistryKey root, string path, string name)

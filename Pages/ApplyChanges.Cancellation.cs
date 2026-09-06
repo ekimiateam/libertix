@@ -61,8 +61,14 @@ namespace Libertix.Pages
             PublishUnattendedFailure(
                 "installation-preparation-failed",
                 "Installation preparation did not reach the verified reboot-ready state.");
-            BackButton.IsEnabled = enableBackButton;
+            BackButton.IsEnabled = CanRetryAfterFailure(
+                enableBackButton, _processTerminationUnverified, _rollbackVerificationPending);
             SetInstallationRunning(false);
+        }
+
+        internal static bool CanRetryAfterFailure(bool requested, bool processStateUnknown, bool rollbackPending)
+        {
+            return requested && !processStateUnknown && !rollbackPending;
         }
 
         private void PublishUnattendedFailure(string errorCode, string errorMessage)
@@ -173,6 +179,7 @@ namespace Libertix.Pages
 
         private async Task RollbackUefiCancellationAsync()
         {
+            _rollbackVerificationPending = true;
             string scriptPath = Path.Combine(
                 AppDomain.CurrentDomain.BaseDirectory,
                 "Scripts",
@@ -225,6 +232,7 @@ namespace Libertix.Pages
                 PublishUnattendedFailure(
                     "uefi-installation-cancelled",
                     "Installation cancelled. Windows was restored and the rollback was verified.");
+                _rollbackVerificationPending = false;
                 FinishInstallation(enableBackButton: true);
                 return;
             }

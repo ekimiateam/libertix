@@ -64,6 +64,7 @@ render_boot_config() {
 }
 
 prepare_workdir() {
+    assert_workdir_unmounted || return 1
     rm -rf "$WORKDIR"
     mkdir -p "$WORKDIR"/{chroot,iso_build}
 }
@@ -118,14 +119,26 @@ unmount_chroot_filesystems() {
 # The chroot keeps its packages only while the shared cache is bind mounted.
 # Emptying it must happen after the unmount so the host cache stays intact.
 purge_chroot_apt_cache() {
+    assert_workdir_unmounted || return 1
     rm -rf "$WORKDIR/chroot/var/cache/apt/archives" "$WORKDIR/chroot/var/lib/apt/lists"
     mkdir -p "$WORKDIR/chroot/var/cache/apt/archives/partial" \
         "$WORKDIR/chroot/var/lib/apt/lists/partial"
 }
 
-workdir_has_mounts() {
-    findmnt -rn -o TARGET \
-        | awk -v prefix="$WORKDIR/" 'index($0, prefix) == 1 { found = 1 } END { exit !found }'
+assert_workdir_unmounted() {
+    local mounts target
+    mounts="$(findmnt -rn --raw -o TARGET)" || {
+        echo "Cannot prove that build mounts were detached from $WORKDIR" >&2
+        return 1
+    }
+    while IFS= read -r target; do
+        case "$target" in
+            "$WORKDIR"|"$WORKDIR/"*)
+                echo "Refusing to clean $WORKDIR while a mount remains: $target" >&2
+                return 1
+                ;;
+        esac
+    done <<< "$mounts"
 }
 
 configure_live_system() {
@@ -168,6 +181,7 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-runner-main.sh|/usr/local/lib/libertix/libertix-runner-main.sh"
         "0755|$ROOT_DIR/assets/live/libertix-gui.py|/usr/local/sbin/libertix-gui"
         "0755|$ROOT_DIR/assets/live/libertix-copy-logs.sh|/usr/local/sbin/libertix-copy-logs"
+        "0755|$ROOT_DIR/assets/live/libertix-log-archive.py|/usr/local/lib/libertix/libertix-log-archive.py"
         "0755|$ROOT_DIR/assets/live/libertix-install-platform-common.sh|/usr/local/lib/libertix/libertix-install-platform-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-storage-common.sh|/usr/local/lib/libertix/libertix-storage-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-install-runtime-common.sh|/usr/local/lib/libertix/libertix-install-runtime-common.sh"
@@ -199,6 +213,7 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-runner-stage-common.sh|/usr/local/lib/libertix/libertix-runner-stage-common.sh"
         "0644|$ROOT_DIR/assets/live/libertix-stages.tsv|/usr/local/lib/libertix/libertix-stages.tsv"
         "0755|$ROOT_DIR/assets/live/cleanup-bcd-main.py|/usr/local/lib/libertix/cleanup-bcd-main.py"
+        "0755|$ROOT_DIR/assets/live/libertix-bios-boot-payload.py|/usr/local/lib/libertix/libertix-bios-boot-payload.py"
         "0755|$ISO_DIR/target/configure-target.sh|/usr/local/lib/libertix/configure-target.sh"
         "0755|$ROOT_DIR/assets/live/configure-target-main.sh|/usr/local/lib/libertix/configure-target-main.sh"
         "0755|$ROOT_DIR/grub/10_libertix|/usr/local/lib/libertix/10_libertix"
@@ -403,10 +418,7 @@ create_iso() {
 cleanup() {
     unmount_chroot_filesystems
     # A leftover bind mount would make this delete the shared host apt cache.
-    if workdir_has_mounts; then
-        echo "Refusing to remove $WORKDIR while mounts remain under it" >&2
-        return
-    fi
+    assert_workdir_unmounted || return 1
     rm -rf "$WORKDIR"
 }
 

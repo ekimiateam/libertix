@@ -324,6 +324,10 @@ def test_ssh_remote_timeouts_are_enforced_on_linux_and_windows() -> None:
     assert "CurrentCulture.TextInfo.OEMCodePage" in wrapper
     assert "Read-NativeOutputText -LiteralPath $stdoutPath" in wrapper
     assert "Read-NativeOutputText -LiteralPath $stderrPath" in wrapper
+    assert wrapper.count("-DrainClock $outputDrainClock") == 2
+    assert "$DrainClock.ElapsedMilliseconds -ge $DrainTimeoutMilliseconds" in wrapper
+    assert "$nativeError -notin @(32, 33)" in wrapper
+    assert "SSH output drain timed out" in wrapper
     assert '"`r`necho %ERRORLEVEL% > `"$statusPath`"`r`n"' in wrapper
     assert "[int]::TryParse($statusText, [ref]$reportedExitCode)" in wrapper
     assert "$exitCode = 126" in wrapper

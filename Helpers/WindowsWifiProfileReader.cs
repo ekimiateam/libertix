@@ -12,6 +12,7 @@ namespace Libertix.Helpers
     {
         public string Id { get; set; }
         public string Ssid { get; set; }
+        public string SsidHex { get; set; }
         public string Security { get; set; }
         public string Secret { get; set; }
         public bool Hidden { get; set; }
@@ -24,7 +25,7 @@ namespace Libertix.Helpers
         private const uint WlanProfileGetPlaintextKey = 4;
         private const int ErrorSuccess = 0;
         private const int ErrorAccessDenied = 5;
-        private const int ErrorServiceNotActive = 1062;
+        internal const int ErrorServiceNotActive = 1062;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct WlanInterfaceInfo
@@ -89,9 +90,7 @@ namespace Libertix.Helpers
                 IntPtr.Zero,
                 out _,
                 out IntPtr clientHandle);
-            if (result == ErrorServiceNotActive)
-                return Array.Empty<WindowsWifiProfile>();
-            ThrowIfError(result, "Windows Wi-Fi profile access could not be initialized.");
+            AssertClientOpened(result);
 
             try
             {
@@ -107,7 +106,7 @@ namespace Libertix.Helpers
                         if (profile == null)
                             continue;
 
-                        string identity = profile.Security + "\n" + profile.Ssid;
+                        string identity = profile.Security + "\n" + profile.SsidHex;
                         if (profiles.TryGetValue(identity, out WindowsWifiProfile existing))
                         {
                             if (!string.Equals(existing.Secret, profile.Secret, StringComparison.Ordinal))
@@ -136,6 +135,14 @@ namespace Libertix.Helpers
             {
                 WlanCloseHandle(clientHandle, IntPtr.Zero);
             }
+        }
+
+        internal static void AssertClientOpened(int result)
+        {
+            // An unavailable service cannot prove that no saved profiles exist.
+            ThrowIfError(result, result == ErrorServiceNotActive
+                ? "The Windows WLAN AutoConfig service is stopped; saved Wi-Fi profiles cannot be read."
+                : "Windows Wi-Fi profile access could not be initialized.");
         }
 
         private static IEnumerable<Guid> EnumerateInterfaces(IntPtr clientHandle)
@@ -287,24 +294,37 @@ namespace Libertix.Helpers
             }
             else if (string.Equals(authentication, "WPA3SAE", StringComparison.OrdinalIgnoreCase))
             {
-                security = "sae";
+                string transitionMode = ElementValue(document, "transitionMode");
+                if (transitionMode != null && transitionMode != "true" && transitionMode != "false" &&
+                    transitionMode != "1" && transitionMode != "0")
+                    throw new InvalidOperationException("A saved WPA3 profile has an invalid transition mode.");
+                // NetworkManager wpa-psk permits WPA2/SAE; sae prohibits WPA2 fallback.
+                security = transitionMode == "true" || transitionMode == "1" ? "wpa-psk" : "sae";
             }
             else
             {
                 return null;
             }
 
-            string ssid = document.Descendants()
-                .Where(element => element.Name.LocalName == "SSID")
-                .SelectMany(element => element.Elements())
-                .FirstOrDefault(element => element.Name.LocalName == "name")
-                ?.Value;
-            if (string.IsNullOrEmpty(ssid) ||
-                System.Text.Encoding.UTF8.GetByteCount(ssid) > 32 ||
-                ssid.IndexOf('\0') >= 0)
+            XElement ssidElement = document.Descendants()
+                .FirstOrDefault(element => element.Name.LocalName == "SSID");
+            string ssid = ssidElement?.Elements().FirstOrDefault(element => element.Name.LocalName == "name")?.Value;
+            string ssidHex = ssidElement?.Elements().FirstOrDefault(element => element.Name.LocalName == "hex")?.Value;
+            if (ssidHex != null)
+            {
+                if (!System.Text.RegularExpressions.Regex.IsMatch(ssidHex, @"\A(?:[0-9a-fA-F]{2}){1,32}\z"))
+                    throw new InvalidOperationException("A saved Windows Wi-Fi profile contains an invalid hexadecimal SSID.");
+                ssidHex = ssidHex.ToLowerInvariant();
+            }
+            else if (!string.IsNullOrEmpty(ssid) && ssid.Length <= 32 &&
+                ssid.All(character => character > 0 && character <= 127))
+            {
+                ssidHex = BitConverter.ToString(System.Text.Encoding.ASCII.GetBytes(ssid)).Replace("-", "").ToLowerInvariant();
+            }
+            else
             {
                 throw new InvalidOperationException(
-                    "A saved Windows Wi-Fi profile contains an invalid SSID.");
+                    "A saved Windows Wi-Fi profile has no exact supported SSID representation.");
             }
 
             string secret = security == "open" || security == "owe"
@@ -332,8 +352,9 @@ namespace Libertix.Helpers
 
             return new WindowsWifiProfile
             {
-                Id = string.IsNullOrWhiteSpace(profileName) ? ssid : profileName,
+                Id = string.IsNullOrWhiteSpace(profileName) ? "Wi-Fi " + ssidHex : profileName,
                 Ssid = ssid,
+                SsidHex = ssidHex,
                 Security = security,
                 Secret = secret,
                 Hidden = string.Equals(

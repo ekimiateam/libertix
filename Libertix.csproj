@@ -101,6 +101,7 @@
     <Compile Include="Installation\InstallationSizePolicy.cs" />
     <Compile Include="Installation\UnattendedInstallationConfigurator.cs" />
     <Compile Include="Installation\InstallationTemporaryArtifacts.cs" />
+    <Compile Include="Installation\BiosBootPayload.cs" />
     <Compile Include="Installation\InstallationStateMachine.cs" />
     <Compile Include="Installation\InstallationStateStore.cs" />
     <Compile Include="Installation\LiveBootArguments.cs" />
@@ -308,6 +309,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.Process.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.BiosMbr.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.Firmware.psm1">

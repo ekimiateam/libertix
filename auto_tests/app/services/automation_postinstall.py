@@ -157,7 +157,7 @@ class PostInstallValidationMixin:
     ) -> None:
         guardian_fault_evidence: BootGuardianFaultEvidence | None = None
         preferred_loader_fault_evidence: BootGuardianFaultEvidence | None = None
-        if options.boot_guardian_fault == "bios-rollback":
+        if options.boot_guardian_fault in {"bios-rollback", "bios-controller-disconnect"}:
             if monitor_outcome != "installation-rollback":
                 raise WorkflowError(
                     "automation.bios_rollback",
@@ -544,8 +544,39 @@ class PostInstallValidationMixin:
                     options,
                     result,
                 )
+            if options.boot_guardian_fault == "bios-postinstall-rollback":
+                self._rollback_completed_bios_installation(final_windows_ssh, vm, options, result)
         finally:
             final_windows_ssh.__exit__(None, None, None)
+
+    def _rollback_completed_bios_installation(
+        self, ssh: SSHClient, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
+    ) -> None:
+        if (
+            vm.firmware != "bios"
+            or options.rollback_baseline is None
+            or any(step.status == "error" for step in result.steps)
+        ):
+            raise WorkflowError(
+                "automation.bios_postinstall_rollback",
+                "Post-install BIOS rollback requires successful checks and its Windows baseline",
+                details={"vm": vm.name},
+            )
+        self._run_windows_script_resiliently(
+            ssh,
+            script_name="request_bios_postinstall_rollback.ps1",
+            config={"expected_firmware": "bios"},
+            step="automation.bios_postinstall_rollback.request",
+            timeout=960,
+        )
+        self._verify_exact_windows_rollback(
+            ssh,
+            vm,
+            options.rollback_baseline,
+            result,
+            step="automation.bios_postinstall_rollback.verify",
+            failure_message="The installed BIOS Linux partition was not fully rolled back",
+        )
 
     def _verify_windows_preference_migration(
         self,
@@ -851,11 +882,45 @@ class PostInstallValidationMixin:
                     "The Windows post-install result process ID is missing",
                     details={"vm": vm.name, "target": vm.host},
                 )
-            self._run_windows_script_resiliently(
+            focus = self._run_windows_script_resiliently(
                 guest_ssh,
                 script_name="focus_post_install_result.ps1",
                 config={"process_id": int(process_id_text)},
                 step="automation.windows_post_install_result_focused",
+                timeout=60,
+            )
+            locale = self.validation.parse_powershell_results(
+                focus.stdout,
+                prefixes=(
+                    "ACTIVE_KEYBOARD_IDENTIFIER",
+                    "INTERACTIVE_UI_CULTURE",
+                    "INTERACTIVE_SESSION_ID",
+                ),
+            )
+            if not all(
+                locale.get(key)
+                for key in (
+                    "ACTIVE_KEYBOARD_IDENTIFIER",
+                    "INTERACTIVE_UI_CULTURE",
+                    "INTERACTIVE_SESSION_ID",
+                )
+            ):
+                raise WorkflowError(
+                    "automation.windows_interactive_locale",
+                    "The focused Windows result did not provide interactive keyboard evidence",
+                    details={"vm": vm.name, "target": vm.host},
+                )
+            self._run_windows_script_resiliently(
+                guest_ssh,
+                script_name="post_install_windows_check.ps1",
+                config={
+                    "check": "locale",
+                    "expected_firmware": vm.firmware,
+                    "interactive_keyboard_identifier": locale["ACTIVE_KEYBOARD_IDENTIFIER"],
+                    "interactive_ui_culture": locale["INTERACTIVE_UI_CULTURE"],
+                    "interactive_session_id": locale["INTERACTIVE_SESSION_ID"],
+                },
+                step="automation.windows_interactive_locale",
                 timeout=60,
             )
         capture = self._capture_with_name(vm, f"post-install-{platform}-success")
@@ -1137,6 +1202,7 @@ class PostInstallValidationMixin:
         phase: str,
         grub_entry: Literal["linux", "windows"] | None = None,
         distribution: DistributionProfile | None = None,
+        previous_windows_boot_id: str | None = None,
     ) -> SSHClient:
         deadline = time.monotonic() + self.settings.post_install_boot_timeout_seconds
         last_error: WorkflowError | None = None
@@ -1178,6 +1244,21 @@ class PostInstallValidationMixin:
                     timeout=30,
                 )
                 if response.stdout.strip() == expected:
+                    if previous_windows_boot_id is not None:
+                        boot_id = self._read_windows_boot_id(client, vm)
+                        if boot_id == previous_windows_boot_id:
+                            raise WorkflowError(
+                                f"automation.{phase}_boot_identity",
+                                "Windows is still running the pre-reboot session",
+                                details={"vm": vm.name, "boot_id": boot_id},
+                            )
+                        result.ok(
+                            f"automation.{phase}_boot_identity",
+                            "A new Windows boot session was proven",
+                            vm=vm.name,
+                            previous_boot_id=previous_windows_boot_id,
+                            boot_id=boot_id,
+                        )
                     return client
             except WorkflowError as exc:
                 last_error = exc
@@ -1394,17 +1475,7 @@ class PostInstallValidationMixin:
             )
         )
         profile_shortcut_test = (
-            "profiles=$(python3 -c 'import base64,json,sys; "
-            'p=json.load(open(sys.argv[1], encoding="utf-8")); '
-            'print("\\n".join(json.loads(base64.b64decode('
-            'p["features"]["windowsProfilesJsonBase64"], validate=True))))\' '
-            "/etc/libertix/installation-plan.json); "
-            f"home=/home/{username}; bookmarks=$home/.config/gtk-3.0/bookmarks; "
-            "printf '%s\\n' \"$profiles\" | while IFS= read -r profile; do "
-            'test -n "$profile" || continue; shortcut=$home/User_$profile; '
-            'test -L "$shortcut"; '
-            'test "$(readlink "$shortcut")" = "/mnt/windows/Users/$profile"; '
-            'grep -Fqx "file://$shortcut User_$profile" "$bookmarks"; done'
+            "python3 /usr/local/lib/libertix/libertix-first-boot-verify.py --verify-windows-sharing"
             if options.share_windows_files_in_linux
             else (
                 f"! find /home/{username} -maxdepth 1 -type l -name 'User_*' "
@@ -1605,6 +1676,7 @@ class PostInstallValidationMixin:
             RemoteCheck(
                 "linux.windows_profile_shortcuts",
                 profile_shortcut_test,
+                requires_sudo=True,
             ),
             RemoteCheck(
                 "linux.desktop_stack",
@@ -1646,7 +1718,7 @@ class PostInstallValidationMixin:
                 'assert s["grub"]["bootChain"]["verified"] is True; '
                 'assert s.get("windowsEvidencePath"); '
                 "fields={k:s.get(k) for k in "
-                '("planId","status","updatedAtUtc","error")}; '
+                '("planId","status","updatedAtUtc","error","attemptId")}; '
                 "fingerprint=hashlib.sha256("
                 "json.dumps(fields, sort_keys=True).encode()).hexdigest(); "
                 'assert a["fingerprint"] == fingerprint\' '
@@ -1862,6 +1934,9 @@ class PostInstallValidationMixin:
     ) -> CommandResult | None:
         # Every semicolon-separated assertion is part of the contract. Without
         # errexit, a later successful diagnostic could hide an earlier failure.
+        result.ok(
+            "automation.check_started", "Post-install check started", vm=vm.name, test=check.name
+        )
         command = f"sh -eu -c {shlex.quote(check.command)}"
         stdin_data = None
         sensitive = check.sensitive
@@ -1984,43 +2059,17 @@ class PostInstallValidationMixin:
         vm: VMConfig,
         result: ResultBuilder,
     ) -> None:
-        try:
-            response = ssh.run(
-                "shutdown.exe /r /t 0 /d p:0:0",
-                step="automation.linux_return_boot",
-                timeout=30,
-                check=False,
-            )
-        except WorkflowError as exc:
-            raise WorkflowError(
-                "automation.linux_return_boot",
-                "Windows could not request the Linux return reboot",
-                details={
-                    "vm": vm.name,
-                    "target": vm.host,
-                    "test": "windows.linux_reboot",
-                    **exc.details,
-                },
-            ) from exc
-        if response.exit_code not in {0, -1}:
-            raise WorkflowError(
-                "automation.linux_return_boot",
-                "Windows rejected the Linux return reboot request",
-                details={
-                    "vm": vm.name,
-                    "target": vm.host,
-                    "test": "windows.linux_reboot",
-                    "exit_code": response.exit_code,
-                    "stdout": response.stdout,
-                    "stderr": response.stderr,
-                },
-            )
+        acknowledged = self._request_windows_power_transition(
+            ssh, vm, "shutdown.exe /r /t 0 /d p:0:0", "automation.linux_return_boot"
+        )
         result.ok(
             "automation.test.windows",
-            "windows.linux_reboot: OK",
+            "Windows reboot requested; the installed Linux boot must still be proven",
             vm=vm.name,
             target=vm.host,
             test="windows.linux_reboot",
+            request_acknowledged=acknowledged,
+            reboot_verified=False,
         )
 
     def _inject_boot_guardian_boot_order_fault(
@@ -2301,7 +2350,7 @@ class PostInstallValidationMixin:
                 capture=str(first_capture),
                 **first_prompt_values,
             )
-            self._request_unanswered_prompt_reboot(ssh, vm, result)
+            previous_boot_id = self._request_unanswered_prompt_reboot(ssh, vm, result)
         finally:
             ssh.__exit__(None, None, None)
 
@@ -2314,6 +2363,7 @@ class PostInstallValidationMixin:
             probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
             expected="LIBERTIX_WINDOWS_READY",
             phase="preferred_path_prompt_after_reboot",
+            previous_windows_boot_id=previous_boot_id,
             grub_entry="windows",
             distribution=options.distribution,
         )
@@ -2360,7 +2410,7 @@ class PostInstallValidationMixin:
                 **restored_values,
             )
             self._inject_boot_guardian_preferred_bypass(ssh, vm, result)
-            self._request_unanswered_prompt_reboot(ssh, vm, result)
+            previous_boot_id = self._request_unanswered_prompt_reboot(ssh, vm, result)
         finally:
             ssh.__exit__(None, None, None)
 
@@ -2373,6 +2423,7 @@ class PostInstallValidationMixin:
             probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
             expected="LIBERTIX_WINDOWS_READY",
             phase="preferred_path_prompt_after_proven_bypass",
+            previous_windows_boot_id=previous_boot_id,
             distribution=options.distribution,
         )
         try:
@@ -2649,7 +2700,7 @@ class PostInstallValidationMixin:
                 capture=str(capture),
                 **initial,
             )
-            self._request_unanswered_prompt_reboot(ssh, vm, result)
+            previous_boot_id = self._request_unanswered_prompt_reboot(ssh, vm, result)
         finally:
             ssh.__exit__(None, None, None)
 
@@ -2662,6 +2713,7 @@ class PostInstallValidationMixin:
             probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
             expected="LIBERTIX_WINDOWS_READY",
             phase="bootnext_fallback_prompt_after_reboot",
+            previous_windows_boot_id=previous_boot_id,
             grub_entry="windows",
             distribution=options.distribution,
         )
@@ -2768,6 +2820,8 @@ class PostInstallValidationMixin:
                 "system_partition_number": int(baseline["SYSTEM_PARTITION_NUMBER"]),
                 "system_partition_offset": int(baseline["SYSTEM_PARTITION_OFFSET"]),
                 "system_partition_size": int(baseline["SYSTEM_PARTITION_SIZE"]),
+                "partition_layout": json.loads(baseline["PARTITION_LAYOUT_JSON"]),
+                "baseline_plan_ids": json.loads(baseline["EXECUTION_PLAN_IDS_JSON"]),
                 "wait_timeout_seconds": 900,
             },
             step=step,
@@ -2783,11 +2837,16 @@ class PostInstallValidationMixin:
                 "ROLLBACK_WINDOWS_BOOT_MANAGER_PRESENT",
                 "ROLLBACK_BOOT_GUARDIAN_PRESENT",
                 "ROLLBACK_VERIFIED",
+                "ROLLBACK_LEDGER_VERIFIED",
+                "ROLLBACK_PLAN_ID",
+                "ROLLBACK_PARTITION_LAYOUT_MATCHES",
                 "RESULT",
             ),
         )
         if (
             verified.get("ROLLBACK_VERIFIED") != "True"
+            or verified.get("ROLLBACK_LEDGER_VERIFIED") != "True"
+            or verified.get("ROLLBACK_PARTITION_LAYOUT_MATCHES") != "True"
             or verified.get("ROLLBACK_BOOT_GUARDIAN_PRESENT") != "False"
             or verified.get("RESULT") != "OK"
         ):
@@ -2805,43 +2864,83 @@ class PostInstallValidationMixin:
             **verified,
         )
 
-    def _request_unanswered_prompt_reboot(
-        self,
+    @staticmethod
+    def _read_windows_boot_id(ssh: SSHClient, vm: VMConfig) -> str:
+        response = ssh.run(
+            "powershell.exe -NoProfile -NonInteractive -Command "
+            '"(Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).'
+            'LastBootUpTime.ToUniversalTime().Ticks"',
+            step="automation.windows_boot_identity",
+            timeout=30,
+        )
+        value = response.stdout.strip()
+        if (
+            response.exit_code != 0
+            or not value.isascii()
+            or not value.isdigit()
+            or len(value) != 18
+        ):
+            raise WorkflowError(
+                "automation.windows_boot_identity",
+                "Windows boot identity is unavailable",
+                details={"vm": vm.name, "exit_code": response.exit_code},
+            )
+        return value
+
+    @staticmethod
+    def _request_windows_power_transition(
         ssh: SSHClient,
         vm: VMConfig,
-        result: ResultBuilder,
-    ) -> None:
+        command: str,
+        step: str,
+    ) -> bool:
         try:
-            response = ssh.run(
-                "shutdown.exe /r /t 0 /d p:0:0",
-                step="automation.preferred_path_prompt.unanswered_reboot",
-                timeout=30,
-                check=False,
-            )
+            response = ssh.run(command, step=step, timeout=30, check=False)
         except WorkflowError as exc:
+            if exc.details.get("exception_type") == "MissingExitStatus":
+                return False
             raise WorkflowError(
-                "automation.preferred_path_prompt.unanswered_reboot",
-                "Windows could not request the unanswered-consent reboot",
+                step,
+                "Windows could not request the power transition",
                 details={"vm": vm.name, "target": vm.host, **exc.details},
             ) from exc
-        if response.exit_code not in {0, -1}:
+        if response.exit_code == -1:
+            return False
+        if response.exit_code != 0:
             raise WorkflowError(
-                "automation.preferred_path_prompt.unanswered_reboot",
-                "Windows rejected the unanswered-consent reboot request",
+                step,
+                "Windows rejected the power transition request",
                 details={
                     "vm": vm.name,
-                    "target": vm.host,
                     "exit_code": response.exit_code,
                     "stdout": response.stdout,
                     "stderr": response.stderr,
                 },
             )
+        return True
+
+    def _request_unanswered_prompt_reboot(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+    ) -> str:
+        previous_boot_id = self._read_windows_boot_id(ssh, vm)
+        acknowledged = self._request_windows_power_transition(
+            ssh,
+            vm,
+            "shutdown.exe /r /t 0 /d p:0:0",
+            "automation.preferred_path_prompt.unanswered_reboot",
+        )
         result.ok(
             "automation.preferred_path_prompt.unanswered_reboot",
-            "Windows accepted a reboot while the preferred-path consent stayed unanswered",
+            "Reboot requested with unanswered consent; a new Windows boot must still be proven",
             vm=vm.name,
             target=vm.host,
+            request_acknowledged=acknowledged,
+            reboot_verified=False,
         )
+        return previous_boot_id
 
     def _send_focused_enter(self, vm: VMConfig) -> None:
         client = None
@@ -3013,31 +3112,9 @@ class PostInstallValidationMixin:
         else:
             raise ValueError("shutdown repair requires a BootGuardian fault mode")
 
-        try:
-            response = ssh.run(
-                "shutdown.exe /s /t 0 /d p:0:0",
-                step="automation.boot_guardian_shutdown.request",
-                timeout=30,
-                check=False,
-            )
-        except WorkflowError as exc:
-            raise WorkflowError(
-                "automation.boot_guardian_shutdown.request",
-                "Windows could not request the BootGuardian shutdown test",
-                details={"vm": vm.name, "target": vm.host, **exc.details},
-            ) from exc
-        if response.exit_code not in {0, -1}:
-            raise WorkflowError(
-                "automation.boot_guardian_shutdown.request",
-                "Windows rejected the BootGuardian shutdown test",
-                details={
-                    "vm": vm.name,
-                    "target": vm.host,
-                    "exit_code": response.exit_code,
-                    "stdout": response.stdout,
-                    "stderr": response.stderr,
-                },
-            )
+        self._request_windows_power_transition(
+            ssh, vm, "shutdown.exe /s /t 0 /d p:0:0", "automation.boot_guardian_shutdown.request"
+        )
 
         with self._proxmox() as proxmox:
             node = proxmox.locate_vm(vm.vmid)
@@ -3150,6 +3227,12 @@ class PostInstallValidationMixin:
     ) -> None:
         plan = build_windows_validation_plan(vm, options, artifacts)
         for name in plan.check_names:
+            result.ok(
+                "automation.check_started",
+                "Post-install check started",
+                vm=vm.name,
+                test=f"windows.{name}",
+            )
             try:
                 response = self._run_windows_script_resiliently(
                     ssh,

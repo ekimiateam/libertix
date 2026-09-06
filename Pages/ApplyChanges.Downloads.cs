@@ -360,6 +360,7 @@ namespace Libertix.Pages
             string continueDownload = supportsByteRanges ? "true" : "false";
             return new[]
             {
+                "--no-conf=true",
                 "--allow-overwrite=true",
                 "--auto-file-renaming=false",
                 $"--continue={continueDownload}",

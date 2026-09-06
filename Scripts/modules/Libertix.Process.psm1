@@ -57,22 +57,33 @@ function ConvertTo-LibertixNativeArgument {
 }
 
 function Stop-LibertixNativeProcessTree {
-    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [ValidateRange(1, 60)][int]$TimeoutSeconds = 10
+    )
 
+    $taskKillProcess = New-Object Diagnostics.Process
     try {
-        $taskKill = Join-Path $env:SystemRoot "System32\taskkill.exe"
-        $previousErrorActionPreference = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = "Continue"
-            & $taskKill /PID $Process.Id /T /F 2>&1 | Out-Null
-            $taskkillExitCode = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousErrorActionPreference
+        $taskKillProcess.StartInfo.FileName = Get-LibertixNativeSystemExecutable -FileName "taskkill.exe"
+        $taskKillProcess.StartInfo.Arguments = "/PID $($Process.Id) /T /F"
+        $taskKillProcess.StartInfo.UseShellExecute = $false
+        $taskKillProcess.StartInfo.CreateNoWindow = $true
+        $taskKillProcess.StartInfo.RedirectStandardOutput = $true
+        $taskKillProcess.StartInfo.RedirectStandardError = $true
+        if (-not $taskKillProcess.Start()) { return $false }
+        $null = $taskKillProcess.StandardOutput.ReadToEndAsync()
+        $null = $taskKillProcess.StandardError.ReadToEndAsync()
+        if (-not $taskKillProcess.WaitForExit($TimeoutSeconds * 1000)) {
+            $taskKillProcess.Kill()
+            $null = $taskKillProcess.WaitForExit(1000)
+            return $false
         }
-        $Process.WaitForExit(10000) | Out-Null
-        return ($taskkillExitCode -eq 0 -and $Process.HasExited)
+        $null = $Process.WaitForExit($TimeoutSeconds * 1000)
+        return ($taskKillProcess.ExitCode -eq 0 -and $Process.HasExited)
     } catch {
         return $false
+    } finally {
+        $taskKillProcess.Dispose()
     }
 }
 
@@ -82,6 +93,7 @@ function Invoke-LibertixNativeCommand {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$ArgumentList = @(),
         [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
+        [string]$StandardInputText = "",
         [scriptblock]$OnStandardOutputLine = $null,
         [scriptblock]$OnStandardErrorLine = $null
     )
@@ -95,6 +107,7 @@ function Invoke-LibertixNativeCommand {
         -FilePath $FilePath `
         -Arguments $arguments `
         -TimeoutSeconds $TimeoutSeconds `
+        -StandardInputText $StandardInputText `
         -OnStandardOutputLine $OnStandardOutputLine `
         -OnStandardErrorLine $OnStandardErrorLine
 }
@@ -105,6 +118,7 @@ function Invoke-LibertixNativeProcess {
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string]$Arguments = "",
         [Parameter(Mandatory = $true)][ValidateRange(1, 86400)][int]$TimeoutSeconds,
+        [string]$StandardInputText = "",
         [string]$MonitoredFilePath = "",
         [int64]$MaximumFileBytes = 0,
         [scriptblock]$OnStandardOutputLine = $null,
@@ -113,6 +127,9 @@ function Invoke-LibertixNativeProcess {
 
     if ($MaximumFileBytes -lt 0) {
         throw "MaximumFileBytes cannot be negative."
+    }
+    if ($StandardInputText.Length -gt 65536) {
+        throw "Native standard input exceeds its bounded command size."
     }
     if (($MaximumFileBytes -gt 0) -ne (-not [string]::IsNullOrWhiteSpace($MonitoredFilePath))) {
         throw "MonitoredFilePath and MaximumFileBytes must be provided together."
@@ -124,14 +141,17 @@ function Invoke-LibertixNativeProcess {
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.RedirectStandardInput = $StandardInputText.Length -gt 0
     $startInfo.CreateNoWindow = $true
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
+    $processStarted = $false
     try {
         if (-not $process.Start()) {
             throw "Failed to start $FilePath."
         }
+        $processStarted = $true
         $output = New-Object Text.StringBuilder
         $errorOutput = New-Object Text.StringBuilder
         $outputTask = $process.StandardOutput.ReadLineAsync()
@@ -139,9 +159,23 @@ function Invoke-LibertixNativeProcess {
         $outputClosed = $false
         $errorClosed = $false
         $timer = [Diagnostics.Stopwatch]::StartNew()
+        $inputTask = $null
+        if ($startInfo.RedirectStandardInput) {
+            $process.StandardInput.AutoFlush = $true
+            $inputTask = $process.StandardInput.WriteAsync($StandardInputText)
+        }
         $processExited = $false
         while (-not $processExited -or -not $outputClosed -or -not $errorClosed) {
+            if ($null -ne $inputTask -and $inputTask.IsCompleted) {
+                $null = $inputTask.GetAwaiter().GetResult()
+                $process.StandardInput.Close()
+                $inputTask = $null
+            }
             while (-not $outputClosed -and $outputTask.IsCompleted) {
+                if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                    if ($process.HasExited) { throw "PROCESS_TREE_NOT_STOPPED: $FilePath output did not drain before its deadline." }
+                    throw "$FilePath timed out while reading standard output."
+                }
                 $line = $outputTask.GetAwaiter().GetResult()
                 if ($null -eq $line) {
                     $outputClosed = $true
@@ -155,6 +189,10 @@ function Invoke-LibertixNativeProcess {
             }
 
             while (-not $errorClosed -and $errorTask.IsCompleted) {
+                if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                    if ($process.HasExited) { throw "PROCESS_TREE_NOT_STOPPED: $FilePath error output did not drain before its deadline." }
+                    throw "$FilePath timed out while reading standard error."
+                }
                 $line = $errorTask.GetAwaiter().GetResult()
                 if ($null -eq $line) {
                     $errorClosed = $true
@@ -196,15 +234,27 @@ function Invoke-LibertixNativeProcess {
                     throw "$FilePath timed out after $TimeoutSeconds seconds."
                 }
             } elseif (-not $outputClosed -or -not $errorClosed) {
+                if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                    throw "PROCESS_TREE_NOT_STOPPED: $FilePath exited but an inherited output stream remains open."
+                }
                 Start-Sleep -Milliseconds 10
             }
         }
         $process.WaitForExit()
+        if ($process.ExitCode -eq 173) {
+            throw "PROCESS_TREE_NOT_STOPPED: $FilePath reported an unverified descendant process."
+        }
         return [pscustomobject]@{
             ExitCode = $process.ExitCode
             StandardOutput = $output.ToString()
             StandardError = $errorOutput.ToString()
         }
+    } catch {
+        $processError = $_
+        if ($processStarted -and -not $process.HasExited -and -not (Stop-LibertixNativeProcessTree -Process $process)) {
+            throw "PROCESS_TREE_NOT_STOPPED: $FilePath failed and its process tree could not be proven stopped."
+        }
+        throw $processError
     } finally {
         $process.Dispose()
     }

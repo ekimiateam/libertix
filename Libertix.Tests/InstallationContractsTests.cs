@@ -33,6 +33,24 @@ namespace Libertix.Tests
             CollectionAssert.Contains(arguments, "--continue=false");
             CollectionAssert.Contains(arguments, "--max-connection-per-server=1");
             CollectionAssert.Contains(arguments, "--split=1");
+            CollectionAssert.Contains(arguments, "--no-conf=true");
+        }
+
+        [DataTestMethod]
+        [DataRow("0.3", false)]
+        [DataRow("0.4-alpha", false)]
+        [DataRow("dev_123abcd", true)]
+        public void DevelopmentSshRequiresADevelopmentBuild(string version, bool allowed)
+        {
+            Assert.IsTrue(StartupOptions.TryParse(new[] {
+                "--dev-ssh-static-ip", "198.51.100.20",
+                "--dev-ssh-prefix-length", "24",
+                "--dev-ssh-gateway", "198.51.100.1",
+                "--dev-ssh-dns", "198.51.100.1"
+            }, out StartupOptions options, out string error), error);
+            Assert.AreEqual(allowed, options.TryValidateBuild(ApplicationBuild.Parse(version), out error));
+            Assert.AreEqual(allowed, error == null);
+            Assert.IsTrue(new StartupOptions().TryValidateBuild(ApplicationBuild.Parse(version), out error));
         }
 
         [TestMethod]
@@ -86,6 +104,43 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
+        public void WifiServiceFailureIsNotReportedAsAnEmptyProfileList()
+        {
+            WindowsWifiProfileReader.AssertClientOpened(0);
+            foreach (int errorCode in new[] { 1062, 5, 1722 })
+            {
+                var error = Assert.ThrowsException<System.ComponentModel.Win32Exception>(
+                    () => WindowsWifiProfileReader.AssertClientOpened(errorCode));
+                Assert.AreEqual(errorCode, error.NativeErrorCode);
+            }
+        }
+
+        [DataTestMethod]
+        [DataRow("true", "wpa-psk")]
+        [DataRow("1", "wpa-psk")]
+        [DataRow("false", "sae")]
+        [DataRow("0", "sae")]
+        public void WifiWpa3TransitionModePreservesAllowedAuthentication(string transition, string expected)
+        {
+            string xml = WifiProfileXml("Home", "WPA3SAE", "AES", "test-password")
+                .Replace("</authEncryption>",
+                    "<transitionMode xmlns=\"http://www.microsoft.com/networking/WLAN/profile/v4\">" +
+                    transition + "</transitionMode></authEncryption>");
+            WindowsWifiProfile profile = WindowsWifiProfileReader.ParseProfile("Home", xml);
+            Assert.AreEqual(expected, profile.Security);
+            Assert.AreEqual("test-password", profile.Secret);
+        }
+
+        [TestMethod]
+        public void WifiWpa3InvalidTransitionModeIsNotSilentlyDowngraded()
+        {
+            string xml = WifiProfileXml("Home", "WPA3SAE", "AES", "test-password")
+                .Replace("</authEncryption>", "<transitionMode>invalid</transitionMode></authEncryption>");
+            Assert.ThrowsException<InvalidOperationException>(
+                () => WindowsWifiProfileReader.ParseProfile("Home", xml));
+        }
+
+        [TestMethod]
         public void WindowsWifiParserExcludesWepAndEnterpriseProfiles()
         {
             Assert.IsNull(WindowsWifiProfileReader.ParseProfile(
@@ -127,11 +182,14 @@ namespace Libertix.Tests
         [TestMethod]
         public void WindowsPreferenceCollectorCreatesAValidatedInMemoryBundle()
         {
-            string json = WindowsPreferenceCollector.Serialize(PlanId, out int wifiProfileCount);
+            var profiles = new[] { WindowsWifiProfileReader.ParseProfile("Home",
+                WifiProfileXml("Home", "WPA2PSK", "AES", "test-password")) };
+            string json = WindowsPreferenceCollector.Serialize(PlanId, profiles, out int wifiProfileCount);
             using (JsonDocument document = JsonDocument.Parse(json))
             {
                 Assert.AreEqual(1, document.RootElement.GetProperty("schemaVersion").GetInt32());
                 Assert.AreEqual(PlanId, document.RootElement.GetProperty("planId").GetString());
+                Assert.AreEqual(1, wifiProfileCount);
                 Assert.AreEqual(
                     wifiProfileCount,
                     document.RootElement.GetProperty("wifiProfiles").GetArrayLength());
@@ -275,10 +333,24 @@ namespace Libertix.Tests
         {
             var incomplete = new TaskCompletionSource<bool>();
 
-            Assert.ThrowsException<InvalidOperationException>(() =>
+            Assert.ThrowsException<UnterminatedProcessException>(() =>
                 WindowsProcessRunner.WaitForRedirectedStreams(
                     TimeSpan.FromMilliseconds(20),
                     incomplete.Task));
+        }
+
+        [TestMethod]
+        public void ChildProcessTerminationFailureCannotBecomeAnOrdinaryExitCode()
+        {
+            WindowsProcessRunner.AssertSafeExitCode(0);
+            WindowsProcessRunner.AssertSafeExitCode(1);
+            Assert.ThrowsException<UnterminatedProcessException>(() =>
+                WindowsProcessRunner.AssertSafeExitCode(173));
+            Assert.ThrowsException<UnterminatedProcessException>(() =>
+                WindowsProcessRunner.Run(
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+                    "/d /c exit 173",
+                    TimeSpan.FromSeconds(30)));
         }
 
         [TestMethod]
@@ -620,7 +692,7 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
-        public void InstallationPlanValidatorRejectsPendingBiosBitLockerDecryption()
+        public void InstallationPlanValidatorAcceptsPendingBiosBitLockerDecryptionBeforePreparation()
         {
             InstallationPlan plan = CreateValidPlan();
             plan.Firmware = InstallationFirmware.Bios;
@@ -632,11 +704,7 @@ namespace Libertix.Tests
             plan.Runtime.WindowsBitLockerState =
                 InstallationBitLockerState.EncryptedOrProtected;
 
-            InstallationPlanValidationException exception =
-                Assert.ThrowsException<InstallationPlanValidationException>(
-                    () => InstallationPlanValidator.Validate(plan));
-
-            StringAssert.Contains(exception.Message, "windowsBitLockerState is invalid");
+            InstallationPlanValidator.Validate(plan);
         }
 
         [TestMethod]
@@ -650,6 +718,33 @@ namespace Libertix.Tests
                     () => InstallationPlanValidator.Validate(plan));
 
             StringAssert.Contains(exception.Message, "UEFI plan requires a GPT disk");
+        }
+
+        [DataTestMethod]
+        [DataRow(true, true)]
+        [DataRow(true, false)]
+        [DataRow(false, true)]
+        public void SharedWindowsBootPartitionRequiresExactBiosIdentity(bool bios, bool sameNumber)
+        {
+            InstallationPlan plan = CreateValidPlan();
+            if (bios)
+            {
+                plan.Firmware = InstallationFirmware.Bios;
+                plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+                plan.Disk.PartitionTableId = "mbr:12345678";
+                plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+                plan.Runtime.SecureBootEnabled = false;
+                plan.Runtime.TrustedMicrosoftUefiAuthorities = new string[0];
+            }
+            plan.Disk.Boot = new PartitionIdentity {
+                Number = plan.Disk.Windows.Number + (sameNumber ? 0 : 1),
+                OffsetBytes = plan.Disk.Windows.OffsetBytes,
+                SizeBytes = plan.Disk.Windows.SizeBytes
+            };
+            if (bios && sameNumber)
+                InstallationPlanValidator.Validate(plan);
+            else
+                Assert.ThrowsException<InstallationPlanValidationException>(() => InstallationPlanValidator.Validate(plan));
         }
 
         [TestMethod]
@@ -1395,6 +1490,38 @@ namespace Libertix.Tests
             StringAssert.Contains(
                 exception.Message,
                 "BIOS plan must not contain trusted Microsoft UEFI authorities");
+        }
+
+        [TestMethod]
+        public void WifiSsidUsesExactHexBytesInsteadOfTheDisplayName()
+        {
+            string xml = WifiProfileXml("display", "open", "none", null)
+                .Replace("<SSID><name>", "<SSID><hex>00FF8041</hex><name>");
+            WindowsWifiProfile profile = WindowsWifiProfileReader.ParseProfile("saved network", xml);
+            Assert.AreEqual("00ff8041", profile.SsidHex);
+            Assert.AreEqual("display", profile.Ssid);
+            profile = WindowsWifiProfileReader.ParseProfile("saved network", xml.Replace("<name>display</name>", ""));
+            Assert.AreEqual("00ff8041", profile.SsidHex);
+        }
+
+        [TestMethod]
+        public void WifiSsidRejectsInvalidHexWithoutFallingBackToTheName()
+        {
+            foreach (string hex in new[] { "", "0", "zz", "41 42", new string('a', 66) })
+            {
+                string xml = WifiProfileXml("display", "open", "none", null)
+                    .Replace("<SSID><name>", "<SSID><hex>" + hex + "</hex><name>");
+                Assert.ThrowsException<InvalidOperationException>(() => WindowsWifiProfileReader.ParseProfile("test", xml));
+            }
+        }
+
+        [TestMethod]
+        public void WifiSsidRetainsAsciiProfilesWithoutHexAndRejectsLossyConversion()
+        {
+            Assert.AreEqual("43616665", WindowsWifiProfileReader.ParseProfile("test",
+                WifiProfileXml("Cafe", "open", "none", null)).SsidHex);
+            Assert.ThrowsException<InvalidOperationException>(() => WindowsWifiProfileReader.ParseProfile("test",
+                WifiProfileXml("caf\u00e9", "open", "none", null)));
         }
 
         private static string WifiProfileXml(

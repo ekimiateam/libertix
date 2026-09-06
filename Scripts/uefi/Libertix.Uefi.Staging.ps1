@@ -220,6 +220,10 @@ function New-OrReuseInstallerPartition {
     Complete-LibertixTrackedStep -Step "windows.system-volume-shrunk"
 
     Start-LibertixTrackedStep -Step "windows.installer-partition-created"
+    # New-Partition may commit before PowerShell returns its object. Save the
+    # verified empty extent first so rollback can resolve that interruption.
+    Save-TransactionPartitionCreationIntent -DiskNumber $systemPartition.DiskNumber `
+        -Offset $installerOffsetBytes -Size $stagingBytes
     $newPartition = New-Partition `
         -DiskNumber $systemPartition.DiskNumber `
         -Size $stagingBytes `

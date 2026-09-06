@@ -76,12 +76,23 @@ namespace Libertix
                 ApplicationLogger.Write(
                     "Published version check skipped for the protected cached recovery UI.");
             }
-            else if (!await ValidatePublishedVersionAsync())
-            {
-                return;
-            }
+            await RunValidatedStartupAsync(
+                () => string.IsNullOrWhiteSpace(recoveryStatePath)
+                    ? ValidatePublishedVersionAsync()
+                    : Task.FromResult(true),
+                () =>
+                {
+                    base.OnStartup(e);
+                    MainWindow = new MainWindow();
+                    MainWindow.Show();
+                });
+        }
 
-            base.OnStartup(e);
+        internal static async Task RunValidatedStartupAsync(Func<Task<bool>> validate, Action openWindow)
+        {
+            // StartupUri would open the window as soon as async OnStartup yields.
+            if (await validate())
+                openWindow();
         }
 
         private static bool IsRecoveryUiInvocation(string[] args)
@@ -123,6 +134,11 @@ namespace Libertix
             }
 
             FilepoolConfig filepool = FilepoolConfig.ForBuild(Build);
+            if (!options.TryValidateBuild(Build, out error))
+            {
+                RejectInvalidStartupOptions(error);
+                return false;
+            }
             if (!string.IsNullOrWhiteSpace(options.FilepoolBaseUrlOverride))
             {
                 if (!Build.AllowsDevelopmentFilepoolOverride)

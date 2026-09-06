@@ -330,6 +330,74 @@ Describe "Durable post-install checkpoints" {
             Should -Invoke Write-LibertixPostInstallResult -Times 1
         }
 
+        It "preserves old observations but reruns them in the next attempt" {
+            $path = Join-Path $TestDrive "resumed-result.json"
+            $result = New-LibertixPostInstallResult -PlanId ('a' * 32) -Firmware bios -LogPath "test.log"
+            $result.checks = @([pscustomobject]@{
+                name = 'windows-read-only-linux-share'; passed = $true; detail = 'old mount'
+            })
+            $null = Start-LibertixPostInstallAttempt -Result $result -ResultPath $path -WriteLog { param($line) }
+            $result.checks.Count | Should -Be 0
+            $result.attempts[-1].previousChecks[0].detail | Should -Be 'old mount'
+            {
+                Add-LibertixPostInstallCheck -Result $result -ResultPath $path `
+                    -Name 'windows-read-only-linux-share' -Test { throw 'MOUNT_DISAPPEARED' } `
+                    -WriteLog { param($line) }
+            } | Should -Throw '*MOUNT_DISAPPEARED*'
+            $saved = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            $saved.checks[0].passed | Should -BeFalse
+            $saved.attempts[-1].previousChecks[0].passed | Should -BeTrue
+        }
+
+        It "rechecks a terminal success from an earlier Windows boot" {
+            $script:saved = New-LibertixPostInstallResult -PlanId ('a' * 32) -Firmware bios -LogPath 'old.log'
+            $script:saved.status = 'succeeded'
+            $script:saved | Add-Member -NotePropertyName windowsBootId -NotePropertyValue 'old-boot'
+            $script:saved.checks = @([pscustomobject]@{ name = 'disk-geometry'; passed = $true; detail = 'old geometry' })
+            Mock Get-LibertixWindowsBootIdentity { 'new-boot' }
+            Mock Get-LibertixPartitionAlignmentBytes { 1MB }
+            Mock Test-Path { $true }
+            Mock Read-LibertixJsonObject {
+                param($Description)
+                if ($Description -eq 'installation plan') {
+                    return [pscustomobject]@{ planId = ('a' * 32); firmware = 'bios' }
+                }
+                if ($Description -eq 'post-install verification result') { return $script:saved }
+                return [pscustomobject]@{ present = $true }
+            }
+            Mock Read-LibertixExecutionState { [pscustomobject]@{ planId = ('a' * 32); status = 'succeeded'; revision = 1 } }
+            Mock Assert-LibertixLinuxBootEvidence { 'valid' }
+            Mock Test-LibertixDiskGeometry { throw 'DISK_CHANGED' }
+            Mock Set-LibertixShutdownVerificationPriority {}
+            Mock Write-LibertixPostInstallResult {}
+            {
+                Invoke-LibertixPostInstallVerification -RecoveryRoot $TestDrive -LogPath 'test.log' -WriteLog { param($line) }
+            } | Should -Throw '*DISK_CHANGED*'
+            $script:saved.status | Should -Be 'failed'
+            $script:saved.windowsBootId | Should -Be 'new-boot'
+            $script:saved.attempts[-1].previousChecks[0].detail | Should -Be 'old geometry'
+        }
+
+        It "keeps a terminal result idempotent within the same Windows boot" {
+            $saved = New-LibertixPostInstallResult -PlanId ('a' * 32) -Firmware bios -LogPath 'old.log'
+            $saved.status = 'succeeded'
+            $saved | Add-Member -NotePropertyName windowsBootId -NotePropertyValue 'same-boot'
+            Mock Get-LibertixWindowsBootIdentity { 'same-boot' }
+            Mock Get-LibertixPartitionAlignmentBytes { 1MB }
+            Mock Test-Path { $true }
+            Mock Read-LibertixJsonObject {
+                param($Description)
+                if ($Description -eq 'installation plan') {
+                    return [pscustomobject]@{ planId = ('a' * 32); firmware = 'bios' }
+                }
+                return $saved
+            }
+            Mock Start-LibertixPostInstallAttempt { throw 'MUST_NOT_RESTART' }
+            $result = Invoke-LibertixPostInstallVerification -RecoveryRoot $TestDrive -LogPath 'test.log' -WriteLog { param($line) }
+            $result.status | Should -Be 'succeeded'
+            Should -Invoke Start-LibertixPostInstallAttempt -Times 0
+        }
+
         It "persists the terminal outcome on the active attempt" {
             $result = [pscustomobject]@{
                 activeAttemptId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

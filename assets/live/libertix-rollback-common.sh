@@ -27,7 +27,7 @@ cleanup_live_mounts_best_effort() {
     umount /mnt/libertix-final-verify 2>/dev/null || true
     umount /mnt/libertix-windows-final-verify 2>/dev/null || true
     umount /mnt/libertix-esp-final-verify 2>/dev/null || true
-    rm -f -- "${LOG_DIR:-/run/libertix}/windows-preferences.secret.json" \
+    rm -f -- "${LOG_DIR:-/run/libertix}-private/windows-preferences.secret.json" \
         2>/dev/null || true
     if [ -n "${WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH:-}" ]; then
         rm -f -- "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" 2>/dev/null || true

@@ -8,6 +8,8 @@ import csv
 import hashlib
 import json
 import os
+import re
+import ssl
 import struct
 import subprocess
 import tempfile
@@ -15,6 +17,11 @@ import uuid
 from pathlib import Path
 
 EFI_CERT_X509_GUID = uuid.UUID("a5c059a1-94e4-4aa7-87b5-ab155c2bf072")
+EFI_X509_HASH_ALGORITHMS = {
+    uuid.UUID("3bd2a492-96c0-4079-b420-fcf98ef103ed"): "sha256",
+    uuid.UUID("7076876e-80c2-4ee6-aad2-28b349a6865b"): "sha384",
+    uuid.UUID("446dbf63-2502-4cda-bcfa-2465d2b0fe9d"): "sha512",
+}
 EFI_HASH_ALGORITHMS = {
     uuid.UUID("826ca512-cf10-4ac9-b187-be01496631bd"): "sha1",
     uuid.UUID("0b6e5233-a65c-44c9-9407-d9ab83bfd236"): "sha224",
@@ -184,9 +191,12 @@ def assert_sbat_allowed(image_name: str, metadata: dict[str, int], revoked: dict
             )
 
 
-def parse_efi_signature_lists(data: bytes) -> tuple[list[bytes], dict[str, set[bytes]]]:
+def parse_efi_signature_lists(
+    data: bytes,
+) -> tuple[list[bytes], dict[str, set[bytes]], list[tuple[str, bytes, bytes]]]:
     certificates: list[bytes] = []
     hashes = {name: set() for name in EFI_HASH_ALGORITHMS.values()}
+    certificate_hashes: list[tuple[str, bytes, bytes]] = []
     offset = 0
     while offset < len(data):
         if offset + 28 > len(data):
@@ -213,9 +223,109 @@ def parse_efi_signature_lists(data: bytes) -> tuple[list[bytes], dict[str, set[b
                 if len(payload) != expected_size:
                     raise VerificationError("EFI signature database contains an invalid hash entry")
                 hashes[algorithm].add(payload)
+            elif signature_type in EFI_X509_HASH_ALGORITHMS:
+                algorithm = EFI_X509_HASH_ALGORITHMS[signature_type]
+                digest_size = hashlib.new(algorithm).digest_size
+                if header_size or len(payload) != digest_size + 16:
+                    raise VerificationError(
+                        "EFI signature database contains an invalid X509 hash entry"
+                    )
+                certificate_hashes.append((algorithm, payload[:digest_size], payload[digest_size:]))
+            else:
+                raise VerificationError(
+                    f"Unsupported EFI signature database type: {signature_type}"
+                )
             entries_offset += signature_size
         offset += list_size
-    return certificates, hashes
+    return certificates, hashes, certificate_hashes
+
+
+def der_sequence_bounds(data: bytes, offset: int, limit: int) -> tuple[int, int]:
+    if offset + 2 > limit or data[offset] != 0x30:
+        raise VerificationError("Certificate DER sequence is missing or truncated")
+    length = data[offset + 1]
+    start = offset + 2
+    if length & 0x80:
+        count = length & 0x7F
+        if not 1 <= count <= 4 or start + count > limit or data[start] == 0:
+            raise VerificationError("Certificate DER length is invalid")
+        length = int.from_bytes(data[start : start + count], "big")
+        if length < 128:
+            raise VerificationError("Certificate DER length is not canonical")
+        start += count
+    if start + length > limit:
+        raise VerificationError("Certificate DER sequence exceeds its container")
+    return start, start + length
+
+
+def certificate_tbs_bytes(certificate: bytes) -> bytes:
+    start, end = der_sequence_bounds(certificate, 0, len(certificate))
+    if end != len(certificate):
+        raise VerificationError("Certificate DER contains trailing data")
+    _, tbs_end = der_sequence_bounds(certificate, start, end)
+    return certificate[start:tbs_end]
+
+
+def image_certificates(openssl: str, data: bytes) -> list[bytes]:
+    layout = pe_layout(data)
+    offset = int(layout["certificate_offset"])
+    end = offset + int(layout["certificate_size"])
+    certificates: list[bytes] = []
+    while offset < end:
+        if offset + 8 > end:
+            raise VerificationError("PE signature header is truncated")
+        length, revision, kind = struct.unpack_from("<IHH", data, offset)
+        if length < 8 or offset + length > end or revision != 0x200 or kind != 2:
+            raise VerificationError("PE signature is not a supported PKCS7 certificate")
+        result = subprocess.run(
+            [openssl, "pkcs7", "-inform", "DER", "-print_certs"],
+            input=data[offset + 8 : offset + length],
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode:
+            raise VerificationError("Cannot extract the EFI signature certificate chain")
+        pem = result.stdout.decode("ascii", errors="strict")
+        matches = re.findall(
+            r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", pem, re.DOTALL
+        )
+        if not matches:
+            raise VerificationError("EFI signature contains no inspectable certificate")
+        certificates.extend(ssl.PEM_cert_to_DER_cert(item) for item in matches)
+        offset += (length + 7) & ~7
+    return certificates
+
+
+def assert_certificate_hashes_allowed(
+    args: argparse.Namespace,
+    images: dict[str, Path],
+    trusted_certificates: list[bytes],
+    revocations: list[tuple[str, bytes, bytes]],
+    temporary_root: Path,
+) -> None:
+    if not revocations:
+        return
+    for name, image in images.items():
+        candidates = set(
+            trusted_certificates + image_certificates(args.openssl, image.read_bytes())
+        )
+        for certificate_bytes in candidates:
+            tbs = certificate_tbs_bytes(certificate_bytes)
+            for algorithm, digest, revoked_at in revocations:
+                if hashlib.new(algorithm, tbs).digest() != digest:
+                    continue
+                certificate = temporary_root / "revoked-candidate.der"
+                certificate.write_bytes(certificate_bytes)
+                if not sbverify_accepts(args.sbverify, certificate, image):
+                    continue
+                if any(revoked_at):
+                    # sbverify does not validate RFC3161 evidence against firmware dbt.
+                    raise VerificationError(
+                        f"{name} matches a timed firmware dbx certificate revocation; "
+                        "a trusted pre-revocation timestamp cannot be verified"
+                    )
+                raise VerificationError(f"{name} is revoked by a firmware dbx certificate TBS hash")
 
 
 def read_efi_variable(efivarfs: Path, name: str, *, required: bool) -> bytes:
@@ -324,8 +434,8 @@ def verify(args: argparse.Namespace) -> dict[str, object]:
     efivarfs = Path(args.efivarfs)
     db = read_efi_variable(efivarfs, "db", required=True)
     dbx = read_efi_variable(efivarfs, "dbx", required=False)
-    db_certificates, _db_hashes = parse_efi_signature_lists(db)
-    dbx_certificates, dbx_hashes = parse_efi_signature_lists(dbx)
+    db_certificates, _db_hashes, _db_certificate_hashes = parse_efi_signature_lists(db)
+    dbx_certificates, dbx_hashes, dbx_certificate_hashes = parse_efi_signature_lists(dbx)
     sbat_output = run_text([args.mokutil, "--list-sbat-revocations"])
     sbat_revocations = parse_sbat_revocations(sbat_output)
 
@@ -344,6 +454,9 @@ def verify(args: argparse.Namespace) -> dict[str, object]:
     trusted_certificate_fingerprint = ""
     with tempfile.TemporaryDirectory(prefix="libertix-secure-boot-") as directory:
         temporary_root = Path(directory)
+        assert_certificate_hashes_allowed(
+            args, images, db_certificates, dbx_certificate_hashes, temporary_root
+        )
         for index, certificate_bytes in enumerate(db_certificates):
             certificate = temporary_root / f"db-{index}.der"
             certificate.write_bytes(certificate_bytes)
@@ -395,8 +508,8 @@ def verify_windows_loader(args: argparse.Namespace) -> dict[str, object]:
     efivarfs = Path(args.efivarfs)
     db = read_efi_variable(efivarfs, "db", required=True)
     dbx = read_efi_variable(efivarfs, "dbx", required=False)
-    db_certificates, _db_hashes = parse_efi_signature_lists(db)
-    dbx_certificates, dbx_hashes = parse_efi_signature_lists(dbx)
+    db_certificates, _db_hashes, _db_certificate_hashes = parse_efi_signature_lists(db)
+    dbx_certificates, dbx_hashes, dbx_certificate_hashes = parse_efi_signature_lists(dbx)
 
     for algorithm, revoked_hashes in dbx_hashes.items():
         if authenticode_digest(data, algorithm) in revoked_hashes:
@@ -405,6 +518,13 @@ def verify_windows_loader(args: argparse.Namespace) -> dict[str, object]:
     trusted_certificate_fingerprint = ""
     with tempfile.TemporaryDirectory(prefix="libertix-windows-loader-") as directory:
         temporary_root = Path(directory)
+        assert_certificate_hashes_allowed(
+            args,
+            {"Windows Boot Manager": image},
+            db_certificates,
+            dbx_certificate_hashes,
+            temporary_root,
+        )
         for index, certificate_bytes in enumerate(db_certificates):
             certificate = temporary_root / f"db-{index}.der"
             certificate.write_bytes(certificate_bytes)
@@ -470,7 +590,7 @@ def main() -> int:
                 )
             result = verify(args)
         write_json_atomic(Path(args.output), result)
-    except (OSError, VerificationError, ValueError) as error:
+    except (OSError, VerificationError, ValueError, subprocess.SubprocessError) as error:
         print(f"Secure Boot chain verification failed: {error}", file=os.sys.stderr)
         return 1
     return 0

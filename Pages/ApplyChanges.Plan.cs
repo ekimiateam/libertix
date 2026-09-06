@@ -227,10 +227,14 @@ namespace Libertix.Pages
                 catch
                 {
                 }
+                bool wifiServiceStopped = exception is System.ComponentModel.Win32Exception nativeError &&
+                    nativeError.NativeErrorCode == WindowsWifiProfileReader.ErrorServiceNotActive;
                 throw new InvalidOperationException(
-                    Localized(
-                        "WindowsPreferenceMigrationPreparationFailed",
-                        "Windows preferences and saved Wi-Fi networks could not be prepared for migration."),
+                    wifiServiceStopped
+                        ? Localized("WindowsPreferenceMigrationWifiServiceStopped",
+                            "Start the Windows WLAN AutoConfig service and retry, or disable preference migration. Saved Wi-Fi networks could not be checked.")
+                        : Localized("WindowsPreferenceMigrationPreparationFailed",
+                            "Windows preferences and saved Wi-Fi networks could not be prepared for migration."),
                     exception);
             }
         }
@@ -345,6 +349,10 @@ namespace Libertix.Pages
 
         private void BeginExecutionRollback()
         {
+            _rollbackVerificationPending = true;
+            if (_processTerminationUnverified)
+                throw new UnterminatedProcessException(
+                    "Rollback is blocked because an earlier process tree was not proven stopped.");
             _executionLedger?.BeginRollback();
         }
 

@@ -42,19 +42,60 @@ def expect_gsetting(schema: str, key: str, expected: str) -> None:
         fail(f"GSettings mismatch for {schema}.{key}: expected {expected}, got {observed}")
 
 
+def verify_user_asset(path: Path, expected_hash: str) -> None:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid():
+        fail("a migrated image is not a regular file owned by the installed user")
+    if sha256(path) != expected_hash:
+        fail("a migrated image has the wrong hash")
+    verify_image_decodes(path)
+
+
+def verify_image_decodes(path: Path) -> None:
+    import gi
+
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import GdkPixbuf
+
+    # Use the desktop image decoder, not just the header or the transport hash.
+    image = GdkPixbuf.Pixbuf.new_from_file(str(path))
+    if image.get_width() != 1280 or image.get_height() != 720:
+        fail("a migrated fixture image has unexpected dimensions")
+    pixels = image.get_pixels()
+    channels = image.get_n_channels()
+    stride = image.get_rowstride()
+    if (
+        pixels[100 * stride + 100 * channels + 2] < 150
+        or pixels[160 * stride + 1040 * channels] < 200
+    ):
+        fail("a migrated fixture image did not decode with the expected colors")
+
+
+def verify_wallpaper(home: Path, prefix: str, expected_hash: str) -> None:
+    for directory in (home / "Pictures", home / "Pictures" / "Libertix"):
+        metadata = directory.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid():
+            fail("a migrated wallpaper directory is not owned by the installed user")
+    wallpapers = list((home / "Pictures" / "Libertix").glob("windows-wallpaper.*"))
+    if len(wallpapers) != 1:
+        fail("the migrated wallpaper is absent or ambiguous")
+    verify_user_asset(wallpapers[0], expected_hash)
+    uri = "'" + wallpapers[0].as_uri() + "'"
+    expect_gsetting(f"{prefix}.desktop.background", "picture-uri", uri)
+    if prefix == "org.gnome":
+        expect_gsetting(f"{prefix}.desktop.background", "picture-uri-dark", uri)
+
+
 def run_checks(args: argparse.Namespace) -> None:
     home = Path.home()
-    wallpapers = list((home / "Pictures" / "Libertix").glob("windows-wallpaper.*"))
-    if len(wallpapers) != 1 or sha256(wallpapers[0]) != args.wallpaper_sha256:
-        fail("the migrated wallpaper is missing or has the wrong hash")
+    prefix = "org.cinnamon" if args.distribution == "mint" else "org.gnome"
+    verify_wallpaper(home, prefix, args.wallpaper_sha256)
     face = home / ".face"
-    if not face.is_file() or sha256(face) != args.account_image_sha256:
-        fail("the migrated account image is missing or has the wrong hash")
+    verify_user_asset(face, args.account_image_sha256)
     account_icon = Path("/var/lib/AccountsService/icons") / args.username
     if not account_icon.is_file() or sha256(account_icon) != args.account_image_sha256:
         fail("the AccountsService image is missing or has the wrong hash")
 
-    prefix = "org.cinnamon" if args.distribution == "mint" else "org.gnome"
     expect_gsetting(f"{prefix}.desktop.screensaver", "lock-enabled", "true")
     expect_gsetting(f"{prefix}.desktop.session", "idle-delay", "uint32 420")
     expect_gsetting(f"{prefix}.desktop.peripherals.mouse", "left-handed", "false")
@@ -98,6 +139,7 @@ def run_checks(args: argparse.Namespace) -> None:
     forbidden = [
         Path("/tmp/windows-preferences.secret.json"),
         Path("/run/libertix/windows-preferences.secret.json"),
+        Path("/run/libertix-private/windows-preferences.secret.json"),
     ]
     if any(path.exists() for path in forbidden):
         fail("the temporary preference bundle survived installation")

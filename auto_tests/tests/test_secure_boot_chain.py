@@ -7,8 +7,16 @@ import os
 import struct
 import subprocess
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import pkcs7
+from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "assets/live/libertix-secure-boot-chain.py"
@@ -91,10 +99,121 @@ def test_efi_signature_list_parser_separates_certificates_and_hashes() -> None:
         uuid.UUID("c1c41626-504c-4092-aca9-41f936934328"), [digest]
     )
 
-    certificates, hashes = module.parse_efi_signature_lists(data)
+    certificates, hashes, certificate_hashes = module.parse_efi_signature_lists(data)
 
     assert certificates == [certificate]
     assert hashes["sha256"] == {digest}
+    assert certificate_hashes == []
+
+
+@pytest.fixture
+def certificate_and_pe() -> tuple[bytes, bytes, bytes]:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Microsoft UEFI CA 2023")])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    signed_data = pkcs7.serialize_certificates([certificate], serialization.Encoding.DER)
+    entry = struct.pack("<IHH", len(signed_data) + 8, 0x200, 2) + signed_data
+    entry += b"\0" * (-len(entry) % 8)
+    data = bytearray(synthetic_pe("shim,4,Vendor,shim,1,url\n")[:0x300])
+    struct.pack_into("<II", data, 0x98 + 112 + 32, 0x300, len(entry))
+    data.extend(entry)
+    return (
+        certificate.public_bytes(serialization.Encoding.DER),
+        certificate.tbs_certificate_bytes,
+        bytes(data),
+    )
+
+
+def test_certificate_extraction_uses_real_openssl_and_exact_tbs(certificate_and_pe) -> None:
+    certificate, tbs, image = certificate_and_pe
+    module = load_module()
+    assert module.image_certificates("openssl", image) == [certificate]
+    assert module.certificate_tbs_bytes(certificate) == tbs
+
+
+@pytest.mark.parametrize("algorithm", ["sha256", "sha384", "sha512"])
+@pytest.mark.parametrize("timed", [False, True])
+@pytest.mark.parametrize("windows_loader", [False, True])
+def test_secure_boot_rejects_matching_certificate_hash_revocation(
+    tmp_path: Path,
+    certificate_and_pe,
+    algorithm: str,
+    timed: bool,
+    windows_loader: bool,
+) -> None:
+    module = load_module()
+    certificate, tbs, image = certificate_and_pe
+    command = secure_boot_fixture(tmp_path, revoked_shim=False)
+    (tmp_path / "shim.efi").write_bytes(image)
+    (tmp_path / "efivars" / f"db-{SECURITY_DATABASE_GUID.upper()}").write_bytes(
+        struct.pack("<I", 7) + efi_signature_list(module.EFI_CERT_X509_GUID, [certificate])
+    )
+    signature_type = next(k for k, v in module.EFI_X509_HASH_ALGORITHMS.items() if v == algorithm)
+    timestamp = (
+        struct.pack("<HBBBBBBIhBB", 2025, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0) if timed else bytes(16)
+    )
+    database = efi_signature_list(
+        signature_type, [hashlib.new(algorithm, tbs).digest() + timestamp]
+    )
+    (tmp_path / "efivars" / f"dbx-{SECURITY_DATABASE_GUID}").write_bytes(
+        struct.pack("<I", 7) + database
+    )
+    command[command.index("--openssl") + 1] = "openssl"
+    if windows_loader:
+        command = (
+            command[:2]
+            + ["--windows-loader", str(tmp_path / "shim.efi")]
+            + command[command.index("--efivarfs") :]
+        )
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode == 1
+    assert (
+        "pre-revocation timestamp cannot be verified" if timed else "certificate TBS hash"
+    ) in result.stderr
+    assert not (tmp_path / "evidence.json").exists()
+
+
+def test_unrelated_certificate_hash_does_not_block_the_chain(
+    tmp_path: Path, certificate_and_pe
+) -> None:
+    from argparse import Namespace
+
+    module = load_module()
+    certificate, _, data = certificate_and_pe
+    image = tmp_path / "image.efi"
+    image.write_bytes(data)
+    module.assert_certificate_hashes_allowed(
+        Namespace(openssl="openssl", sbverify="must-not-run"),
+        {"shim": image},
+        [certificate],
+        [("sha256", bytes(32), bytes(16))],
+        tmp_path,
+    )
+
+
+@pytest.mark.parametrize("payload", [b"", bytes(32), bytes(47), bytes(49)])
+def test_malformed_x509_hash_entry_is_rejected(payload: bytes) -> None:
+    module = load_module()
+    with pytest.raises(module.VerificationError, match="invalid X509 hash entry"):
+        module.parse_efi_signature_lists(
+            efi_signature_list(next(iter(module.EFI_X509_HASH_ALGORITHMS)), [payload])
+        )
+
+
+def test_unknown_revocation_type_is_not_silently_ignored() -> None:
+    module = load_module()
+    with pytest.raises(module.VerificationError, match="Unsupported EFI signature database type"):
+        module.parse_efi_signature_lists(efi_signature_list(uuid.UUID(int=42), [bytes(32)]))
 
 
 def test_sbat_rejects_only_generations_below_the_firmware_minimum() -> None:

@@ -352,6 +352,7 @@ if ($RecoverPreviousTransaction) {
             -Kind "Primary" `
             -CorrelationId $previousRecoveryCorrelationId `
             -Stage "previous-transaction-recovery"
+        if ($previousRecoveryError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
         exit 1
     }
 }
@@ -384,6 +385,7 @@ if ($Revert) {
             -Kind "Rollback" `
             -CorrelationId $ExpectedRecoveryRunId `
             -Stage "rollback"
+        if ($rollbackError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
         exit 1
     }
 }
@@ -493,6 +495,16 @@ try {
         -Kind "Primary" `
         -CorrelationId $diagnosticCorrelationId `
         -Stage $diagnosticStage
+    if ($preparationError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") {
+        try {
+            Set-LibertixTrackedFailure `
+                -Code "WINDOWS_PROCESS_TERMINATION_UNVERIFIED" `
+                -Message $preparationError.Exception.Message
+            Write-Log "Automatic revert is blocked until all previous writers are proven stopped." "Red"
+        } finally {
+            exit 173
+        }
+    }
     Write-Log "Error during preparation; running automatic revert..." "Yellow"
     try {
         Set-LibertixTrackedFailure `
@@ -513,6 +525,7 @@ try {
             -CorrelationId $diagnosticCorrelationId `
             -Stage "rollback"
         Write-Log "Tip: you can run with -Revert to restore Windows boot." "Yellow"
+        if ($revertError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
     }
     exit 1
 }

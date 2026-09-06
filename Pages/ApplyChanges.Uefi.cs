@@ -280,6 +280,7 @@ namespace Libertix.Pages
             string reason,
             string failureCode = "UEFI_PREPARATION_FAILED")
         {
+            _rollbackVerificationPending = true;
             ReloadExecutionState();
             bool rollbackVerified = _executionLedger != null &&
                 _executionLedger.State.Status == InstallationStatus.RolledBack;
@@ -326,6 +327,7 @@ namespace Libertix.Pages
                 PublishUnattendedFailure(
                     failureCode.ToLowerInvariant().Replace('_', '-'),
                     $"{reason} Automatic rollback was verified.");
+                _rollbackVerificationPending = false;
                 FinishInstallation(enableBackButton: true);
                 return;
             }
@@ -430,10 +432,10 @@ namespace Libertix.Pages
             };
         }
 
-        private async Task<bool> FinalizeUefiRecoveryAfterVerifiedRollbackAsync()
+        private async Task FinalizeUefiRecoveryAfterVerifiedRollbackAsync()
         {
             if (_activeUefiRecovery == null)
-                return true;
+                return;
 
             string agentPath = Path.Combine(
                 _activeUefiRecovery.PayloadRoot,
@@ -441,8 +443,7 @@ namespace Libertix.Pages
                 "libertix-uefi-recovery-agent.ps1");
             if (!File.Exists(agentPath))
             {
-                Log("UEFI recovery cleanup agent is missing after rollback.");
-                return false;
+                throw new InvalidOperationException("UEFI recovery cleanup agent is missing after rollback.");
             }
 
             StreamingProcessResult result = await RunStreamingProcessAsync(
@@ -456,12 +457,10 @@ namespace Libertix.Pages
             bool succeeded =
                 result.Completion == StreamingProcessCompletion.Exited &&
                 result.ExitCode == 0;
-            Log(
-                succeeded
-                    ? "UEFI recovery payload cleanup was scheduled and verified."
-                    : $"UEFI recovery payload cleanup failed with rc={result.ExitCode} " +
-                      $"({result.Completion}).");
-            return succeeded;
+            if (!succeeded)
+                throw new InvalidOperationException(
+                    $"UEFI recovery payload cleanup failed with rc={result.ExitCode} ({result.Completion}).");
+            Log("UEFI recovery payload cleanup was verified.");
         }
 
         private void CleanupUefiRecoveryBeforeMutationBestEffort(UefiRecoveryState recovery)

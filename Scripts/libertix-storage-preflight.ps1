@@ -314,6 +314,7 @@ try {
 
     exit 0
 } catch {
+    $failure = $_
     [ordered]@{
         preflightOk = $false
         errorMessage = $_.Exception.Message
@@ -321,5 +322,6 @@ try {
         errorPosition = $_.InvocationInfo.PositionMessage
         errorStack = $_.ScriptStackTrace
     } | ConvertTo-Json -Compress
+    if ($failure.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
     exit 1
 }

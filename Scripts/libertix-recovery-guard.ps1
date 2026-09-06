@@ -35,12 +35,6 @@ $TemporaryArtifactsModulePath = Join-Path $Root "Libertix.TemporaryArtifacts.psm
 $PostInstallVerificationModulePath = Join-Path $Root "Libertix.PostInstallVerification.psm1"
 $ProcessModulePath = Join-Path $Root "Libertix.Process.psm1"
 $RecoveryOperationsPath = Join-Path $Root "recovery-operations.json"
-$TemporaryBootFiles = @(
-    (Join-Path $SystemDrive "grldr"),
-    (Join-Path $SystemDrive "grldr.mbr"),
-    (Join-Path $SystemDrive "menu.lst"),
-    (Join-Path $SystemDrive "libertix-live.iso")
-)
 $WindowsShareRoot = Join-Path $ProgramDataRoot "Libertix\WindowsShare"
 
 if (-not (Test-Path -LiteralPath $InstallationPolicyPath -PathType Leaf)) {
@@ -447,6 +441,28 @@ function Start-RecoveryPromptTask {
     }
 }
 
+function Test-RecoveryRawPartitionGeometry {
+    param(
+        [Parameter(Mandatory = $true)]$Partition,
+        [Parameter(Mandatory = $true)][int64]$FinalOffset,
+        [Parameter(Mandatory = $true)][int64]$FinalSize,
+        [Parameter(Mandatory = $true)][int64]$StagingSize,
+        [Parameter(Mandatory = $true)][int64]$Alignment
+    )
+
+    if ($Alignment -le 0 -or $FinalSize -le $Alignment -or $StagingSize -le $Alignment) {
+        throw "Recovery partition geometry limits are invalid."
+    }
+    $size = [int64]$Partition.Size
+    # Windows normally exposes ext4 without a Volume object. Its final extent,
+    # reconstructed from the saved Windows boundary, still proves ownership.
+    return (
+        ($size -ge ($StagingSize - $Alignment) -and $size -le ($StagingSize + $Alignment)) -or
+        ([int64]$Partition.Offset -eq $FinalOffset -and
+            $size -ge ($FinalSize - $Alignment) -and $size -le $FinalSize)
+    )
+}
+
 function Read-RecoveryExecutionState {
     if (-not (Test-Path -LiteralPath $ExecutionStatePath -PathType Leaf)) {
         throw "Recovery execution state is missing."
@@ -636,14 +652,22 @@ function Restore-BcdState {
 function Restore-BiosMbrBootCode {
     param(
         [Parameter(Mandatory = $true)][int]$DiskNumber,
-        [switch]$Required
+        [Parameter(Mandatory = $true)][object]$ExecutionState
     )
 
+    # Windows prepares BCD/GRUB4DOS without writing MBR boot code. The live
+    # writes GRUB only after target.system-configured; that completed step
+    # survives failures and rollback retries which clear activeStep.
+    $backupRequired = "target.system-configured" -in @($ExecutionState.completedSteps)
+    $backupExists = Test-Path -LiteralPath $MbrBackup -PathType Leaf
+    $hashExists = Test-Path -LiteralPath $MbrBackupHash -PathType Leaf
     if (
-        -not (Test-Path -LiteralPath $MbrBackup -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $MbrBackupHash -PathType Leaf)
+        -not $backupExists -or
+        -not $hashExists
     ) {
-        if ($Required) { throw "Required pre-GRUB MBR backup is missing." }
+        if ($backupRequired -or $backupExists -or $hashExists) {
+            throw "Required pre-GRUB MBR backup is missing or incomplete."
+        }
         Write-RecoveryLog "No pre-GRUB MBR backup exists; boot-code restore skipped."
         return
     }
@@ -657,53 +681,23 @@ function Restore-BiosMbrBootCode {
         throw "Pre-GRUB MBR backup checksum verification failed."
     }
 
-    $devicePath = "\\.\PhysicalDrive$DiskNumber"
-    $stream = New-Object IO.FileStream(
-        $devicePath,
-        [IO.FileMode]::Open,
-        [IO.FileAccess]::ReadWrite,
-        [IO.FileShare]::ReadWrite
-    )
-    try {
-        [byte[]]$current = New-Object byte[] 512
-        if ($stream.Read($current, 0, $current.Length) -ne 512) {
-            throw "Cannot read the current BIOS MBR."
-        }
-        $currentBootCode = [Convert]::ToBase64String($current, 0, 440)
-        $backupBootCode = [Convert]::ToBase64String($backup, 0, 440)
-        if ($currentBootCode -ne $backupBootCode) {
-            $stream.Position = 0
-            $stream.Write($backup, 0, 440)
-            $stream.Flush($true)
-        }
-        $stream.Position = 0
-        [byte[]]$verified = New-Object byte[] 512
-        if ($stream.Read($verified, 0, $verified.Length) -ne 512) {
-            throw "Cannot verify the restored BIOS MBR."
-        }
-        if ([Convert]::ToBase64String($verified, 0, 440) -ne $backupBootCode) {
-            throw "BIOS MBR boot-code restoration could not be verified."
-        }
-    } finally {
-        $stream.Dispose()
+    $disk = Get-Disk -Number $DiskNumber -ErrorAction Stop
+    if ([string]$disk.PartitionStyle -ne "MBR" -or
+        [int]$disk.LogicalSectorSize -notin @(512, 4096) -or
+        [int]$disk.PhysicalSectorSize -notin @(512, 4096)) {
+        throw "Cannot prove the BIOS disk sector geometry."
     }
+    $sectorSize = [Math]::Max([int]$disk.LogicalSectorSize, [int]$disk.PhysicalSectorSize)
+    Import-Module (Join-Path $Root "Libertix.BiosMbr.psm1") -Force -ErrorAction Stop
+    Initialize-LibertixBiosMbrIo
+    [Libertix.BiosMbrIo]::Restore("\\.\PhysicalDrive$DiskNumber", $sectorSize, $backup)
     Write-RecoveryLog "BIOS MBR boot code restored from the durable pre-GRUB backup."
 }
 
 function Remove-TemporaryBootPayload {
-    foreach ($temporaryBootFile in $TemporaryBootFiles) {
-        if (Test-Path -LiteralPath $temporaryBootFile -PathType Leaf) {
-            Remove-Item -LiteralPath $temporaryBootFile -Force -ErrorAction Stop
-            Write-RecoveryLog "Removed temporary boot file: $temporaryBootFile"
-        }
-    }
-    $remainingFiles = @(
-        $TemporaryBootFiles |
-            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
-    )
-    if ($remainingFiles.Count -ne 0) {
-        throw "Temporary boot payload remains: $($remainingFiles -join ', ')"
-    }
+    $planId = Read-EnvValue -Path $Pending -Name "PLAN_ID"
+    Remove-LibertixBiosBootPayload -SystemRoot $SystemDrive -RecoveryRoot $Root -PlanId $planId
+    Write-RecoveryLog "Verified transaction-owned BIOS boot payload cleanup completed."
 }
 
 function Invoke-WindowsShareFinalize {
@@ -815,24 +809,12 @@ function Remove-WindowsShareAfterRollback {
         }
     }
 
-    $shareTask = Get-ScheduledTask `
-        -TaskName "LibertixLinuxReadOnly" `
-        -ErrorAction SilentlyContinue
-    if ($null -ne $shareTask) {
-        Unregister-ScheduledTask `
-            -TaskName "LibertixLinuxReadOnly" `
-            -Confirm:$false `
-            -ErrorAction Stop
-    }
+    Import-Module $TemporaryArtifactsModulePath -Force -ErrorAction Stop
+    Remove-LibertixWindowsShareTasks -ShareRoot $WindowsShareRoot
     if (Test-Path -LiteralPath $WindowsShareRoot) {
         Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
     }
-    if (
-        (Test-Path -LiteralPath $WindowsShareRoot) -or
-        $null -ne (Get-ScheduledTask `
-            -TaskName "LibertixLinuxReadOnly" `
-            -ErrorAction SilentlyContinue)
-    ) {
+    if (Test-Path -LiteralPath $WindowsShareRoot) {
         throw "Windows read-only Linux sharing cleanup could not be verified."
     }
     Write-RecoveryLog "Removed Windows read-only Linux sharing after rollback."
@@ -1011,7 +993,8 @@ try {
     Set-LibertixShutdownVerificationPriority
     $script:TrackRecoveryExecutionState = $false
     $recoveryExecutionState = Read-RecoveryExecutionState
-    $rollbackFromSucceeded = [string]$recoveryExecutionState.status -eq "succeeded"
+    $rollbackFromSucceeded = [string]$recoveryExecutionState.status -eq "succeeded" -or
+        "target.bootloader-installed" -in @($recoveryExecutionState.completedSteps)
     $temporaryBootWasPrepared = (
         "windows.temporary-boot-prepared" -in
         @($recoveryExecutionState.completedSteps)
@@ -1126,7 +1109,8 @@ try {
             Restore-BcdState -Required
         }
         $null = Invoke-RecoveryOperation -Name "windows-share.pending-cleanup" -Operation {
-            Remove-PendingWindowsSharePayload
+            if ($rollbackFromSucceeded) { Remove-WindowsShareAfterRollback }
+            else { Remove-PendingWindowsSharePayload }
         }
         $null = Invoke-RecoveryOperation -Name "hibernation.restore" -Operation {
             Restore-OriginalHibernationSetting
@@ -1138,11 +1122,12 @@ try {
             Remove-TransactionArtifacts
         }
         Assert-RecoveryOperationsSucceeded
-        $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
-            Remove-RecoveryTask -Required
-        }
         $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
             Remove-RecoveryPromptTask -Required
+        }
+        Assert-RecoveryOperationsSucceeded
+        $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
+            Remove-RecoveryTask -Required
         }
         Assert-RecoveryOperationsSucceeded
         Complete-RecoveryAttemptState
@@ -1295,7 +1280,12 @@ try {
             if (
                 ($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
                 ($isLinuxFileSystem -and -not $matchesFinalSize) -or
-                ($isRawTransaction -and -not $matchesStagingSize)
+                ($isRawTransaction -and -not (Test-RecoveryRawPartitionGeometry `
+                    -Partition $partition `
+                    -FinalOffset $expectedTransactionOffset `
+                    -FinalSize $expectedBytes `
+                    -StagingSize $stagingBytes `
+                    -Alignment $partitionSizeTolerance))
             ) {
                 continue
             }
@@ -1396,7 +1386,7 @@ try {
     $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
         Restore-BiosMbrBootCode `
             -DiskNumber $diskNumber `
-            -Required:$temporaryBootWasPrepared
+            -ExecutionState $recoveryExecutionState
     }
     $null = Invoke-RecoveryOperation -Name "windows-share.cleanup" -Operation {
         if ($rollbackFromSucceeded) {
@@ -1481,11 +1471,12 @@ try {
     }
     Assert-RecoveryOperationsSucceeded
 
-    $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
-        Remove-RecoveryTask -Required
-    }
     $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
         Remove-RecoveryPromptTask -Required
+    }
+    Assert-RecoveryOperationsSucceeded
+    $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
+        Remove-RecoveryTask -Required
     }
     Assert-RecoveryOperationsSucceeded
     Complete-RecoveryAttemptState

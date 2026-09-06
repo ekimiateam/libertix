@@ -79,6 +79,7 @@ namespace Libertix.Pages
                             if (policyLimitExceeded?.Invoke() == true)
                             {
                                 bool stopped = WindowsProcessRunner.TerminateProcessTree(process);
+                                _processTerminationUnverified |= !stopped;
                                 return new StreamingProcessResult
                                 {
                                     ExitCode = process.HasExited ? process.ExitCode : -1,
@@ -91,6 +92,7 @@ namespace Libertix.Pages
                             if (observeCancellation && _installationCancellation.IsCancellationRequested)
                             {
                                 bool stopped = WindowsProcessRunner.TerminateProcessTree(process);
+                                _processTerminationUnverified |= !stopped;
                                 return new StreamingProcessResult
                                 {
                                     ExitCode = process.HasExited ? process.ExitCode : -1,
@@ -103,6 +105,7 @@ namespace Libertix.Pages
                             if (timer.Elapsed > timeout)
                             {
                                 bool stopped = WindowsProcessRunner.TerminateProcessTree(process);
+                                _processTerminationUnverified |= !stopped;
                                 Dispatcher.Invoke(() => Log($"ERROR: process timed out after {timeout.TotalMinutes:N0} minutes"));
                                 return new StreamingProcessResult
                                 {
@@ -117,11 +120,27 @@ namespace Libertix.Pages
                         WindowsProcessRunner.WaitForRedirectedStreams(
                             outputClosed.Task,
                             errorClosed.Task);
+                        WindowsProcessRunner.AssertSafeExitCode(process.ExitCode);
                         return new StreamingProcessResult
                         {
                             ExitCode = process.ExitCode,
                             Completion = StreamingProcessCompletion.Exited
                         };
+                    }
+                    catch (UnterminatedProcessException)
+                    {
+                        _processTerminationUnverified = true;
+                        throw;
+                    }
+                    catch
+                    {
+                        if (!process.HasExited && !WindowsProcessRunner.TerminateProcessTree(process))
+                        {
+                            _processTerminationUnverified = true;
+                            throw new UnterminatedProcessException(
+                                "The failed streaming process could not be proven stopped.");
+                        }
+                        throw;
                     }
                     finally
                     {

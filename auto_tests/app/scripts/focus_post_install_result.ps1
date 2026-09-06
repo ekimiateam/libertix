@@ -45,6 +45,42 @@ function Set-PostInstallResultFocus {
 
     Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
     Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+    if (-not ("LibertixTestKeyboard" -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class LibertixTestKeyboard {
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+    [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint threadId);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr ActivateKeyboardLayout(IntPtr layout, uint flags);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)] static extern bool GetKeyboardLayoutName(StringBuilder name);
+    public static string Read(IntPtr window, int expectedProcessId) {
+        uint processId;
+        uint thread = GetWindowThreadProcessId(window, out processId);
+        if (thread == 0 || processId != expectedProcessId)
+            throw new InvalidOperationException("The keyboard target window changed owner.");
+        IntPtr layout = GetKeyboardLayout(thread);
+        if (layout == IntPtr.Zero) throw new InvalidOperationException("The target keyboard is unavailable.");
+        // Affect only this disposable worker thread, never the application or global layout.
+        IntPtr previous = ActivateKeyboardLayout(layout, 0);
+        if (previous == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try {
+            var name = new StringBuilder(9);
+            if (!GetKeyboardLayoutName(name)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (GetKeyboardLayout(thread) != layout)
+                throw new InvalidOperationException("The target keyboard changed during verification.");
+            return name.ToString();
+        } finally {
+            if (ActivateKeyboardLayout(previous, 0) == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+    }
+}
+'@ -ErrorAction Stop
+    }
     $process = Get-Process -Id $TargetProcessId -ErrorAction Stop
     $interactiveSessionIds = @(
         Get-Process -Name explorer -ErrorAction Stop |
@@ -106,6 +142,9 @@ function Set-PostInstallResultFocus {
                 window_handle = $handle
                 window_title = [string]$window.Current.Name
                 focused_control = "LibertixPostInstallCloseButton"
+                active_keyboard_identifier = [LibertixTestKeyboard]::Read([IntPtr]$handle, $TargetProcessId)
+                ui_culture = [string](Get-UICulture).Name
+                session_id = [int]$process.SessionId
             }
         }
         Start-Sleep -Milliseconds 100
@@ -204,6 +243,9 @@ try {
     Write-Output ("WINDOW_HANDLE={0}" -f [int64]$workerResult.window_handle)
     Write-Output ("WINDOW_TITLE={0}" -f [string]$workerResult.window_title)
     Write-Output ("FOCUSED_CONTROL={0}" -f [string]$workerResult.focused_control)
+    Write-Output ("ACTIVE_KEYBOARD_IDENTIFIER={0}" -f [string]$workerResult.active_keyboard_identifier)
+    Write-Output ("INTERACTIVE_UI_CULTURE={0}" -f [string]$workerResult.ui_culture)
+    Write-Output ("INTERACTIVE_SESSION_ID={0}" -f [int]$workerResult.session_id)
     Write-Output "RESULT=OK"
 } finally {
     $null = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")

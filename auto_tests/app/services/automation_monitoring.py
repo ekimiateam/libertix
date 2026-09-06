@@ -13,6 +13,7 @@ from PIL import Image
 from app.config import VMConfig
 from app.distributions import DistributionProfile, load_distribution_profile
 from app.errors import WorkflowError
+from app.services.automation_progress import InstallationProgress, assert_installation_progress
 from app.services.common import ResultBuilder
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,8 @@ class InstallationMonitoringMixin:
         reboot_attempts = 1 if reboot_requested else 0
         previous_signature: tuple[int, ...] | None = None
         unchanged_captures = 0
-        last_visual_change_at = time.monotonic()
+        last_progress_at = time.monotonic()
+        progress = InstallationProgress()
         live_failure_reboot_probe_sent = False
         monitor_delay_seconds = self.settings.automation_monitor_interval_seconds
         while time.monotonic() < deadline:
@@ -102,23 +104,15 @@ class InstallationMonitoringMixin:
             signature = self._capture_signature(capture)
             if signature is not None and signature == previous_signature:
                 unchanged_captures += 1
-                stalled_seconds = time.monotonic() - last_visual_change_at
-                if stalled_seconds >= self.settings.automation_stall_timeout_seconds:
-                    raise WorkflowError(
-                        "automation.progress_stalled",
-                        f"No visible progress during the {firmware.upper()} installation",
-                        details={
-                            "vm": vm.name,
-                            "target": vm.vnc,
-                            "phase": f"{firmware}-installation",
-                            "capture": str(capture),
-                            "stalled_seconds": round(stalled_seconds, 3),
-                            "stall_timeout_seconds": (
-                                self.settings.automation_stall_timeout_seconds
-                            ),
-                            "unchanged_captures": unchanged_captures,
-                        },
-                    )
+                assert_installation_progress(
+                    time.monotonic(),
+                    last_progress_at,
+                    self.settings.automation_stall_timeout_seconds,
+                    vm=vm.name,
+                    target=vm.vnc,
+                    phase=f"{firmware}-installation",
+                    capture=str(capture),
+                )
                 if unchanged_captures % UNCHANGED_CAPTURE_ANALYSIS_INTERVAL != 0:
                     result.ok(
                         "automation.monitor_unchanged",
@@ -132,7 +126,6 @@ class InstallationMonitoringMixin:
             else:
                 previous_signature = signature
                 unchanged_captures = 0
-                last_visual_change_at = time.monotonic()
             try:
                 verdict = self.vision_llm.analyze_install_progress(capture, vm.name, vm.os)
             except WorkflowError as exc:
@@ -149,11 +142,24 @@ class InstallationMonitoringMixin:
                         "provider_message": exc.message,
                     },
                 ) from exc
+            if progress.observe(verdict.visible_text):
+                last_progress_at = time.monotonic()
+            assert_installation_progress(
+                time.monotonic(),
+                last_progress_at,
+                self.settings.automation_stall_timeout_seconds,
+                vm=vm.name,
+                target=vm.vnc,
+                phase=f"{firmware}-installation",
+                capture=str(capture),
+            )
             context = {
                 "target": vm.vnc,
                 "vm": vm.name,
                 "capture": str(capture),
                 **verdict.model_dump(),
+                "progress_generation": progress.generation,
+                "progress_phase": progress.phase,
             }
             last_context = context
             result.ok(
@@ -230,7 +236,7 @@ class InstallationMonitoringMixin:
                 reboot_attempts += 1
                 previous_signature = None
                 unchanged_captures = 0
-                last_visual_change_at = time.monotonic()
+                last_progress_at = time.monotonic()
                 monitor_delay_seconds = min(
                     self.settings.automation_monitor_interval_seconds,
                     REBOOT_RECHECK_INTERVAL_SECONDS,

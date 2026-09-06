@@ -89,6 +89,8 @@ class AutomationService(
         boot_guardian_fault: Literal[
             "none",
             "bios-rollback",
+            "bios-controller-disconnect",
+            "bios-postinstall-rollback",
             "boot-order",
             "bootnext-fallback",
             "bootnext-rollback",
@@ -122,7 +124,12 @@ class AutomationService(
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
             if boot_guardian_fault != "none":
-                expected_firmware = "bios" if boot_guardian_fault == "bios-rollback" else "uefi"
+                expected_firmware = (
+                    "bios"
+                    if boot_guardian_fault
+                    in {"bios-rollback", "bios-postinstall-rollback", "bios-controller-disconnect"}
+                    else "uefi"
+                )
                 if len(selected_vms) != 1 or selected_vms[0].firmware != expected_firmware:
                     raise WorkflowError(
                         "automation.boot_guardian_fault_scope",
@@ -164,6 +171,10 @@ class AutomationService(
                 first_boot=first_boot,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
+                for vm in selected_vms:
+                    result.ok(
+                        "automation.vm_started", "VM installation workflow started", vm=vm.name
+                    )
                 futures = {
                     executor.submit(
                         self._run_vm_isolated,
@@ -178,6 +189,12 @@ class AutomationService(
                 for future in as_completed(futures):
                     vm_result = future.result()
                     result.steps.extend(vm_result.steps)
+                    result.ok(
+                        "automation.vm_finished",
+                        "VM installation workflow terminated",
+                        vm=futures[future].name,
+                        vm_status=vm_result.status,
+                    )
                     if vm_result.status == "error":
                         failures.append(vm_result)
                 if failures:
@@ -295,6 +312,8 @@ class AutomationService(
                 )
             if options.boot_guardian_fault in {
                 "bios-rollback",
+                "bios-controller-disconnect",
+                "bios-postinstall-rollback",
                 "bootnext-rollback",
                 "preferred-path-rollback",
             }:
@@ -438,6 +457,8 @@ class AutomationService(
                 "SYSTEM_PARTITION_NUMBER",
                 "SYSTEM_PARTITION_OFFSET",
                 "SYSTEM_PARTITION_SIZE",
+                "PARTITION_LAYOUT_JSON",
+                "EXECUTION_PLAN_IDS_JSON",
                 "INSTALLER_PARTITION_COUNT",
                 "LIBERTIX_PROCESS_COUNT",
                 "RECOVERY_TASK_COUNT",
@@ -449,6 +470,8 @@ class AutomationService(
             "SYSTEM_PARTITION_NUMBER",
             "SYSTEM_PARTITION_OFFSET",
             "SYSTEM_PARTITION_SIZE",
+            "PARTITION_LAYOUT_JSON",
+            "EXECUTION_PLAN_IDS_JSON",
         )
         if (
             values.get("RESULT") != "OK"

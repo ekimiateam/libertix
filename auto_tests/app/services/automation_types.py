@@ -24,6 +24,8 @@ class AutomationOptions:
     boot_guardian_fault: Literal[
         "none",
         "bios-rollback",
+        "bios-controller-disconnect",
+        "bios-postinstall-rollback",
         "boot-order",
         "bootnext-fallback",
         "bootnext-rollback",

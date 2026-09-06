@@ -150,6 +150,18 @@ def install_assets(preferences: dict[str, Any], username: str) -> tuple[Path | N
     wallpaper_path: Path | None = None
     if wallpaper is not None:
         suffix, content = wallpaper
+        directory = home
+        for name in ("Pictures", "Libertix"):
+            directory = directory / name
+            try:
+                directory.mkdir(mode=0o755)
+            except FileExistsError as error:
+                if directory.is_symlink() or not directory.is_dir():
+                    raise PreferenceMigrationError(
+                        "the wallpaper directory is not a regular directory"
+                    ) from error
+            else:
+                os.chown(directory, account.pw_uid, account.pw_gid, follow_symlinks=False)
         wallpaper_path = home / "Pictures" / "Libertix" / f"windows-wallpaper{suffix}"
         atomic_write(wallpaper_path, content, 0o644, account.pw_uid, account.pw_gid)
 
@@ -214,7 +226,7 @@ def validate_desktop_preferences(preferences: dict[str, Any]) -> dict[str, Any]:
 
     normalized = dict(preferences)
     normalized["darkMode"] = require_optional_bool(preferences.get("darkMode"), "darkMode")
-    normalized["autoLockAfterInactivity"] = require_bool(
+    normalized["autoLockAfterInactivity"] = require_optional_bool(
         preferences.get("autoLockAfterInactivity"),
         "autoLockAfterInactivity",
     )
@@ -327,8 +339,9 @@ def apply_desktop_preferences(
             applied += int(set_gsetting("org.cinnamon.theme", "name", cinnamon_theme))
 
     auto_lock = preferences["autoLockAfterInactivity"]
-    applied += set_for_desktops("desktop.screensaver", "lock-enabled", auto_lock)
-    applied += set_for_desktops("desktop.screensaver", "idle-activation-enabled", auto_lock)
+    if auto_lock is not None:
+        applied += set_for_desktops("desktop.screensaver", "lock-enabled", auto_lock)
+        applied += set_for_desktops("desktop.screensaver", "idle-activation-enabled", auto_lock)
     if auto_lock:
         timeout = preferences.get("autoLockTimeoutSeconds")
         if timeout is not None:
@@ -423,7 +436,7 @@ def keyfile_escape(value: str) -> str:
 
 def validate_wifi_profile(value: Any, index: int) -> dict[str, Any]:
     profile = require_mapping(value, f"wifiProfiles[{index}]")
-    allowed = {"id", "ssid", "security", "secret", "hidden", "autoConnect"}
+    allowed = {"id", "ssid", "ssidHex", "security", "secret", "hidden", "autoConnect"}
     if set(profile) - allowed:
         raise PreferenceMigrationError(f"wifiProfiles[{index}] contains unsupported fields")
     identifier = profile.get("id")
@@ -435,8 +448,17 @@ def validate_wifi_profile(value: Any, index: int) -> dict[str, Any]:
         or any(char in identifier for char in "\r\n\0")
     ):
         raise PreferenceMigrationError(f"wifiProfiles[{index}].id is invalid")
-    if not isinstance(ssid, str) or not ssid or len(ssid.encode("utf-8")) > 32 or "\0" in ssid:
-        raise PreferenceMigrationError(f"wifiProfiles[{index}].ssid is invalid")
+    ssid_hex = profile.get("ssidHex")
+    if "ssidHex" in profile:
+        if (
+            not isinstance(ssid_hex, str)
+            or re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,32}", ssid_hex) is None
+        ):
+            raise PreferenceMigrationError(f"wifiProfiles[{index}].ssidHex is invalid")
+    else:
+        if not isinstance(ssid, str) or not ssid or len(ssid.encode("utf-8")) > 32 or "\0" in ssid:
+            raise PreferenceMigrationError(f"wifiProfiles[{index}].ssid is invalid")
+        ssid_hex = ssid.encode("utf-8").hex()
     if security not in {"open", "owe", "wpa-psk", "sae"}:
         raise PreferenceMigrationError(f"wifiProfiles[{index}].security is unsupported")
     secret = profile.get("secret")
@@ -458,7 +480,7 @@ def validate_wifi_profile(value: Any, index: int) -> dict[str, Any]:
         raise PreferenceMigrationError(f"wifiProfiles[{index}].secret is invalid")
     require_bool(profile.get("hidden"), f"wifiProfiles[{index}].hidden")
     require_bool(profile.get("autoConnect"), f"wifiProfiles[{index}].autoConnect")
-    return profile
+    return {**profile, "ssidHex": ssid_hex.lower()}
 
 
 def install_wifi_profiles(
@@ -471,16 +493,16 @@ def install_wifi_profiles(
     identities: set[tuple[str, str]] = set()
     for index, value in enumerate(values):
         profile = validate_wifi_profile(value, index)
-        identity = (profile["ssid"], profile["security"])
+        identity = (profile["ssidHex"], profile["security"])
         if identity in identities:
             raise PreferenceMigrationError("preference bundle contains duplicate Wi-Fi identities")
         identities.add(identity)
 
         connection_uuid = uuid.uuid5(
             uuid.NAMESPACE_URL,
-            f"https://ekimia.fr/libertix/wifi/{profile['security']}/{profile['ssid']}",
+            f"https://ekimia.fr/libertix/wifi/{profile['security']}/{profile['ssidHex']}",
         )
-        ssid_bytes = profile["ssid"].encode("utf-8")
+        ssid_bytes = bytes.fromhex(profile["ssidHex"])
         lines = [
             "[connection]",
             f"id={keyfile_escape(profile['id'])}",
@@ -507,7 +529,7 @@ def install_wifi_profiles(
             )
         lines.extend(["[ipv4]", "method=auto", "", "[ipv6]", "method=auto", ""])
         file_name = hashlib.sha256(
-            (profile["security"] + "\0" + profile["ssid"]).encode("utf-8")
+            profile["security"].encode("ascii") + b"\0" + ssid_bytes
         ).hexdigest()[:20]
         atomic_write(
             destination / f"libertix-{file_name}.nmconnection",

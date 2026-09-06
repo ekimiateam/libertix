@@ -9,7 +9,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -87,6 +87,32 @@ def wifi_profiles() -> list[dict[str, object]]:
     ]
 
 
+@pytest.mark.parametrize("raw", [b"\x00\xff\x80A", bytes(range(32)), "caf\u00e9".encode()])
+def test_wifi_preserves_exact_ssid_octets(helper: ModuleType, tmp_path: Path, raw: bytes) -> None:
+    profile = {**wifi_profiles()[0], "ssid": "lossy display", "ssidHex": raw.hex().upper()}
+    helper.install_wifi_profiles([profile], tmp_path, os.getuid(), os.getgid())
+    text = next(tmp_path.glob("*.nmconnection")).read_text()
+    assert "ssid=" + ";".join(str(value) for value in raw) + ";\n" in text
+
+
+@pytest.mark.parametrize("value", [None, "", "f", "zz", "41 42", "aa" * 33])
+def test_wifi_rejects_invalid_hex_without_using_display_name(
+    helper: ModuleType, value: object
+) -> None:
+    profile = {**wifi_profiles()[0], "ssidHex": value}
+    with pytest.raises(helper.PreferenceMigrationError, match="ssidHex"):
+        helper.validate_wifi_profile(profile, 0)
+
+
+def test_wifi_deduplicates_raw_identity_not_display_name(
+    helper: ModuleType, tmp_path: Path
+) -> None:
+    first = {**wifi_profiles()[0], "ssidHex": "00FF", "ssid": "first"}
+    second = {**wifi_profiles()[0], "ssidHex": "00ff", "ssid": "second"}
+    with pytest.raises(helper.PreferenceMigrationError, match="duplicate"):
+        helper.install_wifi_profiles([first, second], tmp_path, os.getuid(), os.getgid())
+
+
 def test_bundle_contract_accepts_complete_preferences_and_wifi(
     helper: ModuleType, tmp_path: Path
 ) -> None:
@@ -130,6 +156,65 @@ def test_bundle_contract_rejects_a_wifi_count_mismatch(helper: ModuleType, tmp_p
 
     with pytest.raises(helper.PreferenceMigrationError, match="count does not match"):
         helper.read_bundle(bundle_path, "a" * 32, 2)
+
+
+@pytest.mark.parametrize("existing_pictures", [True, False])
+def test_wallpaper_assigns_new_directories_to_the_user(
+    helper: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing_pictures: bool
+) -> None:
+    if existing_pictures:
+        (tmp_path / "Pictures").mkdir(mode=0o700)
+    content = b"image fixture"
+    preferences = {
+        "wallpaper": {
+            "fileName": "wallpaper.png",
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "contentBase64": base64.b64encode(content).decode(),
+        }
+    }
+    account = SimpleNamespace(pw_dir=str(tmp_path), pw_uid=os.getuid(), pw_gid=os.getgid())
+    monkeypatch.setattr(helper.pwd, "getpwnam", lambda _: account)
+    changes: list[tuple[Path, int, int]] = []
+    original = os.chown
+
+    def record(path: Path, uid: int, gid: int, **kwargs: object) -> None:
+        changes.append((Path(path), uid, gid))
+        original(path, uid, gid, **kwargs)
+
+    monkeypatch.setattr(helper.os, "chown", record)
+    wallpaper, _ = helper.install_assets(preferences, "test")
+    assert wallpaper.read_bytes() == content
+    assert (tmp_path / "Pictures" / "Libertix", account.pw_uid, account.pw_gid) in changes
+    pictures_changed = any(path == tmp_path / "Pictures" for path, _, _ in changes)
+    assert pictures_changed is not existing_pictures
+    if existing_pictures:
+        assert stat.S_IMODE((tmp_path / "Pictures").stat().st_mode) == 0o700
+
+
+def test_wallpaper_refuses_a_symlink_directory(
+    helper: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    foreign = tmp_path / "foreign"
+    home.mkdir()
+    foreign.mkdir()
+    (home / "Pictures").symlink_to(foreign, target_is_directory=True)
+    content = b"image fixture"
+    monkeypatch.setattr(
+        helper.pwd,
+        "getpwnam",
+        lambda _: SimpleNamespace(pw_dir=str(home), pw_uid=os.getuid(), pw_gid=os.getgid()),
+    )
+    preferences = {
+        "wallpaper": {
+            "fileName": "wallpaper.png",
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "contentBase64": base64.b64encode(content).decode(),
+        }
+    }
+    with pytest.raises(helper.PreferenceMigrationError, match="regular directory"):
+        helper.install_assets(preferences, "test")
+    assert list(foreign.iterdir()) == []
 
 
 def test_assets_require_the_declared_sha256(helper: ModuleType) -> None:
@@ -184,14 +269,26 @@ def test_networkmanager_library_loads_every_generated_keyfile(
     from gi.repository import GLib, NM  # noqa: I001, PLC0415
 
     destination = tmp_path / "system-connections"
+    profiles = wifi_profiles() + [
+        {
+            **wifi_profiles()[2],
+            "ssidHex": bytes(range(32)).hex(),
+            "secret": "0123456789abcdef" * 4,
+        },
+        {
+            **wifi_profiles()[3],
+            "ssidHex": "00ff8041",
+            "secret": " space;=\\\\secret ",
+        },
+    ]
     helper.install_wifi_profiles(
-        wifi_profiles(),
+        profiles,
         destination,
         os.geteuid(),
         os.getegid(),
     )
 
-    loaded: dict[str, tuple[str | None, str | None]] = {}
+    loaded: dict[bytes, tuple[str | None, str | None, bool, bool]] = {}
     for path in destination.glob("*.nmconnection"):
         keyfile = GLib.KeyFile()
         keyfile.load_from_file(str(path), GLib.KeyFileFlags.NONE)
@@ -204,18 +301,22 @@ def test_networkmanager_library_loads_every_generated_keyfile(
         )
         assert connection.verify() is True
         wireless = connection.get_setting_wireless()
-        ssid = bytes(wireless.get_ssid().get_data()).decode("utf-8")
+        ssid = bytes(wireless.get_ssid().get_data())
         security = connection.get_setting_wireless_security()
         loaded[ssid] = (
             security.get_key_mgmt() if security is not None else None,
             security.get_psk() if security is not None else None,
+            wireless.get_hidden(),
+            connection.get_setting_connection().get_autoconnect(),
         )
 
     assert loaded == {
-        "Cafe open": (None, None),
-        "Cafe Enhanced Open": ("owe", None),
-        "Home=Network;2": ("wpa-psk", "correct horse battery staple"),
-        "Home WPA3": ("sae", "sae-passphrase"),
+        b"Cafe open": (None, None, False, True),
+        b"Cafe Enhanced Open": ("owe", None, False, True),
+        b"Home=Network;2": ("wpa-psk", "correct horse battery staple", False, True),
+        b"Home WPA3": ("sae", "sae-passphrase", True, False),
+        bytes(range(32)): ("wpa-psk", "0123456789abcdef" * 4, False, True),
+        b"\x00\xff\x80A": ("sae", " space;=\\\\secret ", True, False),
     }
 
 
@@ -225,6 +326,45 @@ def test_unsupported_network_contracts_are_rejected(helper: ModuleType, security
 
     with pytest.raises(helper.PreferenceMigrationError, match="security is unsupported"):
         helper.validate_wifi_profile(profile, 0)
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_unknown_windows_idle_lock_does_not_disable_linux_lock(
+    helper: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool
+) -> None:
+    preferences = desktop_preferences()
+    if missing:
+        preferences.pop("autoLockAfterInactivity")
+    else:
+        preferences["autoLockAfterInactivity"] = None
+    path = tmp_path / "preferences.json"
+    path.write_text(json.dumps(preferences))
+    applied: list[tuple[str, str, object]] = []
+
+    def record(schema: str, key: str, value: object) -> bool:
+        applied.append((schema, key, value))
+        return True
+
+    monkeypatch.setattr(helper, "set_gsetting", record)
+    helper.apply_desktop_preferences(path, None, tmp_path)
+    assert not any(
+        key in {"lock-enabled", "idle-activation-enabled", "idle-delay", "lock-delay"}
+        for _, key, _ in applied
+    )
+
+
+def test_missing_personal_wallpaper_preserves_both_linux_backgrounds(
+    helper: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "preferences.json"
+    path.write_text(json.dumps({"darkMode": True, "primaryMouseButton": "left"}))
+    applied = []
+    monkeypatch.setattr(helper, "set_gsetting", lambda *args: applied.append(args) or True)
+    helper.apply_desktop_preferences(path, None, tmp_path)
+    assert not any(
+        "background" in schema or key.startswith("picture-uri") for schema, key, _ in applied
+    )
+    assert ("org.gnome.desktop.interface", "color-scheme", "prefer-dark") in applied
 
 
 def test_desktop_mapping_applies_every_supported_contract(
@@ -353,11 +493,14 @@ def test_secret_bundle_is_verified_retired_and_never_installed_persistently() ->
     assert "Published Windows preference migration bundle re-verified." in uefi_publisher
     assert "Published Windows preference migration bundle verification failed." in uefi_publisher
     assert "preferences.secret.json" in live_context
-    assert 'chmod 0600 "$LOG_DIR/windows-preferences.secret.json"' in live_context
+    assert (
+        'install -m 0600 "$bundle_candidate" "$private_dir/windows-preferences.secret.json"'
+    ) in live_context
+    assert 'private_dir="${LOG_DIR}-private"' in live_context
     assert 'sha256sum "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH"' in installer
     assert "/mnt/target/tmp/windows-preferences.secret.json" in target
     assert "rm -f /mnt/target/tmp/libertix-configure-target.sh" in target
-    assert "${LOG_DIR:-/run/libertix}/windows-preferences.secret.json" in rollback
+    assert "${LOG_DIR:-/run/libertix}-private/windows-preferences.secret.json" in rollback
     assert 'rm -f -- "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH"' in rollback
 
 

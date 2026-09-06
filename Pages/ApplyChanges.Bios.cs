@@ -26,6 +26,8 @@ namespace Libertix.Pages
             if (_installationPlan == null)
                 throw new InvalidOperationException("Installation plan is not initialized.");
 
+            BiosBootPayload.AssertDestinationsAbsent(_storagePreflight.SystemDrive + @"\");
+
             InstallationDistribution distribution = _installationPlan.Distribution;
             InstallationSizes installationSizes =
                 InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB);
@@ -87,6 +89,11 @@ namespace Libertix.Pages
                 FirmwareType.Bios,
                 decryptBitLocker: true);
             ThrowIfCancellationRequested();
+            if (_storagePreflight.BitLockerState != InstallationBitLockerState.FullyDecrypted &&
+                _storagePreflight.BitLockerState != InstallationBitLockerState.NotEncryptable)
+                throw new InvalidOperationException("BIOS preparation requires verified BitLocker decryption.");
+            _installationPlan.Runtime.WindowsBitLockerState = _storagePreflight.BitLockerState;
+            InstallationPlanSerializer.WriteAtomic(_installationPlanPath, _installationPlan);
 
             // Query SizeMin after disabling Fast Startup because hiberfil.sys is
             // unmovable and can otherwise make Windows report an artificially
@@ -392,6 +399,11 @@ namespace Libertix.Pages
             Log($"Step 7: Downloading GRUB4DOS files to {_storagePreflight.SystemDrive}\\...");
             StartExecutionStep(InstallationStep.WindowsTemporaryBootPrepared);
 
+            string preparedBootRoot = Path.Combine(
+                InstallationTemporaryArtifacts.GetDownloadDirectory(
+                    _storagePreflight.SystemDrive + @"\", _installationPlan.PlanId), "bios-boot");
+            Directory.CreateDirectory(preparedBootRoot);
+
             string[] grubFiles =
             {
                 Artifacts.Grub4Dos.LoaderFileName,
@@ -405,7 +417,7 @@ namespace Libertix.Pages
             foreach (string file in grubFiles)
             {
                 string destinationPath = Path.Combine(
-                    _storagePreflight.SystemDrive + @"\",
+                    preparedBootRoot,
                     file);
                 string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
                 bool ready = false;
@@ -441,19 +453,21 @@ namespace Libertix.Pages
                         $"Integrity verification failed for {file}");
                     return false;
                 }
-                Log($"Ready: {file} at {_storagePreflight.SystemDrive}\\");
+                Log($"Verified temporary boot file: {file}");
             }
 
             try
             {
-                string menuPath = Path.Combine(_storagePreflight.SystemDrive + @"\", "menu.lst");
+                string menuPath = Path.Combine(preparedBootRoot, "menu.lst");
                 string menu = LiveBootArguments
                     .LoadFromApplicationDirectory()
-                    .CreateGrub4DosMenu();
+                    .CreateGrub4DosMenu(_installationState.Compatibility?.LowMemoryMode == true);
                 File.WriteAllText(
                     menuPath,
                     menu,
                     new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                BiosBootPayload.Publish(_storagePreflight.SystemDrive + @"\", RecoveryRoot,
+                    _installationPlan.PlanId, preparedBootRoot);
                 Log($"Ready: menu.lst at {_storagePreflight.SystemDrive}\\");
             }
             catch (Exception ex)
@@ -523,6 +537,7 @@ namespace Libertix.Pages
             string reason,
             string rollbackCompletedMessage = null)
         {
+            _rollbackVerificationPending = true;
             RecordExecutionFailure("BIOS_PREPARATION_FAILED", reason, InstallationPhase.Windows);
             BeginExecutionRollback();
             Log($"ERROR: {reason}");
@@ -570,6 +585,7 @@ namespace Libertix.Pages
                 PublishUnattendedFailure(
                     "bios-preparation-failed",
                     $"{reason} Automatic rollback was verified.");
+                _rollbackVerificationPending = false;
                 FinishInstallation(enableBackButton: true);
             }
             else

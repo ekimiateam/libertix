@@ -278,7 +278,17 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     ):
         left_start, left_end = fixed_extents[left]
         right_start, right_end = fixed_extents[right]
-        if left_start < right_end and right_start < left_end:
+        same_bios_windows_boot_partition = (
+            firmware == "bios"
+            and (left, right) == ("windows", "boot")
+            and fixed_partitions[left]["number"] == fixed_partitions[right]["number"]
+            and (left_start, left_end) == (right_start, right_end)
+        )
+        if (
+            left_start < right_end
+            and right_start < left_end
+            and not same_bios_windows_boot_partition
+        ):
             raise PlanValidationError(f"disk.{left} and disk.{right} overlap")
     windows_end = fixed_extents["windows"][1]
     recovery_offset = fixed_extents["recovery"][0]

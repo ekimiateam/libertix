@@ -642,11 +642,13 @@ function Restore-PreferredBootPathIfPresent {
 function Remove-RecoveryTasks {
     param([Parameter(Mandatory = $true)]$State)
 
-    $taskNames = @([string]$State.TaskName, [string]$State.PromptTaskName) |
+    $taskNames = @([string]$State.PromptTaskName, [string]$State.TaskName) |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     foreach ($taskName in $taskNames) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        $present = @(Get-ScheduledTask -TaskPath "\" -ErrorAction Stop | Where-Object TaskName -eq $taskName)
+        if ($present.Count -eq 0) { continue }
+        Unregister-ScheduledTask -TaskName $taskName -TaskPath "\" -Confirm:$false -ErrorAction Stop
+        if (@(Get-ScheduledTask -TaskPath "\" -ErrorAction Stop | Where-Object TaskName -eq $taskName).Count -ne 0) {
             throw "Recovery task still exists after removal: $taskName"
         }
     }
@@ -805,6 +807,41 @@ function Restore-UefiTransactionArchive {
     }
 }
 
+function Restore-FailedLiveInstallation {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $execution = Read-ValidatedExecutionState -RecoveryState $State
+    if ([string]$execution.status -notin @("failed", "rollback-running", "rolled-back")) {
+        throw "Live failure cannot restore an execution in state '$($execution.status)'."
+    }
+    Restore-UefiTransactionArchive -State $State
+    $processModule = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.Process.psm1"
+    Import-Module -Name $processModule -Force -ErrorAction Stop
+    $installerScript = Join-Path $State.PayloadRoot "Scripts\libertix-uefi-install.ps1"
+    $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $operations = @()
+    if ([string]$execution.status -ne "rolled-back") {
+        $operations += "-Revert"
+    } else {
+        $operations += "-RestoreWindowsSettings"
+    }
+    foreach ($operation in $operations) {
+        $result = Invoke-LibertixNativeCommand -FilePath $powershell `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", $installerScript, $operation, "-ExpectedRecoveryRunId", [string]$State.RunId) `
+            -TimeoutSeconds 900 `
+            -OnStandardOutputLine { param($Line) Write-AgentLog "Live recovery: $Line" } `
+            -OnStandardErrorLine { param($Line) Write-AgentLog "Live recovery error: $Line" }
+        if ($result.ExitCode -ne 0) {
+            throw "Live recovery $operation failed with rc=$($result.ExitCode)."
+        }
+        $execution = Read-ValidatedExecutionState -RecoveryState $State
+        if ([string]$execution.status -ne "rolled-back") {
+            throw "Live recovery did not prove a completed rollback; recovery remains armed."
+        }
+    }
+}
+
 function Save-RecoveryLogs {
     param([Parameter(Mandatory = $true)]$State)
 
@@ -905,7 +942,10 @@ function Restore-HibernationAfterInstallation {
 
 function Remove-PendingWindowsSharePayload {
     if (Test-Path -LiteralPath (Join-Path $WindowsShareRoot "pending.marker") -PathType Leaf) {
-        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $WindowsShareRoot) {
+            throw "Pending Windows sharing payload still exists after removal."
+        }
         Write-AgentLog "Removed pending Windows sharing payload."
     }
 }
@@ -913,7 +953,6 @@ function Remove-PendingWindowsSharePayload {
 function Remove-WindowsShareAfterRollback {
     param([Parameter(Mandatory = $true)]$State)
 
-    if (-not (Test-Path -LiteralPath $WindowsShareRoot -PathType Container)) { return }
     $shareLog = Join-Path $WindowsShareRoot "windows-share.log"
     if (Test-Path -LiteralPath $shareLog -PathType Leaf) {
         Copy-Item `
@@ -922,11 +961,14 @@ function Remove-WindowsShareAfterRollback {
             -Force `
             -ErrorAction Stop
     }
-    Unregister-ScheduledTask `
-        -TaskName "LibertixLinuxReadOnly" `
-        -Confirm:$false `
-        -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    Import-Module (Join-Path $State.PayloadRoot "Scripts\modules\Libertix.TemporaryArtifacts.psm1") -Force -ErrorAction Stop
+    Remove-LibertixWindowsShareTasks -ShareRoot $WindowsShareRoot
+    if (Test-Path -LiteralPath $WindowsShareRoot) {
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $WindowsShareRoot) {
+        throw "Windows sharing payload still exists after rollback cleanup."
+    }
     Write-AgentLog "Removed Windows read-only Linux sharing after rollback."
 }
 
@@ -1064,6 +1106,7 @@ function Invoke-VerifiedInstallationSuccess {
     }
     Import-Module -Name $modulePath -Force -ErrorAction Stop
     $writeLog = { param($Message) Write-AgentLog -Message $Message }
+    $verificationCompleted = $false
     try {
         $filesystemRepair = Invoke-LibertixWindowsFilesystemRepairIfRequired `
             -RecoveryRoot ([string]$State.RecoveryRoot) `
@@ -1105,18 +1148,19 @@ function Invoke-VerifiedInstallationSuccess {
             Remove-TemporaryRecoveryArtifacts -State $State
             Set-FinalizationStep -State $State -Step "TemporaryArtifactsRemoved"
         }
+        $null = Invoke-LibertixPostInstallVerification `
+            -RecoveryRoot ([string]$State.RecoveryRoot) `
+            -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
+            -WriteLog $writeLog
+        $verificationCompleted = $true
         if ((Get-FinalizationStepRank -State $State) -lt 7) {
-            $null = Invoke-LibertixPostInstallVerification `
-                -RecoveryRoot ([string]$State.RecoveryRoot) `
-                -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
-                -WriteLog $writeLog
             Set-FinalizationStep -State $State -Step "PostInstallVerified"
         }
         $State.Phase = "Verified"
         Save-State -State $State
     } catch {
         $verificationFailure = $_
-        if ((Get-FinalizationStepRank -State $State) -ge 7) {
+        if ($verificationCompleted) {
             $State.Phase = "FinalizationPending"
             try {
                 Save-State -State $State
@@ -1183,6 +1227,9 @@ function Invoke-VerifiedInstallationSuccess {
 try {
     $state = Get-Content -LiteralPath $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Assert-RecoveryState -State $state
+    if ([string]$state.Phase -eq "FallbackProcessStateUnknown") {
+        throw "Recovery is blocked because the previous process tree was not proven stopped."
+    }
     Test-RecoveryPayload -State $state
     $script:AtomicFileModulePath = Join-Path `
         $state.PayloadRoot `
@@ -1298,7 +1345,8 @@ try {
     }
 
     if ($Action -eq "Cancel") {
-        $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded"
+        $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded" -or
+            "target.bootloader-installed" -in @($executionState.completedSteps)
         $null = Remove-BootGuardianIfPresent -State $state
         if ([string]$executionState.status -ne "rolled-back") {
             $null = Restore-PreferredBootPathIfPresent -State $state
@@ -1472,13 +1520,7 @@ try {
         $failedRunId -eq [string]$state.RunId -and
         [string]$executionState.status -in @("failed", "rollback-running", "rolled-back")
     ) {
-        $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
-            -RestoreWindowsSettings `
-            -ExpectedRecoveryRunId ([string]$state.RunId)
-        if ($LASTEXITCODE -ne 0) {
-            throw "Windows setting restoration failed after live rollback with rc=$LASTEXITCODE."
-        }
+        Restore-FailedLiveInstallation -State $state
         Remove-PendingWindowsSharePayload
         $state.Phase = "LiveFailed"
         Save-State -State $state
@@ -1520,6 +1562,7 @@ try {
     } catch {
         Write-Verbose "Unable to archive the recovery failure log: $($_.Exception.Message)"
     }
-    Write-Error $fatalError.Exception.Message
+    Write-Error $fatalError.Exception.Message -ErrorAction Continue
+    if ($fatalError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
     exit 1
 }

@@ -506,6 +506,7 @@ def test_bios_mbr_removal_uses_the_observed_postcondition(
     command = (
         'PATH="$1:$PATH"; MOCK_LAYOUT="$2"; export PATH MOCK_LAYOUT; '
         'source "$3"; DISK=/dev/mock; '
+        "sync() { :; }; partprobe() { :; }; udevadm() { :; }; "
         'remove_mbr_partition_entry_verified 3 "test removal"'
     )
 
@@ -522,6 +523,7 @@ def test_bios_mbr_removal_uses_the_observed_postcondition(
         check=False,
         capture_output=True,
         text=True,
+        timeout=10,
     )
 
     assert result.returncode == expected_returncode
@@ -550,6 +552,7 @@ def test_bios_boot_flag_update_uses_the_observed_postcondition(
     command = (
         'PATH="$1:$PATH"; MOCK_LAYOUT="$2"; export PATH MOCK_LAYOUT; '
         'source "$3"; DISK=/dev/mock; '
+        "sync() { :; }; partprobe() { :; }; udevadm() { :; }; "
         'set_mbr_active_partition_verified 1 "test boot flags"'
     )
 
@@ -566,6 +569,7 @@ def test_bios_boot_flag_update_uses_the_observed_postcondition(
         check=False,
         capture_output=True,
         text=True,
+        timeout=10,
     )
 
     assert result.returncode == expected_returncode
@@ -802,7 +806,10 @@ def test_windows_rollbacks_require_the_exact_original_system_partition_size() ->
     assert "[int64]$partitionSizeTolerance = $PartitionAlignmentBytes" in bios_guard
     assert "[int64]$minBytes" in bios_guard
     assert "[int64]$stagingMinBytes" in bios_guard
-    assert "[Math]::Max" not in bios_guard
+    disk_restore = bios_guard.split("$diskLayoutRestored = Invoke-RecoveryOperation", 1)[1].split(
+        "$bcdRestored =", 1
+    )[0]
+    assert "[Math]::Max" not in disk_restore
 
 
 def test_bios_downloader_verifies_bundled_aria2_before_execution() -> None:
@@ -1073,8 +1080,14 @@ def test_uefi_live_failure_restores_windows_settings_for_the_same_run() -> None:
     live_failure = agent.split("$failedRunId = Read-EnvValue -Path $liveFailed", 1)[1].split(
         "$startedRunId = Read-EnvValue -Path $liveStarted", 1
     )[0]
-    assert "-RestoreWindowsSettings" in live_failure
-    assert "-ExpectedRecoveryRunId" in live_failure
+    recovery = agent.split("function Restore-FailedLiveInstallation {", 1)[1].split(
+        "function Save-RecoveryLogs", 1
+    )[0]
+    assert "-RestoreWindowsSettings" in recovery
+    assert "-ExpectedRecoveryRunId" in recovery
+    assert live_failure.index("Restore-FailedLiveInstallation -State $state") < live_failure.index(
+        "Remove-RecoveryTasks -State $state"
+    )
     assert "Remove-PendingWindowsSharePayload" in live_failure
     assert (
         'executionState.status -in @("failed", "rollback-running", "rolled-back")' in live_failure
@@ -1247,7 +1260,8 @@ def test_offline_ntfs_resize_schedules_a_verified_windows_boot_repair() -> None:
     assert "Invoke-LibertixWindowsFilesystemRepairIfRequired" in uefi
     assert 'resizeMode -ne "live-offline"' in module
     assert 'status = "waiting-windows-filesystem-repair"' in module
-    assert 'foreach ($answer in @("Y", "O", "S"))' in module
+    assert '-StandardInputText "Y`r`nO`r`nS`r`n"' in module
+    assert '-ArgumentList @($SystemDrive, "/F") -TimeoutSeconds 120' in module
     assert "BootExecute" in module
     assert "scheduledFromBootId" in module
     assert "attemptCount -ge 2" in module
@@ -1675,7 +1689,7 @@ def test_release_restore_dismount_and_latest_logs_fail_closed() -> None:
 
     assert 'latest_staging="$log_root/.latest-$RUN_ID"' in log_copy
     assert 'latest_backup="$log_root/.latest-previous"' in log_copy
-    assert 'cp -a "$log_dir/." "$latest_staging/"' in log_copy
+    assert 'libertix-log-archive.py "$log_dir" "$latest_staging"' in log_copy
     assert 'mv -- "$latest_staging" "$latest_dir"' in log_copy
     assert 'cp -a "$LOG_DIR/." "$log_root/latest/"' not in log_copy
 
@@ -1837,9 +1851,9 @@ def test_native_stderr_is_never_merged_under_stop_error_policy() -> None:
     guarded_taskkill = process_module.split("function Stop-LibertixNativeProcessTree", 1)[1].split(
         "function Invoke-LibertixNativeCommand", 1
     )[0]
-    assert '$ErrorActionPreference = "Continue"' in guarded_taskkill
-    assert "$taskkillExitCode = $LASTEXITCODE" in guarded_taskkill
-    assert "$ErrorActionPreference = $previousErrorActionPreference" in guarded_taskkill
+    assert "2>&1" not in process_module
+    assert "$taskKillProcess.WaitForExit($TimeoutSeconds * 1000)" in guarded_taskkill
+    assert "$taskKillProcess.ExitCode -eq 0 -and $Process.HasExited" in guarded_taskkill
 
 
 def test_native_process_module_is_packaged_for_every_standalone_consumer() -> None:
@@ -2678,12 +2692,16 @@ def test_unattended_failures_preserve_the_exact_cause_after_rollback() -> None:
 
 def test_process_termination_failure_never_starts_partition_rollback() -> None:
     apply_changes = read("Pages/ApplyChanges.xaml.cs")
-    types = read("Pages/ApplyChanges.Types.cs")
+    runner = read("Helpers/WindowsProcessRunner.cs")
     downloads = read("Pages/ApplyChanges.Downloads.cs")
     system = read("Pages/ApplyChanges.System.cs")
     uefi = read("Pages/ApplyChanges.Uefi.cs")
 
-    assert "class UnterminatedProcessException" in types
+    assert "class UnterminatedProcessException" in runner
+    rollback = read("Pages/ApplyChanges.Plan.cs").split("private void BeginExecutionRollback()", 1)[
+        1
+    ]
+    assert rollback.index("_processTerminationUnverified") < rollback.index("BeginRollback()")
     handler = apply_changes.split("catch (UnterminatedProcessException ex)", 1)[1].split(
         "catch (Exception ex)", 1
     )[0]
@@ -3004,6 +3022,7 @@ def test_filepool_defaults_to_a_signed_build_channel_and_supports_an_override() 
     assert 'DevelopmentSshDnsOption = "--dev-ssh-dns"' in startup
     assert "FilepoolConfig.TryCreate(" in app
     assert "if (!Build.AllowsDevelopmentFilepoolOverride)" in app
+    assert "if (!options.TryValidateBuild(Build, out error))" in app
     assert "public bool AllowsDevelopmentFilepoolOverride => IsDevelopment;" in build
     assert "public sealed class FilepoolConfig" in filepool
     assert "public string BaseUrl { get; }" in filepool
@@ -3544,7 +3563,10 @@ def test_bios_recovery_retries_transient_storage_capacity_refresh_failures() -> 
 def test_bios_recovery_cleanup_verifies_files_share_tasks_bcd_and_hibernation() -> None:
     recovery = read("Scripts/libertix-recovery-guard.ps1")
 
-    assert "Temporary boot payload remains:" in recovery
+    assert "Remove-LibertixBiosBootPayload" in recovery
+    assert "Temporary boot payload remains:" in read(
+        "Scripts/modules/Libertix.TemporaryArtifacts.psm1"
+    )
     assert "Pending Windows sharing payload still exists after removal." in recovery
     assert "Windows read-only Linux sharing cleanup could not be verified." in recovery
     assert '-ArgumentList @("/enum", "{bootmgr}", "/v")' in recovery
@@ -4474,7 +4496,8 @@ def test_live_logs_are_copied_completely_and_verified() -> None:
     assert "cp -f /var/log/Xorg.*.log" in helper
     assert 'umount "$target"' in helper
     assert 'mount -t ntfs-3g -o rw "$win" "$target"' in helper
-    assert 'cp -a "$LOG_DIR/." "$log_dir/"' in helper
+    assert 'libertix-log-archive.py "$LOG_DIR" "$log_dir"' in helper
+    assert "libertix-log-archive.py" in build
     assert "sha256sum > SHA256SUMS" in helper
     assert "trap cleanup_mount EXIT" in helper
     assert 'mount -t ntfs-3g -o ro "$win" "$target"' in helper
@@ -4880,7 +4903,8 @@ def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
     storage_policy = read("Scripts/modules/Libertix.StorageGeometry.psm1")
 
     assert "_initialFreeSpace =" in page
-    assert "systemDrive.AvailableFreeSpace / 1024.0 / 1024.0 / 1024.0" in page
+    assert "this(installationState, drive.TotalSize, drive.AvailableFreeSpace)" in page
+    assert "freeBytes / 1024.0 / 1024.0 / 1024.0" in page
     assert "_initialFreeSpace = Math.Round" not in page
     assert "_installationState.Compatibility?.ShrinkAvailableBytes" in page
     assert "InstallationSizePolicy.AvailableLinuxSizeGiB(" in page
@@ -5296,8 +5320,12 @@ def test_postinstall_winre_and_bios_boot_checks_are_locale_independent() -> None
         )
 
     recovery_check = checks.split('"recovery"', 1)[1].split('"bitlocker"', 1)[0]
-    assert '-Arguments @("/enable")' in recovery_check
-    assert '-Arguments @("/info")' not in recovery_check
+    assert '-Arguments @("/info")' in recovery_check
+    assert '"/enable"' not in recovery_check
+    assert "Assert-RecoveryLocation" in recovery_check
+    assert "Assert-RecoveryBootEnabled" in recovery_check
+    assert "0x16000009" in checks
+    assert "0x14000008" in checks
     assert "deshabilitado" not in recovery_check
 
 
@@ -5471,3 +5499,73 @@ delete_transaction_partition_best_effort
     assert result.returncode == expected_status
     if partition_present:
         assert "transaction partition 7 is still present" in result.stdout
+
+
+def test_fallback_busy_state_uses_the_application_close_interlock() -> None:
+    page = read("Pages/UefiBootFallback.xaml.cs")
+    main = read("MainWindow.xaml.cs")
+    agent = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    assert page.count("_installationState.SetInstallationRunning(true);") == 2
+    assert page.count("_installationState.SetInstallationRunning(false);") == 3
+    assert "if (_installationState.IsInstallationRunning)" in main
+    assert "HideInTrayDuringInstallation();" in main
+    assert agent.index('if ([string]$state.Phase -eq "FallbackProcessStateUnknown")') < agent.index(
+        "Test-RecoveryPayload -State $state"
+    )
+
+
+def test_startup_has_no_automatic_window_bypassing_version_validation() -> None:
+    assert "StartupUri=" not in read("App.xaml")
+    app = read("App.xaml.cs")
+    startup = app.split("protected override async void OnStartup(", 1)[1].split(
+        "internal static async Task RunValidatedStartupAsync", 1
+    )[0]
+    assert startup.index("await RunValidatedStartupAsync(") < startup.index(
+        "MainWindow = new MainWindow();"
+    )
+    assert "? ValidatePublishedVersionAsync()" in startup
+    assert ": Task.FromResult(true)" in startup
+
+
+def test_ci_executes_product_powershell_checks_in_the_51_engine() -> None:
+    workflow = read(".github/workflows/ci.yml")
+    for name in [
+        "Validate PowerShell syntax",
+        "Analyze PowerShell",
+        "Run PowerShell contract tests",
+    ]:
+        step = workflow.split(f"- name: {name}\n", 1)[1].split("\n      - name:", 1)[0]
+        assert "shell: powershell" in step
+        assert "shell: pwsh" not in step
+        if name != "Analyze PowerShell":
+            assert "$PSVersionTable.PSEdition -ne 'Desktop'" in step
+            assert "$PSVersionTable.PSVersion.Major -ne 5" in step
+            assert "$PSVersionTable.PSVersion.Minor -ne 1" in step
+
+
+def test_rollback_exceptions_cannot_reenable_retry_navigation() -> None:
+    cancellation = read("Pages/ApplyChanges.Cancellation.cs")
+    page = read("Pages/ApplyChanges.xaml.cs")
+    plan = read("Pages/ApplyChanges.Plan.cs")
+    assert "BackButton.IsEnabled = CanRetryAfterFailure(" in cancellation
+    assert "if (_isRunning || !CanRetryAfterFailure(" in page
+    begin = plan.split("private void BeginExecutionRollback()", 1)[1]
+    assert begin.index("_rollbackVerificationPending = true;") < begin.index(
+        "_executionLedger?.BeginRollback();"
+    )
+    for path, method in (
+        ("Pages/ApplyChanges.Bios.cs", "FailBiosPreparationAndRollbackAsync"),
+        ("Pages/ApplyChanges.Uefi.cs", "HandleUefiPreparationFailureAsync"),
+        ("Pages/ApplyChanges.Cancellation.cs", "RollbackUefiCancellationAsync"),
+    ):
+        body = read(path).split(f"private async Task {method}(", 1)[1]
+        body = body.split("\n        }", 1)[0]
+        assert body.index("_rollbackVerificationPending = true;") < body.index(
+            "BeginExecutionRollback();"
+        )
+        assert body.index("CompleteExecutionRollback();") < body.index(
+            "_rollbackVerificationPending = false;"
+        )
+        assert body.index("_rollbackVerificationPending = false;") < body.index(
+            "FinishInstallation(enableBackButton: true);"
+        )

@@ -3,18 +3,73 @@ param([Parameter(Mandatory = $true)][string]$ConfigPath)
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Get-FirmwareFixtureScripts {
+    param([Parameter(Mandatory = $true)][string]$ReleaseRoot)
+
+    $names = @("Scripts/modules/Libertix.Firmware.psm1", "Scripts/uefi/Libertix.Uefi.Firmware.ps1")
+    $scripts = @{}
+    if (@($names | Where-Object { -not (Test-Path -LiteralPath (Join-Path $ReleaseRoot $_)) }).Count -eq 0) {
+        foreach ($name in $names) {
+            $scripts[$name] = [IO.File]::ReadAllText((Join-Path $ReleaseRoot $name))
+        }
+        return $scripts
+    }
+
+    Add-Type -AssemblyName System.IO.Compression
+    $assembly = [Reflection.Assembly]::ReflectionOnlyLoad(
+        [IO.File]::ReadAllBytes((Join-Path $ReleaseRoot "Libertix.exe"))
+    )
+    $manifestStream = $assembly.GetManifestResourceStream("Libertix.Standalone.PayloadManifest.json")
+    $payload = $assembly.GetManifestResourceStream("Libertix.Standalone.Payload.zip")
+    $archive = $null
+    try {
+        if (-not $manifestStream -or -not $payload -or $manifestStream.Length -gt 1MB) {
+            throw "The standalone release firmware payload or manifest is unavailable."
+        }
+        $reader = [IO.StreamReader]::new($manifestStream, [Text.Encoding]::UTF8)
+        try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json }
+        finally { $reader.Dispose() }
+        if ([int]$manifest.schemaVersion -ne 1) { throw "Unsupported standalone manifest version." }
+        $archive = [IO.Compression.ZipArchive]::new($payload, [IO.Compression.ZipArchiveMode]::Read)
+        foreach ($name in $names) {
+            $entries = @($archive.Entries | Where-Object FullName -eq $name)
+            $records = @($manifest.files | Where-Object path -eq $name)
+            if ($entries.Count -ne 1 -or $records.Count -ne 1 -or
+                $entries[0].Length -gt 1MB -or $entries[0].Length -ne [long]$records[0].size) {
+                throw "The standalone firmware helper is missing, ambiguous or invalid: $name"
+            }
+            $stream = $entries[0].Open()
+            $buffer = [IO.MemoryStream]::new()
+            $algorithm = [Security.Cryptography.SHA256]::Create()
+            try {
+                $stream.CopyTo($buffer)
+                $bytes = $buffer.ToArray()
+                $hash = ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+                if ($hash -ne [string]$records[0].sha256) {
+                    throw "The standalone firmware helper hash is invalid: $name"
+                }
+                $scripts[$name] = [Text.UTF8Encoding]::new($false, $true).GetString($bytes).TrimStart([char]0xFEFF)
+            } finally {
+                $algorithm.Dispose()
+                $buffer.Dispose()
+                $stream.Dispose()
+            }
+        }
+        return $scripts
+    } finally {
+        if ($archive) { $archive.Dispose() }
+        if ($payload) { $payload.Dispose() }
+        if ($manifestStream) { $manifestStream.Dispose() }
+    }
+}
+
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $releaseRoot = [IO.Path]::GetFullPath([string]$config.release_root)
-$firmwareModule = Join-Path $releaseRoot "Scripts\modules\Libertix.Firmware.psm1"
-$firmwareScript = Join-Path $releaseRoot "Scripts\uefi\Libertix.Uefi.Firmware.ps1"
-if (
-    -not (Test-Path -LiteralPath $firmwareModule -PathType Leaf) -or
-    -not (Test-Path -LiteralPath $firmwareScript -PathType Leaf)
-) {
-    throw "The deployed Libertix release does not contain its UEFI firmware helpers."
-}
-Import-Module -Name $firmwareModule -Force -ErrorAction Stop
-. $firmwareScript
+$scripts = Get-FirmwareFixtureScripts -ReleaseRoot $releaseRoot
+Import-Module (New-Module -Name LibertixFirmwareFixture -ScriptBlock (
+    [scriptblock]::Create($scripts["Scripts/modules/Libertix.Firmware.psm1"])
+)) -Force -ErrorAction Stop
+. ([scriptblock]::Create($scripts["Scripts/uefi/Libertix.Uefi.Firmware.ps1"]))
 
 $systemPartition = Get-Partition `
     -DriveLetter $env:SystemDrive.TrimEnd(":") `

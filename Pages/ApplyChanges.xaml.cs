@@ -100,7 +100,9 @@ namespace Libertix.Pages
             catch (Exception ex)
             {
                 Log($"ERROR: Installation startup failed: {ex.Message}");
-                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
+                UpdateProgress(0, _rollbackVerificationPending
+                    ? Localized("ApplyChangesRollbackIncomplete", "Rollback incomplete. Manual intervention is required.")
+                    : Localized("ApplyChangesError", "Error occurred"));
                 PublishUnattendedFailure("installation-start-failed", ex.Message);
                 FinishInstallation(enableBackButton: true);
             }
@@ -114,7 +116,8 @@ namespace Libertix.Pages
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_isRunning) return;
+            if (_isRunning || !CanRetryAfterFailure(
+                true, _processTerminationUnverified, _rollbackVerificationPending)) return;
 
             Page retryPage = _installationState.Account?.HasPassword == true
                 ? (Page)new WarningConfirmation(_installationState)
@@ -205,6 +208,7 @@ namespace Libertix.Pages
             }
             catch (UnterminatedProcessException ex)
             {
+                _processTerminationUnverified = true;
                 RecordExecutionFailure(
                     "WINDOWS_PROCESS_TERMINATION_UNVERIFIED",
                     ex.Message,

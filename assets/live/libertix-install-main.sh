@@ -174,7 +174,7 @@ mark "010-read-config"
 load_libertix_live_context "$LIBERTIX_FIRMWARE_MODE" || die "installation plan could not be loaded"
 
 if [ "$WINDOWS_PREFERENCE_MIGRATION_ENABLED" = true ]; then
-    WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH="$LOG_DIR/$WINDOWS_PREFERENCE_BUNDLE_FILE_NAME"
+    WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH="${LOG_DIR}-private/$WINDOWS_PREFERENCE_BUNDLE_FILE_NAME"
     [ -f "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" ] || \
         die "Windows preference migration bundle is missing from the validated live context"
     [ "$(stat -c %s "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" 2>/dev/null || echo invalid)" = \
