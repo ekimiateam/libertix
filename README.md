@@ -298,6 +298,8 @@ remain anonymous.
 To help fund continued development and testing, visit the
 [Libertix donation campaign](https://ekimia.fr/donations/campagne-libertix/).
 
+You can discuss about the project and ask beginner questions on the Telegram Channel : [Libertix Project channel](https://t.me/libertixproject)
+
 ## Contributing
 
 New to the codebase? [`CONTRIBUTING.md`](CONTRIBUTING.md) maps what each directory does and where
