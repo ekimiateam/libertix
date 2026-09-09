@@ -322,3 +322,9 @@ Libertix is distributed under the GNU General Public License v3.0. See [`LICENSE
 
 - [Rose Pine](https://rosepinetheme.com/) for the application color palette
 - [WPF](https://github.com/dotnet/wpf) for the Windows desktop framework
+
+
+## Stars
+
+
+[![Star History Chart](https://api.star-history.com/chart?repos=ekimiateam/libertix&type=date&legend=top-left)](https://www.star-history.com/?repos=ekimiateam%2Flibertix&type=date&legend=top-left)
