@@ -296,7 +296,7 @@ jobs:
           $configuration.Output.Verbosity = 'Normal'
           Invoke-Pester -Configuration $configuration
 
-      - name: Stamp product versions in the executables
+      - name: Stamp source revision in the executable
         shell: pwsh
         env:
           LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
