@@ -29,6 +29,7 @@ jobs:
       channel: ${{ steps.identity.outputs.channel }}
       tag: ${{ steps.identity.outputs.tag }}
       build_version: ${{ steps.identity.outputs.build_version }}
+      file_version: ${{ steps.identity.outputs.file_version }}
       publish_release: ${{ steps.identity.outputs.publish_release }}
 
     steps:
@@ -46,6 +47,21 @@ jobs:
           TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
         run: |
           set -Eeuo pipefail
+          release_version="$(python3 -c 'import json; print(json.load(open("release-config.json", encoding="utf-8"))["mainRelease"]["version"])')"
+          file_version="$(python3 - "$release_version" <<'PY'
+          import re
+          import sys
+
+          version = sys.argv[1]
+          match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?(?:-[0-9A-Za-z.-]+)?", version)
+          if match is None:
+              raise SystemExit(f"mainRelease.version cannot be converted to a Windows file version: {version}")
+          parts = [int(part) if part is not None else 0 for part in match.groups()]
+          if any(part > 65534 for part in parts):
+              raise SystemExit("Windows file version components must not exceed 65534")
+          print(".".join(str(part) for part in (*parts, 0)))
+          PY
+          )"
           publish_release=true
           case "$TARGET_BRANCH" in
             dev)
@@ -55,7 +71,7 @@ jobs:
               ;;
             main)
               channel=main
-              tag="$(python3 -c 'import json; print(json.load(open("release-config.json", encoding="utf-8"))["mainRelease"]["version"])')"
+              tag="$release_version"
               build_version="$tag"
               if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
                 comparison_status="$(
@@ -81,6 +97,7 @@ jobs:
             printf 'channel=%s\n' "$channel"
             printf 'tag=%s\n' "$tag"
             printf 'build_version=%s\n' "$build_version"
+            printf 'file_version=%s\n' "$file_version"
             printf 'publish_release=%s\n' "$publish_release"
           } >> "$GITHUB_OUTPUT"
           printf 'Channel: %s; tag: %s; WPF version: %s; publish release: %s\n' \
@@ -279,11 +296,33 @@ jobs:
           $configuration.Output.Verbosity = 'Normal'
           Invoke-Pester -Configuration $configuration
 
-      - name: Stamp source revision in the executable
+      - name: Stamp product versions in the executables
         shell: pwsh
         env:
           LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
+          LIBERTIX_FILE_VERSION: ${{ needs.identity.outputs.file_version }}
         run: |
+          foreach ($path in @(
+            'Properties\AssemblyInfo.cs',
+            'Standalone\AssemblyInfo.cs',
+            'BootGuardian\Properties\AssemblyInfo.cs'
+          )) {
+            $content = [IO.File]::ReadAllText($path)
+            $pattern = 'AssemblyFileVersion\("[0-9.]+"\)'
+            if ([regex]::Matches($content, $pattern).Count -ne 1) {
+              throw "Expected exactly one assembly file version: $path"
+            }
+            $stamped = [regex]::Replace(
+              $content,
+              $pattern,
+              "AssemblyFileVersion(`"$env:LIBERTIX_FILE_VERSION`")"
+            )
+            [IO.File]::WriteAllText(
+              $path,
+              $stamped,
+              [Text.UTF8Encoding]::new($false)
+            )
+          }
           foreach ($path in @('Properties\AssemblyInfo.cs', 'Standalone\AssemblyInfo.cs')) {
             $content = [IO.File]::ReadAllText($path)
             $stamped = $content.Replace(
@@ -324,6 +363,7 @@ jobs:
         shell: pwsh
         env:
           LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
+          LIBERTIX_FILE_VERSION: ${{ needs.identity.outputs.file_version }}
         run: |
           $outputDirectory = 'Standalone\bin\Release'
           $executable = Join-Path $outputDirectory 'Libertix.exe'
@@ -334,6 +374,16 @@ jobs:
             Where-Object { $_.Extension -ne '.pdb' })
           if ($exposedFiles.Count -ne 1 -or $exposedFiles[0].Name -ne 'Libertix.exe') {
             throw 'Standalone output must expose exactly one Libertix.exe.'
+          }
+          foreach ($path in @(
+            $executable,
+            'bin\Release\Libertix.exe',
+            'bin\Release\Libertix.BootGuardian.exe'
+          )) {
+            $actualFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($path).FileVersion
+            if ($actualFileVersion -ne $env:LIBERTIX_FILE_VERSION) {
+              throw "Unexpected file version for ${path}: $actualFileVersion"
+            }
           }
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $executable
           "Libertix.exe SHA-256: $($hash.Hash.ToLowerInvariant())" |
