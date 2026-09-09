@@ -79,7 +79,7 @@ report_stage_warnings() {
 
     warnings="$(
         tail -n "+$first_line" "$LOG_FILE" |
-            grep -Ei '(^|[^[:alpha:]])(warning|error|fatal|failed|failure)([^[:alpha:]]|$)|^W:' |
+            grep -Ei '(^|[^[:alpha:]])(warning|error|fatal|failed|failure)([^[:alpha:]]|$)|(^|[[:space:]])[EW]:' |
             awk '!seen[$0]++' |
             tail -n 80 || true
     )"
@@ -108,14 +108,16 @@ run_stage() {
     echo "ERROR $stage rc=$rc log=$LOG_FILE" >&2
     diagnostics="$(
         tail -n "+$first_line" "$LOG_FILE" |
-            grep -Ei '(^|[^[:alpha:]])(warning|error|fatal|failed|failure)([^[:alpha:]]|$)|^W:' |
+            grep -Ei '(^|[^[:alpha:]])(warning|error|fatal|failed|failure)([^[:alpha:]]|$)|(^|[[:space:]])[EW]:' |
+            awk '!seen[$0]++' |
             tail -n 120 || true
     )"
     if [ -n "$diagnostics" ]; then
         printf '%s\n' "$diagnostics" >&2
-    else
-        tail -n 80 "$LOG_FILE" >&2
     fi
+    # Tools can fail without an error keyword; keep their final output visible.
+    echo "FINAL OUTPUT $stage" >&2
+    tail -n "+$first_line" "$LOG_FILE" | awk '!seen[$0]++' | tail -n 80 >&2
     return "$rc"
 }
 

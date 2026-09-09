@@ -385,6 +385,15 @@ jobs:
         shell: bash
         run: ./iso-tools/build-isos-docker.sh all
 
+      - name: Preserve failed ISO build logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Libertix-iso-build-logs-${{ github.sha }}-${{ github.run_attempt }}
+          path: build-logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Record ISO checksums
         shell: bash
         run: |
