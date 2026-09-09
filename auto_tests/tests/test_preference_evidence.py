@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import os
 import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -90,6 +91,61 @@ def test_asset_evidence_rejects_undecodable_image_even_with_matching_hash(
     monkeypatch.setattr(checker, "verify_image_decodes", reject)
     with pytest.raises(RuntimeError, match="invalid image"):
         checker.verify_user_asset(wallpaper, hashlib.sha256(wallpaper.read_bytes()).hexdigest())
+
+
+@pytest.mark.parametrize("prefix", ["org.cinnamon", "org.gnome"])
+@pytest.mark.parametrize("case", ["default", "changed", "missing-file", "copied-windows"])
+def test_default_wallpaper_evidence_checks_both_backgrounds_and_the_actual_file(
+    checker: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefix: str, case: str
+) -> None:
+    image = tmp_path / "linux-default.jpg"
+    image.write_bytes(b"default image")
+    calls = []
+
+    class Value:
+        def __init__(self, uri):
+            self.uri = uri
+
+        def unpack(self):
+            return self.uri
+
+        def __eq__(self, other):
+            return isinstance(other, Value) and self.uri == other.uri
+
+    class Settings:
+        @staticmethod
+        def new(schema):
+            assert schema == prefix + ".desktop.background"
+            return Settings()
+
+        def get_default_value(self, key):
+            calls.append(key)
+            return Value(image.as_uri())
+
+        def get_value(self, key):
+            return Value("file:///changed.jpg" if case == "changed" else image.as_uri())
+
+    gio = SimpleNamespace(
+        Settings=Settings,
+        File=SimpleNamespace(
+            new_for_uri=lambda _: SimpleNamespace(
+                get_path=lambda: (
+                    str(tmp_path / "missing.jpg") if case == "missing-file" else str(image)
+                )
+            )
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "gi.repository", SimpleNamespace(Gio=gio))
+    if case == "copied-windows":
+        folder = tmp_path / "Pictures" / "Libertix"
+        folder.mkdir(parents=True)
+        (folder / "windows-wallpaper.jpg").write_bytes(b"unwanted copy")
+    if case != "default":
+        with pytest.raises(RuntimeError):
+            checker.verify_default_wallpaper(tmp_path, prefix)
+    else:
+        checker.verify_default_wallpaper(tmp_path, prefix)
+        assert calls == ["picture-uri"] + (["picture-uri-dark"] if prefix == "org.gnome" else [])
 
 
 @pytest.mark.parametrize("kind", ["colored", "black", "old-malformed"])

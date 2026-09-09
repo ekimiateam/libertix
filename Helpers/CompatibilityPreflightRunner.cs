@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using Libertix.Models;
+using Libertix.Installation;
 
 namespace Libertix.Helpers
 {
@@ -211,7 +212,7 @@ namespace Libertix.Helpers
                         "This machine's compatibility could not be confirmed.");
                     throw new CompatibilityPreflightException(code, message, diagnostics);
                 }
-                return new CompatibilityInfo
+                var info = new CompatibilityInfo
                 {
                     Firmware = values.GetString("firmware"),
                     Architecture = values.GetString("architecture"),
@@ -219,6 +220,7 @@ namespace Libertix.Helpers
                     LowMemoryMode = values.GetBoolean("lowMemoryMode"),
                     SystemDiskNumber = values.GetInt32("systemDiskNumber"),
                     SystemDiskUniqueId = values.GetString("systemDiskUniqueId"),
+                    SystemDiskPartitionTableId = values.GetString("systemDiskPartitionTableId"),
                     SystemDiskSize = values.GetInt64("systemDiskSize"),
                     PartitionStyle = values.GetString("partitionStyle"),
                     StorageBusType = values.GetString("storageBusType"),
@@ -232,8 +234,15 @@ namespace Libertix.Helpers
                         values.GetStringArray("trustedMicrosoftUefiAuthorities"),
                     NvramProbePassed = values.GetBoolean("nvramProbePassed"),
                     NvramProbeSkipped = values.GetBoolean("nvramProbeSkipped"),
-                    Warnings = values.GetStringArray("warnings")
+                    Warnings = values.GetStringArray("warnings"),
+                    InstallationTargets = values.GetObjectArray<InstallationTargetInfo>("installationTargets")
                 };
+                info.InstallationTargets = InstallationTargetSelection.ValidateInventory(
+                    info.InstallationTargets,
+                    values.GetString("systemDrive"),
+                    info.SystemDiskNumber,
+                    info.SystemDiskPartitionTableId);
+                return info;
             }
         }
 

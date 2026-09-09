@@ -3,6 +3,9 @@ Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot "Libertix.AtomicFile.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.InstallationState.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.Process.psm1") -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.Rollback.psm1") -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.StorageTargets.psm1") -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.WindowsProfiles.psm1") -ErrorAction Stop
 
 function Set-LibertixShutdownVerificationPriority {
     if (-not ("LibertixShutdownControl" -as [type])) {
@@ -598,6 +601,7 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
         }
     }
 
+    $sourceDrive = Get-LibertixAllocationSourceDrive -Plan $plan
     $repairPath = Join-Path $RecoveryRoot "windows-filesystem-repair.json"
     $repair = if (Test-Path -LiteralPath $repairPath -PathType Leaf) {
         $saved = Read-LibertixJsonObject `
@@ -606,11 +610,20 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
         if ([int]$saved.schemaVersion -ne 1 -or [string]$saved.planId -ne [string]$plan.planId) {
             throw "Windows filesystem repair state belongs to another installation plan."
         }
+        if ((Test-LibertixProperty -Object $saved -Name 'sourceDrive') -and
+            [string]$saved.sourceDrive -cne $sourceDrive) {
+            throw 'Filesystem repair state refers to a different source volume.'
+        }
+        if ([int]$plan.schemaVersion -eq 5 -and
+            -not (Test-LibertixProperty -Object $saved -Name 'sourceDrive')) {
+            throw 'Separate-disk filesystem repair state has no source volume identity.'
+        }
         $saved
     } else {
         [pscustomobject][ordered]@{
             schemaVersion = 1
             planId = [string]$plan.planId
+            sourceDrive = $sourceDrive
             status = "pending"
             attemptCount = 0
             scheduledFromBootId = $null
@@ -621,7 +634,7 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
         }
     }
     $bootId = Get-LibertixWindowsBootIdentity
-    $health = Get-LibertixWindowsVolumeHealth -SystemDrive ([string]$plan.disk.systemDrive)
+    $health = Get-LibertixWindowsVolumeHealth -SystemDrive $sourceDrive
     $repair.lastHealth = $health
     & $WriteLog "Windows filesystem repair assessment: $($health.Detail) boot=$bootId."
 
@@ -653,11 +666,11 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
     if ([int]$repair.attemptCount -ge 2) {
         $repair.status = "failed"
         Write-LibertixPostInstallResult -Path $repairPath -Result $repair
-        throw "Windows system volume remains unhealthy after two verified boot-time repair attempts."
+        throw "Source volume $sourceDrive remains unhealthy after two verified boot-time repair attempts."
     }
 
     Register-LibertixWindowsBootVolumeCheck `
-        -SystemDrive ([string]$plan.disk.systemDrive) `
+        -SystemDrive $sourceDrive `
         -WriteLog $WriteLog
     $repair.attemptCount = [int]$repair.attemptCount + 1
     $repair.status = "waiting-reboot"
@@ -830,23 +843,72 @@ function Assert-LibertixLinuxBootEvidence {
     return "plan=$($Evidence.planId) boot=$($Evidence.bootId) kernel=$($Evidence.grub.runningKernel)"
 }
 
+function Get-LibertixPlannedLinuxDisk {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    if ([int]$Plan.schemaVersion -eq 4 -and
+        -not (Test-LibertixProperty -Object $Plan -Name 'allocation')) {
+        return $Plan.disk
+    }
+    if ([int]$Plan.schemaVersion -eq 5 -and
+        (Test-LibertixProperty -Object $Plan -Name 'allocation') -and
+        $null -ne $Plan.allocation -and
+        [int]$Plan.allocation.number -ne [int]$Plan.disk.number -and
+        [string]$Plan.allocation.partitionTableId -ne [string]$Plan.disk.partitionTableId) {
+        return $Plan.allocation
+    }
+    throw 'The installation plan disk allocation is invalid.'
+}
+
+function Get-LibertixAllocationSourceDrive {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    $allocation = Get-LibertixPlannedLinuxDisk -Plan $Plan
+    $separate = [int]$Plan.schemaVersion -eq 5
+    $drive = if ($separate) { [string]$allocation.sourceDrive } else { [string]$Plan.disk.systemDrive }
+    $source = if ($separate) { $allocation.sourcePartition } else { $Plan.disk.windows }
+    if ($drive -cnotmatch '^[A-Z]:$') { throw 'The allocation source drive is invalid.' }
+    $partitions = @(Get-Partition -DriveLetter $drive.Substring(0, 1) -ErrorAction Stop)
+    if ($partitions.Count -ne 1) { throw 'The allocation source drive is ambiguous.' }
+    $partition = $partitions[0]
+    $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $allocation
+    if ([long]$partition.Offset -ne [long]$source.offsetBytes -or
+        [long]$partition.Size -le 0 -or [long]$partition.Size -gt [long]$source.sizeBytes) {
+        throw 'The allocation source volume extent no longer matches its plan.'
+    }
+    if ($separate) {
+        $volumes = @($partition | Get-Volume -ErrorAction Stop)
+        if ($volumes.Count -ne 1 -or
+            [string]$volumes[0].UniqueId -cne [string]$allocation.sourceVolumeId -or
+            [string]$volumes[0].FileSystem -ne 'NTFS' -or
+            (Get-LibertixNtfsVolumeSerial -Drive $drive) -cne [string]$allocation.sourceNtfsUuid) {
+            throw 'The allocation source volume identity changed.'
+        }
+    }
+    return $drive
+}
+
 function Test-LibertixDiskGeometry {
     param(
         [Parameter(Mandatory = $true)][object]$Plan,
         [Parameter(Mandatory = $true)][int64]$AlignmentBytes
     )
 
-    $disk = Get-Disk -Number ([int]$Plan.disk.number) -ErrorAction Stop
-    if (([string]$disk.UniqueId).Trim() -ne ([string]$Plan.disk.uniqueId).Trim()) {
-        throw "System disk identity differs from the installation plan."
+    $allocation = Get-LibertixPlannedLinuxDisk -Plan $Plan
+    $windowsDisk = Get-Disk -Number ([int]$Plan.disk.number) -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $windowsDisk -PlanDisk $Plan.disk
+    $windowsPartitions = @(Get-Partition -DiskNumber ([int]$windowsDisk.Number) -ErrorAction Stop)
+    $disk = $windowsDisk
+    $partitions = $windowsPartitions
+    $source = $Plan.disk.windows
+    $separate = [int]$allocation.number -ne [int]$Plan.disk.number
+    if ($separate) {
+        $disk = Get-Disk -Number ([int]$allocation.number) -ErrorAction Stop
+        Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $allocation
+        $partitions = @(Get-Partition -DiskNumber ([int]$disk.Number) -ErrorAction Stop)
+        $source = $allocation.sourcePartition
     }
-    if ([int64]$disk.Size -ne [int64]$Plan.disk.sizeBytes) {
-        throw "System disk size differs from the installation plan."
-    }
-    if ([string]$disk.PartitionStyle -ne [string]$Plan.disk.partitionStyle) {
-        throw "System disk partition style differs from the installation plan."
-    }
-    $partitions = @(Get-Partition -DiskNumber ([int]$disk.Number) -ErrorAction Stop)
     [int64]$plannedLinuxSize = [int64]$Plan.disk.installer.finalSizeBytes
     [int64]$plannedLinuxOffset = Get-LibertixPlannedLinuxOffset -Plan $Plan
     $linux = @($partitions | Where-Object {
@@ -857,19 +919,32 @@ function Test-LibertixDiskGeometry {
     if ($linux.Count -ne 1) {
         throw "Expected Linux partition geometry is absent or ambiguous."
     }
-    $windows = @($partitions | Where-Object {
+    $windows = @($windowsPartitions | Where-Object {
         [int64]$_.Offset -eq [int64]$Plan.disk.windows.offsetBytes
     })
     if ($windows.Count -ne 1) {
         throw "Expected Windows partition geometry is absent or ambiguous."
     }
+    if ($separate -and [int64]$windows[0].Size -ne [int64]$Plan.disk.windows.sizeBytes) {
+        throw 'Windows size changed during separate-disk installation.'
+    }
+    $sourcePartitions = @($partitions | Where-Object {
+        [int64]$_.Offset -eq [int64]$source.offsetBytes
+    })
+    if ($sourcePartitions.Count -ne 1) {
+        throw 'The allocation source partition is absent or ambiguous.'
+    }
     $gap = $plannedLinuxOffset -
-        ([int64]$windows[0].Offset + [int64]$windows[0].Size)
+        ([int64]$sourcePartitions[0].Offset + [int64]$sourcePartitions[0].Size)
     if ($gap -lt 0 -or $gap -gt 1MB) {
-        throw "Windows and Linux partitions have an unexpected gap."
+        throw 'The allocation source and Linux partitions have an unexpected gap.'
+    }
+    $shrink = [int64]$source.sizeBytes - [int64]$sourcePartitions[0].Size
+    if ($shrink -lt $plannedLinuxSize -or $shrink -gt ($plannedLinuxSize + 2MB)) {
+        throw 'The allocation source shrink differs from the installation plan.'
     }
     if ([int64]$Plan.disk.recovery.sizeBytes -gt 0) {
-        $recovery = @($partitions | Where-Object {
+        $recovery = @($windowsPartitions | Where-Object {
             [int64]$_.Offset -eq [int64]$Plan.disk.recovery.offsetBytes -and
             [int64]$_.Size -eq [int64]$Plan.disk.recovery.sizeBytes
         })
@@ -877,7 +952,7 @@ function Test-LibertixDiskGeometry {
             throw "Windows Recovery partition geometry changed."
         }
     }
-    return "disk=$($disk.Number) linuxPartition=$($linux[0].PartitionNumber)"
+    return "windowsDisk=$($windowsDisk.Number) linuxDisk=$($disk.Number) linuxPartition=$($linux[0].PartitionNumber)"
 }
 
 function Test-LibertixWindowsHealth {
@@ -1123,6 +1198,9 @@ function Test-LibertixRecoveryArchive {
             "payload\Libertix.BootGuardian.exe",
             "payload\Scripts\modules\Libertix.InstallationState.psm1",
             "payload\Scripts\modules\Libertix.PostInstallVerification.psm1",
+            "payload\Scripts\modules\Libertix.WindowsProfiles.psm1",
+            "payload\Scripts\modules\Libertix.Rollback.psm1",
+            "payload\Scripts\modules\Libertix.StorageTargets.psm1",
             "payload\Scripts\modules\Libertix.PreferredBootPath.psm1",
             "payload\Scripts\modules\Libertix.BootGuardian.psm1",
             "payload\Scripts\libertix-uefi-recovery-agent.ps1",
@@ -1133,6 +1211,9 @@ function Test-LibertixRecoveryArchive {
         @(
             "Libertix.InstallationState.psm1",
             "Libertix.PostInstallVerification.psm1",
+            "Libertix.WindowsProfiles.psm1",
+            "Libertix.Rollback.psm1",
+            "Libertix.StorageTargets.psm1",
             "recover.ps1",
             "libertix-post-install-result.ps1",
             "Images\icon.ico"
@@ -1198,6 +1279,7 @@ function Test-LibertixWindowsReadOnlyShare {
     if (-not [bool]$Plan.features.shareLinuxFilesInWindows) {
         return "Linux-to-Windows sharing was not requested"
     }
+    $allocation = Get-LibertixPlannedLinuxDisk -Plan $Plan
     $shareRoot = Join-Path $env:ProgramData "Libertix\WindowsShare"
     $config = Read-LibertixJsonObject `
         -Path (Join-Path $shareRoot "config.json") `
@@ -1206,8 +1288,9 @@ function Test-LibertixWindowsReadOnlyShare {
         throw "Windows read-only Linux sharing is disabled despite the installation plan."
     }
     if (
-        [int]$config.SystemDiskNumber -ne [int]$Plan.disk.number -or
-        ([string]$config.SystemDiskUniqueId).Trim() -ne ([string]$Plan.disk.uniqueId).Trim() -or
+        [int]$config.SystemDiskNumber -ne [int]$allocation.number -or
+        ([string]$config.SystemDiskUniqueId).Trim() -ne ([string]$allocation.uniqueId).Trim() -or
+        [string]$config.SystemDiskPartitionTableId -cne [string]$allocation.partitionTableId -or
         [int64]$config.ExpectedLinuxPartitionOffset -ne
             (Get-LibertixPlannedLinuxOffset -Plan $Plan) -or
         [int64]$config.ExpectedLinuxPartitionSize -ne [int64]$Plan.disk.installer.finalSizeBytes -or
@@ -1216,9 +1299,7 @@ function Test-LibertixWindowsReadOnlyShare {
         throw "Windows sharing configuration does not match the installation plan partition."
     }
     $disk = Get-Disk -Number ([int]$config.SystemDiskNumber) -ErrorAction Stop
-    if (([string]$disk.UniqueId).Trim() -ne ([string]$config.SystemDiskUniqueId).Trim()) {
-        throw "Windows sharing disk identity does not match the current disk."
-    }
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $allocation
     $partitions = @(
         Get-Partition -DiskNumber ([int]$config.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
@@ -1332,10 +1413,7 @@ function Test-LibertixWindowsReadOnlyShare {
     }
 
     $shortcutPaths = @(
-        Get-ChildItem `
-            -Path "$env:SystemDrive\Users\*\Links\Linux_$($config.LinuxUsername)_read-only.lnk" `
-            -File `
-            -ErrorAction SilentlyContinue
+        Get-LibertixLinuxShortcutFiles -LinuxUsername ([string]$config.LinuxUsername)
     )
     if ($shortcutPaths.Count -eq 0) {
         throw "No Windows user profile contains the Linux read-only shortcut."

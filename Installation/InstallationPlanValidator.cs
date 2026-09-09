@@ -47,8 +47,11 @@ namespace Libertix.Installation
 
             var errors = new List<string>();
 
-            Require(plan.SchemaVersion == InstallationPlan.CurrentSchemaVersion, errors,
-                $"schemaVersion must be {InstallationPlan.CurrentSchemaVersion}.");
+            int expectedSchema = plan.Allocation == null
+                ? InstallationPlan.CurrentSchemaVersion
+                : InstallationPlan.SeparateAllocationSchemaVersion;
+            Require(plan.SchemaVersion == expectedSchema, errors,
+                $"schemaVersion must be {expectedSchema} for this allocation layout.");
             Require(HexIdPattern.IsMatch(plan.PlanId ?? string.Empty), errors,
                 "planId must contain exactly 32 lowercase hexadecimal characters.");
             Require(plan.CreatedAtUtc != default(DateTimeOffset), errors,
@@ -59,7 +62,8 @@ namespace Libertix.Installation
             ValidateDistribution(plan.Distribution, errors);
             ValidateLocale(plan.Locale, errors);
             ValidateAccount(plan.Account, errors);
-            ValidateDisk(plan.Firmware, plan.Disk, errors);
+            ValidateAllocation(plan.Allocation, plan.Disk, errors);
+            ValidateDisk(plan.Firmware, plan.Disk, plan.Allocation, errors);
             ValidateFeatures(plan.Features, errors);
             ValidateRuntime(plan.Firmware, plan.Runtime, errors);
             ValidateDevelopment(plan.Development, errors);
@@ -338,6 +342,7 @@ namespace Libertix.Installation
         private static void ValidateDisk(
             string firmware,
             InstallationDisk disk,
+            InstallationAllocation allocation,
             ICollection<string> errors)
         {
             bool isBios = string.Equals(firmware, InstallationFirmware.Bios, StringComparison.Ordinal);
@@ -398,13 +403,61 @@ namespace Libertix.Installation
             ValidatePartition(disk.Windows, "disk.windows", disk.LogicalSectorSizeBytes, errors);
             ValidatePartition(disk.Boot, "disk.boot", disk.LogicalSectorSizeBytes, errors);
             ValidatePartition(disk.Recovery, "disk.recovery", disk.LogicalSectorSizeBytes, errors);
-            ValidateInstallerPartition(disk.Installer, disk.LogicalSectorSizeBytes, errors);
-            ValidateDiskGeometry(disk, isBios, errors);
+            ValidateInstallerPartition(disk.Installer,
+                allocation?.LogicalSectorSizeBytes ?? disk.LogicalSectorSizeBytes, errors);
+            ValidateDiskGeometry(disk, isBios, allocation, errors);
+        }
+
+        private static void ValidateAllocation(
+            InstallationAllocation allocation,
+            InstallationDisk windowsDisk,
+            ICollection<string> errors)
+        {
+            if (allocation == null)
+                return;
+            Require(windowsDisk != null && allocation.Number >= 0 && allocation.Number != windowsDisk.Number,
+                errors, "allocation must use a physical disk distinct from Windows.");
+            RequireNotBlank(allocation.UniqueId, "allocation.uniqueId", errors);
+            RequireNotBlank(allocation.SourceVolumeId, "allocation.sourceVolumeId", errors);
+            Require(Regex.IsMatch(allocation.SourceNtfsUuid ?? string.Empty, @"\A[0-9A-F]{16}\z") &&
+                allocation.SourceNtfsUuid != "0000000000000000", errors,
+                "allocation.sourceNtfsUuid must identify the recorded NTFS filesystem.");
+            Require(!(allocation.UniqueId ?? string.Empty).Any(char.IsControl) &&
+                !(allocation.SourceVolumeId ?? string.Empty).Any(char.IsControl), errors,
+                "allocation identities must not contain control characters.");
+            bool isGpt = allocation.PartitionStyle == InstallationPartitionStyle.Gpt;
+            bool isMbr = allocation.PartitionStyle == InstallationPartitionStyle.Mbr;
+            Require(isGpt || isMbr, errors, "allocation requires a basic GPT or MBR disk.");
+            string tableId = allocation.PartitionTableId ?? string.Empty;
+            bool validIdentity = isGpt
+                ? Regex.IsMatch(tableId, @"\Agpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z") &&
+                    tableId != "gpt:00000000-0000-0000-0000-000000000000"
+                : isMbr && Regex.IsMatch(tableId, @"\Ambr:[0-9a-f]{8}\z");
+            Require(validIdentity && tableId != windowsDisk?.PartitionTableId, errors,
+                "allocation.partitionTableId must identify a distinct partition table.");
+            Require(Regex.IsMatch(allocation.SourceDrive ?? string.Empty, @"\A[A-Z]:\z") &&
+                allocation.SourceDrive != windowsDisk?.SystemDrive, errors,
+                "allocation.sourceDrive must be a distinct uppercase Windows drive.");
+            Require(new[] { InstallationBitLockerState.FullyDecrypted, InstallationBitLockerState.NotEncryptable,
+                InstallationBitLockerState.EncryptedOrProtected }.Contains(allocation.SourceBitLockerState),
+                errors, "allocation.sourceBitLockerState is invalid.");
+            int sector = allocation.LogicalSectorSizeBytes;
+            Require((sector == 512 || sector == 4096) && allocation.SizeBytes > 0 &&
+                (sector <= 0 || allocation.SizeBytes % sector == 0), errors,
+                "allocation disk size and sector size are invalid.");
+            ValidatePartition(allocation.SourcePartition, "allocation.sourcePartition", sector, errors);
+            PartitionIdentity source = allocation.SourcePartition;
+            Require(source != null && source.OffsetBytes > 0 && source.SizeBytes > 0 &&
+                source.SizeBytes <= allocation.SizeBytes &&
+                source.OffsetBytes <= allocation.SizeBytes - source.SizeBytes &&
+                (!isMbr || source.Number <= 4), errors,
+                "allocation.sourcePartition must be a primary extent inside its disk.");
         }
 
         private static void ValidateDiskGeometry(
             InstallationDisk disk,
             bool isBios,
+            InstallationAllocation allocation,
             ICollection<string> errors)
         {
             if (disk.Windows == null || disk.Boot == null || disk.Recovery == null ||
@@ -446,8 +499,14 @@ namespace Libertix.Installation
             }
 
             long windowsEnd = ends[0];
-            Require(windowsEnd <= disk.Recovery.OffsetBytes, errors,
+            Require(!isBios || windowsEnd <= disk.Recovery.OffsetBytes, errors,
                 "disk.recovery must start at or after the original Windows partition end.");
+
+            PartitionIdentity source = allocation?.SourcePartition ?? disk.Windows;
+            if (source == null || source.OffsetBytes <= 0 || source.SizeBytes <= 0 ||
+                source.OffsetBytes > long.MaxValue - source.SizeBytes)
+                return;
+            long sourceEnd = source.OffsetBytes + source.SizeBytes;
 
             if (disk.Installer.FinalOffsetBytes <= 0 ||
                 disk.Installer.FinalSizeBytes <= 0 ||
@@ -460,21 +519,20 @@ namespace Libertix.Installation
             // Windows preserves the partition end modulo 1 MiB when it shrinks C:.
             // Reconstructing the expected start from the original extent rejects a
             // staging partition silently created in another free extent of the disk.
-            long alignmentPadding = windowsEnd % partitionAlignmentBytes;
-            if (disk.Installer.FinalSizeBytes > windowsEnd - alignmentPadding)
+            long alignmentPadding = sourceEnd % partitionAlignmentBytes;
+            if (disk.Installer.FinalSizeBytes >= source.SizeBytes - alignmentPadding)
             {
                 errors.Add("disk.installer.finalSizeBytes exceeds the original Windows extent.");
                 return;
             }
-            long expectedOffset = windowsEnd - alignmentPadding - disk.Installer.FinalSizeBytes;
+            long expectedOffset = sourceEnd - alignmentPadding - disk.Installer.FinalSizeBytes;
             Require(disk.Installer.FinalOffsetBytes == expectedOffset, errors,
                 "disk.installer.finalOffsetBytes does not match the final aligned Windows shrink geometry.");
             Require(
-                disk.Installer.FinalSizeBytes <= disk.Recovery.OffsetBytes &&
-                disk.Installer.FinalOffsetBytes <=
-                    disk.Recovery.OffsetBytes - disk.Installer.FinalSizeBytes,
+                disk.Installer.FinalOffsetBytes > source.OffsetBytes &&
+                disk.Installer.FinalOffsetBytes <= sourceEnd - disk.Installer.FinalSizeBytes,
                 errors,
-                "disk.installer final extent would overlap disk.recovery.");
+                "disk.installer final extent must remain inside the original Windows partition.");
 
             if (!disk.Installer.OffsetBytes.HasValue)
                 return;
@@ -483,14 +541,14 @@ namespace Libertix.Installation
                 disk.Installer.ResizeMode,
                 InstallationResizeMode.LiveOffline,
                 StringComparison.Ordinal)
-                ? windowsEnd - alignmentPadding - disk.Installer.StagingSizeBytes
+                ? sourceEnd - alignmentPadding - disk.Installer.StagingSizeBytes
                 : expectedOffset;
             // Windows may expose the MBR extended-container start rather than
             // the logical payload start while the transaction is in flight.
             long primaryMbrOffset = expectedObservedOffset - partitionAlignmentBytes;
             bool offsetMatches = disk.Installer.OffsetBytes.Value == expectedObservedOffset ||
                 (string.Equals(
-                    disk.PartitionStyle,
+                    allocation?.PartitionStyle ?? disk.PartitionStyle,
                     InstallationPartitionStyle.Mbr,
                     StringComparison.Ordinal) &&
                  disk.Installer.OffsetBytes.Value == primaryMbrOffset);
@@ -613,6 +671,14 @@ namespace Libertix.Installation
             catch (FormatException)
             {
                 errors.Add("features.windowsProfilesJsonBase64 must be valid Base64.");
+            }
+
+            if (features.WindowsSharing != null)
+            {
+                try { features.WindowsSharing.Validate(); }
+                catch (System.IO.InvalidDataException error) { errors.Add(error.Message); }
+                Require(features.ShareWindowsFilesInLinux, errors,
+                    "Disabled Windows sharing must not include an inventory.");
             }
 
             InstallationPreferenceMigration migration = features.WindowsPreferenceMigration;

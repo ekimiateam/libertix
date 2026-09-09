@@ -3,16 +3,27 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PIL import Image
-from vncdotool import api
+from vncdotool import api, rfb
+from vncdotool.client import VNCDoToolClient, VNCDoToolFactory
 
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
 CAPTURE_MAX_ATTEMPTS = 3
 CAPTURE_RETRY_SECONDS = 2
+
+
+class CompressedVNCProtocol(VNCDoToolClient):
+    # Raw full-screen transfers exceed the capture deadline on slow lab links.
+    encoding = rfb.Encoding.ZRLE
+
+
+class CompressedVNCFactory(VNCDoToolFactory):
+    protocol = CompressedVNCProtocol
 
 
 def _is_valid_capture(path: Path) -> bool:
@@ -39,7 +50,11 @@ class VNCClient:
         # first connections can both observe it as stopped and race to start it.
         # Serialize only connection establishment; VM workflows remain parallel.
         with self._connect_lock:
-            return api.connect(self.vncdotool_address(address), timeout=self.connect_timeout)
+            return api.connect(
+                self.vncdotool_address(address),
+                factory_class=CompressedVNCFactory,
+                timeout=self.connect_timeout,
+            )
 
     @staticmethod
     def vncdotool_address(address: str) -> str:
@@ -50,7 +65,13 @@ class VNCClient:
         # maps display N to TCP port 5900 + N.
         return f"{host}::{5900 + int(display)}"
 
-    def capture(self, address: str, destination: Path) -> Path:
+    def capture(
+        self,
+        address: str,
+        destination: Path,
+        *,
+        on_captured: Callable[[Path], None] | None = None,
+    ) -> Path:
         destination.parent.mkdir(parents=True, exist_ok=True)
         logger.info("VNC capture started", extra={"step": "vnc.capture", "target": address})
         last_error: Exception | None = None
@@ -86,14 +107,23 @@ class VNCClient:
                     )
                     time.sleep(CAPTURE_RETRY_SECONDS)
             finally:
-                if client is not None:
-                    try:
-                        client.disconnect()
-                    except Exception:
-                        logger.warning(
-                            "VNC connection did not close cleanly",
-                            extra={"step": "vnc.close", "target": address},
-                        )
+                try:
+                    # Coordination deadlines must not include slow VNC disconnects.
+                    if (
+                        on_captured is not None
+                        and last_error is None
+                        and _is_valid_capture(destination)
+                    ):
+                        on_captured(destination)
+                finally:
+                    if client is not None:
+                        try:
+                            client.disconnect()
+                        except Exception:
+                            logger.warning(
+                                "VNC connection did not close cleanly",
+                                extra={"step": "vnc.close", "target": address},
+                            )
         if last_error is not None:
             raise WorkflowError(
                 "vnc.capture",

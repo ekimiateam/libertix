@@ -93,6 +93,15 @@ namespace Libertix.Pages
                 _storagePreflight.BitLockerState != InstallationBitLockerState.NotEncryptable)
                 throw new InvalidOperationException("BIOS preparation requires verified BitLocker decryption.");
             _installationPlan.Runtime.WindowsBitLockerState = _storagePreflight.BitLockerState;
+            if (_installationPlan.Allocation != null)
+            {
+                if (_storagePreflight.Allocation == null ||
+                    _storagePreflight.Allocation.SourceNtfsUuid != _installationPlan.Allocation.SourceNtfsUuid ||
+                    (_storagePreflight.Allocation.SourceBitLockerState != InstallationBitLockerState.FullyDecrypted &&
+                     _storagePreflight.Allocation.SourceBitLockerState != InstallationBitLockerState.NotEncryptable))
+                    throw new InvalidOperationException("The BIOS source volume is not proven fully decrypted.");
+                _installationPlan.Allocation.SourceBitLockerState = _storagePreflight.Allocation.SourceBitLockerState;
+            }
             InstallationPlanSerializer.WriteAtomic(_installationPlanPath, _installationPlan);
 
             // Query SizeMin after disabling Fast Startup because hiberfil.sys is

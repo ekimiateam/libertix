@@ -159,6 +159,18 @@ class ProxmoxClient:
             )
         return data
 
+    def has_serial_console(self, node: str, vmid: int) -> bool:
+        data = self._request(
+            "GET", f"/nodes/{node}/qemu/{vmid}/config", step="proxmox.serial_preflight"
+        )
+        if not isinstance(data, dict):
+            raise WorkflowError(
+                "proxmox.serial_preflight",
+                "Invalid Proxmox VM configuration response",
+                details={"vmid": vmid, "node": node},
+            )
+        return bool(data.get("serial0"))
+
     def create_serial_terminal_proxy(
         self,
         node: str,
@@ -397,6 +409,64 @@ class ProxmoxClient:
         if not isinstance(data, str) or not data.startswith("UPID:"):
             raise WorkflowError("proxmox.start_vm", "Invalid Proxmox UPID", details={"vmid": vmid})
         self._wait_task(node, data, vmid, action="start")
+
+    def configure_test_boot_order(self, node: str, vmid: int, devices: tuple[str, ...]) -> None:
+        if (
+            not devices
+            or len(set(devices)) != len(devices)
+            or any(
+                re.fullmatch(r"(?:sata|scsi|ide|virtio|net)\d+", item) is None for item in devices
+            )
+        ):
+            raise ValueError("An explicit, valid test boot order is required")
+        path = f"/nodes/{node}/qemu/{vmid}/config"
+        before = self._request("GET", path, step="proxmox.boot_order_preflight")
+        if (
+            not isinstance(before, dict)
+            or not before.get("digest")
+            or any(not before.get(device) for device in devices)
+        ):
+            raise WorkflowError(
+                "proxmox.boot_order_preflight",
+                "A configured boot device is missing",
+                details={"vmid": vmid, "devices": devices},
+            )
+        desired = "order=" + ";".join(devices)
+        self._request(
+            "PUT",
+            path,
+            step="proxmox.boot_order_update",
+            data={"boot": desired, "digest": before["digest"]},
+        )
+        after = self._request("GET", path, step="proxmox.boot_order_verify")
+        if (
+            not isinstance(after, dict)
+            or after.get("boot") != desired
+            or any(
+                before.get(key) != after.get(key)
+                for key in set(before) | set(after)
+                if key not in {"boot", "digest"}
+            )
+        ):
+            raise WorkflowError(
+                "proxmox.boot_order_verify",
+                "The boot-order update was not isolated",
+                details={"vmid": vmid},
+            )
+
+    def shutdown_vm(self, node: str, vmid: int) -> None:
+        data = self._request(
+            "POST",
+            f"/nodes/{node}/qemu/{vmid}/status/shutdown",
+            step="proxmox.shutdown_vm",
+            data={"timeout": 180, "forceStop": 0},
+        )
+        if not isinstance(data, str) or not data.startswith("UPID:"):
+            raise WorkflowError(
+                "proxmox.shutdown_vm", "Invalid Proxmox UPID", details={"vmid": vmid}
+            )
+        self._wait_task(node, data, vmid, action="shutdown")
+        self.wait_for_vm_status(node, vmid, "stopped", timeout=30, step="proxmox.shutdown_verify")
 
     def wait_for_vm_status(
         self,

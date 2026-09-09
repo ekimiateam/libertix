@@ -320,6 +320,7 @@ class AutomationPreflight:
                 )
                 if execution.get("exitcode") == 0:
                     return
+                last_error = None
             except WorkflowError as exc:
                 last_error = exc
             time.sleep(WINDOWS_INTERACTIVE_SESSION_PROBE_SECONDS)

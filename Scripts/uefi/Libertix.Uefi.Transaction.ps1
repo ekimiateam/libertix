@@ -50,13 +50,77 @@ function Save-LibertixTransactionStateAtomic {
     }
 }
 
+function Get-LibertixTransactionStorageBinding {
+    param([object]$State)
+
+    $separate = $installationPlan.PSObject.Properties.Name -contains 'allocation' -and
+        $null -ne $installationPlan.allocation
+    $binding = [pscustomobject]@{
+        Separate = $separate
+        Disk = $installationPlan.disk
+        SourcePartition = $installationPlan.disk.windows
+        SourceDrive = [string]$installationPlan.disk.systemDrive
+        SourceVolumeId = ''
+    }
+    if ($separate) {
+        $binding.Disk = $installationPlan.allocation
+        $binding.SourcePartition = $installationPlan.allocation.sourcePartition
+        $binding.SourceDrive = [string]$installationPlan.allocation.sourceDrive
+        $binding.SourceVolumeId = [string]$installationPlan.allocation.sourceVolumeId
+        if ([int]$binding.Disk.number -eq [int]$installationPlan.disk.number -or
+            $binding.SourceDrive -eq [string]$installationPlan.disk.systemDrive) {
+            throw 'The UEFI allocation must identify a separate physical disk.'
+        }
+        if ($State) {
+            foreach ($name in @('Version', 'SourceDrive', 'SourceVolumeId', 'OriginalSourceSize', 'SourceOffset',
+                'SourceNtfsUuid', 'InitialSourceEncryption')) {
+                if ($State.PSObject.Properties.Name -notcontains $name) {
+                    throw 'The UEFI allocation transaction has no complete source-volume proof.'
+                }
+            }
+            if ([int]$State.Version -ne 2 -or
+                [string]$State.SourceDrive -ne $binding.SourceDrive -or
+                [string]$State.SourceVolumeId -ne $binding.SourceVolumeId -or
+                [string]$State.SourceNtfsUuid -cne [string]$binding.Disk.sourceNtfsUuid -or
+                [long]$State.SourceOffset -ne [long]$binding.SourcePartition.offsetBytes -or
+                [long]$State.OriginalSourceSize -ne [long]$binding.SourcePartition.sizeBytes) {
+                throw 'The UEFI allocation transaction does not match the planned source volume.'
+            }
+        }
+    }
+    if ($State -and ([int]$State.DiskNumber -ne [int]$binding.Disk.number -or
+        ([string]$State.DiskUniqueId).Trim() -ne ([string]$binding.Disk.uniqueId).Trim())) {
+        throw 'The UEFI transaction does not match the planned allocation disk.'
+    }
+    return $binding
+}
+
 function Save-TransactionPreparationState {
     param([Parameter(Mandatory = $true)]$SystemPartition)
 
     $disk = Get-Disk -Number $SystemPartition.DiskNumber -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $installationPlan.disk
+    if ([long]$SystemPartition.Offset -ne [long]$installationPlan.disk.windows.offsetBytes -or
+        [long]$SystemPartition.Size -ne [long]$installationPlan.disk.windows.sizeBytes) {
+        throw 'The Windows partition changed before arming the UEFI transaction.'
+    }
+    $binding = Get-LibertixTransactionStorageBinding
+    $sourcePartition = $SystemPartition
+    if ($binding.Separate) {
+        $sourcePartition = Get-Partition -DriveLetter $binding.SourceDrive.TrimEnd(':') -ErrorAction Stop
+        $disk = Get-Disk -Number $sourcePartition.DiskNumber -ErrorAction Stop
+        Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
+        $volume = Get-Volume -DriveLetter $binding.SourceDrive.TrimEnd(':') -ErrorAction Stop
+        if ([long]$sourcePartition.Offset -ne [long]$binding.SourcePartition.offsetBytes -or
+            [long]$sourcePartition.Size -ne [long]$binding.SourcePartition.sizeBytes -or
+            [string]$volume.UniqueId -ne $binding.SourceVolumeId -or [string]$volume.FileSystem -ne 'NTFS' -or
+            (Get-LibertixNtfsVolumeSerial -Drive $binding.SourceDrive) -cne [string]$binding.Disk.sourceNtfsUuid) {
+            throw 'The source volume changed before arming the UEFI transaction.'
+        }
+    }
     $state = [ordered]@{
-        Version = 1
-        DiskNumber = [int]$SystemPartition.DiskNumber
+        Version = if ($binding.Separate) { 2 } else { 1 }
+        DiskNumber = [int]$sourcePartition.DiskNumber
         DiskUniqueId = [string]$disk.UniqueId
         SystemDrive = $SystemDrive
         OriginalCSize = [int64]$SystemPartition.Size
@@ -77,9 +141,50 @@ function Save-TransactionPreparationState {
         LowMemoryMode = [bool]$LowMemoryMode
         CreatedUtc = [DateTime]::UtcNow.ToString("o")
     }
+    if ($binding.Separate) {
+        $state.SourceDrive = $binding.SourceDrive
+        $state.SourceVolumeId = $binding.SourceVolumeId
+        $state.SourceNtfsUuid = [string]$binding.Disk.sourceNtfsUuid
+        $existing = Get-TransactionPartitionState
+        if ($null -ne $existing) {
+            Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
+            Get-LibertixTransactionStorageBinding -State $existing | Out-Null
+            $state.InitialSourceEncryption = $existing.InitialSourceEncryption
+        } else {
+            $state.InitialSourceEncryption = Get-LibertixTargetVolumeEncryptionSnapshot -Drive $binding.SourceDrive
+        }
+        $state.SourceOffset = [long]$binding.SourcePartition.offsetBytes
+        $state.OriginalSourceSize = [long]$binding.SourcePartition.sizeBytes
+    }
     $directory = Split-Path -Parent $TransactionStatePath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
     Save-LibertixTransactionStateAtomic -State $state
+}
+
+function Get-LibertixVerifiedTransactionSourcePartition {
+    param([Parameter(Mandatory = $true)][long]$ExpectedSize)
+
+    $binding = Get-LibertixTransactionStorageBinding -State (Get-TransactionPartitionState)
+    $partition = Get-Partition -DriveLetter $binding.SourceDrive.TrimEnd(':') -ErrorAction Stop
+    $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
+    if ([long]$partition.Offset -ne [long]$binding.SourcePartition.offsetBytes -or
+        [long]$partition.Size -ne $ExpectedSize -or $ExpectedSize -le 0 -or
+        $ExpectedSize -gt [long]$binding.SourcePartition.sizeBytes) {
+        throw 'The source partition geometry changed during UEFI preparation.'
+    }
+    if ($binding.Separate) {
+        $volume = Get-Volume -DriveLetter $binding.SourceDrive.TrimEnd(':') -ErrorAction Stop
+        if ([string]$volume.UniqueId -ne $binding.SourceVolumeId -or [string]$volume.FileSystem -ne 'NTFS' -or
+            (Get-LibertixNtfsVolumeSerial -Drive $binding.SourceDrive) -cne [string]$binding.Disk.sourceNtfsUuid) {
+            throw 'The source NTFS volume changed during UEFI preparation.'
+        }
+        $encryption = Get-BitLockerVolume -MountPoint $binding.SourceDrive -ErrorAction Stop
+        if (-not $encryption -or -not (Test-BitLockerVolumeReadable -Volume $encryption)) {
+            throw 'The selected allocation volume must be fully decrypted before partition preparation.'
+        }
+    }
+    return $partition
 }
 
 function Save-TransactionPartitionCreationIntent {
@@ -98,6 +203,8 @@ function Save-TransactionPartitionCreationIntent {
         $Offset -gt ([int64]$disk.Size - $Size)) {
         throw "Cannot persist an unverified UEFI partition creation intent."
     }
+    $binding = Get-LibertixTransactionStorageBinding -State $state
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
     $overlaps = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop | Where-Object {
         [int64]$_.Offset -lt ($Offset + $Size) -and
         ([int64]$_.Offset + [int64]$_.Size) -gt $Offset
@@ -114,13 +221,20 @@ function Save-TransactionPartitionState {
 
     $disk = Get-Disk -Number $Partition.DiskNumber -ErrorAction Stop
     $existing = Get-TransactionPartitionState
+    $binding = Get-LibertixTransactionStorageBinding -State $existing
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
+    if ($binding.Separate -and (-not $existing -or
+        [long]$existing.PartitionOffset -ne [long]$Partition.Offset -or
+        [long]$existing.PartitionSize -ne [long]$Partition.Size)) {
+        throw 'The created UEFI partition has no matching durable allocation intent.'
+    }
     $originalCSize = if ($existing -and $existing.OriginalCSize) {
         [int64]$existing.OriginalCSize
     } else {
         [int64](Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop).Size
     }
     $state = [ordered]@{
-        Version = 1
+        Version = if ($binding.Separate) { 2 } else { 1 }
         DiskNumber = [int]$Partition.DiskNumber
         DiskUniqueId = [string]$disk.UniqueId
         SystemDrive = if (
@@ -160,6 +274,14 @@ function Save-TransactionPartitionState {
             [bool]$LowMemoryMode
         }
         CreatedUtc = [DateTime]::UtcNow.ToString("o")
+    }
+    if ($binding.Separate) {
+        $state.SourceDrive = $existing.SourceDrive
+        $state.SourceVolumeId = $existing.SourceVolumeId
+        $state.SourceNtfsUuid = $existing.SourceNtfsUuid
+        $state.InitialSourceEncryption = $existing.InitialSourceEncryption
+        $state.SourceOffset = $existing.SourceOffset
+        $state.OriginalSourceSize = $existing.OriginalSourceSize
     }
     $directory = Split-Path -Parent $TransactionStatePath
     New-Item -ItemType Directory -Path $directory -Force | Out-Null
@@ -409,10 +531,12 @@ function Get-VerifiedTransactionPartition {
         return $null
     }
     $diskNumber = [int]$state.DiskNumber
+    $binding = Get-LibertixTransactionStorageBinding -State $state
     $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
     if (([string]$disk.UniqueId).Trim() -ne ([string]$state.DiskUniqueId).Trim()) {
         throw "UEFI transaction partition identity does not match the saved state."
     }
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
 
     $partitionMatches = @(
         Get-Partition -DiskNumber $diskNumber -ErrorAction Stop |
@@ -429,7 +553,7 @@ function Get-VerifiedTransactionPartition {
             "live-offline"
         ) -and
         [string]$installationPlan.runtime.recoveryRunId -eq [string]$state.RecoveryRunId -and
-        [int]$installationPlan.disk.number -eq $diskNumber
+        [int]$binding.Disk.number -eq $diskNumber
     ) {
         [int64]$finalOffset = [int64]$installationPlan.disk.installer.finalOffsetBytes
         [int64]$finalSize = [int64]$installationPlan.disk.installer.finalSizeBytes
@@ -508,6 +632,31 @@ function Invoke-Revert {
     }
     if ($rollbackState) {
         Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
+        $binding = Get-LibertixTransactionStorageBinding -State $rollbackState
+        $windowsPartition = Get-Partition `
+            -DriveLetter ([string]$installationPlan.disk.systemDrive).TrimEnd(':') -ErrorAction Stop
+        $windowsDisk = Get-Disk -Number $windowsPartition.DiskNumber -ErrorAction Stop
+        Assert-LibertixDiskMatchesPlan -Disk $windowsDisk -PlanDisk $installationPlan.disk
+        if ([long]$windowsPartition.Offset -ne [long]$installationPlan.disk.windows.offsetBytes -or
+            ($binding.Separate -and
+                [long]$windowsPartition.Size -ne [long]$installationPlan.disk.windows.sizeBytes)) {
+            throw 'The Windows storage identity changed before UEFI rollback.'
+        }
+        $sourcePartition = Get-Partition -DriveLetter $binding.SourceDrive.TrimEnd(':') -ErrorAction Stop
+        $sourceDisk = Get-Disk -Number $sourcePartition.DiskNumber -ErrorAction Stop
+        Assert-LibertixDiskMatchesPlan -Disk $sourceDisk -PlanDisk $binding.Disk
+        if ([long]$sourcePartition.Offset -ne [long]$binding.SourcePartition.offsetBytes) {
+            throw 'The source volume moved before UEFI rollback.'
+        }
+        if ($binding.Separate) {
+            $volume = Get-Volume -DriveLetter $binding.SourceDrive.TrimEnd(':') -ErrorAction Stop
+            if ([string]$volume.UniqueId -ne $binding.SourceVolumeId -or
+                [string]$volume.FileSystem -ne 'NTFS' -or
+                (Get-LibertixNtfsVolumeSerial -Drive $binding.SourceDrive) -ne
+                    [string]$binding.Disk.sourceNtfsUuid) {
+                throw 'The source volume was replaced before UEFI rollback.'
+            }
+        }
     }
 
     $esp = $null
@@ -560,7 +709,13 @@ function Invoke-Revert {
         Write-Log "Revert complete." "Green"
         return
     }
-    Restore-LibertixSystemDriveInitialSize -State $rollbackState
+    if ($binding.Separate) {
+        Restore-LibertixSourceVolumeInitialSize -SourceDrive $binding.SourceDrive `
+            -PlanDisk $binding.Disk -SourcePartition $binding.SourcePartition `
+            -ExpectedVolumeId $binding.SourceVolumeId
+    } else {
+        Restore-LibertixSystemDriveInitialSize -State $rollbackState -PlanDisk $installationPlan.disk
+    }
     # Removing the owned Linux partition and its owned ESP files physically
     # compensates every completed live/target mutation. Record those proofs
     # only after the Windows partition has also been restored and verified.
@@ -591,6 +746,16 @@ function Invoke-Revert {
         -SystemDrive $SystemDrive `
         -PreserveTransactionState
     Complete-LibertixTrackedCompensation -Step "windows.recovery-armed"
+    if ($binding.Separate) {
+        $currentEncryption = Get-LibertixTargetVolumeEncryptionSnapshot -Drive $binding.SourceDrive
+        foreach ($field in @('state', 'conversionStatus', 'encryptionPercentage', 'protectionStatus')) {
+            if ($null -eq $rollbackState.InitialSourceEncryption -or
+                $rollbackState.InitialSourceEncryption.PSObject.Properties.Name -notcontains $field -or
+                $currentEncryption.$field -cne $rollbackState.InitialSourceEncryption.$field) {
+                throw 'Disk and boot rollback completed, but the source volume BitLocker state differs from its initial state.'
+            }
+        }
+    }
     Complete-LibertixTrackedRollback
 
     # Keep the active owner document until every physical compensation and the

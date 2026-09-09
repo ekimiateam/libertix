@@ -2,7 +2,8 @@ param(
     [ValidateSet("BIOS", "UEFI")]
     [string]$ExpectedFirmware,
     [switch]$DecryptBitLocker,
-    [string]$ExpectedPlanPath = ""
+    [string]$ExpectedPlanPath = "",
+    [string]$ExpectedTargetJsonBase64 = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +12,8 @@ Import-Module `
     (Join-Path $PSScriptRoot "modules\Libertix.Process.psm1") `
     -Force `
     -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules\Libertix.StorageGeometry.psm1') -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules\Libertix.StorageTargets.psm1') -Force -ErrorAction Stop
 & "$env:SystemRoot\System32\chcp.com" 65001 > $null
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
@@ -58,46 +61,66 @@ public static class LibertixFirmware {
 
 function Get-BitLockerState {
     param([string]$DriveLetter)
-
-    $namespace = "root/CIMV2/Security/MicrosoftVolumeEncryption"
-    $escaped = $DriveLetter.Replace("'", "''")
-    try {
-        $volume = Get-CimInstance `
-            -Namespace $namespace `
-            -ClassName Win32_EncryptableVolume `
-            -Filter "DriveLetter='$escaped'" `
-            -ErrorAction Stop
-    } catch {
-        throw "BitLocker state is unavailable for ${DriveLetter}: $($_.Exception.Message)"
-    }
-
-    if (-not $volume) {
-        return [pscustomobject]@{
-            Safe = $true
-            State = "NotEncryptable"
-            ConversionStatus = 0
-            EncryptionPercentage = 0
-            ProtectionStatus = 0
-        }
-    }
-
-    $conversion = Invoke-CimMethod -InputObject $volume -MethodName GetConversionStatus -ErrorAction Stop
-    $protection = Invoke-CimMethod -InputObject $volume -MethodName GetProtectionStatus -ErrorAction Stop
-    if ($conversion.ReturnValue -ne 0 -or $protection.ReturnValue -ne 0) {
-        throw "BitLocker status methods failed (conversion=$($conversion.ReturnValue), protection=$($protection.ReturnValue))."
-    }
-
-    $safe = (
-        [int]$conversion.ConversionStatus -eq 0 -and
-        [int]$conversion.EncryptionPercentage -eq 0 -and
-        [int]$protection.ProtectionStatus -eq 0
-    )
+    $snapshot = Get-LibertixTargetVolumeEncryptionSnapshot -Drive $DriveLetter.ToUpperInvariant()
     return [pscustomobject]@{
-        Safe = $safe
-        State = if ($safe) { "FullyDecrypted" } else { "EncryptedOrProtected" }
-        ConversionStatus = [int]$conversion.ConversionStatus
-        EncryptionPercentage = [int]$conversion.EncryptionPercentage
-        ProtectionStatus = [int]$protection.ProtectionStatus
+        Safe = $snapshot.state -in @('FullyDecrypted', 'NotEncryptable')
+        State = $snapshot.state
+        ConversionStatus = $snapshot.conversionStatus
+        EncryptionPercentage = $snapshot.encryptionPercentage
+        ProtectionStatus = $snapshot.protectionStatus
+    }
+}
+
+function Set-PreflightVolumeReadable {
+    param(
+        [Parameter(Mandatory = $true)][ValidatePattern('^[A-Z]:$')][string]$Drive,
+        [Parameter(Mandatory = $true)][scriptblock]$VerifyIdentity
+    )
+    & $VerifyIdentity
+    if ((Get-BitLockerState -DriveLetter $Drive).Safe) { return }
+    $manageBde = Get-Command manage-bde.exe -CommandType Application -ErrorAction Stop
+    & $VerifyIdentity
+    $result = Invoke-LibertixNativeCommand -FilePath $manageBde.Source `
+        -ArgumentList @('-off', $Drive) -TimeoutSeconds 120
+    if ($result.ExitCode -ne 0) {
+        throw "manage-bde could not start decryption of $Drive (rc=$($result.ExitCode))."
+    }
+    Write-Output "BITLOCKER_ACTION=decrypting $Drive"
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($timer.Elapsed -lt [TimeSpan]::FromHours(6)) {
+        Start-Sleep -Seconds 10
+        & $VerifyIdentity
+        $state = Get-BitLockerState -DriveLetter $Drive
+        Write-Output "BITLOCKER_PROGRESS=$($state.EncryptionPercentage) DRIVE=$Drive"
+        if ($state.Safe) { return }
+    }
+    throw "Timed out waiting for BitLocker decryption of $Drive."
+}
+
+function Assert-PreflightStorageStillMatchesPlan {
+    $currentSystem = Get-Partition -DriveLetter $systemDrive.TrimEnd(':') -ErrorAction Stop
+    $currentDisk = Get-Disk -Number $currentSystem.DiskNumber -ErrorAction Stop
+    $currentBoot = Get-Partition -DiskNumber $currentDisk.Number -PartitionNumber $boot.PartitionNumber -ErrorAction Stop
+    $currentRecovery = Get-Partition -DiskNumber $currentDisk.Number -PartitionNumber $recovery.PartitionNumber -ErrorAction Stop
+    Assert-StorageMatchesExpectedPlan -PlanPath $ExpectedPlanPath -Disk $currentDisk `
+        -SystemPartition $currentSystem -BootPartition $currentBoot -RecoveryPartition $currentRecovery
+    if ($null -ne $allocation) {
+        $current = Get-LibertixInstallationAllocation -ExpectedTarget $expectedTarget `
+            -SystemPartition $currentSystem -RequiredPartitionStyle $expectedStyle
+        $plan = Get-Content -LiteralPath $ExpectedPlanPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $current -or $plan.PSObject.Properties.Name -notcontains 'allocation' -or
+            $null -eq $plan.allocation) { throw 'The armed allocation plan is missing.' }
+        foreach ($field in @('number', 'uniqueId', 'partitionTableId', 'sizeBytes',
+            'logicalSectorSizeBytes', 'partitionStyle', 'sourceDrive', 'sourceVolumeId', 'sourceNtfsUuid')) {
+            if ([string]$current.$field -cne [string]$plan.allocation.$field) {
+                throw "The source volume no longer matches its armed plan: $field."
+            }
+        }
+        foreach ($field in @('number', 'offsetBytes', 'sizeBytes')) {
+            if ([long]$current.sourcePartition.$field -ne [long]$plan.allocation.sourcePartition.$field) {
+                throw "The source partition no longer matches its armed plan: $field."
+            }
+        }
     }
 }
 
@@ -138,6 +161,7 @@ function Assert-StorageMatchesExpectedPlan {
     if (
         [int]$Disk.Number -ne [int]$plan.disk.number -or
         ([string]$Disk.UniqueId).Trim() -ne ([string]$plan.disk.uniqueId).Trim() -or
+        (Get-PartitionTableIdentity -Disk $Disk) -ne [string]$plan.disk.partitionTableId -or
         [string]$Disk.PartitionStyle -ne [string]$plan.disk.partitionStyle -or
         [int64]$Disk.Size -ne [int64]$plan.disk.sizeBytes -or
         [int]$Disk.LogicalSectorSize -ne [int]$plan.disk.logicalSectorSizeBytes
@@ -151,6 +175,7 @@ function Assert-StorageMatchesExpectedPlan {
         -Actual $BootPartition -Expected $plan.disk.boot -Label "boot"
     Assert-PartitionMatchesExpectedPlan `
         -Actual $RecoveryPartition -Expected $plan.disk.recovery -Label "recovery"
+    Assert-LibertixUniqueTargetDiskIdentity -Disk $Disk -Disks @(Get-Disk -ErrorAction Stop)
 }
 
 try {
@@ -179,6 +204,7 @@ try {
     if (@($partition).Count -ne 1) {
         throw "The Windows system volume does not resolve to exactly one partition."
     }
+    Assert-LibertixUniqueTargetDiskIdentity -Disk $disk -Disks @(Get-Disk -ErrorAction Stop)
 
     $expectedStyle = if ($ExpectedFirmware -eq "UEFI") { "GPT" } else { "MBR" }
     if ([string]$disk.PartitionStyle -ne $expectedStyle) {
@@ -194,21 +220,13 @@ try {
         throw "An existing MBR extended partition makes this BIOS layout unsafe to modify."
     }
 
-    $recoveryPartitions = @(
-        Get-Partition -DiskNumber $partition.DiskNumber -ErrorAction Stop |
-            Where-Object {
-                $_.GptType -eq "{de94bba4-06d1-4d40-a16a-bfd50179d6ac}" -or
-                [int]$_.MbrType -eq 39 -or
-                $_.Type -match "Recovery"
-            }
-    )
-    if (@($recoveryPartitions).Count -ne 1) {
-        throw "Exactly one Windows recovery partition is required; detected $(@($recoveryPartitions).Count)."
-    }
-    $recovery = $recoveryPartitions[0]
+    $allPartitions = @(Get-Partition -DiskNumber $partition.DiskNumber -ErrorAction Stop)
+    $recovery = Resolve-LibertixWindowsRecoveryPartition -Partitions $allPartitions `
+        -WindowsPartition $partition -PartitionStyle ([string]$disk.PartitionStyle)
     if (
-        [int64]$recovery.Offset -le [int64]$partition.Offset -or
-        [int64]$partition.Size -gt [int64]$recovery.Offset - [int64]$partition.Offset
+        ($ExpectedFirmware -eq 'BIOS' -and [int64]$recovery.Offset -le [int64]$partition.Offset) -or
+        ([int64]$recovery.Offset -lt ([int64]$partition.Offset + [int64]$partition.Size) -and
+            [int64]$partition.Offset -lt ([int64]$recovery.Offset + [int64]$recovery.Size))
     ) {
         throw "The Windows recovery partition must follow the Windows system partition."
     }
@@ -235,6 +253,25 @@ try {
     }
     $boot = $bootPartitions[0]
 
+    $allocation = $null
+    $allocationEncryption = $null
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedTargetJsonBase64)) {
+        if ($ExpectedTargetJsonBase64.Length -gt 16384) {
+            throw 'The requested target identity is excessively large.'
+        }
+        $targetJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ExpectedTargetJsonBase64))
+        $expectedTarget = $targetJson | ConvertFrom-Json -ErrorAction Stop
+        $allocation = Get-LibertixInstallationAllocation -ExpectedTarget $expectedTarget `
+            -SystemPartition $partition -RequiredPartitionStyle $expectedStyle
+        if ($null -ne $allocation) {
+            $allocationEncryption = Get-LibertixTargetVolumeEncryptionSnapshot -Drive $allocation.sourceDrive
+        }
+    }
+
+    if ($null -eq $allocation -and $ExpectedFirmware -eq 'BIOS' -and $allPartitions.Count -ge 4) {
+        throw 'The selected Windows MBR disk has no supported partition slot available.'
+    }
+
     if ($DecryptBitLocker) {
         if ([string]::IsNullOrWhiteSpace($ExpectedPlanPath)) {
             throw "ExpectedPlanPath is required before BitLocker can be modified."
@@ -247,40 +284,26 @@ try {
             -RecoveryPartition $recovery
     }
 
+    $secondaryBootPreflight = $null
+    if ($null -ne $allocation) {
+        Import-Module (Join-Path $PSScriptRoot 'modules\Libertix.SecondaryBootPreflight.psm1') -ErrorAction Stop
+        $secondaryBootPreflight = Assert-LibertixSecondaryBootPreflight -Firmware $ExpectedFirmware `
+            -WindowsDisk $disk -BootPartition $boot -Allocation $allocation
+    }
+
     # Validate the complete disk topology before starting decryption. The
     # caller has armed recovery, but a rejected Recovery or boot layout must
     # still leave BitLocker untouched.
     $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
     $initialBitLocker = $bitLocker
-    if (-not $bitLocker.Safe -and $DecryptBitLocker) {
-        Write-Output "BITLOCKER_ACTION=decrypting"
-        $manageBde = Get-Command manage-bde.exe -CommandType Application -ErrorAction Stop
-        $disableResult = Invoke-LibertixNativeCommand `
-            -FilePath $manageBde.Source `
-            -ArgumentList @("-off", $systemDrive) `
-            -TimeoutSeconds 120
-        $disableOutput = (
-            $disableResult.StandardOutput +
-            [Environment]::NewLine +
-            $disableResult.StandardError
-        ).Trim()
-        if ($disableResult.ExitCode -ne 0) {
-            throw "manage-bde could not start decryption: $disableOutput"
+    if ($DecryptBitLocker) {
+        Set-PreflightVolumeReadable -Drive $systemDrive -VerifyIdentity { Assert-PreflightStorageStillMatchesPlan }
+        if ($null -ne $allocation) {
+            Set-PreflightVolumeReadable -Drive $allocation.sourceDrive -VerifyIdentity { Assert-PreflightStorageStillMatchesPlan }
+            $allocation.sourceBitLockerState = Get-LibertixTargetVolumeEncryptionState -Drive $allocation.sourceDrive
         }
-        $timer = [Diagnostics.Stopwatch]::StartNew()
-        $maximumWait = [TimeSpan]::FromHours(6)
-        while ($timer.Elapsed -lt $maximumWait) {
-            Start-Sleep -Seconds 10
-            $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
-            Write-Output "BITLOCKER_PROGRESS=$($bitLocker.EncryptionPercentage)"
-            if ($bitLocker.Safe) {
-                break
-            }
-        }
-        $timer.Stop()
-        if (-not $bitLocker.Safe) {
-            throw "Timed out waiting for BitLocker decryption."
-        }
+        Assert-PreflightStorageStillMatchesPlan
+        $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
     }
 
     [ordered]@{
@@ -310,7 +333,10 @@ try {
         initialBitLockerConversionStatus = [int]$initialBitLocker.ConversionStatus
         initialBitLockerEncryptionPercentage = [int]$initialBitLocker.EncryptionPercentage
         initialBitLockerProtectionStatus = [int]$initialBitLocker.ProtectionStatus
-    } | ConvertTo-Json -Compress
+        allocation = $allocation
+        allocationEncryption = $allocationEncryption
+        secondaryBootPreflight = $secondaryBootPreflight
+    } | ConvertTo-Json -Depth 5 -Compress
 
     exit 0
 } catch {

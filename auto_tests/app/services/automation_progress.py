@@ -121,7 +121,7 @@ class OperationProgress:
             token = tuple(
                 str(step.context.get(key, "")) for key in ("test", "stage", "phase", "sequence")
             )
-        signature = (vm, step.step, token)
+        signature = (str(step.context.get("scenario", "")), vm, step.step, token)
         if signature in self._seen:
             return False
         self._seen.add(signature)

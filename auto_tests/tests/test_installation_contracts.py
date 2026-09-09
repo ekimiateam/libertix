@@ -729,6 +729,32 @@ def test_plan_rejects_recovery_before_original_windows_end(
         plan_module.validate_plan(plan, require_installer=True)
 
 
+@pytest.mark.parametrize("firmware", ["uefi", "bios"])
+def test_recovery_before_windows_is_supported_only_on_uefi(plan_module: ModuleType, firmware: str):
+    plan = make_plan(firmware, 24)
+    plan["disk"]["recovery"].update(offsetBytes=256 * 1024**2, sizeBytes=512 * 1024**2)
+    if firmware == "uefi":
+        plan_module.validate_plan(plan, require_installer=True)
+    else:
+        with pytest.raises(plan_module.PlanValidationError, match="recovery must start"):
+            plan_module.validate_plan(plan, require_installer=True)
+
+
+@pytest.mark.parametrize("firmware", ["uefi", "bios"])
+def test_installer_cannot_consume_the_entire_windows_partition(
+    plan_module: ModuleType, firmware: str
+):
+    plan = make_plan(firmware, 24)
+    disk = plan["disk"]
+    disk["installer"].update(
+        finalSizeBytes=disk["windows"]["sizeBytes"],
+        finalOffsetBytes=disk["windows"]["offsetBytes"],
+        offsetBytes=disk["windows"]["offsetBytes"],
+    )
+    with pytest.raises(plan_module.PlanValidationError):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
 def test_failure_and_rollback_preserve_the_completed_step_ledger(
     state_module: ModuleType,
 ) -> None:
@@ -1039,9 +1065,22 @@ def test_windows_plan_models_and_powershell_property_sets_match_schema() -> None
         "locale": set(schema["$defs"]["locale"]["properties"]),
         "account": set(schema["$defs"]["account"]["properties"]),
         "disk": set(schema["$defs"]["disk"]["properties"]),
+        "allocation": set(schema["$defs"]["allocation"]["properties"]),
         "partition": set(schema["$defs"]["partitionIdentity"]["properties"]),
         "installer": set(schema["$defs"]["installerPartition"]["properties"]),
         "features": set(schema["$defs"]["features"]["properties"]),
+        "windowsSharing": set(schema["$defs"]["windowsSharing"]["properties"]),
+        "sharingVolume": set(
+            schema["$defs"]["windowsSharing"]["properties"]["volumes"]["items"]["properties"]
+        ),
+        "sharingDisk": set(
+            schema["$defs"]["windowsSharing"]["properties"]["volumes"]["items"]["properties"][
+                "disk"
+            ]["properties"]
+        ),
+        "sharingFolder": set(
+            schema["$defs"]["windowsSharing"]["properties"]["folders"]["items"]["properties"]
+        ),
         "windowsPreferenceMigration": set(
             schema["$defs"]["windowsPreferenceMigration"]["properties"]
         ),
@@ -1068,6 +1107,7 @@ def test_windows_plan_models_and_powershell_property_sets_match_schema() -> None
         "InstallationLocale": "locale",
         "InstallationAccount": "account",
         "InstallationDisk": "disk",
+        "InstallationAllocation": "allocation",
         "PartitionIdentity": "partition",
         "InstallerPartitionPlan": "installer",
         "InstallationFeatures": "features",

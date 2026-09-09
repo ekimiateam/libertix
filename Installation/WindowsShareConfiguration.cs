@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace Libertix.Installation
 {
@@ -13,6 +14,7 @@ namespace Libertix.Installation
         public bool Enabled { get; set; }
         public int SystemDiskNumber { get; set; }
         public string SystemDiskUniqueId { get; set; }
+        public string SystemDiskPartitionTableId { get; set; }
         public long ExpectedLinuxPartitionOffset { get; set; }
         public long ExpectedLinuxPartitionSize { get; set; }
         public long PartitionSizeToleranceBytes { get; set; }
@@ -47,6 +49,7 @@ namespace Libertix.Installation
                 throw new ArgumentNullException(nameof(configuration));
             if (configuration.SystemDiskNumber < 0 ||
                 string.IsNullOrWhiteSpace(configuration.SystemDiskUniqueId) ||
+                !IsPartitionTableId(configuration.SystemDiskPartitionTableId) ||
                 configuration.ExpectedLinuxPartitionOffset <= 0 ||
                 configuration.ExpectedLinuxPartitionSize <= 0 ||
                 configuration.PartitionSizeToleranceBytes <= 0 ||
@@ -66,6 +69,14 @@ namespace Libertix.Installation
             AtomicJsonFile.Write(
                 path,
                 JsonSerializer.Serialize(configuration, SerializerOptions));
+        }
+
+        internal static bool IsPartitionTableId(string value)
+        {
+            if (value == null) return false;
+            if (value.StartsWith("gpt:", StringComparison.Ordinal))
+                return Guid.TryParseExact(value.Substring(4), "D", out Guid guid) && guid != Guid.Empty;
+            return Regex.IsMatch(value, @"\Ambr:[0-9a-f]{8}\z");
         }
 
         private static bool IsFileName(string value)

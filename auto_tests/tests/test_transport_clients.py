@@ -156,6 +156,13 @@ def test_ssh_text_upload_writes_exactly_one_utf8_bom() -> None:
     class FakeSftp:
         def __init__(self, remote: FakeRemote) -> None:
             self.remote = remote
+            self.timeout = None
+
+        def get_channel(self):
+            return self
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeout = timeout
 
         def __enter__(self):
             return self
@@ -164,6 +171,7 @@ def test_ssh_text_upload_writes_exactly_one_utf8_bom() -> None:
             pass
 
         def open(self, remote_path: str, mode: str) -> FakeRemote:
+            assert self.timeout == 120
             assert remote_path == "C:/Windows/Temp/check.ps1"
             assert mode == "wb"
             return self.remote
@@ -182,6 +190,53 @@ def test_ssh_text_upload_writes_exactly_one_utf8_bom() -> None:
 
     assert bytes(remote.content).startswith(b"\xef\xbb\xbfparam")
     assert not bytes(remote.content).startswith(b"\xef\xbb\xbf\xef\xbb\xbf")
+
+
+def test_ssh_file_upload_sets_a_stall_timeout_and_forwards_progress(tmp_path: Path) -> None:
+    class FakeChannel:
+        timeout = None
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeout = timeout
+
+    class FakeSftp:
+        def __init__(self) -> None:
+            self.channel = FakeChannel()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+        def get_channel(self) -> FakeChannel:
+            return self.channel
+
+        def put(self, local: str, remote: str, *, callback=None) -> None:
+            assert Path(local).read_bytes() == b"payload"
+            assert remote == "/remote/artifact"
+            callback(3, 7)
+            callback(7, 7)
+
+    local = tmp_path / "artifact"
+    local.write_bytes(b"payload")
+    sftp = FakeSftp()
+    transport = SimpleNamespace(open_sftp=lambda: sftp)
+    client = object.__new__(SSHClient)
+    client.host = "example.test"
+    client._client = transport
+    progress: list[tuple[int, int]] = []
+
+    client.upload_file(
+        local,
+        "/remote/artifact",
+        step="ssh.upload_file",
+        on_progress=lambda transferred, total: progress.append((transferred, total)),
+        stall_timeout_seconds=45,
+    )
+
+    assert sftp.channel.timeout == 45
+    assert progress == [(3, 7), (7, 7)]
 
 
 def test_ssh_client_connects_with_password_only_and_drains_both_streams(
@@ -211,6 +266,7 @@ def test_ssh_client_connects_with_password_only_and_drains_both_streams(
         "timeout": 4,
         "banner_timeout": 4,
         "auth_timeout": 4,
+        "channel_timeout": 4,
         "look_for_keys": False,
         "allow_agent": False,
     }
@@ -555,7 +611,9 @@ def test_vnc_capture_wakes_the_display_and_always_disconnects(
     monkeypatch.setattr(
         vnc_module.api,
         "connect",
-        lambda address, *, timeout: addresses.append(f"{address}|{timeout}") or connection,
+        lambda address, *, timeout, factory_class: (
+            addresses.append(f"{address}|{timeout}") or connection
+        ),
     )
     monkeypatch.setattr(vnc_module.time, "sleep", lambda _seconds: None)
 
@@ -570,12 +628,43 @@ def test_vnc_capture_wakes_the_display_and_always_disconnects(
     assert connection.disconnected is True
 
 
+@pytest.mark.parametrize("callback_fails", [False, True])
+def test_vnc_capture_coordinates_before_disconnect_and_propagates_callback_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    callback_fails: bool,
+) -> None:
+    connection = FakeVncConnection()
+    monkeypatch.setattr(vnc_module.api, "connect", lambda *_args, **_kwargs: connection)
+    monkeypatch.setattr(vnc_module.time, "sleep", lambda _seconds: None)
+    observed: list[Path] = []
+
+    def coordinate(path: Path) -> None:
+        assert connection.disconnected is False
+        with Image.open(path) as capture:
+            capture.verify()
+        observed.append(path)
+        if callback_fails:
+            raise WorkflowError("test.ack", "Acknowledgement failed")
+
+    destination = tmp_path / "capture.png"
+    if callback_fails:
+        with pytest.raises(WorkflowError, match="Acknowledgement failed"):
+            VNCClient().capture("192.0.2.10:12", destination, on_captured=coordinate)
+    else:
+        assert (
+            VNCClient().capture("192.0.2.10:12", destination, on_captured=coordinate) == destination
+        )
+    assert observed == [destination]
+    assert connection.disconnected is True
+
+
 def test_vnc_capture_failure_removes_only_its_incomplete_output(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     connection = FakeVncConnection(fail_capture=True)
-    monkeypatch.setattr(vnc_module.api, "connect", lambda _address, *, timeout: connection)
+    monkeypatch.setattr(vnc_module.api, "connect", lambda _address, **_kwargs: connection)
     monkeypatch.setattr(vnc_module.time, "sleep", lambda _seconds: None)
     destination = tmp_path / "capture.png"
     destination.write_bytes(b"stale")
@@ -604,8 +693,9 @@ def test_vnc_capture_retries_transient_network_failures(
 
     connections: list[TransientConnection] = []
 
-    def connect(_address: str, *, timeout: float) -> TransientConnection:
+    def connect(_address: str, *, timeout: float, factory_class) -> TransientConnection:
         assert timeout == 15
+        assert factory_class.protocol.encoding == vnc_module.rfb.Encoding.ZRLE
         connection = TransientConnection()
         connections.append(connection)
         return connection
@@ -636,7 +726,7 @@ def test_vnc_capture_keeps_a_complete_image_written_before_transport_loss(
             raise TimeoutError("VNC disconnected during reboot")
 
     connection = RebootingConnection()
-    monkeypatch.setattr(vnc_module.api, "connect", lambda _address, *, timeout: connection)
+    monkeypatch.setattr(vnc_module.api, "connect", lambda _address, **_kwargs: connection)
     monkeypatch.setattr(vnc_module.time, "sleep", lambda _seconds: None)
     destination = tmp_path / "capture.png"
 
@@ -666,8 +756,9 @@ def test_vnc_connection_establishment_is_serialized(
     maximum_active = 0
     state_lock = threading.Lock()
 
-    def fake_connect(address: str, *, timeout: float):
+    def fake_connect(address: str, *, timeout: float, factory_class):
         nonlocal active, maximum_active
+        assert factory_class.protocol.encoding == vnc_module.rfb.Encoding.ZRLE
         with state_lock:
             active += 1
             maximum_active = max(maximum_active, active)

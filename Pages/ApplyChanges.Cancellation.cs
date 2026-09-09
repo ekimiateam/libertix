@@ -86,13 +86,16 @@ namespace Libertix.Pages
         {
             _unattendedRebootReady = true;
             FinishInstallation(enableBackButton: false);
+            RebootButton.IsEnabled = false;
             try
             {
                 await UnattendedWorkflow.PublishStageAndWaitAsync("reboot-ready");
+                RebootButton.IsEnabled = true;
             }
-            catch
+            catch (Exception ex)
             {
                 _unattendedRebootReady = false;
+                UnattendedWorkflow.TryPublishFailure("reboot-acknowledgement-failed", ex.Message);
                 throw;
             }
         }
@@ -282,6 +285,13 @@ namespace Libertix.Pages
                 current.BitLockerConversionStatus == initial.InitialBitLockerConversionStatus &&
                 current.BitLockerEncryptionPercentage == initial.InitialBitLockerEncryptionPercentage &&
                 current.BitLockerProtectionStatus == initial.InitialBitLockerProtectionStatus;
+            bool allocationMatches = initial.Allocation == null
+                ? current.Allocation == null && current.AllocationEncryption == null
+                : current.Allocation != null && initial.AllocationEncryption != null &&
+                    initial.Allocation.SourceNtfsUuid == current.Allocation.SourceNtfsUuid &&
+                    initial.AllocationEncryption.Matches(current.AllocationEncryption);
+            if (!allocationMatches)
+                Log("BitLocker state or identity of the selected source volume does not match its initial state after rollback.");
             if (!matches)
             {
                 Log(
@@ -293,7 +303,7 @@ namespace Libertix.Pages
                     $"encrypted={current.BitLockerEncryptionPercentage}%, " +
                     $"protection={current.BitLockerProtectionStatus}.");
             }
-            return matches;
+            return matches && allocationMatches;
         }
 
         private void ShowBitLockerRollbackIncomplete()

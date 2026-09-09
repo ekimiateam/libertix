@@ -85,19 +85,28 @@ function New-OrReuseInstallerPartition {
         throw "InstallerPartitionSizeGB does not match the installation plan."
     }
     $stagingSizeGB = [int]($stagingBytes / 1GB)
-    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
-    $recoveryOffsetBytes = [int64]$installationPlan.disk.recovery.offsetBytes
+    $binding = Get-LibertixTransactionStorageBinding
+    if ([string]$binding.Disk.partitionStyle -ne 'GPT') {
+        throw 'This UEFI preparation path requires a GPT allocation disk.'
+    }
+    $sourceDriveLetter = $binding.SourceDrive.TrimEnd(':')
+    $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition `
+        -ExpectedSize ([long]$binding.SourcePartition.sizeBytes)
+    $sourceDisk = Get-Disk -Number $sourcePartition.DiskNumber -ErrorAction Stop
+    $originalSourceOffset = [int64]$binding.SourcePartition.offsetBytes
+    $originalSourceSize = [int64]$binding.SourcePartition.sizeBytes
+    $originalSourceEnd = $originalSourceOffset + $originalSourceSize
     if (
-        $requestedBytes -gt $recoveryOffsetBytes -or
+        $requestedBytes -ge $originalSourceSize -or
+        [int64]$installationPlan.disk.installer.finalOffsetBytes -le $originalSourceOffset -or
         [int64]$installationPlan.disk.installer.finalOffsetBytes -gt `
-            $recoveryOffsetBytes - $requestedBytes
+            $originalSourceEnd - $requestedBytes
     ) {
-        throw "The requested Linux partition would overlap Windows Recovery."
+        throw 'The requested Linux partition must stay inside the original source extent.'
     }
 
     Start-LibertixTrackedStep -Step "windows.recovery-armed"
-    Save-TransactionPreparationState -SystemPartition $systemPartition
+    Save-TransactionPreparationState -SystemPartition (Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop)
     Complete-LibertixTrackedStep -Step "windows.recovery-armed"
 
     $forcedOfflineResize = (
@@ -113,25 +122,27 @@ function New-OrReuseInstallerPartition {
     }
 
     $fullGeometry = Get-LibertixAlignedShrinkGeometry `
-        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
-        -PartitionSizeBytes ([int64]$systemPartition.Size) `
+        -PartitionOffsetBytes ([int64]$sourcePartition.Offset) `
+        -PartitionSizeBytes ([int64]$sourcePartition.Size) `
         -RequestedAllocationBytes $requestedBytes `
-        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
+        -LogicalSectorSizeBytes ([int64]$sourceDisk.LogicalSectorSize)
     $stagingGeometry = Get-LibertixAlignedShrinkGeometry `
-        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
-        -PartitionSizeBytes ([int64]$systemPartition.Size) `
+        -PartitionOffsetBytes ([int64]$sourcePartition.Offset) `
+        -PartitionSizeBytes ([int64]$sourcePartition.Size) `
         -RequestedAllocationBytes $stagingBytes `
-        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
+        -LogicalSectorSizeBytes ([int64]$sourceDisk.LogicalSectorSize)
 
-    $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
-    $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
+    $supported = Get-PartitionSupportedSize -DiskNumber $sourcePartition.DiskNumber `
+        -PartitionNumber $sourcePartition.PartitionNumber -ErrorAction Stop
+    $maxShrink = [int64]$sourcePartition.Size - [int64]$supported.SizeMin
     if (-not $forcedOfflineResize -and [int64]$fullGeometry.ShrinkBytes -gt $maxShrink) {
         if (-not $hibernationDisabled) {
             Set-HibernateEnabled -Enabled $false
             $hibernationDisabled = $true
-            $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-            $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
-            $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
+            $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition -ExpectedSize $originalSourceSize
+            $supported = Get-PartitionSupportedSize -DiskNumber $sourcePartition.DiskNumber `
+                -PartitionNumber $sourcePartition.PartitionNumber -ErrorAction Stop
+            $maxShrink = [int64]$sourcePartition.Size - [int64]$supported.SizeMin
         }
         if ([int64]$fullGeometry.ShrinkBytes -gt $maxShrink) {
             Set-LibertixInstallationPlanResizeMode -ResizeMode "live-offline"
@@ -146,7 +157,7 @@ function New-OrReuseInstallerPartition {
     [int64]$installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
     if ($shrinkBytes -gt $maxShrink) {
         throw (
-            "Cannot reserve even the Libertix staging partition on $SystemDrive " +
+            "Cannot reserve even the Libertix staging partition on $($binding.SourceDrive) " +
             "(required=$shrinkBytes bytes, maximum=$maxShrink bytes)."
         )
     }
@@ -173,15 +184,16 @@ function New-OrReuseInstallerPartition {
     if (($verifiedDistributionIso.Attributes -band $unsafeReclaimableAttributes) -ne 0) {
         throw "The verified installer ISO cannot be credited as reclaimable disk space."
     }
-    [int64]$reclaimableArtifactBytes = [int64]$verifiedDistributionIso.Length
+    # The ISO remains on Windows, so its later deletion cannot free space on a separate donor.
+    [int64]$reclaimableArtifactBytes = if ($binding.Separate) { 0 } else { [int64]$verifiedDistributionIso.Length }
     $freeSpaceBudget = Wait-LibertixWindowsFreeSpaceBudget `
-        -DriveLetter $SystemDriveLetter `
+        -DriveLetter $sourceDriveLetter `
         -AllocationBytes $shrinkBytes `
         -ReclaimableArtifactBytes $reclaimableArtifactBytes
     [int64]$remainingBytes = [int64]$freeSpaceBudget.AvailableBytes
     if (-not $freeSpaceBudget.Accepted) {
         throw (
-            "Not enough free space on $SystemDrive " +
+            "Not enough free space on $($binding.SourceDrive) " +
             "(available=$remainingBytes bytes, " +
             "reclaimable=$($freeSpaceBudget.ReclaimableArtifactBytes) bytes, " +
             "effective=$($freeSpaceBudget.EffectiveAvailableBytes) bytes, " +
@@ -202,30 +214,26 @@ function New-OrReuseInstallerPartition {
     }
 
     Start-LibertixTrackedStep -Step "windows.system-volume-shrunk"
+    $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition -ExpectedSize $originalSourceSize
     # A cloned Windows partition can end between 1 MiB boundaries. Move its
     # new end back to the preceding boundary so CreatePartition does not lose
     # part of the requested extent while aligning the staging partition.
     Resize-Partition `
-        -DriveLetter $SystemDriveLetter `
-        -Size ($systemPartition.Size - $shrinkBytes) `
+        -DriveLetter $sourceDriveLetter `
+        -Size ($sourcePartition.Size - $shrinkBytes) `
         -ErrorAction Stop
     Start-Sleep -Seconds 2
-    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    if (
-        [int64]$systemPartition.Offset -ne [int64]$installationPlan.disk.windows.offsetBytes -or
-        [int64]$systemPartition.Size -ne [int64]$shrinkGeometry.TargetSizeBytes
-    ) {
-        throw "Windows partition geometry does not match the aligned shrink target."
-    }
+    $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition `
+        -ExpectedSize ([int64]$shrinkGeometry.TargetSizeBytes)
     Complete-LibertixTrackedStep -Step "windows.system-volume-shrunk"
 
     Start-LibertixTrackedStep -Step "windows.installer-partition-created"
     # New-Partition may commit before PowerShell returns its object. Save the
     # verified empty extent first so rollback can resolve that interruption.
-    Save-TransactionPartitionCreationIntent -DiskNumber $systemPartition.DiskNumber `
+    Save-TransactionPartitionCreationIntent -DiskNumber $sourcePartition.DiskNumber `
         -Offset $installerOffsetBytes -Size $stagingBytes
     $newPartition = New-Partition `
-        -DiskNumber $systemPartition.DiskNumber `
+        -DiskNumber $sourcePartition.DiskNumber `
         -Size $stagingBytes `
         -Offset $installerOffsetBytes `
         -Alignment ([int64]$shrinkGeometry.AlignmentBytes) `

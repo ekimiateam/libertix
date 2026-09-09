@@ -33,6 +33,26 @@ function Test-ObjectProperty {
     return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
 }
 
+function Get-RegisteredLinuxShortcuts {
+    param([Parameter(Mandatory = $true)][string]$LinuxUsername)
+
+    Assert-Condition ($LinuxUsername -cmatch '^[a-z_][a-z0-9_-]{0,31}$') 'Invalid Linux shortcut username.'
+    foreach ($userProfile in @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop)) {
+        if ($userProfile.Special -or [string]$userProfile.SID -notmatch '^S-1-5-21-(?:\d+-){3}\d+$') { continue }
+        $profileDirectory = [string]$userProfile.LocalPath
+        if ((Split-Path -Leaf $profileDirectory) -in @('DefaultAccount', 'defaultuser0', 'WDAGUtilityAccount', 'WsiAccount')) {
+            continue
+        }
+        Assert-Condition ($profileDirectory -match '^[A-Za-z]:\\[^\x00-\x1f<>:"/|?*]+$' -and
+            $profileDirectory -notmatch '(?:^|\\)\.{1,2}(?:\\|$)') 'A registered profile has an unsupported directory.'
+        if (-not (Test-Path -LiteralPath $profileDirectory -PathType Container)) { continue }
+        $path = Join-Path $profileDirectory "Links\Linux_${LinuxUsername}_read-only.lnk"
+        Assert-Condition (Test-Path -LiteralPath $path -PathType Leaf) `
+            "The Linux shortcut is missing from the registered profile: $profileDirectory."
+        Get-Item -LiteralPath $path -ErrorAction Stop
+    }
+}
+
 function Assert-RecoveryLocation {
     param(
         [Parameter(Mandatory = $true)][string]$ReagentOutput,
@@ -356,15 +376,35 @@ function Get-PlannedLinuxOffset {
     return [int64]$Plan.disk.installer.offsetBytes
 }
 
+function Get-PlannedLinuxDisk {
+    param([Parameter(Mandatory = $true)]$Plan)
+    $definition = $Plan.disk
+    if ([int]$Plan.schemaVersion -eq 5) {
+        $definition = $Plan.allocation
+        Assert-Condition ([int]$definition.number -ne [int]$Plan.disk.number) `
+            'The selected allocation disk must be distinct from Windows.'
+    } else {
+        Assert-Condition ([int]$Plan.schemaVersion -eq 4) 'The installation plan schema is unsupported.'
+    }
+    $disk = Get-Disk -Number ([int]$definition.number) -ErrorAction Stop
+    $tableId = if ([string]$disk.PartitionStyle -eq 'GPT') {
+        'gpt:' + ([guid]$disk.Guid).ToString('D').ToLowerInvariant()
+    } else { 'mbr:' + ([uint32]$disk.Signature).ToString('x8') }
+    Assert-Condition (([string]$disk.UniqueId).Trim() -ceq ([string]$definition.uniqueId).Trim() -and
+        $tableId -ceq [string]$definition.partitionTableId -and
+        [long]$disk.Size -eq [long]$definition.sizeBytes -and
+        [int]$disk.LogicalSectorSize -eq [int]$definition.logicalSectorSizeBytes -and
+        [string]$disk.PartitionStyle -ceq [string]$definition.partitionStyle) `
+        'The Linux disk no longer matches the installation plan.'
+    return $disk
+}
+
 function Get-ExpectedLinuxMountIdentity {
     $planPath = "C:\LibertixInstallLogs\Linux\latest\installation-plan.json"
     Assert-Condition (Test-Path -LiteralPath $planPath -PathType Leaf) `
         "The archived installation plan is missing for Linux mount verification."
     $plan = Get-Content -LiteralPath $planPath -Raw -ErrorAction Stop | ConvertFrom-Json
-    $disk = Get-Disk -Number ([int]$plan.disk.number) -ErrorAction Stop
-    Assert-Condition (
-        ([string]$disk.UniqueId).Trim() -eq ([string]$plan.disk.uniqueId).Trim()
-    ) "The Linux mount disk identity differs from the installation plan."
+    $disk = Get-PlannedLinuxDisk -Plan $plan
     [int64]$plannedSize = [int64]$plan.disk.installer.finalSizeBytes
     [int64]$plannedOffset = Get-PlannedLinuxOffset -Plan $plan
     [int64]$alignmentBytes = [int64]$config.partition_alignment_bytes
@@ -878,10 +918,26 @@ try {
             $alignmentTolerance = [int64]$linuxEvidence.root.alignmentToleranceBytes
             $originalWindowsOffset = [int64]$plan.disk.windows.offsetBytes
             $originalWindowsSize = [int64]$plan.disk.windows.sizeBytes
-            $windowsEnd = [int64]$systemPartition.Offset + [int64]$systemPartition.Size
+            $sourcePartition = $systemPartition
+            $originalSourceSize = $originalWindowsSize
+            $linuxDisk = Get-PlannedLinuxDisk -Plan $plan
+            $linuxPartitions = @(Get-Partition -DiskNumber $linuxDisk.Number -ErrorAction Stop)
+            if ([int]$plan.schemaVersion -eq 5) {
+                Assert-Condition ([long]$systemPartition.Size -eq $originalWindowsSize) `
+                    'Windows was resized despite selecting a separate disk.'
+                $sourcePartition = Get-Partition -DiskNumber $linuxDisk.Number `
+                    -PartitionNumber ([int]$plan.allocation.sourcePartition.number) -ErrorAction Stop
+                Assert-Condition ([long]$sourcePartition.Offset -eq [long]$plan.allocation.sourcePartition.offsetBytes) `
+                    'The selected source partition was moved.'
+                $sourceVolume = $sourcePartition | Get-Volume -ErrorAction Stop
+                Assert-Condition ([string]$sourceVolume.UniqueId -ceq [string]$plan.allocation.sourceVolumeId -and
+                    [string]$sourceVolume.FileSystem -eq 'NTFS') 'The source NTFS volume was replaced.'
+                $originalSourceSize = [long]$plan.allocation.sourcePartition.sizeBytes
+            }
+            $windowsEnd = [int64]$sourcePartition.Offset + [int64]$sourcePartition.Size
             $gapBeforeLinux = $installerOffset - $windowsEnd
-            $actualWindowsShrink = $originalWindowsSize - [int64]$systemPartition.Size
-            $linuxMatches = @($partitions | Where-Object {
+            $actualWindowsShrink = $originalSourceSize - [int64]$sourcePartition.Size
+            $linuxMatches = @($linuxPartitions | Where-Object {
                 [int64]$_.Offset -eq $installerOffset -and
                 [int64]$_.Size -eq $observedLinuxSize
             })
@@ -1340,7 +1396,7 @@ try {
             Assert-Condition (-not $accepted) "The Linux volume accepted a Windows write."
         }
         "explorer_shortcut" {
-            $shortcuts = @(Get-ChildItem -Path "C:\Users\*\Links\Linux_*_read-only.lnk" -File -ErrorAction SilentlyContinue)
+            $shortcuts = @(Get-RegisteredLinuxShortcuts -LinuxUsername ([string]$config.linux_username))
             $shortcuts | Format-Table FullName, Length, LastWriteTime -AutoSize
             Assert-Condition ($shortcuts.Count -ge 1) "No Linux read-only Explorer shortcut exists."
             $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)

@@ -378,6 +378,9 @@ class InstallationMonitoringMixin:
             "rollback incomplete",
             "rollback incomplet",
             "restauración incompleta",
+            "rollback not verified",
+            "rollback non vérifié",
+            "restauración no verificada",
         )
         if any(marker in text for marker in incomplete_markers):
             return "incomplete"
@@ -501,7 +504,12 @@ class InstallationMonitoringMixin:
             raise WorkflowError(
                 "automation.reboot_request",
                 "Failed to request reboot from the final controls",
-                details={"vm": vm.name, "target": vm.vnc, "error": str(exc)},
+                details={
+                    **(exc.details if isinstance(exc, WorkflowError) else {}),
+                    "vm": vm.name,
+                    "target": vm.vnc,
+                    "error": str(exc),
+                },
             ) from exc
         finally:
             if client is not None:

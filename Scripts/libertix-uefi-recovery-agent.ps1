@@ -221,41 +221,50 @@ function Test-RecoveryPayload {
     }
 }
 
+function Read-ValidatedRecoveryPlan {
+    param([Parameter(Mandatory = $true)]$State)
+
+    Import-Module (Join-Path $State.PayloadRoot 'Scripts\modules\Libertix.InstallationPlan.psm1') -ErrorAction Stop
+    $plan = Read-LibertixInstallationPlan -Path (Join-Path $State.RecoveryRoot 'installation-plan.json')
+    if (
+        [string]$plan.planId -cne [string]$State.PlanId -or
+        [string]$plan.runtime.recoveryRunId -cne [string]$State.RunId -or
+        [string]$plan.firmware -cne 'uefi' -or
+        [int]$plan.disk.number -ne [int]$State.SystemDiskNumber -or
+        ([string]$plan.disk.uniqueId).Trim() -ne ([string]$State.SystemDiskUniqueId).Trim() -or
+        [string]$plan.disk.partitionTableId -cne [string]$State.SystemDiskPartitionTableId -or
+        [int64]$plan.disk.sizeBytes -ne [int64]$State.SystemDiskSize -or
+        [int64]$plan.disk.installer.finalOffsetBytes -ne [int64]$State.ExpectedLinuxPartitionOffset -or
+        [int64]$plan.disk.installer.finalSizeBytes -ne [int64]$State.ExpectedLinuxPartitionSize
+    ) {
+        throw 'The installation plan does not match the UEFI recovery state.'
+    }
+    return $plan
+}
+
 function Test-LinuxPartitionPresent {
     param([Parameter(Mandatory = $true)]$State)
 
-    if (
-        $null -eq $State.SystemDiskNumber -or
-        [string]::IsNullOrWhiteSpace([string]$State.SystemDiskUniqueId) -or
-        [string]::IsNullOrWhiteSpace([string]$State.SystemDiskPartitionTableId) -or
-        $null -eq $State.SystemDiskSize -or
-        $null -eq $State.ExpectedLinuxPartitionOffset -or
-        $null -eq $State.ExpectedLinuxPartitionSize
-    ) {
-        return $false
+    $plan = Read-ValidatedRecoveryPlan -State $State
+    foreach ($module in @('Libertix.Rollback.psm1', 'Libertix.InstallationPolicy.psm1')) {
+        Import-Module (Join-Path $State.PayloadRoot "Scripts\modules\$module") -ErrorAction Stop
     }
-    $disk = Get-Disk -Number ([int]$State.SystemDiskNumber) -ErrorAction Stop
-    if (
-        ([string]$disk.UniqueId).Trim() -ne ([string]$State.SystemDiskUniqueId).Trim() -or
-        [int64]$disk.Size -ne [int64]$State.SystemDiskSize -or
-        [string]$disk.PartitionStyle -ne "GPT" -or
-        -not $disk.Guid
-    ) {
-        return $false
-    }
-    $partitionTableId = "gpt:$(([Guid]$disk.Guid).ToString('D').ToLowerInvariant())"
-    if ($partitionTableId -ne [string]$State.SystemDiskPartitionTableId) {
-        return $false
-    }
-    $expectedSize = [int64]$State.ExpectedLinuxPartitionSize
-    $expectedOffset = [int64]$State.ExpectedLinuxPartitionOffset
-    $linuxGptType = "{0fc63daf-8483-4772-8e79-3d69d8477de4}"
+    # The ESP remains on Windows even when Linux uses another physical disk.
+    $plannedDisk = if ([int]$plan.schemaVersion -eq 5) { $plan.allocation } else { $plan.disk }
+    $disk = Get-Disk -Number ([int]$plannedDisk.number) -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $plannedDisk
+    $expectedSize = [int64]$plan.disk.installer.finalSizeBytes
+    $expectedOffset = [int64]$plan.disk.installer.finalOffsetBytes
+    $alignment = [int64](Get-LibertixInstallationPolicy).storage.partitionAlignmentBytes
     $installerPartitions = @(
-        Get-Partition -DiskNumber ([int]$State.SystemDiskNumber) -ErrorAction Stop |
+        Get-Partition -DiskNumber ([int]$plannedDisk.number) -ErrorAction Stop |
             Where-Object {
                 [int64]$_.Offset -eq $expectedOffset -and
-                [int64]$_.Size -eq $expectedSize -and
-                ($_.GptType -eq $linuxGptType -or $_.Type -match "Linux")
+                [int64]$_.Size -le $expectedSize -and
+                [int64]$_.Size -ge ($expectedSize - $alignment) -and
+                (([string]$disk.PartitionStyle -eq 'GPT' -and
+                    [string]$_.GptType -eq '{0fc63daf-8483-4772-8e79-3d69d8477de4}') -or
+                 ([string]$disk.PartitionStyle -eq 'MBR' -and [int]$_.MbrType -eq 0x83))
             }
     )
     return $installerPartitions.Count -eq 1

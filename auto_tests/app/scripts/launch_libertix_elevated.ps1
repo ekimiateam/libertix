@@ -73,6 +73,8 @@ function Invoke-InteractiveWorker {
         [string]$WorkerResultPath
     )
 
+    $launcherProcess = $null
+    $runtimeWindowVerified = $false
     try {
         $workerConfig = Get-Content -LiteralPath $WorkerConfigPath -Raw |
             ConvertFrom-Json
@@ -91,7 +93,10 @@ function Invoke-InteractiveWorker {
         ).TrimEnd('\') + '\'
         $runtimeProcess = $null
         $runtimeGraphicalProcess = $null
-        $windowDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        # A cold standalone extraction can take several minutes on lab HDDs.
+        # The window has a separate deadline once its verified child exists.
+        $windowDeadline = [DateTime]::UtcNow.AddSeconds(300)
+        $runtimeDetected = $false
         do {
             $launcherProcess.Refresh()
             if ($launcherProcess.HasExited) {
@@ -116,6 +121,10 @@ function Invoke-InteractiveWorker {
                 Sort-Object CreationDate -Descending |
                 Select-Object -First 1
             if ($runtimeProcess) {
+                if (-not $runtimeDetected) {
+                    $runtimeDetected = $true
+                    $windowDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                }
                 $runtimeGraphicalProcess = Get-Process `
                     -Id $runtimeProcess.ProcessId `
                     -ErrorAction SilentlyContinue
@@ -138,6 +147,7 @@ function Invoke-InteractiveWorker {
         $element = [Windows.Automation.AutomationElement]::FromHandle(
             $runtimeGraphicalProcess.MainWindowHandle)
         $bounds = $element.Current.BoundingRectangle
+        $runtimeWindowVerified = $true
         Write-AtomicJson -Path $WorkerResultPath -Value ([ordered]@{
                 status = "ok"
                 pid = $runtimeGraphicalProcess.Id
@@ -158,11 +168,26 @@ function Invoke-InteractiveWorker {
         exit $launcherProcess.ExitCode
     }
     catch {
+        $launchError = $_
+        $processesStopped = $false
+        if (-not $runtimeWindowVerified -and $null -ne $launcherProcess) {
+            $launcherProcess.Refresh()
+            if (-not $launcherProcess.HasExited) {
+                # Stop only this launcher's tree before deleting its one-use config.
+                $stop = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" `
+                    -ArgumentList @('/PID', [string]$launcherProcess.Id, '/T', '/F') `
+                    -WindowStyle Hidden -PassThru
+                if ($stop.WaitForExit(10000) -and $stop.ExitCode -eq 0) {
+                    $processesStopped = $true
+                }
+            }
+        }
         Write-AtomicJson -Path $WorkerResultPath -Value ([ordered]@{
                 status = "error"
-                error = $_.Exception.Message
-                exception_type = $_.Exception.GetType().FullName
-                script_stack = $_.ScriptStackTrace
+                error = $launchError.Exception.Message
+                exception_type = $launchError.Exception.GetType().FullName
+                script_stack = $launchError.ScriptStackTrace
+                processes_stopped = $processesStopped
             })
         exit 1
     }
@@ -390,7 +415,7 @@ if ($runResult.ExitCode -ne 0) {
 }
 
 $workerResult = $null
-for ($i = 0; $i -lt 700 -and -not $workerResult; $i++) {
+for ($i = 0; $i -lt 3800 -and -not $workerResult; $i++) {
     Start-Sleep -Milliseconds 100
     if (Test-Path -LiteralPath $workerResultPath -PathType Leaf) {
         try {
@@ -404,9 +429,6 @@ for ($i = 0; $i -lt 700 -and -not $workerResult; $i++) {
 }
 
 if (-not $workerResult) {
-    if ($unattendedConfigPath) {
-        Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
-    }
     $taskState = (Invoke-ScheduledTaskCommand -Arguments @(
             "/Query", "/TN", $taskName, "/V", "/FO", "LIST"
         )).Output
@@ -417,7 +439,7 @@ if (-not $workerResult) {
 }
 
 if ([string]$workerResult.status -ne "ok") {
-    if ($unattendedConfigPath) {
+    if ($unattendedConfigPath -and $workerResult.processes_stopped) {
         Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
     }
     Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `

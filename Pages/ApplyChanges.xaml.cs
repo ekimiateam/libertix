@@ -152,6 +152,11 @@ namespace Libertix.Pages
                 }
 
                 FirmwareType firmware = DetectFirmwareTypeOrThrow();
+                if (_installationState.SelectedInstallationTarget != null)
+                    Log("WARNING: " + string.Format(CultureInfo.CurrentCulture,
+                        Localization.GetString("ResizeDiskSecondaryWarning"),
+                        _installationState.SelectedInstallationTarget.Drive,
+                        WindowsSystemDrive));
                 _activeFirmware = firmware;
                 if (firmware == FirmwareType.Uefi)
                     AssertSelectedDistroSecureBootCompatibility();
@@ -176,6 +181,8 @@ namespace Libertix.Pages
                         decryptBitLocker: false);
                     ThrowIfCancellationRequested();
                 }
+                await ReadWindowsSharingInventoryAsync();
+                ThrowIfCancellationRequested();
                 if (!await PrepareWindowsSharePayloadAsync())
                     throw new InvalidOperationException("Windows read-only Linux sharing payload preparation failed.");
                 ThrowIfCancellationRequested();

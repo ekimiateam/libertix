@@ -113,6 +113,19 @@ function Set-InteractiveFixtureWallpaper {
     }
 }
 
+function Start-PreferenceFixtureWlan {
+    $service = Get-Service -Name WlanSvc -ErrorAction Stop
+    if ($service.Status -ne 'Running') {
+        # Ethernet-only snapshots do not trigger this demand-start service.
+        Start-Service -Name WlanSvc -ErrorAction Stop
+        $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+    }
+    $observed = Get-Service -Name WlanSvc -ErrorAction Stop
+    if ($observed.Status -ne 'Running') {
+        throw 'The preference fixture requires a running WLAN AutoConfig service.'
+    }
+}
+
 function Set-RegistryDwordValue {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -209,7 +222,10 @@ function New-PreferenceFixtureImages {
     }
 }
 
-$null = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$wallpaperMode = if ($config.PSObject.Properties['wallpaper_mode']) { [string]$config.wallpaper_mode } else { 'custom' }
+if ($wallpaperMode -notin @('custom', 'windows-default')) { throw 'Unknown wallpaper fixture mode.' }
+Start-PreferenceFixtureWlan
 $explorer = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop |
     Sort-Object CreationDate -Descending |
     Select-Object -First 1
@@ -226,6 +242,16 @@ $accountImagePath = Join-Path $fixtureRoot "account-image.png"
 New-PreferenceFixtureImages -WallpaperPath $wallpaperPath -AccountImagePath $accountImagePath
 
 Set-PreferenceFixtureImageAccess -Paths @($wallpaperPath, $accountImagePath) -UserSid $sid
+if ($wallpaperMode -eq 'windows-default') {
+    $wallpaperPath = Join-Path $env:SystemRoot 'Web\Wallpaper\Windows\img0.jpg'
+    if (-not (Test-Path -LiteralPath $wallpaperPath -PathType Leaf)) {
+        throw 'The Windows default wallpaper is unavailable on this test image.'
+    }
+    $decoded = [Drawing.Bitmap]::new($wallpaperPath)
+    try {
+        if ($decoded.Width -le 0 -or $decoded.Height -le 0) { throw 'Invalid Windows wallpaper.' }
+    } finally { $decoded.Dispose() }
+}
 
 $desktop = "Registry::HKEY_USERS\$sid\Control Panel\Desktop"
 $theme = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"

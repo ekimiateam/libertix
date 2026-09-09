@@ -54,6 +54,8 @@ compare_rootfs_file usr/local/lib/libertix/libertix-distribution-common.sh \
     /workspace/assets/live/libertix-distribution-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.py \
     /workspace/assets/live/libertix-installation-plan.py
+compare_rootfs_file usr/local/lib/libertix/libertix_windows_sharing.py \
+    /workspace/assets/live/libertix_windows_sharing.py
 compare_rootfs_file usr/local/lib/libertix/libertix-uefi-bootentries.py \
     /workspace/assets/live/libertix-uefi-bootentries.py
 compare_rootfs_file usr/local/lib/libertix/libertix_installation_policy.py \

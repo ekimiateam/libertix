@@ -31,6 +31,7 @@ from app.clients.vnc import VNCClient
 from app.config import Settings, get_settings
 from app.logging_config import configure_logging
 from app.models import (
+    AutomationCampaignRequest,
     AutomationRequest,
     OperationResult,
     SourceMode,
@@ -38,6 +39,7 @@ from app.models import (
     ValidationRequest,
 )
 from app.services.automation import AutomationService
+from app.services.automation_campaign import read_interrupted_campaign_summary, run_campaign
 from app.services.automation_progress import OperationProgress
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
@@ -147,18 +149,43 @@ def _run_operation(
             run_workspace=run_workspace,
         )
     if operation == "automation":
+        if isinstance(request, AutomationCampaignRequest):
+            if run_workspace is None:
+                raise ValueError("The complete campaign requires an isolated operation workspace")
+            selected = ValidationService(configured).select_vms(selectors)
+            if len(selected) != 3 or not all(vm.automation_enabled for vm in selected):
+                raise ValueError("The complete campaign requires exactly three enabled test VMs")
+            return run_campaign(
+                request,
+                [vm.name for vm in selected],
+                run_workspace,
+                lambda child, workspace, publish: _run_operation(
+                    configured, "automation", child.selectors(), child, publish, workspace
+                ),
+                on_step,
+            )
         if not isinstance(request, AutomationRequest):
             raise ValueError("Automation request body is required")
-        return AutomationService(configured).run(
+        automation_settings = configured
+        if request.snapshot_mode == "secondary-disk":
+            # Keep the shared server settings and later default/reset requests unchanged.
+            automation_settings = configured.model_copy(
+                update={"reset_snapshot": configured.secondary_disk_reset_snapshot}
+            )
+        return AutomationService(automation_settings).run(
             selectors,
             linux_username=request.linux_username,
             linux_password=request.linux_password,
             linux_size_gib=request.linux_size_gib,
+            installation_target=request.installation_target,
             distribution=request.distribution,
             monitor_iso=request.monitor_iso,
             share_windows_files_in_linux=request.share_windows_files_in_linux,
             share_linux_files_in_windows=request.share_linux_files_in_windows,
             migrate_windows_preferences=request.migrate_windows_preferences,
+            preference_wallpaper=request.preference_wallpaper,
+            storage_fixture=request.storage_fixture,
+            secondary_snapshot=request.snapshot_mode == "secondary-disk",
             simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
             force_offline_ntfs_resize=request.force_offline_ntfs_resize,
             boot_guardian_fault=request.boot_guardian_fault,
@@ -354,6 +381,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             with terminal_result_lock:
                 if terminal_result_seen.is_set():
                     return
+                if isinstance(request, AutomationCampaignRequest) and not result.campaign_summary:
+                    result.campaign_summary = read_interrupted_campaign_summary(run_workspace)
                 event = projector.project_result(result)
                 terminal_result_seen.set()
                 automation_progress.set()
@@ -561,7 +590,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def execute_isolated_automation(
         selectors: list[str] | None,
-        request: AutomationRequest,
+        request: AutomationRequest | AutomationCampaignRequest,
     ) -> OperationResult:
         terminal_result: OperationResult | None = None
         async for payload in stream_operation(
@@ -642,6 +671,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> OperationResult:
         selectors, request = automation_request(body, vm, source)
         return await execute_isolated_automation(selectors, request)
+
+    @api.post("/api/v1/automation/full", response_model=OperationResult)
+    async def automation_full(body: AutomationCampaignRequest) -> OperationResult:
+        return await execute_isolated_automation(body.selectors(), body)
+
+    @api.post("/api/v1/automation/full/stream")
+    async def automation_full_stream(
+        body: AutomationCampaignRequest,
+        format: Annotated[Literal["compact", "ndjson"], Query()] = "compact",
+    ) -> StreamingResponse:
+        return StreamingResponse(
+            stream_operation("automation", body.selectors(), body, format),
+            media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
+        )
 
     @api.post("/api/v1/validation/stream")
     async def validation_stream(

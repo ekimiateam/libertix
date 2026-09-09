@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
 import uuid
@@ -189,6 +190,7 @@ class PostInstallValidationMixin:
                     baseline,
                     result,
                     step="automation.bios_rollback.verify",
+                    storage_fixture_receipt=options.storage_fixture_receipt,
                     failure_message=(
                         "The BIOS cancellation did not restore the exact Windows baseline"
                     ),
@@ -337,7 +339,7 @@ class PostInstallValidationMixin:
                 result,
                 "linux",
                 RemoteCheck(
-                    "linux.post_install_result_ui",
+                    "linux.post_install_result_process",
                     'i=0; while [ "$i" -lt 60 ]; do '
                     "pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
                     ">/dev/null && exit 0; "
@@ -352,6 +354,7 @@ class PostInstallValidationMixin:
                 linux_ssh,
             )
             self._run_linux_checks(linux_ssh, vm, options, result)
+            self._verify_linux_redirected_documents(linux_ssh, vm, options, result)
             self._verify_windows_preference_migration(linux_ssh, vm, options, result)
             artifacts = self._create_cross_os_artifacts(linux_ssh, vm, options, result)
             self._request_windows_boot(linux_ssh, vm, options, result)
@@ -546,8 +549,40 @@ class PostInstallValidationMixin:
                 )
             if options.boot_guardian_fault == "bios-postinstall-rollback":
                 self._rollback_completed_bios_installation(final_windows_ssh, vm, options, result)
+            if options.boot_guardian_fault == "uefi-postinstall-rollback":
+                self._rollback_completed_uefi_installation(final_windows_ssh, vm, options, result)
         finally:
             final_windows_ssh.__exit__(None, None, None)
+
+    def _rollback_completed_uefi_installation(
+        self, ssh: SSHClient, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
+    ) -> None:
+        if (
+            vm.firmware != "uefi"
+            or options.rollback_baseline is None
+            or any(step.status == "error" for step in result.steps)
+        ):
+            raise WorkflowError(
+                "automation.uefi_postinstall_rollback",
+                "Post-install UEFI rollback requires successful checks and its Windows baseline",
+                details={"vm": vm.name},
+            )
+        self._run_windows_script_resiliently(
+            ssh,
+            script_name="request_uefi_postinstall_rollback.ps1",
+            config={"expected_firmware": "uefi"},
+            step="automation.uefi_postinstall_rollback.request",
+            timeout=960,
+        )
+        self._verify_exact_windows_rollback(
+            ssh,
+            vm,
+            options.rollback_baseline,
+            result,
+            step="automation.uefi_postinstall_rollback.verify",
+            storage_fixture_receipt=options.storage_fixture_receipt,
+            failure_message="The installed UEFI Linux partition was not fully rolled back",
+        )
 
     def _rollback_completed_bios_installation(
         self, ssh: SSHClient, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
@@ -575,7 +610,42 @@ class PostInstallValidationMixin:
             options.rollback_baseline,
             result,
             step="automation.bios_postinstall_rollback.verify",
+            storage_fixture_receipt=options.storage_fixture_receipt,
             failure_message="The installed BIOS Linux partition was not fully rolled back",
+        )
+
+    def _verify_linux_redirected_documents(self, ssh, vm, options, result) -> None:
+        receipt = (options.storage_fixture_receipt or {}).get("user_documents")
+        if receipt is None or not options.share_windows_files_in_linux:
+            return
+        step = "automation.test.redirected_documents"
+        witnesses = [
+            item
+            for item in receipt["files"]
+            if re.fullmatch(r"libertix-user-data-[0-9a-f]{32}\.txt", item["relative"])
+        ]
+        if len(witnesses) != 1:
+            raise WorkflowError(step, "The Windows-only Documents witness is missing or ambiguous")
+        evidence = {key: receipt[key] for key in ("volume_id", "user_sid", "destination")}
+        evidence["witness"] = witnesses[0]
+        response = self._run_linux_script_resiliently(
+            ssh,
+            script_name="check_linux_redirected_documents.py",
+            arguments=("--receipt", json.dumps(evidence)),
+            step=step,
+            timeout=60,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout, prefixes=("REDIRECTED_DOCUMENTS",)
+        )
+        if values.get("REDIRECTED_DOCUMENTS") != "OK":
+            raise WorkflowError(
+                step, "Linux could not prove access to redirected Windows Documents"
+            )
+        result.ok(
+            step,
+            "Linux read the Windows-only witness through the redirected Documents shortcut",
+            vm=vm.name,
         )
 
     def _verify_windows_preference_migration(
@@ -604,6 +674,8 @@ class PostInstallValidationMixin:
                 options.linux_username,
                 "--wallpaper-sha256",
                 fixture["WALLPAPER_SHA256"],
+                "--wallpaper-mode",
+                options.preference_wallpaper,
                 "--account-image-sha256",
                 fixture["ACCOUNT_IMAGE_SHA256"],
             ),
@@ -842,14 +914,22 @@ class PostInstallValidationMixin:
             focus = self._run_linux_script_resiliently(
                 guest_ssh,
                 script_name="focus_linux_post_install_result.py",
-                arguments=("--pid", process_id, "--timeout", "15"),
+                arguments=("--pid", process_id, "--ready-timeout", "90", "--timeout", "15"),
                 step="automation.linux_post_install_result_focused",
-                timeout=30,
+                timeout=120,
             )
             values = self.validation.parse_powershell_results(
                 focus.stdout,
-                prefixes=("PROCESS_ID", "WINDOW_ID", "ACTIVE_WINDOW_PROVEN", "RESULT"),
+                prefixes=(
+                    "PROCESS_ID",
+                    "WINDOW_ID",
+                    "ACTIVE_WINDOW_PROVEN",
+                    "FINGERPRINT",
+                    "RESULT",
+                ),
             )
+            if values.get("RESULT") == "NEEDS_USER_ACTIVATION":
+                values = self._activate_wayland_result(vm, guest_ssh, process_id, values)
             if (
                 values.get("PROCESS_ID") != process_id
                 or values.get("ACTIVE_WINDOW_PROVEN") != "True"
@@ -969,6 +1049,52 @@ class PostInstallValidationMixin:
             dismissal_exit_code=dismissal.exit_code,
         )
 
+    def _activate_wayland_result(
+        self, vm: VMConfig, guest_ssh: SSHClient, process_id: str, initial: dict[str, str]
+    ) -> dict[str, str]:
+        fingerprint = initial.get("FINGERPRINT", "")
+        if initial.get("PROCESS_ID") != process_id or not re.fullmatch(
+            r"[0-9a-f]{64}", fingerprint
+        ):
+            raise WorkflowError(
+                "automation.linux_post_install_result_focused",
+                "The Wayland result identity is invalid",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        values = initial
+        for count in range(1, 7):
+            client = self.vnc.connect(vm.vnc)
+            try:
+                client.keyDown("alt")
+                try:
+                    for _ in range(count):
+                        client.keyPress("tab")
+                finally:
+                    client.keyUp("alt")
+            finally:
+                client.disconnect()
+            time.sleep(0.5)
+            probe = self._run_linux_script_resiliently(
+                guest_ssh,
+                script_name="focus_linux_post_install_result.py",
+                arguments=("--pid", process_id, "--timeout", "2", "--check-only"),
+                step="automation.linux_post_install_result_focused",
+                timeout=10,
+            )
+            values = self.validation.parse_powershell_results(
+                probe.stdout,
+                prefixes=("PROCESS_ID", "FINGERPRINT", "ACTIVE_WINDOW_PROVEN", "RESULT"),
+            )
+            if values.get("PROCESS_ID") != process_id or values.get("FINGERPRINT") != fingerprint:
+                raise WorkflowError(
+                    "automation.linux_post_install_result_focused",
+                    "The Wayland result identity changed during activation",
+                    details={"vm": vm.name, "target": vm.host},
+                )
+            if values.get("ACTIVE_WINDOW_PROVEN") == "True" and values.get("RESULT") == "OK":
+                return values
+        return values
+
     def _prepare_linux_graphical_session(
         self,
         linux_ssh: SSHClient,
@@ -984,14 +1110,38 @@ class PostInstallValidationMixin:
             'type=$(loginctl show-session "$sid" -p Type --value); '
             'active=$(loginctl show-session "$sid" -p Active --value); '
             'case "$type:$active" in x11:yes|wayland:yes) '
+            'if [ "$(loginctl show-session "$sid" -p LockedHint --value)" != no ]; then '
+            'case "$(systemctl show display-manager.service -p Id --value)" in '
+            "gdm.service|gdm3.service) printf LIBERTIX_GDM_LOCKED;; "
+            "*) printf LIBERTIX_DESKTOP_LOCKED;; esac; exit 0; fi; "
             "printf LIBERTIX_DESKTOP_READY; exit 0;; esac; done; "
             "for sid in $(loginctl list-sessions --no-legend | awk '{print $1}'); do "
             'class=$(loginctl show-session "$sid" -p Class --value); '
             'type=$(loginctl show-session "$sid" -p Type --value); '
             'active=$(loginctl show-session "$sid" -p Active --value); '
             'case "$class:$type:$active" in greeter:x11:yes|greeter:wayland:yes) '
-            "printf LIBERTIX_GREETER_READY; exit 0;; esac; done; exit 1"
+            'case "$(systemctl show display-manager.service -p Id --value)" in '
+            "gdm.service|gdm3.service) printf LIBERTIX_GDM_GREETER_READY;; "
+            "*) printf LIBERTIX_GREETER_READY;; esac; exit 0;; esac; done; exit 1"
         )
+
+        def finish_if_desktop(response: CommandResult, attempt: int) -> bool:
+            if response.exit_code != 0 or "LIBERTIX_DESKTOP_READY" not in response.stdout:
+                return False
+            capture = self._capture_with_name(
+                vm,
+                f"post-install-linux-session-ready-{attempt:02d}",
+            )
+            result.ok(
+                "automation.linux_graphical_session",
+                "The active Linux graphical session was proven by loginctl",
+                vm=vm.name,
+                target=vm.vnc,
+                attempt=attempt,
+                capture=str(capture),
+            )
+            return True
+
         for attempt in range(1, 6):
             response = linux_ssh.run(
                 graphical_session_probe,
@@ -999,22 +1149,16 @@ class PostInstallValidationMixin:
                 timeout=30,
                 check=False,
             )
-            if response.exit_code == 0 and "LIBERTIX_DESKTOP_READY" in response.stdout:
-                capture = self._capture_with_name(
-                    vm,
-                    f"post-install-linux-session-ready-{attempt:02d}",
-                )
-                result.ok(
-                    "automation.linux_graphical_session",
-                    "The active Linux graphical session was proven by loginctl",
-                    vm=vm.name,
-                    target=vm.vnc,
-                    attempt=attempt,
-                    capture=str(capture),
-                )
+            if finish_if_desktop(response, attempt):
                 return
 
-            if "LIBERTIX_GREETER_READY" not in response.stdout:
+            gdm_account_selection = "LIBERTIX_GDM_GREETER_READY" in response.stdout
+            gdm_locked_session = "LIBERTIX_GDM_LOCKED" in response.stdout
+            if (
+                "LIBERTIX_GREETER_READY" not in response.stdout
+                and not gdm_account_selection
+                and not gdm_locked_session
+            ):
                 result.ok(
                     "automation.linux_graphical_session_wait",
                     "No active Linux desktop or login greeter is proven yet",
@@ -1028,6 +1172,8 @@ class PostInstallValidationMixin:
             client = None
             capture_error: WorkflowError | None = None
             try:
+                if gdm_account_selection or gdm_locked_session:
+                    self._assert_single_gdm_account(linux_ssh, username)
                 client = self.vnc.connect(vm.vnc)
                 self._capture_from_client(
                     client,
@@ -1035,6 +1181,24 @@ class PostInstallValidationMixin:
                     f"post-install-linux-login-{attempt:02d}-ready",
                     result,
                 )
+                if gdm_account_selection:
+                    # GDM can leave the account list without keyboard focus after
+                    # cancelling authentication. Home/Enter alone then do nothing.
+                    client.keyPress("esc")
+                    if not self._wait_for_gdm_password_worker(linux_ssh, present=False):
+                        continue
+                    client.keyPress("home")
+                    client.keyPress("enter")
+                    if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                        client.keyPress("tab")
+                        client.keyPress("enter")
+                        if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                            continue
+                elif gdm_locked_session:
+                    if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                        client.keyPress("enter")
+                        if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                            continue
                 # LightDM already focuses the password entry for the selected
                 # user. Pressing Enter here would submit the empty field and
                 # discard the real password while authentication is pending.
@@ -1043,13 +1207,13 @@ class PostInstallValidationMixin:
                 client.keyUp("ctrl")
                 client.keyPress("bsp")
                 self._type_text(client, password, vm.vnc_keyboard_layout)
+                client.keyPress("enter")
                 self._capture_from_client(
                     client,
                     vm,
-                    f"post-install-linux-login-{attempt:02d}-password-entered",
+                    f"post-install-linux-login-{attempt:02d}-submitted",
                     result,
                 )
-                client.keyPress("enter")
             except WorkflowError as exc:
                 if exc.step != "automation.capture":
                     raise
@@ -1065,6 +1229,7 @@ class PostInstallValidationMixin:
                     target=vm.vnc,
                     attempt=attempt,
                     error=capture_error.message,
+                    capture_details=capture_error.details,
                 )
                 time.sleep(10)
                 continue
@@ -1075,13 +1240,89 @@ class PostInstallValidationMixin:
                 target=vm.vnc,
                 attempt=attempt,
             )
-            time.sleep(10)
+            # A desktop on slow storage can take longer than the GDM spinner.
+            # Do not cancel or restart that authentication conversation while it is settling.
+            for _ in range(12):
+                time.sleep(5)
+                response = linux_ssh.run(
+                    graphical_session_probe,
+                    step="automation.linux_graphical_session",
+                    timeout=30,
+                    check=False,
+                )
+                if finish_if_desktop(response, attempt):
+                    return
 
         raise WorkflowError(
             "automation.linux_graphical_session",
             "The Linux graphical session did not become active after five attempts",
             details={"vm": vm.name, "target": vm.vnc},
         )
+
+    @staticmethod
+    def _wait_for_gdm_password_worker(linux_ssh: SSHClient, *, present: bool) -> bool:
+        # A submitted GDM session retains its PAM worker. Only a worker not
+        # leading an existing loginctl session proves a new password conversation.
+        # The "Not listed" username field starts no such conversation.
+        probe = (
+            "sessions=$(loginctl list-sessions --no-legend) || exit 2; "
+            "leaders=' '; for sid in $(printf '%s\\n' \"$sessions\" | awk '{print $1}'); do "
+            'leader=$(loginctl show-session "$sid" -p Leader --value) || exit 2; '
+            'case "$leader" in ""|*[!0-9]*) exit 2;; esac; '
+            'leaders="$leaders$leader "; done; '
+            "workers=$(pgrep -u 0 -f '^gdm-session-worker \\[pam/gdm-password\\]$'); "
+            'status=$?; [ "$status" -le 1 ] || exit 2; '
+            'for worker in $workers; do case "$leaders" in *" $worker "*) continue;; esac; '
+            "printf LIBERTIX_GDM_PASSWORD_PENDING; exit 0; done; "
+            "printf LIBERTIX_GDM_PASSWORD_ABSENT"
+        )
+        expected = "LIBERTIX_GDM_PASSWORD_PENDING" if present else "LIBERTIX_GDM_PASSWORD_ABSENT"
+        for _ in range(5):
+            response = linux_ssh.run(
+                probe, step="automation.gdm_password_state", timeout=15, check=False
+            )
+            if response.exit_code != 0 or response.stdout.strip() not in {
+                "LIBERTIX_GDM_PASSWORD_PENDING",
+                "LIBERTIX_GDM_PASSWORD_ABSENT",
+            }:
+                raise WorkflowError(
+                    "automation.gdm_password_state", "Could not establish the GDM password state"
+                )
+            if response.stdout.strip() == expected:
+                return True
+            time.sleep(1)
+        return False
+
+    def _assert_single_gdm_account(self, linux_ssh: SSHClient, username: str) -> None:
+        account_uid = linux_ssh.run(
+            f"id -u -- {shlex.quote(username)}",
+            step="automation.gdm_account_identity",
+            timeout=15,
+        ).stdout.strip()
+        if not account_uid.isdigit() or int(account_uid) < 1000:
+            raise WorkflowError("automation.gdm_account_identity", "Invalid GDM test account UID")
+        account_path = f"/org/freedesktop/Accounts/User{account_uid}"
+        reply = linux_ssh.run(
+            "busctl --system call org.freedesktop.Accounts /org/freedesktop/Accounts "
+            "org.freedesktop.Accounts ListCachedUsers && "
+            f"busctl --system get-property org.freedesktop.Accounts {account_path} "
+            "org.freedesktop.Accounts.User UserName && "
+            f"busctl --system get-property org.freedesktop.Accounts {account_path} "
+            "org.freedesktop.Accounts.User SystemAccount",
+            step="automation.gdm_account_identity",
+            timeout=15,
+        )
+        try:
+            values = [shlex.split(line) for line in reply.stdout.splitlines() if line.strip()]
+        except ValueError as error:
+            raise WorkflowError(
+                "automation.gdm_account_identity", "Malformed GDM account inventory"
+            ) from error
+        if values != [["ao", "1", account_path], ["s", username], ["b", "false"]]:
+            raise WorkflowError(
+                "automation.gdm_account_identity",
+                "GDM account selection requires exactly the expected non-system test account",
+            )
 
     def _prepare_windows_graphical_session(
         self,
@@ -1797,7 +2038,9 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
     ) -> CrossOsArtifacts:
         run_id = uuid.uuid4().hex
-        windows_relative = f"Users/Public/Documents/libertix-auto-test-{run_id}.bin"
+        # The public profile can be relocated or absent. This fixture belongs to the
+        # mounted system volume, independently of the user-folder sharing checks.
+        windows_relative = f"libertix-auto-test-{run_id}.bin"
         windows_linux_path = f"/mnt/windows/{windows_relative}"
         linux_relative = f"libertix-auto-test-{run_id}.bin"
         linux_path = f"/home/{options.linux_username}/{linux_relative}"
@@ -2576,6 +2819,7 @@ class PostInstallValidationMixin:
                 baseline,
                 result,
                 step="automation.preferred_path_rollback.verify",
+                storage_fixture_receipt=options.storage_fixture_receipt,
                 failure_message=(
                     "The preferred-path rollback did not restore the exact Windows baseline"
                 ),
@@ -2653,6 +2897,7 @@ class PostInstallValidationMixin:
                 baseline,
                 result,
                 step="automation.bootnext_rollback.verify",
+                storage_fixture_receipt=options.storage_fixture_receipt,
                 failure_message=(
                     "The BootNext fallback rollback did not restore the exact Windows baseline"
                 ),
@@ -2810,6 +3055,7 @@ class PostInstallValidationMixin:
         *,
         step: str,
         failure_message: str,
+        storage_fixture_receipt: dict[str, object] | None = None,
     ) -> None:
         verification = self._run_windows_script_resiliently(
             ssh,
@@ -2821,6 +3067,7 @@ class PostInstallValidationMixin:
                 "system_partition_offset": int(baseline["SYSTEM_PARTITION_OFFSET"]),
                 "system_partition_size": int(baseline["SYSTEM_PARTITION_SIZE"]),
                 "partition_layout": json.loads(baseline["PARTITION_LAYOUT_JSON"]),
+                "storage_layout": json.loads(baseline["STORAGE_LAYOUT_JSON"]),
                 "baseline_plan_ids": json.loads(baseline["EXECUTION_PLAN_IDS_JSON"]),
                 "wait_timeout_seconds": 900,
             },
@@ -2840,6 +3087,7 @@ class PostInstallValidationMixin:
                 "ROLLBACK_LEDGER_VERIFIED",
                 "ROLLBACK_PLAN_ID",
                 "ROLLBACK_PARTITION_LAYOUT_MATCHES",
+                "ROLLBACK_STORAGE_LAYOUT_MATCHES",
                 "RESULT",
             ),
         )
@@ -2847,6 +3095,7 @@ class PostInstallValidationMixin:
             verified.get("ROLLBACK_VERIFIED") != "True"
             or verified.get("ROLLBACK_LEDGER_VERIFIED") != "True"
             or verified.get("ROLLBACK_PARTITION_LAYOUT_MATCHES") != "True"
+            or verified.get("ROLLBACK_STORAGE_LAYOUT_MATCHES") != "True"
             or verified.get("ROLLBACK_BOOT_GUARDIAN_PRESENT") != "False"
             or verified.get("RESULT") != "OK"
         ):
@@ -2863,6 +3112,7 @@ class PostInstallValidationMixin:
             target=vm.host,
             **verified,
         )
+        self._verify_windows_storage_fixture(ssh, vm, result, storage_fixture_receipt)
 
     @staticmethod
     def _read_windows_boot_id(ssh: SSHClient, vm: VMConfig) -> str:
@@ -3217,6 +3467,43 @@ class PostInstallValidationMixin:
         finally:
             windows_ssh.__exit__(None, None, None)
 
+    def _verify_windows_storage_fixture(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        receipt: dict[str, object] | None,
+        installation_target: str | None = None,
+    ) -> None:
+        if receipt is not None:
+            config = {"phase": "verify", "receipt": receipt}
+            if installation_target is not None:
+                config["installation_target"] = installation_target
+            response = self._run_windows_script_resiliently(
+                ssh,
+                script_name="storage_fixture.ps1",
+                config=config,
+                step="automation.storage_fixture.preserved",
+                timeout=120,
+            )
+            values = self.validation.parse_powershell_results(
+                response.stdout,
+                prefixes=("STORAGE_FIXTURE_VERIFIED",),
+            )
+            if values.get("STORAGE_FIXTURE_VERIFIED") != "True":
+                raise WorkflowError(
+                    "automation.storage_fixture.preserved",
+                    "Storage fixture preservation was not verified",
+                    details={"vm": vm.name},
+                )
+            result.ok(
+                "automation.storage_fixture.preserved",
+                "Storage fixture partition identities, geometry and data witnesses preserved",
+                vm=vm.name,
+            )
+            if "user_documents" in receipt:
+                self._verify_storage_documents_fixture(ssh, vm, receipt["user_documents"], result)
+
     def _run_windows_checks(
         self,
         ssh: SSHClient,
@@ -3225,6 +3512,9 @@ class PostInstallValidationMixin:
         artifacts: CrossOsArtifacts,
         result: ResultBuilder,
     ) -> None:
+        self._verify_windows_storage_fixture(
+            ssh, vm, result, options.storage_fixture_receipt, options.installation_target
+        )
         plan = build_windows_validation_plan(vm, options, artifacts)
         for name in plan.check_names:
             result.ok(

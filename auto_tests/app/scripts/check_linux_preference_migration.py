@@ -86,10 +86,31 @@ def verify_wallpaper(home: Path, prefix: str, expected_hash: str) -> None:
         expect_gsetting(f"{prefix}.desktop.background", "picture-uri-dark", uri)
 
 
+def verify_default_wallpaper(home: Path, prefix: str) -> None:
+    from gi.repository import Gio
+
+    if list((home / "Pictures" / "Libertix").glob("windows-wallpaper.*")):
+        fail("a stock Windows wallpaper was copied into the Linux user account")
+    settings = Gio.Settings.new(f"{prefix}.desktop.background")
+    keys = ["picture-uri"] + (["picture-uri-dark"] if prefix == "org.gnome" else [])
+    for key in keys:
+        expected = settings.get_default_value(key)
+        observed = settings.get_value(key)
+        if expected is None or observed != expected:
+            fail(f"the Linux default wallpaper was changed: {key}")
+        uri = observed.unpack()
+        image = Gio.File.new_for_uri(uri).get_path()
+        if not image or not Path(image).is_file():
+            fail(f"the Linux default wallpaper is not an accessible file: {key}")
+
+
 def run_checks(args: argparse.Namespace) -> None:
     home = Path.home()
     prefix = "org.cinnamon" if args.distribution == "mint" else "org.gnome"
-    verify_wallpaper(home, prefix, args.wallpaper_sha256)
+    if args.wallpaper_mode == "windows-default":
+        verify_default_wallpaper(home, prefix)
+    else:
+        verify_wallpaper(home, prefix, args.wallpaper_sha256)
     face = home / ".face"
     verify_user_asset(face, args.account_image_sha256)
     account_icon = Path("/var/lib/AccountsService/icons") / args.username
@@ -156,6 +177,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distribution", choices=("mint", "zorin"), required=True)
     parser.add_argument("--username", required=True)
     parser.add_argument("--wallpaper-sha256", required=True)
+    parser.add_argument("--wallpaper-mode", choices=("custom", "windows-default"), default="custom")
     parser.add_argument("--account-image-sha256", required=True)
     parser.add_argument("--inside-session", action="store_true")
     return parser.parse_args()

@@ -19,6 +19,7 @@ namespace Libertix.Tests
     public sealed class InstallationContractsTests
     {
         private const string PlanId = "0123456789abcdef0123456789abcdef";
+        private const long GiB = InstallationSizePolicy.BytesPerGiB;
 
         [TestMethod]
         public void Aria2UsesOneNonResumableConnectionWithoutByteRangeSupport()
@@ -326,6 +327,66 @@ namespace Libertix.Tests
         {
             Assert.ThrowsException<InvalidOperationException>(
                 () => PowerShellJsonResult.ParseFinalObject("CHECK=storage\r\nnot json\r\n"));
+        }
+
+        [TestMethod]
+        public void PowerShellJsonResultPreservesInstallationTargetObjects()
+        {
+            PowerShellJsonResult result = PowerShellJsonResult.ParseFinalObject(
+                "{\"targets\":[{\"drive\":\"C:\",\"isWindows\":true,\"diskNumber\":3}," +
+                "{\"drive\":\"J:\",\"isWindows\":false,\"diskNumber\":0}]}");
+            InstallationTargetInfo[] targets = result.GetObjectArray<InstallationTargetInfo>("targets");
+            Assert.AreEqual(2, targets.Length);
+            Assert.AreEqual("C:", targets[0].Drive);
+            Assert.IsTrue(targets[0].IsWindows);
+            Assert.AreEqual(3, targets[0].DiskNumber);
+            Assert.AreEqual("J:", targets[1].Drive);
+            Assert.IsFalse(targets[1].IsWindows);
+            Assert.AreEqual(0, targets[1].DiskNumber);
+        }
+
+        [DataTestMethod]
+        [DataRow("{\"targets\":{}}")]
+        [DataRow("{\"targets\":[null]}")]
+        [DataRow("{\"targets\":[\"C:\"]}")]
+        [DataRow("{}")]
+        public void PowerShellJsonResultRejectsMalformedTargetCollections(string json)
+        {
+            Assert.ThrowsException<InvalidOperationException>(() =>
+                PowerShellJsonResult.ParseFinalObject(json).GetObjectArray<InstallationTargetInfo>("targets"));
+        }
+
+        [TestMethod]
+        public void PowerShellJsonResultRetainsTheExplicitNoAllocationDefault()
+        {
+            Assert.IsNull(PowerShellJsonResult.ParseFinalObject("{\"allocation\":null}")
+                .GetNullableObject<InstallationAllocation>("allocation"));
+        }
+
+        [TestMethod]
+        public void PowerShellJsonResultPreservesTheSelectedSourceIdentity()
+        {
+            var allocation = PowerShellJsonResult.ParseFinalObject(
+                "{\"allocation\":{\"number\":2,\"sourceDrive\":\"J:\",\"sourceVolumeId\":\"volume-j\"," +
+                "\"sourcePartition\":{\"number\":1,\"offsetBytes\":1048576,\"sizeBytes\":64424509440}," +
+                "\"sourceBitLockerState\":\"EncryptedOrProtected\"}}")
+                .GetNullableObject<InstallationAllocation>("allocation");
+            Assert.AreEqual(2, allocation.Number);
+            Assert.AreEqual("J:", allocation.SourceDrive);
+            Assert.AreEqual("volume-j", allocation.SourceVolumeId);
+            Assert.AreEqual(64424509440L, allocation.SourcePartition.SizeBytes);
+            Assert.AreEqual("EncryptedOrProtected", allocation.SourceBitLockerState);
+        }
+
+        [DataTestMethod]
+        [DataRow("{}")]
+        [DataRow("{\"allocation\":[]}")]
+        [DataRow("{\"allocation\":\"J:\"}")]
+        [DataRow("{\"allocation\":false}")]
+        public void PowerShellJsonResultRejectsMissingOrNonObjectAllocation(string json)
+        {
+            Assert.ThrowsException<InvalidOperationException>(() => PowerShellJsonResult.ParseFinalObject(json)
+                .GetNullableObject<InstallationAllocation>("allocation"));
         }
 
         [TestMethod]
@@ -679,6 +740,86 @@ namespace Libertix.Tests
         public void InstallationPlanValidatorAcceptsCanonicalUefiPlan()
         {
             InstallationPlanValidator.Validate(CreateValidPlan());
+        }
+
+        private static InstallationPlan CreateSeparateAllocationPlan(bool bios, bool gptAllocation)
+        {
+            InstallationPlan plan = CreateValidPlan();
+            if (bios)
+            {
+                plan.Firmware = InstallationFirmware.Bios;
+                plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+                plan.Disk.PartitionTableId = "mbr:12345678";
+                plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+                plan.Runtime.SecureBootEnabled = false;
+                plan.Runtime.TrustedMicrosoftUefiAuthorities = new string[0];
+            }
+            plan.SchemaVersion = InstallationPlan.SeparateAllocationSchemaVersion;
+            plan.Allocation = new InstallationAllocation
+            {
+                Number = 3, UniqueId = plan.Disk.UniqueId, SizeBytes = 64L * GiB,
+                PartitionStyle = gptAllocation ? InstallationPartitionStyle.Gpt : InstallationPartitionStyle.Mbr,
+                PartitionTableId = gptAllocation
+                    ? "gpt:87654321-1234-1234-1234-123456789abc" : "mbr:87654321",
+                LogicalSectorSizeBytes = 512, SourceDrive = "D:", SourceVolumeId = "volume-data",
+                SourceNtfsUuid = "1234567890ABCDEF",
+                SourceBitLockerState = InstallationBitLockerState.FullyDecrypted,
+                SourcePartition = new PartitionIdentity { Number = 2, OffsetBytes = GiB, SizeBytes = 60L * GiB }
+            };
+            plan.Disk.Installer.FinalOffsetBytes = 61L * GiB - plan.Disk.Installer.FinalSizeBytes;
+            plan.Disk.Installer.OffsetBytes = plan.Disk.Installer.FinalOffsetBytes;
+            return plan;
+        }
+
+        [DataTestMethod]
+        [DataRow(false, false)]
+        [DataRow(false, true)]
+        [DataRow(true, false)]
+        [DataRow(true, true)]
+        public void SeparateAllocationPreservesTheWindowsBootDisk(bool bios, bool gptAllocation)
+        {
+            InstallationPlan plan = CreateSeparateAllocationPlan(bios, gptAllocation);
+            PartitionIdentity windows = plan.Disk.Windows;
+            InstallationPlanValidator.Validate(plan);
+            Assert.AreSame(windows, plan.Disk.Windows);
+            Assert.AreEqual(0, plan.Disk.Number);
+            Assert.AreEqual(3, plan.Allocation.Number);
+        }
+
+        [DataTestMethod]
+        [DataRow("same-disk")]
+        [DataRow("same-table")]
+        [DataRow("same-drive")]
+        [DataRow("out-of-disk")]
+        [DataRow("wrong-extent")]
+        [DataRow("old-schema")]
+        [DataRow("missing-allocation")]
+        [DataRow("disk-id-control-character")]
+        [DataRow("volume-id-control-character")]
+        [DataRow("ntfs-uuid-missing")]
+        [DataRow("ntfs-uuid-zero")]
+        [DataRow("ntfs-uuid-short")]
+        [DataRow("ntfs-uuid-lowercase")]
+        public void SeparateAllocationRejectsAmbiguousOrInconsistentTargets(string mutation)
+        {
+            InstallationPlan plan = CreateSeparateAllocationPlan(false, true);
+            switch (mutation)
+            {
+                case "same-disk": plan.Allocation.Number = plan.Disk.Number; break;
+                case "same-table": plan.Allocation.PartitionTableId = plan.Disk.PartitionTableId; break;
+                case "same-drive": plan.Allocation.SourceDrive = plan.Disk.SystemDrive; break;
+                case "out-of-disk": plan.Allocation.SourcePartition.SizeBytes = 65L * GiB; break;
+                case "wrong-extent": plan.Disk.Installer.FinalOffsetBytes = 150L * GiB; break;
+                case "old-schema": plan.SchemaVersion = 4; break;
+                case "missing-allocation": plan.Allocation = null; break;
+                case "disk-id-control-character": plan.Allocation.UniqueId = "disk\nidentity"; break;
+                case "volume-id-control-character": plan.Allocation.SourceVolumeId = "volume\0identity"; break;
+                case "ntfs-uuid-missing": plan.Allocation.SourceNtfsUuid = null; break;
+                case "ntfs-uuid-zero": plan.Allocation.SourceNtfsUuid = "0000000000000000"; break;
+                case "ntfs-uuid-short": plan.Allocation.SourceNtfsUuid = "12345678"; break;
+                case "ntfs-uuid-lowercase": plan.Allocation.SourceNtfsUuid = "1234567890abcdef"; break;
+            }
+            Assert.ThrowsException<InstallationPlanValidationException>(() => InstallationPlanValidator.Validate(plan));
         }
 
         [TestMethod]
@@ -1182,8 +1323,10 @@ namespace Libertix.Tests
             }
         }
 
-        [TestMethod]
-        public void PlanFactoryBuildsValidatedUefiIntentFromWindowsInputs()
+        [DataTestMethod]
+        [DataRow(false)]
+        [DataRow(true)]
+        public void PlanFactoryBuildsValidatedUefiIntentFromWindowsInputs(bool separateAllocation)
         {
             const long GiB = InstallationSizePolicy.BytesPerGiB;
             Assert.IsTrue(StartupOptions.TryParse(
@@ -1196,6 +1339,7 @@ namespace Libertix.Tests
                 {
                     PlanId = PlanId,
                     Firmware = FirmwareType.Uefi,
+                    Allocation = separateAllocation ? CreateSeparateAllocationPlan(false, true).Allocation : null,
                     Distribution = new DistroInfo
                     {
                         Id = "mint",
@@ -1267,6 +1411,13 @@ namespace Libertix.Tests
             Assert.IsTrue(plan.Runtime.SecureBootEnabled);
             Assert.AreEqual(40L * GiB, plan.Disk.Installer.FinalSizeBytes);
             Assert.AreEqual(8L * GiB, plan.Disk.Installer.StagingSizeBytes);
+            Assert.AreEqual(separateAllocation ? 5 : 4, plan.SchemaVersion);
+            Assert.AreEqual((separateAllocation ? 21L : 142L) * GiB, plan.Disk.Installer.FinalOffsetBytes);
+            Assert.AreEqual(0, plan.Disk.Number);
+            Assert.AreEqual(180L * GiB, plan.Disk.Windows.SizeBytes);
+            Assert.AreEqual(240L * GiB, plan.Disk.Recovery.OffsetBytes);
+            StringAssert.StartsWith(plan.Distribution.InstallerIsoWindowsPath, @"C:\");
+            Assert.AreEqual(@"C:\ProgramData\Libertix\Recovery\account-secret.env", plan.Account.PasswordHashWindowsPath);
             Assert.IsNull(plan.Development);
         }
 
@@ -1348,6 +1499,26 @@ namespace Libertix.Tests
             InstallationPlan plan = CreateValidPlan();
             plan.Disk.Installer.OffsetBytes += 1024L * 1024L;
 
+            Assert.ThrowsException<InstallationPlanValidationException>(
+                () => InstallationPlanValidator.Validate(plan));
+        }
+
+        [TestMethod]
+        public void UefiPlanAcceptsRecoveryBeforeWindowsWithoutMovingIt()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.Recovery.OffsetBytes = 256L * 1024L * 1024L;
+            plan.Disk.Recovery.SizeBytes = 512L * 1024L * 1024L;
+            InstallationPlanValidator.Validate(plan);
+        }
+
+        [TestMethod]
+        public void InstallationPlanCannotAllocateTheEntireWindowsPartition()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Disk.Installer.FinalSizeBytes = plan.Disk.Windows.SizeBytes;
+            plan.Disk.Installer.FinalOffsetBytes = plan.Disk.Windows.OffsetBytes;
+            plan.Disk.Installer.OffsetBytes = plan.Disk.Windows.OffsetBytes;
             Assert.ThrowsException<InstallationPlanValidationException>(
                 () => InstallationPlanValidator.Validate(plan));
         }

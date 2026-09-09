@@ -39,6 +39,8 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="InstallationContractsTests.cs" />
+    <Compile Include="InstallationTargetTests.cs" />
+    <Compile Include="WindowsSharingPlanTests.cs" />
     <Compile Include="RuntimeContractTests.cs" />
     <Compile Include="BootGuardianTests.cs" />
     <Compile Include="BiosBootPayloadTests.cs" />

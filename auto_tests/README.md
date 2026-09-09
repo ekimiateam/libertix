@@ -62,7 +62,7 @@ addresses and contains no working credentials.
 | Samba and Windows SSH | `SAMBA_UNC`, `SAMBA_USERNAME`, `SAMBA_PASSWORD`, `WINDOWS_SSH_PASSWORD`, `SSH_KNOWN_HOSTS` |
 | Windows build VM | `BUILD_VM_HOST`, `BUILD_VM_USER`, `BUILD_VM_PASSWORD` |
 | Source and release | `REPOSITORY_URL`, `REPOSITORY_BRANCH`, `SOURCE_DIR_NAME`, `RELEASE_DIR_NAME`, `FILEPOOL_DIR_NAME`, `FILEPOOL_BASE_URL`, `PUBLISHED_DEV_METADATA_BASE_URL` |
-| Destructive-operation boundaries | `ALLOWED_SMB_ROOTS`, `ALLOWED_PROXMOX_VMIDS`, `RESET_SNAPSHOT`, `PROXMOX_STORAGE` |
+| Destructive-operation boundaries | `ALLOWED_SMB_ROOTS`, `ALLOWED_PROXMOX_VMIDS`, `RESET_SNAPSHOT`, `SECONDARY_DISK_RESET_SNAPSHOT`, `PROXMOX_STORAGE` |
 | Proxmox API | `PROXMOX_URL`, `PROXMOX_TOKEN_ID`, `PROXMOX_TOKEN_SECRET`, `PROXMOX_VERIFY_TLS`, optional `PROXMOX_CA_BUNDLE` |
 | Vision service | `LLM_API_URL`, `LLM_API_KEY`, `LLM_MODEL`, reasoning, timeout, and retry variables |
 | Installed Linux development network | `DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH`, `DEVELOPMENT_STATIC_IPV4_GATEWAY`, `DEVELOPMENT_DNS_SERVERS` |
@@ -147,7 +147,26 @@ GitHub Pages `dev` channel.
 | `share_linux_files_in_windows` | boolean, `true` | Validate the read-only Linux-to-Windows sharing path. |
 | `simulate_stale_firmware_entries` | boolean, `false` | Inject a stale UEFI Libertix entry to verify current-ESP ownership matching. |
 | `force_offline_ntfs_resize` | boolean, `false` | Force the development-only live offline NTFS resize path for regression testing. |
-| `boot_guardian_fault` | `none`, `bios-rollback`, `bios-controller-disconnect`, `bios-postinstall-rollback`, `boot-order`, `bootnext-fallback`, `bootnext-rollback`, `preferred-path`, or `preferred-path-rollback`, default `none` | Run one single-VM boot recovery or rollback test. `bios-rollback` cancels Windows preparation; `bios-controller-disconnect` withholds the final `reboot-ready` acknowledgement and verifies the automatic rollback after the controller timeout; `bios-postinstall-rollback` first completes Linux and Windows validation, then restores the original disk layout and verifies every durable compensation. Requires the matching firmware and `first_boot=windows`. |
+| `snapshot_mode` | `default` or `secondary-disk`, default `default` | Restore `RESET_SNAPSHOT` (normally `clean2`), or explicitly select `SECONDARY_DISK_RESET_SNAPSHOT` (normally `clean3`). The latter snapshot must already exist on every selected VM. This does not change the default reset behavior or create/attach disks. It selects a test baseline, not the product's Linux installation destination. |
+| `installation_target` | `windows` or `secondary`, default `windows` | `windows` keeps the existing system-volume allocation. `secondary` requires the secondary-disk snapshot mode and exactly one verified compatible NTFS candidate on a distinct internal physical disk. Ambiguous, removable and unsupported targets are rejected before installation. The final checks prove that Windows kept its original size, only the selected source was reduced and the data witnesses remain intact. |
+| `preference_wallpaper` | `custom` or `windows-default`, default `custom` | Used when `migrate_windows_preferences` is enabled. `custom` prepares a decodable colored image and verifies its hash, ownership and selection in Linux. `windows-default` selects the image shipped with Windows, then verifies that Linux retains its default light/dark backgrounds and has no imported Windows wallpaper. Other preference checks remain enabled. |
+| `storage_fixture` | Object, disabled by default | Optional, destructive laboratory preparation after snapshot restoration and before launching Libertix. `extra_system_partition` accepts `none`, `fat32`, `ntfs`, or `recovery`; `extra_partition_size_mib` defaults to 1024 (256–4096). The fixture shrinks only the inspected system NTFS volume and creates the test partition inside its former extent, without moving existing partitions. `secondary_data: true` requires `snapshot_mode: "secondary-disk"`; it writes a uniquely named witness to an existing unambiguous NTFS data volume without formatting it, or initializes an empty RAW secondary disk. `redirect_documents: true` additionally requires `secondary_data`; it copies the interactive user's Documents to a unique directory on that volume and changes the Windows known-folder destination, preserving the original files. File hashes, directories and supported Windows compatibility junctions are verified. `decrypt_system_volume: true` explicitly permits fully decrypting the system volume before an extra-partition fixture. `decrypt_secondary_volume: true` requires `secondary_data` and fully decrypts that exact identified test volume before the installation baseline is captured. Neither option uninstalls BitLocker. Unsupported, unhealthy, ambiguous or still-encrypted resize targets are refused. Witness hashes and unrelated partition geometry are checked immediately and again during final Windows validation. |
+| `boot_guardian_fault` | `none`, `bios-rollback`, `bios-controller-disconnect`, `bios-postinstall-rollback`, `uefi-postinstall-rollback`, `boot-order`, `bootnext-fallback`, `bootnext-rollback`, `preferred-path`, or `preferred-path-rollback`, default `none` | Run one single-VM boot recovery or rollback test. `bios-rollback` cancels Windows preparation; `bios-controller-disconnect` withholds the final `reboot-ready` acknowledgement and verifies the automatic rollback after the controller timeout. The two `*-postinstall-rollback` modes first complete Linux and Windows validation, then invoke the matching archived recovery agent and verify the original all-disk layout, recovery ledger, fixture data, tasks and BootGuardian removal. Requires the matching firmware and `first_boot=windows`. |
+
+Each VM may explicitly configure `secondary_disk_boot_order` in `VMS`, for example
+`["sata0", "sata1", "net0"]`. It is applied only with `installation_target: "secondary"`.
+It defaults to an empty list, which does not change
+Proxmox configuration. Only secondary-disk runs apply this operator-authorized list
+after snapshot restoration, verify that all named devices exist and that attachments
+are unchanged, then perform a graceful shutdown and cold start. This makes the disks
+visible to firmware that initializes only bootable devices. Existing snapshots are
+not modified. Default snapshot runs never apply this override.
+If that cold start reaches Windows sign-in, the lab can submit the configured test
+password once through VNC after checking the local account, password provider and
+keyboard layout. It then verifies Explorer's owner. An unverified screen or a failed
+login stops the run; credentials are not saved in a file or registry value, and
+permanent automatic logon is not enabled. This behavior is limited to VMs with the
+explicit secondary-disk boot override.
 
 VM selectors can also be repeated as query parameters (`?vm=vm1&vm=vm2`). Body and query
 selectors are combined. The `source` query parameter overrides its body value.
@@ -183,6 +202,29 @@ curl -fsS -N -H 'Content-Type: application/json' \
   -d '{"vms":["vm1","vm2","vm3"],"apply":true,"distribution":"zorin","linux_username":"test","linux_password":"replace-me","monitor_iso":true,"source":"local"}' \
   http://127.0.0.1:8000/api/v1/automation/stream
 ```
+
+Run the full nominal campaign (Mint and Zorin, Windows-first and Linux-first):
+
+```bash
+curl -fsS -N -H 'Content-Type: application/json' \
+  -d '{"vms":["vm1","vm2","vm3"],"apply":true,"source":"local","linux_username":"test","linux_password":"replace-me","linux_size_gib":20}' \
+  http://127.0.0.1:8000/api/v1/automation/full/stream
+```
+
+This endpoint requires exactly three distinct enabled laboratory VMs. It runs four scenarios
+sequentially, with all three VMs in parallel within each scenario. Each scenario restores the
+configured default snapshot, installs Linux on the default Windows volume, and verifies both
+operating systems and cross-boots. It does not inject faults or replace the separate storage and
+rollback campaigns. Preference migration can be enabled with `migrate_windows_preferences`.
+
+The campaign holds the existing operation lock throughout. It stops after a failed scenario by
+default so the affected VM state remains available for diagnosis. Set `continue_after_failure`
+to `true` only when restoring those failed VMs for the remaining scenarios is intended.
+The terminal `SCENARIO` records include per-VM verdicts, errors and individual log paths;
+unexecuted scenarios are marked `not-run`. A persistent `campaign-summary.json` is updated after
+each scenario. Logs and captures stay together under the campaign workspace's normal retention.
+Use `/api/v1/automation/full` for a JSON result, or append `?format=ndjson` to the streaming endpoint.
+The existing operation-kill endpoint also stops the full campaign without launching another scenario.
 
 Run the complete Mint workflow with the latest signed GitHub `dev` build and its published
 catalogue instead of the local filepool:

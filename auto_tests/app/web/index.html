@@ -201,6 +201,26 @@
         gap: 12px;
       }
 
+      fieldset {
+        border: 1px solid var(--border);
+        padding: 12px;
+        min-width: 0;
+      }
+
+      fieldset:disabled {
+        opacity: 0.55;
+      }
+
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+        margin-bottom: 10px;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
       @media (max-width: 900px) {
         body {
           margin: 14px;
@@ -214,7 +234,7 @@
   </head>
   <body>
     <h1>Libertix Auto Tests</h1>
-    <p class="muted">Interface locale pour lancer les endpoints API, suivre les streams et vérifier le filepool.</p>
+    <p class="muted">Outil de laboratoire : sélectionnez les VM, choisissez un scénario, puis vérifiez la requête avant de lancer. Les installations restaurent les snapshots et remplacent les données de test.</p>
 
     <div class="layout">
       <aside>
@@ -243,14 +263,15 @@
         </section>
 
         <section class="panel stack">
-          <h2>Automation</h2>
+          <h2>Installation automatique</h2>
           <label class="field">
-            <span>Distribution</span>
-            <select id="distribution">
-              <option value="mint">Linux Mint 22.3 Cinnamon</option>
-              <option value="zorin">Zorin OS 18.1 Core</option>
+            <span>Étendue de l'essai</span>
+            <select id="automationMode">
+              <option value="single">Un scénario personnalisé</option>
+              <option value="full">Campagne complète — 4 scénarios × 3 VM</option>
             </select>
           </label>
+          <p id="campaignHint" class="muted" hidden>Mint puis Zorin, Windows-first puis Linux-first : trois VM en parallèle à chaque scénario. Snapshot habituel, espace pris sur Windows, deux partages activés, surveillance activée et aucune panne injectée. Si la migration est cochée, la campagne teste une image personnalisée. Les options de scénario individuel sont désactivées ci-dessous.</p>
           <label class="field">
             <span>Utilisateur Linux</span>
             <input
@@ -278,7 +299,25 @@
           </label>
           <label class="field">
             <span>Taille finale Linux (Gio)</span>
-            <input id="linuxSizeGib" type="number" value="100" min="20" max="16384" step="1" required />
+            <input id="linuxSizeGib" type="number" value="20" min="20" max="16384" step="1" required />
+          </label>
+          <label class="check-field">
+            <input id="migrateWindowsPreferences" type="checkbox" />
+            Tester la migration des préférences Windows (dont Wi-Fi personnel)
+          </label>
+          <p class="muted">Migration unique et consentie. Sans cette option, Linux conserve ses préférences d'origine.</p>
+          <label id="continueAfterFailureField" class="check-field" hidden>
+            <input id="continueAfterFailure" type="checkbox" />
+            Continuer la campagne après un échec (la restauration suivante efface l'état de diagnostic des VM)
+          </label>
+          <fieldset id="singleScenarioOptions" class="stack">
+          <legend>Scénario individuel</legend>
+          <label class="field">
+            <span>Distribution</span>
+            <select id="distribution">
+              <option value="mint">Linux Mint 22.3 Cinnamon</option>
+              <option value="zorin">Zorin OS 18.1 Core</option>
+            </select>
           </label>
           <label class="field">
             <span>Premier système vérifié</span>
@@ -296,9 +335,61 @@
             Afficher les fichiers Linux dans Windows en lecture seule
           </label>
           <label class="check-field">
-            <input id="monitorIso" type="checkbox" checked />
-            Surveiller par vision uniquement les étapes d'installation qui en ont besoin
+            <input id="monitorIso" type="checkbox" checked disabled />
+            Surveillance obligatoire — vision uniquement aux étapes qui en ont besoin
           </label>
+          <label class="field">
+            <span>Fond d'écran de test pour la migration</span>
+            <select id="preferenceWallpaper" disabled>
+              <option value="custom">Image personnalisée — doit être copiée dans Linux</option>
+              <option value="windows-default">Fond Windows intégré / Spotlight — conserver celui de Linux</option>
+            </select>
+          </label>
+          <details>
+            <summary>Stockage et partitions de laboratoire</summary>
+            <div class="stack">
+              <label class="field">
+                <span>Snapshot de départ</span>
+                <select id="snapshotMode">
+                  <option value="default">Snapshot habituel — mode par défaut</option>
+                  <option value="secondary-disk">Snapshot avec second disque</option>
+                </select>
+              </label>
+              <p class="muted">Les noms des snapshots sont ceux configurés sur le serveur. Aucune fixture n'est ajoutée par défaut.</p>
+              <label class="field">
+                <span>Prendre l'espace Linux sur</span>
+                <select id="installationTarget">
+                  <option value="windows">Volume Windows (C: habituellement) — recommandé</option>
+                  <option value="secondary" disabled>Un autre disque physique — expérimental</option>
+                </select>
+              </label>
+              <p id="secondaryTargetHint" class="bad" hidden>Moins bien pris en charge, potentiellement instable : le firmware doit pouvoir démarrer sur cet autre disque. Les partitions existantes ne sont pas déplacées.</p>
+              <label class="field">
+                <span>Partition témoin supplémentaire sur le disque Windows</span>
+                <select id="extraSystemPartition">
+                  <option value="none">Aucune</option>
+                  <option value="fat32">FAT32</option>
+                  <option value="ntfs">NTFS</option>
+                  <option value="recovery">Recovery (récupération OEM simulée)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Taille de la partition témoin (Mio)</span>
+                <input id="extraPartitionSizeMib" type="number" value="1024" min="256" max="4096" step="1" disabled required />
+              </label>
+              <label class="check-field"><input id="decryptSystemVolume" type="checkbox" disabled />Déchiffrer le volume Windows avant de créer la partition témoin</label>
+              <fieldset id="secondaryDataOptions" class="stack" disabled>
+                <legend>Second disque (nécessite le snapshot correspondant)</legend>
+                <label class="check-field"><input id="secondaryData" type="checkbox" />Préparer et vérifier des données témoins sur le second disque</label>
+                <label class="check-field"><input id="decryptSecondaryVolume" type="checkbox" disabled />Déchiffrer le volume de données de test</label>
+                <label class="check-field"><input id="redirectDocuments" type="checkbox" disabled />Déplacer et lier Documents au second disque avant l'installation</label>
+              </fieldset>
+              <p class="muted">Les déchiffrements concernent uniquement les volumes de laboratoire sélectionnés. Un rollback ne réactive pas automatiquement leur chiffrement initial.</p>
+            </div>
+          </details>
+          <details>
+          <summary>Pannes simulées et chemins de récupération</summary>
+          <div class="stack">
           <label class="check-field">
             <input id="simulateStaleFirmwareEntries" type="checkbox" />
             Simuler des entrées firmware Libertix obsolètes avant l'installation
@@ -308,10 +399,13 @@
             Forcer le redimensionnement NTFS hors ligne dans le mini-ISO
           </label>
           <label class="field">
-            <span>Test de réparation du gardien de démarrage</span>
+            <span>Scénario de panne ou de récupération</span>
             <select id="bootGuardianFault">
               <option value="none">Aucun test</option>
               <option value="bios-rollback">Annuler après mutation BIOS et vérifier le rollback</option>
+              <option value="bios-controller-disconnect">BIOS : simuler la perte du contrôleur puis vérifier le rollback</option>
+              <option value="bios-postinstall-rollback">BIOS : rollback après installation complète</option>
+              <option value="uefi-postinstall-rollback">UEFI : rollback après installation complète</option>
               <option value="boot-order">Altérer puis réparer BootOrder</option>
               <option value="bootnext-fallback">Échec BootNext puis accepter BootOrder</option>
               <option value="bootnext-rollback">Échec BootNext puis restaurer Windows</option>
@@ -319,6 +413,10 @@
               <option value="preferred-path-rollback">Refuser le chemin EFI et restaurer Windows</option>
             </select>
           </label>
+          <p class="muted">Essais réservés au laboratoire : une seule VM du firmware correspondant, avec Windows vérifié en premier. Pour une validation nominale, laissez ces options désactivées et le test sur « Aucun test ».</p>
+          </div>
+          </details>
+          </fieldset>
           <p class="muted">
             Le mot de passe est envoyé uniquement à l'API locale au lancement. Cette page ne le
             conserve pas et l'aperçu le masque.
@@ -355,26 +453,37 @@
           <div class="endpoint-grid">
             <div class="stack">
               <h3>Validation</h3>
-              <button id="validationStream" class="primary">POST /validation/stream</button>
-              <button id="validationJson">POST /validation</button>
+              <p class="muted">Compile, teste, déploie et ouvre Libertix, sans lancer d'installation.</p>
+              <button id="validationStream" class="primary">Valider avec suivi</button>
+              <button id="validationJson">Valider — réponse JSON finale</button>
             </div>
             <div class="stack">
-              <h3>Automation unattended</h3>
-              <button id="automationStream" class="danger">POST /automation/stream</button>
-              <button id="automationJson" class="danger">POST /automation</button>
+              <h3>Installation / campagne</h3>
+              <p class="muted">Restaure les snapshots puis installe et vérifie Windows et Linux.</p>
+              <button id="automationStream" class="danger">Lancer avec suivi</button>
+              <button id="automationJson" class="danger">Lancer — réponse JSON finale</button>
             </div>
             <div class="stack">
-              <h3>Reset</h3>
-              <button id="resetStream" class="danger">POST /reset/stream</button>
-              <button id="resetJson" class="danger">POST /reset</button>
+              <h3>Restauration seule</h3>
+              <p class="muted">Restaure le snapshot habituel configuré, sans installation. N'utilise pas les fixtures ni le choix de snapshot du scénario.</p>
+              <button id="resetStream" class="danger">Restaurer avec suivi</button>
+              <button id="resetJson" class="danger">Restaurer — réponse JSON finale</button>
             </div>
           </div>
         </section>
 
         <section class="panel">
           <h2>État</h2>
-          <div id="status">Prêt.</div>
+          <div id="status" role="status" aria-live="polite">Prêt.</div>
           <div id="summary" class="muted"></div>
+          <p><button id="stopOperation" class="danger">Arrêter l'opération active sur le serveur</button></p>
+          <p class="muted">Arrêt forcé de toute la campagne, pas d'une seule VM. Ne déclenche ni rollback ni nettoyage des opérations déjà lancées dans les VM.</p>
+        </section>
+
+        <section id="campaignResults" class="panel" hidden>
+          <h2>Bilan de la campagne</h2>
+          <p class="muted">« Non exécuté » ou « non vérifié » n'est jamais un succès. Les chemins de journaux ci-dessous sont locaux au serveur.</p>
+          <div id="campaignSummary"></div>
         </section>
 
         <section class="panel stack">
@@ -415,6 +524,18 @@
       const simulateStaleFirmwareEntriesInput = document.getElementById("simulateStaleFirmwareEntries");
       const forceOfflineNtfsResizeInput = document.getElementById("forceOfflineNtfsResize");
       const bootGuardianFaultInput = document.getElementById("bootGuardianFault");
+      const automationModeInput = document.getElementById("automationMode");
+      const migrateWindowsPreferencesInput = document.getElementById("migrateWindowsPreferences");
+      const preferenceWallpaperInput = document.getElementById("preferenceWallpaper");
+      const snapshotModeInput = document.getElementById("snapshotMode");
+      const installationTargetInput = document.getElementById("installationTarget");
+      const extraSystemPartitionInput = document.getElementById("extraSystemPartition");
+      const extraPartitionSizeMibInput = document.getElementById("extraPartitionSizeMib");
+      const decryptSystemVolumeInput = document.getElementById("decryptSystemVolume");
+      const secondaryDataInput = document.getElementById("secondaryData");
+      const decryptSecondaryVolumeInput = document.getElementById("decryptSecondaryVolume");
+      const redirectDocumentsInput = document.getElementById("redirectDocuments");
+      const continueAfterFailureInput = document.getElementById("continueAfterFailure");
       const vmList = document.getElementById("vmList");
       const statusBox = document.getElementById("status");
       const summaryBox = document.getElementById("summary");
@@ -438,28 +559,16 @@
       document.getElementById("selectAllVms").addEventListener("click", () => setVmChecks(true));
       document.getElementById("clearVms").addEventListener("click", () => setVmChecks(false));
       document.getElementById("checkFilepool").addEventListener("click", checkFilepool);
+      document.getElementById("stopOperation").addEventListener("click", stopOperation);
 
       document.getElementById("validationStream").addEventListener("click", () => runValidation(true));
       document.getElementById("validationJson").addEventListener("click", () => runValidation(false));
-      document.getElementById("automationStream").addEventListener("click", () => confirmAutomation(() => runAutomation(true)));
-      document.getElementById("automationJson").addEventListener("click", () => confirmAutomation(() => runAutomation(false)));
+      document.getElementById("automationStream").addEventListener("click", () => runAutomation(true));
+      document.getElementById("automationJson").addEventListener("click", () => runAutomation(false));
       document.getElementById("resetStream").addEventListener("click", () => confirmReset(() => runReset(true)));
       document.getElementById("resetJson").addEventListener("click", () => confirmReset(() => runReset(false)));
 
-      [
-        sourceModeInput,
-        distributionInput,
-        linuxUsernameInput,
-        linuxPasswordInput,
-        linuxSizeGibInput,
-        firstBootInput,
-        shareWindowsFilesInLinuxInput,
-        shareLinuxFilesInWindowsInput,
-        monitorIsoInput,
-        simulateStaleFirmwareEntriesInput,
-        forceOfflineNtfsResizeInput,
-        bootGuardianFaultInput,
-      ].forEach((input) => {
+      document.querySelectorAll("aside input, aside select").forEach((input) => {
         input.addEventListener("input", updateRequestPreview);
         input.addEventListener("change", updateRequestPreview);
       });
@@ -493,13 +602,38 @@
         const body = requestBody();
         if (!body) return null;
         if (!validateAutomationInputs()) return null;
+        if (automationModeInput.value === "full" && body.vms.length !== 3) {
+          setStatus("La campagne complète exige exactement trois VM sélectionnées.", true);
+          return null;
+        }
+        if (automationModeInput.value === "single" && bootGuardianFaultInput.value !== "none") {
+          if (body.vms.length !== 1 || firstBootInput.value !== "windows") {
+            setStatus("Une panne simulée exige une seule VM du firmware correspondant et Windows vérifié en premier.", true);
+            return null;
+          }
+        }
+        return automationPayload();
+      }
+
+      function automationPayload(preview = false) {
+        const body = {
+          vms: selectedVms(),
+          source: sourceModeInput.value || "local",
+          apply: true,
+          linux_username: linuxUsernameInput.value || "test",
+          linux_password: preview ? "<masqué>" : linuxPasswordInput.value,
+          linux_size_gib: Number(linuxSizeGibInput.value),
+          migrate_windows_preferences: migrateWindowsPreferencesInput.checked,
+        };
+        if (automationModeInput.value === "full") {
+          return { ...body, continue_after_failure: continueAfterFailureInput.checked };
+        }
+        const secondary = snapshotModeInput.value === "secondary-disk";
+        const secondaryData = secondary && secondaryDataInput.checked;
+        const extraPartition = extraSystemPartitionInput.value !== "none";
         return {
           ...body,
-          apply: true,
           distribution: distributionInput.value || "mint",
-          linux_username: linuxUsernameInput.value || "test",
-          linux_password: linuxPasswordInput.value,
-          linux_size_gib: Number(linuxSizeGibInput.value),
           first_boot: firstBootInput.value,
           monitor_iso: monitorIsoInput.checked,
           share_windows_files_in_linux: shareWindowsFilesInLinuxInput.checked,
@@ -507,39 +641,56 @@
           simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
           force_offline_ntfs_resize: forceOfflineNtfsResizeInput.checked,
           boot_guardian_fault: bootGuardianFaultInput.value,
+          preference_wallpaper: preferenceWallpaperInput.value,
+          snapshot_mode: snapshotModeInput.value,
+          installation_target: installationTargetInput.value,
+          storage_fixture: {
+            extra_system_partition: extraSystemPartitionInput.value,
+            extra_partition_size_mib: extraPartition ? Number(extraPartitionSizeMibInput.value) : 1024,
+            decrypt_system_volume: extraPartition && decryptSystemVolumeInput.checked,
+            secondary_data: secondaryData,
+            decrypt_secondary_volume: secondaryData && decryptSecondaryVolumeInput.checked,
+            redirect_documents: secondaryData && redirectDocumentsInput.checked,
+          },
         };
       }
 
       function validateAutomationInputs() {
-        const inputs = [linuxUsernameInput, linuxPasswordInput, linuxSizeGibInput];
+        const inputs = [linuxUsernameInput, linuxPasswordInput, linuxSizeGibInput, extraPartitionSizeMibInput];
         const invalidInput = inputs.find((input) => !input.checkValidity());
         if (!invalidInput) return true;
+        const details = invalidInput.closest("details");
+        if (details) details.open = true;
         invalidInput.reportValidity();
         setStatus("Corrigez les paramètres unattended invalides avant de lancer l'installation.", true);
         return false;
       }
 
-      function previewAutomationBody() {
-        return {
-          vms: selectedVms(),
-          source: sourceModeInput.value || "local",
-          apply: true,
-          distribution: distributionInput.value || "mint",
-          linux_username: linuxUsernameInput.value || "test",
-          linux_password: "<masqué>",
-          linux_size_gib: Number(linuxSizeGibInput.value || 0),
-          first_boot: firstBootInput.value,
-          monitor_iso: monitorIsoInput.checked,
-          share_windows_files_in_linux: shareWindowsFilesInLinuxInput.checked,
-          share_linux_files_in_windows: shareLinuxFilesInWindowsInput.checked,
-          simulate_stale_firmware_entries: simulateStaleFirmwareEntriesInput.checked,
-          force_offline_ntfs_resize: forceOfflineNtfsResizeInput.checked,
-          boot_guardian_fault: bootGuardianFaultInput.value,
-        };
+      function automationEndpoint() {
+        return automationModeInput.value === "full" ? "/api/v1/automation/full" : "/api/v1/automation";
+      }
+
+      function updateOptionAvailability() {
+        const full = automationModeInput.value === "full";
+        const secondary = snapshotModeInput.value === "secondary-disk";
+        const extraPartition = extraSystemPartitionInput.value !== "none";
+        document.getElementById("singleScenarioOptions").disabled = full;
+        document.getElementById("campaignHint").hidden = !full;
+        document.getElementById("continueAfterFailureField").hidden = !full;
+        preferenceWallpaperInput.disabled = !migrateWindowsPreferencesInput.checked;
+        installationTargetInput.querySelector('option[value="secondary"]').disabled = !secondary;
+        if (!secondary) installationTargetInput.value = "windows";
+        document.getElementById("secondaryTargetHint").hidden = full || installationTargetInput.value !== "secondary";
+        document.getElementById("secondaryDataOptions").disabled = !secondary;
+        extraPartitionSizeMibInput.disabled = !extraPartition;
+        decryptSystemVolumeInput.disabled = !extraPartition;
+        decryptSecondaryVolumeInput.disabled = !secondaryDataInput.checked;
+        redirectDocumentsInput.disabled = !secondaryDataInput.checked;
       }
 
       function updateRequestPreview() {
-        const body = previewAutomationBody();
+        updateOptionAvailability();
+        const body = automationPayload(true);
         const json = JSON.stringify(body, null, 2);
         const compactJson = JSON.stringify(body);
         requestPreview.textContent = [
@@ -547,7 +698,7 @@
           "",
           "curl -N -H 'Content-Type: application/json' \\",
           `  --data '${compactJson}' \\`,
-          `  ${window.location.origin}/api/v1/automation/stream?format=ndjson`,
+          `  ${window.location.origin}${automationEndpoint()}/stream?format=ndjson`,
         ].join("\n");
       }
 
@@ -560,7 +711,7 @@
 
       function setBusy(value) {
         buttons.forEach((button) => {
-          button.disabled = value;
+          if (button.id !== "stopOperation") button.disabled = value;
         });
       }
 
@@ -573,6 +724,8 @@
         stepsBody.innerHTML = "";
         summaryBox.textContent = "";
         rawResult.textContent = "{}";
+        document.getElementById("campaignResults").hidden = true;
+        document.getElementById("campaignSummary").replaceChildren();
       }
 
       function addStep(step) {
@@ -599,10 +752,54 @@
           summaryBox.textContent = `${result.operation} terminé avec statut: ${result.status}`;
           setStatus(result.message || "Opération terminée.", result.status !== "ok");
         }
+        showCampaignSummary(result.campaign_summary || []);
+      }
+
+      function showCampaignSummary(scenarios) {
+        const container = document.getElementById("campaignSummary");
+        container.replaceChildren();
+        document.getElementById("campaignResults").hidden = scenarios.length === 0;
+        const labels = { ok: "Réussi", error: "Échec", "not-run": "Non exécuté", "not-verified": "Non vérifié", interrupted: "Interrompu", running: "En cours" };
+        for (const scenario of scenarios) {
+          const section = document.createElement("section");
+          section.className = "panel stack";
+          const title = document.createElement("h3");
+          title.textContent = `${scenario.scenario} — ${labels[scenario.status] || scenario.status}`;
+          title.className = scenario.status === "ok" ? "ok" : scenario.status === "error" ? "bad" : "muted";
+          section.appendChild(title);
+          const vms = document.createElement("p");
+          vms.textContent = Object.entries(scenario.vms || {}).map(([vm, status]) => `${vm} : ${labels[status] || status}`).join(" · ");
+          section.appendChild(vms);
+          const details = document.createElement("pre");
+          details.textContent = [scenario.message, scenario.log && `Journal : ${scenario.log}`, scenario.captures && `Captures : ${scenario.captures}`].filter(Boolean).join("\n");
+          section.appendChild(details);
+          for (const error of scenario.errors || []) {
+            const diagnostic = document.createElement("pre");
+            diagnostic.className = "bad";
+            diagnostic.textContent = `${error.step}: ${error.message}\n${JSON.stringify(error.context || {}, null, 2)}`;
+            section.appendChild(diagnostic);
+          }
+          container.appendChild(section);
+        }
       }
 
       async function checkHealth() {
         await runJson("/health", { method: "GET" }, "health");
+      }
+
+      async function stopOperation() {
+        if (!confirm("Arrêter de force l'opération actuellement active sur ce serveur, y compris si elle a été lancée depuis un autre onglet ? Aucun rollback automatique ne sera effectué dans les VM.")) return;
+        const button = document.getElementById("stopOperation");
+        button.disabled = true;
+        try {
+          const response = await fetch("/api/v1/operation/kill", { method: "POST" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+          setStatus("Arrêt demandé au contrôleur. Les opérations déjà lancées dans les VM ne sont pas annulées automatiquement.", true);
+        } catch (error) {
+          setStatus(`Arrêt non confirmé : ${error.message}`, true);
+        } finally {
+          button.disabled = false;
+        }
       }
 
       async function loadVms() {
@@ -692,12 +889,16 @@
       function runAutomation(stream) {
         const body = automationBody();
         if (!body) return;
+        const full = automationModeInput.value === "full";
+        const scope = full ? "quatre installations successives par VM" : "une installation par VM";
+        if (!confirm(`Lancer ${scope} sur ${body.vms.join(", ")} ? Les snapshots seront restaurés et les données actuelles de ces VM remplacées. ${full && body.continue_after_failure ? "La campagne continuera après les échecs et effacera l'état de diagnostic avant le scénario suivant." : ""}`)) return;
+        const endpoint = automationEndpoint();
         if (stream) {
-          runStream("/api/v1/automation/stream?format=ndjson", body, "automation unattended stream");
+          runStream(`${endpoint}/stream?format=ndjson`, body, full ? "campagne complète" : "installation automatique");
           return;
         }
         runJson(
-          "/api/v1/automation",
+          endpoint,
           { method: "POST", headers: requestHeaders(true), body: JSON.stringify(body) },
           "automation unattended",
         );
@@ -761,6 +962,7 @@
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
+          let terminalSeen = false;
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
@@ -768,12 +970,13 @@
             const lines = buffer.split("\n");
             buffer = lines.pop();
             for (const line of lines) {
-              handleEventLine(line);
+              terminalSeen = handleEventLine(line) || terminalSeen;
             }
           }
           if (buffer.trim()) {
-            handleEventLine(buffer);
+            terminalSeen = handleEventLine(buffer) || terminalSeen;
           }
+          if (!terminalSeen) throw new Error("Flux interrompu sans verdict final. L'opération peut continuer sur le serveur : ne la relancez pas à l'aveugle.");
         } catch (error) {
           setStatus(`Erreur interface: ${error.message}`, true);
         } finally {
@@ -791,12 +994,7 @@
         }
         if (event.event === "result") {
           showResult(event.data);
-        }
-      }
-
-      function confirmAutomation(action) {
-        if (confirm("Confirmer l'automation unattended ? Cette action peut modifier le disque de la VM cible.")) {
-          action();
+          return true;
         }
       }
 

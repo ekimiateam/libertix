@@ -249,6 +249,13 @@ namespace Libertix.Pages
                     _installationPlan.Disk.Installer.FinalSizeBytes;
                 recovery.Phase = "AwaitingReboot";
                 WriteUefiRecoveryState(recovery);
+
+                UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
+                Log("UEFI installation preparation completed successfully.");
+                RebootButton.Visibility = Visibility.Visible;
+                RebootButton.IsDefault = true;
+                RebootButton.Focus();
+                await PublishUnattendedRebootReadyAsync();
             }
             catch (OperationCanceledException)
             {
@@ -266,12 +273,6 @@ namespace Libertix.Pages
                     $"Unexpected UEFI preparation failure: {ex.Message}");
                 return;
             }
-            UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
-            Log("UEFI installation preparation completed successfully.");
-            RebootButton.Visibility = Visibility.Visible;
-            RebootButton.IsDefault = true;
-            RebootButton.Focus();
-            await PublishUnattendedRebootReadyAsync();
         }
 
         private async Task HandleUefiPreparationFailureAsync(
@@ -280,6 +281,8 @@ namespace Libertix.Pages
             string reason,
             string failureCode = "UEFI_PREPARATION_FAILED")
         {
+            RebootButton.Visibility = Visibility.Collapsed;
+            RebootButton.IsDefault = false;
             _rollbackVerificationPending = true;
             ReloadExecutionState();
             bool rollbackVerified = _executionLedger != null &&
@@ -400,12 +403,10 @@ namespace Libertix.Pages
 
             long expectedLinuxSize =
                 InstallationSizePolicy.FromRequestedGigabytes(_linuxSizeGB).FinalSizeBytes;
-            long originalWindowsEnd = checked(
-                _storagePreflight.SystemPartitionOffset + _storagePreflight.SystemPartitionSize);
-            long alignmentPadding = originalWindowsEnd %
-                InstallationSizePolicy.PartitionAlignmentBytes;
-            long expectedLinuxOffset = checked(
-                originalWindowsEnd - expectedLinuxSize - alignmentPadding);
+            PartitionIdentity allocationSource = _storagePreflight.Allocation?.SourcePartition ??
+                _storagePreflight.WindowsPartition;
+            long expectedLinuxOffset = InstallationSizePolicy.GetFinalInstallerOffset(
+                allocationSource, expectedLinuxSize);
 
             return new UefiRecoveryState
             {

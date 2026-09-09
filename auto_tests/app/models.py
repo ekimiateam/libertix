@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.storage_fixtures import StorageFixtureRequest
 
 _INSTALLATION_POLICY = json.loads(
     (
@@ -32,6 +34,7 @@ BootGuardianFault = Literal[
     "bios-rollback",
     "bios-controller-disconnect",
     "bios-postinstall-rollback",
+    "uefi-postinstall-rollback",
     "boot-order",
     "bootnext-fallback",
     "bootnext-rollback",
@@ -52,6 +55,7 @@ class OperationResult(BaseModel):
     operation: Literal["validation", "reset", "automation"]
     message: str
     steps: list[StepResult] = Field(default_factory=list)
+    campaign_summary: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ValidationRequest(BaseModel):
@@ -80,6 +84,28 @@ class ValidationRequest(BaseModel):
         return values or None
 
 
+class AutomationCampaignRequest(ValidationRequest):
+    """Four nominal installation scenarios, with one shared three-VM scope."""
+
+    model_config = ConfigDict(extra="forbid")
+    apply: Literal[True]
+    linux_username: str = "test"
+    linux_password: str = Field(min_length=4, max_length=128)
+    linux_size_gib: int = Field(default=20, ge=_MINIMUM_LINUX_SIZE_GIB, le=16384)
+    migrate_windows_preferences: bool = False
+    continue_after_failure: bool = False
+
+    @model_validator(mode="after")
+    def validate_installation_options(self) -> AutomationCampaignRequest:
+        AutomationRequest(
+            apply=True,
+            linux_username=self.linux_username,
+            linux_password=self.linux_password,
+            linux_size_gib=self.linux_size_gib,
+        )
+        return self
+
+
 class AutomationRequest(ValidationRequest):
     """Destructive unattended Libertix installation request.
 
@@ -88,6 +114,26 @@ class AutomationRequest(ValidationRequest):
     """
 
     apply: Literal[True] = Field(description="Explicitly authorize the complete installation")
+    snapshot_mode: Literal["default", "secondary-disk"] = Field(
+        default="default",
+        description=(
+            "Restore RESET_SNAPSHOT by default, or SECONDARY_DISK_RESET_SNAPSHOT "
+            "for the explicitly requested secondary-disk test baseline"
+        ),
+    )
+    storage_fixture: StorageFixtureRequest = Field(default_factory=StorageFixtureRequest)
+    installation_target: Literal["windows", "secondary"] = "windows"
+
+    @model_validator(mode="after")
+    def validate_storage_fixture_snapshot(self) -> AutomationRequest:
+        if self.storage_fixture.secondary_data and self.snapshot_mode != "secondary-disk":
+            raise ValueError("secondary_data requires snapshot_mode=secondary-disk")
+        if self.storage_fixture.decrypt_secondary_volume and self.snapshot_mode != "secondary-disk":
+            raise ValueError("decrypt_secondary_volume requires snapshot_mode=secondary-disk")
+        if self.installation_target == "secondary" and self.snapshot_mode != "secondary-disk":
+            raise ValueError("secondary installation requires snapshot_mode=secondary-disk")
+        return self
+
     distribution: DistributionId = Field(
         default="mint", description="Distribution catalog id selected in the Libertix wizard"
     )
@@ -114,6 +160,7 @@ class AutomationRequest(ValidationRequest):
     share_windows_files_in_linux: bool = Field(default=True)
     share_linux_files_in_windows: bool = Field(default=True)
     migrate_windows_preferences: bool = Field(default=False)
+    preference_wallpaper: Literal["custom", "windows-default"] = "custom"
     simulate_stale_firmware_entries: bool = Field(
         default=False,
         description=(

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v4.json",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v5.json",
   "title": "Libertix Installation Plan",
   "description": "Versioned contract shared by the Windows application, the live installer, the installed target and rollback tooling.",
   "type": "object",
@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 4
+      "enum": [4, 5]
     },
     "planId": {
       "type": "string",
@@ -47,6 +47,9 @@
     "disk": {
       "$ref": "#/$defs/disk"
     },
+    "allocation": {
+      "$ref": "#/$defs/allocation"
+    },
     "features": {
       "$ref": "#/$defs/features"
     },
@@ -58,6 +61,29 @@
     }
   },
   "$defs": {
+    "allocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number", "uniqueId", "partitionTableId", "sizeBytes", "logicalSectorSizeBytes",
+        "partitionStyle", "sourceDrive", "sourcePartition", "sourceVolumeId", "sourceNtfsUuid", "sourceBitLockerState"
+      ],
+      "properties": {
+        "number": { "$ref": "#/$defs/disk/properties/number" },
+        "uniqueId": { "$ref": "#/$defs/disk/properties/uniqueId" },
+        "partitionTableId": { "$ref": "#/$defs/disk/properties/partitionTableId" },
+        "sizeBytes": { "$ref": "#/$defs/disk/properties/sizeBytes" },
+        "logicalSectorSizeBytes": { "$ref": "#/$defs/disk/properties/logicalSectorSizeBytes" },
+        "partitionStyle": { "$ref": "#/$defs/disk/properties/partitionStyle" },
+        "sourceDrive": { "$ref": "#/$defs/disk/properties/systemDrive" },
+        "sourcePartition": { "$ref": "#/$defs/partitionIdentity" },
+        "sourceVolumeId": { "type": "string", "minLength": 1 },
+        "sourceNtfsUuid": { "type": "string", "pattern": "^[0-9A-F]{16}$", "not": { "const": "0000000000000000" } },
+        "sourceBitLockerState": {
+          "enum": ["FullyDecrypted", "NotEncryptable", "EncryptedOrProtected"]
+        }
+      }
+    },
     "distribution": {
       "type": "object",
       "additionalProperties": false,
@@ -342,9 +368,50 @@
           "type": "string",
           "minLength": 1
         },
+        "windowsSharing": {
+          "$ref": "#/$defs/windowsSharing"
+        },
         "windowsPreferenceMigration": {
           "$ref": "#/$defs/windowsPreferenceMigration"
         }
+      }
+    },
+    "windowsSharing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "volumes", "folders"],
+      "properties": {
+        "version": {"const": 1},
+        "volumes": {"type": "array", "maxItems": 64, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ntfsUuid", "disk", "offsetBytes", "sizeBytes", "windowsVolumeId", "windowsDrive"],
+          "properties": {
+            "ntfsUuid": {"type": "string", "pattern": "^[A-F0-9]{16}$"},
+            "offsetBytes": {"type": "integer", "minimum": 1},
+            "sizeBytes": {"type": "integer", "minimum": 1},
+            "windowsDrive": {"type": "string", "pattern": "^[A-Z]:$"},
+            "windowsVolumeId": {"type": "string", "pattern": "^\\\\\\\\\\?\\\\Volume\\{[0-9a-fA-F-]{36}\\}\\\\$"},
+            "disk": {
+              "type": "object", "additionalProperties": false,
+              "required": ["partitionTableId", "partitionStyle", "sizeBytes", "logicalSectorSizeBytes"],
+              "properties": {
+                "partitionTableId": {"type": "string"},
+                "partitionStyle": {"enum": ["GPT", "MBR"]},
+                "sizeBytes": {"type": "integer", "minimum": 1},
+                "logicalSectorSizeBytes": {"enum": [512, 4096]}
+              }
+            }
+          }
+        }},
+        "folders": {"type": "array", "maxItems": 256, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["shortcut", "profileSid", "ntfsUuid", "relativePath"],
+          "properties": {
+            "shortcut": {"type": "string", "minLength": 6, "maxLength": 180},
+            "profileSid": {"type": "string", "pattern": "^S-1-5-21-(?:[0-9]+-){3}[0-9]+$"},
+            "ntfsUuid": {"type": "string", "pattern": "^[A-F0-9]{16}$"},
+            "relativePath": {"type": "string", "minLength": 1, "maxLength": 32767}
+          }
+        }}
       }
     },
     "windowsPreferenceMigration": {
@@ -495,6 +562,11 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "schemaVersion": { "const": 5 } }, "required": ["schemaVersion"] },
+      "then": { "required": ["allocation"] },
+      "else": { "not": { "required": ["allocation"] } }
+    },
     {
       "if": {
         "properties": {

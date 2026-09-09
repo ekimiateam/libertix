@@ -12,6 +12,7 @@
       PreviewKeyDown="ResizeDisk_PreviewKeyDown">
 
     <Page.Resources>
+        <BooleanToVisibilityConverter x:Key="TargetVisibility"/>
         <Style x:Key="SliderRepeatButton" TargetType="RepeatButton">
             <Setter Property="Template">
                 <Setter.Value>
@@ -70,19 +71,51 @@
 
     <Grid Background="{DynamicResource PrimaryBackground}">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
+        <ScrollViewer x:Name="AllocationScroll" Grid.Row="0" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+        <Grid MinHeight="{Binding ViewportHeight, ElementName=AllocationScroll}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-        <Label Grid.Row="0"
+        <StackPanel Grid.Row="0">
+        <Label
                Content="{DynamicResource ResizeDiskTitle}"
                HorizontalAlignment="Center"
                Margin="20"
                FontSize="48"
                FontWeight="Light"
                Foreground="{DynamicResource TextPrimary}"/>
+            <StackPanel Margin="40,0,40,8" Visibility="{Binding HasMultipleTargets, Converter={StaticResource TargetVisibility}}">
+                <TextBlock Text="{DynamicResource ResizeDiskTargetTitle}" Foreground="{DynamicResource TextPrimary}"/>
+                <ComboBox x:Name="InstallationTargetComboBox" ItemsSource="{Binding InstallationTargets}"
+                          SelectedItem="{Binding SelectedTarget, Mode=TwoWay}" Margin="0,4" MinHeight="28">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Drive}" Margin="0,0,12,0"/>
+                                <TextBlock Text="{Binding FriendlyName}" Margin="0,0,12,0"/>
+                                <TextBlock Text="{DynamicResource ResizeDiskPhysicalDisk}" Margin="0,0,4,0"/>
+                                <TextBlock Text="{Binding DiskNumber}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+                <TextBlock Text="{Binding TargetRecommendation}" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextSecondary}" FontSize="12"/>
+            </StackPanel>
+            <Border x:Name="SecondaryDiskWarningPanel" Margin="40,0,40,8" Padding="10"
+                    BorderBrush="{DynamicResource ErrorColor}" BorderThickness="1" CornerRadius="4"
+                    Visibility="{Binding IsSecondaryTarget, Converter={StaticResource TargetVisibility}}">
+                <TextBlock Text="{Binding SecondaryDiskWarning}" TextWrapping="Wrap"
+                           Foreground="{DynamicResource TextPrimary}" FontSize="12"/>
+            </Border>
+        </StackPanel>
 
         <Border Grid.Row="1"
                 Height="100"
@@ -109,7 +142,7 @@
                         </Grid>
 
                         <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <TextBlock Text="{DynamicResource Windows}"
+                            <TextBlock Text="{Binding RetainedVolumeName}"
                                        Foreground="{DynamicResource TextPrimary}"
                                        FontWeight="SemiBold"
                                        HorizontalAlignment="Center"/>
@@ -246,8 +279,10 @@
                            Message="{DynamicResource FreeUpSpace}"
                            Details="{Binding SystemRequirements}"
                            AdditionalDetails="{Binding AdditionalSpaceNeeded}"/>
+        </Grid>
+        </ScrollViewer>
 
-        <Grid Grid.Row="3" Margin="20">
+        <Grid Grid.Row="1" Margin="20">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="*"/>

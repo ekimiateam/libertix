@@ -180,6 +180,28 @@ def test_guest_agent_command_preserves_argument_boundaries() -> None:
     assert "pid=42" in str(requests[1][1]) or requests[1][1].endswith("exec-status")
 
 
+@pytest.mark.parametrize("configuration,expected", [({}, False), ({"serial0": "socket"}, True)])
+def test_serial_preflight_reads_the_selected_vm_configuration(configuration, expected) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"data": configuration})
+
+    proxmox = ProxmoxClient(
+        "https://proxmox.test:8006", "token", "secret", timeout=1, task_timeout=1
+    )
+    proxmox.client.close()
+    proxmox.client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        assert proxmox.has_serial_console("node-a", 500) is expected
+    finally:
+        proxmox.client.close()
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.path.endswith("/nodes/node-a/qemu/500/config")
+
+
 def test_serial_terminal_proxy_is_requested_for_serial_zero() -> None:
     requests: list[httpx.Request] = []
 

@@ -31,7 +31,9 @@ namespace Libertix.Tests
                     application.Resources["ModernButton"] = new Style(typeof(Button));
                     application.Resources["BoolToVisibilityConverter"] = new BooleanToVisibilityConverter();
                     application.Resources["StringToVisibilityConverter"] = new Libertix.Converters.StringToVisibilityConverter();
+                    Localization.SetLanguage("en");
                     VerifyResizeSelectionIsPreserved();
+                    VerifySeparateDiskSelection();
                     string root = Path.Combine(Path.GetTempPath(), "Libertix-fallback-test-" + Guid.NewGuid().ToString("N"));
                     string scripts = Path.Combine(root, "Scripts");
                     Directory.CreateDirectory(scripts);
@@ -134,6 +136,111 @@ namespace Libertix.Tests
             var fresh = new ResizeDisk(state, 500 * gib, reducedFree);
             Assert.AreEqual(fresh.RecommendedSize, fresh.SelectedSize);
             Assert.IsFalse(fresh.HasSizeError, "Recommendation must not round above the available budget.");
+        }
+
+        private static void VerifySeparateDiskSelection()
+        {
+            const long gib = 1024L * 1024 * 1024;
+            var windows = new InstallationTargetInfo
+            {
+                Drive = "C:", IsWindows = true, DiskNumber = 0, PartitionStyle = "GPT",
+                SizeBytes = 100 * gib, FreeBytes = 50 * gib, MinimumSizeBytes = 50 * gib
+            };
+            var data = new InstallationTargetInfo
+            {
+                Drive = "D:", DiskNumber = 1, PartitionStyle = "GPT",
+                SizeBytes = 64 * gib, FreeBytes = 50 * gib, MinimumSizeBytes = 14 * gib
+            };
+            var state = new InstallationState
+            {
+                SelectedDistro = new DistroInfo { IsoInstallerSizeBytes = 4 * gib },
+                SelectedLinuxSizeGiB = 20,
+                Compatibility = new CompatibilityInfo
+                {
+                    Firmware = "UEFI", ShrinkAvailableBytes = 40 * gib,
+                    InstallationTargets = new[] { windows, data }
+                }
+            };
+            var page = new ResizeDisk(state, windows.SizeBytes, windows.FreeBytes);
+            Assert.AreSame(windows, page.SelectedTarget);
+            Assert.IsNull(state.SelectedInstallationTarget);
+            Assert.IsTrue(page.HasMultipleTargets);
+            Assert.IsFalse(page.IsSecondaryTarget);
+            Assert.AreEqual(string.Empty, page.SecondaryDiskWarning);
+            Assert.AreEqual(26d, page.WindowsFreeSpace);
+            page.SelectedTarget = data;
+            Assert.AreSame(data, state.SelectedInstallationTarget);
+            Assert.IsFalse(page.IsWindowsTarget);
+            Assert.IsTrue(page.IsSecondaryTarget);
+            StringAssert.Contains(page.SecondaryDiskWarning, "D:");
+            StringAssert.Contains(page.SecondaryDiskWarning, "C:");
+            Assert.AreNotEqual("ResizeDiskSecondaryWarning", page.SecondaryDiskWarning);
+            Assert.AreEqual("D:", page.RetainedVolumeName);
+            Assert.AreEqual(30d, page.WindowsFreeSpace,
+                "The ISO stays on Windows and must not consume the donor volume budget.");
+            Assert.IsTrue(page.CanAllocateLinux);
+            Assert.IsFalse(page.HasSizeError);
+            string language = Localization.CurrentLanguage;
+            foreach (string candidate in new[] { "en", "fr", "es" })
+            {
+                Localization.SetLanguage(candidate);
+                page.Measure(new Size(1070, 530));
+                page.Arrange(new Rect(0, 0, 1070, 530));
+                page.UpdateLayout();
+                var next = (Button)page.FindName("NextButton");
+                Rect bounds = next.TransformToAncestor(page).TransformBounds(new Rect(next.RenderSize));
+                Assert.IsTrue(bounds.Top >= 0 && bounds.Bottom <= 530,
+                    "The secondary disk warning must not push navigation outside the page.");
+                Assert.AreEqual(Visibility.Visible, ((Border)page.FindName("SecondaryDiskWarningPanel")).Visibility);
+                StringAssert.Contains(page.SecondaryDiskWarning, "D:");
+                Assert.IsFalse(page.SecondaryDiskWarning.Contains("{0}"));
+                Assert.IsFalse(page.SecondaryDiskWarning.Contains("{1}"));
+            }
+            Localization.SetLanguage(language);
+            var restored = new ResizeDisk(state, windows.SizeBytes, windows.FreeBytes);
+            Assert.AreSame(data, restored.SelectedTarget);
+            Assert.AreEqual(20d, restored.SelectedSize);
+            Assert.ThrowsException<InvalidOperationException>(() =>
+                restored.SelectedTarget = new InstallationTargetInfo { Drive = "E:" });
+            windows.FreeBytes = 5 * gib;
+            var noDownloadSpace = new ResizeDisk(state, windows.SizeBytes, windows.FreeBytes);
+            Assert.IsFalse(noDownloadSpace.CanAllocateLinux);
+            Assert.IsTrue(noDownloadSpace.HasError);
+            Assert.IsTrue(noDownloadSpace.HasSizeError);
+            Assert.AreEqual(Localization.GetString("ResizeDiskWindowsDownloadSpace"),
+                noDownloadSpace.AdditionalSpaceNeeded);
+            windows.FreeBytes = 50 * gib;
+            restored.SelectedTarget = windows;
+            Assert.IsNull(state.SelectedInstallationTarget);
+            Assert.IsFalse(restored.IsSecondaryTarget);
+            Assert.AreEqual(string.Empty, restored.SecondaryDiskWarning);
+            Assert.AreEqual(26d, restored.WindowsFreeSpace);
+            state.Compatibility.ShrinkAvailableBytes = 0;
+            var secondaryOnly = new ResizeDisk(state, windows.SizeBytes, windows.FreeBytes);
+            Assert.AreSame(windows, secondaryOnly.SelectedTarget);
+            Assert.IsFalse(secondaryOnly.CanAllocateLinux);
+            secondaryOnly.SelectedTarget = data;
+            Assert.IsTrue(secondaryOnly.CanAllocateLinux);
+            Assert.AreSame(data, state.SelectedInstallationTarget);
+            secondaryOnly.SelectedTarget = windows;
+            Assert.IsFalse(secondaryOnly.CanAllocateLinux);
+
+            data.SizeBytes = gib;
+            data.FreeBytes = gib / 2;
+            data.MinimumSizeBytes = gib / 2;
+            secondaryOnly.SelectedTarget = data;
+            Assert.IsFalse(secondaryOnly.CanAllocateLinux);
+            Assert.IsTrue(secondaryOnly.HasSizeError);
+            Assert.IsTrue(secondaryOnly.HasError);
+            Assert.AreEqual(100d, secondaryOnly.WindowsPartitionPercentage.Value,
+                "An impossible allocation must keep the existing volume in the preview.");
+            Assert.AreEqual(0d, secondaryOnly.LinuxPartitionPercentage.Value);
+            state.Compatibility.ShrinkAvailableBytes = 40 * gib;
+            secondaryOnly.SelectedTarget = windows;
+            Assert.IsTrue(secondaryOnly.CanAllocateLinux);
+            Assert.IsFalse(secondaryOnly.HasError);
+            Assert.AreEqual(76d, secondaryOnly.WindowsPartitionPercentage.Value);
+            Assert.AreEqual(20d, secondaryOnly.LinuxPartitionPercentage.Value);
         }
     }
 }

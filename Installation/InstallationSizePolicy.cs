@@ -29,6 +29,21 @@ namespace Libertix.Installation
         public const long BytesPerGiB = 1024L * 1024L * 1024L;
         public const long MebibytesPerGiB = 1024L;
 
+        public static long GetFinalInstallerOffset(PartitionIdentity source, long finalSizeBytes)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+            if (source.OffsetBytes <= 0 || source.SizeBytes <= 0 ||
+                source.OffsetBytes > long.MaxValue - source.SizeBytes)
+                throw new ArgumentOutOfRangeException(nameof(source));
+            long originalEnd = source.OffsetBytes + source.SizeBytes;
+            long padding = originalEnd % PartitionAlignmentBytes;
+            if (finalSizeBytes <= 0 || finalSizeBytes % PartitionAlignmentBytes != 0 ||
+                finalSizeBytes >= source.SizeBytes - padding)
+                throw new ArgumentOutOfRangeException(nameof(finalSizeBytes));
+            return originalEnd - padding - finalSizeBytes;
+        }
+
         public static InstallationSizes FromRequestedGigabytes(double requestedGigabytes)
         {
             if (double.IsNaN(requestedGigabytes) || double.IsInfinity(requestedGigabytes))

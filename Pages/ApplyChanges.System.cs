@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Libertix.Helpers;
@@ -61,12 +62,16 @@ namespace Libertix.Pages
             string expectedPlanArgument = firmware == FirmwareType.Bios && decryptBitLocker
                 ? $" -ExpectedPlanPath {QuoteArgument(_installationPlanPath)}"
                 : string.Empty;
+            string targetArgument = _installationState.SelectedInstallationTarget == null
+                ? string.Empty
+                : " -ExpectedTargetJsonBase64 " + QuoteArgument(Convert.ToBase64String(
+                    Encoding.UTF8.GetBytes(JsonSerializer.Serialize(_installationState.SelectedInstallationTarget))));
             StreamingProcessResult processResult = await RunStreamingProcessAsync(
                 powershell,
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
                 $"-ExpectedFirmware {expected} " +
                 (firmware == FirmwareType.Bios && decryptBitLocker ? "-DecryptBitLocker" : "") +
-                expectedPlanArgument,
+                expectedPlanArgument + targetArgument,
                 firmware == FirmwareType.Bios && decryptBitLocker
                     ? WindowsProcessTimeouts.InstallerOperation
                     : WindowsProcessTimeouts.DiskOperation,
@@ -116,6 +121,8 @@ namespace Libertix.Pages
                 SystemDiskSize = values.GetInt64("systemDiskSize"),
                 LogicalSectorSize = values.GetInt32("logicalSectorSize"),
                 PartitionStyle = values.GetString("partitionStyle"),
+                Allocation = values.GetNullableObject<InstallationAllocation>("allocation"),
+                AllocationEncryption = values.GetNullableObject<VolumeEncryptionSnapshot>("allocationEncryption"),
                 RecoveryPartitionNumber = values.GetInt32("recoveryPartitionNumber"),
                 RecoveryPartitionOffset = values.GetInt64("recoveryPartitionOffset"),
                 RecoveryPartitionSize = values.GetInt64("recoveryPartitionSize"),
@@ -128,6 +135,11 @@ namespace Libertix.Pages
                 InitialBitLockerEncryptionPercentage = values.GetInt32("initialBitLockerEncryptionPercentage"),
                 InitialBitLockerProtectionStatus = values.GetInt32("initialBitLockerProtectionStatus")
             };
+
+            if (info.Allocation != null && (info.AllocationEncryption == null || !info.AllocationEncryption.IsValid))
+                throw new InvalidOperationException("The selected volume encryption snapshot is missing or invalid.");
+            if (info.Allocation == null && info.AllocationEncryption != null)
+                throw new InvalidOperationException("An encryption snapshot was returned without a selected allocation volume.");
 
             if (firmware == FirmwareType.Bios && decryptBitLocker && !info.BitLockerSafe)
                 throw new InvalidOperationException("BitLocker is not fully decrypted on the Windows volume.");

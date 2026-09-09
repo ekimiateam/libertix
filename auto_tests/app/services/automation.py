@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -18,6 +19,7 @@ from app.api_runtime import (
 )
 from app.clients.proxmox import ProxmoxClient
 from app.clients.proxmox_serial import ProxmoxSerialCapture, SerialCaptureReport
+from app.clients.ssh import SSHClient
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
@@ -31,6 +33,13 @@ from app.services.automation_types import AutomationOptions, WizardProfile
 from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
 from app.services.validation import ValidationService
+from app.services.windows_lab_login import ensure_secondary_windows_session
+from app.storage_fixtures import (
+    StorageFixtureInventory,
+    StorageFixtureRequest,
+    plan_storage_fixture,
+    verify_storage_fixture_creation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,11 +88,15 @@ class AutomationService(
         linux_username: str,
         linux_password: str,
         linux_size_gib: int = 100,
+        installation_target: Literal["windows", "secondary"] = "windows",
         distribution: str = "mint",
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
         share_linux_files_in_windows: bool = True,
         migrate_windows_preferences: bool = False,
+        preference_wallpaper: Literal["custom", "windows-default"] = "custom",
+        storage_fixture: StorageFixtureRequest | None = None,
+        secondary_snapshot: bool = False,
         simulate_stale_firmware_entries: bool = False,
         force_offline_ntfs_resize: bool = False,
         boot_guardian_fault: Literal[
@@ -91,6 +104,7 @@ class AutomationService(
             "bios-rollback",
             "bios-controller-disconnect",
             "bios-postinstall-rollback",
+            "uefi-postinstall-rollback",
             "boot-order",
             "bootnext-fallback",
             "bootnext-rollback",
@@ -123,6 +137,19 @@ class AutomationService(
                 )
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
+            fixture = storage_fixture or StorageFixtureRequest()
+            if installation_target not in {"windows", "secondary"} or (
+                installation_target == "secondary" and not secondary_snapshot
+            ):
+                raise WorkflowError(
+                    "automation.installation_target.scope",
+                    "Secondary installation requires the secondary-disk snapshot mode",
+                )
+            if fixture.secondary_data and not secondary_snapshot:
+                raise WorkflowError(
+                    "automation.storage_fixture.scope",
+                    "A secondary-data fixture requires the secondary-disk snapshot mode",
+                )
             if boot_guardian_fault != "none":
                 expected_firmware = (
                     "bios"
@@ -148,6 +175,8 @@ class AutomationService(
             # Restore every selected VM after one all-VM preflight barrier so
             # parallel nominal runs start from one coherent clean baseline.
             self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
+            if secondary_snapshot and installation_target == "secondary":
+                self._prepare_secondary_boot_devices(result, selected_vms, profiles)
             executable = self.validation.prepare_server(result, source=source)
             windows_path = self.validation.to_windows_share_path(executable)
             result.ok(
@@ -159,11 +188,15 @@ class AutomationService(
                 linux_username=linux_username,
                 linux_password=linux_password,
                 linux_size_gib=linux_size_gib,
+                installation_target=installation_target,
                 monitor_iso=monitor_iso,
                 distribution=load_distribution_profile(distribution),
                 share_windows_files_in_linux=share_windows_files_in_linux,
                 share_linux_files_in_windows=share_linux_files_in_windows,
                 migrate_windows_preferences=migrate_windows_preferences,
+                preference_wallpaper=preference_wallpaper,
+                storage_fixture=fixture,
+                secondary_snapshot=secondary_snapshot,
                 use_default_filepool=source == "published",
                 simulate_stale_firmware_entries=simulate_stale_firmware_entries,
                 force_offline_ntfs_resize=force_offline_ntfs_resize,
@@ -207,7 +240,7 @@ class AutomationService(
                     )
             return result.success(
                 f"Libertix automation on {len(selected_vms)} VM(s): "
-                "installation and Linux/Windows validation completed"
+                "selected scenario completed and verified"
             )
         except WorkflowError as exc:
             return result.failure(exc)
@@ -292,6 +325,36 @@ class AutomationService(
     ) -> None:
         self.preflight.restore_clean_snapshots(result, profiles)
 
+    def _prepare_secondary_boot_devices(
+        self, result: ResultBuilder, vms: Sequence[VMConfig], profiles: dict[str, WizardProfile]
+    ) -> None:
+        for vm in vms:
+            if not vm.secondary_disk_boot_order:
+                continue
+            if vm.vmid not in self.settings.allowed_proxmox_vmids or not vm.automation_enabled:
+                raise WorkflowError(
+                    "automation.boot_order_scope", "Boot-order target is not authorized"
+                )
+            with self._proxmox() as proxmox:
+                node = proxmox.locate_vm(vm.vmid)
+                proxmox.configure_test_boot_order(node, vm.vmid, vm.secondary_disk_boot_order)
+                # A restored RAM snapshot retains the old firmware device enumeration.
+                # A guest reboot alone does not reconstruct QEMU's bootindex properties.
+                proxmox.shutdown_vm(node, vm.vmid)
+                proxmox.start_vm(node, vm.vmid)
+                proxmox.wait_for_vm_status(
+                    node, vm.vmid, "running", timeout=60, step="automation.boot_devices_started"
+                )
+                ensure_secondary_windows_session(self, proxmox, node, vm)
+                self.preflight.configure_windows_guest_network(proxmox, node, profiles[vm.name])
+            result.ok(
+                "automation.secondary_boot_devices",
+                "Configured test boot devices are enabled",
+                vm=vm.name,
+                vmid=vm.vmid,
+                devices=vm.secondary_disk_boot_order,
+            )
+
     def _run_vm_isolated(
         self,
         vm: VMConfig,
@@ -305,15 +368,23 @@ class AutomationService(
         try:
             self._prepare_windows_test_vm(vm, result)
             vm_options = options
+            if options.storage_fixture.enabled:
+                vm_options = replace(
+                    vm_options,
+                    storage_fixture_receipt=self._configure_storage_fixture(vm, options, result),
+                )
             if options.migrate_windows_preferences:
                 vm_options = replace(
                     vm_options,
-                    preference_fixture=self._configure_windows_preference_fixture(vm, result),
+                    preference_fixture=self._configure_windows_preference_fixture(
+                        vm, result, wallpaper_mode=options.preference_wallpaper
+                    ),
                 )
             if options.boot_guardian_fault in {
                 "bios-rollback",
                 "bios-controller-disconnect",
                 "bios-postinstall-rollback",
+                "uefi-postinstall-rollback",
                 "bootnext-rollback",
                 "preferred-path-rollback",
             }:
@@ -384,10 +455,295 @@ class AutomationService(
             return result.failure(failure)
         return result.success(f"Automation completed on {vm.name}")
 
+    def _configure_storage_fixture(
+        self, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
+    ) -> dict[str, object]:
+        step = "automation.storage_fixture"
+        with self.validation.ssh(
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
+        ) as ssh:
+            inspected = self.validation.run_windows_script(
+                ssh,
+                script_name="storage_fixture.ps1",
+                config={"phase": "inspect"},
+                step=step + ".inspect",
+                timeout=120,
+            )
+            values = self.validation.parse_powershell_results(
+                inspected.stdout,
+                prefixes=("STORAGE_INVENTORY_JSON",),
+            )
+            try:
+                inventory = StorageFixtureInventory.model_validate_json(
+                    values["STORAGE_INVENTORY_JSON"]
+                )
+            except (KeyError, ValueError) as exc:
+                raise WorkflowError(
+                    step, "Invalid storage fixture inventory", details={"vm": vm.name}
+                ) from exc
+            plan = plan_storage_fixture(
+                options.storage_fixture,
+                inventory,
+                secondary_snapshot=options.secondary_snapshot,
+            )
+            if plan["requires_decryption"]:
+                system_disk = next(
+                    disk for disk in inventory.disks if disk.number == inventory.system_disk_number
+                )
+                self._decrypt_storage_fixture_volume(
+                    ssh,
+                    vm,
+                    result,
+                    drive=inventory.system_drive + ":",
+                    disk_device_path=system_disk.device_path,
+                    require_system=True,
+                )
+                inspected = self.validation.run_windows_script(
+                    ssh,
+                    script_name="storage_fixture.ps1",
+                    config={"phase": "inspect"},
+                    step=step + ".inspect_decrypted",
+                    timeout=120,
+                )
+                values = self.validation.parse_powershell_results(
+                    inspected.stdout,
+                    prefixes=("STORAGE_INVENTORY_JSON",),
+                )
+                inventory = StorageFixtureInventory.model_validate_json(
+                    values["STORAGE_INVENTORY_JSON"]
+                )
+                if not inventory.system_volume_decrypted:
+                    raise WorkflowError(step, "Independent volume encryption verification failed")
+                plan = plan_storage_fixture(
+                    options.storage_fixture,
+                    inventory,
+                    secondary_snapshot=options.secondary_snapshot,
+                )
+            result.ok(step + ".plan", "Storage fixture dry-run verified", vm=vm.name, plan=plan)
+            applied = self.validation.run_windows_script(
+                ssh,
+                script_name="storage_fixture.ps1",
+                config={"phase": "apply", "plan": plan},
+                step=step + ".apply",
+                timeout=300,
+            )
+            values = self.validation.parse_powershell_results(
+                applied.stdout,
+                prefixes=("STORAGE_FIXTURE_JSON",),
+            )
+            try:
+                receipt = json.loads(values["STORAGE_FIXTURE_JSON"])
+                created_inventory = StorageFixtureInventory.model_validate(receipt["inventory"])
+                if not isinstance(receipt["witnesses"], list) or len(receipt["witnesses"]) != len(
+                    plan["actions"]
+                ):
+                    raise ValueError("Missing storage witnesses")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WorkflowError(
+                    step, "Invalid storage fixture receipt", details={"vm": vm.name}
+                ) from exc
+            verify_storage_fixture_creation(inventory, created_inventory, plan["actions"])
+            verified = self.validation.run_windows_script(
+                ssh,
+                script_name="storage_fixture.ps1",
+                config={"phase": "verify", "receipt": receipt},
+                step=step + ".verify",
+                timeout=120,
+            )
+            values = self.validation.parse_powershell_results(
+                verified.stdout, prefixes=("STORAGE_FIXTURE_VERIFIED",)
+            )
+            if values.get("STORAGE_FIXTURE_VERIFIED") != "True":
+                raise WorkflowError(
+                    step, "Storage fixture creation was not verified", details={"vm": vm.name}
+                )
+            if options.storage_fixture.decrypt_secondary_volume:
+                system_path = next(
+                    disk.device_path
+                    for disk in inventory.disks
+                    if disk.number == inventory.system_disk_number
+                )
+                secondary_witnesses = [
+                    item for item in receipt["witnesses"] if item["disk_device_path"] != system_path
+                ]
+                if len(secondary_witnesses) != 1:
+                    raise WorkflowError(step, "No unambiguous secondary volume to decrypt")
+                witness = secondary_witnesses[0]
+                self._decrypt_storage_fixture_volume(
+                    ssh,
+                    vm,
+                    result,
+                    drive=str(witness["drive_letter"]) + ":",
+                    disk_device_path=str(witness["disk_device_path"]),
+                    partition_offset=int(witness["partition_offset"]),
+                    volume_id=str(witness["volume_id"]),
+                    require_system=False,
+                )
+                decrypted_verification = self.validation.run_windows_script(
+                    ssh,
+                    script_name="storage_fixture.ps1",
+                    config={"phase": "verify", "receipt": receipt},
+                    step=step + ".verify_decrypted",
+                    timeout=120,
+                )
+                fields = self.validation.parse_powershell_results(
+                    decrypted_verification.stdout, prefixes=("STORAGE_FIXTURE_VERIFIED",)
+                )
+                if fields.get("STORAGE_FIXTURE_VERIFIED") != "True":
+                    raise WorkflowError(
+                        step, "Storage preservation after decryption was not verified"
+                    )
+            if options.storage_fixture.redirect_documents:
+                system_path = next(
+                    disk.device_path
+                    for disk in inventory.disks
+                    if disk.number == inventory.system_disk_number
+                )
+                witnesses = [
+                    item for item in receipt["witnesses"] if item["disk_device_path"] != system_path
+                ]
+                if len(witnesses) != 1:
+                    raise WorkflowError(step, "No unambiguous secondary document fixture volume")
+                prepared = self.validation.run_windows_script(
+                    ssh,
+                    script_name="storage_documents_fixture.ps1",
+                    config={"phase": "apply", **witnesses[0]},
+                    step=step + ".documents",
+                    timeout=180,
+                )
+                fields = self.validation.parse_powershell_results(
+                    prepared.stdout, prefixes=("STORAGE_DOCUMENTS_JSON",)
+                )
+                try:
+                    documents = json.loads(fields["STORAGE_DOCUMENTS_JSON"])
+                    if not isinstance(documents["files"], list) or not documents["files"]:
+                        raise ValueError("Missing document witnesses")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise WorkflowError(step, "Invalid redirected Documents receipt") from exc
+                receipt["user_documents"] = documents
+                self._verify_storage_documents_fixture(ssh, vm, documents, result)
+        result.ok(
+            step,
+            "Storage fixture created and its data witnesses verified",
+            vm=vm.name,
+            receipt=receipt,
+        )
+        return receipt
+
+    def _verify_storage_documents_fixture(
+        self, ssh: SSHClient, vm: VMConfig, receipt: dict[str, object], result: ResultBuilder
+    ) -> None:
+        step = "automation.storage_fixture.documents_preserved"
+        response = self.validation.run_windows_script(
+            ssh,
+            script_name="storage_documents_fixture.ps1",
+            config={"phase": "verify", "receipt": receipt},
+            step=step,
+            timeout=180,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout, prefixes=("STORAGE_DOCUMENTS_VERIFIED",)
+        )
+        if values.get("STORAGE_DOCUMENTS_VERIFIED") != "True":
+            raise WorkflowError(step, "Redirected Documents preservation was not verified")
+        result.ok(step, "Windows Documents redirection and file hashes verified", vm=vm.name)
+
+    def _decrypt_storage_fixture_volume(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        *,
+        drive: str,
+        disk_device_path: str,
+        require_system: bool,
+        partition_offset: int = 0,
+        volume_id: str = "",
+    ) -> None:
+        config = {
+            "drive": drive,
+            "disk_device_path": disk_device_path,
+            "require_system": require_system,
+            "partition_offset": partition_offset,
+            "volume_id": volume_id,
+        }
+        deadline = time.monotonic() + 1800
+        progress_deadline = time.monotonic() + 600
+        last_percentage = None
+        begin = True
+        while time.monotonic() < min(deadline, progress_deadline):
+            response = self.validation.run_windows_script(
+                ssh,
+                script_name="prepare_storage_fixture_volume.ps1",
+                config={**config, "begin": begin},
+                step="automation.storage_fixture.decryption",
+                timeout=min(90, max(1, min(deadline, progress_deadline) - time.monotonic())),
+            )
+            begin = False
+            values = self.validation.parse_powershell_results(
+                response.stdout, prefixes=("STORAGE_ENCRYPTION_JSON",)
+            )
+            try:
+                state = json.loads(values["STORAGE_ENCRYPTION_JSON"])
+                if (
+                    state["drive"] != config["drive"]
+                    or type(state["percentage"]) is not int
+                    or not 0 <= state["percentage"] <= 100
+                    or type(state["fully_decrypted"]) is not bool
+                    or state["status"] not in {"FullyDecrypted", "DecryptionInProgress"}
+                    or state["fully_decrypted"]
+                    != (state["status"] == "FullyDecrypted" and state["percentage"] == 0)
+                ):
+                    raise ValueError("Invalid or non-decrypting encryption status")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise WorkflowError(
+                    "automation.storage_fixture.decryption", "Invalid encryption status"
+                ) from exc
+            if last_percentage is not None and state["percentage"] > last_percentage:
+                raise WorkflowError(
+                    "automation.storage_fixture.decryption",
+                    "Windows fixture decryption progress regressed",
+                    details={"vm": vm.name},
+                )
+            if last_percentage is None or state["percentage"] < last_percentage:
+                progress_deadline = time.monotonic() + 600
+            last_percentage = state["percentage"]
+            result.ok(
+                "automation.storage_fixture.decryption",
+                "Windows fixture decryption status",
+                vm=vm.name,
+                drive=state["drive"],
+                status=state["status"],
+                percentage=state["percentage"],
+                sequence=f"{state['status']}:{state['percentage']}",
+            )
+            if (
+                state["fully_decrypted"] is True
+                and state["status"] == "FullyDecrypted"
+                and state["percentage"] == 0
+            ):
+                return
+            time.sleep(min(5, max(0, min(deadline, progress_deadline) - time.monotonic())))
+        raise WorkflowError(
+            "automation.storage_fixture.decryption",
+            "Windows fixture decryption exceeded its deadline",
+            details={
+                "vm": vm.name,
+                "timeout_seconds": 1800,
+                "inactivity_timeout_seconds": 600,
+                "last_encryption_percentage": last_percentage,
+            },
+        )
+
     def _configure_windows_preference_fixture(
         self,
         vm: VMConfig,
         result: ResultBuilder,
+        *,
+        wallpaper_mode: Literal["custom", "windows-default"] = "custom",
     ) -> dict[str, str]:
         with self.validation.ssh(
             vm.host,
@@ -398,7 +754,7 @@ class AutomationService(
             response = self.validation.run_windows_script(
                 ssh,
                 script_name="configure_windows_preference_fixture.ps1",
-                config={},
+                config={"wallpaper_mode": wallpaper_mode},
                 step="automation.windows_preference_fixture",
                 timeout=90,
             )
@@ -458,6 +814,7 @@ class AutomationService(
                 "SYSTEM_PARTITION_OFFSET",
                 "SYSTEM_PARTITION_SIZE",
                 "PARTITION_LAYOUT_JSON",
+                "STORAGE_LAYOUT_JSON",
                 "EXECUTION_PLAN_IDS_JSON",
                 "INSTALLER_PARTITION_COUNT",
                 "LIBERTIX_PROCESS_COUNT",
@@ -471,6 +828,7 @@ class AutomationService(
             "SYSTEM_PARTITION_OFFSET",
             "SYSTEM_PARTITION_SIZE",
             "PARTITION_LAYOUT_JSON",
+            "STORAGE_LAYOUT_JSON",
             "EXECUTION_PLAN_IDS_JSON",
         )
         if (
@@ -509,6 +867,16 @@ class AutomationService(
             try:
                 with self._proxmox() as proxmox:
                     node = proxmox.locate_vm(vm.vmid)
+                    if not proxmox.has_serial_console(node, vm.vmid):
+                        session.report = SerialCaptureReport(
+                            path=destination,
+                            payload_bytes=0,
+                            connections=0,
+                            disconnects=0,
+                            unavailable_reason="serial0 is not configured on the VM",
+                        )
+                        ready_event.set()
+                        return
                     session.report = ProxmoxSerialCapture(proxmox).run(
                         node,
                         vm.vmid,
@@ -553,6 +921,16 @@ class AutomationService(
                     "error_type": type(session.error).__name__,
                 },
             ) from session.error
+        if session.report is not None and session.report.unavailable_reason is not None:
+            result.ok(
+                "automation.serial_capture_unavailable",
+                "Proxmox configuration has no serial0; serial capture was not started",
+                vm=vm.name,
+                target=vm.host,
+                vmid=vm.vmid,
+                capture_available=False,
+            )
+            return session
         result.ok(
             "automation.serial_capture_started",
             "Deterministic Proxmox serial-console capture started",
@@ -759,6 +1137,7 @@ class AutomationService(
                 "schemaVersion": 1,
                 "distribution": options.distribution.id,
                 "linuxSizeGiB": options.linux_size_gib,
+                "installationTarget": options.installation_target,
                 "linuxUsername": options.linux_username,
                 "linuxPassword": options.linux_password,
                 "computerName": f"{vm.name.lower()}-linux",

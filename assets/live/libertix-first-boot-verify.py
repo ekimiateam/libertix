@@ -34,21 +34,29 @@ DEFAULT_LOCALE_PATH = Path("/etc/default/locale")
 DEFAULT_KEYBOARD_PATH = Path("/etc/default/keyboard")
 HEX_ID = re.compile(r"^[0-9a-f]{32}$")
 EFI_GLOBAL_VARIABLE_GUID = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
+BLOCK_CLASS_PATH = Path("/sys/class/block")
+BLOCK_DEVICE_PATH = Path("/dev")
 
 
 class VerificationError(RuntimeError):
     """Raised when first-boot evidence cannot be proven safely."""
 
 
-def run(*arguments: str) -> str:
-    result = subprocess.run(
-        arguments,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+def run(*arguments: str, timeout_seconds: float | None = None) -> str:
+    try:
+        result = subprocess.run(
+            arguments,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise VerificationError(
+            f"command exceeded {timeout_seconds} seconds: {' '.join(arguments)}"
+        ) from error
     if result.returncode != 0:
         diagnostic = (result.stderr or result.stdout).strip()
         raise VerificationError(
@@ -199,7 +207,7 @@ def verify_localization(
 
 def sysfs_partition_geometry(device: Path) -> tuple[str, int, int, int]:
     device_name = device.resolve().name
-    sysfs_path = Path("/sys/class/block") / device_name
+    sysfs_path = BLOCK_CLASS_PATH / device_name
     if not (sysfs_path / "partition").is_file():
         raise VerificationError(f"root source is not a partition: {device}")
     resolved = sysfs_path.resolve()
@@ -224,8 +232,11 @@ def planned_linux_offset(installer: dict[str, object]) -> int:
 
 def find_partition_at_offset(parent_name: str, offset_bytes: int) -> tuple[Path, int]:
     matches: list[tuple[Path, int]] = []
-    for candidate in Path("/sys/class/block").glob(f"{parent_name}*"):
+    for candidate in BLOCK_CLASS_PATH.glob(f"{parent_name}*"):
         if not (candidate / "partition").is_file():
+            continue
+        # A prefix also matches other disks, for example sda and sdaa.
+        if candidate.resolve().parent.name != parent_name:
             continue
         try:
             candidate_offset = int((candidate / "start").read_text().strip()) * 512
@@ -233,12 +244,76 @@ def find_partition_at_offset(parent_name: str, offset_bytes: int) -> tuple[Path,
         except (OSError, ValueError):
             continue
         if candidate_offset == offset_bytes:
-            matches.append((Path("/dev") / candidate.name, candidate_size))
+            matches.append((BLOCK_DEVICE_PATH / candidate.name, candidate_size))
     if len(matches) != 1:
         raise VerificationError(
             "Windows partition geometry does not resolve to exactly one block device"
         )
     return matches[0]
+
+
+def resolve_recorded_disk(recorded: dict[str, object]) -> Path:
+    identity = require_text(recorded, "partitionTableId")
+    style = require_text(recorded, "partitionStyle")
+    prefix, separator, table_id = identity.partition(":")
+    expected_type = {"GPT": "gpt", "MBR": "dos"}.get(style)
+    if not separator or prefix != style.lower() or not table_id or expected_type is None:
+        raise VerificationError("recorded disk partition-table identity is invalid")
+    matches: list[Path] = []
+    try:
+        candidates = list(BLOCK_CLASS_PATH.iterdir())
+    except OSError as error:
+        raise VerificationError("cannot enumerate installed-system disks") from error
+    for candidate in candidates:
+        if (candidate / "partition").exists():
+            continue
+        device = BLOCK_DEVICE_PATH / candidate.name
+        if not device.is_block_device():
+            continue
+        try:
+            observed_id = run(
+                "blkid", "-p", "-s", "PTUUID", "-o", "value", str(device), timeout_seconds=15
+            )
+            observed_type = run(
+                "blkid", "-p", "-s", "PTTYPE", "-o", "value", str(device), timeout_seconds=15
+            )
+        except VerificationError:
+            continue
+        if observed_id.casefold() == table_id.casefold() and observed_type == expected_type:
+            matches.append(device)
+    # Reject clones even when their sizes differ; the table identity is not unique.
+    if len(matches) != 1:
+        raise VerificationError("recorded disk identity does not resolve to exactly one disk")
+    device = matches[0]
+    try:
+        size = int(run("blockdev", "--getsize64", str(device), timeout_seconds=15))
+        sector = int(run("blockdev", "--getss", str(device), timeout_seconds=15))
+    except ValueError as error:
+        raise VerificationError("recorded disk geometry could not be read") from error
+    if size != require_integer(recorded, "sizeBytes") or sector != require_integer(
+        recorded, "logicalSectorSizeBytes"
+    ):
+        raise VerificationError("recorded disk size or sector size changed")
+    return device
+
+
+def resolve_installed_disks(plan: dict[str, object], root_device: Path) -> tuple[Path, Path]:
+    windows_record = require_mapping(plan, "disk")
+    version = require_integer(plan, "schemaVersion")
+    if version == 4 and "allocation" not in plan:
+        allocation_record = windows_record
+    elif version == 5:
+        allocation_record = require_mapping(plan, "allocation")
+    else:
+        raise VerificationError("installation plan disk allocation schema is invalid")
+    windows_disk = resolve_recorded_disk(windows_record)
+    allocation_disk = windows_disk if version == 4 else resolve_recorded_disk(allocation_record)
+    if version == 5 and allocation_disk == windows_disk:
+        raise VerificationError("separate allocation resolves to the Windows disk")
+    parent_name, _, _, _ = sysfs_partition_geometry(root_device)
+    if parent_name != allocation_disk.name:
+        raise VerificationError("Linux root is not on the recorded allocation disk")
+    return windows_disk, allocation_disk
 
 
 def mounted_target(device: Path) -> Path | None:
@@ -696,6 +771,13 @@ def verify_windows_sharing(plan: dict[str, object], windows_device: Path) -> dic
     features = require_mapping(plan, "features")
     if features.get("shareWindowsFilesInLinux") is not True:
         return {"enabled": False}
+    if "windowsSharing" in features:
+        from libertix_windows_sharing import verify
+
+        try:
+            return verify(plan, windows_device)
+        except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
+            raise VerificationError(str(error)) from error
     mount = WINDOWS_SHARED_MOUNT_PATH
     try:
         filesystems = json.loads(
@@ -772,7 +854,8 @@ def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str
     if recovery_run_id != plan_id:
         raise VerificationError("recovery identity differs from the installation plan")
 
-    parent_name, partition_number, offset_bytes, size_bytes = sysfs_partition_geometry(root_device)
+    windows_disk, allocation_disk = resolve_installed_disks(plan, root_device)
+    _, partition_number, offset_bytes, size_bytes = sysfs_partition_geometry(root_device)
     linux_offset = planned_linux_offset(installer)
     if offset_bytes != linux_offset:
         raise VerificationError("root partition offset differs from the installation plan")
@@ -792,18 +875,30 @@ def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str
         )
 
     windows_device, windows_size_bytes = find_partition_at_offset(
-        parent_name,
+        windows_disk.name,
         require_integer(windows, "offsetBytes"),
     )
-    windows_end = require_integer(windows, "offsetBytes") + windows_size_bytes
-    gap_before_linux = linux_offset - windows_end
+    if run("blkid", "-s", "TYPE", "-o", "value", str(windows_device)) != "ntfs":
+        raise VerificationError("recorded Windows partition is not NTFS")
+    source = windows
+    source_size_bytes = windows_size_bytes
+    if windows_disk != allocation_disk:
+        if windows_size_bytes != require_integer(windows, "sizeBytes"):
+            raise VerificationError("Windows size changed during separate-disk installation")
+        source = require_mapping(require_mapping(plan, "allocation"), "sourcePartition")
+        source_device, source_size_bytes = find_partition_at_offset(
+            allocation_disk.name, require_integer(source, "offsetBytes")
+        )
+        if run("blkid", "-s", "TYPE", "-o", "value", str(source_device)) != "ntfs":
+            raise VerificationError("recorded allocation source is not NTFS")
+    source_end = require_integer(source, "offsetBytes") + source_size_bytes
+    gap_before_linux = linux_offset - source_end
     if gap_before_linux < 0 or gap_before_linux > 1024 * 1024:
-        raise VerificationError("Windows and Linux partition geometry has an unexpected gap")
-    original_windows_size = require_integer(windows, "sizeBytes")
-    actual_shrink = original_windows_size - windows_size_bytes
+        raise VerificationError("Allocation source and Linux geometry has an unexpected gap")
+    actual_shrink = require_integer(source, "sizeBytes") - source_size_bytes
     expected_linux_size = require_integer(installer, "finalSizeBytes")
     if actual_shrink < expected_linux_size or actual_shrink > expected_linux_size + 2 * 1024 * 1024:
-        raise VerificationError("Windows partition shrink differs from the installation plan")
+        raise VerificationError("Allocation source shrink differs from the installation plan")
     boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
     if not re.fullmatch(r"[0-9a-f-]{36}", boot_id):
         raise VerificationError("Linux boot identifier is invalid")
@@ -834,7 +929,7 @@ def build_evidence(plan: dict[str, object], root_device: Path) -> tuple[dict[str
         "system": verify_installed_system(plan, root_uuid),
         "localization": verify_localization(plan),
         "windowsSharing": verify_windows_sharing(plan, windows_device),
-        "grub": verify_grub(plan, firmware, Path("/dev") / parent_name),
+        "grub": verify_grub(plan, firmware, windows_disk),
     }
     return evidence, windows_device
 
@@ -885,9 +980,11 @@ def resolve_windows_device(plan: dict[str, object]) -> Path:
     root_source = Path(run("findmnt", "-n", "-o", "SOURCE", "/"))
     if not root_source.exists():
         raise VerificationError(f"root source is not a block device: {root_source}")
-    parent_name, _, _, _ = sysfs_partition_geometry(root_source)
+    windows_disk, _ = resolve_installed_disks(plan, root_source)
     windows = require_mapping(require_mapping(plan, "disk"), "windows")
-    device, _ = find_partition_at_offset(parent_name, require_integer(windows, "offsetBytes"))
+    device, _ = find_partition_at_offset(windows_disk.name, require_integer(windows, "offsetBytes"))
+    if run("blkid", "-s", "TYPE", "-o", "value", str(device)) != "ntfs":
+        raise VerificationError("recorded Windows partition is not NTFS")
     return device
 
 

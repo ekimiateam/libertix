@@ -141,7 +141,8 @@ def test_web_ui_is_served() -> None:
     assert "/api/v1/validation" in response.text
     assert "/api/v1/validation/stream" in response.text
     assert "/api/v1/automation" in response.text
-    assert "/api/v1/automation/stream" in response.text
+    assert "/api/v1/automation/full" in response.text
+    assert "`${endpoint}/stream?format=ndjson`" in response.text
     assert "/api/v1/reset" in response.text
     assert "/api/v1/reset/stream" in response.text
     assert "/filepool/catalog.json" in response.text
@@ -168,10 +169,26 @@ def test_web_ui_is_served() -> None:
     assert "source" in response.text
     assert "Working tree local" in response.text
     assert "Le partage SMB sera conservé" in response.text
-    assert "Automation unattended" in response.text
+    assert "Installation automatique" in response.text
     assert "apply: true" in response.text
     assert 'id="requestPreview"' in response.text
-    assert 'linux_password: "<masqué>"' in response.text
+    assert 'linux_password: preview ? "<masqué>" : linuxPasswordInput.value' in response.text
+    for field in (
+        "automationMode",
+        "snapshotMode",
+        "installationTarget",
+        "extraSystemPartition",
+        "extraPartitionSizeMib",
+        "secondaryData",
+        "decryptSystemVolume",
+        "decryptSecondaryVolume",
+        "redirectDocuments",
+        "migrateWindowsPreferences",
+        "preferenceWallpaper",
+        "continueAfterFailure",
+        "campaignSummary",
+    ):
+        assert f'id="{field}"' in response.text
     assert 'sessionStorage.setItem("libertix_linux_password"' not in response.text
     assert 'localStorage.setItem("libertix_linux_password"' not in response.text
     assert "automationDry" not in response.text

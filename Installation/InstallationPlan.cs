@@ -14,6 +14,7 @@ namespace Libertix.Installation
     public sealed class InstallationPlan
     {
         public const int CurrentSchemaVersion = 4;
+        public const int SeparateAllocationSchemaVersion = 5;
 
         [JsonPropertyName("schemaVersion")]
         public int SchemaVersion { get; set; } = CurrentSchemaVersion;
@@ -38,6 +39,10 @@ namespace Libertix.Installation
 
         [JsonPropertyName("disk")]
         public InstallationDisk Disk { get; set; }
+
+        [JsonPropertyName("allocation")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public InstallationAllocation Allocation { get; set; }
 
         [JsonPropertyName("features")]
         public InstallationFeatures Features { get; set; }
@@ -202,6 +207,42 @@ namespace Libertix.Installation
         public long SizeBytes { get; set; }
     }
 
+    public sealed class InstallationAllocation
+    {
+        [JsonPropertyName("number")]
+        public int Number { get; set; }
+
+        [JsonPropertyName("uniqueId")]
+        public string UniqueId { get; set; }
+
+        [JsonPropertyName("partitionTableId")]
+        public string PartitionTableId { get; set; }
+
+        [JsonPropertyName("sizeBytes")]
+        public long SizeBytes { get; set; }
+
+        [JsonPropertyName("logicalSectorSizeBytes")]
+        public int LogicalSectorSizeBytes { get; set; }
+
+        [JsonPropertyName("partitionStyle")]
+        public string PartitionStyle { get; set; }
+
+        [JsonPropertyName("sourceDrive")]
+        public string SourceDrive { get; set; }
+
+        [JsonPropertyName("sourcePartition")]
+        public PartitionIdentity SourcePartition { get; set; }
+
+        [JsonPropertyName("sourceVolumeId")]
+        public string SourceVolumeId { get; set; }
+
+        [JsonPropertyName("sourceNtfsUuid")]
+        public string SourceNtfsUuid { get; set; }
+
+        [JsonPropertyName("sourceBitLockerState")]
+        public string SourceBitLockerState { get; set; }
+    }
+
     public sealed class InstallerPartitionPlan
     {
         [JsonPropertyName("number")]
@@ -233,6 +274,10 @@ namespace Libertix.Installation
 
         [JsonPropertyName("windowsProfilesJsonBase64")]
         public string WindowsProfilesJsonBase64 { get; set; }
+
+        [JsonPropertyName("windowsSharing")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public WindowsSharingPlan WindowsSharing { get; set; }
 
         [JsonPropertyName("windowsPreferenceMigration")]
         public InstallationPreferenceMigration WindowsPreferenceMigration { get; set; }

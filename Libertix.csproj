@@ -95,6 +95,7 @@
     <Compile Include="Installation\InstallationPlan.cs" />
     <Compile Include="Installation\InstallationPolicy.cs" />
     <Compile Include="Installation\InstallationPlanFactory.cs" />
+    <Compile Include="Installation\InstallationTargetSelection.cs" />
     <Compile Include="Installation\InstallationPlanSerializer.cs" />
     <Compile Include="Installation\InstallationPlanValidator.cs" />
     <Compile Include="Installation\Ipv4NetworkPolicy.cs" />
@@ -108,6 +109,8 @@
     <Compile Include="Installation\RuntimeNames.cs" />
     <Compile Include="Installation\WindowsKeyboardLayout.cs" />
     <Compile Include="Installation\WindowsShareConfiguration.cs" />
+    <Compile Include="Installation\WindowsSharingPlan.cs" />
+    <Compile Include="Scripts\native\WindowsSharingPaths.cs" />
     <Compile Include="Installation\WindowsPreferenceMigrationContract.cs" />
     <Compile Include="Installation\StoragePreflightInfo.cs" />
     <Compile Include="Installation\FirmwareInterop.cs" />
@@ -115,6 +118,7 @@
     <Compile Include="Models\DistroInfoJson.cs" />
     <Compile Include="Models\AccountInfo.cs" />
     <Compile Include="Models\CompatibilityInfo.cs" />
+    <Compile Include="Models\InstallationTargetInfo.cs" />
     <Compile Include="Models\SharingOptions.cs" />
     <Compile Include="Models\InstallationState.cs" />
     <Compile Include="Pages\AccountCreation.xaml.cs">
@@ -293,6 +297,9 @@
     <Content Include="Scripts\libertix-storage-preflight.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\libertix-windows-sharing-inventory.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\libertix-compatibility-preflight.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -311,6 +318,15 @@
     <Content Include="Scripts\modules\Libertix.Process.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\modules\Libertix.WindowsProfiles.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.WindowsSharingInventory.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\native\WindowsSharingPaths.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\modules\Libertix.BiosMbr.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -318,6 +334,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.FirmwareRead.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.SecondaryBootPreflight.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.PreferredBootPath.psm1">
@@ -345,6 +364,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.StorageGeometry.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\modules\Libertix.StorageTargets.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="Scripts\modules\Libertix.TemporaryArtifacts.psm1">

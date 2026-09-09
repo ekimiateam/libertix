@@ -424,6 +424,7 @@ def test_boot_guardian_fault_accepts_only_explicit_fixture_modes() -> None:
         "bios-rollback",
         "bios-controller-disconnect",
         "bios-postinstall-rollback",
+        "uefi-postinstall-rollback",
         "boot-order",
         "bootnext-fallback",
         "bootnext-rollback",
@@ -641,6 +642,61 @@ def test_capture_cleanup_refuses_a_workspace_named_symlink(tmp_path: Path) -> No
 
     assert (outside / "keep.txt").read_text(encoding="utf-8") == "keep"
     assert linked.is_symlink()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_scenario_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stream: bool
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+
+    class FakeAutomationService:
+        def __init__(self, _settings):
+            pass
+
+        def run(self, selectors, *, on_step, boot_guardian_fault, **_kwargs):
+            assert selectors == ["vm1", "vm2", "vm3"]
+            assert boot_guardian_fault == "none"
+            steps = []
+            for name in selectors:
+                step = StepResult(
+                    step="automation.vm_finished",
+                    status="ok",
+                    message="done",
+                    context={"vm": name, "vm_status": "ok"},
+                )
+                on_step(step)
+                steps.append(step)
+            return OperationResult(status="ok", operation="automation", message="done", steps=steps)
+
+    monkeypatch.setattr(main_module, "AutomationService", FakeAutomationService)
+    configured = settings(capture_dir=tmp_path / "captures", operation_log_dir=tmp_path / "logs")
+    configured = configured.model_copy(
+        update={
+            "vms": tuple(
+                vm.model_copy(update={"automation_enabled": True}) for vm in configured.vms
+            )
+        }
+    )
+    endpoint = "/api/v1/automation/full" + ("/stream?format=ndjson" if stream else "")
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            endpoint,
+            json={"vms": ["vm1", "vm2", "vm3"], "apply": True, "linux_password": "test-passphrase"},
+        )
+    assert response.status_code == 200
+    data = (
+        [json.loads(line) for line in response.text.splitlines()][-1]["data"]
+        if stream
+        else response.json()
+    )
+    assert data["status"] == "ok"
+    assert len(data["campaign_summary"]) == 4
+    assert len({item["log"] for item in data["campaign_summary"]}) == 4
+    assert all(Path(item["log"]).is_file() for item in data["campaign_summary"])
+    assert all(set(item["vms"].values()) == {"ok"} for item in data["campaign_summary"])
+    assert lock.acquire_calls == lock.release_calls == 1
 
 
 def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(

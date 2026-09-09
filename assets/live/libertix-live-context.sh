@@ -287,7 +287,7 @@ prepare_bios_mbr_backup_or_die() {
     fi
     [ "$load_result" -eq 3 ] || return "$load_result"
 
-    run_logged dd if="$DISK" of="$MBR_BACKUP" bs=512 count=1 iflag=fullblock status=none
+    run_logged dd if="${WINDOWS_DISK:-$DISK}" of="$MBR_BACKUP" bs=512 count=1 iflag=fullblock status=none
     [ "$(stat -c %s "$MBR_BACKUP" 2>/dev/null || echo 0)" -eq 512 ] || return 2
     with_windows_mounted_for_mbr_backup publish "$MBR_BACKUP"
 }

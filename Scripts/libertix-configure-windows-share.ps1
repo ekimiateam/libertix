@@ -18,6 +18,7 @@ if (-not (Test-Path -LiteralPath $processModulePath -PathType Leaf)) {
     throw "Native-process module is missing from the Windows sharing payload."
 }
 Import-Module -Name $processModulePath -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Libertix.WindowsProfiles.psm1') -ErrorAction Stop
 
 function Write-ShareLog {
     param([string]$Message)
@@ -112,6 +113,7 @@ function Get-Config {
     if (
         [int]$config.SystemDiskNumber -lt 0 -or
         [string]::IsNullOrWhiteSpace([string]$config.SystemDiskUniqueId) -or
+        [string]::IsNullOrWhiteSpace([string]$config.SystemDiskPartitionTableId) -or
         [int64]$config.ExpectedLinuxPartitionOffset -le 0 -or
         [int64]$config.ExpectedLinuxPartitionSize -le 0 -or
         [int64]$config.PartitionSizeToleranceBytes -le 0 -or
@@ -322,6 +324,14 @@ function Get-LinuxPartition {
     if (([string]$disk.UniqueId).Trim() -ne ([string]$Config.SystemDiskUniqueId).Trim()) {
         throw "Windows share configuration disk identity no longer matches the system disk."
     }
+    $tableId = switch ([string]$disk.PartitionStyle) {
+        'GPT' { 'gpt:' + ([guid]$disk.Guid).ToString('D').ToLowerInvariant() }
+        'MBR' { 'mbr:' + ([uint32]$disk.Signature).ToString('x8') }
+        default { throw 'Windows sharing requires a basic GPT or MBR disk.' }
+    }
+    if ($tableId -cne [string]$Config.SystemDiskPartitionTableId) {
+        throw 'Windows sharing partition-table identity no longer matches the recorded disk.'
+    }
     $expectedOffset = [int64]$Config.ExpectedLinuxPartitionOffset
     $expected = [int64]$Config.ExpectedLinuxPartitionSize
     $minimum = $expected - [int64]$Config.PartitionSizeToleranceBytes
@@ -342,23 +352,7 @@ function Get-LinuxPartition {
 }
 
 function Get-RealWindowsProfiles {
-    $excludedNames = @(
-        "DefaultAccount",
-        "defaultuser0",
-        "WDAGUtilityAccount",
-        "WsiAccount"
-    )
-    return @(
-        Get-CimInstance Win32_UserProfile -ErrorAction Stop |
-            Where-Object {
-                $profileName = Split-Path -Leaf ([string]$_.LocalPath)
-                -not $_.Special -and
-                [string]$_.SID -match '^S-1-5-21-(?:\d+-){3}\d+$' -and
-                $_.LocalPath -like "$env:SystemDrive\Users\*" -and
-                $profileName -notin $excludedNames -and
-                (Test-Path -LiteralPath $_.LocalPath -PathType Container)
-            }
-    )
+    return @(Get-LibertixWindowsUserProfiles)
 }
 
 function Write-MountStatus {

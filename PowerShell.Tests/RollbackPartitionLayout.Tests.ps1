@@ -3,11 +3,66 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
     if (@($errors).Count) { throw $errors[0] }
+    foreach ($name in @('Test-RollbackPartitionLayout', 'Test-RollbackStorageLayout')) {
     $function = $ast.Find({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq "Test-RollbackPartitionLayout"
+        $node.Name -eq $name
     }, $true)
     . ([scriptblock]::Create($function.Extent.Text))
+    }
+}
+
+Describe 'Rollback verifies the secondary disk as well as Windows' {
+    BeforeEach {
+        $expectedDisks = @(0..1 | ForEach-Object {
+            [pscustomobject]@{
+                Number = $_; UniqueId = 'disk-' + $_; Guid = ''; Signature = $_ + 1
+                Size = 64GB; PartitionStyle = 'MBR'; LogicalSectorSize = 512
+                Partitions = @([pscustomobject]@{ Offset = 1MB; Size = 60GB; GptType = $null; MbrType = 7 })
+            }
+        })
+        $script:rollbackObservedDisks = ConvertFrom-Json (ConvertTo-Json -InputObject $expectedDisks -Depth 6)
+        Mock Get-Disk { $script:rollbackObservedDisks }
+        Mock Get-Partition { $script:rollbackObservedDisks[[int]$DiskNumber[0]].Partitions }
+    }
+    It 'accepts both disks only after every extent was restored' {
+        Test-RollbackStorageLayout -Expected $expectedDisks | Should -BeTrue
+    }
+    It 'round-trips the actual baseline collector for GPT disks without an MBR signature' {
+        foreach ($disk in $script:rollbackObservedDisks) {
+            $disk.PartitionStyle = 'GPT'
+            $disk.Guid = [guid]::NewGuid().ToString('B')
+            $disk.Signature = $null
+        }
+        $collector = [Management.Automation.Language.Parser]::ParseFile(
+            "$PSScriptRoot/../auto_tests/app/scripts/inspect_installation_rollback_state.ps1",
+            [ref]$null, [ref]$null)
+        $assignment = $collector.Find({ param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left.Extent.Text -eq '$storageLayout'
+        }, $true)
+        . ([scriptblock]::Create($assignment.Extent.Text))
+        $saved = ConvertFrom-Json (ConvertTo-Json -InputObject $storageLayout -Depth 6)
+        Test-RollbackStorageLayout -Expected $saved | Should -BeTrue
+        $script:rollbackObservedDisks[1].Guid = [guid]::NewGuid().ToString('B')
+        Test-RollbackStorageLayout -Expected $saved | Should -BeFalse
+    }
+    It 'rejects a secondary source that remains shrunk' {
+        $script:rollbackObservedDisks[1].Partitions[0].Size = 40GB
+        Test-RollbackStorageLayout -Expected $expectedDisks | Should -BeFalse
+    }
+    It 'rejects an extra Linux partition on the secondary disk' {
+        $script:rollbackObservedDisks[1].Partitions += [pscustomobject]@{ Offset = 40GB + 1MB; Size = 20GB; GptType = $null; MbrType = 131 }
+        Test-RollbackStorageLayout -Expected $expectedDisks | Should -BeFalse
+    }
+    It 'rejects a replaced secondary disk with the same capacity' {
+        $script:rollbackObservedDisks[1].Signature = 42
+        Test-RollbackStorageLayout -Expected $expectedDisks | Should -BeFalse
+    }
+    It 'rejects a missing secondary disk' {
+        $script:rollbackObservedDisks = @($script:rollbackObservedDisks[0])
+        Test-RollbackStorageLayout -Expected $expectedDisks | Should -BeFalse
+    }
 }
 
 Describe "Rollback partition identity ignores only volatile Windows numbering" {

@@ -23,6 +23,22 @@ def language_section(language: str, section: str) -> dict[str, str]:
     return translation_catalogue()["languages"][language][section]
 
 
+@pytest.mark.parametrize(
+    "language,limitation",
+    [
+        ("en", "will not automatically restore encryption"),
+        ("fr", "ne rétablira pas automatiquement le chiffrement"),
+        ("es", "no restaurará automáticamente el cifrado"),
+    ],
+)
+def test_final_warning_discloses_bitlocker_rollback_limit(language, limitation):
+    warning = language_section(language, "wpf")["WarningMessage"]
+    assert "BitLocker" in warning
+    assert limitation in warning
+    page = (ROOT / "Pages/WarningConfirmation.xaml").read_text(encoding="utf-8-sig")
+    assert 'Text="{DynamicResource WarningMessage}"' in page
+
+
 def load_i18n_module() -> ModuleType:
     path = ROOT / "assets/live/libertix-i18n.py"
     spec = importlib.util.spec_from_file_location("libertix_i18n_tests", path)

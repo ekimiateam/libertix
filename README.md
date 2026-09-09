@@ -141,9 +141,17 @@ flowchart TB
 - At least 10 GiB reported shrinkable by Windows for initial preparation
 - A storage layout accepted by the compatibility preflight
 
-Libertix supports one local SATA, ATA, NVMe, SAS, SCSI, or MMC system disk. It refuses ambiguous or
+Libertix identifies the Windows system disk independently of unrelated attached storage. It supports
+local SATA, ATA, NVMe, SAS, SCSI, or MMC system disks. It refuses ambiguous or
 unsafe topologies such as Windows dynamic disks, Storage Spaces, USB system disks, VHD/iSCSI system
 disks, unsupported RAID controllers and unsupported Intel RST/VMD or AMD RAID configurations.
+
+The recommended destination takes space from the Windows system volume, usually `C:`. A compatible
+NTFS volume on a distinct internal physical disk can also be selected, with an explicit experimental
+support warning. Another drive letter on the same physical disk is not offered as an alternative.
+Windows cannot reliably prove that every firmware will expose a secondary disk during boot.
+Unrelated USB storage and OEM partitions are preserved. Existing partitions are not moved; layouts
+requiring unsupported movement, ambiguous identities, or unavailable MBR partition slots are refused.
 
 Free space and immediately shrinkable space are different. Libertix first tries to shrink Windows
 by the full requested Linux size. If unmovable NTFS files prevent that, it can create an 8 GiB
@@ -162,6 +170,11 @@ outside the Linux allocation and is checked again before the live environment wr
 
 The installer can expose Windows user folders in Linux and Linux user files in Windows. Linux files
 are mounted read-only on Windows. Both directions are optional and selected before installation.
+Windows folders are resolved from each registered profile, including redirected Documents and other
+known folders on another supported internal NTFS volume. The installation records the volume and
+disk identities, then rechecks them under Linux before creating the corresponding shortcuts.
+Unavailable, network, external, or separately encrypted data dependencies are not silently ignored
+or decrypted. Disable Windows file sharing or resolve the reported dependency before installation.
 
 ## Runtime configuration
 

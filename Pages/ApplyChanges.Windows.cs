@@ -16,6 +16,44 @@ namespace Libertix.Pages
 {
     public partial class ApplyChanges
     {
+        private WindowsSharingPlan _windowsSharingPlan;
+
+        private async Task ReadWindowsSharingInventoryAsync()
+        {
+            _windowsSharingPlan = null;
+            if (!_installationState.Sharing.ShareWindowsFilesInLinux) return;
+            string script = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                "Scripts", "libertix-windows-sharing-inventory.ps1");
+            string arguments = "-NoProfile -ExecutionPolicy Bypass -File " + QuoteArgument(script) +
+                " -SystemDrive " + QuoteArgument(_storagePreflight.SystemDrive);
+            if (_storagePreflight.Allocation != null)
+                arguments += " -AllocationDrive " + QuoteArgument(_storagePreflight.Allocation.SourceDrive);
+            var output = new StringBuilder();
+            object gate = new object();
+            StreamingProcessResult result = await RunStreamingProcessAsync(
+                WindowsProcessRunner.ResolvePowerShell(), arguments, WindowsProcessTimeouts.DiskOperation,
+                line => { }, captureStandardOutput: line => { lock (gate) output.AppendLine(line); });
+            if (result.Completion == StreamingProcessCompletion.Cancelled)
+                throw new OperationCanceledException(_installationCancellation.Token);
+            if (result.Completion == StreamingProcessCompletion.TerminationFailed)
+                throw new UnterminatedProcessException("Windows sharing inventory process could not be stopped.");
+            if (result.Completion != StreamingProcessCompletion.Exited)
+                throw new InvalidOperationException(Localization.GetString("WindowsSharingInventoryFailed"));
+            string text;
+            lock (gate) text = output.ToString();
+            PowerShellJsonResult values = PowerShellJsonResult.ParseFinalObject(text);
+            if (result.ExitCode != 0 || !values.GetBoolean("ok"))
+            {
+                Log("WINDOWS_SHARING: " + values.GetOptionalString("error", "Inventory failed."));
+                throw new InvalidOperationException(Localization.GetString("WindowsSharingInventoryFailed"));
+            }
+            _windowsSharingPlan = values.GetNullableObject<WindowsSharingPlan>("inventory") ??
+                throw new InvalidOperationException("Windows sharing inventory is missing.");
+            _windowsSharingPlan.Validate();
+            Log($"Windows sharing inventory verified: {_windowsSharingPlan.Folders.Length} folders, " +
+                $"{_windowsSharingPlan.Volumes.Length} related volumes.");
+        }
+
         private string GetWindowsProfilesJsonBase64()
         {
             var profiles = new List<string>();
@@ -106,6 +144,12 @@ namespace Libertix.Pages
                         "The native-process module is missing.",
                         processModuleSource);
                 File.Copy(processModuleSource, processModuleTarget, true);
+                string profilesModuleSource = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "Scripts", "modules", "Libertix.WindowsProfiles.psm1");
+                if (!File.Exists(profilesModuleSource))
+                    throw new FileNotFoundException("The Windows-profile module is missing.", profilesModuleSource);
+                File.Copy(profilesModuleSource, Path.Combine(WindowsShareRoot, "Libertix.WindowsProfiles.psm1"), true);
                 string hiddenHostSource = Path.Combine(
                     AppDomain.CurrentDomain.BaseDirectory,
                     "Libertix.BootGuardian.exe");
@@ -155,21 +199,24 @@ namespace Libertix.Pages
                 long expectedLinuxSize = InstallationSizePolicy
                     .FromRequestedGigabytes(_linuxSizeGB)
                     .FinalSizeBytes;
-                long originalWindowsEnd = checked(
-                    _storagePreflight.SystemPartitionOffset +
-                    _storagePreflight.SystemPartitionSize);
-                long alignmentPadding = originalWindowsEnd %
+                InstallationAllocation allocation = _installationPlan?.Allocation;
+                long originalSourceEnd = allocation == null
+                    ? checked(_storagePreflight.SystemPartitionOffset + _storagePreflight.SystemPartitionSize)
+                    : checked(allocation.SourcePartition.OffsetBytes + allocation.SourcePartition.SizeBytes);
+                long alignmentPadding = originalSourceEnd %
                     InstallationSizePolicy.PartitionAlignmentBytes;
                 long expectedLinuxOffset = checked(
-                    originalWindowsEnd - expectedLinuxSize - alignmentPadding);
+                    originalSourceEnd - expectedLinuxSize - alignmentPadding);
                 string configPath = Path.Combine(WindowsShareRoot, "config.json");
                 WindowsShareConfigurationStore.WriteAtomic(
                     configPath,
                     new WindowsShareConfiguration
                     {
                         Enabled = options.ShareLinuxFilesInWindows,
-                        SystemDiskNumber = _storagePreflight.SystemDiskNumber,
-                        SystemDiskUniqueId = _storagePreflight.SystemDiskUniqueId,
+                        SystemDiskNumber = allocation?.Number ?? _storagePreflight.SystemDiskNumber,
+                        SystemDiskUniqueId = allocation?.UniqueId ?? _storagePreflight.SystemDiskUniqueId,
+                        SystemDiskPartitionTableId = allocation?.PartitionTableId ??
+                            _storagePreflight.SystemDiskPartitionTableId,
                         ExpectedLinuxPartitionOffset = expectedLinuxOffset,
                         ExpectedLinuxPartitionSize = expectedLinuxSize,
                         PartitionSizeToleranceBytes =
@@ -210,8 +257,10 @@ namespace Libertix.Pages
             string configPath = Path.Combine(WindowsShareRoot, "config.json");
             WindowsShareConfiguration configuration =
                 WindowsShareConfigurationStore.Read(configPath);
-            configuration.SystemDiskNumber = _installationPlan.Disk.Number;
-            configuration.SystemDiskUniqueId = _installationPlan.Disk.UniqueId;
+            configuration.SystemDiskNumber = _installationPlan.Allocation?.Number ?? _installationPlan.Disk.Number;
+            configuration.SystemDiskUniqueId = _installationPlan.Allocation?.UniqueId ?? _installationPlan.Disk.UniqueId;
+            configuration.SystemDiskPartitionTableId =
+                _installationPlan.Allocation?.PartitionTableId ?? _installationPlan.Disk.PartitionTableId;
             configuration.ExpectedLinuxPartitionOffset =
                 GetExpectedFinalLinuxOffset();
             configuration.ExpectedLinuxPartitionSize =
@@ -403,8 +452,17 @@ namespace Libertix.Pages
                         Path.Combine("Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
                         "Libertix.PostInstallVerification.psm1");
                     CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.Rollback.psm1"),
+                        "Libertix.Rollback.psm1");
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.StorageTargets.psm1"),
+                        "Libertix.StorageTargets.psm1");
+                    CopyRequiredRecoveryFile(
                         Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
                         "Libertix.Process.psm1");
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.WindowsProfiles.psm1"),
+                        "Libertix.WindowsProfiles.psm1");
                     CopyRequiredRecoveryFile(
                         Path.Combine("Scripts", "modules", "Libertix.BiosMbr.psm1"),
                         "Libertix.BiosMbr.psm1");
@@ -470,6 +528,20 @@ namespace Libertix.Pages
                         $"CREATED_UTC={DateTime.UtcNow:O}"
                     });
                     File.WriteAllText(metadataPath, metadata + Environment.NewLine);
+                    if (_storagePreflight.Allocation != null)
+                    {
+                        if (_storagePreflight.AllocationEncryption == null ||
+                            !_storagePreflight.AllocationEncryption.IsValid)
+                            throw new InvalidOperationException("The initial source encryption state is not proven.");
+                        AtomicJsonFile.Write(Path.Combine(RecoveryRoot, "source-encryption-original.json"),
+                            System.Text.Json.JsonSerializer.Serialize(new
+                            {
+                                recoveryRunId = _installationPlan.Runtime.RecoveryRunId,
+                                sourceDrive = _storagePreflight.Allocation.SourceDrive,
+                                sourceNtfsUuid = _storagePreflight.Allocation.SourceNtfsUuid,
+                                snapshot = _storagePreflight.AllocationEncryption
+                            }));
+                    }
 
                     string registrationScript = Path.Combine(
                         AppDomain.CurrentDomain.BaseDirectory,
@@ -658,16 +730,30 @@ namespace Libertix.Pages
                 throw new FileNotFoundException("BIOS storage helper is missing.", scriptPath);
 
             string powershell = WindowsProcessRunner.ResolvePowerShell();
+            InstallationAllocation allocation = _installationPlan.Allocation;
+            if (allocation != null && allocation.PartitionStyle != InstallationPartitionStyle.Mbr)
+                throw new InvalidOperationException("The BIOS allocation requires a separate MBR data disk.");
+            PartitionIdentity sourcePartition = allocation?.SourcePartition ?? _installationPlan.Disk.Windows;
+            string sourceDrive = allocation?.SourceDrive ?? _storagePreflight.SystemDrive;
+            long sourceBoundary = allocation == null
+                ? _storagePreflight.RecoveryPartitionOffset
+                : checked(sourcePartition.OffsetBytes + sourcePartition.SizeBytes);
             string arguments =
                 $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
                 $"-Action {QuoteArgument(action)} " +
-                $"-SystemDrive {QuoteArgument(_storagePreflight.SystemDrive)} " +
-                $"-DiskNumber {_storagePreflight.SystemDiskNumber} " +
-                $"-DiskUniqueId {QuoteArgument(_storagePreflight.SystemDiskUniqueId)} " +
-                $"-WindowsPartitionOffsetBytes {_storagePreflight.SystemPartitionOffset} " +
-                $"-RecoveryPartitionOffsetBytes {_storagePreflight.RecoveryPartitionOffset} " +
+                $"-SystemDrive {QuoteArgument(sourceDrive)} " +
+                $"-DiskNumber {allocation?.Number ?? _storagePreflight.SystemDiskNumber} " +
+                $"-DiskUniqueId {QuoteArgument(allocation?.UniqueId ?? _storagePreflight.SystemDiskUniqueId)} " +
+                $"-DiskPartitionTableId {QuoteArgument(allocation?.PartitionTableId ?? _storagePreflight.SystemDiskPartitionTableId)} " +
+                $"-ExpectedDiskSizeBytes {allocation?.SizeBytes ?? _storagePreflight.SystemDiskSize} " +
+                $"-ExpectedLogicalSectorSizeBytes {allocation?.LogicalSectorSizeBytes ?? _storagePreflight.LogicalSectorSize} " +
+                (allocation == null ? string.Empty : $"-ExpectedSourceVolumeId {QuoteArgument(allocation.SourceVolumeId)} ") +
+                (allocation == null ? string.Empty : $"-ExpectedSourceNtfsUuid {QuoteArgument(allocation.SourceNtfsUuid)} ") +
+                $"-WindowsPartitionOffsetBytes {sourcePartition.OffsetBytes} " +
+                $"-OriginalWindowsPartitionSizeBytes {sourcePartition.SizeBytes} " +
+                $"-RecoveryPartitionOffsetBytes {sourceBoundary} " +
                 $"-SizeBytes {sizeBytes} " +
-                $"-ReclaimableArtifactBytes {reclaimableArtifactBytes}";
+                $"-ReclaimableArtifactBytes {(allocation == null ? reclaimableArtifactBytes : 0)}";
             var processResult = await Task.Run(() => RunProcess(
                 powershell,
                 arguments,

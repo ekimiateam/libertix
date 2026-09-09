@@ -79,6 +79,11 @@ configure_windows_mount() {
 
 configure_windows_profile_shortcuts() {
     [ "$SHARE_WINDOWS_FILES_IN_LINUX" = "true" ] || return 0
+    if python3 -c 'import json; p=json.load(open("/etc/libertix/installation-plan.json")); raise SystemExit(0 if "windowsSharing" in p["features"] else 1)'; then
+        python3 /usr/local/lib/libertix/libertix_windows_sharing.py configure \
+            /etc/libertix/installation-plan.json "$WINDOWS_PART"
+        return
+    fi
     local home_dir bookmarks profile shortcut profiles_output bookmark_uri
     home_dir="/home/$USERNAME"
     bookmarks="$home_dir/.config/gtk-3.0/bookmarks"

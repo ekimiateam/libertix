@@ -591,6 +591,31 @@ class ValidationService:
         copied = 0
         reused = 0
         manifest: dict[str, dict[str, object]] = {}
+
+        def make_upload_progress_reporter(
+            file_name: str, progress_interval: int
+        ) -> Callable[[int, int], None]:
+            last_reported = 0
+
+            def report(transferred: int, total: int) -> None:
+                nonlocal last_reported
+                if transferred < total and transferred - last_reported < progress_interval:
+                    return
+                last_reported = transferred
+                result.ok(
+                    "server.filepool_upload_progress",
+                    "Development filepool upload progressed",
+                    target=s.main_ssh_host,
+                    file=file_name,
+                    phase=file_name,
+                    sequence=transferred,
+                    bytes_transferred=transferred,
+                    total_bytes=total,
+                    percent=round(transferred * 100 / total, 1) if total > 0 else 100.0,
+                )
+
+            return report
+
         for name, local_path in sorted(artifacts.items()):
             with local_path.open("rb") as stream:
                 sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -608,11 +633,14 @@ class ValidationService:
                 reused += 1
             else:
                 temporary_path = remote_root / f".{name}.{uuid.uuid4().hex}.tmp"
+                progress_interval = max(8 * 1024 * 1024, (size + 9) // 10)
                 try:
                     ssh.upload_file(
                         local_path,
                         str(temporary_path),
                         step="server.filepool_upload",
+                        on_progress=make_upload_progress_reporter(name, progress_interval),
+                        stall_timeout_seconds=120,
                     )
                     publish = (
                         "set -eu; "
@@ -950,7 +978,7 @@ class ValidationService:
                     "unattended": unattended_config,
                 },
                 step=step,
-                timeout=90,
+                timeout=420,
             )
             values = self.parse_powershell_results(
                 response.stdout,

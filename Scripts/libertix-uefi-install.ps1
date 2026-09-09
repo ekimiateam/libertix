@@ -40,6 +40,7 @@ $requiredModules = @(
     "Libertix.InstallationPlan.psm1",
     "Libertix.InstallationState.psm1",
     "Libertix.StorageGeometry.psm1",
+    "Libertix.StorageTargets.psm1",
     "Libertix.Process.psm1",
     "Libertix.Firmware.psm1",
     "Libertix.Download.psm1",
@@ -325,7 +326,7 @@ if ($RecoverPreviousTransaction) {
             # The durable ledger already proves every compensation. Run the
             # idempotent physical checks without attempting a second state
             # transition, then remove only the leftover active transaction.
-            $installationPlan = $null
+            # Keep the validated disk proof even when ledger transitions are disabled.
             $InstallationPlanPath = ""
             $ExecutionStatePath = ""
         } else {
@@ -364,14 +365,14 @@ if ($Revert) {
         if ([string]$rollbackContext.ExecutionState.status -eq "pending") {
             throw "UEFI recovery execution state is pending; no rollback is active."
         }
+        $installationPlan = $rollbackContext.Plan
         if ([string]$rollbackContext.ExecutionState.status -eq "rolled-back") {
             # The ledger is already terminal. Keep the physical cleanup idempotent
             # without trying to record a second rollback transition.
-            $installationPlan = $null
+            # Storage verification still needs the original disk and Windows extent.
             $InstallationPlanPath = ""
             $ExecutionStatePath = ""
         } else {
-            $installationPlan = $rollbackContext.Plan
             $InstallationPlanPath = $rollbackContext.PlanPath
             $ExecutionStatePath = $rollbackContext.StatePath
         }
@@ -438,9 +439,17 @@ try {
     }
 
     Assert-LibertixPlanMatchesCurrentStorage
+    Assert-LibertixAllocationMatchesCurrentStorage
     Test-LibertixSecureBootCompatibility -InstallationPlan $installationPlan
-    Set-WindowsVolumeReadableFromLinux
+    if ($installationPlan.PSObject.Properties.Name -contains 'allocation' -and $null -ne $installationPlan.allocation) {
+        Save-TransactionPreparationState -SystemPartition (Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop)
+    }
+    Set-WindowsVolumeReadableFromLinux -VerifyStorageIdentity {
+        Assert-LibertixPlanMatchesCurrentStorage
+        Assert-LibertixAllocationMatchesCurrentStorage
+    }
     Set-LibertixInstallationPlanWindowsBitLockerState -State "FullyDecrypted"
+    Set-LibertixAllocationVolumeReadableFromLinux
     Start-LibertixTrackedStep -Step "windows.artifacts-verified"
     Write-LibertixProgress -Stage "installer-iso-download" -Percent 30
     Set-DistributionIsoOnWindows

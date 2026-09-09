@@ -98,14 +98,14 @@ debug_disk_state() {
 }
 
 assert_recovery_unchanged_or_die() {
-    local attempt recovery_partition="" recovery_size=0
+    local attempt recovery_partition="" recovery_size=0 windows_disk="${WINDOWS_DISK:-$DISK}"
 
     # Partition-table writes can temporarily remove a device from sysfs while
     # the on-disk table is already correct. Retry the exact manifest lookup;
     # never accept a different offset or size.
     for attempt in $(seq 1 20); do
         udevadm settle --timeout=10 2>/dev/null || true
-        recovery_partition=$(partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES" || true)
+        recovery_partition=$(partition_at_offset "$windows_disk" "$RECOVERY_PARTITION_OFFSET_BYTES" || true)
         if [ -n "$recovery_partition" ] && [ -b "$recovery_partition" ]; then
             recovery_size=$(blockdev --getsize64 "$recovery_partition" 2>/dev/null || echo 0)
             [ "$recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES" ] && break

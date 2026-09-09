@@ -22,6 +22,15 @@ $systemPartition = Get-Partition -DriveLetter C -ErrorAction Stop
 $systemDisk = $systemPartition | Get-Disk -ErrorAction Stop
 $partitionLayout = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop |
     Sort-Object PartitionNumber | Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
+$storageLayout = @(Get-Disk -ErrorAction Stop | Where-Object Size -GT 0 | Sort-Object Number | ForEach-Object {
+    [pscustomobject]@{
+        Number = [int]$_.Number; UniqueId = [string]$_.UniqueId; Guid = [string]$_.Guid
+        Signature = [string]$_.Signature; Size = [long]$_.Size
+        PartitionStyle = [string]$_.PartitionStyle; LogicalSectorSize = [int]$_.LogicalSectorSize
+        Partitions = @(Get-Partition -DiskNumber $_.Number -ErrorAction Stop |
+            Sort-Object Offset | Select-Object Offset, Size, GptType, MbrType)
+    }
+})
 $ledgerPaths = @()
 $biosLedger = Join-Path $env:SystemDrive "LibertixInstallRecovery\installation-state.json"
 if (Test-Path -LiteralPath $biosLedger) { $ledgerPaths += $biosLedger }
@@ -65,6 +74,7 @@ Write-Output ("SYSTEM_PARTITION_NUMBER={0}" -f [int]$systemPartition.PartitionNu
 Write-Output ("SYSTEM_PARTITION_OFFSET={0}" -f [int64]$systemPartition.Offset)
 Write-Output ("SYSTEM_PARTITION_SIZE={0}" -f [int64]$systemPartition.Size)
 Write-Output ("PARTITION_LAYOUT_JSON={0}" -f (ConvertTo-Json -InputObject $partitionLayout -Compress))
+Write-Output ("STORAGE_LAYOUT_JSON={0}" -f (ConvertTo-Json -InputObject $storageLayout -Depth 6 -Compress))
 Write-Output ("EXECUTION_PLAN_IDS_JSON={0}" -f (ConvertTo-Json -InputObject $baselinePlanIds -Compress))
 Write-Output ("INSTALLER_PARTITION_COUNT={0}" -f [int]$installerPartitions.Count)
 Write-Output (

@@ -65,6 +65,7 @@ namespace Libertix.Pages
                 Sharing = _installationState.Sharing,
                 Compatibility = _installationState.Compatibility,
                 Storage = _storagePreflight,
+                Allocation = _storagePreflight.Allocation,
                 Sizes = sizes,
                 Keyboard = keyboard,
                 StartupOptions = startupOptions,
@@ -74,6 +75,7 @@ namespace Libertix.Pages
                 SystemDriveRoot = systemDriveRoot,
                 PasswordHashWindowsPath = passwordHashWindowsPath,
                 WindowsProfilesJsonBase64 = GetWindowsProfilesJsonBase64(),
+                WindowsSharing = _windowsSharingPlan,
                 WindowsPreferenceMigration = preferenceMigration,
                 RecoveryRootWindows = recoveryRoot,
                 RecoveryRunId = recoveryRunId
@@ -112,7 +114,8 @@ namespace Libertix.Pages
             string powershell = WindowsProcessRunner.ResolvePowerShell();
             string command =
                 $"$p=Get-Partition -DriveLetter {char.ToUpperInvariant(driveLetter)} -ErrorAction Stop; " +
-                "[Console]::Out.WriteLine(('{0}|{1}|{2}' -f $p.PartitionNumber,$p.Offset,$p.Size))";
+                "if(@($p).Count -ne 1){throw 'Installer drive is ambiguous.'}; " +
+                "[Console]::Out.WriteLine(('{0}|{1}|{2}|{3}' -f $p.DiskNumber,$p.PartitionNumber,$p.Offset,$p.Size))";
             var result = await Task.Run(() => RunProcess(
                 powershell,
                 $"-NoProfile -Command {QuoteArgument(command)}",
@@ -121,10 +124,13 @@ namespace Libertix.Pages
                 throw new InvalidOperationException($"Installer partition identity query failed: {result.error}");
 
             string[] fields = result.output.Trim().Split('|');
-            if (fields.Length != 3 ||
-                !int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int number) ||
-                !long.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out long offset) ||
-                !long.TryParse(fields[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out long size) ||
+            int expectedDiskNumber = _installationPlan.Allocation?.Number ?? _installationPlan.Disk.Number;
+            if (fields.Length != 4 ||
+                !int.TryParse(fields[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int diskNumber) ||
+                diskNumber != expectedDiskNumber ||
+                !int.TryParse(fields[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int number) ||
+                !long.TryParse(fields[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out long offset) ||
+                !long.TryParse(fields[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out long size) ||
                 number <= 0 || offset <= 0 || size <= 0)
             {
                 throw new InvalidOperationException(

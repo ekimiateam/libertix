@@ -13,11 +13,20 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$DiskUniqueId,
     [Parameter(Mandatory = $true)]
+    [ValidatePattern('^mbr:[0-9a-f]{8}$')]
+    [string]$DiskPartitionTableId,
+    [Parameter(Mandatory = $true)]
     [int64]$WindowsPartitionOffsetBytes,
+    [Parameter(Mandatory = $true)]
+    [int64]$OriginalWindowsPartitionSizeBytes,
     [Parameter(Mandatory = $true)]
     [int64]$RecoveryPartitionOffsetBytes,
     [int64]$SizeBytes = 0,
-    [int64]$ReclaimableArtifactBytes = 0
+    [int64]$ReclaimableArtifactBytes = 0,
+    [string]$ExpectedSourceVolumeId = '',
+    [string]$ExpectedSourceNtfsUuid = '',
+    [int64]$ExpectedDiskSizeBytes = 0,
+    [int]$ExpectedLogicalSectorSizeBytes = 0
 )
 
 Set-StrictMode -Version Latest
@@ -28,6 +37,7 @@ if (-not (Test-Path -LiteralPath $geometryModule -PathType Leaf)) {
     throw "Libertix storage geometry module is missing: $geometryModule"
 }
 Import-Module -Name $geometryModule -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'modules\Libertix.StorageTargets.psm1') -Force -ErrorAction Stop
 $policyModule = Join-Path $PSScriptRoot "modules\Libertix.InstallationPolicy.psm1"
 if (-not (Test-Path -LiteralPath $policyModule -PathType Leaf)) {
     throw "Libertix installation policy module is missing: $policyModule"
@@ -42,9 +52,30 @@ function Get-ValidatedWindowsPartition {
     if (
         [int]$partition.DiskNumber -ne $DiskNumber -or
         [int64]$partition.Offset -ne $WindowsPartitionOffsetBytes -or
-        ([string]$disk.UniqueId).Trim() -ne $DiskUniqueId.Trim()
+        $OriginalWindowsPartitionSizeBytes -le 0 -or
+        [int64]$partition.Size -gt $OriginalWindowsPartitionSizeBytes -or
+        ([string]$disk.UniqueId).Trim() -ne $DiskUniqueId.Trim() -or
+        [string]$disk.PartitionStyle -ne 'MBR' -or
+        ($ExpectedDiskSizeBytes -gt 0 -and [long]$disk.Size -ne $ExpectedDiskSizeBytes) -or
+        ($ExpectedLogicalSectorSizeBytes -gt 0 -and [int]$disk.LogicalSectorSize -ne $ExpectedLogicalSectorSizeBytes) -or
+        ('mbr:' + ([uint32]$disk.Signature).ToString('x8')) -ne $DiskPartitionTableId
     ) {
         throw "Windows storage identity changed after compatibility preflight."
+    }
+    Assert-LibertixUniqueTargetDiskIdentity -Disk $disk -Disks @(Get-Disk -ErrorAction Stop)
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedSourceVolumeId)) {
+        $volume = Get-Volume -DriveLetter $driveLetter -ErrorAction Stop
+        if ([string]$volume.UniqueId -cne $ExpectedSourceVolumeId -or [string]$volume.FileSystem -ne 'NTFS') {
+            throw 'The selected source NTFS volume changed before the BIOS storage action.'
+        }
+        if ($ExpectedSourceNtfsUuid -cnotmatch '\A[0-9A-F]{16}\z' -or
+            (Get-LibertixNtfsVolumeSerial -Drive $SystemDrive.ToUpperInvariant()) -cne $ExpectedSourceNtfsUuid) {
+            throw 'The selected source NTFS filesystem identity changed before the BIOS storage action.'
+        }
+        $encryptionState = Get-LibertixTargetVolumeEncryptionState -Drive $SystemDrive.ToUpperInvariant()
+        if ($encryptionState -notin @('FullyDecrypted', 'NotEncryptable')) {
+            throw 'The selected source must be fully decrypted before the BIOS storage action.'
+        }
     }
     return $partition
 }
@@ -58,6 +89,14 @@ $windowsPartition = Get-ValidatedWindowsPartition
 $driveLetter = $SystemDrive.TrimEnd(":")
 $systemDisk = Get-Disk -Number $windowsPartition.DiskNumber -ErrorAction Stop
 $partitionAlignmentBytes = Get-LibertixPartitionAlignmentBytes
+if ($OriginalWindowsPartitionSizeBytes -gt [int64]$systemDisk.Size -or
+    $WindowsPartitionOffsetBytes -gt [int64]$systemDisk.Size - $OriginalWindowsPartitionSizeBytes) {
+    throw 'The original Windows extent is outside the selected disk.'
+}
+$allocationEndBytes = [Math]::Min(
+    $WindowsPartitionOffsetBytes + $OriginalWindowsPartitionSizeBytes,
+    $RecoveryPartitionOffsetBytes
+)
 
 switch ($Action) {
     "QueryShrink" {
@@ -82,6 +121,9 @@ switch ($Action) {
         }
     }
     "Shrink" {
+        if ([int64]$windowsPartition.Size -ne $OriginalWindowsPartitionSizeBytes) {
+            throw 'The Windows extent changed before the requested shrink.'
+        }
         if ($SizeBytes -le 0 -or $SizeBytes -ge [int64]$windowsPartition.Size) {
             throw "The requested shrink size is outside the Windows partition bounds."
         }
@@ -113,15 +155,19 @@ switch ($Action) {
             )
         }
         if (
-            $SizeBytes -gt $RecoveryPartitionOffsetBytes -or
+            $SizeBytes -gt $allocationEndBytes -or
             $installerOffsetBytes -gt `
-                $RecoveryPartitionOffsetBytes - $SizeBytes - $partitionAlignmentBytes
+                $allocationEndBytes - $SizeBytes - $partitionAlignmentBytes
         ) {
-            throw "The requested Linux partition would overlap Windows Recovery."
+            throw "The requested Linux partition would exceed the original Windows extent or overlap Recovery."
         }
         $supported = Get-PartitionSupportedSize -DriveLetter $driveLetter -ErrorAction Stop
         if ($targetSize -lt [int64]$supported.SizeMin) {
             throw "Windows does not expose enough shrinkable space for the requested size."
+        }
+        $currentSource = Get-ValidatedWindowsPartition
+        if ([long]$currentSource.Size -ne $OriginalWindowsPartitionSizeBytes) {
+            throw 'The source volume changed immediately before the requested shrink.'
         }
         Resize-Partition -DriveLetter $driveLetter -Size $targetSize -ErrorAction Stop
         $verified = Get-ValidatedWindowsPartition
@@ -144,12 +190,16 @@ switch ($Action) {
         )
         $maximumPartitionOffsetBytes = $containerOffsetBytes + $partitionAlignmentBytes
         if (
-            $SizeBytes -gt $RecoveryPartitionOffsetBytes -or
-            $maximumPartitionOffsetBytes -gt $RecoveryPartitionOffsetBytes - $SizeBytes
+            $SizeBytes -gt $allocationEndBytes -or
+            $maximumPartitionOffsetBytes -gt $allocationEndBytes - $SizeBytes
         ) {
-            throw "The staging partition would overlap Windows Recovery."
+            throw "The staging partition would exceed the original Windows extent or overlap Recovery."
         }
 
+        $currentSource = Get-ValidatedWindowsPartition
+        if ([long]$currentSource.Size -ne [long]$windowsPartition.Size) {
+            throw 'The source volume changed immediately before staging creation.'
+        }
         $partition = New-Partition `
             -DiskNumber $DiskNumber `
             -Size $SizeBytes `
@@ -157,13 +207,20 @@ switch ($Action) {
             -Alignment $partitionAlignmentBytes `
             -ErrorAction Stop
         if (
+            [int]$partition.DiskNumber -ne $DiskNumber -or
+            [int]$partition.PartitionNumber -le 0 -or
+            [int]$partition.PartitionNumber -eq [int]$windowsPartition.PartitionNumber -or
             [int64]$partition.Offset -lt $containerOffsetBytes -or
             [int64]$partition.Offset -gt $maximumPartitionOffsetBytes -or
             [int64]$partition.Offset % [int64]$systemDisk.LogicalSectorSize -ne 0 -or
-            [int64]$partition.Offset -gt $RecoveryPartitionOffsetBytes - $SizeBytes -or
+            [int64]$partition.Offset -gt $allocationEndBytes - $SizeBytes -or
             [int64]$partition.Size -ne $SizeBytes
         ) {
             throw "Windows created the BIOS staging partition with unexpected geometry."
+        }
+        $sourceBeforeFormat = Get-ValidatedWindowsPartition
+        if ([long]$sourceBeforeFormat.Size -ne [long]$windowsPartition.Size) {
+            throw 'The source volume changed before staging format.'
         }
         Format-Volume `
             -Partition $partition `

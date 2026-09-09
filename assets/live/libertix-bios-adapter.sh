@@ -66,19 +66,20 @@ only_mbr_partition_has_boot_flag() {
 set_mbr_active_partition_verified() {
     local partition_number="$1"
     local purpose="$2"
+    local windows_disk="${WINDOWS_DISK:-$DISK}"
     local rc
 
-    echo "+ sfdisk --lock --activate $DISK $partition_number"
-    if sfdisk --lock --activate "$DISK" "$partition_number"; then
+    echo "+ sfdisk --lock --activate $windows_disk $partition_number"
+    if sfdisk --lock --activate "$windows_disk" "$partition_number"; then
         rc=0
     else
         rc=$?
     fi
     sync || true
-    partprobe "$DISK" 2>/dev/null || true
+    partprobe "$windows_disk" 2>/dev/null || true
     udevadm settle --timeout=10 2>/dev/null || true
 
-    if ! only_mbr_partition_has_boot_flag "$DISK" "$partition_number"; then
+    if ! only_mbr_partition_has_boot_flag "$windows_disk" "$partition_number"; then
         echo "$purpose: MBR boot flags do not match the requested state after rc=$rc"
         return 1
     fi
@@ -118,7 +119,7 @@ final_verify_or_die() {
         die "final verify: MBR primary slot count is $primary_slot_count"
 
     windows_boot_part_num="$(partition_number "$WINDOWS_BOOT_PART")"
-    partition_has_boot_flag "$DISK" "$windows_boot_part_num" || \
+    partition_has_boot_flag "${WINDOWS_DISK:-$DISK}" "$windows_boot_part_num" || \
         die "final verify: Windows boot partition is not active"
     if partition_has_boot_flag "$DISK" "$NEW_PART_NUM"; then
         die "final verify: Linux partition unexpectedly has the MBR boot flag"
@@ -215,12 +216,7 @@ firmware_rollback_partition_is_owned() {
     local partition="$1"
 
     [ "$(parent_disk_from_part "$partition")" = "$DISK" ] \
-        && {
-            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
-                "$INSTALLER_PARTITION_OFFSET_BYTES" ] ||
-            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
-                "$INSTALLER_FINAL_OFFSET_BYTES" ]
-        }
+        && transaction_partition_extent_matches_manifest "$partition"
 }
 
 firmware_relocate_installer_partition_or_die() {
@@ -336,7 +332,7 @@ firmware_cleanup_partition_container_best_effort() {
             ;;
     esac
 
-    windows_number="$(partition_number "$WINDOWS_PART")"
+    windows_number="$(partition_number "${ALLOCATION_SOURCE_PART:-$WINDOWS_PART}")"
     windows_end="$(
         printf '%s\n' "$layout" | awk -F: -v number="$windows_number" '
             $1 == number { end=$3; sub(/s$/, "", end); print end; exit }
@@ -358,7 +354,7 @@ firmware_cleanup_partition_container_best_effort() {
 firmware_restore_boot_state_best_effort() {
     local windows_boot_partition windows_boot_number
 
-    windows_boot_partition=$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
+    windows_boot_partition=$(partition_at_offset "${WINDOWS_DISK:-$DISK}" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
     if [ -z "$windows_boot_partition" ] || [ ! -b "$windows_boot_partition" ]; then
         echo "ROLLBACK: Windows boot partition could not be resolved from the manifest"
         return 1

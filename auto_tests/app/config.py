@@ -26,6 +26,16 @@ class VMConfig(BaseModel):
     firmware: Literal["bios", "uefi"]
     vnc_keyboard_layout: Literal["fr", "us"] = "us"
     automation_enabled: bool = False
+    secondary_disk_boot_order: tuple[str, ...] = ()
+
+    @field_validator("secondary_disk_boot_order")
+    @classmethod
+    def validate_secondary_disk_boot_order(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)) or any(
+            re.fullmatch(r"(?:sata|scsi|ide|virtio|net)\d+", item) is None for item in value
+        ):
+            raise ValueError("secondary_disk_boot_order requires unique disk/network device names")
+        return value
 
 
 class Settings(BaseSettings):
@@ -58,6 +68,7 @@ class Settings(BaseSettings):
     allowed_smb_roots: tuple[str, ...] = Field(min_length=1)
     allowed_proxmox_vmids: tuple[int, ...] = Field(min_length=1)
     reset_snapshot: str = "clean2"
+    secondary_disk_reset_snapshot: str = "clean3"
     proxmox_storage: str = "local-lvm"
     proxmox_storage_min_free_gib: int = Field(default=20, ge=0)
     proxmox_storage_min_free_per_vm_gib: int = Field(default=20, ge=0)
@@ -149,7 +160,7 @@ class Settings(BaseSettings):
             )
         return value.rstrip("/")
 
-    @field_validator("reset_snapshot", "proxmox_storage")
+    @field_validator("reset_snapshot", "secondary_disk_reset_snapshot", "proxmox_storage")
     @classmethod
     def validate_proxmox_identifier(cls, value: str) -> str:
         normalized = value.strip()

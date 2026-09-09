@@ -15,6 +15,7 @@ namespace Libertix.Installation
         public SharingOptions Sharing { get; set; }
         public CompatibilityInfo Compatibility { get; set; }
         public StoragePreflightInfo Storage { get; set; }
+        public InstallationAllocation Allocation { get; set; }
         public InstallationSizes Sizes { get; set; }
         public LinuxKeyboardConfiguration Keyboard { get; set; }
         public StartupOptions StartupOptions { get; set; }
@@ -24,6 +25,7 @@ namespace Libertix.Installation
         public string SystemDriveRoot { get; set; }
         public string PasswordHashWindowsPath { get; set; }
         public string WindowsProfilesJsonBase64 { get; set; }
+        public WindowsSharingPlan WindowsSharing { get; set; }
         public InstallationPreferenceMigration WindowsPreferenceMigration { get; set; }
         public string RecoveryRootWindows { get; set; }
         public string RecoveryRunId { get; set; }
@@ -54,15 +56,16 @@ namespace Libertix.Installation
                     options.SystemDriveRoot,
                     options.PlanId,
                     options.Distribution.IsoInstallerFileName);
-            long originalWindowsEnd = checked(
-                options.Storage.WindowsPartition.OffsetBytes +
-                options.Storage.WindowsPartition.SizeBytes);
-            long alignmentPadding = originalWindowsEnd %
-                InstallationSizePolicy.PartitionAlignmentBytes;
-            long finalInstallerOffset = checked(
-                originalWindowsEnd - alignmentPadding - options.Sizes.FinalSizeBytes);
+            PartitionIdentity allocationSource = options.Allocation?.SourcePartition ??
+                options.Storage.WindowsPartition;
+            long finalInstallerOffset = InstallationSizePolicy.GetFinalInstallerOffset(
+                allocationSource, options.Sizes.FinalSizeBytes);
             var plan = new InstallationPlan
             {
+                SchemaVersion = options.Allocation == null
+                    ? InstallationPlan.CurrentSchemaVersion
+                    : InstallationPlan.SeparateAllocationSchemaVersion,
+                Allocation = options.Allocation,
                 PlanId = options.PlanId,
                 CreatedAtUtc = DateTimeOffset.UtcNow,
                 Firmware = isUefi ? InstallationFirmware.Uefi : InstallationFirmware.Bios,
@@ -128,6 +131,7 @@ namespace Libertix.Installation
                     ShareWindowsFilesInLinux = options.Sharing.ShareWindowsFilesInLinux,
                     ShareLinuxFilesInWindows = options.Sharing.ShareLinuxFilesInWindows,
                     WindowsProfilesJsonBase64 = options.WindowsProfilesJsonBase64,
+                    WindowsSharing = options.WindowsSharing,
                     WindowsPreferenceMigration = options.WindowsPreferenceMigration ??
                         new InstallationPreferenceMigration { Enabled = false }
                 },

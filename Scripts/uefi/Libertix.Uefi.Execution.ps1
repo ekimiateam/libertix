@@ -102,8 +102,7 @@ function Write-LibertixProgress {
 }
 
 function Test-LibertixTrackedExecution {
-    # Revert can run from transaction state alone after the plan volume is no
-    # longer available. Normal preparation always supplies both documents.
+    # A completed rollback retains its disk proof but must not repeat ledger transitions.
     return (
         $null -ne $installationPlan -and
         -not [string]::IsNullOrWhiteSpace($ExecutionStatePath)
@@ -204,7 +203,8 @@ function Update-LibertixInstallationPlanPartition {
     if ($null -eq $installationPlan) {
         return
     }
-    if ([int]$Partition.DiskNumber -ne [int]$installationPlan.disk.number) {
+    $binding = Get-LibertixTransactionStorageBinding
+    if ([int]$Partition.DiskNumber -ne [int]$binding.Disk.number) {
         throw "Installer partition is not on the disk selected by the installation plan."
     }
     if ([int64]$Partition.Size -ne [int64]$installationPlan.disk.installer.stagingSizeBytes) {

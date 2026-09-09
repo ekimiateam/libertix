@@ -56,7 +56,9 @@ partition_start_bytes() {
         *) return 1 ;;
     esac
 }
-blockdev() { echo 274877906944; }
+blockdev() {
+    if [ "$1" = --getss ]; then echo 512; else echo 274877906944; fi
+}
 parted() {
     local style=gpt
     [ "$FIRMWARE" != bios ] || style=msdos

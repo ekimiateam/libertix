@@ -180,12 +180,7 @@ firmware_rollback_partition_is_owned() {
 
     [ "$partition" != "$WINDOWS_PART" ] \
         && [ "$(parent_disk_from_part "$partition")" = "$DISK" ] \
-        && {
-            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
-                "$INSTALLER_PARTITION_OFFSET_BYTES" ] ||
-            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
-                "$INSTALLER_FINAL_OFFSET_BYTES" ]
-        }
+        && transaction_partition_extent_matches_manifest "$partition"
 }
 
 firmware_relocate_installer_partition_or_die() {
@@ -243,14 +238,14 @@ firmware_cleanup_partition_container_best_effort() {
 firmware_restore_boot_state_best_effort() {
     # On GPT, parted's "boot" flag is the ESP flag. Resolve the real ESP instead
     # of assuming partition 1, otherwise a rollback marks the wrong partition.
-    local esp_part esp_num
+    local esp_part esp_num windows_disk="${WINDOWS_DISK:-$DISK}"
     esp_part="$(find_esp_partition || true)"
     [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 1
-    [ "$(parent_disk_from_part "$esp_part")" = "$DISK" ] || return 1
+    [ "$(parent_disk_from_part "$esp_part")" = "$windows_disk" ] || return 1
     esp_num="$(partition_number "$esp_part")"
     [ -n "$esp_num" ] || return 1
-    parted -s "$DISK" set "$esp_num" esp on 2>/dev/null || return 1
-    parted -sm "$DISK" print 2>/dev/null | awk -F: -v number="$esp_num" '
+    parted -s "$windows_disk" set "$esp_num" esp on 2>/dev/null || return 1
+    parted -sm "$windows_disk" print 2>/dev/null | awk -F: -v number="$esp_num" '
         $1 == number {
             count++
             if ($7 ~ /(^|,)(boot|esp)(,|;$)/) found=1
@@ -315,7 +310,7 @@ wait_for_prereqs() {
 }
 
 find_esp_partition() (
-    local esp filesystem mountpoint="" mounted=false
+    local esp filesystem mountpoint="" mounted=false windows_disk="${WINDOWS_DISK:-$DISK}"
 
     cleanup_esp_probe_mount() {
         if [ "$mounted" = true ] && mountpoint -q "$mountpoint"; then
@@ -325,9 +320,9 @@ find_esp_partition() (
     }
     trap cleanup_esp_probe_mount EXIT HUP INT TERM
 
-    esp="$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)"
+    esp="$(partition_at_offset "$windows_disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)"
     [ -n "$esp" ] && [ -b "$esp" ] || return 1
-    [ "$(parent_disk_from_part "$esp")" = "$DISK" ] || return 1
+    [ "$(parent_disk_from_part "$esp")" = "$windows_disk" ] || return 1
     filesystem="$(blkid -s TYPE -o value "$esp" 2>/dev/null || echo "")"
     case "$filesystem" in
         vfat|fat|msdos) ;;
@@ -489,7 +484,7 @@ ensure_windows_bootentry_for_current_esp_or_die() {
     fi
 
     echo "Windows Boot Manager entry is absent for the current ESP; creating it"
-    run_logged efibootmgr -c -d "$DISK" -p "$esp_num" \
+    run_logged efibootmgr -c -d "${WINDOWS_DISK:-$DISK}" -p "$esp_num" \
         -L "$WINDOWS_BOOT_DESCRIPTION" -l "$WINDOWS_BOOT_LOADER"
     if ! bootnumbers="$(find_exact_uefi_bootnumbers \
         "$WINDOWS_BOOT_DESCRIPTION" "$WINDOWS_BOOT_LOADER" "$esp_num" "$esp_guid")"; then
@@ -572,7 +567,7 @@ EOF
     ensure_windows_bootentry_for_current_esp_or_die "$esp_num" "$esp_guid"
     LIBERTIX_FINAL_BOOTNUM=""
     if ! set_libertix_bootentry_first_or_die "$esp_num" "$esp_guid"; then
-        run_logged efibootmgr -c -d "$DISK" -p "$esp_num" \
+        run_logged efibootmgr -c -d "${WINDOWS_DISK:-$DISK}" -p "$esp_num" \
             -L "$LIBERTIX_BOOT_DESCRIPTION" -l "$LIBERTIX_BOOT_LOADER"
         set_libertix_bootentry_first_or_die "$esp_num" "$esp_guid" || \
             die "failed to put the current ESP Libertix entry first in UEFI BootOrder"

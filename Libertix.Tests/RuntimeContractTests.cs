@@ -12,6 +12,14 @@ namespace Libertix.Tests
     [TestClass]
     public sealed class RuntimeContractTests
     {
+        [TestMethod]
+        public void UnattendedAcknowledgementAllowsBoundedCaptureRetries()
+        {
+            var method = typeof(UnattendedWorkflow).GetMethod("PublishStageAndWaitAsync");
+            Assert.IsNotNull(method);
+            Assert.AreEqual(180, method.GetParameters()[1].DefaultValue);
+        }
+
         [DataTestMethod]
         [DataRow(@"C:\Windows\Web\Wallpaper\Windows\img0.jpg", 0)]
         [DataRow(@"c:\WINDOWS\Web\4K\Wallpaper\Windows\img0_1920x1080.jpg", 0)]
@@ -288,6 +296,7 @@ namespace Libertix.Tests
                         Enabled = true,
                         SystemDiskNumber = 2,
                         SystemDiskUniqueId = "disk-id",
+                        SystemDiskPartitionTableId = "mbr:12345678",
                         ExpectedLinuxPartitionOffset = 1024,
                         ExpectedLinuxPartitionSize = 2048,
                         PartitionSizeToleranceBytes = 512,
@@ -311,6 +320,7 @@ namespace Libertix.Tests
                 Assert.AreEqual(4096L, observed.ExpectedLinuxPartitionOffset);
                 Assert.AreEqual(2048L, observed.ExpectedLinuxPartitionSize);
                 Assert.AreEqual(512L, observed.PartitionSizeToleranceBytes);
+                Assert.AreEqual("mbr:12345678", observed.SystemDiskPartitionTableId);
                 Assert.IsFalse(File.Exists(Path.Combine(root, ".config.json.tmp")));
             }
             finally
@@ -334,6 +344,7 @@ namespace Libertix.Tests
                         {
                             SystemDiskNumber = 0,
                             SystemDiskUniqueId = "disk-id",
+                            SystemDiskPartitionTableId = "mbr:12345678",
                             ExpectedLinuxPartitionOffset = 1024,
                             ExpectedLinuxPartitionSize = 2048,
                             PartitionSizeToleranceBytes = 0
@@ -345,6 +356,19 @@ namespace Libertix.Tests
                 if (Directory.Exists(root))
                     Directory.Delete(root, true);
             }
+        }
+
+        [DataTestMethod]
+        [DataRow("mbr:12345678", true)]
+        [DataRow("gpt:12345678-1234-1234-1234-123456789abc", true)]
+        [DataRow(null, false)]
+        [DataRow("", false)]
+        [DataRow("mbr:1234", false)]
+        [DataRow("gpt:00000000-0000-0000-0000-000000000000", false)]
+        [DataRow("gpt:not-a-guid", false)]
+        public void WindowsSharePartitionTableIdentityIsRequired(string value, bool expected)
+        {
+            Assert.AreEqual(expected, WindowsShareConfigurationStore.IsPartitionTableId(value));
         }
 
         [TestMethod]

@@ -18,9 +18,11 @@ mkdir -p "$LOG_DIR"
 
 CURRENT_STAGE="bootstrap"
 DISK=""
+WINDOWS_DISK=""
 DISKNAME=""
 LIVE_PART=""
 WINDOWS_PART=""
+ALLOCATION_SOURCE_PART=""
 WINDOWS_BOOT_PART=""
 NEW_PART=""
 NEW_PART_NUM=""
@@ -207,6 +209,12 @@ fi
 [ ! -b "$TARGET_DISK" ] && die "target disk not found: $TARGET_DISK"
 
 DISK="$TARGET_DISK"
+WINDOWS_DISK="$TARGET_DISK"
+if [ "$SEPARATE_ALLOCATION_DISK" = true ]; then
+    DISK="$(resolve_allocation_disk_from_manifest || true)"
+    [ -n "$DISK" ] && [ -b "$DISK" ] && [ "$DISK" != "$WINDOWS_DISK" ] || \
+        die "allocation disk is missing or is not distinct from Windows"
+fi
 DISKNAME="$(basename "$DISK")"
 
 LIVE_PART=$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || true)
@@ -217,34 +225,41 @@ LIVE_PART=$(partition_at_offset "$DISK" "$INSTALLER_PARTITION_OFFSET_BYTES" || t
 
 lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "$DISK"
 
-RECOVERY_GEOMETRY_BEFORE="$(recovery_geometry "$DISK")"
+RECOVERY_GEOMETRY_BEFORE="$(recovery_geometry "$WINDOWS_DISK")"
 [ -n "$RECOVERY_GEOMETRY_BEFORE" ] && echo "Recovery partition geometry before install: $RECOVERY_GEOMETRY_BEFORE"
 
-WINDOWS_PART=$(partition_at_offset "$DISK" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
+WINDOWS_PART=$(partition_at_offset "$WINDOWS_DISK" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)
 WINDOWS_SIZE=0
 [ -n "$WINDOWS_PART" ] && WINDOWS_SIZE=$(($(blockdev --getsize64 "$WINDOWS_PART" 2>/dev/null || echo 0) / 1024 / 1024))
 
 if [ -z "$WINDOWS_PART" ] || [ "$(blkid -s TYPE -o value "$WINDOWS_PART" 2>/dev/null || true)" != "ntfs" ]; then
-    BITLOCKER_PART="$(find_biggest_bitlocker_partition "$DISK" || true)"
+    BITLOCKER_PART="$(find_biggest_bitlocker_partition "$WINDOWS_DISK" || true)"
     if [ -n "$BITLOCKER_PART" ]; then
         die "Windows partition is BitLocker-encrypted: $BITLOCKER_PART"
     fi
-    echo "--- no NTFS Windows partition detected on $DISK ---"
-    lsblk -e7 -o NAME,MAJ:MIN,PKNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS "$DISK" || true
+    echo "--- no NTFS Windows partition detected on $WINDOWS_DISK ---"
+    lsblk -e7 -o NAME,MAJ:MIN,PKNAME,TYPE,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS "$WINDOWS_DISK" || true
     die "Windows partition does not match the Windows manifest"
 fi
 echo "Windows: $WINDOWS_PART (${WINDOWS_SIZE}MB)"
 echo "$WINDOWS_PART" > "$LOG_DIR/windows-partition"
 
-WINDOWS_BOOT_PART=$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
+ALLOCATION_SOURCE_PART="$(partition_at_offset "$DISK" "$ALLOCATION_SOURCE_OFFSET_BYTES" || true)"
+[ -n "$ALLOCATION_SOURCE_PART" ] && [ -b "$ALLOCATION_SOURCE_PART" ] || \
+    die "allocation source partition does not match the manifest"
+[ "$(blkid -s TYPE -o value "$ALLOCATION_SOURCE_PART" 2>/dev/null || true)" = ntfs ] || \
+    die "allocation source partition is not decrypted NTFS"
+
+WINDOWS_BOOT_PART=$(partition_at_offset "$WINDOWS_DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)
 [ -n "$WINDOWS_BOOT_PART" ] && [ -b "$WINDOWS_BOOT_PART" ] || \
     die "Windows boot partition does not match the Windows manifest"
-[ "$(parent_disk_from_part "$WINDOWS_BOOT_PART")" = "$DISK" ] || \
+[ "$(parent_disk_from_part "$WINDOWS_BOOT_PART")" = "$WINDOWS_DISK" ] || \
     die "Windows boot partition is not on the target disk"
 echo "Windows boot partition: $WINDOWS_BOOT_PART"
 
 start_installation_state_step "live.preflight-verified"
 run_live_preflight
+python3 /usr/local/lib/libertix/libertix_windows_sharing.py preflight "$INSTALLATION_PLAN_PATH"
 complete_installation_state_step "live.preflight-verified"
 cleanup_windows_live_boot_artifacts
 mark "027-windows-live-boot-cleaned"
@@ -330,13 +345,14 @@ if [ "$current_partition_bytes" -lt "$requested_partition_bytes" ]; then
     partition_start_sector=$(bytes_to_logical_sectors \
         "$INSTALLER_PARTITION_OFFSET_BYTES" "$logical_sector_bytes") || \
         die "installer partition offset is not aligned to the logical sector size"
-    recovery_start_sector=$(bytes_to_logical_sectors \
-        "$RECOVERY_PARTITION_OFFSET_BYTES" "$logical_sector_bytes") || \
-        die "recovery partition offset is not aligned to the logical sector size"
-    maximum_partition_bytes=$(((recovery_start_sector - partition_start_sector) * logical_sector_bytes))
+    original_windows_end=$((ALLOCATION_SOURCE_OFFSET_BYTES + ALLOCATION_SOURCE_SIZE_BYTES))
+    original_windows_end_sector=$(bytes_to_logical_sectors \
+        "$original_windows_end" "$logical_sector_bytes") || \
+        die "original Windows partition end is not aligned to the logical sector size"
+    maximum_partition_bytes=$(((original_windows_end_sector - partition_start_sector) * logical_sector_bytes))
     desired_partition_bytes=$(installer_partition_target_bytes \
         "$requested_partition_bytes" "$maximum_partition_bytes") || \
-        die "requested Linux partition would overlap the Windows recovery partition"
+        die "requested Linux partition would exceed the original Windows extent"
 
     if [ "$current_partition_bytes" -lt "$desired_partition_bytes" ]; then
         desired_partition_sectors=$((desired_partition_bytes / logical_sector_bytes))
@@ -406,7 +422,7 @@ if [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ]; then
     echo "Preparing a durable MBR backup before installing GRUB..."
     prepare_bios_mbr_backup_or_die || die "pre-GRUB MBR backup could not be persisted and verified"
     BOOTLOADER_WRITE_STARTED=true
-    chroot /mnt/target grub-install --target=i386-pc --recheck "$DISK"
+    chroot /mnt/target grub-install --target=i386-pc --recheck "$WINDOWS_DISK"
 else
     BOOTLOADER_WRITE_STARTED=true
     echo "Installing signed UEFI bootloader..."

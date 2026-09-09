@@ -16,6 +16,7 @@ namespace Libertix.Helpers
         public int SchemaVersion { get; set; }
         public string Distribution { get; set; }
         public int LinuxSizeGiB { get; set; }
+        public string InstallationTarget { get; set; } = "windows";
         public string LinuxUsername { get; set; }
         public string LinuxPassword { get; set; }
         public string ComputerName { get; set; }
@@ -114,6 +115,8 @@ namespace Libertix.Helpers
             error = null;
             if (SchemaVersion != 1)
                 error = "The unattended configuration schemaVersion must be 1.";
+            else if (InstallationTarget != "windows" && InstallationTarget != "secondary")
+                error = "The unattended installation target must be windows or secondary.";
             else if (!Regex.IsMatch(
                 Distribution ?? string.Empty,
                 "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"))
@@ -138,7 +141,8 @@ namespace Libertix.Helpers
 
     public static class UnattendedWorkflow
     {
-        private const int AcknowledgementTimeoutSeconds = 45;
+        // VNC capture retries can exceed 45 seconds before the controller can acknowledge.
+        private const int AcknowledgementTimeoutSeconds = 180;
         private static readonly object Sync = new object();
         private static int _sequence;
 

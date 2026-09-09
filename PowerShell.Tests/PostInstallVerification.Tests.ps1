@@ -186,6 +186,9 @@ Describe "Permanent recovery archive" {
             "payload\Libertix.BootGuardian.exe",
             "payload\Scripts\modules\Libertix.InstallationState.psm1",
             "payload\Scripts\modules\Libertix.PostInstallVerification.psm1",
+            "payload\Scripts\modules\Libertix.WindowsProfiles.psm1",
+            "payload\Scripts\modules\Libertix.Rollback.psm1",
+            "payload\Scripts\modules\Libertix.StorageTargets.psm1",
             "payload\Scripts\modules\Libertix.PreferredBootPath.psm1",
             "payload\Scripts\modules\Libertix.BootGuardian.psm1",
             "payload\Scripts\libertix-uefi-recovery-agent.ps1",
@@ -589,6 +592,7 @@ Describe "Windows filesystem repair after offline NTFS resize" {
             $script:RepairRoot = Join-Path $TestDrive "filesystem-repair"
             New-Item -ItemType Directory -Path $script:RepairRoot -Force | Out-Null
             $script:RepairPlan = [pscustomobject]@{
+                schemaVersion = 4
                 planId = "ffffffffffffffffffffffffffffffff"
                 firmware = "bios"
                 disk = [pscustomobject]@{
@@ -599,6 +603,7 @@ Describe "Windows filesystem repair after offline NTFS resize" {
                 }
             }
             Mock Read-LibertixJsonObject { $script:RepairPlan }
+            Mock Get-LibertixAllocationSourceDrive { 'C:' }
             Mock Get-LibertixWindowsBootIdentity { "2026-08-15T10:00:00.0000000Z" }
             Mock Write-LibertixPostInstallResult
             Mock Set-LibertixPostInstallWaitingForWindowsRepair
@@ -658,6 +663,36 @@ Describe "Windows filesystem repair after offline NTFS resize" {
             Should -Invoke Register-LibertixWindowsBootVolumeCheck -Times 0
             Should -Invoke Write-LibertixPostInstallResult -Times 1 `
                 -ParameterFilter { $Path -like "*windows-filesystem-repair.json" }
+        }
+
+        It 'checks and schedules repair only for the selected data volume' {
+            $script:RepairPlan.schemaVersion = 5
+            Mock Get-LibertixAllocationSourceDrive { 'J:' }
+            Mock Get-LibertixWindowsVolumeHealth {
+                [pscustomobject]@{ IsHealthy = $false; Detail = 'J: requires a consistency check' }
+            }
+            $result = Invoke-LibertixWindowsFilesystemRepairIfRequired `
+                -RecoveryRoot $script:RepairRoot -LogPath (Join-Path $script:RepairRoot 'recovery.log') `
+                -WriteLog { param($Message) }
+            $result.RestartRequired | Should -BeTrue
+            Should -Invoke Get-LibertixWindowsVolumeHealth -Times 1 -Exactly `
+                -ParameterFilter { $SystemDrive -eq 'J:' }
+            Should -Invoke Register-LibertixWindowsBootVolumeCheck -Times 1 -Exactly `
+                -ParameterFilter { $SystemDrive -eq 'J:' }
+            Should -Invoke Write-LibertixPostInstallResult -Times 1 -Exactly `
+                -ParameterFilter { $Path -like '*windows-filesystem-repair.json' -and $Result.sourceDrive -eq 'J:' }
+        }
+
+        It 'rejects a persisted repair intended for a different volume' {
+            Mock Get-LibertixAllocationSourceDrive { 'J:' }
+            Mock Test-Path { $true } -ParameterFilter { $LiteralPath -like '*windows-filesystem-repair.json' }
+            Mock Read-LibertixJsonObject {
+                [pscustomobject]@{ schemaVersion = 1; planId = $script:RepairPlan.planId; sourceDrive = 'C:' }
+            } -ParameterFilter { $Path -like '*windows-filesystem-repair.json' }
+            { Invoke-LibertixWindowsFilesystemRepairIfRequired `
+                -RecoveryRoot $script:RepairRoot -LogPath (Join-Path $script:RepairRoot 'recovery.log') `
+                -WriteLog { param($Message) } } | Should -Throw '*different source volume*'
+            Should -Invoke Register-LibertixWindowsBootVolumeCheck -Times 0
         }
     }
 }

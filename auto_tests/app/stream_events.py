@@ -33,9 +33,10 @@ class StreamEventProjector:
         if step.step == "automation.monitor_installation":
             return self._project_installation_phase(step)
         if step.step.startswith("automation.test."):
-            return self._compact_step(step, keep_context=("vm", "test"))
+            return self._compact_step(step, keep_context=("vm", "test", "scenario"))
 
         visible_steps = {
+            "automation.campaign_scenario",
             "automation.reset_vm_done",
             "build_vm.compile",
             "automation.deploy",
@@ -48,7 +49,7 @@ class StreamEventProjector:
         if step.step not in visible_steps:
             return None
 
-        signature = (step.step, self._vm_identity(step))
+        signature = (str(step.context.get("scenario", "")), step.step, self._vm_identity(step))
         if signature in self._emitted:
             return None
         self._emitted.add(signature)
@@ -71,9 +72,16 @@ class StreamEventProjector:
         data = event["data"]
         if event["event"] == "result":
             status = "OK" if data["status"] == "ok" else "ERROR"
-            return f"RESULT {status} log={data['detailed_log']}\n"
+            summary = "".join(
+                "SCENARIO " + json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for item in data.get("campaign_summary", [])
+            )
+            return summary + f"RESULT {status} log={data['detailed_log']}\n"
 
         vm = str(data.get("context", {}).get("vm") or "global")
+        scenario = str(data.get("context", {}).get("scenario") or "")
+        if scenario:
+            vm = f"{scenario}/{vm}"
         if data["status"] == "error":
             return "ERROR " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
         if data["step"].startswith("automation.test."):
@@ -87,7 +95,7 @@ class StreamEventProjector:
         source = str(step.context.get("analysis_source", "strict_json"))
         vm = self._vm_identity(step)
         if source != "strict_json":
-            signature = ("llm-response-format", vm, source)
+            signature = (str(step.context.get("scenario", "")), "llm-response-format", vm, source)
             if signature not in self._emitted:
                 self._emitted.add(signature)
                 return {
@@ -106,7 +114,7 @@ class StreamEventProjector:
         if phase is None:
             return None
         phase_id, message = phase
-        signature = ("installation-phase", vm, phase_id)
+        signature = (str(step.context.get("scenario", "")), "installation-phase", vm, phase_id)
         if signature in self._emitted:
             return None
         self._emitted.add(signature)
@@ -116,7 +124,13 @@ class StreamEventProjector:
                 "step": "automation.installation_phase",
                 "status": "ok",
                 "message": message,
-                "context": {"vm": vm, "phase": phase_id},
+                "context": {
+                    "vm": vm,
+                    "phase": phase_id,
+                    **(
+                        {"scenario": step.context["scenario"]} if "scenario" in step.context else {}
+                    ),
+                },
             },
         }
 
@@ -166,7 +180,7 @@ class StreamEventProjector:
     def _compact_step(
         step: StepResult,
         *,
-        keep_context: tuple[str, ...] = ("vm", "target"),
+        keep_context: tuple[str, ...] = ("vm", "target", "scenario"),
     ) -> dict[str, Any]:
         context = {key: step.context[key] for key in keep_context if key in step.context}
         return {

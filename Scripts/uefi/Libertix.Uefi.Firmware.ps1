@@ -29,15 +29,8 @@ function Assert-LibertixPlanMatchesCurrentStorage {
         -DriveLetter $env:SystemDrive.TrimEnd(":") `
         -ErrorAction Stop
     $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
-    if (
-        [int]$systemDisk.Number -ne [int]$installationPlan.disk.number -or
-        ([string]$systemDisk.UniqueId).Trim() -ne ([string]$installationPlan.disk.uniqueId).Trim() -or
-        [int64]$systemDisk.Size -ne [int64]$installationPlan.disk.sizeBytes -or
-        [string]$systemDisk.PartitionStyle -ne [string]$installationPlan.disk.partitionStyle -or
-        [int]$systemDisk.LogicalSectorSize -ne [int]$installationPlan.disk.logicalSectorSizeBytes
-    ) {
-        throw "Windows system disk no longer matches the installation plan."
-    }
+    Assert-LibertixDiskMatchesPlan -Disk $systemDisk -PlanDisk $installationPlan.disk
+    Assert-LibertixUniqueTargetDiskIdentity -Disk $systemDisk -Disks @(Get-Disk -ErrorAction Stop)
     if (
         [int]$systemPartition.PartitionNumber -ne [int]$installationPlan.disk.windows.number -or
         [int64]$systemPartition.Offset -ne [int64]$installationPlan.disk.windows.offsetBytes -or
@@ -58,6 +51,38 @@ function Assert-LibertixPlanMatchesCurrentStorage {
         if ($partitionMatches.Count -ne 1) {
             throw "Windows $name partition no longer matches the installation plan."
         }
+    }
+}
+
+function Assert-LibertixAllocationMatchesCurrentStorage {
+    if ($null -eq $installationPlan -or
+        $installationPlan.PSObject.Properties.Name -notcontains 'allocation' -or
+        $null -eq $installationPlan.allocation) { return }
+
+    $allocation = $installationPlan.allocation
+    if ([string]$allocation.partitionStyle -ne 'GPT' -or
+        [int]$allocation.number -eq [int]$installationPlan.disk.number -or
+        [string]$allocation.sourceDrive -eq [string]$installationPlan.disk.systemDrive) {
+        throw 'The UEFI allocation requires a supported source on a separate GPT disk.'
+    }
+    $expectedTarget = [pscustomobject]@{
+        drive = [string]$allocation.sourceDrive
+        diskNumber = [int]$allocation.number
+        diskUniqueId = [string]$allocation.uniqueId
+        partitionTableId = [string]$allocation.partitionTableId
+        diskSizeBytes = [long]$allocation.sizeBytes
+        logicalSectorSizeBytes = [int]$allocation.logicalSectorSizeBytes
+        partitionStyle = [string]$allocation.partitionStyle
+        partitionNumber = [int]$allocation.sourcePartition.number
+        offsetBytes = [long]$allocation.sourcePartition.offsetBytes
+        sizeBytes = [long]$allocation.sourcePartition.sizeBytes
+        volumeId = [string]$allocation.sourceVolumeId
+    }
+    $windowsPartition = Get-Partition -DriveLetter $env:SystemDrive.TrimEnd(':') -ErrorAction Stop
+    Get-LibertixVerifiedInstallationTarget -ExpectedTarget $expectedTarget `
+        -SystemPartition $windowsPartition | Out-Null
+    if ((Get-LibertixNtfsVolumeSerial -Drive $allocation.sourceDrive) -cne $allocation.sourceNtfsUuid) {
+        throw 'The selected source NTFS filesystem identity changed before UEFI preparation.'
     }
 }
 

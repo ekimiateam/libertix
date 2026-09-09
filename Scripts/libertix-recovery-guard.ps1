@@ -94,6 +94,8 @@ function Import-RecoveryVerificationModules {
     # forced nested import removes the previous script-scope Process commands
     # in Windows PowerShell 5.1, so restore the script-scope import last.
     Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
+    Import-Module (Join-Path $Root 'Libertix.Rollback.psm1') -Force -ErrorAction Stop
+    Import-Module (Join-Path $Root 'Libertix.StorageTargets.psm1') -ErrorAction Stop
     Import-Module -Name $ProcessModulePath -Force -ErrorAction Stop
 }
 
@@ -289,6 +291,31 @@ function Invoke-RecoveryOperation {
     }
     $endStatePersisted = Save-RecoveryOperationStateSafely -Context "$Name.end"
     return ($operationSucceeded -and $beginStatePersisted -and $endStatePersisted)
+}
+
+function Assert-OriginalSourceEncryption {
+    $plan = Get-Content -LiteralPath (Join-Path $Root 'installation-plan.json') -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([int]$plan.schemaVersion -eq 4) { return }
+    if ([int]$plan.schemaVersion -ne 5 -or $null -eq $plan.allocation) {
+        throw 'The source encryption check has no valid allocation plan.'
+    }
+    $original = Get-Content -LiteralPath (Join-Path $Root 'source-encryption-original.json') -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([string]$original.recoveryRunId -cne [string]$plan.runtime.recoveryRunId -or
+        [string]$original.sourceDrive -cne [string]$plan.allocation.sourceDrive -or
+        [string]$original.sourceNtfsUuid -cne [string]$plan.allocation.sourceNtfsUuid -or
+        (Get-LibertixNtfsVolumeSerial -Drive $original.sourceDrive) -cne [string]$original.sourceNtfsUuid) {
+        throw 'The original source encryption evidence does not match this recovery transaction.'
+    }
+    $current = Get-LibertixTargetVolumeEncryptionSnapshot -Drive $original.sourceDrive
+    foreach ($field in @('state', 'conversionStatus', 'encryptionPercentage', 'protectionStatus')) {
+        if ($original.snapshot.PSObject.Properties.Name -notcontains $field -or
+            $null -eq $original.snapshot.$field -or
+            [string]$original.snapshot.$field -cne [string]$current.$field) {
+            throw 'Disk and boot rollback completed, but the source volume BitLocker state differs from its initial state.'
+        }
+    }
 }
 
 function Assert-RecoveryOperationsSucceeded {
@@ -820,59 +847,6 @@ function Remove-WindowsShareAfterRollback {
     Write-RecoveryLog "Removed Windows read-only Linux sharing after rollback."
 }
 
-function Wait-SystemDriveResizeCapacity {
-    param(
-        [Parameter(Mandatory = $true)][int]$DiskNumber,
-        [Parameter(Mandatory = $true)][int64]$RequiredSize,
-        [int]$TimeoutSeconds = 60
-    )
-
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $capacityReadFailures = 0
-    do {
-        # Removing a partition updates the disk before every Storage CIM object
-        # sees the new free extent. Refresh both caches before trusting SizeMax.
-        Update-HostStorageCache -ErrorAction SilentlyContinue
-        Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
-
-        try {
-            $partition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-            $supported = Get-PartitionSupportedSize `
-                -DriveLetter $SystemDriveLetter `
-                -ErrorAction Stop
-        } catch {
-            $capacityReadFailures++
-            if ($capacityReadFailures -eq 1) {
-                Write-RecoveryLog (
-                    "Windows storage capacity is still refreshing after partition " +
-                    "removal; retrying: $($_.Exception.Message)"
-                )
-            }
-            if ([DateTime]::UtcNow -ge $deadline) {
-                throw (
-                    "Windows storage capacity did not become readable within " +
-                    "$TimeoutSeconds seconds: $($_.Exception.Message)"
-                )
-            }
-            Start-Sleep -Seconds 2
-            continue
-        }
-        if ($partition.Size -ge $RequiredSize -or $supported.SizeMax -ge $RequiredSize) {
-            if ($capacityReadFailures -gt 0) {
-                Write-RecoveryLog (
-                    "Windows storage capacity became readable after " +
-                    "$capacityReadFailures transient failure(s)."
-                )
-            }
-            return $supported
-        }
-        if ([DateTime]::UtcNow -ge $deadline) {
-            return $supported
-        }
-        Start-Sleep -Seconds 2
-    } while ($true)
-}
-
 function Remove-EmptyTransactionExtendedContainer {
     param(
         [Parameter(Mandatory = $true)][int]$DiskNumber,
@@ -1121,6 +1095,9 @@ try {
         $null = Invoke-RecoveryOperation -Name "downloads.cleanup" -Operation {
             Remove-TransactionArtifacts
         }
+        $null = Invoke-RecoveryOperation -Name 'source-encryption.verify' -Operation {
+            Assert-OriginalSourceEncryption
+        }
         Assert-RecoveryOperationsSucceeded
         $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
             Remove-RecoveryPromptTask -Required
@@ -1195,22 +1172,38 @@ try {
         $stagingMinBytes = 1
     }
     $stagingMaxBytes = $stagingBytes + $partitionSizeTolerance
-    $alignmentPadding =
-        ($initialSystemOffset + $initialSystemSize) % $PartitionAlignmentBytes
-    $expectedTransactionOffset = `
-        $initialSystemOffset + $initialSystemSize - $alignmentPadding - $expectedBytes
-    [int64]$initialSystemEnd = $initialSystemOffset + $initialSystemSize
+    $rollbackPlan = Get-Content -LiteralPath (Join-Path $Root 'installation-plan.json') `
+        -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($expectedDiskId) -or
+        $expectedRecoveryRunId -notmatch '^[0-9a-f]{32}$' -or
+        [int]$rollbackPlan.schemaVersion -notin @(4, 5) -or [string]$rollbackPlan.firmware -ne 'bios' -or
+        [string]$rollbackPlan.planId -ne $expectedRecoveryRunId -or
+        [string]$rollbackPlan.runtime.recoveryRunId -ne $expectedRecoveryRunId -or
+        [string]$rollbackPlan.disk.systemDrive -ne $SystemDrive -or
+        [int]$rollbackPlan.disk.number -ne $diskNumber -or
+        ([string]$rollbackPlan.disk.uniqueId).Trim() -ne $expectedDiskId.Trim() -or
+        [int]$rollbackPlan.disk.windows.number -ne $systemPartitionNumber -or
+        [long]$rollbackPlan.disk.windows.offsetBytes -ne $initialSystemOffset -or
+        [long]$rollbackPlan.disk.windows.sizeBytes -ne $initialSystemSize -or
+        [long]$rollbackPlan.disk.recovery.offsetBytes -ne $recoveryPartitionOffset -or
+        [long]$rollbackPlan.disk.installer.finalSizeBytes -ne $expectedBytes -or
+        [long]$rollbackPlan.disk.installer.stagingSizeBytes -ne $stagingBytes) {
+        throw 'The BIOS rollback plan does not match its pending recovery metadata.'
+    }
 
     $script:RecoveryCompensationSequenceStarted = $true
     $diskLayoutRestored = Invoke-RecoveryOperation -Name "disk-layout.restore" -Operation {
         $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
         if (
             $systemPartition.DiskNumber -ne $diskNumber -or
-            $systemPartition.PartitionNumber -ne $systemPartitionNumber
+            $systemPartition.PartitionNumber -ne $systemPartitionNumber -or
+            [long]$systemPartition.Offset -ne $initialSystemOffset -or
+            [long]$systemPartition.Size -gt $initialSystemSize
         ) {
             throw "Windows system partition identity changed; refusing rollback."
         }
         $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
+        Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $rollbackPlan.disk
         if (
             $expectedDiskId -and
             ([string]$disk.UniqueId).Trim() -ne $expectedDiskId.Trim()
@@ -1218,29 +1211,70 @@ try {
             throw "Windows system disk identity changed; refusing rollback."
         }
 
+        $sourcePlanDisk = $rollbackPlan.disk
+        $sourceDefinition = $rollbackPlan.disk.windows
+        $sourceDrive = $SystemDrive
+        $sourcePartition = $systemPartition
+        $sourceRecoveryBoundary = $recoveryPartitionOffset
+        $separateSource = $rollbackPlan.PSObject.Properties.Name -contains 'allocation' -and
+            $null -ne $rollbackPlan.allocation
+        if (([int]$rollbackPlan.schemaVersion -eq 5) -ne $separateSource) {
+            throw 'The BIOS rollback allocation does not match its schema version.'
+        }
+        if ($separateSource) {
+            $sourcePlanDisk = $rollbackPlan.allocation
+            $sourceDefinition = $sourcePlanDisk.sourcePartition
+            $sourceDrive = [string]$sourcePlanDisk.sourceDrive
+            if ([string]$sourcePlanDisk.partitionStyle -ne 'MBR' -or
+                [int]$sourcePlanDisk.number -eq $diskNumber -or
+                [string]$sourcePlanDisk.partitionTableId -eq [string]$rollbackPlan.disk.partitionTableId -or
+                $sourceDrive -cnotmatch '^[A-Z]:$' -or $sourceDrive -eq $SystemDrive -or
+                [string]::IsNullOrWhiteSpace([string]$sourcePlanDisk.sourceVolumeId) -or
+                [long]$systemPartition.Size -ne $initialSystemSize) {
+                throw 'The BIOS rollback cannot prove a separate source without changing Windows.'
+            }
+            $sourcePartition = Get-Partition -DriveLetter $sourceDrive.TrimEnd(':') -ErrorAction Stop
+            Assert-LibertixSourceVolumeIdentity -Partition $sourcePartition -PlanDisk $sourcePlanDisk `
+                -SourcePartition $sourceDefinition -DriveLetter $sourceDrive.TrimEnd(':') `
+                -ExpectedVolumeId ([string]$sourcePlanDisk.sourceVolumeId)
+            $sourceRecoveryBoundary = 0
+        }
+        [long]$sourceOriginalOffset = $sourceDefinition.offsetBytes
+        [long]$sourceOriginalSize = $sourceDefinition.sizeBytes
+        if ($sourceOriginalOffset -le 0 -or $sourceOriginalSize -le 0 -or
+            $sourceOriginalSize -gt [long]$sourcePlanDisk.sizeBytes -or
+            $sourceOriginalOffset -gt ([long]$sourcePlanDisk.sizeBytes - $sourceOriginalSize) -or
+            [long]$sourcePartition.Size -le 0 -or [long]$sourcePartition.Size -gt $sourceOriginalSize -or
+            [int]$sourcePartition.PartitionNumber -ne [int]$sourceDefinition.number) {
+            throw 'The BIOS rollback source extent is invalid.'
+        }
+        [int]$sourceDiskNumber = $sourcePlanDisk.number
+        [long]$sourceOriginalEnd = $sourceOriginalOffset + $sourceOriginalSize
+        [long]$sourceExpectedTransactionOffset = $sourceOriginalEnd -
+            ($sourceOriginalEnd % $PartitionAlignmentBytes) - $expectedBytes
+
         # Imaging and partitioning tools can use different alignment padding. A
         # transaction candidate must still be wholly owned by the exact extent
-        # released from the recorded Windows partition. This accepts variable
-        # padding without allowing recovery to cross the original Windows end.
-        $partitions = Get-Partition -DiskNumber $diskNumber | Sort-Object Offset
+        # released from the recorded source partition, never another disk's free space.
+        $partitions = Get-Partition -DiskNumber $sourceDiskNumber | Sort-Object Offset
         $candidates = @()
-        [int64]$systemPartitionEnd = (
-            [int64]$systemPartition.Offset + [int64]$systemPartition.Size
+        [int64]$sourcePartitionEnd = (
+            [int64]$sourcePartition.Offset + [int64]$sourcePartition.Size
         )
 
         foreach ($partition in $partitions) {
-            if ($partition.PartitionNumber -eq $systemPartition.PartitionNumber) {
+            if ($partition.PartitionNumber -eq $sourcePartition.PartitionNumber) {
                 continue
             }
             [int64]$partitionStart = [int64]$partition.Offset
             [int64]$partitionEnd = $partitionStart + [int64]$partition.Size
             if (
                 [int]$partition.MbrType -in @(5, 15, 133) -or
-                $partitionStart -lt $systemPartitionEnd -or
-                $partitionEnd -gt $initialSystemEnd -or
+                $partitionStart -lt $sourcePartitionEnd -or
+                $partitionEnd -gt $sourceOriginalEnd -or
                 (
-                    $recoveryPartitionOffset -gt 0 -and
-                    $partitionEnd -gt $recoveryPartitionOffset
+                    $sourceRecoveryBoundary -gt 0 -and
+                    $partitionEnd -gt $sourceRecoveryBoundary
                 )
             ) {
                 continue
@@ -1282,7 +1316,7 @@ try {
                 ($isLinuxFileSystem -and -not $matchesFinalSize) -or
                 ($isRawTransaction -and -not (Test-RecoveryRawPartitionGeometry `
                     -Partition $partition `
-                    -FinalOffset $expectedTransactionOffset `
+                    -FinalOffset $sourceExpectedTransactionOffset `
                     -FinalSize $expectedBytes `
                     -StagingSize $stagingBytes `
                     -Alignment $partitionSizeTolerance))
@@ -1317,67 +1351,43 @@ try {
                 "fs=$($candidate.FileSystem)."
             )
             Remove-Partition `
-                -DiskNumber $diskNumber `
+                -DiskNumber $sourceDiskNumber `
                 -PartitionNumber $number `
                 -Confirm:$false `
                 -ErrorAction Stop
             Start-Sleep -Seconds 2
             Remove-EmptyTransactionExtendedContainer `
-                -DiskNumber $diskNumber `
+                -DiskNumber $sourceDiskNumber `
                 -TransactionOffset $candidateOffset `
                 -TransactionSize $candidateSize `
-                -SystemPartitionEnd $systemPartitionEnd `
-                -OriginalSystemPartitionEnd $initialSystemEnd `
-                -RecoveryPartitionOffset $recoveryPartitionOffset
+                -SystemPartitionEnd $sourcePartitionEnd `
+                -OriginalSystemPartitionEnd $sourceOriginalEnd `
+                -RecoveryPartitionOffset $sourceRecoveryBoundary
         } else {
             Write-RecoveryLog (
                 "No transaction partition exists; checking whether only the " +
                 "system partition needs extension."
             )
             Remove-EmptyTransactionExtendedContainer `
-                -DiskNumber $diskNumber `
-                -TransactionOffset $expectedTransactionOffset `
+                -DiskNumber $sourceDiskNumber `
+                -TransactionOffset $sourceExpectedTransactionOffset `
                 -TransactionSize $stagingBytes `
-                -SystemPartitionEnd $systemPartitionEnd `
-                -OriginalSystemPartitionEnd $initialSystemEnd `
-                -RecoveryPartitionOffset $recoveryPartitionOffset
+                -SystemPartitionEnd $sourcePartitionEnd `
+                -OriginalSystemPartitionEnd $sourceOriginalEnd `
+                -RecoveryPartitionOffset $sourceRecoveryBoundary
         }
 
-        $currentSystemPartition = Get-Partition `
-            -DriveLetter $SystemDriveLetter `
-            -ErrorAction Stop
-        if ($currentSystemPartition.Size -ne $initialSystemSize) {
-            $supported = Wait-SystemDriveResizeCapacity `
-                -DiskNumber $diskNumber `
-                -RequiredSize $initialSystemSize
-            if (
-                $supported.SizeMin -gt $initialSystemSize -or
-                $supported.SizeMax -lt $initialSystemSize
-            ) {
-                throw (
-                    "$SystemDrive cannot be restored to its initial size " +
-                    "($initialSystemSize); SizeMin=$($supported.SizeMin), " +
-                    "SizeMax=$($supported.SizeMax)."
-                )
-            }
-            Write-RecoveryLog (
-                "Restoring $SystemDrive to its exact initial size: " +
-                "$initialSystemSize bytes."
-            )
-            Resize-Partition `
-                -DriveLetter $SystemDriveLetter `
-                -Size $initialSystemSize `
-                -ErrorAction Stop
-        } else {
-            Write-RecoveryLog (
-                "$SystemDrive is already at its initial size; resize skipped."
-            )
+        if ($separateSource) {
+            Restore-LibertixSourceVolumeInitialSize -SourceDrive $sourceDrive -PlanDisk $sourcePlanDisk `
+                -SourcePartition $sourceDefinition -ExpectedVolumeId ([string]$sourcePlanDisk.sourceVolumeId)
+            return
         }
-
-        $finalSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-        if ($finalSystemPartition.Size -ne $initialSystemSize) {
-            throw "$SystemDrive rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
-        }
+        Restore-LibertixSystemDriveInitialSize -PlanDisk $rollbackPlan.disk -State ([pscustomobject]@{
+            SystemDrive = $SystemDrive
+            DiskNumber = $diskNumber
+            DiskUniqueId = $expectedDiskId
+            OriginalCSize = $initialSystemSize
+        })
     }
 
     $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
@@ -1453,6 +1463,10 @@ try {
     }
     Assert-RecoveryOperationsSucceeded
 
+    $null = Invoke-RecoveryOperation -Name 'source-encryption.verify' -Operation {
+        Assert-OriginalSourceEncryption
+    }
+    Assert-RecoveryOperationsSucceeded
     if ($script:TrackRecoveryExecutionState) {
         $null = Invoke-RecoveryOperation `
             -Name "ledger.recovery-armed.compensate" `

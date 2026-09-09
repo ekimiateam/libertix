@@ -188,6 +188,7 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-offline-ntfs-resize.sh|/usr/local/lib/libertix/libertix-offline-ntfs-resize.sh"
         "0755|$ROOT_DIR/assets/live/libertix-distribution-common.sh|/usr/local/lib/libertix/libertix-distribution-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-installation-plan.py|/usr/local/lib/libertix/libertix-installation-plan.py"
+        "0755|$ROOT_DIR/assets/live/libertix_windows_sharing.py|/usr/local/lib/libertix/libertix_windows_sharing.py"
         "0755|$ROOT_DIR/assets/live/libertix-uefi-bootentries.py|/usr/local/lib/libertix/libertix-uefi-bootentries.py"
         "0755|$ROOT_DIR/assets/live/libertix_installation_policy.py|/usr/local/lib/libertix/libertix_installation_policy.py"
         "0644|$ROOT_DIR/Scripts/config/Libertix.InstallationPolicy.json|/usr/local/lib/libertix/Libertix.InstallationPolicy.json"

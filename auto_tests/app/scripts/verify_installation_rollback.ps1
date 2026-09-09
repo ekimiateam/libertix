@@ -78,6 +78,7 @@ function Get-RollbackState {
     $expectedLayout = @($config.partition_layout | Sort-Object PartitionNumber |
         Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
     $layoutMatches = Test-RollbackPartitionLayout -Actual $layout -Expected $expectedLayout
+    $storageMatches = Test-RollbackStorageLayout -Expected @($config.storage_layout)
     $ledgerPaths = @()
     $biosLedger = Join-Path $env:SystemDrive "LibertixInstallRecovery\installation-state.json"
     if (Test-Path -LiteralPath $biosLedger) { $ledgerPaths += $biosLedger }
@@ -96,7 +97,7 @@ function Get-RollbackState {
         [int64]$systemPartition.Size -eq $expectedPartitionSize
     $verified =
         $geometryMatches -and
-        $layoutMatches -and $ledger.Verified -and
+        $layoutMatches -and $storageMatches -and $ledger.Verified -and
         $installerPartitions.Count -eq 0 -and
         $recoveryTasks.Count -eq 0 -and
         $temporaryBootReferences.Count -eq 0 -and
@@ -104,6 +105,7 @@ function Get-RollbackState {
     return [pscustomobject]@{
         GeometryMatches = [bool]$geometryMatches
         PartitionLayoutMatches = [bool]$layoutMatches
+        StorageLayoutMatches = [bool]$storageMatches
         LedgerVerified = [bool]$ledger.Verified
         PlanId = [string]$ledger.PlanId
         InstallerPartitionCount = [int]$installerPartitions.Count
@@ -113,6 +115,27 @@ function Get-RollbackState {
         BootGuardianPresent = [bool]($null -ne $bootGuardian)
         Verified = [bool]$verified
     }
+}
+
+function Test-RollbackStorageLayout {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Expected)
+    $disks = @(Get-Disk -ErrorAction Stop | Where-Object Size -GT 0)
+    if ($Expected.Count -eq 0 -or $disks.Count -ne $Expected.Count) { return $false }
+    foreach ($saved in $Expected) {
+        $diskMatches = @($disks | Where-Object Number -EQ $saved.Number)
+        if ($diskMatches.Count -ne 1) { return $false }
+        $disk = $diskMatches[0]
+        foreach ($field in @('UniqueId', 'Guid', 'Signature', 'Size', 'PartitionStyle', 'LogicalSectorSize')) {
+            if ([string]$disk.$field -cne [string]$saved.$field) { return $false }
+        }
+        $partitions = @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop)
+        if (@($saved.Partitions).Count -eq 0) {
+            if ($partitions.Count -ne 0) { return $false }
+        } elseif (-not (Test-RollbackPartitionLayout -Actual $partitions -Expected @($saved.Partitions))) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Get-RollbackLedgerEvidence {
@@ -149,6 +172,7 @@ do {
 
 Write-Output ("ROLLBACK_GEOMETRY_MATCHES={0}" -f $rollbackState.GeometryMatches)
 Write-Output ("ROLLBACK_PARTITION_LAYOUT_MATCHES={0}" -f $rollbackState.PartitionLayoutMatches)
+Write-Output ("ROLLBACK_STORAGE_LAYOUT_MATCHES={0}" -f $rollbackState.StorageLayoutMatches)
 Write-Output ("ROLLBACK_LEDGER_VERIFIED={0}" -f $rollbackState.LedgerVerified)
 Write-Output ("ROLLBACK_PLAN_ID={0}" -f $rollbackState.PlanId)
 Write-Output ("ROLLBACK_INSTALLER_PARTITION_COUNT={0}" -f $rollbackState.InstallerPartitionCount)

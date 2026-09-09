@@ -9,6 +9,7 @@ import re
 import shlex
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -142,6 +143,7 @@ class SSHClient:
                     timeout=self.connect_timeout,
                     banner_timeout=self.connect_timeout,
                     auth_timeout=self.connect_timeout,
+                    channel_timeout=self.connect_timeout,
                     look_for_keys=False,
                     allow_agent=False,
                 )
@@ -549,11 +551,13 @@ exit $exitCode
             raise WorkflowError(step, "SSH client is not connected", details={"host": self.host})
         logger.info("SSH text upload started", extra={"step": step, "target": self.host})
         try:
-            with self._client.open_sftp() as sftp, sftp.open(remote_path, "wb") as remote:
-                # PowerShell 5 requires a BOM for non-ASCII UTF-8 scripts. A
-                # source file may already contain U+FEFF, so normalize it
-                # before encoding to guarantee exactly one leading BOM.
-                remote.write(content.removeprefix("\ufeff").encode("utf-8-sig"))
+            with self._client.open_sftp() as sftp:
+                sftp.get_channel().settimeout(120)
+                with sftp.open(remote_path, "wb") as remote:
+                    # PowerShell 5 requires a BOM for non-ASCII UTF-8 scripts. A
+                    # source file may already contain U+FEFF, so normalize it
+                    # before encoding to guarantee exactly one leading BOM.
+                    remote.write(content.removeprefix("\ufeff").encode("utf-8-sig"))
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             raise WorkflowError(
                 step,
@@ -567,14 +571,28 @@ exit $exitCode
             ) from exc
         logger.info("SSH text upload completed", extra={"step": step, "target": self.host})
 
-    def upload_file(self, local_path: str | Path, remote_path: str, *, step: str) -> None:
+    def upload_file(
+        self,
+        local_path: str | Path,
+        remote_path: str,
+        *,
+        step: str,
+        on_progress: Callable[[int, int], None] | None = None,
+        stall_timeout_seconds: float = 120,
+    ) -> None:
         if not self._client:
             raise WorkflowError(step, "SSH client is not connected", details={"host": self.host})
+        if stall_timeout_seconds <= 0:
+            raise ValueError("stall_timeout_seconds must be positive")
         local = Path(local_path)
         logger.info("SSH file upload started", extra={"step": step, "target": self.host})
         try:
             with self._client.open_sftp() as sftp:
-                sftp.put(str(local), remote_path)
+                # Paramiko otherwise inherits a blocking channel with no read/write
+                # deadline. A broken network could therefore leave a validation
+                # operation alive indefinitely without emitting another step.
+                sftp.get_channel().settimeout(stall_timeout_seconds)
+                sftp.put(str(local), remote_path, callback=on_progress)
         except (TimeoutError, paramiko.SSHException, OSError) as exc:
             raise WorkflowError(
                 step,

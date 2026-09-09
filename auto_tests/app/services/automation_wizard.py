@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -128,15 +129,50 @@ class WizardAutomationMixin:
                             "three keyboard attempts",
                             details={"vm": vm.name, "target": vm.host, **observed},
                         )
-                    capture = self._accept_unattended_warning_dialog(
-                        ssh,
-                        warning_client,
-                        vm,
-                        result,
-                        process_id,
-                        int(observed["sequence"]),
-                        warning_attempt,
-                    )
+                    try:
+                        capture = self._accept_unattended_warning_dialog(
+                            ssh,
+                            warning_client,
+                            vm,
+                            result,
+                            process_id,
+                            int(observed["sequence"]),
+                            warning_attempt,
+                        )
+                    except WorkflowError as exc:
+                        if (
+                            exc.step != "automation.capture"
+                            or warning_attempt >= UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS
+                        ):
+                            raise
+                        # Capture failure occurs before any acceptance key is sent.
+                        # A timed-out VNC proxy must not be reused for keyboard input.
+                        try:
+                            warning_client.disconnect()
+                        except Exception:
+                            logger.warning("Failed to close the timed-out warning VNC connection")
+                        warning_client = self.vnc.connect(vm.vnc)
+                        current = self._wait_for_unattended_stage(
+                            ssh,
+                            vm,
+                            quoted_status,
+                            after_sequence,
+                            ("warning-ready",),
+                            timeout_seconds=10,
+                        )
+                        if current["sequence"] != observed["sequence"]:
+                            raise WorkflowError(
+                                "automation.unattended_warning",
+                                "The warning changed during capture reconnection",
+                                details={"vm": vm.name},
+                            ) from exc
+                        result.ok(
+                            "automation.unattended_warning_capture_retry",
+                            "VNC reconnected before any warning acceptance key was sent",
+                            vm=vm.name,
+                            attempt=warning_attempt,
+                        )
+                        continue
                     # Keep this VNC connection alive until the coordination files
                     # prove acceptance. Some VNC transports take long enough to
                     # disconnect that Libertix can otherwise expire first.
@@ -251,6 +287,14 @@ class WizardAutomationMixin:
                 result,
                 quoted_acknowledgement,
                 observed,
+            )
+            # A slow capture can outlive the product's acknowledgement deadline.
+            self._wait_for_unattended_stage(
+                ssh,
+                vm,
+                quoted_status,
+                int(observed["sequence"]) - 1,
+                ("reboot-ready",),
             )
             if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
                 self._force_bootnext_failure(ssh, vm, result)
@@ -476,33 +520,40 @@ class WizardAutomationMixin:
     ) -> int:
         sequence = int(observed["sequence"])
         stage = str(observed["stage"])
-        capture = capture or self._capture_with_name(
-            vm,
-            f"wizard-{sequence:02d}-{stage}",
-        )
-        acknowledgement = self._run_unattended_control_command(
-            ssh,
-            'powershell.exe -NoProfile -NonInteractive -Command "'
-            f"$p='{quoted_acknowledgement_path}'; "
-            "$deadline=[DateTime]::UtcNow.AddSeconds(5); "
-            "while ($true) { try { "
-            f"[IO.File]::WriteAllText($p, '{sequence}', [Text.Encoding]::ASCII); "
-            "break } catch [IO.IOException] { "
-            "if ([DateTime]::UtcNow -ge $deadline) { throw }; "
-            'Start-Sleep -Milliseconds 50 } }"',
-            step="automation.unattended_acknowledgement",
-            timeout=20,
-        )
-        result.ok(
-            "automation.unattended_stage",
-            f"Unattended wizard stage captured and acknowledged: {stage}",
-            vm=vm.name,
-            target=vm.vnc,
-            stage=stage,
-            sequence=sequence,
-            capture=str(capture),
-            acknowledgement_exit_code=acknowledgement.exit_code,
-        )
+
+        def send_acknowledgement(captured_path: Path) -> None:
+            acknowledgement = self._run_unattended_control_command(
+                ssh,
+                'powershell.exe -NoProfile -NonInteractive -Command "'
+                f"$p='{quoted_acknowledgement_path}'; "
+                "$deadline=[DateTime]::UtcNow.AddSeconds(5); "
+                "while ($true) { try { "
+                f"[IO.File]::WriteAllText($p, '{sequence}', [Text.Encoding]::ASCII); "
+                "break } catch [IO.IOException] { "
+                "if ([DateTime]::UtcNow -ge $deadline) { throw }; "
+                'Start-Sleep -Milliseconds 50 } }"',
+                step="automation.unattended_acknowledgement",
+                timeout=20,
+            )
+            result.ok(
+                "automation.unattended_stage",
+                f"Unattended wizard stage captured; acknowledgement sent: {stage}",
+                vm=vm.name,
+                target=vm.vnc,
+                stage=stage,
+                sequence=sequence,
+                capture=str(captured_path),
+                acknowledgement_exit_code=acknowledgement.exit_code,
+            )
+
+        if capture is not None:
+            send_acknowledgement(capture)
+        else:
+            self._capture_with_name(
+                vm,
+                f"wizard-{sequence:02d}-{stage}",
+                on_captured=send_acknowledgement,
+            )
         return sequence
 
     @staticmethod
@@ -633,9 +684,18 @@ class WizardAutomationMixin:
         )
         return path
 
-    def _capture_with_name(self, vm: VMConfig, label: str) -> Path:
+    def _capture_with_name(
+        self,
+        vm: VMConfig,
+        label: str,
+        *,
+        on_captured: Callable[[Path], None] | None = None,
+    ) -> Path:
         path = self._capture_path(vm, label)
-        self.vnc.capture(vm.vnc, path)
+        if on_captured is None:
+            self.vnc.capture(vm.vnc, path)
+        else:
+            self.vnc.capture(vm.vnc, path, on_captured=on_captured)
         return path
 
     def _capture_path(self, vm: VMConfig, label: str) -> Path:

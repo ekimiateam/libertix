@@ -52,6 +52,34 @@ namespace Libertix.Helpers
         public int GetInt32(string name) => Get(name).GetInt32();
         public long GetInt64(string name) => Get(name).GetInt64();
 
+        public T GetNullableObject<T>(string name) where T : class
+        {
+            JsonElement value = Get(name);
+            if (value.ValueKind == JsonValueKind.Null)
+                return null;
+            if (value.ValueKind != JsonValueKind.Object)
+                throw new InvalidOperationException($"PowerShell returned a non-object {name} value.");
+            return JsonSerializer.Deserialize<T>(value.GetRawText()) ??
+                throw new InvalidOperationException($"PowerShell returned an invalid {name} object.");
+        }
+
+        public T[] GetObjectArray<T>(string name) where T : class
+        {
+            JsonElement value = Get(name);
+            if (value.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException($"PowerShell returned a non-array {name} value.");
+            var result = new T[value.GetArrayLength()];
+            int index = 0;
+            foreach (JsonElement item in value.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    throw new InvalidOperationException($"PowerShell returned a non-object in {name}.");
+                result[index++] = JsonSerializer.Deserialize<T>(item.GetRawText()) ??
+                    throw new InvalidOperationException($"PowerShell returned a null object in {name}.");
+            }
+            return result;
+        }
+
         public string[] GetStringArray(string name)
         {
             JsonElement value = Get(name);
