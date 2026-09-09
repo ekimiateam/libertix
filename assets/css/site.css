@@ -1,0 +1,1005 @@
+/* ==========================================================================
+   Libertix
+   --------------------------------------------------------------------------
+   Trois regles tiennent toute la page.
+
+   1. La retenue plutot que la masse. Le titre fait 60px en graisse 500, pas
+      80px en 800 : l'allure vient de l'interlettrage serre et d'une hauteur
+      de ligne a 1, pas du poids. Les boutons restent a 14px.
+   2. Le conteneur est etroit (64rem). Une colonne large laisse le regard
+      flotter ; une colonne courte tient la composition toute seule.
+   3. La page est monochrome. Les seules couleurs saturees appartiennent au
+      produit : l'icone de l'application et le voile de selection. Aucun
+      degrade decoratif, aucun halo. Le reste est du blanc, du gris, du noir.
+   ========================================================================== */
+
+/* --- 1. Jetons ---------------------------------------------------------- */
+
+:root {
+  color-scheme: dark;
+
+  --bg: #0a0a0a;
+  --surface: #151515;
+  --surface-2: rgba(255, 255, 255, 0.055);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.05);
+
+  --text: #f5f5f6;
+  --muted: #8e929a;
+  --faint: #7a7e86;
+
+  /* La seule couleur de la page, reservee au produit et aux liens. */
+  --blue: #5b93ff;
+
+  /* Echelle typographique. Sept valeurs, pas une de plus. */
+  --t-xs: 0.8125rem;
+  --t-sm: 0.875rem;
+  --t-base: 1rem;
+  --t-md: 1.125rem;
+  --t-lg: 1.375rem;
+  --t-2xl: clamp(1.75rem, 1.32rem + 1.7vw, 2.375rem);
+  --t-3xl: clamp(2.3rem, 1.45rem + 3.4vw, 3.75rem);
+
+  --sans: "Archivo", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --pad: clamp(1.25rem, 4vw, 1.5rem);
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* --- 2. Bilingue --------------------------------------------------------
+   Les deux langues sont ecrites dans le HTML, pas injectees par script :
+   sans JavaScript la page reste lisible, et un moteur de recherche voit un
+   vrai contenu dans les deux langues. */
+
+html[data-lang="fr"] [lang="en"],
+html[data-lang="en"] [lang="fr"] {
+  display: none !important;
+}
+
+/* --- 3. Base ------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 var(--t-base) / 1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 500;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+}
+
+p {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+a {
+  color: inherit;
+}
+
+strong {
+  font-weight: 500;
+  color: var(--text);
+}
+
+code {
+  font: 400 0.9em var(--mono);
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: rgba(91, 147, 255, 0.32);
+}
+
+.skip {
+  position: fixed;
+  left: 1rem;
+  top: -4rem;
+  z-index: 100;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: #fff;
+  color: #0a0a0a;
+  font: 500 var(--t-sm) var(--sans);
+  text-decoration: none;
+  transition: top 0.2s var(--ease);
+}
+
+.skip:focus {
+  top: 1rem;
+}
+
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* --- 4. Ossature -------------------------------------------------------- */
+
+.wrap {
+  width: 100%;
+  max-width: 64rem;
+  margin-inline: auto;
+  padding-inline: var(--pad);
+}
+
+/* La demonstration a droit a un peu plus de largeur que le texte : c'est la
+   seule chose de la page qui gagne a etre grande. */
+.wrap--wide {
+  max-width: 70rem;
+}
+
+.sec {
+  padding-block: clamp(4.5rem, 10vw, 8rem);
+}
+
+.lede {
+  color: var(--muted);
+  font-size: var(--t-md);
+  line-height: 1.62;
+  max-width: 34rem;
+}
+
+/* Le detail repris a la lettre : premiere phrase en blanc, suite en gris.
+   La hierarchie se fait dans la phrase, sans ajouter de titre. */
+.lede strong {
+  color: var(--text);
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 1rem;
+  font: 400 var(--t-xs) / 1 var(--mono);
+  letter-spacing: 0.05em;
+  color: var(--faint);
+}
+
+/* --- 5. Barre de navigation --------------------------------------------- */
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: rgba(10, 10, 10, 0.72);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.3s var(--ease);
+}
+
+.nav[data-stuck="1"] {
+  border-bottom-color: var(--line-2);
+}
+
+.nav__in {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  height: 3.5rem;
+  max-width: 70rem;
+}
+
+.mark {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--t-base);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  text-decoration: none;
+  flex: none;
+}
+
+.mark i {
+  display: grid;
+  place-items: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #6ea0ff, #2a52d8);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+
+.mark svg {
+  width: 0.78rem;
+  height: 0.78rem;
+}
+
+.nav__links {
+  display: none;
+  gap: 1.5rem;
+  margin-inline: auto;
+  font-size: var(--t-sm);
+}
+
+@media (min-width: 56rem) {
+  .nav__links {
+    display: flex;
+  }
+}
+
+.nav__links a {
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.2s var(--ease);
+}
+
+.nav__links a:hover {
+  color: var(--text);
+}
+
+.nav__end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+@media (min-width: 56rem) {
+  .nav__end {
+    margin-left: 0;
+  }
+}
+
+/* Le selecteur de langue : deux etats dans une seule pastille, l'actif
+   surligne. Plus direct qu'un menu deroulant pour deux entrees. */
+.lang {
+  display: flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+.lang button {
+  appearance: none;
+  border: 0;
+  padding: 0.28rem 0.55rem;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--faint);
+  font: 500 var(--t-xs) / 1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.2s var(--ease), color 0.2s var(--ease);
+}
+
+.lang button[aria-pressed="true"] {
+  background: rgba(255, 255, 255, 0.11);
+  color: var(--text);
+}
+
+.lang button:hover {
+  color: var(--text);
+}
+
+/* --- 6. Boutons --------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 1rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font: 500 var(--t-sm) / 1.4 var(--sans);
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease),
+    color 0.2s var(--ease);
+}
+
+.btn--fill {
+  background: #fff;
+  color: #0a0a0a;
+}
+
+.btn--fill:hover {
+  background: #d8dade;
+}
+
+.btn--soft {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.btn--soft:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.btn--lg {
+  padding: 0.65rem 1.25rem;
+  font-size: var(--t-base);
+}
+
+.btn svg {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex: none;
+}
+
+.btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+/* --- 7. Hero ------------------------------------------------------------ */
+
+.hero {
+  text-align: center;
+  padding-block: clamp(3.5rem, 9vw, 7rem) 0;
+}
+
+.hero h1 {
+  margin-inline: auto;
+  max-width: 15ch;
+  font-size: var(--t-3xl);
+  line-height: 1.02;
+  letter-spacing: -0.03em;
+}
+
+.hero__sub {
+  margin: 1.35rem auto 0;
+  max-width: 36rem;
+  color: var(--muted);
+  font-size: var(--t-md);
+  line-height: 1.6;
+}
+
+.hero .btns {
+  margin-top: 2rem;
+  justify-content: center;
+}
+
+.hero__note {
+  margin-top: 1.15rem;
+  font: 400 var(--t-xs) / 1.5 var(--mono);
+  color: var(--faint);
+}
+
+/* --- 8. La demonstration ------------------------------------------------ */
+
+.demo-wrap {
+  margin-top: clamp(3rem, 7vw, 5rem);
+}
+
+.demo {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  overflow: hidden;
+  aspect-ratio: 16 / 10;
+  background: #05060c;
+}
+
+@media (min-width: 48rem) {
+  .demo {
+    aspect-ratio: 16 / 8.4;
+  }
+}
+
+/* Le bureau. Un aplat neutre, sans degrade et sans teinte : la page est
+   monochrome, la demonstration aussi. Les seules couleurs saturees sont
+   l'icone de l'application et le voile de selection, c'est-a-dire le
+   produit lui-meme. */
+.demo__wall {
+  position: absolute;
+  inset: 0;
+  background: #121214;
+}
+
+.file {
+  position: absolute;
+  left: 3.5%;
+  top: 7%;
+  width: 5.8rem;
+  padding: 0.45rem 0.3rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  display: grid;
+  justify-items: center;
+  gap: 0.45rem;
+  text-align: center;
+}
+
+/* La selection : le voile bleu du systeme, pas une lueur. */
+.file[data-sel="1"] {
+  background: rgba(91, 147, 255, 0.2);
+  border-color: rgba(91, 147, 255, 0.45);
+}
+
+.file__ico {
+  display: grid;
+  place-items: center;
+  width: 2.7rem;
+  height: 2.7rem;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #6ea0ff, #23409f);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.42),
+    0 12px 26px -14px rgba(40, 80, 230, 0.95);
+  color: #fff;
+}
+
+.file__ico svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.file__name {
+  font: 400 0.66rem/1.3 var(--mono);
+  color: rgba(255, 255, 255, 0.88);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+
+.ripple {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 3.6rem;
+  height: 3.6rem;
+  margin: -1.8rem 0 0 -1.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Un seul curseur. Il y en avait plusieurs, ce qui racontait un bureau
+   partage : Libertix s'installe sur une machine, par une personne. */
+.ptr {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1.35rem;
+  height: 1.35rem;
+  pointer-events: none;
+  z-index: 7;
+  color: #fff;
+}
+
+.ptr svg {
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+  stroke: rgba(0, 0, 0, 0.6);
+  stroke-width: 1.4;
+  filter: drop-shadow(0 3px 7px rgba(0, 0, 0, 0.6));
+}
+
+.win {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(24rem, 62%);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 14px;
+  overflow: hidden;
+  /* Opaque, pas en verre : flouter un aplat uni ne montrerait rien, donc la
+     transparence ne serait que decorative. */
+  background: #1b1b1e;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.09),
+    0 32px 70px -34px #000;
+  opacity: 0;
+  z-index: 5;
+}
+
+.win__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.65rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  font: 400 0.68rem/1 var(--mono);
+  color: var(--muted);
+}
+
+.win__bar i {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+  display: block;
+}
+
+.win__body {
+  padding: clamp(0.9rem, 2.4vw, 1.5rem);
+  display: grid;
+  gap: 0.55rem;
+  justify-items: center;
+  text-align: center;
+}
+
+.win__body h3 {
+  font-size: clamp(0.95rem, 0.8rem + 0.65vw, 1.3rem);
+  letter-spacing: -0.028em;
+}
+
+.win__body p {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.win__go {
+  margin-top: 0.3rem;
+  padding: 0.4rem 1rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #6ea0ff, #2549cf);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
+  font: 500 0.76rem/1 var(--sans);
+  color: #fff;
+}
+
+.demo__foot {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.85rem 0 0;
+  font: 400 var(--t-xs) / 1.5 var(--mono);
+  color: var(--faint);
+  min-height: 1.6rem;
+}
+
+.demo__foot p {
+  flex: 1;
+}
+
+.demo__foot button {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.2s var(--ease), border-color 0.2s var(--ease);
+}
+
+.demo__foot button:hover {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.demo__foot button svg {
+  width: 0.68rem;
+  height: 0.68rem;
+}
+
+.demo__foot button[data-state="playing"] .s-play,
+.demo__foot button[data-state="paused"] .s-pause {
+  display: none;
+}
+
+/* --- 9. Sections -------------------------------------------------------- */
+
+.sec h2 {
+  font-size: var(--t-2xl);
+  line-height: 1.1;
+  max-width: 22ch;
+}
+
+.sec__head p {
+  margin-top: 1rem;
+}
+
+/* Rangees alternees : le texte d'un cote, un fragment d'interface de
+   l'autre. Le sens s'inverse d'une rangee a la suivante. */
+.rows {
+  display: grid;
+  gap: clamp(3.5rem, 8vw, 6rem);
+  margin-top: clamp(3rem, 6vw, 4.5rem);
+}
+
+.row {
+  display: grid;
+  gap: clamp(1.75rem, 4vw, 3rem);
+  align-items: center;
+}
+
+@media (min-width: 52rem) {
+  .row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .row:nth-child(even) .row__text {
+    order: 2;
+  }
+}
+
+.row h3 {
+  font-size: var(--t-lg);
+  line-height: 1.25;
+  margin-bottom: 0.75rem;
+}
+
+.row p {
+  color: var(--muted);
+  font-size: var(--t-base);
+  line-height: 1.65;
+  max-width: 32rem;
+}
+
+.row p strong {
+  color: var(--text);
+}
+
+/* Le cadre qui porte les fragments d'interface. */
+.frame {
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: var(--surface);
+  padding: clamp(1.1rem, 3vw, 1.75rem);
+  display: grid;
+  gap: 0.6rem;
+  align-content: center;
+  min-height: 13rem;
+}
+
+/* Le menu de demarrage, reconstruit en HTML plutot qu'en capture : il reste
+   net a toutes les densites et suit le theme. */
+.boot {
+  display: grid;
+  gap: 0.4rem;
+  font: 400 var(--t-sm) / 1 var(--mono);
+}
+
+.boot li {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.boot li[data-on="1"] {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+.boot li i {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: currentColor;
+  flex: none;
+  opacity: 0.5;
+}
+
+.boot li[data-on="1"] i {
+  opacity: 1;
+  background: var(--blue);
+}
+
+/* Le decompte de place, en barre plutot qu'en chiffres seuls. */
+.gauge {
+  display: flex;
+  height: 2.6rem;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+
+.gauge span {
+  display: grid;
+  place-content: center;
+  font: 400 0.68rem/1 var(--mono);
+}
+
+.gauge .g-win {
+  flex: 3;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--muted);
+}
+
+.gauge .g-lx {
+  flex: 1;
+  background: linear-gradient(180deg, #6ea0ff, #2549cf);
+  color: #fff;
+}
+
+.gauge-legend {
+  display: flex;
+  gap: 1rem;
+  font: 400 0.7rem/1 var(--mono);
+  color: var(--faint);
+}
+
+/* La liste des controles */
+.checks {
+  display: grid;
+  gap: 0.55rem;
+  font: 400 var(--t-sm) / 1.4 var(--sans);
+  color: var(--muted);
+}
+
+.checks li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.checks svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  color: var(--blue);
+  flex: none;
+}
+
+/* --- 10. Cartes --------------------------------------------------------- */
+
+.duo {
+  display: grid;
+  gap: 1rem;
+  margin-top: clamp(2.5rem, 5vw, 3.5rem);
+}
+
+@media (min-width: 46rem) {
+  .duo {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.card {
+  padding: clamp(1.4rem, 3vw, 2rem);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--surface);
+}
+
+.card h3 {
+  font-size: var(--t-lg);
+  letter-spacing: -0.025em;
+}
+
+.card p {
+  margin-top: 0.7rem;
+  color: var(--muted);
+  font-size: var(--t-sm);
+  line-height: 1.65;
+}
+
+.card dl {
+  margin: 1.2rem 0 0;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--line-2);
+  font: 400 var(--t-xs) / 1.9 var(--mono);
+}
+
+.card dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.card dt {
+  color: var(--faint);
+}
+
+.card dd {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* Enumeration en ligne : six mots ne meritent pas six lignes de tableau. */
+.specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.65rem;
+  margin-top: 1.75rem;
+  font: 400 var(--t-sm) / 1.9 var(--mono);
+  color: var(--muted);
+}
+
+.specs li {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.specs li:not(:last-child)::after {
+  content: "";
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+/* --- 11. Fin et pied ---------------------------------------------------- */
+
+.end {
+  text-align: center;
+  padding-block: clamp(4.5rem, 10vw, 8rem);
+}
+
+.end h2 {
+  margin-inline: auto;
+  font-size: var(--t-2xl);
+  max-width: 18ch;
+}
+
+.end p {
+  margin: 1.1rem auto 0;
+  max-width: 34rem;
+  color: var(--muted);
+  font-size: var(--t-base);
+  line-height: 1.6;
+}
+
+.end .btns {
+  margin-top: 2rem;
+  justify-content: center;
+}
+
+/* Le pied de page a de la masse, et c'est ce qui le fait tenir : un filet
+   horizontal, un logotype tres large en gris presque invisible, un filet
+   vertical, puis quatre colonnes au meme rythme. Une simple rangee de liens
+   n'a aucune presence a cet endroit de la page. */
+.foot {
+  border-top: 1px solid var(--line-2);
+  padding-block: clamp(3rem, 7vw, 5rem) clamp(2.5rem, 5vw, 3.5rem);
+}
+
+.foot__grid {
+  display: grid;
+  gap: 2.5rem;
+}
+
+@media (min-width: 54rem) {
+  .foot__grid {
+    grid-template-columns: minmax(0, 0.9fr) minmax(0, 2.1fr);
+    gap: clamp(2rem, 6vw, 4.5rem);
+  }
+}
+
+/* Le logotype est grand et presque eteint. Un pied de page qui crie son
+   propre nom manque d'assurance ; a 12 % d'opacite il se lit quand meme. */
+.foot__word {
+  font-size: clamp(1.9rem, 1.3rem + 2.2vw, 2.9rem);
+  font-weight: 500;
+  letter-spacing: -0.045em;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.12);
+}
+
+.foot__meta {
+  margin-top: 1.1rem;
+  font-size: var(--t-xs);
+  line-height: 1.7;
+  color: var(--faint);
+}
+
+.foot__cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2.25rem 2rem;
+}
+
+@media (min-width: 54rem) {
+  .foot__cols {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    padding-left: clamp(2rem, 5vw, 4rem);
+    border-left: 1px solid var(--line-2);
+  }
+}
+
+.foot h3 {
+  margin-bottom: 0.95rem;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.foot ul {
+  display: grid;
+  gap: 0.62rem;
+  font-size: var(--t-sm);
+}
+
+.foot a {
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.2s var(--ease);
+}
+
+.foot a:hover {
+  color: var(--text);
+}
+
+/* --- 12. Apparition ----------------------------------------------------- */
+
+/* Un seul geste sur toute la page : quatorze pixels vers le haut et un
+   deflou. Repete a l'identique partout, il devient un rythme au lieu d'un
+   effet. */
+[data-in],
+[data-hero-in] {
+  opacity: 0;
+  transform: translateY(14px);
+  filter: blur(8px);
+}
+
+[data-in].on {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  transition: opacity 0.7s var(--ease), transform 0.7s var(--ease),
+    filter 0.7s var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  [data-in],
+  [data-hero-in] {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}

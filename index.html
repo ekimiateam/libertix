@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="fr" data-lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Libertix — installez Linux depuis Windows</title>
+<meta name="description" content="Libertix est une application Windows gratuite qui installe Linux Mint ou Zorin OS à côté de votre système actuel. Sans clé USB, et annulable tant que l'installation n'est pas terminée.">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="icon" href="https://avatars.githubusercontent.com/u/5138495?s=200&amp;v=4" type="image/png">
+<link rel="canonical" href="https://libertix.eu/">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Libertix">
+<meta property="og:title" content="Libertix — installez Linux depuis Windows">
+<meta property="og:description" content="Une application Windows gratuite qui installe Linux à côté de votre système actuel. Sans clé USB, et annulable tant qu'elle n'est pas terminée.">
+<meta property="og:url" content="https://libertix.eu/">
+
+<link rel="preload" href="assets/fonts/archivo-var-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/css/fonts.css">
+<link rel="stylesheet" href="assets/css/site.css">
+<link rel="stylesheet" href="assets/css/scene.css">
+
+<script>
+  /* Choix explicite, choix mémorisé, langues du navigateur, puis anglais. */
+  (function () {
+    var valid = function (l) { return l === "fr" || l === "en"; };
+    var lang = null;
+    try { lang = new URLSearchParams(location.search).get("lang"); } catch (e) {}
+    if (!valid(lang)) {
+      try { lang = localStorage.getItem("libertix.lang"); } catch (e) {}
+    }
+    if (!valid(lang)) {
+      var preferences = navigator.languages && navigator.languages.length
+        ? navigator.languages : [navigator.language || "en"];
+      lang = "en";
+      for (var i = 0; i < preferences.length; i++) {
+        var candidate = preferences[i].toLowerCase().split(/[-_]/)[0];
+        if (valid(candidate)) { lang = candidate; break; }
+      }
+    }
+    document.documentElement.setAttribute("data-lang", lang);
+    document.documentElement.setAttribute("lang", lang);
+  })();
+</script>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Libertix",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "Windows 10, Windows 11",
+  "softwareVersion": "0.3",
+  "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+  "url": "https://libertix.eu/",
+  "codeRepository": "https://github.com/ekimiateam/libertix",
+  "description": "Free Windows application that installs a Linux distribution alongside Windows, with no USB drive.",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" },
+  "author": { "@type": "Organization", "name": "Ekimia", "url": "https://ekimia.fr" }
+}
+</script>
+</head>
+
+<body>
+<a class="skip" href="#main"><span lang="fr">Aller au contenu</span><span lang="en">Skip to content</span></a>
+
+<!-- Icones Lucide v0.469 (ISC License, (c) Lucide Contributors), en sprite. -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></symbol>
+  <symbol id="i-code" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 16 4-4-4-4"/><path d="m6 8-4 4 4 4"/><path d="m14.5 4-5 16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+  <symbol id="i-replay" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10a9 9 0 1 1 2.7 8.2"/><path d="M3 4v6h6"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+</svg>
+
+<header class="nav">
+  <div class="wrap nav__in">
+    <a class="mark" href="#main">
+      <img class="mark__logo" data-ekimia-logo src="https://avatars.githubusercontent.com/u/5138495?s=200&amp;v=4" alt="" width="23" height="23" referrerpolicy="no-referrer">
+      Libertix
+    </a>
+
+    <nav class="nav__links" aria-label="Navigation">
+      <a href="#how"><span lang="fr">Fonctionnement</span><span lang="en">How it works</span></a>
+      <a href="#systems"><span lang="fr">Systèmes</span><span lang="en">Systems</span></a>
+      <a href="#requirements"><span lang="fr">Prérequis</span><span lang="en">Requirements</span></a>
+      <a href="#project"><span lang="fr">Projet</span><span lang="en">Project</span></a>
+    </nav>
+
+    <div class="nav__end">
+      <div class="lang" data-language-control hidden>
+        <button type="button" data-lang-toggle aria-label="Switch to English" title="Switch to English">
+          <span data-lang-code>FR</span>
+        </button>
+      </div>
+      <a class="btn btn--fill" href="https://github.com/ekimiateam/libertix/releases/tag/0.3">
+        <span lang="fr">Télécharger</span><span lang="en">Download</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ================= HERO ================= -->
+  <section class="wrap hero">
+    <h1 data-hero-in>
+      <span lang="fr">Installez Linux depuis Windows</span>
+      <span lang="en">Install Linux from Windows</span>
+    </h1>
+
+    <p class="hero__sub" data-hero-in>
+      <span lang="fr">Une application Windows gratuite qui pose Linux à côté de
+        votre système actuel. Aucune clé USB à graver, aucun réglage de firmware
+        à trouver, et une installation qui sait revenir en arrière.</span>
+      <span lang="en">A free Windows application that installs Linux next to
+        your current system. No USB drive to burn, no firmware settings to hunt
+        for, and an install that knows how to undo itself.</span>
+    </p>
+
+    <div class="btns" data-hero-in>
+      <a class="btn btn--fill btn--lg" href="https://github.com/ekimiateam/libertix/releases/tag/0.3">
+        <svg aria-hidden="true"><use href="#i-download"/></svg>
+        <span lang="fr">Télécharger Libertix 0.3</span>
+        <span lang="en">Download Libertix 0.3</span>
+      </a>
+      <a class="btn btn--soft btn--lg" href="https://github.com/ekimiateam/libertix">
+        <svg aria-hidden="true"><use href="#i-code"/></svg>
+        <span lang="fr">Voir le code</span><span lang="en">View the code</span>
+      </a>
+    </div>
+
+    <p class="hero__note" data-hero-in><span lang="fr">Windows 10 &amp; 11 &middot; 64 bits &middot; GPL-3.0</span><span lang="en">Windows 10 &amp; 11 &middot; 64-bit &middot; GPL-3.0</span></p>
+  </section>
+
+  <!-- Démonstration SVG : une ouverture, puis une image fixe. -->
+  <div class="wrap wrap--wide demo-wrap" data-hero-in>
+    <figure style="margin:0">
+      <div class="demo" data-scene role="img"
+           aria-label="Aperçu de Libertix : un double-clic sur Libertix.exe ouvre l’écran d’accueil.">
+        <div class="demo__wall"></div>
+
+        <div class="file" data-file>
+          <span class="file__ico" data-file-icon><img data-ekimia-logo src="https://avatars.githubusercontent.com/u/5138495?s=200&amp;v=4" alt="" width="44" height="44" draggable="false" referrerpolicy="no-referrer"></span>
+          <span class="file__name">Libertix.exe</span>
+        </div>
+
+        <div class="win" data-win>
+          <svg class="welcome" data-welcome="" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 580" fill="none" aria-hidden="true" focusable="false">
+            <!-- Palette de la maquette uniquement : le thème du site reste inchangé. -->
+            <rect x="0.75" y="0.75" width="998.5" height="578.5" rx="14" fill="#19191c"/>
+            <path d="M15 1H985A14 14 0 0 1 999 15V38H1V15A14 14 0 0 1 15 1Z" fill="#252528"/>
+            <path d="M1 38.5H999" stroke="#363639"/>
+            <defs>
+              <clipPath id="welcome-logo-clip"><circle cx="23" cy="19" r="8"/></clipPath>
+            </defs>
+            <image data-ekimia-logo="" href="https://avatars.githubusercontent.com/u/5138495?s=200&amp;v=4" x="15" y="11" width="16" height="16" clip-path="url(#welcome-logo-clip)"/>
+            <g font-family="'Segoe UI', Archivo, Arial, sans-serif">
+              <text x="42" y="24" font-size="14" fill="#d4d4d8">Libertix</text>
+              <path d="M970 14L980 24M980 14L970 24" stroke="#b8b8bf" stroke-width="1.4" stroke-linecap="round"/>
+
+              <g fill="#ededf1" font-size="64" font-weight="300" text-anchor="middle" letter-spacing="-1.7">
+                <text lang="fr" x="500" y="220">Bienvenue sur Libertix !</text>
+                <text lang="en" x="500" y="220">Welcome to Libertix!</text>
+              </g>
+              <g fill="#a8a8b1" font-size="18" text-anchor="middle">
+                <text lang="fr" x="500" y="296">Un installateur Linux simple et moderne</text>
+                <text lang="en" x="500" y="296">A simple and modern Linux installer</text>
+              </g>
+              <rect x="400" y="325" width="200" height="50" rx="8" fill="#3569db"/>
+              <g fill="#ffffff" font-size="19" font-weight="600" text-anchor="middle">
+                <text lang="fr" x="500" y="357">Commencer</text>
+                <text lang="en" x="500" y="357">Get Started</text>
+              </g>
+              <g fill="#b8b8c1" font-size="16" text-anchor="end">
+                <text lang="fr" x="457" y="434">Langue</text>
+                <text lang="en" x="457" y="434">Language</text>
+              </g>
+              <rect x="476" y="409" width="124" height="39" rx="6" fill="#252528" stroke="#39393e"/>
+              <g fill="#dedee3" font-size="16">
+                <text lang="fr" x="491" y="434">Français</text>
+                <text lang="en" x="491" y="434">English</text>
+              </g>
+              <path d="M577 426L582 431L587 426" stroke="#a3a3ad" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              <rect x="836" y="517" width="136" height="38" rx="6" fill="#252528"/>
+              <g fill="#b8b8c1" font-size="16" text-anchor="middle">
+                <text lang="fr" x="904" y="542">À propos</text>
+                <text lang="en" x="904" y="542">About</text>
+              </g>
+            </g>
+            <rect x="0.75" y="0.75" width="998.5" height="578.5" rx="14" stroke="#3d3d42" stroke-width="1.5"/>
+          </svg>
+        </div>
+
+        <span class="ptr" data-ptr aria-hidden="true">
+          <img src="assets/img/cursor-arrow.png" width="24" height="24" alt="" draggable="false">
+        </span>
+
+      </div>
+
+      <figcaption class="demo__foot">
+        <p data-cap><span lang="fr">Aperçu de l’écran d’accueil de Libertix 0.3.</span><span lang="en">Preview of the Libertix 0.3 welcome screen.</span></p>
+        <button type="button" data-toggle data-state="playing" aria-label="Mettre l’animation en pause" hidden>
+          <svg class="s-replay" aria-hidden="true"><use href="#i-replay"/></svg>
+          <svg class="s-pause" aria-hidden="true"><use href="#i-pause"/></svg>
+          <svg class="s-play" aria-hidden="true"><use href="#i-play"/></svg>
+        </button>
+      </figcaption>
+    </figure>
+  </div>
+
+
+  <!-- ================= FONCTIONNEMENT ================= -->
+  <section class="wrap sec" id="how">
+    <div class="sec__head" data-in>
+      <span class="eyebrow"><span lang="fr">fonctionnement</span><span lang="en">how it works</span></span>
+      <h2>
+        <span lang="fr">Trois moments décident de tout.</span>
+        <span lang="en">Three moments decide everything.</span>
+      </h2>
+      <p class="lede">
+        <span lang="fr">Installer Linux à côté de Windows n'est pas difficile en
+          soi. Ce sont les étapes autour qui découragent, et ce sont
+          celles-là que Libertix prend en charge.</span>
+        <span lang="en">Installing Linux next to Windows is not hard in itself.
+          It is the steps around it that put people off, and those are the ones
+          Libertix takes over.</span>
+      </p>
+    </div>
+
+    <div class="rows">
+      <!-- 1 -->
+      <div class="row" data-in>
+        <div class="row__text">
+          <h3><span lang="fr">Avant d'écrire quoi que ce soit</span><span lang="en">Before anything is written</span></h3>
+          <p>
+            <span lang="fr"><strong>Libertix inspecte la machine et a le droit de dire non.</strong>
+              Firmware, mémoire, chiffrement du disque, contrôleur de stockage,
+              espace réellement libérable. Une configuration qu'il ne saurait
+              pas restaurer est refusée, avec un code d'erreur exploitable.</span>
+            <span lang="en"><strong>Libertix inspects the machine and is allowed to say no.</strong>
+              Firmware, memory, disk encryption, storage controller, space that
+              can genuinely be freed. A layout it could not restore is refused,
+              with an error code you can act on.</span>
+          </p>
+        </div>
+        <div class="frame">
+          <ul class="checks">
+            <li><svg><use href="#i-check"/></svg><span lang="fr">Windows 11, 64 bits</span><span lang="en">Windows 11, 64-bit</span></li>
+            <li><svg><use href="#i-check"/></svg><span lang="fr">Firmware UEFI, disque GPT</span><span lang="en">UEFI firmware, GPT disk</span></li>
+            <li><svg><use href="#i-check"/></svg><span lang="fr">BitLocker entièrement déchiffré</span><span lang="en">BitLocker fully decrypted</span></li>
+            <li><svg><use href="#i-check"/></svg><span lang="fr">Démarrage sécurisé compatible</span><span lang="en">Secure Boot compatible</span></li>
+            <li><svg><use href="#i-check"/></svg><span lang="fr">62 Go libérables</span><span lang="en">62 GB can be freed</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 2 -->
+      <div class="row" data-in>
+        <div class="row__text">
+          <h3><span lang="fr">La place que vous accordez</span><span lang="en">The space you give it</span></h3>
+          <p>
+            <span lang="fr"><strong>Vous choisissez, Libertix vérifie.</strong>
+              Il garde toujours de quoi laisser Windows respirer, refuse une
+              taille qui mettrait le système en difficulté, et prépare
+              lui-même l'environnement d'installation sur le disque. Rien à
+              graver, rien à brancher.</span>
+            <span lang="en"><strong>You choose, Libertix checks.</strong>
+              It always keeps enough room for Windows to breathe, refuses a size
+              that would leave the system struggling, and prepares the install
+              environment on the disk itself. Nothing to burn, nothing to plug
+              in.</span>
+          </p>
+        </div>
+        <div class="frame">
+          <div class="gauge">
+            <span class="g-win">Windows</span>
+            <span class="g-lx">Linux</span>
+          </div>
+          <div class="gauge-legend">
+            <span><span lang="fr">Windows 380 Go</span><span lang="en">Windows 380 GB</span></span>
+            <span><span lang="fr">Linux 120 Go</span><span lang="en">Linux 120 GB</span></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3 -->
+      <div class="row" data-in>
+        <div class="row__text">
+          <h3><span lang="fr">Le menu, à chaque allumage</span><span lang="en">The menu, every time you start</span></h3>
+          <p>
+            <span lang="fr"><strong>Windows n'est pas remplacé, il devient une entrée.</strong>
+              Le menu est installé puis vérifié, et trois gardes le maintiennent
+              en place quand le noyau, GRUB ou le chargeur signé sont mis à
+              jour. Tant que l'installation n'est pas finie, elle reste
+              annulable, et la restauration est contrôlée avant d'être
+              annoncée.</span>
+            <span lang="en"><strong>Windows is not replaced, it becomes an entry.</strong>
+              The menu is installed and then verified, and three guards keep it
+              in place when the kernel, GRUB or the signed loader are updated.
+              Until the install finishes it stays reversible, and the restore is
+              checked before it is reported.</span>
+          </p>
+        </div>
+        <div class="frame">
+          <ul class="boot">
+            <li data-on="1"><i></i>Linux Mint 22.3 Cinnamon</li>
+            <li><i></i>Windows</li>
+            <li><i></i><span lang="fr">Options avancées</span><span lang="en">Advanced options</span></li>
+            <li><i></i><span lang="fr">Éteindre</span><span lang="en">Shut down</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ================= SYSTÈMES ================= -->
+  <section class="wrap sec" id="systems">
+    <div class="sec__head" data-in>
+      <span class="eyebrow"><span lang="fr">au choix</span><span lang="en">your pick</span></span>
+      <h2>
+        <span lang="fr">Deux distributions, réinstallées à chaque version.</span>
+        <span lang="en">Two distributions, reinstalled for every release.</span>
+      </h2>
+      <p class="lede">
+        <span lang="fr">La liste est courte parce que chacune est reposée et
+          vérifiée sur trois vraies machines avant chaque publication.</span>
+        <span lang="en">The list is short because each one is installed again and
+          verified on three real machines before every release.</span>
+      </p>
+    </div>
+
+    <div class="duo">
+      <article class="card" data-in>
+        <h3>Linux Mint</h3>
+        <p>
+          <span lang="fr">Le choix par défaut quand on vient de Windows : un
+            bureau familier, les applications courantes déjà présentes, rien à
+            configurer pour commencer à travailler.</span>
+          <span lang="en">The default choice coming from Windows: a familiar
+            desktop, everyday applications already there, nothing to configure
+            before you start working.</span>
+        </p>
+        <dl>
+          <div><dt lang="fr">version</dt><dt lang="en">version</dt><dd>22.3 Cinnamon</dd></div>
+          <div><dt lang="fr">base</dt><dt lang="en">base</dt><dd>Ubuntu 24.04</dd></div>
+          <div><dt lang="fr">place</dt><dt lang="en">space</dt><dd><span lang="fr">20 Gio</span><span lang="en">20 GiB</span></dd></div>
+        </dl>
+      </article>
+
+      <article class="card" data-in>
+        <h3>Zorin OS</h3>
+        <p>
+          <span lang="fr">Le choix quand on veut décider de l'apparence : quatre
+            dispositions de bureau, sur les mêmes fondations et avec les mêmes
+            logiciels disponibles.</span>
+          <span lang="en">The choice when you want to decide how it looks: four
+            desktop layouts, on the same foundations and with the same software
+            available.</span>
+        </p>
+        <dl>
+          <div><dt lang="fr">version</dt><dt lang="en">version</dt><dd>18.1 Core</dd></div>
+          <div><dt lang="fr">base</dt><dt lang="en">base</dt><dd>Ubuntu</dd></div>
+          <div><dt lang="fr">place</dt><dt lang="en">space</dt><dd><span lang="fr">20 Gio</span><span lang="en">20 GiB</span></dd></div>
+        </dl>
+      </article>
+    </div>
+  </section>
+
+
+  <!-- ================= PRÉREQUIS ================= -->
+  <section class="wrap sec" id="requirements">
+    <div class="sec__head" data-in>
+      <span class="eyebrow"><span lang="fr">avant de commencer</span><span lang="en">before you start</span></span>
+      <h2><span lang="fr">Ce qu'il faut sur la machine.</span><span lang="en">What the machine needs.</span></h2>
+      <p class="lede">
+        <span lang="fr">Libertix vérifie tout cela lui-même au lancement. Le
+          dernier point n'est pas une formalité : il écrit sur votre disque
+          système.</span>
+        <span lang="en">Libertix checks all of this itself on launch. The last
+          item is not a formality: it writes to your system disk.</span>
+      </p>
+      <ul class="specs">
+        <li><span lang="fr">Windows 10 ou 11</span><span lang="en">Windows 10 or 11</span></li>
+        <li><span lang="fr">64 bits</span><span lang="en">64-bit</span></li>
+        <li><span lang="fr">compte administrateur</span><span lang="en">administrator account</span></li>
+        <li>.NET Framework 4.8</li>
+        <li><span lang="fr">20 Gio libérables sur le disque Windows</span><span lang="en">20 GiB of shrinkable space on the Windows disk</span></li>
+        <li><span lang="fr">une connexion internet</span><span lang="en">an internet connection</span></li>
+        <li><span lang="fr">une sauvegarde de vos données</span><span lang="en">a backup of your data</span></li>
+      </ul>
+    </div>
+  </section>
+
+
+  <!-- ================= PROJET ================= -->
+  <section class="wrap sec" id="project">
+    <div class="sec__head" data-in>
+      <span class="eyebrow"><span lang="fr">le projet</span><span lang="en">the project</span></span>
+      <h2>
+        <span lang="fr">Libre, et financé par ceux qui s'en servent.</span>
+        <span lang="en">Free software, funded by the people who use it.</span>
+      </h2>
+      <p class="lede">
+        <span lang="fr">Libertix est développé par Félix et
+          <a href="https://ekimia.fr">Ekimia</a>, avec les contributions de
+          Michel Memeteau, MopigamesYT&nbsp;/&nbsp;Margot et Aamir Shahzad. Tout
+          le code est publié sous GPL-3.0, y compris les scripts qui construisent
+          les images d'installation. La campagne de dons a dépassé son objectif
+          de 3&nbsp;000&nbsp;€ avec 41 contributions.</span>
+        <span lang="en">Libertix is built by Félix and
+          <a href="https://ekimia.fr">Ekimia</a>, with contributions from Michel
+          Memeteau, MopigamesYT&nbsp;/&nbsp;Margot and Aamir Shahzad. All of the
+          code is published under GPL-3.0, including the scripts that build the
+          install images. The donation campaign passed its
+          &euro;3,000 goal with 41 contributions.</span>
+      </p>
+      <div class="btns" style="margin-top:1.75rem">
+        <a class="btn btn--soft" href="https://ekimia.fr/donations/campagne-libertix/">
+          <span lang="fr">Soutenir le développement</span><span lang="en">Support development</span>
+        </a>
+        <a class="btn btn--soft" href="https://github.com/ekimiateam/libertix/issues">
+          <span lang="fr">Signaler un problème</span><span lang="en">Report an issue</span>
+        </a>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ================= FIN ================= -->
+  <section class="wrap end">
+    <h2 data-in><span lang="fr">Téléchargez Libertix 0.3</span><span lang="en">Download Libertix 0.3</span></h2>
+    <p data-in>
+      <span lang="fr">Sauvegardez vos données importantes avant de lancer
+        l'installation.</span>
+      <span lang="en">Back up anything important before you start the
+        installation.</span>
+    </p>
+    <div class="btns" data-in>
+      <a class="btn btn--fill btn--lg" href="https://github.com/ekimiateam/libertix/releases/tag/0.3">
+        <svg aria-hidden="true"><use href="#i-download"/></svg>
+        <span lang="fr">Télécharger Libertix 0.3</span><span lang="en">Download Libertix 0.3</span>
+      </a>
+      <a class="btn btn--soft btn--lg" href="https://github.com/ekimiateam/libertix">
+        <span lang="fr">Voir le code</span><span lang="en">View the code</span>
+      </a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap wrap--wide foot__grid">
+    <div class="foot__brand">
+      <p class="foot__word">Libertix</p>
+      <p class="foot__meta">
+        <span lang="fr">Installateur Linux pour Windows.<br>Développé par Ekimia.</span>
+        <span lang="en">Linux installer for Windows.<br>Built by Ekimia.</span>
+      </p>
+      <p class="foot__meta">&copy; <span data-year>2026</span> Ekimia &middot; GPL-3.0</p>
+    </div>
+
+    <div class="foot__cols">
+      <div>
+        <h3>Libertix</h3>
+        <ul>
+          <li><a href="https://github.com/ekimiateam/libertix/releases/tag/0.3"><span lang="fr">Télécharger</span><span lang="en">Download</span></a></li>
+          <li><a href="https://github.com/ekimiateam/libertix/releases"><span lang="fr">Toutes les versions</span><span lang="en">All releases</span></a></li>
+          <li><a href="https://github.com/ekimiateam/libertix/issues"><span lang="fr">Signaler un problème</span><span lang="en">Report an issue</span></a></li>
+        </ul>
+      </div>
+
+      <div>
+        <h3><span lang="fr">Code</span><span lang="en">Code</span></h3>
+        <ul>
+          <li><a href="https://github.com/ekimiateam/libertix"><span lang="fr">Dépôt</span><span lang="en">Repository</span></a></li>
+          <li><a href="https://github.com/ekimiateam/libertix/blob/main/docs/ARCHITECTURE.md">Architecture</a></li>
+          <li><a href="https://www.gnu.org/licenses/gpl-3.0.html"><span lang="fr">Licence GPL-3.0</span><span lang="en">GPL-3.0 license</span></a></li>
+        </ul>
+      </div>
+
+      <div>
+        <h3><span lang="fr">Systèmes</span><span lang="en">Systems</span></h3>
+        <ul>
+          <li><a href="https://linuxmint.com/">Linux Mint</a></li>
+          <li><a href="https://zorin.com/os/">Zorin OS</a></li>
+        </ul>
+      </div>
+
+      <div>
+        <h3>Ekimia</h3>
+        <ul>
+          <li><a href="https://ekimia.fr"><span lang="fr">Site</span><span lang="en">Website</span></a></li>
+          <li><a href="https://ekimia.fr/libertix"><span lang="fr">Page du projet</span><span lang="en">Project page</span></a></li>
+          <li><a href="https://ekimia.fr/donations/campagne-libertix/"><span lang="fr">Soutenir</span><span lang="en">Support</span></a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/vendor/gsap.min.js" defer></script>
+<script src="assets/js/site.js" defer></script>
+<script src="assets/js/scene.js" defer></script>
+</body>
+</html>

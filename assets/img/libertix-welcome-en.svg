@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 580" fill="none" lang="en" width="1000" height="580" role="img" aria-labelledby="title desc">
+  <title id="title">Libertix welcome screen</title>
+  <desc id="desc">Vector mockup: welcome message, Get Started button, English language and About button. Colors adapted to the Libertix website.</desc>
+  <rect x="0.75" y="0.75" width="998.5" height="578.5" rx="14" fill="#19191c" />
+  <path d="M15 1H985A14 14 0 0 1 999 15V38H1V15A14 14 0 0 1 15 1Z" fill="#252528" />
+  <path d="M1 38.5H999" stroke="#363639" />
+  <defs>
+    <clipPath id="welcome-logo-clip">
+      <circle cx="23" cy="19" r="8" />
+    </clipPath>
+  </defs>
+  <image href="https://avatars.githubusercontent.com/u/5138495?s=200&amp;v=4" x="15" y="11" width="16" height="16" clip-path="url(#welcome-logo-clip)" />
+  <g font-family="'Segoe UI', Archivo, Arial, sans-serif">
+    <text x="42" y="24" font-size="14" fill="#d4d4d8">Libertix</text>
+    <path d="M970 14L980 24M980 14L970 24" stroke="#b8b8bf" stroke-width="1.4" stroke-linecap="round" />
+    <g fill="#ededf1" font-size="64" font-weight="300" text-anchor="middle" letter-spacing="-1.7">
+      <text lang="en" x="500" y="220">Welcome to Libertix!</text>
+    </g>
+    <g fill="#a8a8b1" font-size="18" text-anchor="middle">
+      <text lang="en" x="500" y="296">A simple and modern Linux installer</text>
+    </g>
+    <rect x="400" y="325" width="200" height="50" rx="8" fill="#3569db" />
+    <g fill="#ffffff" font-size="19" font-weight="600" text-anchor="middle">
+      <text lang="en" x="500" y="357">Get Started</text>
+    </g>
+    <g fill="#b8b8c1" font-size="16" text-anchor="end">
+      <text lang="en" x="457" y="434">Language</text>
+    </g>
+    <rect x="476" y="409" width="124" height="39" rx="6" fill="#252528" stroke="#39393e" />
+    <g fill="#dedee3" font-size="16">
+      <text lang="en" x="491" y="434">English</text>
+    </g>
+    <path d="M577 426L582 431L587 426" stroke="#a3a3ad" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+    <rect x="836" y="517" width="136" height="38" rx="6" fill="#252528" />
+    <g fill="#b8b8c1" font-size="16" text-anchor="middle">
+      <text lang="en" x="904" y="542">About</text>
+    </g>
+  </g>
+  <rect x="0.75" y="0.75" width="998.5" height="578.5" rx="14" stroke="#3d3d42" stroke-width="1.5" />
+</svg>

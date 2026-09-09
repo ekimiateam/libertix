@@ -1,0 +1,125 @@
+/* Ajustements de la démo, du logo et du bouton de langue uniquement.
+   La feuille assets/css/site.css reste celle du ZIP original. */
+
+[hidden] { display: none !important; }
+
+.lang button[data-lang-toggle] {
+  min-width: 2.2rem;
+  min-height: 1.6rem;
+  color: var(--text);
+}
+
+/* Le texte reste accessible si JavaScript ou ses dépendances sont absents. */
+[data-in],
+[data-hero-in] {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+html.js-reveal [data-in]:not(.on) {
+  opacity: 0;
+  transform: translateY(14px);
+  filter: blur(8px);
+}
+
+/* Logo Ekimia : taille de l'ancien repère, sans son carré bleu inventé. */
+.mark__logo {
+  display: block;
+  flex: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  object-fit: contain;
+}
+
+.demo .file__ico {
+  background: none;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.demo .file__ico img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: contain;
+}
+
+/* Même fenêtre, mêmes dimensions et mêmes arrondis que la version précédente. */
+.demo .win {
+  width: min(50rem, 74%);
+  left: 54%;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+  background: transparent;
+  box-shadow: none;
+  opacity: 1;
+  pointer-events: none;
+}
+
+.demo .welcome {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.25));
+}
+
+/* Image haute définition d'un pointeur, pas un pictogramme de flèche.
+   Sa taille et sa pointe restent constantes, sur ordinateur comme sur mobile. */
+.demo .ptr {
+  width: 24px;
+  height: 24px;
+  opacity: 0;
+  visibility: hidden;
+  transform-origin: 0 0;
+}
+
+.demo .ptr img {
+  display: block;
+  width: 24px;
+  height: 24px;
+  max-width: none;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.demo[data-playback="playing"] .ptr,
+.demo[data-playback="playing"] .win {
+  will-change: transform, opacity;
+}
+
+.demo .file[data-hover="1"]:not([data-sel="1"]) {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* Retour de clic sur le fichier ; la souris reste strictement immobile. */
+.demo .file[data-pressed="1"] {
+  background: rgba(91, 147, 255, 0.29);
+  border-color: rgba(91, 147, 255, 0.60);
+}
+
+.demo[data-phase="open"] .file[data-sel="1"] {
+  background: rgba(255, 255, 255, 0.065);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.demo__foot button .s-replay { display: none; }
+.demo__foot button[data-state="ended"] .s-replay { display: block; }
+.demo__foot button[data-state="ended"] .s-play,
+.demo__foot button[data-state="ended"] .s-pause { display: none; }
+
+@media (max-width: 47.999rem) {
+  .demo .win { width: 92%; left: 50%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.js-reveal [data-in]:not(.on) {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
