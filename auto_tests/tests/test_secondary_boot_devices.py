@@ -137,6 +137,7 @@ def test_boot_override_requires_explicit_secondary_allocation(
     service = AutomationService(settings())
     calls = []
     monkeypatch.setattr(service, "_restore_clean_snapshots", lambda *args: None)
+    monkeypatch.setattr(service, "_prepare_windows_test_vm", lambda *args: None)
     monkeypatch.setattr(
         service, "_prepare_secondary_boot_devices", lambda *args: calls.append("boot")
     )

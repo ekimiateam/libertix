@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -1714,6 +1715,452 @@ namespace Libertix.Tests
                 "</authentication><encryption>" + encryption +
                 "</encryption><useOneX>false</useOneX></authEncryption>" + sharedKey +
                 "</security></MSM></WLANProfile>";
+        }
+
+        [TestMethod]
+        public void RollbackProgressCountsOnlyRecordedCompensatableOperations()
+        {
+            InstallationStateMachine machine = CreateSuccessfulExecutionState(PlanId);
+            machine.BeginRollback();
+            Assert.AreEqual(0, InstallationStateMachine.GetRollbackProgressPercent(machine.State));
+
+            machine.CompleteCompensation(InstallationStep.TargetBootloaderInstalled);
+            Assert.AreEqual(10, InstallationStateMachine.GetRollbackProgressPercent(machine.State));
+            foreach (string step in new[]
+            {
+                InstallationStep.TargetSystemConfigured,
+                InstallationStep.LiveDistributionExtracted,
+                InstallationStep.LiveTargetFilesystemCreated,
+                InstallationStep.LiveInstallerPartitionExpanded,
+                InstallationStep.WindowsTemporaryBootPrepared,
+                InstallationStep.WindowsLiveMediaPrepared,
+                InstallationStep.WindowsInstallerPartitionCreated,
+                InstallationStep.WindowsSystemVolumeShrunk,
+                InstallationStep.WindowsRecoveryArmed
+            })
+            {
+                machine.CompleteCompensation(step);
+            }
+            machine.CompleteRollback();
+
+            Assert.AreEqual(100, InstallationStateMachine.GetRollbackProgressPercent(machine.State));
+        }
+
+        [DataTestMethod]
+        [DataRow("bios")]
+        [DataRow("uefi")]
+        public void InstalledLinuxRecoveryRequiresACompleteVerifiedArchive(string firmware)
+        {
+            WithRecoveryRoots((systemRoot, programData, root) =>
+            {
+                CreateSuccessfulRecoveryArchive(root, firmware, PlanId);
+
+                InstalledLinuxRecoveryDetection detection =
+                    InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.Available, detection.Status);
+                Assert.AreEqual(firmware, detection.Candidate.Firmware);
+                Assert.AreEqual(PlanId, detection.Candidate.PlanId);
+                Assert.IsFalse(detection.Candidate.RollbackInProgress);
+            }, firmware, PlanId);
+        }
+
+        [DataTestMethod]
+        [DataRow("bios")]
+        [DataRow("uefi")]
+        public void RecoveryCodeUpgradePreservesOriginalCodeAndInstallationRecords(string firmware)
+        {
+            WithRecoveryRoots((systemRoot, programData, root) =>
+            {
+                string source = Path.Combine(root, "current-code");
+                Directory.CreateDirectory(Path.Combine(source, "modules"));
+                bool uefi = firmware == "uefi";
+                string scriptName = uefi ? "libertix-uefi-recovery-agent.ps1" : "libertix-recovery-guard.ps1";
+                string relative = uefi ? Path.Combine("Scripts", scriptName) : "recover.ps1";
+                string payload = uefi ? Path.Combine(root, "payload") : root;
+                string target = Path.Combine(payload, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                const string original = "param([string]$Action)";
+                const string current = "param([string]$Action, [switch]$VerifiedUninstall)";
+                File.WriteAllText(target, original);
+                File.WriteAllText(Path.Combine(source, scriptName), current);
+                string witness = Path.Combine(root, "installation-plan.json");
+                File.WriteAllText(witness, "original installation plan and backups must stay unchanged");
+                string manifestPath = Path.Combine(root, "payload-manifest.json");
+                string originalManifest = null;
+                if (uefi)
+                {
+                    string hash;
+                    using (var sha = System.Security.Cryptography.SHA256.Create())
+                        hash = BitConverter.ToString(sha.ComputeHash(File.ReadAllBytes(target))).Replace("-", "").ToLowerInvariant();
+                    originalManifest = new JsonObject { ["Files"] = new JsonArray(new JsonObject {
+                        ["RelativePath"] = relative, ["Length"] = new FileInfo(target).Length, ["Sha256"] = hash
+                    }) }.ToJsonString();
+                    File.WriteAllText(manifestPath, originalManifest);
+                }
+                var candidate = new InstalledLinuxRecoveryCandidate {
+                    Firmware = firmware, RecoveryRoot = root, RecoveryScriptPath = target
+                };
+                RecoveryCodeUpgrade.Prepare(candidate, source);
+                Assert.AreEqual(current, File.ReadAllText(target));
+                Assert.AreEqual(original, File.ReadAllText(Path.Combine(root, "pre-uninstall-code", relative)));
+                if (uefi)
+                {
+                    Assert.AreEqual(originalManifest, File.ReadAllText(Path.Combine(root, "pre-uninstall-code", "payload-manifest.json")));
+                    // Reproduce interruption after code replacement but before manifest publication.
+                    File.WriteAllText(manifestPath, originalManifest);
+                }
+                RecoveryCodeUpgrade.Prepare(candidate, source);
+                Assert.AreEqual(current, File.ReadAllText(target));
+                Assert.AreEqual(original, File.ReadAllText(Path.Combine(root, "pre-uninstall-code", relative)));
+                Assert.AreEqual("original installation plan and backups must stay unchanged", File.ReadAllText(witness));
+            }, firmware, PlanId);
+        }
+
+        [TestMethod]
+        public void InstalledLinuxRecoveryOffersToResumeAnInterruptedRollback()
+        {
+            WithRecoveryRoots((systemRoot, programData, root) =>
+            {
+                CreateSuccessfulRecoveryArchive(root, InstallationFirmware.Uefi, PlanId);
+                InstallationStateMachine machine = new InstallationStateMachine(
+                    InstallationStateStore.Read(Path.Combine(root, "installation-state.json")));
+                machine.BeginRollback();
+                machine.CompleteCompensation(InstallationStep.TargetBootloaderInstalled);
+                InstallationStateStore.WriteAtomic(
+                    Path.Combine(root, "installation-state.json"),
+                    machine.State);
+
+                InstalledLinuxRecoveryDetection detection =
+                    InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.Available, detection.Status);
+                Assert.IsTrue(detection.Candidate.RollbackInProgress);
+            }, InstallationFirmware.Uefi, PlanId);
+        }
+
+        [TestMethod]
+        public void InstalledLinuxRecoveryOffersToFinishAfterLedgerRollback()
+        {
+            WithRecoveryRoots((systemRoot, programData, root) =>
+            {
+                CreateSuccessfulRecoveryArchive(root, InstallationFirmware.Bios, PlanId);
+                InstallationStateMachine machine = new InstallationStateMachine(
+                    InstallationStateStore.Read(Path.Combine(root, "installation-state.json")));
+                machine.BeginRollback();
+                foreach (string step in new[]
+                {
+                    InstallationStep.TargetBootloaderInstalled,
+                    InstallationStep.TargetSystemConfigured,
+                    InstallationStep.LiveDistributionExtracted,
+                    InstallationStep.LiveTargetFilesystemCreated,
+                    InstallationStep.LiveInstallerPartitionExpanded,
+                    InstallationStep.WindowsTemporaryBootPrepared,
+                    InstallationStep.WindowsLiveMediaPrepared,
+                    InstallationStep.WindowsInstallerPartitionCreated,
+                    InstallationStep.WindowsSystemVolumeShrunk,
+                    InstallationStep.WindowsRecoveryArmed
+                })
+                {
+                    machine.CompleteCompensation(step);
+                }
+                machine.CompleteRollback();
+                InstallationStateStore.WriteAtomic(
+                    Path.Combine(root, "installation-state.json"),
+                    machine.State);
+
+                InstalledLinuxRecoveryDetection detection =
+                    InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.Available, detection.Status);
+                Assert.IsTrue(detection.Candidate.RollbackInProgress);
+
+                Assert.ThrowsException<InvalidOperationException>(() =>
+                    InstalledLinuxRecoveryLocator.VerifyRollbackResult(detection.Candidate, machine.State));
+                string resultPath = Path.Combine(root, "post-install-verification.json");
+                JsonObject result = JsonNode.Parse(File.ReadAllText(resultPath)).AsObject();
+                result["status"] = "rolled-back";
+                result["rollbackAvailable"] = false;
+                result["rollbackExecutionRevision"] = machine.State.Revision;
+                result["rolledBackAtUtc"] = DateTimeOffset.UtcNow.ToString("o");
+                File.WriteAllText(resultPath, result.ToJsonString());
+                string completedResult = File.ReadAllText(resultPath);
+                InstalledLinuxRecoveryLocator.VerifyRollbackResult(
+                    detection.Candidate,
+                    machine.State);
+                InstalledLinuxRecoveryLocator.VerifyRollbackResult(
+                    detection.Candidate,
+                    machine.State);
+                Assert.AreEqual(completedResult, File.ReadAllText(resultPath));
+
+                detection = InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.None, detection.Status);
+            }, InstallationFirmware.Bios, PlanId);
+        }
+
+        [DataTestMethod]
+        [DataRow("missing-evidence")]
+        [DataRow("failed-check")]
+        [DataRow("missing-runtime")]
+        [DataRow("missing-ledger")]
+        [DataRow("corrupt-ledger")]
+        public void InstalledLinuxRecoveryBlocksIncompleteOrAlteredProofs(string mutation)
+        {
+            WithRecoveryRoots((systemRoot, programData, root) =>
+            {
+                CreateSuccessfulRecoveryArchive(root, InstallationFirmware.Uefi, PlanId);
+                if (mutation == "missing-evidence")
+                {
+                    File.Delete(Path.Combine(root, "installed-linux-boot.json"));
+                }
+                else if (mutation == "failed-check")
+                {
+                    string path = Path.Combine(root, "post-install-verification.json");
+                    string json = File.ReadAllText(path).Replace(
+                        "\"passed\":true",
+                        "\"passed\":false");
+                    File.WriteAllText(path, json);
+                }
+                else if (mutation == "missing-runtime")
+                {
+                    File.Delete(Path.Combine(
+                        root,
+                        "payload",
+                        "Scripts",
+                        "libertix-uefi-recovery-agent.ps1"));
+                }
+                else if (mutation == "missing-ledger")
+                {
+                    File.Delete(Path.Combine(root, "installation-state.json"));
+                }
+                else
+                {
+                    File.WriteAllText(
+                        Path.Combine(root, "installation-state.json"),
+                        "{not-json");
+                }
+
+                InstalledLinuxRecoveryDetection detection =
+                    InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.Blocked, detection.Status);
+                Assert.IsNull(detection.Candidate);
+            }, InstallationFirmware.Uefi, PlanId);
+        }
+
+        [TestMethod]
+        public void InstalledLinuxRecoveryRejectsMultipleSuccessfulTransactions()
+        {
+            string firstPlanId = PlanId;
+            string secondPlanId = new string('e', 32);
+            string temporaryRoot = Path.Combine(
+                Path.GetTempPath(),
+                "libertix-recovery-detection-" + Guid.NewGuid().ToString("N"));
+            string systemRoot = Path.Combine(temporaryRoot, "system");
+            string programData = Path.Combine(temporaryRoot, "program-data");
+            try
+            {
+                Directory.CreateDirectory(systemRoot);
+                string uefiRoot = Path.Combine(programData, "Libertix", "UefiRecovery");
+                CreateSuccessfulRecoveryArchive(
+                    Path.Combine(uefiRoot, firstPlanId),
+                    InstallationFirmware.Uefi,
+                    firstPlanId);
+                CreateSuccessfulRecoveryArchive(
+                    Path.Combine(uefiRoot, secondPlanId),
+                    InstallationFirmware.Uefi,
+                    secondPlanId);
+
+                InstalledLinuxRecoveryDetection detection =
+                    InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.Blocked, detection.Status);
+            }
+            finally
+            {
+                if (Directory.Exists(temporaryRoot))
+                    Directory.Delete(temporaryRoot, true);
+            }
+        }
+
+        private static void WithRecoveryRoots(
+            Action<string, string, string> test,
+            string firmware,
+            string planId)
+        {
+            string temporaryRoot = Path.Combine(
+                Path.GetTempPath(),
+                "libertix-recovery-detection-" + Guid.NewGuid().ToString("N"));
+            string systemRoot = Path.Combine(temporaryRoot, "system");
+            string programData = Path.Combine(temporaryRoot, "program-data");
+            string recoveryRoot = firmware == InstallationFirmware.Bios
+                ? Path.Combine(systemRoot, RuntimeNames.BiosRecoveryDirectory)
+                : Path.Combine(programData, "Libertix", "UefiRecovery", planId);
+            try
+            {
+                Directory.CreateDirectory(systemRoot);
+                test(systemRoot, programData, recoveryRoot);
+            }
+            finally
+            {
+                if (Directory.Exists(temporaryRoot))
+                    Directory.Delete(temporaryRoot, true);
+            }
+        }
+
+        private static void CreateSuccessfulRecoveryArchive(
+            string root,
+            string firmware,
+            string planId)
+        {
+            Directory.CreateDirectory(root);
+            InstallationPlan plan = CreateValidPlan();
+            plan.PlanId = planId;
+            plan.Firmware = firmware;
+            plan.Runtime.RecoveryRunId = planId;
+            plan.Runtime.RecoveryRootWindows = root;
+            plan.Account.PasswordHashWindowsPath = Path.Combine(root, "account-secret.env");
+            string drive = Path.GetPathRoot(root).TrimEnd('\\', '/');
+            plan.Disk.SystemDrive = drive;
+            plan.Distribution.InstallerIsoWindowsPath =
+                InstallationTemporaryArtifacts.GetDistributionIsoPath(
+                    drive + Path.DirectorySeparatorChar,
+                    planId,
+                    plan.Distribution.InstallerIsoFileName);
+            if (firmware == InstallationFirmware.Bios)
+            {
+                plan.Disk.PartitionStyle = InstallationPartitionStyle.Mbr;
+                plan.Disk.PartitionTableId = "mbr:12345678";
+                plan.Runtime.BootStrategy = InstallationBootStrategy.BiosGrub4Dos;
+                plan.Runtime.SecureBootEnabled = false;
+                plan.Runtime.TrustedMicrosoftUefiAuthorities = new string[0];
+            }
+            InstallationPlanSerializer.WriteAtomic(
+                Path.Combine(root, "installation-plan.json"),
+                plan);
+
+            InstallationStateMachine machine = CreateSuccessfulExecutionState(planId);
+            InstallationStateStore.WriteAtomic(
+                Path.Combine(root, "installation-state.json"),
+                machine.State);
+            File.WriteAllText(
+                Path.Combine(root, "installed-linux-boot.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    planId,
+                    recoveryRunId = planId,
+                    firmware
+                }));
+
+            string[] checks = firmware == InstallationFirmware.Uefi
+                ? new[]
+                {
+                    "execution-ledger", "installed-linux-boot", "disk-geometry",
+                    "windows-read-only-linux-share", "windows-health", "boot-configuration",
+                    "temporary-boot-cleanup", "permanent-recovery-archive", "boot-guardian"
+                }
+                : new[]
+                {
+                    "execution-ledger", "installed-linux-boot", "disk-geometry",
+                    "windows-read-only-linux-share", "windows-health", "boot-configuration",
+                    "temporary-boot-cleanup", "permanent-recovery-archive"
+                };
+            File.WriteAllText(
+                Path.Combine(root, "post-install-verification.json"),
+                JsonSerializer.Serialize(new
+                {
+                    schemaVersion = 1,
+                    planId,
+                    firmware,
+                    status = "succeeded",
+                    rollbackAvailable = true,
+                    activeAttemptId = (string)null,
+                    checks = checks.Select(name => new { name, passed = true }).ToArray(),
+                    attempts = new[] { new { outcome = "succeeded" } }
+                }));
+
+            if (firmware == InstallationFirmware.Uefi)
+            {
+                string payloadRoot = Path.Combine(root, "payload");
+                File.WriteAllText(
+                    Path.Combine(root, "state.json"),
+                    JsonSerializer.Serialize(new UefiRecoveryState
+                    {
+                        RunId = planId,
+                        PlanId = planId,
+                        RecoveryRoot = root,
+                        PayloadRoot = payloadRoot,
+                        ConfigPath = Path.Combine(root, "uefi-config.json"),
+                        Phase = "Verified"
+                    }));
+                WriteRecoveryFiles(root, new[]
+                {
+                    "payload-manifest.json",
+                    "uefi-transaction.json",
+                    Path.Combine("payload", "Scripts", "libertix-uefi-recovery-agent.ps1"),
+                    Path.Combine("payload", "Scripts", "libertix-uefi-install.ps1"),
+                    Path.Combine("payload", "Scripts", "modules", "Libertix.InstallationState.psm1"),
+                    Path.Combine("payload", "Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
+                    Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1")
+                });
+            }
+            else
+            {
+                File.WriteAllText(
+                    Path.Combine(root, "pending.env"),
+                    $"PLAN_ID={planId}{Environment.NewLine}RECOVERY_RUN_ID={planId}{Environment.NewLine}");
+                WriteRecoveryFiles(root, new[]
+                {
+                    "install-success.env", "recover.ps1", "Libertix.InstallationState.psm1",
+                    "Libertix.AtomicFile.psm1", "Libertix.InstallationPolicy.json",
+                    "Libertix.TemporaryArtifacts.psm1", "Libertix.PostInstallVerification.psm1",
+                    "Libertix.Rollback.psm1", "Libertix.StorageTargets.psm1",
+                    "Libertix.Process.psm1", "Libertix.WindowsProfiles.psm1",
+                    "Libertix.BiosMbr.psm1", "bcd-backup",
+                    Path.Combine("mbr-backup", "mbr-before-grub.bin"),
+                    Path.Combine("mbr-backup", "mbr-before-grub.sha256")
+                });
+            }
+        }
+
+        private static InstallationStateMachine CreateSuccessfulExecutionState(string planId)
+        {
+            InstallationStateMachine machine = InstallationStateMachine.Create(planId);
+            foreach (string step in new[]
+            {
+                InstallationStep.WindowsPreflightVerified,
+                InstallationStep.WindowsArtifactsVerified,
+                InstallationStep.WindowsRecoveryArmed,
+                InstallationStep.WindowsSystemVolumeShrunk,
+                InstallationStep.WindowsInstallerPartitionCreated,
+                InstallationStep.WindowsLiveMediaPrepared,
+                InstallationStep.WindowsTemporaryBootPrepared,
+                InstallationStep.LivePreflightVerified,
+                InstallationStep.LiveInstallerPartitionExpanded,
+                InstallationStep.LiveTargetFilesystemCreated,
+                InstallationStep.LiveDistributionExtracted,
+                InstallationStep.TargetSystemConfigured,
+                InstallationStep.TargetBootloaderInstalled,
+                InstallationStep.TargetInstallationVerified
+            })
+            {
+                machine.StartStep(step);
+                machine.CompleteStep(step);
+            }
+            machine.CompleteInstallation();
+            return machine;
+        }
+
+        private static void WriteRecoveryFiles(string root, string[] relativePaths)
+        {
+            foreach (string relativePath in relativePaths)
+            {
+                string path = Path.Combine(root, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, "test");
+            }
         }
 
         private static InstallationPlan CreateValidPlan()

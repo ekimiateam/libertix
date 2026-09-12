@@ -153,15 +153,14 @@ def test_actual_desktop_decoder_rejects_the_old_fixture_and_black_images(
     tmp_path: Path, kind: str
 ) -> None:
     python = Path("/usr/bin/python3")
-    if (
-        not python.is_file()
-        or subprocess.run(
-            [str(python), "-c", "import gi; gi.require_version('GdkPixbuf', '2.0')"],
-            capture_output=True,
-            check=False,
-        ).returncode
-    ):
-        pytest.skip("The system GdkPixbuf Python binding is unavailable")
+    assert python.is_file(), f"System Python is unavailable: {python}"
+    dependency_check = subprocess.run(
+        [str(python), "-c", "import gi; gi.require_version('GdkPixbuf', '2.0')"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert dependency_check.returncode == 0, dependency_check.stderr
     image = tmp_path / "image.png"
     if kind == "old-malformed":
         image.write_bytes(

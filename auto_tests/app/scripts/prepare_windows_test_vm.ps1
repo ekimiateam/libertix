@@ -21,7 +21,72 @@ function Set-RegistryDwordValue {
     }
 }
 
+function Get-DirectoryFileBytes {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        return [int64]0
+    }
+    $measurement = Get-ChildItem -LiteralPath $Path -File -Recurse -Force `
+        -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
+    return [int64]$measurement.Sum
+}
+
+function Clear-TestVmTemporaryFiles {
+    param([Parameter(Mandatory = $true)][string[]]$Paths)
+
+    [int64]$beforeBytes = 0
+    [int64]$afterBytes = 0
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+            continue
+        }
+        $beforeBytes += Get-DirectoryFileBytes -Path $path
+        Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -notlike "auto-tests-*" -and
+                $_.Name -notlike "libertix-ssh-*"
+            } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        $afterBytes += Get-DirectoryFileBytes -Path $path
+    }
+    return [Math]::Max([int64]0, $beforeBytes - $afterBytes)
+}
+
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+# This script runs only on disposable test VMs. Apply the policy before
+# advancing a restored clock, which can make scheduled updates immediately due.
+$windowsUpdatePolicyPath = "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+Set-RegistryDwordValue -Path "$windowsUpdatePolicyPath\AU" -Name NoAutoUpdate -Value 1
+Set-RegistryDwordValue -Path $windowsUpdatePolicyPath -Name SetDisableUXWUAccess -Value 1
+Set-Service -Name wuauserv -StartupType Disabled -ErrorAction Stop
+$updateService = Get-Service -Name wuauserv -ErrorAction Stop
+if ($updateService.Status -notin @("Stopped", "StopPending")) {
+    $updateService.Stop()
+}
+$updateService.WaitForStatus(
+    [System.ServiceProcess.ServiceControllerStatus]::Stopped,
+    [TimeSpan]::FromSeconds(30)
+)
+$observedUpdateService = Get-CimInstance Win32_Service -Filter "Name='wuauserv'" -ErrorAction Stop
+if ($observedUpdateService.State -ne "Stopped" -or $observedUpdateService.StartMode -ne "Disabled") {
+    throw "Windows Update must be stopped and disabled before the test starts."
+}
+$temporaryBytesReclaimed = Clear-TestVmTemporaryFiles -Paths @(
+    $env:TEMP,
+    "C:\Windows\Temp",
+    "C:\Windows\SoftwareDistribution\Download"
+)
+foreach ($pendingRestartPath in @(
+    "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
+    "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+)) {
+    if (Test-Path -LiteralPath $pendingRestartPath) {
+        throw "The test snapshot already has a pending Windows servicing restart: $pendingRestartPath."
+    }
+}
+
 $target = [DateTimeOffset]::Parse(
     [string]$config.utc_now,
     [Globalization.CultureInfo]::InvariantCulture,
@@ -146,3 +211,5 @@ Write-Output "TOAST_NOTIFICATIONS_DISABLED=True"
 Write-Output "WINDOWS_BACKUP_NOTIFICATIONS_DISABLED=True"
 Write-Output "WINDOWS_NOTIFICATION_SERVICES_DISABLED=True"
 Write-Output "WINDOWS_SETUP_REMINDER_DISABLED=True"
+Write-Output "WINDOWS_UPDATES_DISABLED=True"
+Write-Output "TEMPORARY_FILES_RECLAIMED_BYTES=$temporaryBytesReclaimed"

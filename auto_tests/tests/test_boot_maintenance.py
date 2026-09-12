@@ -5,6 +5,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -329,3 +331,94 @@ def test_efi_sync_propagates_installation_plan_parse_failure(tmp_path: Path) -> 
     assert "installation plan boot metadata could not be parsed" in result.stderr
     assert (efi / "shimx64.efi").read_text(encoding="ascii") == "old-shimx64.efi\n"
     assert not (tmp_path / "history").exists()
+
+
+def test_efi_sync_mounts_esp_before_if_present_owner_check(tmp_path: Path) -> None:
+    environment, _efi, _shim = create_efi_sync_fixture(
+        tmp_path,
+        secure_boot_enabled=False,
+        trusted=["2011"],
+        supported=["2011"],
+        firmware_authorities=["2011"],
+    )
+    commands = Path(environment["PATH"].split(os.pathsep, 1)[0])
+    unmounted_esp = tmp_path / "unmounted-esp"
+    unmounted_esp.mkdir()
+    mount_attempt = tmp_path / "mount-attempted"
+    write_executable(commands / "mountpoint", "#!/bin/sh\nexit 1\n")
+    write_executable(
+        commands / "mount",
+        f"#!/bin/sh\nprintf mounted > {mount_attempt}\nexit 1\n",
+    )
+    environment["LIBERTIX_ESP_MOUNT"] = str(unmounted_esp)
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "assets/live/libertix-sync-efi.sh"), "--if-present"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert mount_attempt.read_text(encoding="ascii") == "mounted"
+    assert "could not be mounted" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("initially_mounted", "owner", "unmount_fails"),
+    [
+        (False, "missing", False),
+        (False, "valid", False),
+        (False, "foreign", False),
+        (False, "missing", True),
+        (True, "missing", False),
+        (True, "valid", False),
+        (True, "foreign", False),
+    ],
+)
+def test_efi_sync_releases_only_its_own_mount(
+    tmp_path: Path, initially_mounted: bool, owner: str, unmount_fails: bool
+) -> None:
+    environment, efi, _shim = create_efi_sync_fixture(
+        tmp_path,
+        secure_boot_enabled=False,
+        trusted=["2011"],
+        supported=["2011"],
+        firmware_authorities=["2011"],
+    )
+    if owner == "missing":
+        (efi / ".libertix-owner").unlink()
+    elif owner == "foreign":
+        (efi / ".libertix-owner").write_text("e" * 32 + "\n", encoding="ascii")
+    commands = Path(environment["PATH"].split(os.pathsep, 1)[0])
+    state = tmp_path / "mount-state"
+    unmount_attempt = tmp_path / "unmount-attempt"
+    if initially_mounted:
+        state.touch()
+    environment.update(
+        TEST_MOUNT_STATE=str(state),
+        TEST_UNMOUNT_ATTEMPT=str(unmount_attempt),
+        TEST_UNMOUNT_FAILS="1" if unmount_fails else "0",
+    )
+    write_executable(commands / "mountpoint", '#!/bin/sh\n[ -f "$TEST_MOUNT_STATE" ]\n')
+    write_executable(commands / "mount", '#!/bin/sh\ntouch "$TEST_MOUNT_STATE"\n')
+    write_executable(
+        commands / "umount",
+        '#!/bin/sh\ntouch "$TEST_UNMOUNT_ATTEMPT"\n'
+        '[ "$TEST_UNMOUNT_FAILS" = 0 ] || exit 1\nrm "$TEST_MOUNT_STATE"\n',
+    )
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "assets/live/libertix-sync-efi.sh"), "--if-present"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert (result.returncode == 0) == (owner != "foreign" and not unmount_fails)
+    assert unmount_attempt.exists() == (not initially_mounted)
+    assert state.exists() == (initially_mounted or unmount_fails)
+    if owner != "valid":
+        assert (efi / "shimx64.efi").read_text(encoding="ascii") == "old-shimx64.efi\n"

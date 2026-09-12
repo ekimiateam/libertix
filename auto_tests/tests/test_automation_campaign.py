@@ -26,7 +26,7 @@ def test_campaign_runs_four_nominal_three_vm_scenarios_and_retains_failures(
     names = ["vm1", "vm2", "vm3"]
 
     def run(child, workspace, publish):
-        calls.append((child.distribution, child.first_boot))
+        calls.append((child.distribution, child.first_boot, child.verify_uninstall))
         assert child.vms == names
         assert child.boot_guardian_fault == "none"
         assert child.snapshot_mode == "default"
@@ -59,7 +59,11 @@ def test_campaign_runs_four_nominal_three_vm_scenarios_and_retains_failures(
         )
 
     outcome = run_campaign(request, names, tmp_path, run)
-    assert calls == list(SCENARIOS if continue_after_failure else SCENARIOS[:2])
+    expected = [
+        (distribution, first_boot, True)
+        for distribution, first_boot in (SCENARIOS if continue_after_failure else SCENARIOS[:2])
+    ]
+    assert calls == expected
     assert outcome.status == "error"
     assert len(outcome.campaign_summary) == 4
     assert outcome.campaign_summary[1]["vms"]["vm2"] == "error"

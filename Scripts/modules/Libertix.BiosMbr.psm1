@@ -15,6 +15,27 @@ using Microsoft.Win32.SafeHandles;
 
 namespace Libertix {
     public static class BiosMbrIo {
+        public static void VerifyBootCode(string path, int sectorSize, byte[] backup) {
+            if (sectorSize != 512 && sectorSize != 4096)
+                throw new InvalidDataException("Unsupported BIOS disk sector size.");
+            if (backup == null || backup.Length != 512 || backup[510] != 0x55 || backup[511] != 0xaa)
+                throw new InvalidDataException("Invalid pre-GRUB MBR backup signature.");
+            IntPtr buffer = VirtualAlloc(IntPtr.Zero, (UIntPtr)sectorSize, 0x3000, 4);
+            if (buffer == IntPtr.Zero) Fail("allocate aligned BIOS sector");
+            try {
+                using (SafeFileHandle disk = CreateFile(path, 0x80000000, 3, IntPtr.Zero, 3, 0x20000000, IntPtr.Zero)) {
+                    if (disk.IsInvalid) Fail("open BIOS disk for verification");
+                    byte[] current = ReadSector(disk, buffer, sectorSize);
+                    for (int i = 0; i < 440; i++) {
+                        if (current[i] != backup[i])
+                            throw new InvalidDataException("Restored BIOS boot code differs from its backup.");
+                    }
+                    if (current[510] != 0x55 || current[511] != 0xaa)
+                        throw new InvalidDataException("Restored BIOS MBR signature is invalid.");
+                }
+            } finally { VirtualFree(buffer, UIntPtr.Zero, 0x8000); }
+        }
+
         public static void Restore(string path, int sectorSize, byte[] backup) {
             if (sectorSize != 512 && sectorSize != 4096)
                 throw new InvalidDataException("Unsupported BIOS disk sector size.");

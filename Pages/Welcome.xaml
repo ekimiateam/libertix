@@ -22,6 +22,7 @@
 
             <Button x:Name="StartButton"
                     Content="{DynamicResource GetStarted}"
+                    AutomationProperties.AutomationId="StartInstallationButton"
                     Style="{StaticResource ModernButton}"
                     Width="200"
                     Height="50"
@@ -31,6 +32,33 @@
                     IsDefault="True"
                     Click="Start_Click"/>
 
+            <Border x:Name="InstalledLinuxPanel"
+                    Visibility="Collapsed"
+                    Width="620"
+                    Margin="0,0,0,32"
+                    Padding="22"
+                    Background="{DynamicResource SecondaryBackground}"
+                    BorderBrush="{DynamicResource PanelBorder}"
+                    BorderThickness="1"
+                    CornerRadius="8">
+                <StackPanel>
+                    <TextBlock x:Name="InstalledLinuxText"
+                               Foreground="{DynamicResource TextPrimary}"
+                               FontSize="17"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,18"/>
+                    <Button x:Name="UninstallButton"
+                            Content="{DynamicResource UninstallLinuxButton}"
+                            AutomationProperties.AutomationId="UninstallLinuxButton"
+                            Style="{StaticResource ModernButton}"
+                            Width="250"
+                            Height="50"
+                            HorizontalAlignment="Center"
+                            Click="Uninstall_Click"/>
+                </StackPanel>
+            </Border>
+
             <StackPanel Orientation="Horizontal"
                         HorizontalAlignment="Center">
                 <TextBlock Text="{DynamicResource Language}"
@@ -39,6 +67,7 @@
                            VerticalAlignment="Center"
                            Margin="0,0,10,0"/>
                 <ComboBox x:Name="LanguageComboBox"
+                          AutomationProperties.AutomationId="LanguageComboBox"
                           Width="120"
                           TabIndex="1"
                           Style="{StaticResource ModernComboBox}"

@@ -264,7 +264,8 @@ def test_networkmanager_keyfiles_cover_open_owe_wpa2_and_wpa3_without_logging_se
 def test_networkmanager_library_loads_every_generated_keyfile(
     helper: ModuleType, tmp_path: Path
 ) -> None:
-    gi = pytest.importorskip("gi")
+    import gi
+
     gi.require_version("NM", "1.0")
     from gi.repository import GLib, NM  # noqa: I001, PLC0415
 

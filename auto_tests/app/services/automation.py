@@ -111,6 +111,7 @@ class AutomationService(
             "preferred-path",
             "preferred-path-rollback",
         ] = "none",
+        verify_uninstall: bool = False,
         first_boot: Literal["windows", "linux"] = "windows",
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
@@ -177,6 +178,13 @@ class AutomationService(
             self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
             if secondary_snapshot and installation_target == "secondary":
                 self._prepare_secondary_boot_devices(result, selected_vms, profiles)
+            with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
+                preparations = [
+                    executor.submit(self._prepare_windows_test_vm, vm, result)
+                    for vm in selected_vms
+                ]
+                for preparation in preparations:
+                    preparation.result()
             executable = self.validation.prepare_server(result, source=source)
             windows_path = self.validation.to_windows_share_path(executable)
             result.ok(
@@ -201,6 +209,7 @@ class AutomationService(
                 simulate_stale_firmware_entries=simulate_stale_firmware_entries,
                 force_offline_ntfs_resize=force_offline_ntfs_resize,
                 boot_guardian_fault=boot_guardian_fault,
+                verify_uninstall=verify_uninstall,
                 first_boot=first_boot,
             )
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
@@ -366,7 +375,6 @@ class AutomationService(
         serial_session: _SerialCaptureSession | None = None
         failure: WorkflowError | None = None
         try:
-            self._prepare_windows_test_vm(vm, result)
             vm_options = options
             if options.storage_fixture.enabled:
                 vm_options = replace(
@@ -380,7 +388,7 @@ class AutomationService(
                         vm, result, wallpaper_mode=options.preference_wallpaper
                     ),
                 )
-            if options.boot_guardian_fault in {
+            if options.verify_uninstall or options.boot_guardian_fault in {
                 "bios-rollback",
                 "bios-controller-disconnect",
                 "bios-postinstall-rollback",
@@ -393,6 +401,7 @@ class AutomationService(
                     rollback_baseline=self._capture_rollback_baseline(vm, result),
                 )
             local_executable = self.validation.deploy_to_documents(vm, executable)
+            vm_options = replace(vm_options, deployed_executable=local_executable)
             result.ok(
                 "automation.deploy",
                 "Libertix release copied locally before automation",
@@ -816,6 +825,8 @@ class AutomationService(
                 "PARTITION_LAYOUT_JSON",
                 "STORAGE_LAYOUT_JSON",
                 "EXECUTION_PLAN_IDS_JSON",
+                "WINDOWS_BOOT_LOADERS_JSON",
+                "WINDOWS_BOOT_LOADER_PARTITIONS_JSON",
                 "INSTALLER_PARTITION_COUNT",
                 "LIBERTIX_PROCESS_COUNT",
                 "RECOVERY_TASK_COUNT",
@@ -830,6 +841,8 @@ class AutomationService(
             "PARTITION_LAYOUT_JSON",
             "STORAGE_LAYOUT_JSON",
             "EXECUTION_PLAN_IDS_JSON",
+            "WINDOWS_BOOT_LOADERS_JSON",
+            "WINDOWS_BOOT_LOADER_PARTITIONS_JSON",
         )
         if (
             values.get("RESULT") != "OK"
@@ -1030,6 +1043,8 @@ class AutomationService(
                         "WINDOWS_BACKUP_NOTIFICATIONS_DISABLED",
                         "WINDOWS_NOTIFICATION_SERVICES_DISABLED",
                         "WINDOWS_SETUP_REMINDER_DISABLED",
+                        "WINDOWS_UPDATES_DISABLED",
+                        "TEMPORARY_FILES_RECLAIMED_BYTES",
                     ),
                 )
                 if (
@@ -1039,10 +1054,12 @@ class AutomationService(
                     or values.get("WINDOWS_BACKUP_NOTIFICATIONS_DISABLED") != "True"
                     or values.get("WINDOWS_NOTIFICATION_SERVICES_DISABLED") != "True"
                     or values.get("WINDOWS_SETUP_REMINDER_DISABLED") != "True"
+                    or values.get("WINDOWS_UPDATES_DISABLED") != "True"
+                    or not values.get("TEMPORARY_FILES_RECLAIMED_BYTES", "").isdigit()
                 ):
                     raise WorkflowError(
                         "automation.prepare_vm",
-                        "Windows test VM did not confirm its clock and notification policy",
+                        "Windows test VM did not confirm its clock, notification and update policy",
                         details={"vm": vm.name, "host": vm.host},
                     )
                 break
@@ -1057,7 +1074,7 @@ class AutomationService(
                 time.sleep(3)
         result.ok(
             "automation.prepare_vm",
-            "Windows test VM clock synchronized and notifications disabled after snapshot restore",
+            "Windows test VM clock synchronized; notifications and Windows Update disabled",
             vm=vm.name,
             target=vm.host,
             utc_now=values["UTC_NOW"],
@@ -1066,6 +1083,8 @@ class AutomationService(
             windows_backup_notifications_disabled=True,
             windows_notification_services_disabled=True,
             windows_setup_reminder_disabled=True,
+            windows_updates_disabled=True,
+            temporary_files_reclaimed_bytes=int(values["TEMPORARY_FILES_RECLAIMED_BYTES"]),
         )
 
     def _inject_stale_firmware_entry(

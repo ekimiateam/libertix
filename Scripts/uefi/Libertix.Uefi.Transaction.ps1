@@ -127,6 +127,8 @@ function Save-TransactionPreparationState {
         PartitionNumber = 0
         PartitionOffset = 0
         PartitionSize = 0
+        PartitionGuid = ""
+        PartitionStyle = [string]$disk.PartitionStyle
         Label = $InstallerLabel
         BootStrategy = $BootStrategy
         RecoveryRoot = $RecoveryRoot
@@ -187,6 +189,19 @@ function Get-LibertixVerifiedTransactionSourcePartition {
     return $partition
 }
 
+function Set-LibertixTransactionStateProperty {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [AllowNull()]$Value
+    )
+    if ($State.PSObject.Properties.Name -contains $Name) {
+        $State.$Name = $Value
+    } else {
+        $State | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+    }
+}
+
 function Save-TransactionPartitionCreationIntent {
     param(
         [Parameter(Mandatory = $true)][int]$DiskNumber,
@@ -213,6 +228,11 @@ function Save-TransactionPartitionCreationIntent {
     $state.PartitionNumber = 0
     $state.PartitionOffset = $Offset
     $state.PartitionSize = $Size
+    Set-LibertixTransactionStateProperty -State $state -Name 'PartitionGuid' -Value ''
+    Set-LibertixTransactionStateProperty `
+        -State $state `
+        -Name 'PartitionStyle' `
+        -Value ([string]$disk.PartitionStyle)
     Save-LibertixTransactionStateAtomic -State $state
 }
 
@@ -227,6 +247,14 @@ function Save-TransactionPartitionState {
         [long]$existing.PartitionOffset -ne [long]$Partition.Offset -or
         [long]$existing.PartitionSize -ne [long]$Partition.Size)) {
         throw 'The created UEFI partition has no matching durable allocation intent.'
+    }
+    if ([string]$disk.PartitionStyle -eq 'GPT' -and -not $Partition.Guid) {
+        throw 'The created UEFI partition has no stable GPT identity.'
+    }
+    $partitionGuid = if ($Partition.Guid) {
+        Get-GuidDLower -Guid ([Guid]$Partition.Guid)
+    } else {
+        ''
     }
     $originalCSize = if ($existing -and $existing.OriginalCSize) {
         [int64]$existing.OriginalCSize
@@ -246,6 +274,8 @@ function Save-TransactionPartitionState {
         PartitionNumber = [int]$Partition.PartitionNumber
         PartitionOffset = [int64]$Partition.Offset
         PartitionSize = [int64]$Partition.Size
+        PartitionGuid = $partitionGuid
+        PartitionStyle = [string]$disk.PartitionStyle
         Label = $InstallerLabel
         BootStrategy = if ($existing -and $existing.BootStrategy) { [string]$existing.BootStrategy } else { $BootStrategy }
         RecoveryRoot = if ($existing -and $existing.RecoveryRoot) { [string]$existing.RecoveryRoot } else { $RecoveryRoot }
@@ -520,7 +550,7 @@ function Remove-LibertixRecoveryTasksForRunId {
     }
 }
 
-function Get-VerifiedTransactionPartition {
+function Resolve-LibertixTransactionPartition {
     param([switch]$AllowMissing)
 
     $state = Get-TransactionPartitionState
@@ -538,7 +568,9 @@ function Get-VerifiedTransactionPartition {
     }
     Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
 
-    $partitionMatches = @(
+    $stateChanged = $false
+    $partitionWasCommitted = [int]$state.PartitionNumber -ne 0
+    $partitionCandidates = @(
         Get-Partition -DiskNumber $diskNumber -ErrorAction Stop |
             Where-Object {
                 [int64]$_.Offset -eq [int64]$state.PartitionOffset -and
@@ -546,7 +578,7 @@ function Get-VerifiedTransactionPartition {
             }
     )
     if (
-        $partitionMatches.Count -eq 0 -and
+        $partitionCandidates.Count -eq 0 -and
         $null -ne $installationPlan -and
         [string]$installationPlan.disk.installer.resizeMode -in @(
             "windows-online",
@@ -561,7 +593,7 @@ function Get-VerifiedTransactionPartition {
         if ($alignmentTolerance -le 0) {
             throw "Installation policy partition alignment is invalid during rollback."
         }
-        $partitionMatches = @(
+        $partitionCandidates = @(
             Get-Partition -DiskNumber $diskNumber -ErrorAction Stop |
                 Where-Object {
                     [int64]$_.Offset -eq $finalOffset -and
@@ -569,17 +601,54 @@ function Get-VerifiedTransactionPartition {
                     [int64]$_.Size -ge ($finalSize - $alignmentTolerance)
                 }
         )
-        if ($partitionMatches.Count -eq 1) {
-            $state.PartitionNumber = [int]$partitionMatches[0].PartitionNumber
+        if ($partitionCandidates.Count -eq 1) {
+            $state.PartitionNumber = [int]$partitionCandidates[0].PartitionNumber
             $state.PartitionOffset = $finalOffset
-            $state.PartitionSize = [int64]$partitionMatches[0].Size
-            Save-LibertixTransactionStateAtomic -State $state
+            $state.PartitionSize = [int64]$partitionCandidates[0].Size
+            $stateChanged = $true
             Write-Log (
                 "Resolved the live-expanded UEFI partition from the durable plan: " +
                 "disk=$diskNumber offset=$finalOffset " +
                 "plannedSize=$finalSize observedSize=$($state.PartitionSize)."
             ) "Yellow"
         }
+    }
+    $savedPartitionGuid = if (
+        $state.PSObject.Properties.Name -contains 'PartitionGuid'
+    ) {
+        [string]$state.PartitionGuid
+    } else {
+        ''
+    }
+    if ([string]$disk.PartitionStyle -eq 'GPT' -and
+        -not [string]::IsNullOrWhiteSpace($savedPartitionGuid)) {
+        try {
+            $savedPartitionGuid = Get-GuidDLower -Guid ([Guid]$savedPartitionGuid)
+        } catch {
+            throw 'The saved UEFI transaction partition GUID is invalid.'
+        }
+        $partitionMatches = @(
+            $partitionCandidates | Where-Object {
+                $_.Guid -and
+                (Get-GuidDLower -Guid ([Guid]$_.Guid)) -eq $savedPartitionGuid
+            }
+        )
+        if ($partitionCandidates.Count -gt 0 -and $partitionMatches.Count -eq 0) {
+            throw 'The UEFI transaction partition identity changed at the saved geometry.'
+        }
+    } elseif ([string]$disk.PartitionStyle -eq 'GPT') {
+        if ($partitionWasCommitted) {
+            throw 'The UEFI transaction has no durable partition GUID; refusing recovery.'
+        }
+        $partitionMatches = @($partitionCandidates)
+    } else {
+        if (
+            -not ($state.PSObject.Properties.Name -contains 'PartitionStyle') -or
+            [string]$state.PartitionStyle -ne 'MBR'
+        ) {
+            throw 'The UEFI MBR transaction partition style is missing or invalid.'
+        }
+        $partitionMatches = @($partitionCandidates)
     }
     if ($partitionMatches.Count -eq 0 -and $AllowMissing) {
         Write-Log (
@@ -596,9 +665,29 @@ function Get-VerifiedTransactionPartition {
         )
     }
     $partition = $partitionMatches[0]
+    if ([string]$disk.PartitionStyle -eq 'GPT' -and
+        [string]::IsNullOrWhiteSpace($savedPartitionGuid)) {
+        if (-not $partition.Guid) {
+            throw 'The resolved UEFI transaction partition has no stable GPT identity.'
+        }
+        Set-LibertixTransactionStateProperty `
+            -State $state `
+            -Name 'PartitionGuid' `
+            -Value (Get-GuidDLower -Guid ([Guid]$partition.Guid))
+        $stateChanged = $true
+    }
     if ([int]$state.PartitionNumber -ne [int]$partition.PartitionNumber) {
         Write-Log "Windows renumbered the transaction partition from $($state.PartitionNumber) to $($partition.PartitionNumber); updating saved state." "Yellow"
         $state.PartitionNumber = [int]$partition.PartitionNumber
+        $stateChanged = $true
+    }
+    if ([int64]$state.PartitionOffset -ne [int64]$partition.Offset -or
+        [int64]$state.PartitionSize -ne [int64]$partition.Size) {
+        $state.PartitionOffset = [int64]$partition.Offset
+        $state.PartitionSize = [int64]$partition.Size
+        $stateChanged = $true
+    }
+    if ($stateChanged) {
         Save-LibertixTransactionStateAtomic -State $state
     }
     return $partition

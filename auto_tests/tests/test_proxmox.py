@@ -11,6 +11,59 @@ from app.clients.proxmox_serial import ProxmoxSerialCapture
 from app.errors import WorkflowError
 
 
+@pytest.mark.parametrize(
+    ("method", "failure", "failures", "expected_attempts"),
+    [
+        ("GET", "disconnect", 1, 2),
+        ("GET", "disconnect", 4, 3),
+        ("GET", "timeout", 1, 2),
+        ("GET", "403", 1, 1),
+        ("GET", "500", 1, 1),
+        ("GET", "invalid-json", 1, 1),
+        ("POST", "disconnect", 1, 1),
+        ("PUT", "timeout", 1, 1),
+        ("DELETE", "disconnect", 1, 1),
+    ],
+)
+def test_proxmox_retries_only_transient_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    failure: str,
+    failures: int,
+    expected_attempts: int,
+) -> None:
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(proxmox_module.time, "sleep", sleeps.append)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts.append(request.method)
+        if len(attempts) <= failures:
+            if failure == "disconnect":
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            if failure == "timeout":
+                raise httpx.ReadTimeout("Read timed out")
+            if failure == "invalid-json":
+                return httpx.Response(200, content=b"invalid")
+            return httpx.Response(int(failure))
+        return httpx.Response(200, json={"data": {"status": "stopped", "exitstatus": "OK"}})
+
+    client = object.__new__(ProxmoxClient)
+    client.base_url = "https://proxmox.test/api2/json"
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+        client.client = http_client
+        if expected_attempts > failures:
+            assert client._request(method, "/task/status", step="proxmox.wait_task") == {
+                "status": "stopped",
+                "exitstatus": "OK",
+            }
+        else:
+            with pytest.raises(WorkflowError):
+                client._request(method, "/task/status", step="proxmox.wait_task")
+    assert attempts == [method] * expected_attempts
+    assert sleeps == [5] * (expected_attempts - 1)
+
+
 @pytest.mark.parametrize(("verify_tls", "expected"), ((True, True), (False, False)))
 def test_tls_verification_is_explicit(
     monkeypatch: pytest.MonkeyPatch, verify_tls: bool, expected: bool

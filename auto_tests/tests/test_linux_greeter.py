@@ -31,6 +31,7 @@ def test_gdm_selects_proven_account_and_submits_before_capture(
     )
     ssh = SimpleNamespace(run=lambda *_a, **_k: next(responses))
     client = SimpleNamespace(
+        mouseMove=lambda x, y: events.append((x, y)),
         keyPress=lambda key: events.append(key),
         keyDown=lambda key: events.append("down:" + key),
         keyUp=lambda key: events.append("up:" + key),
@@ -54,8 +55,9 @@ def test_gdm_selects_proven_account_and_submits_before_capture(
     monkeypatch.setattr(service, "_capture_from_client", capture)
     result = ResultBuilder("automation")
     service._prepare_linux_graphical_session(ssh, vm, result, "test", "fixture-password")
+    assert events[:2] == [(1, 1), (2, 1)]
     if not locked:
-        assert events[:4] == ["post-install-linux-login-01-ready", "esc", "home", "enter"]
+        assert events[2:6] == ["post-install-linux-login-01-ready", "esc", "home", "enter"]
         assert ("tab" in events) == focus_missing
     else:
         assert "esc" not in events
@@ -110,7 +112,10 @@ def test_gdm_never_types_secret_without_password_conversation(monkeypatch, locke
     marker = "LIBERTIX_GDM_LOCKED" if locked else "LIBERTIX_GDM_GREETER_READY"
     ssh = SimpleNamespace(run=lambda *_a, **_k: CommandResult(marker, "", 0))
     keys = []
-    client = SimpleNamespace(keyPress=keys.append, disconnect=lambda: None)
+    client = SimpleNamespace(
+        mouseMove=lambda x, y: None, keyPress=keys.append, disconnect=lambda: None
+    )
+    monkeypatch.setattr("app.services.automation_postinstall.time.sleep", lambda _: None)
     monkeypatch.setattr(service, "_assert_single_gdm_account", lambda *_: None)
     monkeypatch.setattr(
         service, "_wait_for_gdm_password_worker", lambda *_a, **kw: not kw["present"]

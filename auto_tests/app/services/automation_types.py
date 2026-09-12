@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import PureWindowsPath
 from typing import Literal
 
 from app.distributions import DistributionProfile, load_distribution_profile
@@ -42,6 +43,8 @@ class AutomationOptions:
     storage_fixture: StorageFixtureRequest = field(default_factory=StorageFixtureRequest)
     secondary_snapshot: bool = False
     storage_fixture_receipt: dict[str, object] | None = None
+    verify_uninstall: bool = False
+    deployed_executable: PureWindowsPath | None = None
 
 
 @dataclass(frozen=True)

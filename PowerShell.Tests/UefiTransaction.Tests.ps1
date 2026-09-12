@@ -76,7 +76,7 @@ Describe 'UEFI partition removal retries' {
     BeforeEach {
         $script:InstallerLabel = 'LIBERTIX_INSTALLER'
         $script:removalAttempted = $false
-        Mock Get-VerifiedTransactionPartition {
+        Mock Resolve-LibertixTransactionPartition {
             [pscustomobject]@{ DiskNumber = 1; PartitionNumber = 5; DriveLetter = '' }
         }
         Mock Remove-Partition { $script:removalAttempted = $true; throw 'STORAGE_RESPONSE_LOST' }
@@ -86,7 +86,7 @@ Describe 'UEFI partition removal retries' {
     }
 
     It 'does not delete a second partition after a successful removal with a lost response' {
-        Mock Get-VerifiedTransactionPartition {
+        Mock Resolve-LibertixTransactionPartition {
             if (-not $script:removalAttempted) {
                 [pscustomobject]@{ DiskNumber = 1; PartitionNumber = 5; DriveLetter = '' }
             }
@@ -96,7 +96,7 @@ Describe 'UEFI partition removal retries' {
     }
 
     It 'resolves the owned partition again before the diskpart fallback' {
-        Mock Get-VerifiedTransactionPartition {
+        Mock Resolve-LibertixTransactionPartition {
             [pscustomobject]@{
                 DiskNumber = 1
                 PartitionNumber = if ($script:removalAttempted) { 4 } else { 5 }
@@ -110,7 +110,7 @@ Describe 'UEFI partition removal retries' {
     }
 
     It 'refuses the fallback when the storage identity changed after the failed removal' {
-        Mock Get-VerifiedTransactionPartition {
+        Mock Resolve-LibertixTransactionPartition {
             if ($script:removalAttempted) { throw 'DISK_IDENTITY_CHANGED' }
             [pscustomobject]@{ DiskNumber = 1; PartitionNumber = 5; DriveLetter = '' }
         }
@@ -146,7 +146,7 @@ Describe 'UEFI partition presence verification' {
     }
 
     It 'refuses to report an ext4 transaction partition as removed' {
-        Mock Get-VerifiedTransactionPartition {
+        Mock Resolve-LibertixTransactionPartition {
             [pscustomobject]@{ DiskNumber = 0; PartitionNumber = 5 }
         }
         { Assert-LibertixInstallerPartitionRemoved } | Should -Throw '*still present*'
@@ -154,7 +154,7 @@ Describe 'UEFI partition presence verification' {
     }
 
     It 'accepts verified absence without consulting labels on unrelated disks' {
-        Mock Get-VerifiedTransactionPartition { $null }
+        Mock Resolve-LibertixTransactionPartition { $null }
         Assert-LibertixInstallerPartitionRemoved
         Should -Invoke Get-Volume -Times 0
     }
@@ -229,6 +229,7 @@ Describe 'UEFI separate allocation transaction' {
         Save-TransactionPartitionCreationIntent -DiskNumber 1 -Offset 40GB -Size 8GB
         Save-TransactionPartitionState -Partition ([pscustomobject]@{
             DiskNumber = 1; PartitionNumber = 3; Offset = 40GB; Size = 8GB
+            Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
         })
         $state = Get-TransactionPartitionState
         $state.Version | Should -Be 2
@@ -268,9 +269,12 @@ Describe 'UEFI separate allocation transaction' {
             resizeMode = 'live-offline'; finalOffsetBytes = 32GB; finalSizeBytes = 16GB
         }
         Mock Get-Partition {
-            @([pscustomobject]@{ DiskNumber = 1; PartitionNumber = 3; Offset = 32GB; Size = 16GB })
+            @([pscustomobject]@{
+                DiskNumber = 1; PartitionNumber = 3; Offset = 32GB; Size = 16GB
+                Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+            })
         }
-        $partition = Get-VerifiedTransactionPartition
+        $partition = Resolve-LibertixTransactionPartition
         $partition.DiskNumber | Should -Be 1
         $partition.Offset | Should -Be 32GB
         Should -Invoke Get-Partition -Times 2 -ParameterFilter {
@@ -288,6 +292,7 @@ Describe "UEFI transaction partition resolution" {
             PartitionNumber = 5
             PartitionOffset = 1048576
             PartitionSize = 8589934592
+            PartitionGuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
             RecoveryRunId = "0123456789abcdef0123456789abcdef"
             RecoveryRoot = "C:\ProgramData\Libertix\UefiRecovery\0123456789abcdef0123456789abcdef"
         }
@@ -300,14 +305,14 @@ Describe "UEFI transaction partition resolution" {
     It "keeps a missing saved partition fatal during normal preparation" {
         Mock Get-Partition { @() }
 
-        { Get-VerifiedTransactionPartition } |
+        { Resolve-LibertixTransactionPartition } |
             Should -Throw "*matches=0*"
     }
 
     It "accepts an already absent saved partition only during rollback" {
         Mock Get-Partition { @() }
 
-        Get-VerifiedTransactionPartition -AllowMissing |
+        Resolve-LibertixTransactionPartition -AllowMissing |
             Should -BeNullOrEmpty
         Should -Invoke Write-Log -Times 1
     }
@@ -315,12 +320,18 @@ Describe "UEFI transaction partition resolution" {
     It "rejects ambiguous geometry even during rollback" {
         Mock Get-Partition {
             @(
-                [pscustomobject]@{ PartitionNumber = 5; Offset = 1048576; Size = 8589934592 },
-                [pscustomobject]@{ PartitionNumber = 6; Offset = 1048576; Size = 8589934592 }
+                [pscustomobject]@{
+                    PartitionNumber = 5; Offset = 1048576; Size = 8589934592
+                    Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+                },
+                [pscustomobject]@{
+                    PartitionNumber = 6; Offset = 1048576; Size = 8589934592
+                    Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+                }
             )
         }
 
-        { Get-VerifiedTransactionPartition -AllowMissing } |
+        { Resolve-LibertixTransactionPartition -AllowMissing } |
             Should -Throw "*matches=2*"
     }
 
@@ -331,8 +342,24 @@ Describe "UEFI transaction partition resolution" {
             $disk
         }
         Mock Get-Partition { throw 'Partition enumeration must not be reached.' }
-        { Get-VerifiedTransactionPartition -AllowMissing } | Should -Throw '*Disk identity*'
+        { Resolve-LibertixTransactionPartition -AllowMissing } | Should -Throw '*Disk identity*'
         Should -Invoke Get-Partition -Times 0
+        Should -Invoke Save-LibertixTransactionStateAtomic -Times 0
+    }
+
+    It 'refuses a replacement partition at the transaction geometry' {
+        Mock Get-Partition {
+            @([pscustomobject]@{
+                DiskNumber = 0
+                PartitionNumber = 5
+                Offset = 1048576
+                Size = 8589934592
+                Guid = 'ffffffff-1111-2222-3333-444444444444'
+            })
+        }
+
+        { Resolve-LibertixTransactionPartition -AllowMissing } |
+            Should -Throw '*partition identity changed*'
         Should -Invoke Save-LibertixTransactionStateAtomic -Times 0
     }
 
@@ -344,11 +371,12 @@ Describe "UEFI transaction partition resolution" {
                     PartitionNumber = 7
                     Offset = 1048576
                     Size = 8589934592
+                    Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
                 }
             )
         }
 
-        $result = Get-VerifiedTransactionPartition
+        $result = Resolve-LibertixTransactionPartition
 
         $result.PartitionNumber | Should -Be 7
         $script:savedState.PartitionNumber | Should -Be 7
@@ -371,11 +399,12 @@ Describe "UEFI transaction partition resolution" {
                     PartitionNumber = 5
                     Offset = 172872433664
                     Size = 42949672960
+                    Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
                 }
             )
         }
 
-        $result = Get-VerifiedTransactionPartition
+        $result = Resolve-LibertixTransactionPartition
 
         $result.Offset | Should -Be 172872433664
         $script:savedState.PartitionOffset | Should -Be 172872433664
@@ -396,10 +425,11 @@ Describe "UEFI transaction partition resolution" {
                 PartitionNumber = 5
                 Offset = 172872433664
                 Size = $observedSize
+                Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
             })
         }
 
-        $result = Get-VerifiedTransactionPartition
+        $result = Resolve-LibertixTransactionPartition
 
         $result.Size | Should -Be $observedSize
         $script:savedState.PartitionSize | Should -Be $observedSize
@@ -420,11 +450,12 @@ Describe "UEFI transaction partition resolution" {
                     PartitionNumber = 5
                     Offset = 172872433664
                     Size = 42949672960
+                    Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
                 }
             )
         }
 
-        { Get-VerifiedTransactionPartition } | Should -Throw "*matches=0*"
+        { Resolve-LibertixTransactionPartition } | Should -Throw "*matches=0*"
         Should -Invoke Save-LibertixTransactionStateAtomic -Times 0
     }
 }
@@ -447,15 +478,18 @@ Describe "UEFI durable partition creation intent" {
     It "finds a committed partition even when New-Partition never returned its number" {
         Save-TransactionPartitionCreationIntent -DiskNumber 0 -Offset 40GB -Size 8GB
         (Get-TransactionPartitionState).PartitionNumber | Should -Be 0
-        Mock Get-Partition { @([pscustomobject]@{ DiskNumber = 0; PartitionNumber = 4; Offset = 40GB; Size = 8GB }) }
-        $partition = Get-VerifiedTransactionPartition
+        Mock Get-Partition { @([pscustomobject]@{
+            DiskNumber = 0; PartitionNumber = 4; Offset = 40GB; Size = 8GB
+            Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        }) }
+        $partition = Resolve-LibertixTransactionPartition
         $partition.PartitionNumber | Should -Be 4
         (Get-TransactionPartitionState).PartitionNumber | Should -Be 4
     }
 
     It "allows rollback when interruption occurred before partition creation" {
         Save-TransactionPartitionCreationIntent -DiskNumber 0 -Offset 40GB -Size 8GB
-        Get-VerifiedTransactionPartition -AllowMissing | Should -BeNullOrEmpty
+        Resolve-LibertixTransactionPartition -AllowMissing | Should -BeNullOrEmpty
     }
 
     It "refuses an extent that already contains another partition" {

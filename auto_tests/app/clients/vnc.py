@@ -13,8 +13,8 @@ from vncdotool.client import VNCDoToolClient, VNCDoToolFactory
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
-CAPTURE_MAX_ATTEMPTS = 3
-CAPTURE_RETRY_SECONDS = 2
+CAPTURE_MAX_ATTEMPTS = 5
+CAPTURE_RETRY_SECONDS = 5
 
 
 class CompressedVNCProtocol(VNCDoToolClient):
@@ -32,7 +32,7 @@ def _is_valid_capture(path: Path) -> bool:
     try:
         with Image.open(path) as capture:
             capture.verify()
-    except (OSError, ValueError):
+    except (OSError, ValueError, SyntaxError):
         return False
     return True
 

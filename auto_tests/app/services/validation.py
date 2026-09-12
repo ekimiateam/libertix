@@ -978,7 +978,7 @@ class ValidationService:
                     "unattended": unattended_config,
                 },
                 step=step,
-                timeout=420,
+                timeout=720,
             )
             values = self.parse_powershell_results(
                 response.stdout,

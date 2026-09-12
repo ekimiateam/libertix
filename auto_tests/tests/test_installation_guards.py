@@ -31,6 +31,43 @@ def read_apply_changes() -> str:
     )
 
 
+def test_uninstall_upgrades_archived_code_before_starting_recovery() -> None:
+    page = read("Pages/UninstallLinux.xaml.cs")
+    assert page.index("RecoveryCodeUpgrade.Prepare") < page.index(
+        "Task<int> processTask = RunRecoveryProcessAsync()"
+    )
+    assert "InstalledLinuxRecoveryLocator.VerifyRollbackResult" in page
+    locator = read("Helpers/InstalledLinuxRecovery.cs")
+    verification = locator.split("internal static void VerifyRollbackResult", 1)[1].split(
+        "private static void InspectRoot", 1
+    )[0]
+    assert "File.Write" not in verification
+    assert "AtomicJsonFile.Write" not in verification
+    assert "recovery agent has not published" in verification
+
+
+def test_verified_bios_uninstall_checks_filesystem_identity_before_removal() -> None:
+    script = read("Scripts/libertix-recovery-guard.ps1")
+    deletion = script.split("if (@($candidates).Count -eq 1)", 1)[1]
+    assert deletion.index("Assert-LibertixInstalledFilesystemIdentity") < deletion.index(
+        "Remove-Partition"
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["inspect_installation_rollback_state.ps1", "verify_installation_rollback.ps1"]
+)
+def test_bcd_rollback_tracks_device_and_osdevice_partition_identities(name: str) -> None:
+    script = read(f"auto_tests/app/scripts/{name}")
+    block = script.split("foreach ($elementType", 1)[1].split(
+        "if ([int]$device.DeviceType -ne 4)", 1
+    )[0]
+    assert "0x11000001" in block and "0x21000001" in block
+    assert "GetElementWithFlags($elementType, [uint32]1)" in block
+    assert "PartitionIdentifier = [string]$partitionDevice.PartitionIdentifier" in block
+    assert "remained unqualified" in block
+
+
 def test_compatibility_preflight_is_before_distro_selection() -> None:
     main = read("MainWindow.xaml.cs")
     page = read("Pages/CompatibilityCheck.xaml.cs")
@@ -1177,7 +1214,9 @@ def test_all_blocking_windows_operations_use_the_named_timeout_policy() -> None:
     assert "process.WaitForExit();" not in processes
     assert "WaitForRedirectedStreams(" in processes
     assert "WaitForRedirectedStreams(" in read("Helpers/CompatibilityPreflightRunner.cs")
-    assert "WaitForRedirectedStreams(" in read("Pages/UefiBootFallback.xaml.cs")
+    fallback = read("Pages/UefiBootFallback.xaml.cs")
+    assert "WindowsProcessRunner.RunStreaming(" in fallback
+    assert "WaitForRedirectedStreams(outputClosed.Task, errorClosed.Task);" in policy
 
 
 def test_live_target_disk_requires_cross_platform_partition_table_identity() -> None:
@@ -2236,6 +2275,8 @@ def test_uefi_recovery_retires_only_the_exact_transaction_partition() -> None:
     assert "[int64]$_.Size -ge ($expectedSize - $alignment)" in partition_check
     assert "Get-Partition -DiskNumber ([int]$plannedDisk.number)" in partition_check
     assert "Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $plannedDisk" in partition_check
+    assert "Join-Path $SystemDrive 'LibertixTools\\uefi-transaction.json'" in partition_check
+    assert "active and permanent UEFI transaction states are both missing" in partition_check
     assert "gpt:" in partition_check
     assert "256MB" not in partition_check
 
@@ -2551,8 +2592,8 @@ def test_uefi_fallback_publishes_recovery_phase_atomically() -> None:
 def test_uefi_fallback_fails_closed_when_process_termination_is_unknown() -> None:
     fallback = read("Pages/UefiBootFallback.xaml.cs")
 
-    assert "bool stopped;" in fallback
-    assert "if (!stopped)" in fallback
+    assert "WindowsProcessRunner.RunStreaming(" in fallback
+    assert "catch (UnterminatedProcessException)" in fallback
     assert "ProcessTreeTerminationException" in fallback
     termination_handler = fallback.split("catch (ProcessTreeTerminationException ex)", 1)[1].split(
         "catch (Exception ex)", 1
@@ -3293,7 +3334,8 @@ def test_failed_interactive_launch_keeps_config_until_its_processes_are_stopped(
     )[0]
     assert "AddSeconds(300)" in worker
     assert "if (-not $runtimeDetected)" in worker
-    assert "AddSeconds(60)" in worker
+    assert worker.count("AddSeconds(300)") >= 2
+    assert "$i -lt 6800" in launch
     assert "'/PID', [string]$launcherProcess.Id, '/T', '/F'" in worker
     assert "$stop.WaitForExit(10000) -and $stop.ExitCode -eq 0" in worker
     assert "processes_stopped = $processesStopped" in worker
@@ -3442,7 +3484,54 @@ def test_uefi_previous_transaction_is_recovered_before_a_new_plan_or_payload() -
     assert "Assert-LibertixTransactionRecoveryRunId" in installer
     assert "Remove-LibertixRecoveryTasksForRunId" in transaction
     assert "Save-LibertixRollbackTransactionArchive" in transaction
-    assert "Get-VerifiedTransactionPartition -AllowMissing" in storage
+    assert "Resolve-LibertixTransactionPartition -AllowMissing" in storage
+
+
+def test_installed_linux_uninstall_ui_has_deterministic_controls_and_exact_proof() -> None:
+    welcome = read("Pages/Welcome.xaml")
+    uninstall = read("Pages/UninstallLinux.xaml")
+    driver = read("auto_tests/app/scripts/drive_installed_linux_uninstall.ps1")
+    verifier = read("auto_tests/app/scripts/verify_installation_rollback.ps1")
+
+    for automation_id in (
+        "LanguageComboBox",
+        "UninstallLinuxButton",
+        "StartInstallationButton",
+    ):
+        assert f'AutomationProperties.AutomationId="{automation_id}"' in welcome
+    for automation_id in (
+        "UninstallLinuxProgressBar",
+        "UninstallLinuxRetryButton",
+        "UninstallLinuxDoneButton",
+    ):
+        assert f'AutomationProperties.AutomationId="{automation_id}"' in uninstall
+        assert f'"{automation_id}"' in driver
+    assert '"LocalizedConfirmationYesButton"' in driver
+    assert "GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)" in driver
+    assert "GetCurrentPattern([Windows.Automation.RangeValuePattern]::Pattern)" in driver
+    assert 'status -ceq "rolled-back"' in verifier
+    assert "rollbackAvailable -eq $false" in verifier
+    assert "rollbackExecutionRevision" in verifier
+    assert "-VerifiedUninstall" in read("Pages/UninstallLinux.xaml.cs")
+    assert "GetElementWithFlags" in verifier
+    assert "ROLLBACK_WINDOWS_BOOT_LOADER_PARTITIONS_MATCH" in verifier
+
+
+def test_verified_uninstall_partition_proof_allows_resuming_completed_removal() -> None:
+    recovery = read("Scripts/libertix-uefi-recovery-agent.ps1")
+    cancel = recovery.split('if ($Action -eq "Cancel")', 1)[1].split(
+        'if ($Action -eq "InstallPreferredPath")', 1
+    )[0]
+
+    assert "$VerifiedUninstall -and" in cancel
+    assert "status -ne 'rolled-back'" in cancel
+    assert "$resumingUninstall = [string]$executionState.status -eq 'rollback-running'" in cancel
+    identity_check = cancel.index(
+        "Test-LinuxPartitionPresent -State $state "
+        "-VerifiedUninstall -AllowMissing:$resumingUninstall"
+    )
+    assert "-not $linuxPresent -and -not $resumingUninstall" in cancel
+    assert identity_check < cancel.index("Remove-BootGuardianIfPresent")
 
 
 def test_uefi_rollback_validates_owner_before_touching_firmware_or_storage() -> None:

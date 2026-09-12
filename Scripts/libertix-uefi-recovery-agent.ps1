@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$StatePath,
     [ValidateSet("Check", "Prompt", "Cancel", "InstallPreferredPath")]
-    [string]$Action = "Check"
+    [string]$Action = "Check",
+    [switch]$VerifiedUninstall
 )
 
 Set-StrictMode -Version Latest
@@ -243,9 +244,28 @@ function Read-ValidatedRecoveryPlan {
 }
 
 function Test-LinuxPartitionPresent {
-    param([Parameter(Mandatory = $true)]$State)
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [switch]$VerifiedUninstall,
+        [switch]$AllowMissing
+    )
 
     $plan = Read-ValidatedRecoveryPlan -State $State
+    $transactionPath = Join-Path $State.RecoveryRoot 'uefi-transaction.json'
+    if (-not (Test-Path -LiteralPath $transactionPath -PathType Leaf)) {
+        $transactionPath = Join-Path $SystemDrive 'LibertixTools\uefi-transaction.json'
+    }
+    if (-not (Test-Path -LiteralPath $transactionPath -PathType Leaf)) {
+        throw 'The active and permanent UEFI transaction states are both missing.'
+    }
+    $transaction = Get-Content `
+        -LiteralPath $transactionPath `
+        -Raw `
+        -Encoding UTF8 `
+        -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
+        throw 'The UEFI transaction partition identity is invalid.'
+    }
     foreach ($module in @('Libertix.Rollback.psm1', 'Libertix.InstallationPolicy.psm1')) {
         Import-Module (Join-Path $State.PayloadRoot "Scripts\modules\$module") -ErrorAction Stop
     }
@@ -253,21 +273,62 @@ function Test-LinuxPartitionPresent {
     $plannedDisk = if ([int]$plan.schemaVersion -eq 5) { $plan.allocation } else { $plan.disk }
     $disk = Get-Disk -Number ([int]$plannedDisk.number) -ErrorAction Stop
     Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $plannedDisk
+    $expectedPartitionGuid = ''
+    if ([string]$disk.PartitionStyle -eq 'GPT') {
+        if ($transaction.PSObject.Properties.Name -contains 'PartitionGuid' -and
+            -not [string]::IsNullOrWhiteSpace([string]$transaction.PartitionGuid)) {
+            if ([string]$transaction.PartitionGuid -notmatch (
+                '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-' +
+                '[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+            )) { throw 'The UEFI GPT partition identity is invalid.' }
+            $expectedPartitionGuid = ([Guid]$transaction.PartitionGuid).ToString('D').ToLowerInvariant()
+        }
+    }
     $expectedSize = [int64]$plan.disk.installer.finalSizeBytes
     $expectedOffset = [int64]$plan.disk.installer.finalOffsetBytes
     $alignment = [int64](Get-LibertixInstallationPolicy).storage.partitionAlignmentBytes
+    $partitions = @(Get-Partition -DiskNumber ([int]$plannedDisk.number) -ErrorAction Stop)
     $installerPartitions = @(
-        Get-Partition -DiskNumber ([int]$plannedDisk.number) -ErrorAction Stop |
+        $partitions |
             Where-Object {
                 [int64]$_.Offset -eq $expectedOffset -and
                 [int64]$_.Size -le $expectedSize -and
                 [int64]$_.Size -ge ($expectedSize - $alignment) -and
                 (([string]$disk.PartitionStyle -eq 'GPT' -and
+                    $_.Guid -and
+                    ($expectedPartitionGuid -eq '' -or
+                        ([Guid]$_.Guid).ToString('D').ToLowerInvariant() -eq $expectedPartitionGuid) -and
                     [string]$_.GptType -eq '{0fc63daf-8483-4772-8e79-3d69d8477de4}') -or
                  ([string]$disk.PartitionStyle -eq 'MBR' -and [int]$_.MbrType -eq 0x83))
             }
     )
-    return $installerPartitions.Count -eq 1
+    if ($installerPartitions.Count -ne 1) {
+        if ($VerifiedUninstall -and $AllowMissing -and
+            @($partitions | Where-Object { [long]$_.Offset -eq $expectedOffset }).Count -gt 0) {
+            throw 'The installed Linux partition was replaced before uninstall resumed.'
+        }
+        return $false
+    }
+    if ($VerifiedUninstall) {
+        Assert-LibertixInstalledFilesystemIdentity -Partition $installerPartitions[0] -RecoveryRoot $State.RecoveryRoot
+        if ([string]$disk.PartitionStyle -eq 'GPT' -and $expectedPartitionGuid -eq '') {
+            # Older archives did not record the GPT GUID. Adopt it only after matching the ext UUID.
+            $transaction | Add-Member -NotePropertyName PartitionGuid `
+                -NotePropertyValue ([Guid]$installerPartitions[0].Guid).ToString('D') -Force
+            $backup = "$transactionPath.before-uninstall-guid"
+            if (-not (Test-Path -LiteralPath $backup)) {
+                Copy-Item -LiteralPath $transactionPath -Destination $backup -ErrorAction Stop
+            }
+            $temporary = "$transactionPath.guid-$PID.tmp"
+            [IO.File]::WriteAllText($temporary, ($transaction | ConvertTo-Json -Depth 20),
+                [Text.UTF8Encoding]::new($false))
+            Publish-RecoveryFileAtomic -TemporaryPath $temporary -DestinationPath $transactionPath `
+                -BackupPath "$transactionPath.guid-replace.bak"
+        }
+    } elseif ([string]$disk.PartitionStyle -eq 'GPT' -and $expectedPartitionGuid -eq '') {
+        throw 'The UEFI GPT partition identity is missing.'
+    }
+    return $true
 }
 
 function Get-VerifiedEspPartition {
@@ -1356,6 +1417,13 @@ try {
     if ($Action -eq "Cancel") {
         $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded" -or
             "target.bootloader-installed" -in @($executionState.completedSteps)
+        if ($VerifiedUninstall -and [string]$executionState.status -ne 'rolled-back') {
+            $resumingUninstall = [string]$executionState.status -eq 'rollback-running'
+            $linuxPresent = Test-LinuxPartitionPresent -State $state -VerifiedUninstall -AllowMissing:$resumingUninstall
+            if (-not $linuxPresent -and -not $resumingUninstall) {
+                throw 'The installed Linux partition identity could not be verified before uninstall.'
+            }
+        }
         $null = Remove-BootGuardianIfPresent -State $state
         if ([string]$executionState.status -ne "rolled-back") {
             $null = Restore-PreferredBootPathIfPresent -State $state
@@ -1409,6 +1477,32 @@ try {
         Save-RecoveryLogs -State $state
         Remove-TemporaryRecoveryArtifacts -State $state
         Remove-RecoveryTasks -State $state
+        if ($VerifiedUninstall) {
+            Assert-LibertixUninstallComplete -RecoveryRoot ([string]$state.RecoveryRoot) `
+                -RecoveryTaskNames @([string]$state.TaskName, [string]$state.PromptTaskName) `
+                -WriteLog { param($Message) Write-AgentLog $Message } -VerifyBoot {
+                    $null = Invoke-WithVerifiedEsp -State $state -Action {
+                        param($espPartition, $espRoot)
+                        foreach ($name in @('EFI\Libertix', 'EFI\LibertixInstaller')) {
+                            if (Test-Path -LiteralPath (Join-Path $espRoot $name)) {
+                                throw "An owned EFI boot directory remains after uninstall: $name"
+                            }
+                        }
+                        if (-not (Test-Path -LiteralPath (Join-Path $espRoot 'EFI\Microsoft\Boot\bootmgfw.efi') -PathType Leaf)) {
+                            throw 'Windows Boot Manager is missing from the verified ESP.'
+                        }
+                    }
+                    Import-Module (Join-Path $state.PayloadRoot 'Scripts\modules\Libertix.Process.psm1') -ErrorAction Stop
+                    $bcd = Invoke-LibertixNativeProcess -FilePath "$env:SystemRoot\System32\bcdedit.exe" `
+                        -Arguments '/enum firmware /v' -TimeoutSeconds 60
+                    if ($bcd.ExitCode -ne 0 -or $bcd.StandardOutput -match '(?i)\\EFI\\Libertix(?:Installer)?\\') {
+                        throw 'The final UEFI boot entry verification failed.'
+                    }
+                    'Windows EFI loader present; Libertix EFI directories and boot references absent.'
+                }
+            $null = Set-LibertixPostInstallRolledBack `
+                -RecoveryRoot ([string]$state.RecoveryRoot)
+        }
         exit 0
     }
 

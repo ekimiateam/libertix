@@ -91,6 +91,7 @@ def run_campaign(
             linux_password=request.linux_password,
             linux_size_gib=request.linux_size_gib,
             migrate_windows_preferences=request.migrate_windows_preferences,
+            verify_uninstall=True,
         )
         try:
             outcome = run_scenario(child_request, scenario_workspace, publish)

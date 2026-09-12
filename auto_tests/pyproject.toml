@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "jsonschema>=4,<5",
+  "pygobject>=3.58,<3.59",
   "pytest>=9.0.3,<10",
   "pytest-cov>=5,<7",
   "ruff>=0.8,<1",

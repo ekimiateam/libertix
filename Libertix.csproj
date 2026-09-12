@@ -79,6 +79,8 @@
     <Compile Include="Helpers\BoundedHttpContent.cs" />
     <Compile Include="Helpers\TrayIconController.cs" />
     <Compile Include="Helpers\UefiRecoveryState.cs" />
+    <Compile Include="Helpers\InstalledLinuxRecovery.cs" />
+    <Compile Include="Helpers\RecoveryCodeUpgrade.cs" />
     <Compile Include="Dialogs\LocalizedConfirmationDialog.xaml.cs">
       <DependentUpon>LocalizedConfirmationDialog.xaml</DependentUpon>
     </Compile>
@@ -129,6 +131,9 @@
     </Compile>
     <Compile Include="Pages\Welcome.xaml.cs">
       <DependentUpon>Welcome.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="Pages\UninstallLinux.xaml.cs">
+      <DependentUpon>UninstallLinux.xaml</DependentUpon>
     </Compile>
     <Compile Include="Pages\ApplyChanges.xaml.cs">
       <DependentUpon>ApplyChanges.xaml</DependentUpon>
@@ -192,6 +197,7 @@
     <Page Include="Pages\About.xaml" />
     <Page Include="Dialogs\UnattendedWarningDialog.xaml" />
     <Page Include="Pages\Welcome.xaml" />
+    <Page Include="Pages\UninstallLinux.xaml" />
     <Page Include="Pages\ApplyChanges.xaml" />
     <Page Include="Pages\UefiBootFallback.xaml" />
     <Page Include="Pages\WarningConfirmation.xaml" />

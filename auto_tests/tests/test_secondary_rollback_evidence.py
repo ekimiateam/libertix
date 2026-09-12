@@ -10,7 +10,14 @@ from tests.test_core import settings
 
 
 @pytest.mark.parametrize("secondary_restored", [True, False])
-def test_rollback_cannot_pass_with_only_the_system_disk_restored(monkeypatch, secondary_restored):
+@pytest.mark.parametrize("boot_loaders_preserved", [True, False])
+@pytest.mark.parametrize("boot_loader_partitions_preserved", [True, False])
+def test_rollback_cannot_pass_with_only_the_system_disk_restored(
+    monkeypatch,
+    secondary_restored,
+    boot_loaders_preserved,
+    boot_loader_partitions_preserved,
+):
     service = AutomationService(settings())
     baseline = {
         "SYSTEM_DISK_NUMBER": "0",
@@ -20,6 +27,8 @@ def test_rollback_cannot_pass_with_only_the_system_disk_restored(monkeypatch, se
         "PARTITION_LAYOUT_JSON": "[]",
         "EXECUTION_PLAN_IDS_JSON": "[]",
         "STORAGE_LAYOUT_JSON": '[{"Number":0},{"Number":1}]',
+        "WINDOWS_BOOT_LOADERS_JSON": '["Windows boot loader","custom maintenance entry"]',
+        "WINDOWS_BOOT_LOADER_PARTITIONS_JSON": '[{"PartitionIdentifier":"recovery"}]',
     }
     received = {}
 
@@ -28,6 +37,9 @@ def test_rollback_cannot_pass_with_only_the_system_disk_restored(monkeypatch, se
         return CommandResult(
             "ROLLBACK_VERIFIED=True\nROLLBACK_LEDGER_VERIFIED=True\n"
             "ROLLBACK_PARTITION_LAYOUT_MATCHES=True\nROLLBACK_BOOT_GUARDIAN_PRESENT=False\n"
+            f"ROLLBACK_WINDOWS_BOOT_LOADERS_MATCH={boot_loaders_preserved}\n"
+            "ROLLBACK_WINDOWS_BOOT_LOADER_PARTITIONS_MATCH="
+            f"{boot_loader_partitions_preserved}\n"
             f"ROLLBACK_STORAGE_LAYOUT_MATCHES={secondary_restored}\nRESULT=OK",
             "",
             0,
@@ -36,7 +48,7 @@ def test_rollback_cannot_pass_with_only_the_system_disk_restored(monkeypatch, se
     monkeypatch.setattr(service, "_run_windows_script_resiliently", check)
     result = ResultBuilder("automation")
     arguments = (None, service.settings.vms[0], baseline, result)
-    if secondary_restored:
+    if secondary_restored and boot_loaders_preserved and boot_loader_partitions_preserved:
         service._verify_exact_windows_rollback(*arguments, step="test", failure_message="failed")
         assert result.success("done").status == "ok"
     else:
@@ -45,6 +57,10 @@ def test_rollback_cannot_pass_with_only_the_system_disk_restored(monkeypatch, se
                 *arguments, step="test", failure_message="failed"
             )
     assert received["storage_layout"] == json.loads(baseline["STORAGE_LAYOUT_JSON"])
+    assert received["windows_boot_loaders"] == json.loads(baseline["WINDOWS_BOOT_LOADERS_JSON"])
+    assert received["windows_boot_loader_partitions"] == json.loads(
+        baseline["WINDOWS_BOOT_LOADER_PARTITIONS_JSON"]
+    )
 
 
 @pytest.mark.parametrize("files_preserved", [True, False])
@@ -60,6 +76,8 @@ def test_rollback_also_requires_fixture_hashes_and_redirected_documents(
         "PARTITION_LAYOUT_JSON": "[]",
         "EXECUTION_PLAN_IDS_JSON": "[]",
         "STORAGE_LAYOUT_JSON": '[{"Number":0},{"Number":1}]',
+        "WINDOWS_BOOT_LOADERS_JSON": '["Windows boot loader"]',
+        "WINDOWS_BOOT_LOADER_PARTITIONS_JSON": '[{"PartitionIdentifier":"recovery"}]',
     }
     receipt = {"user_documents": {"files": ["witness"]}, "witnesses": ["fat32-witness"]}
     calls, documents = [], []
@@ -70,6 +88,8 @@ def test_rollback_also_requires_fixture_hashes_and_redirected_documents(
             output = (
                 "ROLLBACK_VERIFIED=True\nROLLBACK_LEDGER_VERIFIED=True\n"
                 "ROLLBACK_PARTITION_LAYOUT_MATCHES=True\nROLLBACK_BOOT_GUARDIAN_PRESENT=False\n"
+                "ROLLBACK_WINDOWS_BOOT_LOADERS_MATCH=True\n"
+                "ROLLBACK_WINDOWS_BOOT_LOADER_PARTITIONS_MATCH=True\n"
                 "ROLLBACK_STORAGE_LAYOUT_MATCHES=True\nRESULT=OK"
             )
         else:

@@ -123,7 +123,7 @@ function Invoke-InteractiveWorker {
             if ($runtimeProcess) {
                 if (-not $runtimeDetected) {
                     $runtimeDetected = $true
-                    $windowDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                    $windowDeadline = [DateTime]::UtcNow.AddSeconds(300)
                 }
                 $runtimeGraphicalProcess = Get-Process `
                     -Id $runtimeProcess.ProcessId `
@@ -415,7 +415,7 @@ if ($runResult.ExitCode -ne 0) {
 }
 
 $workerResult = $null
-for ($i = 0; $i -lt 3800 -and -not $workerResult; $i++) {
+for ($i = 0; $i -lt 6800 -and -not $workerResult; $i++) {
     Start-Sleep -Milliseconds 100
     if (Test-Path -LiteralPath $workerResultPath -PathType Leaf) {
         try {

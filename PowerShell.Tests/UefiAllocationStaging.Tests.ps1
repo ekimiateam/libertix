@@ -45,7 +45,7 @@ Describe 'UEFI source-volume preparation preserves the Windows disk' {
                 sourcePartition = [pscustomobject]@{ number = 2; offsetBytes = 16MB; sizeBytes = 60GB }
             }
         }
-        Mock Get-VerifiedTransactionPartition { $null }
+        Mock Resolve-LibertixTransactionPartition { $null }
         Mock Test-LibertixInstallerPartitionPresent { $false }
         Mock Get-Disk {
             if ($Number[0] -eq 0) {

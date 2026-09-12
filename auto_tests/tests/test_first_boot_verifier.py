@@ -368,6 +368,39 @@ def test_installed_system_proof_checks_account_packages_and_services(
     assert proof["failedSystemdUnits"] == 0
 
 
+@pytest.mark.parametrize(
+    "fstab_content",
+    (
+        "# UUID={uuid} / ext4 defaults 0 1\n",
+        "UUID={uuid} /mnt/not-root ext4 defaults 0 1\n",
+    ),
+)
+def test_installed_system_proof_rejects_non_root_fstab_uuid(
+    verifier: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fstab_content: str,
+) -> None:
+    root_uuid = "11111111-2222-3333-4444-555555555555"
+    fstab = tmp_path / "fstab"
+    machine_id = tmp_path / "machine-id"
+    fstab.write_text(fstab_content.format(uuid=root_uuid), encoding="utf-8")
+    machine_id.write_text("a" * 32 + "\n", encoding="ascii")
+    monkeypatch.setattr(
+        verifier,
+        "run",
+        lambda *args: "rw,relatime" if args == ("findmnt", "-n", "-o", "OPTIONS", "/") else "",
+    )
+
+    with pytest.raises(verifier.VerificationError, match="active /etc/fstab root entry"):
+        verifier.verify_installed_system(
+            {"account": {"username": "test"}},
+            root_uuid,
+            fstab_path=fstab,
+            machine_id_path=machine_id,
+        )
+
+
 def test_installed_system_proof_rejects_failed_units(
     verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -22,7 +22,7 @@ function Set-LibertixAllocationVolumeReadableFromLinux {
 # Windows storage, ESP mounting, volume letters, and installer cleanup.
 
 function Remove-LibertixInstallerPartitionIfPresent {
-    $partition = Get-VerifiedTransactionPartition -AllowMissing
+    $partition = Resolve-LibertixTransactionPartition -AllowMissing
     if (-not $partition) {
         if (Test-LibertixInstallerPartitionPresent) {
             throw "$InstallerLabel exists without a matching transaction state; refusing removal."
@@ -44,7 +44,7 @@ function Remove-LibertixInstallerPartitionIfPresent {
     } catch {
         # The storage operation may have completed before its response failed.
         # Resolve ownership again; a cached number can now name another partition.
-        $remainingPartition = Get-VerifiedTransactionPartition -AllowMissing
+        $remainingPartition = Resolve-LibertixTransactionPartition -AllowMissing
         if ($remainingPartition) {
             Write-Log "PowerShell could not remove $InstallerLabel partition; trying diskpart fallback..." "Yellow"
             Invoke-DiskpartScript -ScriptText @"
@@ -73,7 +73,7 @@ function Test-LibertixInstallerPartitionPresent {
 function Assert-LibertixInstallerPartitionRemoved {
     Start-Sleep -Seconds 1
     # The live installer changes FAT32 into ext4, which Get-Volume may not expose.
-    if (Get-VerifiedTransactionPartition -AllowMissing) {
+    if (Resolve-LibertixTransactionPartition -AllowMissing) {
         throw "$InstallerLabel partition is still present after revert attempt."
     }
 }

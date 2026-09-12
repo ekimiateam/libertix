@@ -30,6 +30,7 @@ BeforeAll {
 
 Describe 'BIOS rollback validates physical identity before removing a partition' {
     BeforeEach {
+        $VerifiedUninstall = $false
         $SystemDrive = 'C:'
         $SystemDriveLetter = 'C'
         $diskNumber = 3

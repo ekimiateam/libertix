@@ -10,6 +10,49 @@ BeforeAll {
         -Force
 }
 
+Describe 'Installed filesystem ownership before uninstall' {
+    InModuleScope Libertix.PostInstallVerification {
+        BeforeEach {
+            $script:header = New-Object byte[] 4096
+            $script:header[1080] = 0x53; $script:header[1081] = 0xef
+            for ($i = 1128; $i -lt 1144; $i++) { $script:header[$i] = 0x11 }
+            Mock Read-LibertixPartitionHeader { return ,$script:header }
+            Mock Read-LibertixJsonObject {
+                if ($Path -like '*installation-plan.json') { return [pscustomobject]@{ planId = 'test-plan' } }
+                return [pscustomobject]@{
+                    planId = 'test-plan'; recoveryRunId = 'test-plan'
+                    root = [pscustomobject]@{
+                        filesystem = 'ext4'; uuid = '11111111-1111-1111-1111-111111111111'
+                        offsetBytes = 1MB; sizeBytes = 20GB
+                    }
+                }
+            }
+            $script:partition = [pscustomobject]@{ DiskNumber = 0; Offset = 1MB; Size = 20GB }
+        }
+        It 'accepts the original filesystem without writing to disk' {
+            { Assert-LibertixInstalledFilesystemIdentity -Partition $script:partition -RecoveryRoot 'C:\archive' } |
+                Should -Not -Throw
+            Should -Invoke Read-LibertixPartitionHeader -Exactly 1
+        }
+        It 'refuses a replacement filesystem occupying the identical extent' {
+            $script:header[1128] = 0x22
+            { Assert-LibertixInstalledFilesystemIdentity -Partition $script:partition -RecoveryRoot 'C:\archive' } |
+                Should -Throw '*filesystem was replaced*'
+        }
+        It 'refuses a non-ext filesystem even with matching UUID bytes' {
+            $script:header[1080] = 0
+            { Assert-LibertixInstalledFilesystemIdentity -Partition $script:partition -RecoveryRoot 'C:\archive' } |
+                Should -Throw '*filesystem was replaced*'
+        }
+        It 'refuses changed geometry before opening the disk' {
+            $script:partition.Offset = 2MB
+            { Assert-LibertixInstalledFilesystemIdentity -Partition $script:partition -RecoveryRoot 'C:\archive' } |
+                Should -Throw '*does not match*'
+            Should -Invoke Read-LibertixPartitionHeader -Exactly 0
+        }
+    }
+}
+
 Describe "Post-install Linux boot evidence" {
     BeforeEach {
         $script:Plan = [pscustomobject]@{
@@ -693,6 +736,136 @@ Describe "Windows filesystem repair after offline NTFS resize" {
                 -RecoveryRoot $script:RepairRoot -LogPath (Join-Path $script:RepairRoot 'recovery.log') `
                 -WriteLog { param($Message) } } | Should -Throw '*different source volume*'
             Should -Invoke Register-LibertixWindowsBootVolumeCheck -Times 0
+        }
+    }
+}
+
+Describe 'Final uninstall verification' {
+    InModuleScope Libertix.PostInstallVerification {
+        BeforeEach {
+            $script:FinalPlan = [pscustomobject]@{
+                planId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; firmware = 'bios'
+                disk = [pscustomobject]@{
+                    number = 0; systemDrive = 'C:'
+                    windows = [pscustomobject]@{ offsetBytes = 1048576; sizeBytes = 40000000000 }
+                    recovery = [pscustomobject]@{ sizeBytes = 0 }
+                }
+            }
+            $script:FinalReport = $null
+            Mock Read-LibertixJsonObject { $script:FinalPlan }
+            Mock Read-LibertixExecutionState {
+                [pscustomobject]@{ planId = $script:FinalPlan.planId; status = 'rolled-back'; revision = 42 }
+            }
+            Mock Get-LibertixPlannedLinuxDisk { $script:FinalPlan.disk }
+            Mock Get-Partition { [pscustomobject]@{ Offset = 1048576; Size = 40000000000 } }
+            Mock Assert-LibertixSourceVolumeIdentity { }
+            Mock Get-ScheduledTask { @() }
+            Mock Get-Service { @() }
+            Mock Write-LibertixPostInstallResult { $script:FinalReport = $Result }
+            Mock Write-LibertixPostInstallErrorDiagnostic { }
+        }
+
+        It 'rereads storage and records every final check before reporting success' {
+            Assert-LibertixUninstallComplete -RecoveryRoot $TestDrive `
+                -RecoveryTaskNames @('LibertixInstallRecovery') -VerifyBoot { 'boot verified' } -WriteLog { }
+            $script:FinalReport.status | Should -Be 'succeeded'
+            $script:FinalReport.rollbackExecutionRevision | Should -Be 42
+            @($script:FinalReport.checks).Count | Should -Be 4
+            @($script:FinalReport.checks | Where-Object { -not $_.passed }).Count | Should -Be 0
+            Should -Invoke Get-Partition -Times 1 -Exactly
+        }
+
+        It 'does not trust the rolled-back ledger when the source size is wrong' {
+            Mock Get-Partition { [pscustomobject]@{ Offset = 1048576; Size = 20000000000 } }
+            { Assert-LibertixUninstallComplete -RecoveryRoot $TestDrive `
+                -RecoveryTaskNames @('LibertixInstallRecovery') -VerifyBoot { } -WriteLog { } } |
+                Should -Throw '*original size*'
+            $script:FinalReport.status | Should -Be 'failed'
+            $script:FinalReport.checks[-1].name | Should -Be 'restored-storage'
+            $script:FinalReport.checks[-1].passed | Should -BeFalse
+        }
+
+        It 'keeps a failed boot verification in the permanent report' {
+            { Assert-LibertixUninstallComplete -RecoveryRoot $TestDrive `
+                -RecoveryTaskNames @('LibertixInstallRecovery') `
+                -VerifyBoot { throw 'GRUB remains' } -WriteLog { } } | Should -Throw '*GRUB remains*'
+            $script:FinalReport.status | Should -Be 'failed'
+            $script:FinalReport.checks[-1].name | Should -Be 'boot-restored'
+        }
+
+        It 'rejects remaining maintenance tasks without deleting them in the verifier' {
+            Mock Get-ScheduledTask { [pscustomobject]@{ TaskName = 'LibertixLinuxReadOnly' } }
+            { Assert-LibertixUninstallComplete -RecoveryRoot $TestDrive `
+                -RecoveryTaskNames @('LibertixInstallRecovery') -VerifyBoot { } -WriteLog { } } |
+                Should -Throw '*task remains*'
+            $script:FinalReport.status | Should -Be 'failed'
+        }
+    }
+}
+
+Describe "Post-install rollback result" {
+    InModuleScope Libertix.PostInstallVerification {
+        BeforeEach {
+            $script:RollbackPlan = [pscustomobject]@{
+                planId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                firmware = "uefi"
+            }
+            $script:RollbackResult = [pscustomobject]@{
+                schemaVersion = 1
+                planId = $script:RollbackPlan.planId
+                firmware = $script:RollbackPlan.firmware
+                status = "succeeded"
+                rollbackAvailable = $true
+                updatedAtUtc = "2026-09-10T08:00:00Z"
+            }
+            $script:WrittenRollbackResult = $null
+            Mock Test-Path { $true } -ParameterFilter {
+                $LiteralPath -like "*post-install-verification.json"
+            }
+            Mock Read-LibertixJsonObject {
+                if ($Path -like "*installation-plan.json") {
+                    return $script:RollbackPlan
+                }
+                return $script:RollbackResult
+            }
+            Mock Read-LibertixExecutionState {
+                [PSCustomObject]@{
+                    planId = $script:RollbackPlan.planId
+                    status = "rolled-back"
+                    revision = 42
+                }
+            }
+            Mock Write-LibertixPostInstallResult {
+                $script:WrittenRollbackResult = $Result
+            }
+        }
+
+        It "closes the durable verification result only after a proven rollback" {
+            $result = Set-LibertixPostInstallRolledBack -RecoveryRoot $TestDrive
+
+            $result.status | Should -Be "rolled-back"
+            $result.rollbackAvailable | Should -BeFalse
+            $result.rollbackExecutionRevision | Should -Be 42
+            $result.rolledBackAtUtc | Should -Not -BeNullOrEmpty
+            $result.updatedAtUtc | Should -Not -Be "2026-09-10T08:00:00Z"
+            $script:WrittenRollbackResult.status | Should -Be "rolled-back"
+            $script:WrittenRollbackResult.rollbackExecutionRevision | Should -Be 42
+            Should -Invoke Write-LibertixPostInstallResult -Times 1 -Exactly
+        }
+
+        It "refuses to publish completion while the ledger is still successful" {
+            Mock Read-LibertixExecutionState {
+                [PSCustomObject]@{
+                    planId = $script:RollbackPlan.planId
+                    status = "succeeded"
+                    revision = 41
+                }
+            }
+
+            {
+                Set-LibertixPostInstallRolledBack -RecoveryRoot $TestDrive
+            } | Should -Throw "*before the execution ledger proves rollback*"
+            Should -Invoke Write-LibertixPostInstallResult -Times 0
         }
     }
 }

@@ -77,7 +77,19 @@ class ProxmoxClient:
     ) -> object:
         logger.info("Proxmox request", extra={"step": step, "target": path})
         try:
-            response = self.client.request(method, f"{self.base_url}{path}", data=data)
+            for attempt in range(1, 4):
+                try:
+                    response = self.client.request(method, f"{self.base_url}{path}", data=data)
+                    break
+                except (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError):
+                    # Retrying a status read is safe; a lost mutation reply is ambiguous.
+                    if method != "GET" or attempt == 3:
+                        raise
+                    logger.warning(
+                        "Transient Proxmox read failure; retrying in five seconds",
+                        extra={"step": step, "target": path, "attempt": attempt},
+                    )
+                    time.sleep(5)
             response.raise_for_status()
             return response.json()["data"]
         except (httpx.HTTPError, ValueError, KeyError) as exc:

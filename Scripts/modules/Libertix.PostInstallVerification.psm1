@@ -404,6 +404,193 @@ function Set-LibertixPostInstallFailure {
     return $result
 }
 
+function Assert-LibertixInstalledFilesystemIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Partition,
+        [Parameter(Mandatory = $true)][string]$RecoveryRoot
+    )
+    $evidence = Read-LibertixJsonObject -Path (Join-Path $RecoveryRoot 'installed-linux-boot.json') `
+        -Description 'installed Linux boot evidence'
+    $plan = Read-LibertixJsonObject -Path (Join-Path $RecoveryRoot 'installation-plan.json') `
+        -Description 'installation plan'
+    if ([string]$evidence.planId -cne [string]$plan.planId -or
+        [string]$evidence.recoveryRunId -cne [string]$plan.planId -or
+        [string]$evidence.root.filesystem -cne 'ext4' -or
+        [string]$evidence.root.uuid -notmatch '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' -or
+        [long]$evidence.root.offsetBytes -ne [long]$Partition.Offset -or
+        [long]$evidence.root.sizeBytes -ne [long]$Partition.Size) {
+        throw 'The current Linux partition does not match the archived filesystem evidence.'
+    }
+    [byte[]]$header = Read-LibertixPartitionHeader -Partition $Partition
+    $uuid = [BitConverter]::ToString($header, 1128, 16).Replace('-', '')
+    if ($header[1080] -ne 0x53 -or $header[1081] -ne 0xef -or
+        $uuid -ine ([string]$evidence.root.uuid).Replace('-', '')) {
+        throw 'The Linux filesystem was replaced; refusing to delete this partition.'
+    }
+}
+
+function Read-LibertixPartitionHeader {
+    param([Parameter(Mandatory = $true)]$Partition)
+    $stream = [IO.File]::Open("\\.\PhysicalDrive$([int]$Partition.DiskNumber)",
+        [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        # Read an aligned block; the ext superblock begins 1024 bytes into the partition.
+        $null = $stream.Seek([long]$Partition.Offset, [IO.SeekOrigin]::Begin)
+        $header = New-Object byte[] 4096
+        $read = 0
+        while ($read -lt $header.Length) {
+            $count = $stream.Read($header, $read, $header.Length - $read)
+            if ($count -eq 0) { throw 'The Linux filesystem header could not be read completely.' }
+            $read += $count
+        }
+        return ,$header
+    } finally { $stream.Dispose() }
+}
+
+function Assert-LibertixUninstallComplete {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RecoveryRoot,
+        [Parameter(Mandatory = $true)][string[]]$RecoveryTaskNames,
+        [Parameter(Mandatory = $true)][scriptblock]$VerifyBoot,
+        [Parameter(Mandatory = $true)][scriptblock]$WriteLog
+    )
+
+    $plan = Read-LibertixJsonObject -Path (Join-Path $RecoveryRoot 'installation-plan.json') `
+        -Description 'installation plan'
+    $execution = Read-LibertixExecutionState -Path (Join-Path $RecoveryRoot 'installation-state.json')
+    $report = [pscustomobject]@{
+        schemaVersion = 1; planId = [string]$plan.planId; firmware = [string]$plan.firmware
+        rollbackExecutionRevision = [int]$execution.revision
+        status = 'in-progress'; updatedAtUtc = ''; checks = @(); error = $null
+    }
+    $path = Join-Path $RecoveryRoot 'uninstall-verification.json'
+    Write-LibertixPostInstallResult -Path $path -Result $report
+    try {
+        # Always observe the machine again; a previous attempt's checks are not current evidence.
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'execution-ledger' `
+            -WriteLog $WriteLog -Test {
+                if ([string]$execution.planId -cne [string]$plan.planId -or
+                    [string]$execution.status -cne 'rolled-back') {
+                    throw 'The installation ledger does not prove a completed rollback.'
+                }
+                'All recorded installation operations are compensated.'
+            }
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'restored-storage' `
+            -WriteLog $WriteLog -Test {
+                $targets = @([pscustomobject]@{
+                    Disk = $plan.disk; Partition = $plan.disk.windows
+                    Drive = [string]$plan.disk.systemDrive; VolumeId = ''
+                })
+                $allocation = Get-LibertixPlannedLinuxDisk -Plan $plan
+                if ([int]$allocation.number -ne [int]$plan.disk.number) {
+                    $targets += [pscustomobject]@{
+                        Disk = $allocation; Partition = $allocation.sourcePartition
+                        Drive = [string]$allocation.sourceDrive; VolumeId = [string]$allocation.sourceVolumeId
+                    }
+                }
+                foreach ($target in $targets) {
+                    $letter = $target.Drive.TrimEnd(':')
+                    $partition = Get-Partition -DriveLetter $letter -ErrorAction Stop
+                    Assert-LibertixSourceVolumeIdentity -Partition $partition -PlanDisk $target.Disk `
+                        -SourcePartition $target.Partition -DriveLetter $letter -ExpectedVolumeId $target.VolumeId
+                    if ([long]$partition.Size -ne [long]$target.Partition.sizeBytes) {
+                        throw 'The source volume has not returned to its original size.'
+                    }
+                }
+                if ([long]$plan.disk.recovery.sizeBytes -gt 0) {
+                    $recovery = @(Get-Partition -DiskNumber $plan.disk.number -ErrorAction Stop | Where-Object {
+                        [long]$_.Offset -eq [long]$plan.disk.recovery.offsetBytes -and
+                        [long]$_.Size -eq [long]$plan.disk.recovery.sizeBytes
+                    })
+                    if ($recovery.Count -ne 1) { throw 'Windows Recovery geometry changed.' }
+                }
+                'Windows, allocation source and Recovery geometry verified.'
+            }
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'boot-restored' `
+            -WriteLog $WriteLog -Test $VerifyBoot
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'maintenance-removed' `
+            -WriteLog $WriteLog -Test {
+                $tasks = @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object {
+                    $_.TaskName -in $RecoveryTaskNames -or $_.TaskName -eq 'LibertixLinuxReadOnly' -or
+                    $_.TaskName -like 'LibertixLinuxReadOnlyPin_*'
+                })
+                if ($tasks.Count -ne 0) { throw 'An installation or sharing task remains after uninstall.' }
+                if (@(Get-Service -ErrorAction Stop | Where-Object Name -EQ 'LibertixBootGuardian').Count -ne 0) {
+                    throw 'BootGuardian remains installed after uninstall.'
+                }
+                'Installation, sharing and boot-maintenance tasks/services are absent.'
+            }
+        $report.status = 'succeeded'
+        Write-LibertixPostInstallResult -Path $path -Result $report
+        & $WriteLog "Final uninstall verification succeeded: $path"
+    } catch {
+        $report.status = 'failed'
+        $report.error = $_.Exception.Message
+        Write-LibertixPostInstallResult -Path $path -Result $report
+        throw
+    }
+}
+
+function Set-LibertixPostInstallRolledBack {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$RecoveryRoot)
+
+    $plan = Read-LibertixJsonObject `
+        -Path (Join-Path $RecoveryRoot "installation-plan.json") `
+        -Description "installation plan"
+    $execution = Read-LibertixExecutionState `
+        -Path (Join-Path $RecoveryRoot "installation-state.json")
+    if (
+        [string]$execution.planId -ne [string]$plan.planId -or
+        [string]$execution.status -ne "rolled-back"
+    ) {
+        throw "Post-install result cannot be closed before the execution ledger proves rollback."
+    }
+
+    $resultPath = Join-Path $RecoveryRoot "post-install-verification.json"
+    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+        # Rollback can complete before the post-install verifier has ever started.
+        return $null
+    }
+    $result = Read-LibertixJsonObject `
+        -Path $resultPath `
+        -Description "post-install verification result"
+    if (
+        [int]$result.schemaVersion -ne 1 -or
+        [string]$result.planId -ne [string]$plan.planId -or
+        [string]$result.firmware -ne [string]$plan.firmware -or
+        [string]$result.status -notin @(
+            "in-progress", "waiting-linux-boot", "waiting-windows-filesystem-repair",
+            "succeeded", "failed", "rolled-back"
+        )
+    ) {
+        throw "Post-install verification result belongs to another recovery state."
+    }
+
+    $rolledBackAtUtc = if (
+        (Test-LibertixProperty -Object $result -Name "rolledBackAtUtc") -and
+        -not [string]::IsNullOrWhiteSpace([string]$result.rolledBackAtUtc)
+    ) {
+        [string]$result.rolledBackAtUtc
+    } else {
+        [DateTime]::UtcNow.ToString("o")
+    }
+    $result.status = "rolled-back"
+    $result.rollbackAvailable = $false
+    $result.updatedAtUtc = [DateTime]::UtcNow.ToString("o")
+    $result | Add-Member `
+        -NotePropertyName rolledBackAtUtc `
+        -NotePropertyValue $rolledBackAtUtc `
+        -Force
+    $result | Add-Member `
+        -NotePropertyName rollbackExecutionRevision `
+        -NotePropertyValue ([int]$execution.revision) `
+        -Force
+    Write-LibertixPostInstallResult -Path $resultPath -Result $result
+    return $result
+}
+
 function Add-LibertixPostInstallCheck {
     param(
         [Parameter(Mandatory = $true)][object]$Result,
@@ -1582,10 +1769,13 @@ function Invoke-LibertixPostInstallVerification {
 }
 
 Export-ModuleMember -Function `
+    Assert-LibertixInstalledFilesystemIdentity, `
+    Assert-LibertixUninstallComplete, `
     Assert-LibertixLinuxBootEvidence, `
     Invoke-LibertixWindowsFilesystemRepairIfRequired, `
     Invoke-LibertixPostInstallVerification, `
     Set-LibertixPostInstallFailure, `
+    Set-LibertixPostInstallRolledBack, `
     Set-LibertixPostInstallWaitingForLinux, `
     Set-LibertixShutdownVerificationPriority, `
     Test-LibertixDiskGeometry, `

@@ -96,6 +96,10 @@ Describe 'UEFI recovery real module import order' {
         $plan = New-ValidInstallationPlan
         $plan.runtime.recoveryRunId = $plan.planId
         $plan | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $TestDrive 'installation-plan.json') -Encoding UTF8
+        @{
+            RecoveryRunId = $plan.planId
+            PartitionGuid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        } | ConvertTo-Json | Set-Content (Join-Path $TestDrive 'uefi-transaction.json') -Encoding UTF8
         $state = [pscustomobject]@{
             PayloadRoot = (Resolve-Path "$PSScriptRoot/..").Path; RecoveryRoot = $TestDrive
             PlanId = $plan.planId; RunId = $plan.planId
@@ -114,6 +118,7 @@ Describe 'UEFI recovery real module import order' {
             [pscustomobject]@{
                 Offset = 172872433664; Size = 40GB
                 GptType = '{0fc63daf-8483-4772-8e79-3d69d8477de4}'
+                Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
             }
         }
         Test-LinuxPartitionPresent -State $state | Should -BeTrue
@@ -125,6 +130,8 @@ Describe 'UEFI recovery Linux partition selection' {
     BeforeAll {
         # Keep the unit-test stub out of the real module-loading regression test.
         function Get-LibertixInstallationPolicy {}
+        function Assert-LibertixInstalledFilesystemIdentity { param($Partition, $RecoveryRoot) }
+        function Publish-RecoveryFileAtomic { param($TemporaryPath, $DestinationPath, $BackupPath) }
     }
     BeforeEach {
         $script:windowsDisk = [pscustomobject]@{
@@ -138,6 +145,7 @@ Describe 'UEFI recovery Linux partition selection' {
         $script:linux = [pscustomobject]@{
             DiskNumber = 1; PartitionNumber = 3; Offset = 40GB; Size = 20GB
             GptType = '{0fc63daf-8483-4772-8e79-3d69d8477de4}'; Type = 'Unknown'; MbrType = 0
+            Guid = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
         }
         $script:esp = [pscustomobject]@{
             DiskNumber = 0; PartitionNumber = 1; Offset = 1MB; Size = 100MB
@@ -145,7 +153,8 @@ Describe 'UEFI recovery Linux partition selection' {
             Guid = '11111111-1234-1234-1234-123456789abc'
         }
         $script:state = [pscustomobject]@{
-            PayloadRoot = $TestDrive
+            PayloadRoot = $TestDrive; RecoveryRoot = $TestDrive
+            RunId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
             SystemDiskNumber = 0; SystemDiskUniqueId = 'vendor'; SystemDiskSize = 128GB
             SystemDiskPartitionTableId = 'gpt:12345678-1234-1234-1234-123456789abc'
             ExpectedLinuxPartitionOffset = 40GB; ExpectedLinuxPartitionSize = 20GB
@@ -163,6 +172,10 @@ Describe 'UEFI recovery Linux partition selection' {
                 partitionStyle = 'GPT'; partitionTableId = 'gpt:87654321-1234-1234-1234-123456789abc'
             }
         }
+        @{
+            RecoveryRunId = $script:state.RunId
+            PartitionGuid = $script:linux.Guid
+        } | ConvertTo-Json | Set-Content (Join-Path $TestDrive 'uefi-transaction.json') -Encoding UTF8
         Mock Read-ValidatedRecoveryPlan { $script:plan }
         Mock Import-Module {}
         Mock Get-LibertixInstallationPolicy { @{ storage = @{ partitionAlignmentBytes = 1MB } } }
@@ -184,6 +197,52 @@ Describe 'UEFI recovery Linux partition selection' {
         Test-LinuxPartitionPresent -State $script:state | Should -BeTrue
         (Get-VerifiedEspPartition -State $script:state).DiskNumber | Should -Be 0
         Should -Invoke Get-Partition -Times 1 -ParameterFilter { $DiskNumber[0] -eq 1 }
+    }
+
+    It 'upgrades a legacy partition identity only after checking the installed filesystem' {
+        $path = Join-Path $TestDrive 'uefi-transaction.json'
+        @{ RecoveryRunId = $script:state.RunId } | ConvertTo-Json | Set-Content $path
+        $original = Get-Content $path -Raw
+        Mock Assert-LibertixInstalledFilesystemIdentity {}
+        Mock Publish-RecoveryFileAtomic {
+            Copy-Item -LiteralPath $TemporaryPath -Destination $DestinationPath -Force
+        }
+        Test-LinuxPartitionPresent -State $script:state -VerifiedUninstall | Should -BeTrue
+        (Get-Content $path -Raw | ConvertFrom-Json).PartitionGuid | Should -Be $script:linux.Guid
+        Get-Content "$path.before-uninstall-guid" -Raw | Should -Be $original
+        Should -Invoke Assert-LibertixInstalledFilesystemIdentity -Times 1
+        Should -Invoke Publish-RecoveryFileAtomic -Times 1
+    }
+
+    It 'does not upgrade a legacy archive when filesystem ownership fails' {
+        $path = Join-Path $TestDrive 'uefi-transaction.json'
+        @{ RecoveryRunId = $script:state.RunId } | ConvertTo-Json | Set-Content $path
+        $original = Get-Content $path -Raw
+        Mock Assert-LibertixInstalledFilesystemIdentity { throw 'Filesystem replaced' }
+        Mock Publish-RecoveryFileAtomic {}
+        { Test-LinuxPartitionPresent -State $script:state -VerifiedUninstall } | Should -Throw '*Filesystem replaced*'
+        Get-Content $path -Raw | Should -Be $original
+        Should -Invoke Publish-RecoveryFileAtomic -Times 0
+    }
+
+    It 'revalidates the filesystem when uninstall resumes with the same GPT identity' {
+        Mock Assert-LibertixInstalledFilesystemIdentity { throw 'Filesystem replaced' }
+        { Test-LinuxPartitionPresent -State $script:state -VerifiedUninstall -AllowMissing } |
+            Should -Throw '*Filesystem replaced*'
+        Should -Invoke Assert-LibertixInstalledFilesystemIdentity -Times 1
+    }
+
+    It 'allows uninstall to resume after the Linux partition was already removed' {
+        Mock Get-Partition { @() }
+        Mock Assert-LibertixInstalledFilesystemIdentity {}
+        Test-LinuxPartitionPresent -State $script:state -VerifiedUninstall -AllowMissing | Should -BeFalse
+        Should -Invoke Assert-LibertixInstalledFilesystemIdentity -Times 0
+    }
+
+    It 'refuses a replacement partition instead of treating it as already removed' {
+        $script:linux.Guid = 'ffffffff-1111-2222-3333-444444444444'
+        { Test-LinuxPartitionPresent -State $script:state -VerifiedUninstall -AllowMissing } |
+            Should -Throw '*replaced before uninstall resumed*'
     }
 
     It 'preserves the original single-disk plan' {
@@ -219,7 +278,8 @@ Describe 'UEFI recovery Linux partition selection' {
 
     It 'rejects an incorrect partition <Field>' -ForEach @(
         @{ Field = 'Offset'; Value = 41GB }, @{ Field = 'Size'; Value = 21GB },
-        @{ Field = 'GptType'; Value = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' }
+        @{ Field = 'GptType'; Value = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' },
+        @{ Field = 'Guid'; Value = 'ffffffff-1111-2222-3333-444444444444' }
     ) {
         $script:linux.$Field = $Value
         Test-LinuxPartitionPresent -State $script:state | Should -BeFalse

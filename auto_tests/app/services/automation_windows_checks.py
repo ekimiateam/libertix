@@ -55,6 +55,7 @@ def build_windows_validation_plan(
         "network",
         "locale",
         "ssh_service",
+        "update_policy",
         "core_services",
         "hibernation",
         "dism_check_health",

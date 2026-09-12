@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet("Check", "Revert")]
-    [string]$Action = "Check"
+    [string]$Action = "Check",
+    [switch]$VerifiedUninstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -637,8 +638,81 @@ function Restore-HibernationAfterInstallation {
     Write-RecoveryLog "Original hibernation state restored after verified installation."
 }
 
+function Remove-OwnedBiosBcdEntry {
+    $recoveryRunId = Read-EnvValue -Path $Pending -Name 'RECOVERY_RUN_ID'
+    if ($recoveryRunId -notmatch '^[0-9a-f]{32}$') {
+        throw 'The BIOS recovery identity is invalid; refusing selective BCD cleanup.'
+    }
+    $bcdedit = Get-LibertixNativeSystemExecutable -FileName 'bcdedit.exe'
+    Write-RecoveryLog "Resolved native BCD editor: $bcdedit"
+    $enumeration = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @('/enum', 'all', '/v') `
+        -TimeoutSeconds 60
+    $enumerationOutput = (
+        $enumeration.StandardOutput +
+        [Environment]::NewLine +
+        $enumeration.StandardError
+    ).Trim()
+    if ($enumeration.ExitCode -ne 0) {
+        throw "BCD enumeration failed with rc=$($enumeration.ExitCode) output=$enumerationOutput"
+    }
+    $description = "Libertix BIOS Installer $recoveryRunId"
+    $blocks = @($enumerationOutput -split '(?:\r?\n){2,}')
+    $ownedBlocks = @(
+        $blocks | Where-Object {
+            $_ -match '(?im)^\s*\S.*\s+(\{[0-9a-f-]{36}\})\s*$' -and
+            $_ -match ('(?im)^\s*\S.*\s+' + [regex]::Escape($description) + '\s*$') -and
+            $_ -match '(?im)^\s*\S.*\s+\\grldr\.mbr\s*$' -and
+            $_ -match ('(?im)^\s*\S.*\s+partition=' + [regex]::Escape($SystemDrive) + '\s*$')
+        }
+    )
+    if ($ownedBlocks.Count -gt 1) {
+        throw 'Multiple transaction-owned BIOS BCD entries were found; refusing cleanup.'
+    }
+    if ($ownedBlocks.Count -eq 0) {
+        Write-RecoveryLog 'The transaction-owned BIOS BCD entry is already absent.'
+        return
+    }
+    $identifier = [regex]::Match(
+        $ownedBlocks[0],
+        '(?im)^\s*\S.*\s+(\{[0-9a-f-]{36}\})\s*$'
+    ).Groups[1].Value
+    $removal = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @('/delete', $identifier, '/f') `
+        -TimeoutSeconds 60
+    $removalOutput = (
+        $removal.StandardOutput + [Environment]::NewLine + $removal.StandardError
+    ).Trim()
+    if ($removal.ExitCode -ne 0) {
+        throw "Owned BCD entry removal failed with rc=$($removal.ExitCode) output=$removalOutput"
+    }
+    $verification = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @('/enum', 'all', '/v') `
+        -TimeoutSeconds 60
+    $verificationOutput = (
+        $verification.StandardOutput +
+        [Environment]::NewLine +
+        $verification.StandardError
+    ).Trim()
+    if ($verification.ExitCode -ne 0 -or $verificationOutput -match [regex]::Escape($identifier)) {
+        throw 'The transaction-owned BIOS BCD entry could not be verified as removed.'
+    }
+    Write-RecoveryLog "Transaction-owned BIOS BCD entry removed: $identifier"
+}
+
 function Restore-BcdState {
-    param([switch]$Required)
+    param(
+        [switch]$Required,
+        [switch]$PreserveUnrelatedChanges
+    )
+
+    if ($PreserveUnrelatedChanges) {
+        Remove-OwnedBiosBcdEntry
+        return
+    }
 
     if (-not (Test-Path -LiteralPath $BcdBackup -PathType Leaf)) {
         if ($Required) {
@@ -1341,6 +1415,9 @@ try {
 
         if (@($candidates).Count -eq 1) {
             $candidate = $candidates[0]
+            if ($VerifiedUninstall) {
+                Assert-LibertixInstalledFilesystemIdentity -Partition $candidate.Partition -RecoveryRoot $Root
+            }
             $number = $candidate.Partition.PartitionNumber
             $candidateOffset = [int64]$candidate.Partition.Offset
             $candidateSize = [int64]$candidate.Partition.Size
@@ -1391,7 +1468,9 @@ try {
     }
 
     $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
-        Restore-BcdState -Required:$temporaryBootWasPrepared
+        Restore-BcdState `
+            -Required:$temporaryBootWasPrepared `
+            -PreserveUnrelatedChanges:$VerifiedUninstall
     }
     $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
         Restore-BiosMbrBootCode `
@@ -1494,6 +1573,31 @@ try {
     }
     Assert-RecoveryOperationsSucceeded
     Complete-RecoveryAttemptState
+    if ($VerifiedUninstall) {
+        $null = Invoke-RecoveryOperation -Name 'uninstall.final-verification' -Operation {
+            Assert-LibertixUninstallComplete -RecoveryRoot $Root `
+                -RecoveryTaskNames @($TaskName, $PromptTaskName) `
+                -WriteLog { param($Message) Write-RecoveryLog $Message } -VerifyBoot {
+                    $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
+                    $sectorSize = [Math]::Max([int]$disk.LogicalSectorSize, [int]$disk.PhysicalSectorSize)
+                    [Libertix.BiosMbrIo]::VerifyBootCode("\\.\PhysicalDrive$diskNumber", $sectorSize,
+                        [IO.File]::ReadAllBytes($MbrBackup))
+                    $bcd = Invoke-LibertixNativeCommand `
+                        -FilePath (Get-LibertixNativeSystemExecutable -FileName 'bcdedit.exe') `
+                        -ArgumentList @('/enum', 'all', '/v') -TimeoutSeconds 60
+                    if ($bcd.ExitCode -ne 0 -or $bcd.StandardOutput -match
+                        [regex]::Escape("Libertix BIOS Installer $script:RecoveryCorrelationId")) {
+                        throw 'The final BIOS BCD verification failed.'
+                    }
+                    'Original BIOS boot code verified; transaction BCD entry absent.'
+                }
+        }
+        Assert-RecoveryOperationsSucceeded
+        $null = Invoke-RecoveryOperation -Name "post-install-result.rollback-complete" -Operation {
+            $null = Set-LibertixPostInstallRolledBack -RecoveryRoot $Root
+        }
+        Assert-RecoveryOperationsSucceeded
+    }
     $successfulOperationCount = @(
         $script:RecoveryOperationRecords |
             Where-Object { $_.status -eq "success" }

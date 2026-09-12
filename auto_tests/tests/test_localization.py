@@ -461,7 +461,7 @@ def test_confirmations_use_libertix_language_instead_of_windows_button_captions(
     assert '<Page Include="Dialogs\\LocalizedConfirmationDialog.xaml" />' in project
     assert 'x:Name="YesButton"' in dialog
     assert 'x:Name="NoButton"' in dialog
-    assert sources.count("LocalizedConfirmationDialog.Show(") == 3
+    assert sources.count("LocalizedConfirmationDialog.Show(") == 4
     assert "MessageBoxButton.YesNo" not in sources
 
 

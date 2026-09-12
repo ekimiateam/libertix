@@ -71,16 +71,6 @@ recovery_run_id="${plan_values[1]:-}"
 secure_boot_enabled="${plan_values[2]:-}"
 plan_supported_authorities="${plan_values[3]:-}"
 
-if [ ! -f "$owner_file" ]; then
-    [ "$allow_missing" = true ] && exit 0
-    echo "Owned EFI/Libertix directory is missing" >&2
-    exit 1
-fi
-[ "$(sed -n '1p' "$owner_file" | tr -d '\r\n')" = "$recovery_run_id" ] || {
-    echo "EFI/Libertix belongs to another Libertix recovery run" >&2
-    exit 1
-}
-
 install -d -m 0755 "$(dirname "$log")" "$history_root" "$(dirname "$lock_path")"
 touch "$log"
 chmod 0600 "$log"
@@ -88,6 +78,46 @@ exec > >(tee -a "$log") 2>&1
 exec 9>"$lock_path"
 flock -w 120 9 || {
     echo "Another EFI synchronization did not finish within 120 seconds" >&2
+    exit 1
+}
+
+mounted_here=false
+staged_paths=()
+cleanup_efi_sync() {
+    local status=$? path
+    for path in "${staged_paths[@]}"; do
+        [ ! -e "$path" ] || rm -f -- "$path" || status=1
+    done
+    # A mount opened by an update hook must not leak into the live installer.
+    if [ "$mounted_here" = true ]; then
+        umount "$esp_mount" || status=1
+    fi
+    exit "$status"
+}
+trap cleanup_efi_sync EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! mountpoint -q "$esp_mount"; then
+    mount "$esp_mount" || {
+        echo "The EFI System Partition could not be mounted at $esp_mount" >&2
+        exit 1
+    }
+    mounted_here=true
+fi
+mountpoint -q "$esp_mount" || {
+    echo "The EFI System Partition is not mounted at $esp_mount" >&2
+    exit 1
+}
+
+if [ ! -f "$owner_file" ]; then
+    [ "$allow_missing" = true ] && exit 0
+    echo "Owned EFI/Libertix directory is missing" >&2
+    exit 1
+fi
+[ "$(sed -n '1p' "$owner_file" | tr -d '\r\n')" = "$recovery_run_id" ] || {
+    echo "EFI/Libertix belongs to another Libertix recovery run" >&2
     exit 1
 }
 
@@ -101,12 +131,6 @@ done
     echo "Secure Boot chain verifier is missing: $secure_boot_verifier" >&2
     exit 1
 }
-mountpoint -q "$esp_mount" || mount "$esp_mount"
-mountpoint -q "$esp_mount" || {
-    echo "The EFI System Partition is not mounted at $esp_mount" >&2
-    exit 1
-}
-
 package_owns_file() {
     local file="$1" expected="$2" owner
     owner="$(dpkg-query -S "$file" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
@@ -279,15 +303,6 @@ synchronize_preferred_boot_path() {
         --secure-boot-verifier "$secure_boot_verifier"
     echo "[$(date -u +%FT%TZ)] Preferred Windows boot path synchronized"
 }
-
-staged_paths=()
-cleanup_staged_paths() {
-    local path
-    for path in "${staged_paths[@]}"; do
-        [ ! -e "$path" ] || rm -f -- "$path"
-    done
-}
-trap cleanup_staged_paths EXIT HUP INT TERM
 
 candidate_evidence="$history_root/.secure-boot-candidate.$$"
 staged_paths+=("$candidate_evidence")

@@ -299,69 +299,24 @@ namespace Libertix.Pages
                     StandardOutputEncoding = Encoding.UTF8,
                     StandardErrorEncoding = Encoding.UTF8
                 };
-                using (var process = new Process { StartInfo = startInfo })
+                try
                 {
-                    var outputClosed = new TaskCompletionSource<bool>();
-                    var errorClosed = new TaskCompletionSource<bool>();
-                    process.OutputDataReceived += (_, output) =>
+                    WindowsProcessResult result = WindowsProcessRunner.RunStreaming(
+                        startInfo,
+                        WindowsProcessTimeouts.RecoveryOperation,
+                        output => Dispatcher.BeginInvoke(new Action(() => Log(output))),
+                        error => Dispatcher.BeginInvoke(new Action(() => Log("ERROR: " + error))));
+                    if (result.TimedOut)
                     {
-                        if (output.Data == null)
-                        {
-                            outputClosed.TrySetResult(true);
-                        }
-                        else
-                        {
-                            Dispatcher.BeginInvoke(new Action(() => Log(output.Data)));
-                        }
-                    };
-                    process.ErrorDataReceived += (_, output) =>
-                    {
-                        if (output.Data == null)
-                        {
-                            errorClosed.TrySetResult(true);
-                        }
-                        else
-                        {
-                            Dispatcher.BeginInvoke(new Action(() => Log("ERROR: " + output.Data)));
-                        }
-                    };
-                    if (!process.Start())
-                        throw new InvalidOperationException("The recovery process could not be started.");
-                    process.BeginOutputReadLine();
-                    process.BeginErrorReadLine();
-                    if (!process.WaitForExit(
-                        (int)WindowsProcessTimeouts.RecoveryOperation.TotalMilliseconds))
-                    {
-                        bool stopped;
-                        try
-                        {
-                            stopped = WindowsProcessRunner.TerminateProcessTree(process);
-                        }
-                        catch
-                        {
-                            stopped = false;
-                        }
-                        if (!stopped)
-                        {
-                            throw new ProcessTreeTerminationException(
-                                Localization.GetString("UefiFallbackTerminationFailed"));
-                        }
                         Dispatcher.BeginInvoke(new Action(() =>
                             Log(Localization.GetString("UefiFallbackTimeoutLog"))));
-                        return -1;
                     }
-                    try
-                    {
-                        WindowsProcessRunner.WaitForRedirectedStreams(
-                            outputClosed.Task, errorClosed.Task);
-                        WindowsProcessRunner.AssertSafeExitCode(process.ExitCode);
-                    }
-                    catch (UnterminatedProcessException)
-                    {
-                        throw new ProcessTreeTerminationException(
-                            Localization.GetString("UefiFallbackTerminationFailed"));
-                    }
-                    return process.ExitCode;
+                    return result.ExitCode;
+                }
+                catch (UnterminatedProcessException)
+                {
+                    throw new ProcessTreeTerminationException(
+                        Localization.GetString("UefiFallbackTerminationFailed"));
                 }
             });
         }

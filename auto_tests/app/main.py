@@ -189,6 +189,7 @@ def _run_operation(
             simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
             force_offline_ntfs_resize=request.force_offline_ntfs_resize,
             boot_guardian_fault=request.boot_guardian_fault,
+            verify_uninstall=request.verify_uninstall,
             first_boot=request.first_boot,
             source=request.source,
             on_step=on_step,

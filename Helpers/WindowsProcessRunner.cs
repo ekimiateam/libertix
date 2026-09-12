@@ -237,6 +237,111 @@ namespace Libertix.Helpers
             }
         }
 
+        public static WindowsProcessResult RunStreaming(
+            ProcessStartInfo startInfo,
+            TimeSpan timeout,
+            Action<string> onStandardOutput,
+            Action<string> onStandardError)
+        {
+            using (var process = new Process { StartInfo = startInfo })
+            {
+                var output = new StringBuilder();
+                var error = new StringBuilder();
+                var outputClosed = new TaskCompletionSource<bool>();
+                var errorClosed = new TaskCompletionSource<bool>();
+                bool started = false;
+                process.OutputDataReceived += (_, data) =>
+                {
+                    if (data.Data == null)
+                    {
+                        outputClosed.TrySetResult(true);
+                        return;
+                    }
+                    lock (output)
+                        output.AppendLine(data.Data);
+                    onStandardOutput?.Invoke(data.Data);
+                };
+                process.ErrorDataReceived += (_, data) =>
+                {
+                    if (data.Data == null)
+                    {
+                        errorClosed.TrySetResult(true);
+                        return;
+                    }
+                    lock (error)
+                        error.AppendLine(data.Data);
+                    onStandardError?.Invoke(data.Data);
+                };
+                try
+                {
+                    if (!process.Start())
+                        throw new InvalidOperationException(
+                            $"The process could not be started: {startInfo.FileName}.");
+                    started = true;
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+                    if (!process.WaitForExit(checked((int)timeout.TotalMilliseconds)))
+                    {
+                        bool stopped = TerminateProcessTree(process);
+                        Task.WaitAll(
+                            new Task[] { outputClosed.Task, errorClosed.Task },
+                            checked((int)WindowsProcessTimeouts.RedirectedStreamDrain.TotalMilliseconds));
+                        if (!stopped)
+                        {
+                            throw new UnterminatedProcessException(
+                                $"Timed-out process tree could not be proven stopped: {startInfo.FileName}.");
+                        }
+                        return CreateStreamingResult(-1, true, output, error);
+                    }
+                    WaitForRedirectedStreams(outputClosed.Task, errorClosed.Task);
+                    AssertSafeExitCode(process.ExitCode);
+                    return CreateStreamingResult(process.ExitCode, false, output, error);
+                }
+                catch
+                {
+                    if (started && IsRunning(process) && !TerminateProcessTree(process))
+                    {
+                        throw new UnterminatedProcessException(
+                            $"Failed process tree could not be proven stopped: {startInfo.FileName}.");
+                    }
+                    throw;
+                }
+            }
+        }
+
+        private static WindowsProcessResult CreateStreamingResult(
+            int exitCode,
+            bool timedOut,
+            StringBuilder output,
+            StringBuilder error)
+        {
+            string standardOutput;
+            string standardError;
+            lock (output)
+                standardOutput = output.ToString();
+            lock (error)
+                standardError = error.ToString();
+            return new WindowsProcessResult
+            {
+                ExitCode = exitCode,
+                StandardOutput = standardOutput,
+                StandardError = standardError,
+                TimedOut = timedOut
+            };
+        }
+
+        private static bool IsRunning(Process process)
+        {
+            try
+            {
+                return !process.HasExited;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
         internal static void WaitForRedirectedStreams(params Task[] streamTasks)
         {
             WaitForRedirectedStreams(WindowsProcessTimeouts.RedirectedStreamDrain, streamTasks);

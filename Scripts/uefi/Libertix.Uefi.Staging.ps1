@@ -41,7 +41,7 @@ function Get-LibertixFirmwareBootVariableSummary {
 function New-OrReuseInstallerPartition {
     param([Parameter(Mandatory = $true)][int]$SizeGB)
 
-    $existingPartition = Get-VerifiedTransactionPartition
+    $existingPartition = Resolve-LibertixTransactionPartition
     if ($existingPartition) {
         if (-not $existingPartition.DriveLetter) {
             $existingDriveLetter = Get-LibertixFreeDriveLetter
@@ -262,12 +262,12 @@ function New-OrReuseInstallerPartition {
     # Exposing a RAW partition through a drive letter makes Explorer display a
     # modal format prompt. Assign the access path only after FAT32 exists, while
     # still letting Mount Manager avoid persistent or disconnected mappings.
-    $formattedPartition = Get-VerifiedTransactionPartition
+    $formattedPartition = Resolve-LibertixTransactionPartition
     Add-PartitionAccessPath `
         -InputObject $formattedPartition `
         -AssignDriveLetter `
         -ErrorAction Stop | Out-Null
-    $verifiedPartition = Get-VerifiedTransactionPartition
+    $verifiedPartition = Resolve-LibertixTransactionPartition
     $createdDriveLetter = [string]$verifiedPartition.DriveLetter
     if ([string]::IsNullOrWhiteSpace($createdDriveLetter)) {
         throw "Windows formatted the installer partition but did not assign a drive letter."
@@ -302,7 +302,7 @@ function New-OrReuseInstallerPartition {
 }
 
 function Get-ReusablePreparedInstallerPartition {
-    $partition = Get-VerifiedTransactionPartition
+    $partition = Resolve-LibertixTransactionPartition
     if (-not $partition) {
         throw "Owned prepared installer partition is missing; refusing firmware fallback."
     }

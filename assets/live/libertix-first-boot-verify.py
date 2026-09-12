@@ -350,6 +350,22 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def verify_fstab_root_uuid(fstab: str, root_uuid: str) -> None:
+    expected_source = f"UUID={root_uuid}".casefold()
+    matching_root_entries = []
+    for raw_line in fstab.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] == "/":
+            matching_root_entries.append(fields[0].casefold())
+    if matching_root_entries != [expected_source]:
+        raise VerificationError(
+            "the active /etc/fstab root entry does not use the installed root UUID"
+        )
+
+
 def verify_installed_system(
     plan: dict[str, object],
     root_uuid: str,
@@ -364,8 +380,7 @@ def verify_installed_system(
         machine_id = machine_id_path.read_text(encoding="ascii").strip()
     except (OSError, UnicodeError) as error:
         raise VerificationError(f"cannot read installed-system identity: {error}") from error
-    if f"UUID={root_uuid}" not in fstab:
-        raise VerificationError("the root filesystem UUID is absent from /etc/fstab")
+    verify_fstab_root_uuid(fstab, root_uuid)
     if not re.fullmatch(r"[0-9a-f]{32}", machine_id):
         raise VerificationError("the installed system machine-id is invalid")
 

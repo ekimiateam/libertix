@@ -14,6 +14,12 @@ Local FastAPI service for validating Libertix on Windows test VMs.
 - verify a 100 MiB cross-OS file by SHA-256 and verify the Linux volume is read-only in Windows;
 - restore the configured snapshots of the authorized test VMs.
 
+Installation automation disables automatic Windows updates and the Windows Update service on
+the selected test VMs immediately after snapshot restoration, before building or deploying
+Libertix. Preparation fails if the service is not stopped and disabled. These laboratory settings
+remain disabled after the campaign and are reapplied after each snapshot restore; they are not
+part of the Libertix installer and do not affect the build VM or the controller machine.
+
 ## Source and build
 
 The source of truth is `ekimiateam/libertix`, branch `dev`.
@@ -214,7 +220,10 @@ curl -fsS -N -H 'Content-Type: application/json' \
 This endpoint requires exactly three distinct enabled laboratory VMs. It runs four scenarios
 sequentially, with all three VMs in parallel within each scenario. Each scenario restores the
 configured default snapshot, installs Linux on the default Windows volume, and verifies both
-operating systems and cross-boots. It does not inject faults or replace the separate storage and
+operating systems and cross-boots. After each scenario, it relaunches Libertix, uninstalls Linux
+through the product UI, and verifies the restored Windows state again after an unattended reboot.
+This covers both distributions and both initial boot orders on all three VMs.
+It does not inject faults or replace the separate storage and
 rollback campaigns. Preference migration can be enabled with `migrate_windows_preferences`.
 
 The campaign holds the existing operation lock throughout. It stops after a failed scenario by

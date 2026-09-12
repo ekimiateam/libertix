@@ -28,8 +28,8 @@ from app.services.common import ResultBuilder
 
 EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4
 REMOTE_CHECK_SSH_MAX_ATTEMPTS = 6
-WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS = 2
-LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 3
+WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS = 5
+LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -75,6 +75,8 @@ class PostInstallValidationMixin:
                     or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
                 ):
                     raise
+
+                time.sleep(LINUX_SCRIPT_RECONNECT_DELAY_SECONDS)
 
         assert last_error is not None
         raise last_error
@@ -551,8 +553,209 @@ class PostInstallValidationMixin:
                 self._rollback_completed_bios_installation(final_windows_ssh, vm, options, result)
             if options.boot_guardian_fault == "uefi-postinstall-rollback":
                 self._rollback_completed_uefi_installation(final_windows_ssh, vm, options, result)
+            if options.verify_uninstall:
+                self._exercise_installed_linux_uninstall(
+                    final_windows_ssh,
+                    vm,
+                    options,
+                    result,
+                )
         finally:
             final_windows_ssh.__exit__(None, None, None)
+
+    def _exercise_installed_linux_uninstall(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        if (
+            options.rollback_baseline is None
+            or options.deployed_executable is None
+            or options.boot_guardian_fault != "none"
+            or any(step.status == "error" for step in result.steps)
+        ):
+            raise WorkflowError(
+                "automation.installed_linux_uninstall",
+                "Interactive uninstall requires successful nominal checks, its executable, "
+                "and the original Windows baseline",
+                details={"vm": vm.name, "target": vm.host},
+            )
+
+        task_name = f"LibertixVerifiedUninstall_{vm.name}"
+        launch = self.validation.launch_elevated_process(
+            vm,
+            options.deployed_executable,
+            task_name=task_name,
+            step="automation.installed_linux_uninstall.launch",
+            use_default_filepool=options.use_default_filepool,
+        )
+        process_id = int(launch["PID"])
+        result.ok(
+            "automation.installed_linux_uninstall.launch",
+            "Libertix was relaunched without unattended installation arguments",
+            vm=vm.name,
+            target=vm.host,
+            process_id=process_id,
+            window_handle=launch["WINDOW_HANDLE"],
+        )
+
+        inspect = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "inspect", timeout=90
+        )
+        detected_capture = self._capture_with_name(vm, "verified-install-uninstall-detected")
+        result.ok(
+            "automation.installed_linux_uninstall.detected",
+            "The language selector and installed-Linux uninstall action were visible",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(detected_capture),
+            language=inspect.get("LANGUAGE", ""),
+            uninstall_caption=inspect.get("UNINSTALL_CAPTION", ""),
+        )
+
+        confirmation = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "request", timeout=90
+        )
+        confirmation_capture = self._capture_with_name(vm, "verified-install-uninstall-confirm")
+        result.ok(
+            "automation.installed_linux_uninstall.confirmation",
+            "The localized uninstall confirmation was displayed through the product UI",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(confirmation_capture),
+            confirmation_caption=confirmation.get("CONFIRMATION_CAPTION", ""),
+        )
+
+        completed = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "confirm", timeout=960
+        )
+        completed_capture = self._capture_with_name(vm, "verified-install-uninstall-complete")
+        result.ok(
+            "automation.installed_linux_uninstall.progress",
+            "The product UI reported verified uninstall completion",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(completed_capture),
+            progress=completed.get("PROGRESS", ""),
+        )
+
+        self._verify_exact_windows_rollback(
+            ssh,
+            vm,
+            options.rollback_baseline,
+            result,
+            step="automation.installed_linux_uninstall.verify",
+            storage_fixture_receipt=options.storage_fixture_receipt,
+            failure_message="The interactive uninstall did not restore the exact Windows baseline",
+            require_closed_post_install_result=True,
+        )
+
+        returned = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "complete", timeout=90
+        )
+        welcome_capture = self._capture_with_name(vm, "verified-install-uninstall-welcome")
+        result.ok(
+            "automation.installed_linux_uninstall.completed",
+            "Libertix returned to the language page without an installed-Linux action",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(welcome_capture),
+            language=returned.get("LANGUAGE", ""),
+        )
+
+        previous_boot_id = self._read_windows_boot_id(ssh, vm)
+        self._request_windows_power_transition(
+            ssh,
+            vm,
+            "shutdown.exe /r /t 0 /d p:0:0",
+            "automation.installed_linux_uninstall.reboot",
+        )
+        restarted = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="uninstall_windows_return",
+            previous_windows_boot_id=previous_boot_id,
+        )
+        try:
+            result.ok(
+                "automation.installed_linux_uninstall.unassisted_boot",
+                "Windows SSH returned in a new boot session without selecting an OS",
+                vm=vm.name,
+                target=vm.host,
+            )
+            self._verify_exact_windows_rollback(
+                restarted,
+                vm,
+                options.rollback_baseline,
+                result,
+                step="automation.installed_linux_uninstall.after_reboot",
+                storage_fixture_receipt=options.storage_fixture_receipt,
+                failure_message="Windows did not retain the restored baseline after reboot",
+                require_closed_post_install_result=True,
+            )
+        finally:
+            restarted.__exit__(None, None, None)
+
+    def _drive_installed_linux_uninstall_ui(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        process_id: int,
+        action: Literal["inspect", "request", "confirm", "complete"],
+        *,
+        timeout: int,
+    ) -> dict[str, str]:
+        # A dropped reply does not prove that an interactive click was not sent.
+        # Only the read-only inspection can be replayed after an ambiguous failure.
+        run_script = (
+            self._run_windows_script_resiliently
+            if action == "inspect"
+            else self.validation.run_windows_script
+        )
+        response = run_script(
+            ssh,
+            script_name="drive_installed_linux_uninstall.ps1",
+            config={
+                "process_id": process_id,
+                "action": action,
+                "timeout_seconds": timeout,
+            },
+            step=f"automation.installed_linux_uninstall.{action}",
+            timeout=timeout + 90,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "ACTION",
+                "WINDOW_HANDLE",
+                "SESSION_ID",
+                "LANGUAGE",
+                "UNINSTALL_CAPTION",
+                "CONFIRMATION_CAPTION",
+                "FOCUSED_CONTROL",
+                "PROGRESS",
+                "RESULT",
+            ),
+        )
+        if (
+            values.get("ACTION") != action
+            or values.get("RESULT") != "OK"
+            or not values.get("WINDOW_HANDLE", "").isdigit()
+            or int(values["WINDOW_HANDLE"]) <= 0
+        ):
+            raise WorkflowError(
+                f"automation.installed_linux_uninstall.{action}",
+                "The interactive uninstall UI action was not proven",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        return values
 
     def _rollback_completed_uefi_installation(
         self, ssh: SSHClient, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
@@ -1143,6 +1346,18 @@ class PostInstallValidationMixin:
             return True
 
         for attempt in range(1, 6):
+            if attempt > 1:
+                # Leave authentication undisturbed for five minutes before retrying.
+                for _ in range(60):
+                    time.sleep(5)
+                    response = linux_ssh.run(
+                        graphical_session_probe,
+                        step="automation.linux_graphical_session",
+                        timeout=30,
+                        check=False,
+                    )
+                    if finish_if_desktop(response, attempt - 1):
+                        return
             response = linux_ssh.run(
                 graphical_session_probe,
                 step="automation.linux_graphical_session",
@@ -1166,7 +1381,6 @@ class PostInstallValidationMixin:
                     target=vm.vnc,
                     attempt=attempt,
                 )
-                time.sleep(10)
                 continue
 
             client = None
@@ -1175,6 +1389,10 @@ class PostInstallValidationMixin:
                 if gdm_account_selection or gdm_locked_session:
                     self._assert_single_gdm_account(linux_ssh, username)
                 client = self.vnc.connect(vm.vnc)
+                # Move without clicking or changing focus to wake a blanked display.
+                client.mouseMove(1, 1)
+                client.mouseMove(2, 1)
+                time.sleep(1)
                 self._capture_from_client(
                     client,
                     vm,
@@ -1231,7 +1449,6 @@ class PostInstallValidationMixin:
                     error=capture_error.message,
                     capture_details=capture_error.details,
                 )
-                time.sleep(10)
                 continue
             result.ok(
                 "automation.linux_graphical_login",
@@ -1240,18 +1457,18 @@ class PostInstallValidationMixin:
                 target=vm.vnc,
                 attempt=attempt,
             )
-            # A desktop on slow storage can take longer than the GDM spinner.
-            # Do not cancel or restart that authentication conversation while it is settling.
-            for _ in range(12):
-                time.sleep(5)
-                response = linux_ssh.run(
-                    graphical_session_probe,
-                    step="automation.linux_graphical_session",
-                    timeout=30,
-                    check=False,
-                )
-                if finish_if_desktop(response, attempt):
-                    return
+
+        # Give the final submission the same settling time as earlier attempts.
+        for _ in range(60):
+            time.sleep(5)
+            response = linux_ssh.run(
+                graphical_session_probe,
+                step="automation.linux_graphical_session",
+                timeout=30,
+                check=False,
+            )
+            if finish_if_desktop(response, 5):
+                return
 
         raise WorkflowError(
             "automation.linux_graphical_session",
@@ -3056,6 +3273,7 @@ class PostInstallValidationMixin:
         step: str,
         failure_message: str,
         storage_fixture_receipt: dict[str, object] | None = None,
+        require_closed_post_install_result: bool = False,
     ) -> None:
         verification = self._run_windows_script_resiliently(
             ssh,
@@ -3069,7 +3287,12 @@ class PostInstallValidationMixin:
                 "partition_layout": json.loads(baseline["PARTITION_LAYOUT_JSON"]),
                 "storage_layout": json.loads(baseline["STORAGE_LAYOUT_JSON"]),
                 "baseline_plan_ids": json.loads(baseline["EXECUTION_PLAN_IDS_JSON"]),
+                "windows_boot_loaders": json.loads(baseline["WINDOWS_BOOT_LOADERS_JSON"]),
+                "windows_boot_loader_partitions": json.loads(
+                    baseline["WINDOWS_BOOT_LOADER_PARTITIONS_JSON"]
+                ),
                 "wait_timeout_seconds": 900,
+                "require_closed_post_install_result": require_closed_post_install_result,
             },
             step=step,
             timeout=960,
@@ -3086,8 +3309,11 @@ class PostInstallValidationMixin:
                 "ROLLBACK_VERIFIED",
                 "ROLLBACK_LEDGER_VERIFIED",
                 "ROLLBACK_PLAN_ID",
+                "ROLLBACK_POST_INSTALL_RESULT_VERIFIED",
                 "ROLLBACK_PARTITION_LAYOUT_MATCHES",
                 "ROLLBACK_STORAGE_LAYOUT_MATCHES",
+                "ROLLBACK_WINDOWS_BOOT_LOADERS_MATCH",
+                "ROLLBACK_WINDOWS_BOOT_LOADER_PARTITIONS_MATCH",
                 "RESULT",
             ),
         )
@@ -3096,7 +3322,13 @@ class PostInstallValidationMixin:
             or verified.get("ROLLBACK_LEDGER_VERIFIED") != "True"
             or verified.get("ROLLBACK_PARTITION_LAYOUT_MATCHES") != "True"
             or verified.get("ROLLBACK_STORAGE_LAYOUT_MATCHES") != "True"
+            or verified.get("ROLLBACK_WINDOWS_BOOT_LOADERS_MATCH") != "True"
+            or verified.get("ROLLBACK_WINDOWS_BOOT_LOADER_PARTITIONS_MATCH") != "True"
             or verified.get("ROLLBACK_BOOT_GUARDIAN_PRESENT") != "False"
+            or (
+                require_closed_post_install_result
+                and verified.get("ROLLBACK_POST_INSTALL_RESULT_VERIFIED") != "True"
+            )
             or verified.get("RESULT") != "OK"
         ):
             raise WorkflowError(
@@ -3144,16 +3376,29 @@ class PostInstallValidationMixin:
         command: str,
         step: str,
     ) -> bool:
-        try:
-            response = ssh.run(command, step=step, timeout=30, check=False)
-        except WorkflowError as exc:
-            if exc.details.get("exception_type") == "MissingExitStatus":
-                return False
-            raise WorkflowError(
-                step,
-                "Windows could not request the power transition",
-                details={"vm": vm.name, "target": vm.host, **exc.details},
-            ) from exc
+        for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    ssh.reconnect()
+                response = ssh.run(command, step=step, timeout=30, check=False)
+                break
+            except WorkflowError as exc:
+                if exc.details.get("exception_type") == "MissingExitStatus":
+                    return False
+                # Paramiko raises this before creating the exec channel, so the
+                # shutdown command was never sent. Other failures are ambiguous.
+                channel_not_opened = (
+                    exc.details.get("exception_type") == "SSHException"
+                    and exc.details.get("error") == "Timeout opening channel."
+                )
+                if channel_not_opened and attempt < REMOTE_CHECK_SSH_MAX_ATTEMPTS:
+                    time.sleep(WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS)
+                    continue
+                raise WorkflowError(
+                    step,
+                    "Windows could not request the power transition",
+                    details={"vm": vm.name, "target": vm.host, **exc.details},
+                ) from exc
         if response.exit_code == -1:
             return False
         if response.exit_code != 0:

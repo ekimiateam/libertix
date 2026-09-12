@@ -177,6 +177,13 @@ class AutomationRequest(ValidationRequest):
         default="none",
         description=("Development-only recovery scenario used to prove rollback or boot repair"),
     )
+    verify_uninstall: bool = Field(
+        default=False,
+        description=(
+            "Relaunch Libertix after successful post-install verification and prove the "
+            "interactive installed-Linux uninstall path"
+        ),
+    )
 
     @field_validator("linux_username")
     @classmethod

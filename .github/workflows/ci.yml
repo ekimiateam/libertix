@@ -157,6 +157,18 @@ jobs:
           enable-cache: true
           cache-dependency-glob: auto_tests/uv.lock
 
+      - name: Install native Python test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            gir1.2-gdkpixbuf-2.0 \
+            gir1.2-nm-1.0 \
+            libcairo2-dev \
+            libgirepository-2.0-dev \
+            pkg-config \
+            python3-dev \
+            python3-gi
+
       - name: Synchronize locked test environment
         working-directory: auto_tests
         run: uv sync --frozen --extra dev
@@ -172,6 +184,29 @@ jobs:
         run: >-
           uv run --frozen python -m ruff format --check
           app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
+
+      - name: Reject skipped or expected-failure tests
+        working-directory: auto_tests
+        run: |
+          uv run --frozen python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          forbidden = {"importorskip", "skip", "skipif", "xfail"}
+          violations = []
+          for path in sorted(Path("tests").rglob("*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.Call):
+                      continue
+                  function = node.func
+                  if isinstance(function, ast.Attribute) and function.attr in forbidden:
+                      violations.append(f"{path}:{node.lineno}: {function.attr}")
+          if violations:
+              raise SystemExit(
+                  "Skipped and expected-failure tests are forbidden:\n" + "\n".join(violations)
+              )
+          PY
 
       - name: Run Python test suite with coverage
         working-directory: auto_tests
@@ -497,6 +532,15 @@ jobs:
           version: "0.9.8"
           enable-cache: true
           cache-dependency-glob: auto_tests/uv.lock
+
+      - name: Install native dependencies for the locked metadata environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            libcairo2-dev \
+            libgirepository-2.0-dev \
+            pkg-config \
+            python3-dev
 
       - name: Synchronize locked metadata environment
         working-directory: auto_tests

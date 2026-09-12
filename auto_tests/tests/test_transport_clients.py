@@ -687,7 +687,7 @@ def test_vnc_capture_retries_transient_network_failures(
         def captureScreen(self, destination: str) -> None:  # noqa: N802
             nonlocal attempts
             attempts += 1
-            if attempts < 3:
+            if attempts < vnc_module.CAPTURE_MAX_ATTEMPTS:
                 raise OSError(101, "Network is unreachable")
             Image.new("RGB", (32, 24), (12, 24, 48)).save(destination)
 
@@ -705,11 +705,13 @@ def test_vnc_capture_retries_transient_network_failures(
     destination = tmp_path / "capture.png"
 
     assert VNCClient().capture("192.0.2.10:12", destination) == destination
-    assert attempts == 3
+    assert attempts == vnc_module.CAPTURE_MAX_ATTEMPTS
     with Image.open(destination) as capture:
         assert capture.size == (32, 24)
     assert all(connection.disconnected for connection in connections)
-    assert sleeps.count(vnc_module.CAPTURE_RETRY_SECONDS) == 2
+    assert vnc_module.CAPTURE_MAX_ATTEMPTS == 5
+    assert vnc_module.CAPTURE_RETRY_SECONDS == 5
+    assert sleeps.count(vnc_module.CAPTURE_RETRY_SECONDS) == (vnc_module.CAPTURE_MAX_ATTEMPTS - 1)
 
 
 def test_vnc_capture_keeps_a_complete_image_written_before_transport_loss(

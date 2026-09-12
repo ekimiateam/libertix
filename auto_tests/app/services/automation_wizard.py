@@ -6,6 +6,7 @@ import base64
 import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -13,6 +14,7 @@ from typing import Literal
 from PIL import Image
 
 from app.clients.ssh import CommandResult, SSHClient, is_reconnectable_transport_error
+from app.clients.vision_models import InstallProgressVerdict
 from app.config import VMConfig
 from app.errors import WorkflowError
 from app.services.automation_progress import InstallationProgress, assert_installation_progress
@@ -360,11 +362,45 @@ class WizardAutomationMixin:
             raise ValueError("A result builder is required while observing installation progress")
 
         deadline = time.monotonic() + timeout_seconds
+        vision_executor = (
+            ThreadPoolExecutor(max_workers=1) if observe_installation_progress else None
+        )
+        try:
+            return self._poll_unattended_stage(
+                ssh,
+                vm,
+                quoted_status_path,
+                after_sequence,
+                accepted_stages,
+                deadline=deadline,
+                observe_installation_progress=observe_installation_progress,
+                result=result,
+                vision_executor=vision_executor,
+            )
+        finally:
+            if vision_executor is not None:
+                # A slow provider must not hold up the next wizard acknowledgement.
+                vision_executor.shutdown(wait=False, cancel_futures=True)
+
+    def _poll_unattended_stage(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        quoted_status_path: str,
+        after_sequence: int,
+        accepted_stages: tuple[str, ...],
+        *,
+        deadline: float,
+        observe_installation_progress: bool,
+        result: ResultBuilder | None,
+        vision_executor: ThreadPoolExecutor | None,
+    ) -> dict[str, object]:
         observed: dict[str, object] | None = None
         next_progress_observation = time.monotonic()
         progress_observation = 0
         last_progress_at = time.monotonic()
         progress = InstallationProgress()
+        pending_verdict: Future[InstallProgressVerdict] | None = None
         while time.monotonic() < deadline:
             response = self._run_unattended_control_command(
                 ssh,
@@ -411,9 +447,12 @@ class WizardAutomationMixin:
                             **observed,
                         },
                     )
-                break
-
-            if observe_installation_progress and time.monotonic() >= next_progress_observation:
+            if (
+                observe_installation_progress
+                and observed is None
+                and pending_verdict is None
+                and time.monotonic() >= next_progress_observation
+            ):
                 progress_observation += 1
                 capture = self._capture_with_name(
                     vm,
@@ -422,12 +461,17 @@ class WizardAutomationMixin:
                 next_progress_observation = (
                     time.monotonic() + self.settings.automation_monitor_interval_seconds
                 )
+                assert vision_executor is not None
+                pending_verdict = vision_executor.submit(
+                    self.vision_llm.analyze_install_progress,
+                    capture,
+                    vm.name,
+                    vm.os,
+                )
+
+            if pending_verdict is not None and wait((pending_verdict,), timeout=0.2).done:
                 try:
-                    verdict = self.vision_llm.analyze_install_progress(
-                        capture,
-                        vm.name,
-                        vm.os,
-                    )
+                    verdict = pending_verdict.result()
                 except WorkflowError as exc:
                     raise WorkflowError(
                         "automation.windows_preparation_vision_required",
@@ -441,6 +485,8 @@ class WizardAutomationMixin:
                             "provider_message": exc.message,
                         },
                     ) from exc
+
+                pending_verdict = None
 
                 if progress.observe(verdict.visible_text):
                     last_progress_at = time.monotonic()
@@ -481,6 +527,8 @@ class WizardAutomationMixin:
                         "Visible error during Windows installation preparation",
                         details=context,
                     )
+            if observed is not None:
+                break
             time.sleep(0.2)
 
         expected_stage = " or ".join(accepted_stages)

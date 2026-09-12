@@ -1161,6 +1161,20 @@ try {
             Assert-Condition ($service.Status -eq "Running") "The Windows SSH service is not running."
             Assert-Condition ($configuration.StartMode -eq "Auto") "The Windows SSH service is not configured for automatic startup."
         }
+        "update_policy" {
+            $updatePolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            $automaticUpdates = Get-ItemPropertyValue -LiteralPath "$updatePolicy\AU" -Name NoAutoUpdate
+            $updateUi = Get-ItemPropertyValue -LiteralPath $updatePolicy -Name SetDisableUXWUAccess
+            Assert-Condition ($automaticUpdates -eq 1 -and $updateUi -eq 1) `
+                "The test VM Windows Update policy changed during installation."
+            # Windows can repair or trigger-start wuauserv across reboots. The
+            # machine policies, not that service state, define whether automatic
+            # updates and interactive scan/download/install are allowed.
+            $updateService = Get-CimInstance Win32_Service -Filter "Name='wuauserv'"
+            Write-Output ("WINDOWS_UPDATE_SERVICE_STATE={0}" -f $updateService.State)
+            Write-Output ("WINDOWS_UPDATE_SERVICE_START_MODE={0}" -f $updateService.StartMode)
+            Write-Output "WINDOWS_UPDATES_DISABLED=True"
+        }
         "core_services" {
             $names = @("EventLog", "PlugPlay", "RpcSs", "Schedule")
             $services = @(Get-Service -Name $names -ErrorAction Stop)

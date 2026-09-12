@@ -20,9 +20,23 @@ Describe "Aligned BIOS MBR restoration" {
         [Array]::Copy($backup, 0, $expected, 0, 440)
         foreach ($attempt in @(1, 2)) {
             [Libertix.BiosMbrIo]::Restore($path, $Size, $backup)
+            [Libertix.BiosMbrIo]::VerifyBootCode($path, $Size, $backup)
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) |
                 Should -BeExactly ([Convert]::ToBase64String($expected))
         }
+    }
+
+    It 'detects changed boot code without repairing or writing the sector' {
+        $path = Join-Path $TestDrive 'changed-boot-code.bin'
+        [byte[]]$backup = New-Object byte[] 512
+        $backup[510] = 0x55; $backup[511] = 0xaa
+        [byte[]]$current = $backup.Clone()
+        $current[20] = 42
+        [IO.File]::WriteAllBytes($path, $current)
+        { [Libertix.BiosMbrIo]::VerifyBootCode($path, 512, $backup) } |
+            Should -Throw '*differs from its backup*'
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) |
+            Should -BeExactly ([Convert]::ToBase64String($current))
     }
 
     It "rejects unsupported geometry without opening a destination" {

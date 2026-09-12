@@ -79,7 +79,7 @@ namespace Libertix.Installation
             }
         }
 
-        private static void Publish(string temporaryPath, string fullPath)
+        internal static void Publish(string temporaryPath, string fullPath)
         {
             for (int attempt = 1; ; attempt++)
             {
