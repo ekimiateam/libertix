@@ -1,6 +1,7 @@
 ﻿using System;
 using System.IO;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,6 +16,18 @@ namespace Libertix
     {
         private Mutex _singleInstanceMutex;
         private bool _ownsSingleInstanceMutex;
+        private bool _keepAwakeRequested;
+
+        [Flags]
+        private enum ExecutionState : uint
+        {
+            SystemRequired = 0x00000001,
+            DisplayRequired = 0x00000002,
+            Continuous = 0x80000000
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern ExecutionState SetThreadExecutionState(ExecutionState flags);
         public InstallationState InstallationState { get; } = new InstallationState();
         public StartupOptions RuntimeOptions { get; private set; } = new StartupOptions();
         public ApplicationBuild Build { get; } = ApplicationBuild.Current;
@@ -68,6 +81,27 @@ namespace Libertix
                 Shutdown(1);
                 return;
             }
+
+            // Keep this request on the WPF thread until OnExit, including time in the tray.
+            // Windows also releases it if the process terminates without running OnExit.
+            _keepAwakeRequested = SetThreadExecutionState(
+                ExecutionState.Continuous | ExecutionState.SystemRequired |
+                ExecutionState.DisplayRequired) != 0;
+            if (!_keepAwakeRequested)
+            {
+                ApplicationLogger.Write("Startup refused: Windows rejected the sleep prevention request.");
+                MessageBox.Show(
+                    Localization.GetBootstrapString(
+                        "SleepPreventionFailed",
+                        "Windows could not keep the computer and display awake. " +
+                        "Libertix will close without starting the installation. Try again."),
+                    "Libertix",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
+                Shutdown(6);
+                return;
+            }
+            ApplicationLogger.Write("Automatic system sleep and display timeout prevention requested.");
 
             string recoveryStatePath = TryGetUefiRecoveryStatePath(RuntimeOptions);
             if (!string.IsNullOrWhiteSpace(recoveryStatePath))
@@ -279,6 +313,14 @@ namespace Libertix
 
         protected override void OnExit(ExitEventArgs e)
         {
+            if (_keepAwakeRequested)
+            {
+                bool released = SetThreadExecutionState(ExecutionState.Continuous) != 0;
+                ApplicationLogger.Write(released
+                    ? "Automatic system sleep and display timeout prevention released."
+                    : "Sleep prevention release failed; Windows will release it when this thread exits.");
+                _keepAwakeRequested = false;
+            }
             ApplicationLogger.Write($"Libertix.exe exit, code={e.ApplicationExitCode}.");
             if (_singleInstanceMutex != null)
             {

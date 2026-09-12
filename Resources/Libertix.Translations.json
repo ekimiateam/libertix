@@ -299,6 +299,7 @@
         "bootstrapMessages": {
           "AdministratorRequired": "Libertix must be run as administrator to modify partitions and the Windows boot configuration.",
           "SingleInstanceRequired": "Another Libertix instance is already running.",
+          "SleepPreventionFailed": "Windows could not keep the computer and display awake. Libertix will close without starting the installation. Try again.",
           "InvalidStartupOptionsTitle": "Libertix - invalid startup option",
           "InvalidStartupOptionsMessage": "Invalid startup option: {0}",
           "ReleaseCheckFailedTitle": "Libertix - version verification failed",
@@ -699,6 +700,7 @@
         "bootstrapMessages": {
           "AdministratorRequired": "Libertix doit être lancé en administrateur pour modifier les partitions et le démarrage Windows.",
           "SingleInstanceRequired": "Une autre instance de Libertix est déjà en cours d'exécution.",
+          "SleepPreventionFailed": "Windows n’a pas pu maintenir l’ordinateur et l’écran éveillés. Libertix va se fermer sans démarrer l’installation. Réessayez.",
           "InvalidStartupOptionsTitle": "Libertix - option de démarrage invalide",
           "InvalidStartupOptionsMessage": "Option de démarrage invalide : {0}",
           "ReleaseCheckFailedTitle": "Libertix - échec de la vérification de version",
@@ -1099,6 +1101,7 @@
         "bootstrapMessages": {
           "AdministratorRequired": "Libertix debe ejecutarse como administrador para modificar las particiones y el arranque de Windows.",
           "SingleInstanceRequired": "Ya se está ejecutando otra instancia de Libertix.",
+          "SleepPreventionFailed": "Windows no pudo mantener el equipo y la pantalla activos. Libertix se cerrará sin iniciar la instalación. Vuelva a intentarlo.",
           "InvalidStartupOptionsTitle": "Libertix - opción de inicio no válida",
           "InvalidStartupOptionsMessage": "Opción de inicio no válida: {0}",
           "ReleaseCheckFailedTitle": "Libertix - error al verificar la versión",
@@ -1499,6 +1502,7 @@
         "bootstrapMessages": {
           "AdministratorRequired": "파티션과 Windows 부팅 구성을 변경하려면 Libertix를 관리자 권한으로 실행해야 합니다.",
           "SingleInstanceRequired": "다른 Libertix 인스턴스가 이미 실행 중입니다.",
+          "SleepPreventionFailed": "Windows에서 컴퓨터와 화면을 켜진 상태로 유지할 수 없습니다. Libertix는 설치를 시작하지 않고 종료됩니다. 다시 시도하세요.",
           "InvalidStartupOptionsTitle": "Libertix - 잘못된 시작 옵션",
           "InvalidStartupOptionsMessage": "잘못된 시작 옵션입니다: {0}",
           "ReleaseCheckFailedTitle": "Libertix - 버전 확인 실패",
