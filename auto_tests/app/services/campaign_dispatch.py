@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Sequence
+import queue as queue_module
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Literal
 
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
-from app.models import AutomationCampaignRequest, BootGuardianFault, DistributionId, OperationResult
+from app.models import (
+    AutomationCampaignRequest,
+    AutomationRequest,
+    BootGuardianFault,
+    DistributionId,
+    OperationResult,
+    StepResult,
+)
 from app.services.validation import ValidationService
 from app.storage_fixtures import StorageFixtureRequest
+from app.stream_events import StreamEventProjector
 
 FORMAT_VERSION = 1
 
@@ -413,3 +423,272 @@ def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]
         if entry["status"] == "running":
             entry["status"] = "interrupted"
     return runs
+
+
+# `run_scenario` is a fake in every current test (Task 7) -- no real
+# AutomationService/Proxmox/SSH dependency is exercised here. Source
+# preparation (ValidationService.prepare_server -> a real SSH round trip to
+# the Samba host) is deliberately NOT performed inside CampaignDispatcher:
+# doing it here would make every dispatcher test perform a live SSH connect
+# with no mocking hook available (unlike the existing service tests, which
+# monkeypatch ValidationService.ssh). Instead, mirroring the "pre-built
+# windows_path" pattern already introduced for AutomationService.run()
+# (see _run_operation's automation branch in main.py), CampaignDispatcher
+# accepts an already-resolved `windows_path` and threads it straight through
+# to every worker's `run_scenario` call. Preparing the server once, up front,
+# and passing the result in is the caller's responsibility -- wiring that
+# caller is a later task.
+RunScenario = Callable[
+    [AutomationRequest, Path, Callable[[StepResult], None], PureWindowsPath | None],
+    OperationResult,
+]
+
+
+@dataclass
+class _SchedulerState:
+    pending: list[ScenarioRun]
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    quarantined: set[str] = field(default_factory=set)
+    stop_claiming: bool = False
+
+
+def _sweep_pending(
+    summary: dict[str, object],
+    vm_pool: Sequence[VMConfig],
+    spec_by_id: dict[str, ScenarioSpec],
+    state: _SchedulerState,
+) -> None:
+    for entry in summary["runs"].values():  # type: ignore[union-attr]
+        if entry["status"] != "pending":
+            continue
+        spec = spec_by_id[str(entry["scenario_id"])]
+        has_worker = any(
+            vm.name not in state.quarantined
+            and vm.os == entry["profile"]
+            and _vm_compatible(vm, spec.requirements)
+            for vm in vm_pool
+        )
+        entry["status"] = (
+            "stopped-after-failure" if has_worker else "no-compatible-worker-after-quarantine"
+        )
+
+
+def _aggregate_result(summary: dict[str, object]) -> OperationResult:
+    entries = list(summary["runs"].values())  # type: ignore[union-attr]
+    passed = all(entry["status"] == "passed" for entry in entries)
+    counts = _counts(summary["runs"])  # type: ignore[arg-type]
+    return OperationResult(
+        status="ok" if passed else "error",
+        operation="automation",
+        message="Campaign passed" if passed else f"Campaign incomplete: {counts}",
+        steps=[],
+        campaign_summary=entries,
+    )
+
+
+class CampaignDispatcher:
+    def __init__(
+        self, configured: Settings, matrix: Sequence[ScenarioSpec] = SCENARIO_MATRIX
+    ) -> None:
+        self._configured = configured
+        self._matrix = matrix
+
+    def run(
+        self,
+        request: AutomationCampaignRequest,
+        run_scenario: RunScenario,
+        workspace: Path,
+        on_step: Callable[[StepResult], None] | None = None,
+        windows_path: PureWindowsPath | None = None,
+    ) -> OperationResult:
+        fleet = self._configured.vms
+        # AutomationCampaignRequest.scenario_ids doesn't exist yet (added in a
+        # later task); getattr keeps this buildable until then, consistent
+        # with _build_summary's own tolerance for the missing field.
+        scenario_ids = getattr(request, "scenario_ids", None)
+        specs = _resolve_specs(self._matrix, scenario_ids, fleet)
+        spec_by_id = {spec.id: spec for spec in specs}
+        vm_pool = _resolve_worker_pool(self._configured, request.selectors())
+        runs = _expand_runs(specs, fleet, vm_pool)
+
+        summary = _build_summary(request, specs, vm_pool, runs)
+        _persist_summary(workspace, summary)
+
+        state = _SchedulerState(pending=list(runs))
+        updates: queue_module.Queue = queue_module.Queue()
+        threads = [
+            threading.Thread(
+                target=self._worker,
+                args=(
+                    vm,
+                    state,
+                    updates,
+                    spec_by_id,
+                    request,
+                    run_scenario,
+                    on_step,
+                    windows_path,
+                    workspace,
+                ),
+            )
+            for vm in vm_pool
+        ]
+        for thread in threads:
+            thread.start()
+
+        active = len(threads)
+        while active > 0:
+            kind, payload = updates.get()
+            if kind == "claimed":
+                run_id, vm_name, when, ack = payload
+                _mark_running(summary, run_id, vm_name, when)
+                _persist_summary(workspace, summary)
+                ack.set()
+            elif kind == "completed":
+                _mark_completed(summary, payload)
+                _persist_summary(workspace, summary)
+            elif kind == "worker_done":
+                active -= 1
+
+        for thread in threads:
+            thread.join()
+
+        _sweep_pending(summary, vm_pool, spec_by_id, state)
+        summary["finished_at"] = _now_iso()
+        _persist_summary(workspace, summary)
+        return _aggregate_result(summary)
+
+    @staticmethod
+    def _worker(
+        vm: VMConfig,
+        state: _SchedulerState,
+        updates: queue_module.Queue,
+        spec_by_id: dict[str, ScenarioSpec],
+        request: AutomationCampaignRequest,
+        run_scenario: RunScenario,
+        on_step: Callable[[StepResult], None] | None,
+        windows_path: PureWindowsPath | None,
+        workspace: Path,
+    ) -> None:
+        try:
+            while True:
+                claimed: ScenarioRun | None = None
+                with state.lock:
+                    if vm.name not in state.quarantined and not state.stop_claiming:
+                        for candidate in state.pending:
+                            spec = spec_by_id[candidate.scenario_id]
+                            if candidate.profile == vm.os and _vm_compatible(
+                                vm, spec.requirements
+                            ):
+                                claimed = candidate
+                                state.pending.remove(candidate)
+                                break
+                if claimed is None:
+                    return
+
+                ack = threading.Event()
+                updates.put(("claimed", (claimed.run_id, vm.name, _now_iso(), ack)))
+                ack.wait()
+
+                spec = spec_by_id[claimed.scenario_id]
+                scenario_workspace = (
+                    workspace / "scenarios" / f"{claimed.run_id.replace('::', '__')}-{vm.name}"
+                )
+                scenario_workspace.mkdir(parents=True, exist_ok=True)
+                projector = StreamEventProjector("automation", scenario_workspace)
+
+                def publish(
+                    step: StepResult,
+                    *,
+                    scenario_id: str = claimed.scenario_id,
+                    projector: StreamEventProjector = projector,
+                ) -> None:
+                    tagged = step.model_copy(
+                        update={"context": {**step.context, "scenario": scenario_id}}
+                    )
+                    projector.project_step(tagged)
+                    if on_step is not None:
+                        on_step(tagged)
+
+                child_request = AutomationRequest(
+                    vms=[vm.name],
+                    source=request.source,
+                    apply=True,
+                    linux_username=request.linux_username,
+                    linux_password=request.linux_password,
+                    linux_size_gib=request.linux_size_gib,
+                    migrate_windows_preferences=request.migrate_windows_preferences,
+                    distribution=spec.distribution,
+                    first_boot=spec.first_boot,
+                    installation_target=spec.installation_target,
+                    snapshot_mode=spec.snapshot_mode,
+                    storage_fixture=spec.storage_fixture,
+                    boot_guardian_fault=spec.boot_guardian_fault,
+                    simulate_stale_firmware_entries=spec.simulate_stale_firmware_entries,
+                    force_offline_ntfs_resize=spec.force_offline_ntfs_resize,
+                    share_windows_files_in_linux=spec.share_windows_files_in_linux,
+                    share_linux_files_in_windows=spec.share_linux_files_in_windows,
+                    preference_wallpaper=spec.preference_wallpaper,
+                    verify_uninstall=spec.verify_uninstall,
+                )
+
+                claimed_at = _now_iso()
+                try:
+                    outcome_result = run_scenario(
+                        child_request, scenario_workspace, publish, windows_path
+                    )
+                    outcome, reason = _classify(outcome_result, vm.name)
+                    errors = [
+                        step.model_dump(mode="json")
+                        for step in outcome_result.steps
+                        if step.status == "error"
+                    ]
+                    message = outcome_result.message
+                    projector.project_result(outcome_result)
+                except Exception as exc:
+                    error_step = StepResult(
+                        step="automation.campaign_exception",
+                        status="error",
+                        message="Scenario terminated unexpectedly",
+                        context={"exception_type": type(exc).__name__},
+                    )
+                    publish(error_step)
+                    outcome, reason = "failed", None
+                    errors = [error_step.model_dump(mode="json")]
+                    message = error_step.message
+                    projector.project_result(
+                        OperationResult(
+                            status="error",
+                            operation="automation",
+                            message=message,
+                            steps=[error_step],
+                        )
+                    )
+
+                with state.lock:
+                    if outcome == "retryable" and reason in {"restore_failed", "preflight_failed"}:
+                        state.quarantined.add(vm.name)
+                    if outcome in {"failed", "retryable"} and not request.continue_after_failure:
+                        state.stop_claiming = True
+
+                updates.put(
+                    (
+                        "completed",
+                        ScenarioRunResult(
+                            run_id=claimed.run_id,
+                            scenario_id=claimed.scenario_id,
+                            profile=claimed.profile,
+                            vm=vm.name,
+                            outcome=outcome,
+                            reason=reason,
+                            message=message,
+                            errors=errors,
+                            log=str(projector.log_path),
+                            captures=str(scenario_workspace / "captures"),
+                            claimed_at=claimed_at,
+                            finished_at=_now_iso(),
+                        ),
+                    )
+                )
+        finally:
+            updates.put(("worker_done", vm.name))
