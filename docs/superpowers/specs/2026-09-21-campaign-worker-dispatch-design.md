@@ -146,11 +146,15 @@ translation at `_run_operation` never needs a second representation:
 `distribution`, `first_boot`, `installation_target`, `snapshot_mode`,
 `storage_fixture`, `boot_guardian_fault`, `simulate_stale_firmware_entries`,
 `force_offline_ntfs_resize`, `share_windows_files_in_linux`,
-`share_linux_files_in_windows`, `migrate_windows_preferences`,
-`preference_wallpaper`, `verify_uninstall`. The campaign/request owns
-`source`, `apply`, `linux_username`, `linux_password`, `linux_size_gib`, VM
+`share_linux_files_in_windows`, `preference_wallpaper`, `verify_uninstall`.
+The campaign/request owns `source`, `apply`, `linux_username`,
+`linux_password`, `linux_size_gib`, `migrate_windows_preferences`, VM
 selectors, and `continue_after_failure` -- exactly what
-`AutomationCampaignRequest` already models today. The dispatcher builds
+`AutomationCampaignRequest` already models today
+(`migrate_windows_preferences: bool = False`, `models.py:95`, passed to
+every child request unchanged; it stays campaign-owned rather than
+scenario-owned so this PR doesn't silently repurpose an existing public
+campaign option). The dispatcher builds
 each child `AutomationRequest` by passing campaign-owned fields and one
 spec's scenario-owned fields as separate, named keyword arguments into the
 real `AutomationRequest` Pydantic model (not by merging dicts), so a
@@ -191,13 +195,12 @@ class ScenarioSpec:
     first_boot: Literal["windows", "linux"] = "windows"
     installation_target: Literal["windows", "secondary"] = "windows"
     snapshot_mode: Literal["default", "secondary-disk"] = "default"
-    storage_fixture: StorageFixtureRequest | None = None
+    storage_fixture: StorageFixtureRequest = field(default_factory=StorageFixtureRequest)
     boot_guardian_fault: str = "none"
     simulate_stale_firmware_entries: bool = False
     force_offline_ntfs_resize: bool = False
     share_windows_files_in_linux: bool = True
     share_linux_files_in_windows: bool = True
-    migrate_windows_preferences: bool = False
     preference_wallpaper: Literal["custom", "windows-default"] = "custom"
     verify_uninstall: bool = False
 
@@ -230,20 +233,38 @@ class ScenarioRunResult:
 
 ### Starter matrix
 
-Preserves current coverage: the 4 existing nominal scenarios as
-`ScenarioSpec(requirements=ScenarioRequirements())`, which (per the
-"required profiles" rule above) expand to every configured profile -- the
-same full coverage as today's fixed 3-VM campaign, generalized to however
-many distinct profiles actually exist. One representative secondary-disk
+Preserves current coverage exactly: the 4 existing nominal scenarios as
+`ScenarioSpec(requirements=ScenarioRequirements(), verify_uninstall=True,
+...)`. `verify_uninstall=True` is set explicitly on all four -- today's
+`run_campaign()` hardcodes `verify_uninstall=True` for every nominal
+scenario; the field defaults to `False` on `ScenarioSpec` only so a later,
+different scenario can opt out, not because the starter matrix should
+silently change this behavior. Per the "required profiles" rule above,
+these four expand to every configured profile -- the same full coverage as
+today's fixed 3-VM campaign, generalized to however many distinct profiles
+actually exist.
+
+One representative secondary-disk scenario is included as a genuine
+secondary installation, not just a secondary-disk snapshot baseline:
 `ScenarioSpec(requirements=ScenarioRequirements(requires_secondary_disk=True),
-snapshot_mode="secondary-disk")` is included; it only produces
-`ScenarioRun`s for profiles that actually have a VM with a non-empty
-`secondary_disk_boot_order` in the current fleet -- if none exists, it
-silently resolves to zero runs (a property of the matrix, not a dropped
-filter; see "Resolve" for the distinction from an explicit `scenario_ids`
-request for it). `boot_guardian_fault` scenarios stay out of the starter
-matrix for this PR (single-VM-scoped; `ScenarioRequirements(firmware=...)`
-already expresses their compatibility constraint for later additions).
+snapshot_mode="secondary-disk", installation_target="secondary",
+verify_uninstall=True)`. `installation_target="secondary"` combined with
+`snapshot_mode="secondary-disk"` is already a supported, validated
+combination in `AutomationService.run()` (`automation.py:142-148`:
+`installation_target == "secondary"` requires `secondary_snapshot`, i.e.
+`snapshot_mode == "secondary-disk"`) -- no new fixture behavior is
+invented for this PR. It only produces `ScenarioRun`s for profiles that
+actually have a VM with a non-empty `secondary_disk_boot_order` in the
+current fleet -- if none exists, it silently resolves to zero runs (a
+property of the matrix, not a dropped filter; see "Resolve" for the
+distinction from an explicit `scenario_ids` request for it). If, during
+planning, `installation_target="secondary"` turns out not to be clean to
+exercise standalone in this environment, drop this scenario from the
+starter matrix entirely rather than substituting an untested fixture
+combination -- the four preserved nominal scenarios are not contingent on
+it. `boot_guardian_fault` scenarios stay out of the starter matrix for
+this PR (single-VM-scoped; `ScenarioRequirements(firmware=...)` already
+expresses their compatibility constraint for later additions).
 
 ## Dispatch algorithm
 
@@ -312,12 +333,20 @@ OperationResult` executes these steps in order:
    `run_scenario` itself):
    - **Atomic claim.** Under `scheduler_lock`: if `vm.name in quarantined`
      or `stop_claiming` is true, do nothing (fall through to exit). Else
-     find the first entry in `pending` whose `profile == vm.os` and remove
-     it from `pending` in the same critical section (so the quarantine
-     check, the stop check, and the claim are one atomic transition -- no
-     window where a worker claims after the stop condition became visible
-     but before it observed it). If nothing compatible remains, exit
-     (falls through to `finally`).
+     find the first entry in `pending` whose `profile == vm.os` **and**
+     `_vm_compatible(vm, spec_by_id[run.scenario_id].requirements)` (the
+     dispatcher keeps a `spec_by_id: dict[str, ScenarioSpec]` built in step
+     1), and remove it from `pending` in the same critical section (so the
+     quarantine check, the stop check, and the claim are one atomic
+     transition -- no window where a worker claims after the stop
+     condition became visible but before it observed it). Profile equality
+     alone is not enough: two physical VMs can share a profile (`vm.os`)
+     while differing in another capability (e.g. one `win11-uefi` clone
+     has `secondary_disk_boot_order` set, another doesn't) -- a run whose
+     spec requires that capability may only be claimed by a VM that
+     actually satisfies `_vm_compatible`, even though both VMs match the
+     run's `profile`. If nothing compatible remains, exit (falls through
+     to `finally`).
    - Release `scheduler_lock`, then report the claim and **wait for it to
      land on disk** before running anything: put `("claimed", run_id,
      vm.name, now, ack)` on `updates`, where `ack` is a `threading.Event`;
@@ -341,29 +370,52 @@ OperationResult` executes these steps in order:
      `self._capture_dir` mutation stays safe). `publish()` tags every step
      with `context={"scenario": scenario_id}` exactly as today, so
      `OperationProgress` stall detection needs no changes.
-   - Classify the outcome (below). If it is `retryable` with `reason` in
+   - Classify the outcome (below), **under `scheduler_lock`, before doing
+     anything else**: if it is `retryable` with `reason` in
      `{"restore_failed", "preflight_failed"}`, add `vm.name` to
-     `quarantined` under `scheduler_lock`.
-   - Put `("completed", ScenarioRunResult)` on `updates`.
+     `quarantined`; separately, if `outcome in {"failed", "retryable"}`
+     **and** `request.continue_after_failure` is false, set
+     `stop_claiming = True`. Both of these are set by the worker itself,
+     synchronously, immediately after classification -- **not** by the
+     consumer thread after it drains the `updates` queue. `scheduler_lock`
+     is a shared, thread-safe primitive that any thread may mutate; the
+     "single writer" rule in "Summary persistence" applies only to
+     `campaign-summary.json`/the in-memory summary, never to
+     `SchedulerState`. Setting `stop_claiming` only when the consumer
+     processes `"completed"` would leave a window where a worker (this one
+     or another) claims a new run after its own outcome is already known
+     to be `failed`/`retryable`, simply because the queue message hasn't
+     been consumed yet -- setting it here, synchronously, before the next
+     "Atomic claim" attempt, closes that window regardless of queue
+     latency.
+   - Put `("completed", ScenarioRunResult)` on `updates` (for persistence
+     only -- the scheduling decision above has already taken effect).
    - Loop back to "Atomic claim".
    - `finally`: put `("worker_done", vm.name)` on `updates`, unconditionally.
 9. **Dispatcher consumer loop** (the thread that called
    `CampaignDispatcher.run()`, running concurrently with the worker threads
    it started in step 7): loop on `updates.get()` until `worker_done` has
-   been received from every started worker:
+   been received from every started worker. This loop is the sole writer
+   of `campaign-summary.json`/the in-memory summary; it never mutates
+   `SchedulerState` (`quarantined`/`stop_claiming` are already set by the
+   worker that observed the outcome, per step 8):
    - `"claimed"` -> set that run's entry to `running`, set `claimed_at`,
      persist, then set the handshake `Event` so the worker proceeds.
    - `"completed"` -> update the run's entry with its `ScenarioRunResult`,
-     persist. If `outcome in {"failed", "retryable"}` and
-     `request.continue_after_failure` is false, set `stop_claiming = True`
-     under `scheduler_lock`.
+     persist.
    - `"worker_done"` -> decrement the active-worker count.
 10. **Final sweep and aggregate result.** Once the active-worker count
     reaches 0, for every run still `pending`:
-    - If no VM in `vm_pool` with a matching profile remains outside
-      `quarantined` -> `status="no-compatible-worker-after-quarantine"`
-      (it was never attempted because every eligible worker quarantined
-      itself; not a `failed`/`retryable` outcome of its own).
+    - If no VM in `vm_pool` outside `quarantined` satisfies **both**
+      `vm.os == run.profile` **and** `_vm_compatible(vm,
+      spec_by_id[run.scenario_id].requirements)` -> `status=
+      "no-compatible-worker-after-quarantine"` (it was never attempted
+      because every eligible worker quarantined itself; not a
+      `failed`/`retryable` outcome of its own). Matching profile alone is
+      not sufficient here either -- the same claim-time compatibility
+      predicate applies, so a run isn't reported as "waiting for a worker"
+      when the only remaining same-profile VMs were never actually
+      eligible to run it in the first place.
     - Else if `stop_claiming` was set -> `status="stopped-after-failure"`.
     - (These two cases are exhaustive by construction -- a run cannot stay
       `pending` after every worker reports `worker_done` for any other
@@ -600,10 +652,21 @@ Unit tests (no real Proxmox/SSH dependency, matching existing test style):
   claims profile-compatible runs, no run is claimed twice, two VMs sharing
   a profile correctly compete for the same pending runs, a worker exits
   cleanly when nothing compatible remains.
-- Atomic stop/claim race: a worker that checks `stop_claiming` and a
-  concurrent `stop_claiming` write from the dispatcher consumer can never
-  interleave such that a run is claimed after the stop condition became
-  visible (exercised with a stub that forces the interleaving).
+- Claim-time compatibility beyond profile string: two VMs sharing `vm.os`
+  but differing in `_vm_compatible` (e.g. one has `secondary_disk_boot_order`
+  set, the other doesn't) -- the incompatible VM must never claim a run
+  whose spec requires that capability, even though its profile matches.
+  Same check exercised in the step-10 "no-compatible-worker" sweep: a run
+  is not misreported as `no-compatible-worker-after-quarantine` versus
+  legitimately still claimable, based on the same predicate.
+- Worker-owns-stop-claiming race: worker A classifies its run
+  `failed`/`retryable` with `continue_after_failure=false`; before the
+  dispatcher consumer has drained A's `"completed"` message from `updates`,
+  neither worker A nor a concurrent worker B may claim another run --
+  `stop_claiming` must already be visible to every worker because A set it
+  synchronously under `scheduler_lock` at classification time, not because
+  the consumer eventually processed the queue (exercised with a stub that
+  delays queue consumption to force the interleaving).
 - `worker_done` guarantee: every exit path (exhaustion, quarantine,
   `stop_claiming`, a construction error, an exception from `run_scenario`)
   results in exactly one `("worker_done", vm.name)` reaching the consumer;
@@ -638,6 +701,13 @@ Unit tests (no real Proxmox/SSH dependency, matching existing test style):
   `ScenarioSpec` + campaign request contains exactly the expected merged
   fields (including `snapshot_mode` passed through unchanged to
   `_run_operation`'s existing `secondary_snapshot`/`reset_snapshot`
-  translation), and no scenario-owned field can leak into or override a
-  campaign-owned one (a `ScenarioSpec` has no field through which it could
-  set `source`/`apply`/credentials).
+  translation, and `migrate_windows_preferences` taken from the campaign
+  request rather than the scenario, matching today's `run_campaign()`),
+  and no scenario-owned field can leak into or override a campaign-owned
+  one (a `ScenarioSpec` has no field through which it could set
+  `source`/`apply`/credentials/`migrate_windows_preferences`).
+- Starter matrix fidelity: the four nominal `ScenarioSpec`s resolve with
+  `verify_uninstall=True` (matching today's hardcoded `run_campaign()`
+  behavior), and `storage_fixture` defaults to a concrete
+  `StorageFixtureRequest()` instance, never `None`, matching
+  `AutomationRequest`'s own default.
