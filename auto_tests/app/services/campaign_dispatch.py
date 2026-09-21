@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
-from app.models import BootGuardianFault, DistributionId, OperationResult
+from app.models import AutomationCampaignRequest, BootGuardianFault, DistributionId, OperationResult
 from app.services.validation import ValidationService
 from app.storage_fixtures import StorageFixtureRequest
 
@@ -277,3 +281,116 @@ def _classify(outcome: OperationResult, vm_name: str) -> tuple[ScenarioOutcome, 
     if verdicts.get(vm_name) != "ok":
         return "failed", None
     return "passed", None
+
+
+_COUNT_KEYS = (
+    "pending", "running", "passed", "failed", "retryable",
+    "interrupted", "stopped_after_failure", "no_compatible_worker_after_quarantine",
+)
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _pending_run_entry(run: ScenarioRun) -> dict[str, object]:
+    return {
+        "run_id": run.run_id,
+        "scenario_id": run.scenario_id,
+        "profile": run.profile,
+        "vm": None,
+        "status": "pending",
+        "reason": None,
+        "message": None,
+        "errors": [],
+        "log": None,
+        "captures": None,
+        "claimed_at": None,
+        "finished_at": None,
+    }
+
+
+def _build_summary(
+    request: AutomationCampaignRequest,
+    specs: Sequence[ScenarioSpec],
+    vm_pool: Sequence[VMConfig],
+    runs: Sequence[ScenarioRun],
+) -> dict[str, object]:
+    return {
+        "format_version": FORMAT_VERSION,
+        # AutomationCampaignRequest.scenario_ids doesn't exist yet (added in a
+        # later task); getattr keeps this file buildable until then and is a
+        # no-op once the field lands.
+        "requested": {"scenario_ids": getattr(request, "scenario_ids", None), "vms": request.selectors()},
+        "resolved": {
+            "scenario_ids": [spec.id for spec in specs],
+            "vm_pool": [vm.name for vm in vm_pool],
+        },
+        "runs": {run.run_id: _pending_run_entry(run) for run in runs},
+        "started_at": _now_iso(),
+        "finished_at": None,
+    }
+
+
+def _counts(runs: dict[str, dict[str, object]]) -> dict[str, int]:
+    counts = dict.fromkeys(_COUNT_KEYS, 0)
+    for entry in runs.values():
+        key = str(entry["status"]).replace("-", "_")
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _persist_summary(workspace: Path, summary: dict[str, object]) -> None:
+    runs: dict[str, dict[str, object]] = summary["runs"]  # type: ignore[assignment]
+    payload = {**summary, "runs": list(runs.values()), "counts": _counts(runs)}
+    temporary = workspace / "campaign-summary.json.tmp"
+    with temporary.open("w", encoding="utf-8") as output:
+        json.dump(payload, output, ensure_ascii=False)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(workspace / "campaign-summary.json")
+
+
+def _mark_running(summary: dict[str, object], run_id: str, vm_name: str, when: str) -> None:
+    entry = summary["runs"][run_id]  # type: ignore[index]
+    entry["status"] = "running"
+    entry["vm"] = vm_name
+    entry["claimed_at"] = when
+
+
+def _mark_completed(summary: dict[str, object], result: ScenarioRunResult) -> None:
+    entry = summary["runs"][result.run_id]  # type: ignore[index]
+    entry.update(
+        status=result.outcome,
+        reason=result.reason,
+        message=result.message,
+        errors=result.errors,
+        log=result.log,
+        captures=result.captures,
+        finished_at=result.finished_at,
+    )
+
+
+def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]]:
+    path = workspace / "campaign-summary.json"
+    try:
+        if path.stat().st_size > 1024 * 1024:
+            return []
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, dict) or raw.get("format_version") != FORMAT_VERSION:
+        return []
+    runs = raw.get("runs")
+    resolved = raw.get("resolved")
+    requested = raw.get("requested")
+    if not isinstance(runs, list) or not isinstance(resolved, dict) or not isinstance(requested, dict):
+        return []
+    required_keys = {"run_id", "scenario_id", "profile", "vm", "status"}
+    for entry in runs:
+        if not isinstance(entry, dict) or not required_keys.issubset(entry):
+            return []
+    for entry in runs:
+        if entry["status"] == "running":
+            entry["status"] = "interrupted"
+    return runs

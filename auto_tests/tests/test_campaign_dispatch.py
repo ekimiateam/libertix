@@ -1,20 +1,32 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from app.config import VMConfig
 from app.errors import WorkflowError
-from app.models import OperationResult, StepResult
+from app.models import AutomationCampaignRequest, OperationResult, StepResult
 from app.services.campaign_dispatch import (
+    FORMAT_VERSION,
     SCENARIO_MATRIX,
     ScenarioRequirements,
+    ScenarioRun,
+    ScenarioRunResult,
     ScenarioSpec,
+    _build_summary,
     _classify,
+    _counts,
     _expand_runs,
     _fleet_profiles,
+    _mark_completed,
+    _mark_running,
+    _persist_summary,
     _resolve_specs,
     _resolve_worker_pool,
     _vm_compatible,
+    read_interrupted_campaign_summary,
 )
 
 
@@ -254,3 +266,89 @@ def test_classify_returns_failed_for_error_status_with_no_error_steps() -> None:
         steps=[],
     )
     assert _classify(result, "vm1") == ("failed", None)
+
+
+def _campaign_request(**overrides: object) -> AutomationCampaignRequest:
+    values = {"apply": True, "linux_password": "test-passphrase"}
+    values.update(overrides)
+    return AutomationCampaignRequest(**values)
+
+
+def test_build_summary_has_one_pending_entry_per_run() -> None:
+    specs = [ScenarioSpec(id="x", tags=(), requirements=ScenarioRequirements())]
+    vm_pool = [_vm(name="a")]
+    runs = [ScenarioRun(run_id="x::Windows 10 UEFI", scenario_id="x", profile="Windows 10 UEFI")]
+    summary = _build_summary(_campaign_request(), specs, vm_pool, runs)
+    assert summary["format_version"] == FORMAT_VERSION
+    entry = summary["runs"]["x::Windows 10 UEFI"]
+    assert entry["status"] == "pending"
+    assert entry["vm"] is None
+
+
+def test_persist_summary_writes_atomically_and_matches_schema(tmp_path: Path) -> None:
+    specs = [ScenarioSpec(id="x", tags=(), requirements=ScenarioRequirements())]
+    vm_pool = [_vm(name="a")]
+    runs = [ScenarioRun(run_id="x::Windows 10 UEFI", scenario_id="x", profile="Windows 10 UEFI")]
+    summary = _build_summary(_campaign_request(), specs, vm_pool, runs)
+    _persist_summary(tmp_path, summary)
+    on_disk = json.loads((tmp_path / "campaign-summary.json").read_text(encoding="utf-8"))
+    assert on_disk["format_version"] == FORMAT_VERSION
+    assert isinstance(on_disk["runs"], list)
+    assert on_disk["runs"][0]["run_id"] == "x::Windows 10 UEFI"
+    assert on_disk["counts"]["pending"] == 1
+    assert not (tmp_path / "campaign-summary.json.tmp").exists()
+
+
+def test_mark_running_then_completed_updates_entry_and_counts() -> None:
+    specs = [ScenarioSpec(id="x", tags=(), requirements=ScenarioRequirements())]
+    runs = [ScenarioRun(run_id="x::p", scenario_id="x", profile="p")]
+    summary = _build_summary(_campaign_request(), specs, [_vm(name="a")], runs)
+    _mark_running(summary, "x::p", "a", "2026-09-21T00:00:00Z")
+    assert summary["runs"]["x::p"]["status"] == "running"
+    _mark_completed(
+        summary,
+        ScenarioRunResult(
+            run_id="x::p", scenario_id="x", profile="p", vm="a", outcome="passed", reason=None,
+            message="ok", errors=[], log="log.txt", captures="captures",
+            claimed_at="2026-09-21T00:00:00Z", finished_at="2026-09-21T00:01:00Z",
+        ),
+    )
+    assert summary["runs"]["x::p"]["status"] == "passed"
+    assert _counts(summary["runs"])["passed"] == 1
+
+
+def test_read_interrupted_campaign_summary_marks_running_interrupted_and_keeps_pending(
+    tmp_path: Path,
+) -> None:
+    specs = [ScenarioSpec(id="x", tags=(), requirements=ScenarioRequirements())]
+    runs = [
+        ScenarioRun(run_id="x::a", scenario_id="x", profile="a"),
+        ScenarioRun(run_id="x::b", scenario_id="x", profile="b"),
+    ]
+    summary = _build_summary(_campaign_request(), specs, [_vm(name="v")], runs)
+    _mark_running(summary, "x::a", "v", "2026-09-21T00:00:00Z")
+    _persist_summary(tmp_path, summary)
+
+    result = read_interrupted_campaign_summary(tmp_path)
+    statuses = {entry["run_id"]: entry["status"] for entry in result}
+    assert statuses["x::a"] == "interrupted"
+    assert statuses["x::b"] == "pending"
+
+
+def test_read_interrupted_campaign_summary_fails_safe_on_malformed_file(tmp_path: Path) -> None:
+    (tmp_path / "campaign-summary.json").write_text("not json", encoding="utf-8")
+    assert read_interrupted_campaign_summary(tmp_path) == []
+
+
+def test_read_interrupted_campaign_summary_fails_safe_on_missing_file(tmp_path: Path) -> None:
+    assert read_interrupted_campaign_summary(tmp_path) == []
+
+
+def test_read_interrupted_campaign_summary_fails_safe_on_wrong_format_version(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "campaign-summary.json").write_text(
+        json.dumps({"format_version": 999, "runs": [], "resolved": {}, "requested": {}}),
+        encoding="utf-8",
+    )
+    assert read_interrupted_campaign_summary(tmp_path) == []
