@@ -39,7 +39,7 @@ from app.models import (
     ValidationRequest,
 )
 from app.services.automation import AutomationService
-from app.services.automation_campaign import read_interrupted_campaign_summary, run_campaign
+from app.services.campaign_dispatch import SCENARIO_MATRIX, CampaignDispatcher, read_interrupted_campaign_summary
 from app.services.automation_progress import OperationProgress
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
@@ -153,16 +153,18 @@ def _run_operation(
         if isinstance(request, AutomationCampaignRequest):
             if run_workspace is None:
                 raise ValueError("The complete campaign requires an isolated operation workspace")
-            selected = ValidationService(configured).select_vms(selectors)
-            if len(selected) != 3 or not all(vm.automation_enabled for vm in selected):
-                raise ValueError("The complete campaign requires exactly three enabled test VMs")
-            return run_campaign(
+            return CampaignDispatcher(configured, SCENARIO_MATRIX).run(
                 request,
-                [vm.name for vm in selected],
-                run_workspace,
-                lambda child, workspace, publish: _run_operation(
-                    configured, "automation", child.selectors(), child, publish, workspace
+                lambda child, workspace, publish, child_windows_path: _run_operation(
+                    configured,
+                    "automation",
+                    child.selectors(),
+                    child,
+                    publish,
+                    workspace,
+                    windows_path=child_windows_path,
                 ),
+                run_workspace,
                 on_step,
             )
         if not isinstance(request, AutomationRequest):

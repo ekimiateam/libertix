@@ -85,7 +85,12 @@ class ValidationRequest(BaseModel):
 
 
 class AutomationCampaignRequest(ValidationRequest):
-    """Four nominal installation scenarios, with one shared three-VM scope."""
+    """A campaign run: the code-defined scenario matrix, expanded across
+    every compatible logical platform profile, dispatched to whichever
+    configured automation-enabled VM claims each pending run. `vms`/`vm`
+    (inherited from ValidationRequest) restrict the worker pool, not the
+    required coverage; `scenario_ids` restricts which matrix scenarios run.
+    """
 
     model_config = ConfigDict(extra="forbid")
     apply: Literal[True]
@@ -94,6 +99,9 @@ class AutomationCampaignRequest(ValidationRequest):
     linux_size_gib: int = Field(default=20, ge=_MINIMUM_LINUX_SIZE_GIB, le=16384)
     migrate_windows_preferences: bool = False
     continue_after_failure: bool = False
+    scenario_ids: list[str] | None = Field(
+        default=None, description="Optional subset of the campaign scenario matrix to run"
+    )
 
     @model_validator(mode="after")
     def validate_installation_options(self) -> AutomationCampaignRequest:
