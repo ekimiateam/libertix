@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from app.config import VMConfig
+from app.models import BootGuardianFault, DistributionId
 from app.storage_fixtures import StorageFixtureRequest
 
 FORMAT_VERSION = 1
@@ -45,12 +46,12 @@ class ScenarioSpec:
     id: str
     tags: tuple[str, ...]
     requirements: ScenarioRequirements
-    distribution: str = "mint"
+    distribution: DistributionId = "mint"
     first_boot: Literal["windows", "linux"] = "windows"
     installation_target: Literal["windows", "secondary"] = "windows"
     snapshot_mode: Literal["default", "secondary-disk"] = "default"
     storage_fixture: StorageFixtureRequest = field(default_factory=StorageFixtureRequest)
-    boot_guardian_fault: str = "none"
+    boot_guardian_fault: BootGuardianFault = "none"
     simulate_stale_firmware_entries: bool = False
     force_offline_ntfs_resize: bool = False
     share_windows_files_in_linux: bool = True
