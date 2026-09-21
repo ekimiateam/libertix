@@ -116,6 +116,7 @@ class AutomationService(
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
         run_workspace: Path | None = None,
+        windows_path: PureWindowsPath | None = None,
     ) -> OperationResult:
         owns_workspace = run_workspace is None
         workspace = run_workspace or create_capture_workspace(self.settings, "automation")
@@ -185,8 +186,9 @@ class AutomationService(
                 ]
                 for preparation in preparations:
                     preparation.result()
-            executable = self.validation.prepare_server(result, source=source)
-            windows_path = self.validation.to_windows_share_path(executable)
+            if windows_path is None:
+                executable = self.validation.prepare_server(result, source=source)
+                windows_path = self.validation.to_windows_share_path(executable)
             result.ok(
                 "automation.release_path",
                 "Libertix executable ready for UI automation",

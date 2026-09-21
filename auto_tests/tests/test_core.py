@@ -3099,6 +3099,47 @@ def test_automation_run_retains_completed_capture_workspace(
     assert (workspaces[0] / "captures" / "proof.png").read_bytes() == b"capture"
 
 
+def test_run_skips_prepare_server_when_windows_path_is_supplied(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service = AutomationService(settings(capture_dir=tmp_path))
+    vm = service.validation.select_vms(["vm1"])[0]
+
+    monkeypatch.setattr(service.validation, "select_vms", lambda _selectors: (vm,))
+    monkeypatch.setattr(service, "_restore_clean_snapshots", lambda _result, _profiles: None)
+    monkeypatch.setattr(service, "_prepare_windows_test_vm", lambda vm, _result: None)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        service.validation,
+        "prepare_server",
+        lambda *a, **k: calls.append("prepare_server") or None,
+    )
+    monkeypatch.setattr(
+        service.validation,
+        "to_windows_share_path",
+        lambda *a, **k: calls.append("to_windows_share_path"),
+    )
+
+    def fake_run_vm(*_args, **_kwargs):
+        return ResultBuilder("automation").success("ok")
+
+    monkeypatch.setattr(service, "_run_vm_isolated", fake_run_vm)
+
+    supplied = PureWindowsPath("Z:/prebuilt/Libertix.exe")
+    result = service.run(
+        ["vm1"],
+        linux_username="test",
+        linux_password="test",
+        monitor_iso=True,
+        source="local",
+        windows_path=supplied,
+    )
+
+    assert result.status == "ok"
+    assert calls == []
+
+
 def test_automation_isolates_unexpected_errors_to_the_originating_vm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
