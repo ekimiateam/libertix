@@ -4,10 +4,12 @@ import pytest
 
 from app.config import VMConfig
 from app.errors import WorkflowError
+from app.models import OperationResult, StepResult
 from app.services.campaign_dispatch import (
     SCENARIO_MATRIX,
     ScenarioRequirements,
     ScenarioSpec,
+    _classify,
     _expand_runs,
     _fleet_profiles,
     _resolve_specs,
@@ -185,3 +187,58 @@ def test_expand_runs_two_vms_sharing_a_profile_still_produce_one_run() -> None:
     spec = ScenarioSpec(id="x", tags=(), requirements=ScenarioRequirements())
     runs = _expand_runs([spec], fleet, list(fleet))
     assert len(runs) == 1
+
+
+def test_classify_returns_passed_for_clean_ok_result_with_verdict() -> None:
+    result = OperationResult(
+        status="ok",
+        operation="automation",
+        message="done",
+        steps=[
+            StepResult(
+                step="automation.vm_finished",
+                status="ok",
+                message="done",
+                context={"vm": "vm1", "vm_status": "ok"},
+            )
+        ],
+    )
+    assert _classify(result, "vm1") == ("passed", None)
+
+
+def test_classify_returns_failed_when_ok_status_missing_verdict() -> None:
+    result = OperationResult(status="ok", operation="automation", message="incomplete", steps=[])
+    assert _classify(result, "vm1") == ("failed", None)
+
+
+def test_classify_returns_retryable_when_every_error_step_is_recognized_infra() -> None:
+    result = OperationResult(
+        status="error",
+        operation="automation",
+        message="preflight failed",
+        steps=[
+            StepResult(
+                step="automation.rollback_preflight", status="error", message="boom", context={}
+            )
+        ],
+    )
+    outcome, reason = _classify(result, "vm1")
+    assert outcome == "retryable"
+    assert reason in {"restore_failed", "preflight_failed"}
+
+
+def test_classify_returns_failed_when_any_error_step_is_a_real_failure() -> None:
+    result = OperationResult(
+        status="error",
+        operation="automation",
+        message="mixed failure",
+        steps=[
+            StepResult(
+                step="automation.rollback_preflight", status="error", message="infra", context={}
+            ),
+            StepResult(
+                step="automation.installer_crash", status="error", message="real bug", context={}
+            ),
+        ],
+    )
+    assert _classify(result, "vm1") == ("failed", None)

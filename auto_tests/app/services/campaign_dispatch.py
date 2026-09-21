@@ -6,7 +6,7 @@ from typing import Literal
 
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
-from app.models import BootGuardianFault, DistributionId
+from app.models import BootGuardianFault, DistributionId, OperationResult
 from app.services.validation import ValidationService
 from app.storage_fixtures import StorageFixtureRequest
 
@@ -230,3 +230,44 @@ def _expand_runs(
             details={"scenario_ids": [spec.id for spec in specs]},
         )
     return runs
+
+
+_RECOGNIZED_INFRA_STEPS = frozenset(
+    {
+        "automation.rollback_preflight",
+        "automation.reset_vm_done",
+        "automation.guest_network_ready",
+        "automation.guest_network_discovery",
+        "automation.guest_network_configure",
+        "automation.guest_network_verify",
+        "automation.vm_status",
+    }
+)
+
+
+def _is_infra_step(step: str) -> bool:
+    return step in _RECOGNIZED_INFRA_STEPS or step.startswith("automation.rollback_")
+
+
+def _classify(outcome: OperationResult, vm_name: str) -> tuple[ScenarioOutcome, str | None]:
+    error_steps = [step.step for step in outcome.steps if step.status == "error"]
+    if outcome.status == "error":
+        if error_steps and all(_is_infra_step(step) for step in error_steps):
+            reason = (
+                "restore_failed"
+                if any(
+                    step.startswith("automation.rollback_") or step == "automation.reset_vm_done"
+                    for step in error_steps
+                )
+                else "preflight_failed"
+            )
+            return "retryable", reason
+        return "failed", None
+    verdicts = {
+        str(step.context.get("vm")): step.context.get("vm_status")
+        for step in outcome.steps
+        if step.step == "automation.vm_finished" and "vm" in step.context
+    }
+    if verdicts.get(vm_name) != "ok":
+        return "failed", None
+    return "passed", None
