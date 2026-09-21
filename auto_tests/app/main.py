@@ -39,8 +39,12 @@ from app.models import (
     ValidationRequest,
 )
 from app.services.automation import AutomationService
-from app.services.campaign_dispatch import SCENARIO_MATRIX, CampaignDispatcher, read_interrupted_campaign_summary
 from app.services.automation_progress import OperationProgress
+from app.services.campaign_dispatch import (
+    SCENARIO_MATRIX,
+    CampaignDispatcher,
+    read_interrupted_campaign_summary,
+)
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
 from app.stream_events import StreamEventProjector
