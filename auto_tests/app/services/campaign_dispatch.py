@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue as queue_module
 import threading
@@ -24,6 +25,8 @@ from app.services.common import ResultBuilder
 from app.services.validation import ValidationService
 from app.storage_fixtures import StorageFixtureRequest
 from app.stream_events import StreamEventProjector
+
+logger = logging.getLogger(__name__)
 
 FORMAT_VERSION = 1
 
@@ -533,9 +536,16 @@ class CampaignDispatcher:
             kind, payload = updates.get()
             if kind == "claimed":
                 run_id, vm_name, when, ack = payload
-                _mark_running(summary, run_id, vm_name, when)
-                _persist_summary(workspace, summary)
-                ack.set()
+                try:
+                    _mark_running(summary, run_id, vm_name, when)
+                    _persist_summary(workspace, summary)
+                finally:
+                    # A worker is blocked on ack.wait() with no timeout --
+                    # guarantee it unblocks even if _persist_summary raises
+                    # (disk full, share unavailable, AV lock), then let the
+                    # original exception still propagate: fail loudly rather
+                    # than hang.
+                    ack.set()
             elif kind == "completed":
                 _mark_completed(summary, payload)
                 _persist_summary(workspace, summary)
@@ -625,18 +635,18 @@ class CampaignDispatcher:
                 )
 
                 claimed_at = _now_iso()
+                # Narrowly scoped: run_scenario() and _classify() are the only
+                # calls that decide the run's outcome. Logging/persistence I/O
+                # (projector.project_result, and publish() in the except
+                # branch) is handled separately below so a secondary I/O fault
+                # there can never misreport a real pass as "failed", nor
+                # prevent a "completed" message from ever being sent (which
+                # would otherwise leave the run's summary entry stuck at
+                # "running" forever -- _sweep_pending only touches "pending").
                 try:
                     outcome_result = run_scenario(
                         child_request, scenario_workspace, publish, windows_path
                     )
-                    outcome, reason = _classify(outcome_result, vm.name)
-                    errors = [
-                        step.model_dump(mode="json")
-                        for step in outcome_result.steps
-                        if step.status == "error"
-                    ]
-                    message = outcome_result.message
-                    projector.project_result(outcome_result)
                 except Exception as exc:
                     error_step = StepResult(
                         step="automation.campaign_exception",
@@ -644,18 +654,33 @@ class CampaignDispatcher:
                         message="Scenario terminated unexpectedly",
                         context={"exception_type": type(exc).__name__},
                     )
-                    publish(error_step)
                     outcome, reason = "failed", None
                     errors = [error_step.model_dump(mode="json")]
                     message = error_step.message
-                    projector.project_result(
-                        OperationResult(
-                            status="error",
-                            operation="automation",
-                            message=message,
-                            steps=[error_step],
-                        )
+                    log_target: OperationResult = OperationResult(
+                        status="error",
+                        operation="automation",
+                        message=message,
+                        steps=[error_step],
                     )
+                    try:
+                        publish(error_step)
+                    except Exception:
+                        logger.exception("Failed to publish the campaign_exception step")
+                else:
+                    outcome, reason = _classify(outcome_result, vm.name)
+                    errors = [
+                        step.model_dump(mode="json")
+                        for step in outcome_result.steps
+                        if step.status == "error"
+                    ]
+                    message = outcome_result.message
+                    log_target = outcome_result
+
+                try:
+                    projector.project_result(log_target)
+                except Exception:
+                    logger.exception("Failed to persist the scenario's detailed log")
 
                 with state.lock:
                     if outcome == "retryable" and reason in {"restore_failed", "preflight_failed"}:

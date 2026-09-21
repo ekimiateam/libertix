@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
+import app.services.campaign_dispatch as campaign_dispatch_module
 from app.config import VMConfig
 from app.errors import WorkflowError
 from app.models import AutomationCampaignRequest, OperationResult, StepResult
@@ -30,6 +31,7 @@ from app.services.campaign_dispatch import (
     _vm_compatible,
     read_interrupted_campaign_summary,
 )
+from app.stream_events import StreamEventProjector
 
 
 def _vm(**overrides: object) -> VMConfig:
@@ -627,3 +629,85 @@ def test_campaign_dispatcher_stop_claiming_visible_before_consumer_drains_queue(
     # Only the single VM in the pool exists, so it can claim at most one run before
     # the failure it just produced must stop it from claiming the second.
     assert len(claim_order) == 1
+
+
+def test_campaign_dispatcher_project_result_failure_does_not_change_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A logging/persistence I/O fault while writing the detailed scenario
+    log must never override the classified outcome: run_scenario() and
+    _classify() are the sole source of truth for pass/fail, and a
+    "completed" message must still be sent."""
+
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
+
+    def broken_project_result(self, result):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(StreamEventProjector, "project_result", broken_project_result)
+
+    configured = _settings_with_vms(
+        {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
+    )
+    request = AutomationCampaignRequest(
+        apply=True, linux_password="test-passphrase",
+    ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
+    run_scenario = _fake_run_scenario_always_ok()
+
+    result = CampaignDispatcher(configured).run(request, run_scenario, tmp_path, on_step=None)
+
+    assert result.status == "ok"
+    statuses = {entry["status"] for entry in result.campaign_summary}
+    assert statuses == {"passed"}
+
+
+def test_campaign_dispatcher_persist_summary_failure_still_unblocks_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A _persist_summary failure while marking a run "claimed" must still
+    unblock the worker's ack.wait() -- not hang it forever -- even though
+    the original exception is allowed to propagate out of run()."""
+
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
+
+    real_persist_summary = campaign_dispatch_module._persist_summary
+    call_count = {"n": 0}
+
+    def flaky_persist_summary(workspace, summary):
+        call_count["n"] += 1
+        # Call 1 persists the freshly built summary before any worker starts;
+        # call 2 is the consumer's "claimed" write -- that is the one that
+        # must fail here without leaving the worker stuck on ack.wait().
+        if call_count["n"] == 2:
+            raise OSError("disk full")
+        return real_persist_summary(workspace, summary)
+
+    monkeypatch.setattr(campaign_dispatch_module, "_persist_summary", flaky_persist_summary)
+
+    configured = _settings_with_vms(
+        {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
+    )
+    request = AutomationCampaignRequest(
+        apply=True, linux_password="test-passphrase",
+    ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
+    run_scenario = _fake_run_scenario_always_ok()
+
+    outcome: dict[str, object] = {}
+
+    def target() -> None:
+        try:
+            CampaignDispatcher(configured).run(request, run_scenario, tmp_path, on_step=None)
+        except Exception as exc:  # noqa: BLE001 -- captured to assert on below
+            outcome["exception"] = exc
+        else:
+            outcome["completed"] = True
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "CampaignDispatcher.run() hung -- ack.set() not guaranteed"
+    assert isinstance(outcome.get("exception"), OSError)
