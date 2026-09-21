@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -381,6 +381,36 @@ def test_read_interrupted_campaign_summary_fails_safe_on_non_string_status(
     assert read_interrupted_campaign_summary(tmp_path) == []
 
 
+def _fake_validation_service_class():
+    """A `ValidationService` stand-in with no real SSH/I/O, for
+    `CampaignDispatcher` tests.
+
+    `.calls` records every `prepare_server()`/`to_windows_share_path()`
+    invocation so a test can assert the design spec's build-once contract:
+    `CampaignDispatcher.run()` must call each exactly once per campaign run,
+    never once per worker or once per resolved `ScenarioRun`.
+    """
+
+    calls: list[str] = []
+    posix_path = PurePosixPath("/srv/libertix-smb/Libertix-release/Libertix.exe")
+    windows_path = PureWindowsPath("Z:/Libertix-release/Libertix.exe")
+
+    class _FakeValidationService:
+        def __init__(self, configured: object) -> None:
+            self._configured = configured
+
+        def prepare_server(self, result: object, *, source: str) -> PurePosixPath:
+            calls.append("prepare_server")
+            return posix_path
+
+        def to_windows_share_path(self, path: PurePosixPath) -> PureWindowsPath:
+            calls.append("to_windows_share_path")
+            return windows_path
+
+    _FakeValidationService.calls = calls  # type: ignore[attr-defined]
+    return _FakeValidationService
+
+
 def _fake_run_scenario_always_ok():
     # (vm_name, distribution, first_boot): distribution alone collapses the two
     # nominal scenarios per distribution (windows-first vs linux-first) into
@@ -402,7 +432,11 @@ def _fake_run_scenario_always_ok():
     return run
 
 
-def test_campaign_dispatcher_runs_every_resolved_run_exactly_once(tmp_path: Path) -> None:
+def test_campaign_dispatcher_runs_every_resolved_run_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_validation = _fake_validation_service_class()
+    monkeypatch.setattr("app.services.campaign_dispatch.ValidationService", fake_validation)
     configured = _settings_with_vms(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
         {"name": "b", "os": "Windows 10 UEFI", "firmware": "uefi", "automation_enabled": True},
@@ -414,11 +448,18 @@ def test_campaign_dispatcher_runs_every_resolved_run_exactly_once(tmp_path: Path
     assert result.status == "ok"
     assert len(run_scenario.calls) == 12  # 4 nominal scenarios x 3 profiles
     assert len(set(run_scenario.calls)) == 12  # no run claimed twice
+    # Design spec: prepare_server()/to_windows_share_path() are each called
+    # exactly once per campaign run, regardless of how many ScenarioRuns (12
+    # here, across 3 concurrent worker threads) the campaign resolves to.
+    assert fake_validation.calls == ["prepare_server", "to_windows_share_path"]
 
 
 def test_campaign_dispatcher_two_vms_sharing_a_profile_compete_for_the_same_runs(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
     configured = _settings_with_vms(
         {"name": "a", "os": "Windows 11 UEFI", "firmware": "uefi", "automation_enabled": True},
         {"name": "b", "os": "Windows 11 UEFI", "firmware": "uefi", "automation_enabled": True},
@@ -438,8 +479,11 @@ def test_campaign_dispatcher_two_vms_sharing_a_profile_compete_for_the_same_runs
 
 
 def test_campaign_dispatcher_claim_respects_capability_not_just_profile_string(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
     configured = _settings_with_vms(
         {
             "name": "with-secondary", "os": "Windows 11 UEFI", "firmware": "uefi",
@@ -459,7 +503,12 @@ def test_campaign_dispatcher_claim_respects_capability_not_just_profile_string(
     assert run_scenario.calls == [("with-secondary", "mint", "windows")]
 
 
-def test_campaign_dispatcher_continue_after_failure_false_stops_new_claims(tmp_path: Path) -> None:
+def test_campaign_dispatcher_continue_after_failure_false_stops_new_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
     configured = _settings_with_vms(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )
@@ -482,8 +531,11 @@ def test_campaign_dispatcher_continue_after_failure_false_stops_new_claims(tmp_p
 
 
 def test_campaign_dispatcher_restore_failure_quarantines_worker_not_whole_campaign(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
     configured = _settings_with_vms(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
         {"name": "b", "os": "Windows 10 UEFI", "firmware": "uefi", "automation_enabled": True},
@@ -518,9 +570,14 @@ def test_campaign_dispatcher_restore_failure_quarantines_worker_not_whole_campai
     assert entries["mint-linux-first::Windows 10 UEFI"]["status"] == "passed"
 
 
-def test_campaign_dispatcher_worker_done_reported_on_every_exit_path(tmp_path: Path) -> None:
+def test_campaign_dispatcher_worker_done_reported_on_every_exit_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """No compatible worker at all -> dispatcher must still terminate, not hang."""
 
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
     configured = _settings_with_vms(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )
@@ -542,11 +599,14 @@ def test_campaign_dispatcher_worker_done_reported_on_every_exit_path(tmp_path: P
 
 
 def test_campaign_dispatcher_stop_claiming_visible_before_consumer_drains_queue(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Regression test for the queue-latency race: a worker must set stop_claiming
     itself, synchronously, at classification time -- not rely on the consumer."""
 
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
     configured = _settings_with_vms(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )

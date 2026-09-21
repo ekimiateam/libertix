@@ -20,6 +20,7 @@ from app.models import (
     OperationResult,
     StepResult,
 )
+from app.services.common import ResultBuilder
 from app.services.validation import ValidationService
 from app.storage_fixtures import StorageFixtureRequest
 from app.stream_events import StreamEventProjector
@@ -425,21 +426,8 @@ def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]
     return runs
 
 
-# `run_scenario` is a fake in every current test (Task 7) -- no real
-# AutomationService/Proxmox/SSH dependency is exercised here. Source
-# preparation (ValidationService.prepare_server -> a real SSH round trip to
-# the Samba host) is deliberately NOT performed inside CampaignDispatcher:
-# doing it here would make every dispatcher test perform a live SSH connect
-# with no mocking hook available (unlike the existing service tests, which
-# monkeypatch ValidationService.ssh). Instead, mirroring the "pre-built
-# windows_path" pattern already introduced for AutomationService.run()
-# (see _run_operation's automation branch in main.py), CampaignDispatcher
-# accepts an already-resolved `windows_path` and threads it straight through
-# to every worker's `run_scenario` call. Preparing the server once, up front,
-# and passing the result in is the caller's responsibility -- wiring that
-# caller is a later task.
 RunScenario = Callable[
-    [AutomationRequest, Path, Callable[[StepResult], None], PureWindowsPath | None],
+    [AutomationRequest, Path, Callable[[StepResult], None], PureWindowsPath],
     OperationResult,
 ]
 
@@ -499,7 +487,6 @@ class CampaignDispatcher:
         run_scenario: RunScenario,
         workspace: Path,
         on_step: Callable[[StepResult], None] | None = None,
-        windows_path: PureWindowsPath | None = None,
     ) -> OperationResult:
         fleet = self._configured.vms
         # AutomationCampaignRequest.scenario_ids doesn't exist yet (added in a
@@ -510,6 +497,11 @@ class CampaignDispatcher:
         spec_by_id = {spec.id: spec for spec in specs}
         vm_pool = _resolve_worker_pool(self._configured, request.selectors())
         runs = _expand_runs(specs, fleet, vm_pool)
+
+        validation = ValidationService(self._configured)
+        build_result = ResultBuilder("automation")
+        posix_path = validation.prepare_server(build_result, source=request.source)
+        windows_path = validation.to_windows_share_path(posix_path)
 
         summary = _build_summary(request, specs, vm_pool, runs)
         _persist_summary(workspace, summary)
@@ -567,7 +559,7 @@ class CampaignDispatcher:
         request: AutomationCampaignRequest,
         run_scenario: RunScenario,
         on_step: Callable[[StepResult], None] | None,
-        windows_path: PureWindowsPath | None,
+        windows_path: PureWindowsPath,
         workspace: Path,
     ) -> None:
         try:
