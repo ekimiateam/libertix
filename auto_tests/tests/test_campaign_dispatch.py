@@ -352,3 +352,28 @@ def test_read_interrupted_campaign_summary_fails_safe_on_wrong_format_version(
         encoding="utf-8",
     )
     assert read_interrupted_campaign_summary(tmp_path) == []
+
+
+def test_read_interrupted_campaign_summary_fails_safe_on_non_string_status(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "campaign-summary.json").write_text(
+        json.dumps(
+            {
+                "format_version": FORMAT_VERSION,
+                "resolved": {},
+                "requested": {},
+                "runs": [
+                    {
+                        "run_id": "x::p",
+                        "scenario_id": "x",
+                        "profile": "p",
+                        "vm": None,
+                        "status": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert read_interrupted_campaign_summary(tmp_path) == []

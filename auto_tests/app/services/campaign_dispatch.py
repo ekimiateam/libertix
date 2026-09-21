@@ -321,7 +321,10 @@ def _build_summary(
         # AutomationCampaignRequest.scenario_ids doesn't exist yet (added in a
         # later task); getattr keeps this file buildable until then and is a
         # no-op once the field lands.
-        "requested": {"scenario_ids": getattr(request, "scenario_ids", None), "vms": request.selectors()},
+        "requested": {
+            "scenario_ids": getattr(request, "scenario_ids", None),
+            "vms": request.selectors(),
+        },
         "resolved": {
             "scenario_ids": [spec.id for spec in specs],
             "vm_pool": [vm.name for vm in vm_pool],
@@ -333,7 +336,7 @@ def _build_summary(
 
 
 def _counts(runs: dict[str, dict[str, object]]) -> dict[str, int]:
-    counts = dict.fromkeys(_COUNT_KEYS, 0)
+    counts: dict[str, int] = dict.fromkeys(_COUNT_KEYS, 0)
     for entry in runs.values():
         key = str(entry["status"]).replace("-", "_")
         counts[key] = counts.get(key, 0) + 1
@@ -361,6 +364,7 @@ def _mark_running(summary: dict[str, object], run_id: str, vm_name: str, when: s
 def _mark_completed(summary: dict[str, object], result: ScenarioRunResult) -> None:
     entry = summary["runs"][result.run_id]  # type: ignore[index]
     entry.update(
+        vm=result.vm,
         status=result.outcome,
         reason=result.reason,
         message=result.message,
@@ -371,6 +375,13 @@ def _mark_completed(summary: dict[str, object], result: ScenarioRunResult) -> No
     )
 
 
+# Temporary name collision: app/services/automation_campaign.py (still live,
+# used by main.py today) exports a same-named read_interrupted_campaign_summary/
+# _persist_summary pair with a different on-disk schema (a bare list, no
+# format_version). This one supersedes it and replaces the old module's wiring
+# in a later task in this plan; until then the two coexist under different
+# module names and this function's format_version check is what keeps them
+# from misreading each other's files.
 def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]]:
     path = workspace / "campaign-summary.json"
     try:
@@ -384,11 +395,19 @@ def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]
     runs = raw.get("runs")
     resolved = raw.get("resolved")
     requested = raw.get("requested")
-    if not isinstance(runs, list) or not isinstance(resolved, dict) or not isinstance(requested, dict):
+    if (
+        not isinstance(runs, list)
+        or not isinstance(resolved, dict)
+        or not isinstance(requested, dict)
+    ):
         return []
     required_keys = {"run_id", "scenario_id", "profile", "vm", "status"}
     for entry in runs:
-        if not isinstance(entry, dict) or not required_keys.issubset(entry):
+        if (
+            not isinstance(entry, dict)
+            or not required_keys.issubset(entry)
+            or not isinstance(entry["status"], str)
+        ):
             return []
     for entry in runs:
         if entry["status"] == "running":
