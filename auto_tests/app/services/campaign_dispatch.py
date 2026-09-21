@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
-from app.config import VMConfig
+from app.config import Settings, VMConfig
+from app.errors import WorkflowError
 from app.models import BootGuardianFault, DistributionId
+from app.services.validation import ValidationService
 from app.storage_fixtures import StorageFixtureRequest
 
 FORMAT_VERSION = 1
@@ -127,3 +130,93 @@ class ScenarioRunResult:
     captures: str
     claimed_at: str
     finished_at: str
+
+
+def _fleet_profiles(spec: ScenarioSpec, fleet: Sequence[VMConfig]) -> set[str]:
+    return {
+        vm.os
+        for vm in fleet
+        if vm.automation_enabled and _vm_compatible(vm, spec.requirements)
+    }
+
+
+def _resolve_specs(
+    matrix: Sequence[ScenarioSpec],
+    scenario_ids: list[str] | None,
+    fleet: Sequence[VMConfig],
+) -> list[ScenarioSpec]:
+    by_id = {spec.id: spec for spec in matrix}
+    if scenario_ids is None:
+        candidates = list(matrix)
+        explicit = False
+    else:
+        unknown = [sid for sid in scenario_ids if sid not in by_id]
+        if unknown:
+            raise WorkflowError(
+                "campaign.unknown_scenario_id",
+                "Unknown scenario id in scenario_ids filter",
+                details={"unknown": unknown, "known": sorted(by_id)},
+            )
+        candidates = [by_id[sid] for sid in scenario_ids]
+        explicit = True
+
+    resolved: list[ScenarioSpec] = []
+    for spec in candidates:
+        if _fleet_profiles(spec, fleet):
+            resolved.append(spec)
+        elif explicit:
+            raise WorkflowError(
+                "campaign.scenario_unrunnable",
+                f"No VM in the fleet can ever run scenario '{spec.id}'",
+                details={"scenario_id": spec.id},
+            )
+    if not resolved:
+        raise WorkflowError(
+            "campaign.empty_matrix", "No scenarios resolved for this campaign"
+        )
+    return resolved
+
+
+def _resolve_worker_pool(configured: Settings, selectors: list[str] | None) -> list[VMConfig]:
+    if selectors is None:
+        return [vm for vm in configured.vms if vm.automation_enabled]
+    selected = ValidationService(configured).select_vms(selectors)
+    disabled = [vm.name for vm in selected if not vm.automation_enabled]
+    if disabled:
+        raise WorkflowError(
+            "campaign.vm_not_automation_enabled",
+            "The campaign worker pool must contain only automation-enabled VMs",
+            details={"disabled": disabled},
+        )
+    return list(selected)
+
+
+def _expand_runs(
+    specs: Sequence[ScenarioSpec],
+    fleet: Sequence[VMConfig],
+    vm_pool: Sequence[VMConfig],
+) -> list[ScenarioRun]:
+    runs: list[ScenarioRun] = []
+    for spec in specs:
+        fleet_profiles = _fleet_profiles(spec, fleet)
+        pool_profiles = {
+            vm.os
+            for vm in vm_pool
+            if vm.automation_enabled and _vm_compatible(vm, spec.requirements)
+        }
+        missing = fleet_profiles - pool_profiles
+        if missing:
+            raise WorkflowError(
+                "campaign.vm_filter_drops_coverage",
+                f"VM filter removes every worker for a profile required by '{spec.id}'",
+                details={"scenario_id": spec.id, "missing_profiles": sorted(missing)},
+            )
+        for profile in sorted(fleet_profiles):
+            runs.append(
+                ScenarioRun(run_id=f"{spec.id}::{profile}", scenario_id=spec.id, profile=profile)
+            )
+    if not runs:
+        raise WorkflowError(
+            "campaign.empty_matrix", "No scenario runs resolved for this campaign"
+        )
+    return runs
