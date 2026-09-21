@@ -244,16 +244,22 @@ _RECOGNIZED_INFRA_STEPS = frozenset(
     }
 )
 
+RetryReason = Literal["restore_failed", "preflight_failed"]
+
 
 def _is_infra_step(step: str) -> bool:
     return step in _RECOGNIZED_INFRA_STEPS or step.startswith("automation.rollback_")
 
 
-def _classify(outcome: OperationResult, vm_name: str) -> tuple[ScenarioOutcome, str | None]:
+def _classify(outcome: OperationResult, vm_name: str) -> tuple[ScenarioOutcome, RetryReason | None]:
     error_steps = [step.step for step in outcome.steps if step.status == "error"]
     if outcome.status == "error":
+        # Conservative by design: only retryable if EVERY error step is
+        # recognized infra noise. A single real failure step among them
+        # (even alongside infra errors) must still fail the run -- never let
+        # a genuine Libertix/install/validation bug get silently retried.
         if error_steps and all(_is_infra_step(step) for step in error_steps):
-            reason = (
+            reason: RetryReason = (
                 "restore_failed"
                 if any(
                     step.startswith("automation.rollback_") or step == "automation.reset_vm_done"

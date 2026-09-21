@@ -242,3 +242,15 @@ def test_classify_returns_failed_when_any_error_step_is_a_real_failure() -> None
         ],
     )
     assert _classify(result, "vm1") == ("failed", None)
+
+
+def test_classify_returns_failed_for_error_status_with_no_error_steps() -> None:
+    # Matches a real construction site: main.py's "another operation is
+    # already running" result is status="error" with steps=[].
+    result = OperationResult(
+        status="error",
+        operation="automation",
+        message="error: another operation is already running",
+        steps=[],
+    )
+    assert _classify(result, "vm1") == ("failed", None)
