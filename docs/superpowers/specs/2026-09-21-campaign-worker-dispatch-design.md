@@ -134,11 +134,13 @@ run_scenario, on_step) -> OperationResult`:
    is also a validation error (coverage can't silently drop) rather than a
    silently smaller campaign.
 2. **Build once.** Call `ValidationService(configured).prepare_server(result,
-   source=request.source)` a single time before any scenario thread starts.
-   `AutomationService.run()` gains an optional `prepared_executable:
-   PureWindowsPath | None = None` parameter; when set, it skips its own
-   `prepare_server()` call and uses the supplied path. All `ScenarioRun`s
-   reuse this one build.
+   source=request.source)` followed by `to_windows_share_path(...)` a single
+   time before any scenario thread starts (`automation.py:188-189` does both
+   today, back to back, on every `run()` call). `AutomationService.run()`
+   gains an optional `windows_path: PureWindowsPath | None = None` parameter;
+   when set, it skips both of those calls and uses the supplied path
+   directly, exactly as it uses the locally computed `windows_path` today.
+   All `ScenarioRun`s reuse this one build.
 3. **Per-VM worker threads.** One `threading.Thread` per physical VM in the
    resolved pool. Each thread loops:
    - Under one `threading.Lock` guarding the pending-run list: pop the
@@ -191,7 +193,7 @@ making concurrent completions safe.
 
 ## API / wiring changes
 
-- `AutomationService.run()`: add optional `prepared_executable` parameter
+- `AutomationService.run()`: add optional `windows_path` parameter
   (default `None`, existing behavior unchanged when omitted).
 - `automation_campaign.py` (or a new `campaign_dispatch.py` alongside it):
   add `ScenarioSpec`, `ScenarioRun`, `CampaignDispatcher`, the starter
@@ -229,6 +231,6 @@ Unit tests (no real Proxmox/SSH dependency, matching existing test style):
 - Summary persistence: concurrent `ScenarioRunResult` reports from multiple
   simulated workers never interleave/corrupt `campaign-summary.json`
   (single-writer invariant holds under concurrency).
-- `prepared_executable` plumbing: `AutomationService.run()` skips
-  `prepare_server()` when given a `prepared_executable`, and the dispatcher
+- `windows_path` plumbing: `AutomationService.run()` skips
+  `prepare_server()`/`to_windows_share_path()` when given a `windows_path`, and the dispatcher
   calls `prepare_server()` exactly once regardless of scenario count.
