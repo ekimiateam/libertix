@@ -7,7 +7,7 @@ import pickle
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -1425,3 +1425,27 @@ def test_compact_stream_uses_short_success_lines_and_verbose_errors(
     assert lines[2].startswith("RESULT ERROR log=")
     detailed_log = Path(lines[2].split("log=", 1)[1])
     assert '"stdout": "test"' in detailed_log.read_text(encoding="utf-8")
+
+
+def test_run_operation_passes_windows_path_through_to_automation_service(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    received: dict[str, object] = {}
+
+    class FakeAutomationService:
+        def __init__(self, _settings) -> None:
+            pass
+
+        def run(self, selectors, *, windows_path=None, **_kwargs):
+            received["windows_path"] = windows_path
+            return OperationResult(status="ok", operation="automation", message="done", steps=[])
+
+    monkeypatch.setattr(main_module, "AutomationService", FakeAutomationService)
+    configured = settings(capture_dir=tmp_path / "captures", operation_log_dir=tmp_path / "logs")
+    request = AutomationRequest(apply=True, linux_password="test-passphrase")
+    supplied = PureWindowsPath("Z:/prebuilt/Libertix.exe")
+
+    main_module._run_operation(
+        configured, "automation", ["vm1"], request, None, None, windows_path=supplied
+    )
+    assert received["windows_path"] == supplied

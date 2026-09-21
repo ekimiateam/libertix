@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from multiprocessing.connection import Connection
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -139,6 +139,7 @@ def _run_operation(
     request: ValidationRequest | AutomationRequest | None,
     on_step: Callable[[StepResult], None] | None = None,
     run_workspace: Path | None = None,
+    windows_path: PureWindowsPath | None = None,
 ) -> OperationResult:
     if operation == "validation":
         validation = request if isinstance(request, ValidationRequest) else ValidationRequest()
@@ -194,6 +195,7 @@ def _run_operation(
             source=request.source,
             on_step=on_step,
             run_workspace=run_workspace,
+            windows_path=windows_path,
         )
     return ResetService(configured).run(selectors, on_step=on_step)
 
