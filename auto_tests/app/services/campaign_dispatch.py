@@ -172,13 +172,18 @@ def _resolve_specs(
             )
     if not resolved:
         raise WorkflowError(
-            "campaign.empty_matrix", "No scenarios resolved for this campaign"
+            "campaign.empty_scenario_matrix",
+            "No scenarios resolved for this campaign",
+            details={"scenario_ids": scenario_ids},
         )
     return resolved
 
 
 def _resolve_worker_pool(configured: Settings, selectors: list[str] | None) -> list[VMConfig]:
-    if selectors is None:
+    # None and [] both mean "no filter": ValidationService.select_vms([]) would
+    # otherwise return every configured VM (including automation-disabled ones),
+    # which is inconsistent with the None case below.
+    if not selectors:
         return [vm for vm in configured.vms if vm.automation_enabled]
     selected = ValidationService(configured).select_vms(selectors)
     disabled = [vm.name for vm in selected if not vm.automation_enabled]
@@ -196,14 +201,17 @@ def _expand_runs(
     fleet: Sequence[VMConfig],
     vm_pool: Sequence[VMConfig],
 ) -> list[ScenarioRun]:
+    """Expand each spec into one ScenarioRun per fleet-wide compatible profile.
+
+    `fleet` must be the same VM set `specs` was resolved against (via
+    `_resolve_specs`) -- it defines required coverage; `vm_pool` only narrows
+    which of those profiles currently have an eligible physical worker.
+    """
+
     runs: list[ScenarioRun] = []
     for spec in specs:
         fleet_profiles = _fleet_profiles(spec, fleet)
-        pool_profiles = {
-            vm.os
-            for vm in vm_pool
-            if vm.automation_enabled and _vm_compatible(vm, spec.requirements)
-        }
+        pool_profiles = _fleet_profiles(spec, vm_pool)
         missing = fleet_profiles - pool_profiles
         if missing:
             raise WorkflowError(
@@ -217,6 +225,8 @@ def _expand_runs(
             )
     if not runs:
         raise WorkflowError(
-            "campaign.empty_matrix", "No scenario runs resolved for this campaign"
+            "campaign.empty_run_matrix",
+            "No scenario runs resolved for this campaign",
+            details={"scenario_ids": [spec.id for spec in specs]},
         )
     return runs
