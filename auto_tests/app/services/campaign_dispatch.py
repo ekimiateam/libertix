@@ -332,11 +332,8 @@ def _build_summary(
 ) -> dict[str, object]:
     return {
         "format_version": FORMAT_VERSION,
-        # AutomationCampaignRequest.scenario_ids doesn't exist yet (added in a
-        # later task); getattr keeps this file buildable until then and is a
-        # no-op once the field lands.
         "requested": {
-            "scenario_ids": getattr(request, "scenario_ids", None),
+            "scenario_ids": request.scenario_ids,
             "vms": request.selectors(),
         },
         "resolved": {
@@ -389,13 +386,6 @@ def _mark_completed(summary: dict[str, object], result: ScenarioRunResult) -> No
     )
 
 
-# Temporary name collision: app/services/automation_campaign.py (still live,
-# used by main.py today) exports a same-named read_interrupted_campaign_summary/
-# _persist_summary pair with a different on-disk schema (a bare list, no
-# format_version). This one supersedes it and replaces the old module's wiring
-# in a later task in this plan; until then the two coexist under different
-# module names and this function's format_version check is what keeps them
-# from misreading each other's files.
 def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]]:
     path = workspace / "campaign-summary.json"
     try:
@@ -492,11 +482,7 @@ class CampaignDispatcher:
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
         fleet = self._configured.vms
-        # AutomationCampaignRequest.scenario_ids doesn't exist yet (added in a
-        # later task); getattr keeps this buildable until then, consistent
-        # with _build_summary's own tolerance for the missing field.
-        scenario_ids = getattr(request, "scenario_ids", None)
-        specs = _resolve_specs(self._matrix, scenario_ids, fleet)
+        specs = _resolve_specs(self._matrix, request.scenario_ids, fleet)
         spec_by_id = {spec.id: spec for spec in specs}
         vm_pool = _resolve_worker_pool(self._configured, request.selectors())
         runs = _expand_runs(specs, fleet, vm_pool)

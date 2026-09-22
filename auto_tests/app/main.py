@@ -159,6 +159,9 @@ def _run_operation(
                 raise ValueError("The complete campaign requires an isolated operation workspace")
             return CampaignDispatcher(configured, SCENARIO_MATRIX).run(
                 request,
+                # child is always a plain AutomationRequest (see
+                # CampaignDispatcher._worker), so this recursive call can
+                # never re-enter this isinstance branch.
                 lambda child, workspace, publish, child_windows_path: _run_operation(
                     configured,
                     "automation",
