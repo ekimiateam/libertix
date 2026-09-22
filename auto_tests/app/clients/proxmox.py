@@ -6,10 +6,11 @@ import ssl
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import httpx
 
+from app.clients import network_recovery
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
@@ -75,18 +76,40 @@ class ProxmoxClient:
         step: str,
         data: dict[str, object] | None = None,
     ) -> object:
+        network_recovery.checkpoint()
         logger.info("Proxmox request", extra={"step": step, "target": path})
         try:
-            for attempt in range(1, 4):
+            max_attempts = 2 if network_recovery.active is not None else 3
+            failed_at: float | None = None
+            attempt = 0
+            while True:
+                attempt += 1
                 try:
                     response = self.client.request(method, f"{self.base_url}{path}", data=data)
                     break
-                except (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError):
+                except (
+                    httpx.NetworkError,
+                    httpx.TimeoutException,
+                    httpx.RemoteProtocolError,
+                ) as exc:
+                    if failed_at is None:
+                        failed_at = time.monotonic()
                     # Retrying a status read is safe; a lost mutation reply is ambiguous.
-                    if method != "GET" or attempt == 3:
+                    safe_to_retry = method == "GET" or (
+                        network_recovery.active is not None
+                        and isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+                    )
+                    if not safe_to_retry:
+                        network_recovery.recover(failed_at, replay_safe=False)
+                        raise
+                    if attempt == max_attempts:
+                        if network_recovery.recover(failed_at):
+                            attempt = 0
+                            failed_at = None
+                            continue
                         raise
                     logger.warning(
-                        "Transient Proxmox read failure; retrying in five seconds",
+                        "Transient Proxmox transport failure; retrying in five seconds",
                         extra={"step": step, "target": path, "attempt": attempt},
                     )
                     time.sleep(5)
@@ -117,32 +140,19 @@ class ProxmoxClient:
             path = f"/nodes/{node}/qemu/{vmid}/status/current"
             logger.info("Looking up target VM", extra={"step": "proxmox.locate_vm", "target": path})
             try:
-                response = self.client.get(f"{self.base_url}{path}")
-            except httpx.HTTPError as exc:
-                raise WorkflowError(
-                    "proxmox.locate_vm",
-                    "Network failure while locating target VM",
-                    details={"vmid": vmid, "node": node, "error": str(exc)},
-                ) from exc
-            if response.status_code == 200:
-                return node
-            if response.status_code in (401, 403):
-                raise WorkflowError(
-                    "proxmox.permissions",
-                    "The Proxmox token lacks VM.Audit on the target VM",
-                    details={
-                        "vmid": vmid,
-                        "node": node,
-                        "http_status": response.status_code,
-                        "response_body": response.text[-2000:],
-                    },
-                )
-            if response.status_code != 404:
-                raise WorkflowError(
-                    "proxmox.locate_vm",
-                    "Unexpected target VM response",
-                    details={"vmid": vmid, "node": node, "http_status": response.status_code},
-                )
+                self._request("GET", path, step="proxmox.locate_vm")
+            except WorkflowError as exc:
+                if exc.details.get("http_status") == 404:
+                    continue
+                if exc.details.get("http_status") in (401, 403):
+                    raise WorkflowError(
+                        "proxmox.permissions",
+                        "The Proxmox token lacks VM.Audit on the target VM",
+                        details={**exc.details, "vmid": vmid, "node": node},
+                    ) from exc
+                exc.details.update(vmid=vmid, node=node)
+                raise
+            return node
         raise WorkflowError("proxmox.locate_vm", "Target VM not found", details={"vmid": vmid})
 
     def assert_snapshot(self, node: str, vmid: int, snapshot: str) -> None:
@@ -273,25 +283,15 @@ class ProxmoxClient:
 
         path = f"/nodes/{node}/qemu/{vmid}/agent/exec"
         try:
-            response = self.client.post(
-                f"{self.base_url}{path}",
-                content=urlencode([("command", argument) for argument in command]).encode("ascii"),
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            response.raise_for_status()
-            data = response.json()["data"]
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            response = getattr(exc, "response", None)
+            data = self._request("POST", path, step=step, data={"command": command})
+        except WorkflowError as exc:
             raise WorkflowError(
                 step,
                 "QEMU guest-agent command could not be started",
                 details={
                     "vmid": vmid,
                     "node": node,
-                    "http_status": getattr(response, "status_code", None),
-                    "response_body": getattr(response, "text", "")[-2000:],
-                    "exception_type": type(exc).__name__,
-                    "error": str(exc),
+                    **exc.details,
                 },
             ) from exc
 
@@ -307,24 +307,19 @@ class ProxmoxClient:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                response = self.client.get(
-                    f"{self.base_url}/nodes/{node}/qemu/{vmid}/agent/exec-status",
-                    params={"pid": pid},
+                data = self._request(
+                    "GET",
+                    f"/nodes/{node}/qemu/{vmid}/agent/exec-status?pid={pid}",
+                    step=step,
                 )
-                response.raise_for_status()
-                data = response.json()["data"]
-            except (httpx.HTTPError, ValueError, KeyError) as exc:
-                response = getattr(exc, "response", None)
+            except WorkflowError as exc:
                 raise WorkflowError(
                     step,
                     "QEMU guest-agent command status could not be read",
                     details={
                         "vmid": vmid,
                         "node": node,
-                        "http_status": getattr(response, "status_code", None),
-                        "response_body": getattr(response, "text", "")[-2000:],
-                        "exception_type": type(exc).__name__,
-                        "error": str(exc),
+                        **exc.details,
                     },
                 ) from exc
             result = data.get("result", data) if isinstance(data, dict) else data

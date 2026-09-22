@@ -15,6 +15,7 @@ class AutomationOptions:
     monitor_iso: bool
     linux_size_gib: int = 100
     installation_target: Literal["windows", "secondary"] = "windows"
+    expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None
     distribution: DistributionProfile = field(
         default_factory=lambda: load_distribution_profile("mint")
     )
@@ -45,6 +46,7 @@ class AutomationOptions:
     storage_fixture_receipt: dict[str, object] | None = None
     verify_uninstall: bool = False
     deployed_executable: PureWindowsPath | None = None
+    release_sha256: str | None = None
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,8 @@ import pickle
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from contextlib import nullcontext
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -24,7 +25,7 @@ from app.api_runtime import (
 )
 from app.config import VMConfig
 from app.main import create_app
-from app.models import AutomationRequest, OperationResult, StepResult
+from app.models import AutomationCampaignRequest, AutomationRequest, OperationResult, StepResult
 
 from .asgi_client import AsgiTestClient
 from .test_core import settings
@@ -41,6 +42,13 @@ def preserve_monkeypatched_workers_with_a_fork_test_context(
         return real_get_context("fork")
 
     monkeypatch.setattr(main_module.multiprocessing, "get_context", get_test_context)
+    monkeypatch.setattr(
+        main_module,
+        "collect_failure_diagnostics",
+        lambda _settings, vm, _options, capture_dir, _errors, _capture: (
+            capture_dir.parent / "diagnostics" / vm.name / "manifest.json"
+        ),
+    )
 
 
 class FakeOperationLock:
@@ -78,7 +86,8 @@ def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
         event = original(self, step)
         if step.context.get("test", "").startswith("working-"):
             now[0] += 0.4
-        relayed.wait(timeout=5)
+        if not step.step.startswith("automation.diagnostics."):
+            relayed.wait(timeout=5)
         return event
 
     class Service:
@@ -138,6 +147,7 @@ def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
     assert failure["context"]["stalled_step"] == "automation.check_started:linux.blocked"
     assert failure["context"]["captures"]["vm1"] == str(captures[0])
     assert "working-" in failure["context"]["active_steps"]["vm2"]
+    assert set(failure["context"]["diagnostics"]) == {"vm1", "vm2"}
     assert lock.release_calls == 1
 
 
@@ -262,7 +272,9 @@ def test_stream_worker_serializes_parallel_vm_events(
         _request,
         on_step,
         _run_workspace,
+        prepared_release,
     ) -> OperationResult:
+        assert prepared_release is None
         barrier = threading.Barrier(3)
 
         def publish_vm_step(index: int) -> None:
@@ -651,26 +663,36 @@ def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_scenario_logs(
     lock = FakeOperationLock()
     monkeypatch.setattr(main_module, "operation_lock", lock)
 
-    class FakeAutomationService:
-        def __init__(self, _settings):
-            pass
+    def prepare(_self, result, *, source):
+        result.ok("test.build", "One campaign build", source=source)
+        return PurePosixPath(_self.settings.smb_root) / "Libertix-release/Libertix.exe"
 
-        def run(self, selectors, *, on_step, boot_guardian_fault, **_kwargs):
-            assert selectors == ["vm1", "vm2", "vm3"]
-            assert boot_guardian_fault == "none"
-            steps = []
-            for name in selectors:
-                step = StepResult(
-                    step="automation.vm_finished",
-                    status="ok",
-                    message="done",
-                    context={"vm": name, "vm_status": "ok"},
-                )
-                on_step(step)
-                steps.append(step)
-            return OperationResult(status="ok", operation="automation", message="done", steps=steps)
+    monkeypatch.setattr(main_module.ValidationService, "prepare_server", prepare)
+    monkeypatch.setattr(
+        main_module.ValidationService,
+        "ssh",
+        lambda *args, **kwargs: nullcontext(
+            SimpleNamespace(
+                run=lambda *args, **kwargs: SimpleNamespace(stdout="a" * 64 + "  Libertix.exe")
+            )
+        ),
+    )
 
-    monkeypatch.setattr(main_module, "AutomationService", FakeAutomationService)
+    def run_cell(_settings, request, workspace, on_step, release):
+        assert len(request.vms) == 1 and request.vms[0] in {"vm1", "vm2", "vm3"}
+        assert request.boot_guardian_fault == "none"
+        assert release[1] == "a" * 64
+        assert workspace.parent.name == request.vms[0]
+        step = StepResult(
+            step="automation.vm_finished",
+            status="ok",
+            message="done",
+            context={"vm": request.vms[0], "vm_status": "ok"},
+        )
+        on_step(step)
+        return OperationResult(status="ok", operation="automation", message="done", steps=[step])
+
+    monkeypatch.setattr(main_module, "_run_campaign_vm_attempt", run_cell)
     configured = settings(capture_dir=tmp_path / "captures", operation_log_dir=tmp_path / "logs")
     configured = configured.model_copy(
         update={
@@ -693,8 +715,13 @@ def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_scenario_logs(
     )
     assert data["status"] == "ok"
     assert len(data["campaign_summary"]) == 4
-    assert len({item["log"] for item in data["campaign_summary"]}) == 4
-    assert all(Path(item["log"]).is_file() for item in data["campaign_summary"])
+    logs = [cell["log"] for item in data["campaign_summary"] for cell in item["cells"].values()]
+    assert len(set(logs)) == 12
+    assert all(Path(path).is_file() for path in logs)
+    root = Path(logs[0]).parents[3]
+    provenance = json.loads((root / "release-provenance.json").read_text())
+    assert provenance["sha256"] == "a" * 64
+    assert [step["step"] for step in provenance["build_steps"]] == ["test.build"]
     assert all(set(item["vms"].values()) == {"ok"} for item in data["campaign_summary"])
     assert lock.acquire_calls == lock.release_calls == 1
 
@@ -825,7 +852,10 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
         )
 
     events = [json.loads(line) for line in response.text.splitlines()]
-    assert [event["event"] for event in events].count("step") == 1
+    assert [event["data"]["step"] for event in events if event["event"] == "step"] == [
+        "automation.installed_boot_menu_seen",
+        "automation.diagnostics.wait",
+    ]
     result_events = [event for event in events if event["event"] == "result"]
     assert len(result_events) == 1
     result = result_events[0]["data"]
@@ -836,9 +866,92 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
         "vm2": "automation.installed_boot_menu_seen"
     }
     assert result["steps"][0]["context"]["captures"]["vm2"].endswith("timeout-vm2.png")
+    assert result["steps"][0]["context"]["diagnostics"]["vm2"].endswith(
+        "diagnostics/vm2/manifest.json"
+    )
     assert captured[0][0] == ["vm2"]
     assert lock.release_calls == 1
     assert lock.held is False
+
+
+def test_timeout_keeps_operation_locked_until_vm_diagnostics_finish(monkeypatch, tmp_path):
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+    monkeypatch.setattr(main_module, "_capture_automation_timeout_screens", lambda *_: ({}, {}))
+
+    def hang(*_args, **_kwargs):
+        time.sleep(5)
+        raise AssertionError("worker should have been stopped")
+
+    monkeypatch.setattr(main_module, "_run_operation", hang)
+    configured = settings(
+        capture_dir=tmp_path / "captures",
+        operation_log_dir=tmp_path / "logs",
+        automation_operation_timeout_seconds=0.05,
+    )
+    api = create_app(configured)
+    collected = []
+
+    def collect(_settings, vm, _options, _dir, errors, _capture):
+        assert lock.held
+        assert not api.state.operation_process._process.is_alive()
+        assert errors[0]["step"] == "automation.inactivity_timeout"
+        time.sleep(0.05)
+        assert lock.held
+        collected.append(vm.name)
+        return tmp_path / vm.name / "manifest.json"
+
+    monkeypatch.setattr(main_module, "collect_failure_diagnostics", collect)
+    with AsgiTestClient(api) as client:
+        response = client.post(
+            "/api/v1/automation/stream?format=ndjson",
+            json={"vms": ["vm1", "vm2"], "apply": True, "linux_password": "test-only"},
+        )
+    terminal = json.loads(response.text.splitlines()[-1])["data"]
+    assert terminal["status"] == "error"
+    assert sorted(collected) == ["vm1", "vm2"]
+    assert set(terminal["steps"][0]["context"]["diagnostics"]) == {"vm1", "vm2"}
+    assert lock.release_calls == 1
+
+
+def test_campaign_timeout_collects_the_active_scenario_with_its_linux_credentials(
+    monkeypatch, tmp_path
+):
+    from app.services.automation_campaign import SCENARIOS
+
+    summary = [
+        {"scenario": f"{d}-{b}-first", "status": "not-run", "vms": {"vm2": "not-run"}}
+        for d, b in SCENARIOS
+    ]
+    summary[-1]["status"] = "running"
+    (tmp_path / "campaign-summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    calls = []
+
+    def collect(_settings, vm, options, directory, errors, _capture):
+        calls.append((vm.name, options, directory, errors))
+        return directory.parent / "manifest.json"
+
+    monkeypatch.setattr(main_module, "collect_failure_diagnostics", collect)
+    failure = StepResult(step="automation.inactivity_timeout", status="error", message="stalled")
+    result = main_module._collect_timeout_diagnostics(
+        settings(),
+        ["vm1", "vm2", "vm3"],
+        AutomationCampaignRequest(
+            apply=True, linux_username="linux-test", linux_password="test-password"
+        ),
+        tmp_path,
+        failure,
+    )
+    assert list(result) == ["vm2"]
+    assert len(calls) == 1
+    name, options, directory, errors = calls[0]
+    assert name == "vm2"
+    assert options.distribution.id == "zorin"
+    assert options.first_boot == "linux"
+    assert options.linux_username == "linux-test"
+    assert options.linux_password == "test-password"
+    assert directory == tmp_path / "zorin-linux-first/captures"
+    assert errors[0]["step"] == "automation.inactivity_timeout"
 
 
 def test_json_automation_uses_isolated_timeout_and_captures_selected_vms(

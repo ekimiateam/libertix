@@ -237,7 +237,7 @@ function Resolve-LibertixWindowsRecoveryPartition {
         $_.GptType -eq '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}' -or
         [int]$_.MbrType -eq 39 -or $_.Type -match 'Recovery'
     })
-    if ($candidates.Count -eq 0 -or ($candidates.Count -gt 1 -and $PartitionStyle -ne 'GPT')) {
+    if ($candidates.Count -eq 0) {
         throw 'The current partition layout has no supported, unambiguous Windows recovery partition.'
     }
     # A lone OEM recovery image may coexist with active WinRE on another disk.

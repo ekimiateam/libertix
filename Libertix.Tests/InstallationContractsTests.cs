@@ -1091,26 +1091,30 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
-        public void LinuxAllocationReservesTheInstallerIsoAndWindowsMinimum()
+        public void LinuxAllocationRequiresTheInstallerDownloadAndCreditsItsCleanup()
         {
             Assert.AreEqual(
-                30d,
+                33d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(41d, 35d, 3d));
             Assert.AreEqual(
-                10d,
-                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 3d, 28d));
+                13d,
+                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 28d));
             Assert.AreEqual(
-                8d,
-                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 3d, 30d));
+                11d,
+                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 30d));
             Assert.AreEqual(
                 0d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(10d, 35d, 3d));
             Assert.AreEqual(
-                49d,
+                52d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 12d, 3d));
             Assert.AreEqual(
                 0d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 7.99d, 3d));
+            Assert.AreEqual(
+                20.01d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(28.01d, 8d, 3.641d),
+                0.001d);
             Assert.AreEqual(10, InstallationSizePolicy.TargetWindowsFreeSpaceGiB);
             Assert.AreEqual(2, InstallationSizePolicy.WindowsFreeSpaceToleranceGiB);
             Assert.AreEqual(8, InstallationSizePolicy.MinimumWindowsFreeSpaceGiB);
@@ -2039,6 +2043,7 @@ namespace Libertix.Tests
             InstallationPlanSerializer.WriteAtomic(
                 Path.Combine(root, "installation-plan.json"),
                 plan);
+            File.WriteAllText(Path.Combine(root, "storage-before-installation.json"), "{}");
 
             InstallationStateMachine machine = CreateSuccessfulExecutionState(planId);
             InstallationStateStore.WriteAtomic(
@@ -2103,7 +2108,8 @@ namespace Libertix.Tests
                     Path.Combine("payload", "Scripts", "libertix-uefi-install.ps1"),
                     Path.Combine("payload", "Scripts", "modules", "Libertix.InstallationState.psm1"),
                     Path.Combine("payload", "Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
-                    Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1")
+                    Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1"),
+                    Path.Combine("payload", "Scripts", "modules", "Libertix.StorageBaseline.psm1")
                 });
             }
             else
@@ -2117,6 +2123,7 @@ namespace Libertix.Tests
                     "Libertix.AtomicFile.psm1", "Libertix.InstallationPolicy.json",
                     "Libertix.TemporaryArtifacts.psm1", "Libertix.PostInstallVerification.psm1",
                     "Libertix.Rollback.psm1", "Libertix.StorageTargets.psm1",
+                    "Libertix.StorageBaseline.psm1",
                     "Libertix.Process.psm1", "Libertix.WindowsProfiles.psm1",
                     "Libertix.BiosMbr.psm1", "bcd-backup",
                     Path.Combine("mbr-backup", "mbr-before-grub.bin"),

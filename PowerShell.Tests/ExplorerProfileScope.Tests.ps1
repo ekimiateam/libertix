@@ -45,7 +45,12 @@ Describe "Explorer shortcuts use the task user's profile" {
         Mock New-Object { $script:fakeExplorer } -ParameterFilter { $ComObject -eq 'Shell.Application' }
         Mock New-Item {}
         Mock Test-Path { $true }
-        Mock Get-Item { [pscustomobject]@{ Attributes = [IO.FileAttributes]::ReparsePoint } }
+        $script:junction = [pscustomobject]@{
+            Attributes = [IO.FileAttributes]::ReparsePoint
+            LinkType = 'Junction'
+            Target = @('L:\home\test')
+        }
+        Mock Get-Item { $script:junction }
         $script:config = [pscustomobject]@{ LinuxUsername = 'test'; ShortcutDescription = 'Linux read-only' }
     }
 
@@ -66,5 +71,25 @@ Describe "Explorer shortcuts use the task user's profile" {
         { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
             Should -Throw '*missing or ambiguous*'
         @($script:shortcuts.Keys).Count | Should -Be 0
+    }
+
+    It "rejects a stale junction without replacing the existing path" {
+        $script:junction.Target = @('M:\home\test')
+        { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
+            Should -Throw '*targets another location*'
+        Should -Invoke New-Item -Times 0 -ParameterFilter { $ItemType -eq 'Junction' }
+        $script:junction.Target[0] | Should -Be 'M:\home\test'
+    }
+
+    It "does not treat another reparse-point type as the owned junction" {
+        $script:junction.LinkType = 'SymbolicLink'
+        { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
+            Should -Throw '*targets another location*'
+    }
+
+    It "rejects ambiguous junction targets" {
+        $script:junction.Target = @('L:\home\test', 'M:\home\test')
+        { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
+            Should -Throw '*targets another location*'
     }
 }

@@ -232,7 +232,31 @@ class InstallationMonitoringMixin:
                     ),
                     **context,
                 )
-                self._request_reboot_after_preparation(vm, result)
+                if reboot_attempts > 0 and "task host window" in verdict.visible_text.casefold():
+                    # Enter selects Cancel on this Windows shutdown blocker, not Restart anyway.
+                    with self.validation.ssh(
+                        vm.host,
+                        vm.username,
+                        self.settings.windows_ssh_password.get_secret_value(),
+                        remote_os="windows",
+                    ) as ssh:
+                        acknowledged = self._request_windows_power_transition(
+                            ssh,
+                            vm,
+                            "shutdown.exe /r /f /t 0 /d p:0:0",
+                            "automation.reboot_task_host",
+                        )
+                    result.ok(
+                        "automation.reboot_requested",
+                        "Restart requested past the Task Host blocker on the test VM; "
+                        "live boot remains unverified",
+                        vm=vm.name,
+                        target=vm.host,
+                        request_acknowledged=acknowledged,
+                        reboot_verified=False,
+                    )
+                else:
+                    self._request_reboot_after_preparation(vm, result)
                 reboot_attempts += 1
                 previous_signature = None
                 unchanged_captures = 0

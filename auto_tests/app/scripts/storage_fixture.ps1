@@ -4,13 +4,108 @@ param([Parameter(Mandatory = $true)][string]$ConfigPath)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$script:fixtureStage = 'configuration'
+$script:fixtureJournal = $null
+$script:witnesses = @()
+$script:fixtureClock = [Diagnostics.Stopwatch]::StartNew()
+
+function Write-FixtureJournal {
+    param([string]$Stage, [object]$Details = $null)
+    $script:fixtureStage = $Stage
+    $record = [ordered]@{
+        time = [DateTime]::UtcNow.ToString('o')
+        elapsedSeconds = $script:fixtureClock.Elapsed.TotalSeconds
+        stage = $Stage
+        details = $Details
+    } | ConvertTo-Json -Depth 12 -Compress
+    [IO.File]::AppendAllText($script:fixtureJournal, $record + "`r`n", (New-Object Text.UTF8Encoding($false)))
+}
+
+trap {
+    $failure = $_
+    $details = [ordered]@{
+        failedStage = $script:fixtureStage
+        message = $failure.Exception.Message
+        errorDetails = [string]$failure.ErrorDetails
+        exceptionType = $failure.Exception.GetType().FullName
+        fullyQualifiedErrorId = $failure.FullyQualifiedErrorId
+        category = [string]$failure.CategoryInfo
+        position = $failure.InvocationInfo.PositionMessage
+        scriptStackTrace = $failure.ScriptStackTrace
+        witnesses = @($script:witnesses)
+    }
+    try {
+        $errorData = $failure.Exception.PSObject.Properties['ErrorData']
+        if ($null -ne $errorData -and $null -ne $errorData.Value) {
+            $details.cimError = $errorData.Value | Select-Object Message, MessageID, ErrorSource,
+                CIMStatusCode, CIMStatusCodeDescription, PerceivedSeverity, ProbableCause,
+                ProbableCauseDescription, RecommendedActions
+        }
+        if ($null -ne $script:fixtureJournal) {
+            Write-FixtureJournal -Stage 'failed' -Details $details
+            # Do not repeat Get-PartitionSupportedSize while diagnosing its failure.
+            Write-FixtureJournal -Stage 'failure.geometry' -Details @{
+                disks = @(Get-Disk | Select-Object Number, UniqueId, Path, Guid, Signature, Size, PartitionStyle)
+                partitions = @(Get-Partition | Select-Object DiskNumber, PartitionNumber, Guid, GptType, MbrType, Offset, Size, DriveLetter)
+            }
+        }
+    } catch {
+        [Console]::Error.WriteLine('STORAGE_FIXTURE_DIAGNOSTIC_ERROR=' + $_.Exception.Message)
+    }
+    [Console]::Error.WriteLine('STORAGE_FIXTURE_FAILURE_JSON=' + ($details | ConvertTo-Json -Depth 8 -Compress))
+    Write-Error -ErrorRecord $failure -ErrorAction Continue
+    exit 1
+}
+
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$journalRoot = Join-Path $env:ProgramData 'Libertix\Automation'
+New-Item -ItemType Directory -Path $journalRoot -Force | Out-Null
+$script:fixtureJournal = Join-Path $journalRoot ([IO.Path]::GetFileNameWithoutExtension($ConfigPath) + '.log')
+Write-FixtureJournal -Stage ([string]$config.phase + '.started')
+
+function Get-FixturePartitionSupportedSize {
+    param(
+        [Parameter(Mandatory = $true)][int]$DiskNumber,
+        [Parameter(Mandatory = $true)][int]$PartitionNumber
+    )
+
+    $callerStage = $script:fixtureStage
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $result = Get-PartitionSupportedSize -DiskNumber $DiskNumber `
+                -PartitionNumber $PartitionNumber -ErrorAction Stop
+            $script:fixtureStage = $callerStage
+            return $result
+        } catch {
+            $storageProviderFailed =
+                $_.Exception -is [Microsoft.Management.Infrastructure.CimException] -and
+                [string]$_.FullyQualifiedErrorId -like 'StorageWMI 4,*'
+            if (-not $storageProviderFailed -or $attempt -eq 3) {
+                $script:fixtureStage = $callerStage
+                throw
+            }
+            Write-FixtureJournal -Stage 'storage.supported-size.retry' -Details @{
+                attempt = $attempt
+                diskNumber = $DiskNumber
+                partitionNumber = $PartitionNumber
+                message = $_.Exception.Message
+                fullyQualifiedErrorId = $_.FullyQualifiedErrorId
+            }
+            # StorageWMI can lag behind resize, partition and format operations.
+            Update-HostStorageCache -ErrorAction SilentlyContinue
+            Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
+            Start-Sleep -Seconds 2
+            $script:fixtureStage = $callerStage
+        }
+    }
+}
 
 function Get-FixtureInventory {
     $letter = $env:SystemDrive.TrimEnd(':').ToUpperInvariant()
     $windows = Get-Partition -DriveLetter $letter
     $volume = $windows | Get-Volume
-    $minimum = Get-PartitionSupportedSize -DiskNumber $windows.DiskNumber -PartitionNumber $windows.PartitionNumber
+    $minimum = Get-FixturePartitionSupportedSize -DiskNumber $windows.DiskNumber `
+        -PartitionNumber $windows.PartitionNumber
     $decrypted = $false
     $encryptedVolumes = @(Get-CimInstance -Namespace 'root/CIMV2/Security/MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume)
     foreach ($encrypted in $encryptedVolumes) {
@@ -214,7 +309,9 @@ if ($config.phase -eq 'inspect') {
 }
 if ($config.phase -eq 'apply') {
     # A plan is bound to the inspected VM state, not to whichever disk has a given number later.
+    Write-FixtureJournal -Stage 'apply.inventory.before'
     $observed = Get-FixtureInventory
+    Write-FixtureJournal -Stage 'apply.identity' -Details $observed
     Assert-FixtureHardwareIdentity -Disks $observed.disks
     $baseline = $config.plan.baseline
     if (($observed.disks | ConvertTo-Json -Depth 10 -Compress) -cne
@@ -236,7 +333,9 @@ if ($config.phase -eq 'apply') {
                 $newSize = [long]$action.new_system_size
                 $offset = [long]$action.offset
                 $size = [long]$action.size
-                $limits = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $windows.PartitionNumber
+                Write-FixtureJournal -Stage 'apply.shrink.limits' -Details $action
+                $limits = Get-FixturePartitionSupportedSize -DiskNumber $disk.Number `
+                    -PartitionNumber $windows.PartitionNumber
                 if ($newSize -lt $limits.SizeMin -or $newSize -lt 24GB -or $newSize -ge $windows.Size -or
                     $offset -ne ([long]$windows.Offset + $newSize) -or $size -lt 256MB -or $size -gt 4GB -or
                     ($offset + $size) -gt ([long]$windows.Offset + [long]$windows.Size) -or
@@ -249,17 +348,42 @@ if ($config.phase -eq 'apply') {
                         throw 'The fixture has no free primary MBR partition slot.'
                     }
                 }
+                Write-FixtureJournal -Stage 'apply.shrink.scan'
                 if ([string](Repair-Volume -DriveLetter $observed.system_drive -Scan) -ne 'NoErrorsFound') {
                     throw 'The fixture NTFS scan did not succeed.'
                 }
+                Write-FixtureJournal -Stage 'apply.shrink.resize'
                 Resize-Partition -DiskNumber $disk.Number -PartitionNumber $windows.PartitionNumber -Size $newSize
+                Write-FixtureJournal -Stage 'apply.shrink.verify'
                 $updated = Get-Partition -DriveLetter $observed.system_drive
                 if ($updated.Offset -ne $windows.Offset -or $updated.Size -ne $newSize) {
                     throw 'The fixture Windows shrink was not verified.'
                 }
+                Write-FixtureJournal -Stage 'apply.partition.create'
                 $part = New-FixtureSystemPartition -Disk $disk -Offset $offset -Size $size -Recovery:($action.format -eq 'recovery')
                 $filesystem = if ($action.format -eq 'fat32') { 'FAT32' } else { 'NTFS' }
+                Write-FixtureJournal -Stage 'apply.partition.format'
                 $part | Format-Volume -FileSystem $filesystem -NewFileSystemLabel 'LIBERTIX_TEST' -Confirm:$false | Out-Null
+                if ($action.format -eq 'recovery' -and [string]$disk.PartitionStyle -eq 'MBR') {
+                    # NTFS formatting can reset the MBR type to 0x07; restore Recovery after formatting.
+                    $current = Resolve-FixtureDisk ([string]$disk.Path)
+                    $formatted = @(Get-Partition -DiskNumber $current.Number | Where-Object {
+                        $_.PartitionNumber -eq $part.PartitionNumber -and
+                        $_.Offset -eq $offset -and $_.Size -eq $size -and [int]$_.MbrType -in @(7, 39)
+                    })
+                    if ($current.Number -ne $disk.Number -or $current.Signature -ne $disk.Signature -or
+                        $current.Size -ne $disk.Size -or [string]$current.PartitionStyle -ne 'MBR' -or
+                        $formatted.Count -ne 1) {
+                        throw 'The formatted fixture partition changed before restoring its Recovery type.'
+                    }
+                    Invoke-FixtureDiskPart -Commands (
+                        "select disk $([int]$current.Number)`r`nselect partition $([int]$part.PartitionNumber)`r`nset id=27 override`r`nexit")
+                    $part = Get-Partition -DiskNumber $current.Number -PartitionNumber $part.PartitionNumber
+                    if ([int]$part.MbrType -ne 39 -or $part.Offset -ne $offset -or $part.Size -ne $size) {
+                        throw 'The fixture Recovery type was not preserved after formatting.'
+                    }
+                }
+                Write-FixtureJournal -Stage 'apply.partition.witness'
                 $witnesses += New-FixtureWitness -Disk $disk -Partition $part -Name ([string]$action.format)
             }
             'secondary-data' {
@@ -273,13 +397,18 @@ if ($config.phase -eq 'apply') {
                     @(Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -ieq $letter }).Count -ne 0) {
                     throw 'The fixture drive letter is invalid or already occupied.'
                 }
+                Write-FixtureJournal -Stage 'apply.secondary.initialize' -Details $action
                 Initialize-Disk -Number $disk.Number -PartitionStyle GPT | Out-Null
                 $disk = Resolve-FixtureDisk ([string]$action.disk_device_path)
+                Write-FixtureJournal -Stage 'apply.secondary.create'
                 $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -DriveLetter $letter
+                Write-FixtureJournal -Stage 'apply.secondary.format'
                 $part | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'LIBERTIX_DATA_TEST' -Confirm:$false | Out-Null
+                Write-FixtureJournal -Stage 'apply.secondary.witness'
                 $witnesses += New-FixtureWitness -Disk $disk -Partition $part -Name 'secondary-data'
             }
             'existing-secondary-data' {
+                Write-FixtureJournal -Stage 'apply.secondary.identity' -Details $action
                 if ($disk.Number -eq $observed.system_disk_number -or $disk.IsBoot -or $disk.IsSystem) {
                     throw 'The existing secondary fixture volume belongs to a boot disk.'
                 }
@@ -293,12 +422,17 @@ if ($config.phase -eq 'apply') {
                     throw 'The existing secondary data volume is not healthy NTFS.'
                 }
                 # Existing snapshot data is never reformatted, relabelled or assigned another letter.
+                Write-FixtureJournal -Stage 'apply.secondary.witness'
                 $witnesses += New-FixtureWitness -Disk $disk -Partition $parts[0] -Name 'existing-secondary-data'
             }
             default { throw 'Unknown storage fixture action.' }
         }
+        Write-FixtureJournal -Stage 'apply.action.completed' -Details @{ witnesses = $witnesses }
     }
-    Write-Output ('STORAGE_FIXTURE_JSON=' + (@{ inventory = Get-FixtureInventory; witnesses = $witnesses } | ConvertTo-Json -Depth 10 -Compress))
+    Write-FixtureJournal -Stage 'apply.inventory.after'
+    $finalInventory = Get-FixtureInventory
+    Write-FixtureJournal -Stage 'apply.completed' -Details $finalInventory
+    Write-Output ('STORAGE_FIXTURE_JSON=' + (@{ inventory = $finalInventory; witnesses = $witnesses } | ConvertTo-Json -Depth 10 -Compress))
     exit 0
 }
 function Test-FixtureAllocationSource {

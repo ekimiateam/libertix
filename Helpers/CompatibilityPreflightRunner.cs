@@ -227,6 +227,7 @@ namespace Libertix.Helpers
                     LogicalSectorSize = values.GetInt32("logicalSectorSize"),
                     PhysicalSectorSize = values.GetInt32("physicalSectorSize"),
                     ShrinkAvailableBytes = values.GetInt64("shrinkAvailableBytes"),
+                    WindowsPartitionSlotAvailable = values.GetBoolean("windowsPartitionSlotAvailable"),
                     BitLockerSafe = values.GetBoolean("bitLockerSafe"),
                     BitLockerState = values.GetString("bitLockerState"),
                     SecureBootEnabled = values.GetBoolean("secureBootEnabled"),

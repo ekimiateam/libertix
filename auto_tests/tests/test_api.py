@@ -62,8 +62,9 @@ def test_stream_worker_finishes_when_its_parent_event_pipe_is_gone(
             calls.append("close")
 
     def run_operation(
-        _settings, _operation, _selectors, _request, on_step, _run_workspace
+        _settings, _operation, _selectors, _request, on_step, _run_workspace, prepared_release
     ) -> OperationResult:
+        assert prepared_release is None
         on_step(
             main_module.StepResult(
                 step="automation.deploy",

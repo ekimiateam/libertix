@@ -94,6 +94,10 @@ class AutomationCampaignRequest(ValidationRequest):
     linux_size_gib: int = Field(default=20, ge=_MINIMUM_LINUX_SIZE_GIB, le=16384)
     migrate_windows_preferences: bool = False
     continue_after_failure: bool = False
+    include_storage_scenarios: bool = False
+    start_scenario: str | None = Field(default=None, min_length=1, max_length=80)
+    retry_failed_scenarios: bool = False
+    start_scenario_attempt: Literal[1, 2] = 1
 
     @model_validator(mode="after")
     def validate_installation_options(self) -> AutomationCampaignRequest:
@@ -123,6 +127,7 @@ class AutomationRequest(ValidationRequest):
     )
     storage_fixture: StorageFixtureRequest = Field(default_factory=StorageFixtureRequest)
     installation_target: Literal["windows", "secondary"] = "windows"
+    expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None
 
     @model_validator(mode="after")
     def validate_storage_fixture_snapshot(self) -> AutomationRequest:

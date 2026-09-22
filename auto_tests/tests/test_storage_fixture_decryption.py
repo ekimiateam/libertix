@@ -60,11 +60,17 @@ def test_decryption_waits_for_explicit_zero_and_starts_only_once(monkeypatch):
     assert all(call.kwargs["config"]["drive"] == "C:" for call in calls)
     assert all(call.kwargs["config"]["disk_device_path"] == "system-device" for call in calls)
     assert elapsed[0] == 10
-    assert len(result.steps) == 3
+    assert len(result.steps) == 6
+    requests = [step for step in result.steps if step.step.endswith(".decryption_request")]
+    statuses = [step for step in result.steps if step.step.endswith(".decryption")]
+    assert len(requests) == len(statuses) == 3
+    assert [step.context["begin"] for step in requests] == [True, False, False]
+    assert all(step.context["drive"] == "C:" for step in requests)
+    assert all(step.context["disk_device_path"] == "system-device" for step in requests)
     progress = OperationProgress(0)
-    assert progress.observe(result.steps[0], 1)
-    assert not progress.observe(result.steps[0], 2)
-    assert progress.observe(result.steps[1], 3)
+    assert progress.observe(statuses[0], 1)
+    assert not progress.observe(statuses[0], 2)
+    assert progress.observe(statuses[1], 3)
     assert progress.oldest() == ("global", 3)
 
 

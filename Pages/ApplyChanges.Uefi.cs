@@ -166,13 +166,13 @@ namespace Libertix.Pages
             Log($"Linux account: {account.Username}");
 
             string powershell = WindowsProcessRunner.ResolvePowerShell();
-            UefiRecoveryState recovery = CreateUefiRecoverySession();
+            UefiRecoveryState recovery = await Task.Run(CreateUefiRecoverySession);
             _activeUefiRecovery = recovery;
 
             // Persist one validated contract before PowerShell is allowed to
             // mutate storage. The adapter receives paths, not a second copy of
             // account, locale, sizing, or disk policy.
-            InitializeInstallationContext(
+            await InitializeInstallationContextAsync(
                 FirmwareType.Uefi,
                 recovery.RecoveryRoot,
                 recovery.RecoveryRoot,
@@ -189,7 +189,7 @@ namespace Libertix.Pages
 
             try
             {
-                ArmUefiRecoveryAgent(recovery, powershell);
+                await Task.Run(() => ArmUefiRecoveryAgent(recovery, powershell));
             }
             catch (Exception ex)
             {
@@ -198,9 +198,12 @@ namespace Libertix.Pages
                     ex.Message,
                     InstallationPhase.Windows);
                 Log($"ERROR: UEFI recovery agent setup failed before disk mutation: {ex.Message}");
-                CleanupPendingWindowsSharePayload();
-                CleanupTransactionDownloadsBestEffort();
-                CleanupUefiRecoveryBeforeMutationBestEffort(recovery);
+                await Task.Run(() =>
+                {
+                    CleanupPendingWindowsSharePayload();
+                    CleanupTransactionDownloadsBestEffort();
+                    CleanupUefiRecoveryBeforeMutationBestEffort(recovery);
+                });
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
                 FinishInstallation(enableBackButton: true);
                 return;

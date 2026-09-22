@@ -120,8 +120,14 @@ function Test-RollbackPartitionLayout {
     if ($Actual.Count -eq 0 -or $Actual.Count -ne $Expected.Count) { return $false }
     # MSFT_Partition numbers can retain the pre-removal enumeration until reboot.
     # Compare every physical extent and type, not that volatile Windows identifier.
-    $actualLayout = @($Actual | Sort-Object Offset | Select-Object Offset, Size, GptType, MbrType)
-    $expectedLayout = @($Expected | Sort-Object Offset | Select-Object Offset, Size, GptType, MbrType)
+    $normalize = {
+        [pscustomobject]@{
+            Offset = [long]$_.Offset; Size = [long]$_.Size
+            GptType = [string]$_.GptType; MbrType = [int]$_.MbrType
+        }
+    }
+    $actualLayout = @($Actual | Sort-Object Offset | ForEach-Object $normalize)
+    $expectedLayout = @($Expected | Sort-Object Offset | ForEach-Object $normalize)
     return (ConvertTo-Json -InputObject $actualLayout -Compress) -ceq
         (ConvertTo-Json -InputObject $expectedLayout -Compress)
 }
@@ -239,6 +245,36 @@ function Test-RollbackStorageLayout {
     return $true
 }
 
+function Test-ProductStorageBaseline {
+    param(
+        [Parameter(Mandatory = $true)][object]$Baseline,
+        [Parameter(Mandatory = $true)][object[]]$Expected,
+        [Parameter(Mandatory = $true)][string]$PlanId
+    )
+    if ([int]$Baseline.schemaVersion -ne 1 -or [string]$Baseline.planId -cne $PlanId -or
+        @($Baseline.disks | Where-Object sizeBytes -GT 0).Count -ne $Expected.Count) { return $false }
+    foreach ($disk in $Expected) {
+        $savedDisks = @($Baseline.disks | Where-Object number -EQ $disk.Number)
+        if ($savedDisks.Count -ne 1) { return $false }
+        $saved = $savedDisks[0]
+        if ($null -ne $saved.inventoryError -or
+            ([string]$saved.uniqueId).Trim() -cne ([string]$disk.UniqueId).Trim() -or
+            [long]$saved.sizeBytes -ne [long]$disk.Size -or
+            [string]$saved.partitionStyle -cne [string]$disk.PartitionStyle -or
+            [int]$saved.logicalSectorSizeBytes -ne [int]$disk.LogicalSectorSize) { return $false }
+        if ([string]$disk.PartitionStyle -eq 'GPT' -and [guid]$saved.guid -ne [guid]$disk.Guid) { return $false }
+        if ([string]$disk.PartitionStyle -eq 'MBR' -and [uint32]$saved.signature -ne [uint32]$disk.Signature) { return $false }
+        $partitions = @($saved.partitions | ForEach-Object {
+            [pscustomobject]@{
+                Offset = [long]$_.offsetBytes; Size = [long]$_.sizeBytes
+                GptType = $_.gptType; MbrType = $_.mbrType
+            }
+        })
+        if (-not (Test-RollbackPartitionLayout -Actual $partitions -Expected @($disk.Partitions))) { return $false }
+    }
+    return $true
+}
+
 function Get-RollbackLedgerEvidence {
     param(
         [AllowEmptyCollection()][string[]]$Paths,
@@ -262,12 +298,17 @@ function Get-RollbackLedgerEvidence {
     $state = Read-LibertixExecutionState -Path $candidates[0]
     $resultVerified = $true
     if ($RequireClosedPostInstallResult) {
+        $storagePath = Join-Path $directory 'storage-before-installation.json'
+        $storageBaseline = Get-Content -LiteralPath $storagePath -Raw -Encoding UTF8 -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $resultVerified = Test-ProductStorageBaseline -Baseline $storageBaseline `
+            -Expected @($config.storage_layout) -PlanId ([string]$state.planId)
         $resultPath = Join-Path $directory "post-install-verification.json"
         if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
             $resultVerified = $false
         } else {
             $result = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $resultVerified =
+            $resultVerified = $resultVerified -and
                 [string]$result.planId -ceq [string]$state.planId -and
                 [string]$result.status -ceq "rolled-back" -and
                 $result.rollbackAvailable -eq $false -and

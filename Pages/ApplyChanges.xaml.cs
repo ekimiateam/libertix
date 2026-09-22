@@ -197,7 +197,7 @@ namespace Libertix.Pages
                     Log("BIOS firmware detected. Using existing BIOS workflow.");
                     ArchivePreviousBiosRecoverySession();
                     string biosRecoveryRunId = Guid.NewGuid().ToString("N");
-                    InitializeInstallationContext(
+                    await InitializeInstallationContextAsync(
                         firmware,
                         RecoveryRoot,
                         RecoveryRoot,

@@ -590,6 +590,7 @@ try {
         logicalSectorSize = [int]$disk.LogicalSectorSize
         physicalSectorSize = [int]$disk.PhysicalSectorSize
         shrinkAvailableBytes = [long]$shrinkAvailable
+        windowsPartitionSlotAvailable = [bool]$windowsPartitionSlotAvailable
         bitLockerSafe = [bool]$bitLocker.Safe
         bitLockerState = [string]$bitLocker.State
         secureBootEnabled = [bool]$secureBootEnabled

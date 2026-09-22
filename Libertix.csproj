@@ -360,6 +360,12 @@
     <Content Include="Scripts\modules\Libertix.Rollback.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="Scripts\modules\Libertix.StorageBaseline.psm1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Scripts\libertix-save-storage-baseline.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="Scripts\modules\Libertix.InstallationPlan.psm1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

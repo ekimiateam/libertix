@@ -5,6 +5,7 @@ import logging
 import re
 import threading
 import time
+import traceback
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
@@ -26,6 +27,7 @@ from app.config import Settings, VMConfig
 from app.distributions import load_distribution_profile
 from app.errors import WorkflowError
 from app.models import STAGING_VOLUME_LABELS, OperationResult, SourceMode, StepResult
+from app.services.automation_diagnostics import collect_failure_diagnostics
 from app.services.automation_monitoring import InstallationMonitoringMixin
 from app.services.automation_postinstall import PostInstallValidationMixin
 from app.services.automation_preflight import AutomationPreflight
@@ -89,6 +91,7 @@ class AutomationService(
         linux_password: str,
         linux_size_gib: int = 100,
         installation_target: Literal["windows", "secondary"] = "windows",
+        expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None,
         distribution: str = "mint",
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
@@ -116,6 +119,7 @@ class AutomationService(
         source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
         run_workspace: Path | None = None,
+        prepared_release: tuple[str, str] | None = None,
     ) -> OperationResult:
         owns_workspace = run_workspace is None
         workspace = run_workspace or create_capture_workspace(self.settings, "automation")
@@ -139,6 +143,17 @@ class AutomationService(
             selected_vms = self.validation.select_vms(vm_selectors)
             profiles = self._automation_profiles(selected_vms, vm_selectors)
             fixture = storage_fixture or StorageFixtureRequest()
+            if expected_compatibility_refusal and (
+                len(selected_vms) != 1
+                or selected_vms[0].firmware != "bios"
+                or installation_target != "windows"
+                or not secondary_snapshot
+                or fixture.extra_system_partition == "none"
+                or verify_uninstall
+            ):
+                raise WorkflowError(
+                    "automation.compatibility_refusal", "Invalid BIOS refusal scope"
+                )
             if installation_target not in {"windows", "secondary"} or (
                 installation_target == "secondary" and not secondary_snapshot
             ):
@@ -173,30 +188,12 @@ class AutomationService(
                         "A boot guardian fault test requires first_boot=windows",
                         details={"fault": boot_guardian_fault, "first_boot": first_boot},
                     )
-            # Restore every selected VM after one all-VM preflight barrier so
-            # parallel nominal runs start from one coherent clean baseline.
-            self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
-            if secondary_snapshot and installation_target == "secondary":
-                self._prepare_secondary_boot_devices(result, selected_vms, profiles)
-            with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
-                preparations = [
-                    executor.submit(self._prepare_windows_test_vm, vm, result)
-                    for vm in selected_vms
-                ]
-                for preparation in preparations:
-                    preparation.result()
-            executable = self.validation.prepare_server(result, source=source)
-            windows_path = self.validation.to_windows_share_path(executable)
-            result.ok(
-                "automation.release_path",
-                "Libertix executable ready for UI automation",
-                path=str(windows_path),
-            )
             options = AutomationOptions(
                 linux_username=linux_username,
                 linux_password=linux_password,
                 linux_size_gib=linux_size_gib,
                 installation_target=installation_target,
+                expected_compatibility_refusal=expected_compatibility_refusal,
                 monitor_iso=monitor_iso,
                 distribution=load_distribution_profile(distribution),
                 share_windows_files_in_linux=share_windows_files_in_linux,
@@ -211,9 +208,58 @@ class AutomationService(
                 boot_guardian_fault=boot_guardian_fault,
                 verify_uninstall=verify_uninstall,
                 first_boot=first_boot,
+                release_sha256=prepared_release[1] if prepared_release else None,
             )
+            # Restore every selected VM after one all-VM preflight barrier so
+            # parallel nominal runs start from one coherent clean baseline.
+            self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
+            if secondary_snapshot and installation_target == "secondary":
+                self._prepare_secondary_boot_devices(result, selected_vms, profiles)
+            failed_preparations: set[str] = set()
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
-                for vm in selected_vms:
+                preparations = {
+                    executor.submit(self._prepare_windows_test_vm, vm, result): vm
+                    for vm in selected_vms
+                }
+                for preparation in as_completed(preparations):
+                    vm = preparations[preparation]
+                    try:
+                        preparation.result()
+                    except Exception as exc:
+                        failure = (
+                            exc
+                            if isinstance(exc, WorkflowError)
+                            else WorkflowError(
+                                "automation.prepare_vm",
+                                "Unexpected VM preparation failure",
+                                details={"exception_type": type(exc).__name__},
+                            )
+                        )
+                        failure.details.setdefault("vm", vm.name)
+                        failed_preparations.add(vm.name)
+                        result.failure(failure)
+                        self._collect_vm_failure_diagnostics(vm, options, result)
+                        result.ok(
+                            "automation.vm_finished",
+                            "VM preparation failed; installation not started",
+                            vm=vm.name,
+                            vm_status="error",
+                        )
+            ready_vms = [vm for vm in selected_vms if vm.name not in failed_preparations]
+            if not ready_vms:
+                return result.success("VM preparation completed")
+            if prepared_release is None:
+                executable = self.validation.prepare_server(result, source=source)
+                windows_path = self.validation.to_windows_share_path(executable)
+            else:
+                windows_path = PureWindowsPath(prepared_release[0])
+            result.ok(
+                "automation.release_path",
+                "Libertix executable ready for UI automation",
+                path=str(windows_path),
+            )
+            with ThreadPoolExecutor(max_workers=len(ready_vms)) as executor:
+                for vm in ready_vms:
                     result.ok(
                         "automation.vm_started", "VM installation workflow started", vm=vm.name
                     )
@@ -225,7 +271,7 @@ class AutomationService(
                         options,
                         on_step,
                     ): vm
-                    for vm in selected_vms
+                    for vm in ready_vms
                 }
                 failures: list[OperationResult] = []
                 for future in as_completed(futures):
@@ -371,7 +417,15 @@ class AutomationService(
         options: AutomationOptions,
         on_step: Callable[[StepResult], None] | None,
     ) -> OperationResult:
-        result = ResultBuilder("automation", on_step=on_step)
+        def record_step(step: StepResult) -> None:
+            if on_step is not None:
+                on_step(step)
+            # Save evidence before the next check or reboot changes the failed VM.
+            # Collection failures are reported but must not recursively collect themselves.
+            if step.status == "error" and not step.step.startswith("automation.diagnostics."):
+                self._collect_vm_failure_diagnostics(vm, options, result)
+
+        result = ResultBuilder("automation", on_step=record_step)
         serial_session: _SerialCaptureSession | None = None
         failure: WorkflowError | None = None
         try:
@@ -388,19 +442,32 @@ class AutomationService(
                         vm, result, wallpaper_mode=options.preference_wallpaper
                     ),
                 )
-            if options.verify_uninstall or options.boot_guardian_fault in {
-                "bios-rollback",
-                "bios-controller-disconnect",
-                "bios-postinstall-rollback",
-                "uefi-postinstall-rollback",
-                "bootnext-rollback",
-                "preferred-path-rollback",
-            }:
+            if (
+                options.verify_uninstall
+                or options.expected_compatibility_refusal
+                or options.boot_guardian_fault
+                in {
+                    "bios-rollback",
+                    "bios-controller-disconnect",
+                    "bios-postinstall-rollback",
+                    "uefi-postinstall-rollback",
+                    "bootnext-rollback",
+                    "preferred-path-rollback",
+                }
+            ):
                 vm_options = replace(
                     vm_options,
-                    rollback_baseline=self._capture_rollback_baseline(vm, result),
+                    rollback_baseline=self._capture_rollback_baseline(
+                        vm,
+                        result,
+                        include_full_boot_configuration=bool(
+                            options.expected_compatibility_refusal
+                        ),
+                    ),
                 )
-            local_executable = self.validation.deploy_to_documents(vm, executable)
+            local_executable = self.validation.deploy_to_documents(
+                vm, executable, expected_sha256=options.release_sha256, on_step=record_step
+            )
             vm_options = replace(vm_options, deployed_executable=local_executable)
             result.ok(
                 "automation.deploy",
@@ -425,10 +492,15 @@ class AutomationService(
                 vm=vm.name,
                 **launch,
             )
-            monitor_outcome = self._run_unattended_wizard(vm, vm_options, result, launch)
-            self._run_post_install_validation(vm, vm_options, result, monitor_outcome)
+            if options.expected_compatibility_refusal:
+                self._verify_compatibility_refusal(vm, vm_options, result, launch)
+            else:
+                monitor_outcome = self._run_unattended_wizard(vm, vm_options, result, launch)
+                self._run_post_install_validation(vm, vm_options, result, monitor_outcome)
         except WorkflowError as exc:
             failure = exc
+            failure.details.setdefault("vm", vm.name)
+            failure.details.setdefault("target", vm.host)
         except Exception as exc:
             logger.exception(
                 "Unexpected internal error during automation on %s",
@@ -442,6 +514,10 @@ class AutomationService(
                     "vm": vm.name,
                     "target": vm.host,
                     "type": type(exc).__name__,
+                    "traceback": [
+                        {"file": frame.filename, "line": frame.lineno, "function": frame.name}
+                        for frame in traceback.extract_tb(exc.__traceback__)
+                    ],
                 },
             )
         finally:
@@ -463,6 +539,59 @@ class AutomationService(
         if failure is not None:
             return result.failure(failure)
         return result.success(f"Automation completed on {vm.name}")
+
+    def _collect_vm_failure_diagnostics(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        errors = [
+            step.model_dump(mode="json")
+            for step in result.steps
+            if step.status == "error"
+            and not step.step.startswith("automation.diagnostics.")
+            and step.context.get("vm", vm.name) == vm.name
+        ]
+        result.ok(
+            "automation.diagnostics.wait",
+            "Waiting 15 seconds before collecting VM diagnostics; the test remains failed",
+            vm=vm.name,
+            failed_step=errors[-1]["step"],
+        )
+        try:
+            manifest_path = collect_failure_diagnostics(
+                self.settings,
+                vm,
+                options,
+                self._capture_dir,
+                errors,
+                lambda path: self.vnc.capture(vm.vnc, path),
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            context_status = manifest.get("system_context", {}).get("status", "unavailable")
+            record = (
+                result.ok
+                if manifest["status"] == "collected" and context_status == "collected"
+                else result.error
+            )
+            record(
+                "automation.diagnostics.saved",
+                "VM diagnostics saved; consult the manifest for missing or unreadable logs",
+                vm=vm.name,
+                path=str(manifest_path),
+                collection_status=manifest["status"],
+                system_context_status=context_status,
+            )
+        except Exception as exc:
+            # Diagnostics must never replace the original failure or stop another VM.
+            result.error(
+                "automation.diagnostics.failed",
+                "VM diagnostics could not be saved",
+                vm=vm.name,
+                exception_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     def _configure_storage_fixture(
         self, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
@@ -684,6 +813,15 @@ class AutomationService(
         last_percentage = None
         begin = True
         while time.monotonic() < min(deadline, progress_deadline):
+            result.ok(
+                "automation.storage_fixture.decryption_request",
+                "Requesting decryption" if begin else "Observing decryption",
+                vm=vm.name,
+                begin=begin,
+                drive=drive,
+                disk_device_path=disk_device_path,
+                partition_offset=partition_offset,
+            )
             response = self.validation.run_windows_script(
                 ssh,
                 script_name="prepare_storage_fixture_volume.ps1",
@@ -801,6 +939,9 @@ class AutomationService(
         self,
         vm: VMConfig,
         result: ResultBuilder,
+        *,
+        installation_not_started: bool = True,
+        include_full_boot_configuration: bool = False,
     ) -> dict[str, str]:
         with self.validation.ssh(
             vm.host,
@@ -811,7 +952,10 @@ class AutomationService(
             response = self.validation.run_windows_script(
                 ssh,
                 script_name="inspect_installation_rollback_state.ps1",
-                config={"staging_volume_labels": list(STAGING_VOLUME_LABELS)},
+                config={
+                    "staging_volume_labels": list(STAGING_VOLUME_LABELS),
+                    "include_full_boot_configuration": include_full_boot_configuration,
+                },
                 step="automation.rollback_baseline",
                 timeout=90,
             )
@@ -826,6 +970,7 @@ class AutomationService(
                 "STORAGE_LAYOUT_JSON",
                 "EXECUTION_PLAN_IDS_JSON",
                 "WINDOWS_BOOT_LOADERS_JSON",
+                "WINDOWS_BOOT_CONFIGURATION_JSON",
                 "WINDOWS_BOOT_LOADER_PARTITIONS_JSON",
                 "INSTALLER_PARTITION_COUNT",
                 "LIBERTIX_PROCESS_COUNT",
@@ -844,11 +989,13 @@ class AutomationService(
             "WINDOWS_BOOT_LOADERS_JSON",
             "WINDOWS_BOOT_LOADER_PARTITIONS_JSON",
         )
+        if include_full_boot_configuration:
+            required += ("WINDOWS_BOOT_CONFIGURATION_JSON",)
         if (
             values.get("RESULT") != "OK"
             or any(not values.get(name) for name in required)
             or values.get("INSTALLER_PARTITION_COUNT") != "0"
-            or values.get("LIBERTIX_PROCESS_COUNT") != "0"
+            or (installation_not_started and values.get("LIBERTIX_PROCESS_COUNT") != "0")
             or values.get("RECOVERY_TASK_COUNT") != "0"
         ):
             raise WorkflowError(
@@ -1019,7 +1166,9 @@ class AutomationService(
 
     def _prepare_windows_test_vm(self, vm: VMConfig, result: ResultBuilder) -> None:
         values: dict[str, str] = {}
-        for attempt in range(1, 4):
+        servicing_restarted = False
+        attempt = 1
+        while True:
             try:
                 with self.validation.ssh(
                     vm.host,
@@ -1030,9 +1179,12 @@ class AutomationService(
                     response = self.validation.run_windows_script(
                         ssh,
                         script_name="prepare_windows_test_vm.ps1",
-                        config={"utc_now": datetime.now(UTC).isoformat()},
+                        config={
+                            "utc_now": datetime.now(UTC).isoformat(),
+                            "expected_username": vm.username,
+                        },
                         step="automation.prepare_vm",
-                        timeout=60,
+                        timeout=300,
                     )
                 values = self.validation.parse_powershell_results(
                     response.stdout,
@@ -1044,7 +1196,10 @@ class AutomationService(
                         "WINDOWS_NOTIFICATION_SERVICES_DISABLED",
                         "WINDOWS_SETUP_REMINDER_DISABLED",
                         "WINDOWS_UPDATES_DISABLED",
+                        "SMART_APP_CONTROL_STATE",
                         "TEMPORARY_FILES_RECLAIMED_BYTES",
+                        "WINDOWS_SERVICING_INITIAL_PENDING_PATHS",
+                        "WINDOWS_UPDATE_STOP_ELAPSED_MS",
                     ),
                 )
                 if (
@@ -1055,15 +1210,37 @@ class AutomationService(
                     or values.get("WINDOWS_NOTIFICATION_SERVICES_DISABLED") != "True"
                     or values.get("WINDOWS_SETUP_REMINDER_DISABLED") != "True"
                     or values.get("WINDOWS_UPDATES_DISABLED") != "True"
+                    or values.get("SMART_APP_CONTROL_STATE") not in {"Off", "NotAvailable"}
                     or not values.get("TEMPORARY_FILES_RECLAIMED_BYTES", "").isdigit()
                 ):
                     raise WorkflowError(
                         "automation.prepare_vm",
-                        "Windows test VM did not confirm its clock, notification and update policy",
+                        "Windows test VM did not confirm its clock, notification, update policy "
+                        "or Smart App Control state",
                         details={"vm": vm.name, "host": vm.host},
                     )
                 break
-            except WorkflowError:
+            except WorkflowError as exc:
+                servicing = self.validation.parse_powershell_results(
+                    str(exc.details.get("stdout", "")),
+                    prefixes=(
+                        "WINDOWS_SERVICING_RESTART_REQUIRED",
+                        "WINDOWS_SERVICING_PENDING_PATHS",
+                        "WINDOWS_SERVICING_INITIAL_PENDING_PATHS",
+                        "WINDOWS_UPDATE_STOP_ELAPSED_MS",
+                    ),
+                )
+                if servicing.get("WINDOWS_SERVICING_RESTART_REQUIRED") == "True":
+                    if servicing_restarted:
+                        raise WorkflowError(
+                            "automation.prepare_vm",
+                            "Windows servicing still requires a restart after one verified reboot; "
+                            "installation not started",
+                            details=exc.details,
+                        ) from exc
+                    servicing_restarted = True
+                    self._restart_windows_test_vm_for_servicing(vm, result, servicing)
+                    continue
                 if attempt == 3:
                     raise
                 logger.warning(
@@ -1071,6 +1248,7 @@ class AutomationService(
                     attempt,
                     extra={"step": "automation.prepare_vm_retry", "target": vm.host},
                 )
+                attempt += 1
                 time.sleep(3)
         result.ok(
             "automation.prepare_vm",
@@ -1084,8 +1262,49 @@ class AutomationService(
             windows_notification_services_disabled=True,
             windows_setup_reminder_disabled=True,
             windows_updates_disabled=True,
+            smart_app_control_state=values["SMART_APP_CONTROL_STATE"],
             temporary_files_reclaimed_bytes=int(values["TEMPORARY_FILES_RECLAIMED_BYTES"]),
+            initial_pending_paths=values.get("WINDOWS_SERVICING_INITIAL_PENDING_PATHS", ""),
+            update_stop_elapsed_ms=values.get("WINDOWS_UPDATE_STOP_ELAPSED_MS", ""),
         )
+
+    def _restart_windows_test_vm_for_servicing(
+        self, vm: VMConfig, result: ResultBuilder, servicing: dict[str, str]
+    ) -> None:
+        if not vm.automation_enabled or vm.vmid not in self.settings.allowed_proxmox_vmids:
+            raise WorkflowError(
+                "automation.prepare_vm", "Servicing restart requires an authorized test VM"
+            )
+        result.ok(
+            "automation.prepare_vm.servicing_restart",
+            "Windows servicing requires a restart; requesting one reboot "
+            "before retrying preparation",
+            vm=vm.name,
+            pending_paths=servicing.get("WINDOWS_SERVICING_PENDING_PATHS", ""),
+            initial_pending_paths=servicing.get("WINDOWS_SERVICING_INITIAL_PENDING_PATHS", ""),
+            update_stop_elapsed_ms=servicing.get("WINDOWS_UPDATE_STOP_ELAPSED_MS", ""),
+        )
+        password = self.settings.windows_ssh_password.get_secret_value()
+        with self.validation.ssh(vm.host, vm.username, password, remote_os="windows") as ssh:
+            previous_boot_id = self._read_windows_boot_id(ssh, vm)
+            self._request_windows_power_transition(
+                ssh, vm, "shutdown.exe /r /t 0 /d p:2:17", "automation.prepare_vm.servicing_restart"
+            )
+        restarted = self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=password,
+            trust_on_first_use=False,
+            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+            expected="LIBERTIX_WINDOWS_READY",
+            phase="prepare_vm_servicing_return",
+            previous_windows_boot_id=previous_boot_id,
+        )
+        try:
+            self._prepare_windows_graphical_session(restarted, vm, result)
+        finally:
+            restarted.__exit__(None, None, None)
 
     def _inject_stale_firmware_entry(
         self,

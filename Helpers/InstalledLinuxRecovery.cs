@@ -272,6 +272,7 @@ namespace Libertix.Helpers
 
                 ValidateLinuxBootEvidence(canonicalRoot, plan);
                 ValidatePostInstallResult(canonicalRoot, plan);
+                ValidateRequiredFiles(canonicalRoot, new[] { "storage-before-installation.json" });
                 string statePath = null;
                 string scriptPath;
                 if (firmware == InstallationFirmware.Uefi)
@@ -293,6 +294,7 @@ namespace Libertix.Helpers
                         "Libertix.TemporaryArtifacts.psm1",
                         "Libertix.PostInstallVerification.psm1",
                         "Libertix.Rollback.psm1",
+                        "Libertix.StorageBaseline.psm1",
                         "Libertix.StorageTargets.psm1",
                         "Libertix.Process.psm1",
                         "Libertix.WindowsProfiles.psm1",
@@ -453,7 +455,8 @@ namespace Libertix.Helpers
                 Path.Combine("payload", "Scripts", "libertix-uefi-install.ps1"),
                 Path.Combine("payload", "Scripts", "modules", "Libertix.InstallationState.psm1"),
                 Path.Combine("payload", "Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
-                Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1")
+                Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1"),
+                Path.Combine("payload", "Scripts", "modules", "Libertix.StorageBaseline.psm1")
             });
             return Path.Combine(
                 state.PayloadRoot,

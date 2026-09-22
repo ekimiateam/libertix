@@ -28,6 +28,13 @@ class StreamEventProjector:
 
         if step.status == "error":
             return full_event
+        if step.step == "automation.campaign_retry":
+            self._emitted.clear()
+            return full_event
+        if step.step == "automation.campaign_plan":
+            return full_event
+        if step.step.startswith(("automation.diagnostics.", "automation.network.")):
+            return full_event
         if step.step == "automation.capture":
             return None
         if step.step == "automation.monitor_installation":
@@ -36,10 +43,20 @@ class StreamEventProjector:
             return self._compact_step(step, keep_context=("vm", "test", "scenario"))
 
         visible_steps = {
+            "automation.prepare_vm",
+            "automation.vm_finished",
+            "automation.installed_linux_uninstall.launch",
+            "automation.installed_linux_uninstall.detected",
+            "automation.installed_linux_uninstall.confirmation",
+            "automation.installed_linux_uninstall.progress",
+            "automation.installed_linux_uninstall.verify",
+            "automation.installed_linux_uninstall.after_reboot",
             "automation.campaign_scenario",
             "automation.reset_vm_done",
             "build_vm.compile",
             "automation.deploy",
+            "automation.compatibility_refusal",
+            "automation.compatibility_unchanged",
             "automation.preparation_finished",
             "automation.reboot_requested",
             "automation.installed_boot_menu_seen",
@@ -84,6 +101,14 @@ class StreamEventProjector:
             vm = f"{scenario}/{vm}"
         if data["status"] == "error":
             return "ERROR " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
+        if data["step"].startswith("automation.diagnostics."):
+            return (
+                "DIAGNOSTICS " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+        if data["step"].startswith("automation.network."):
+            return "NETWORK " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
+        if data["step"] == "automation.campaign_retry":
+            return "RETRY " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
         if data["step"].startswith("automation.test."):
             name = str(data.get("context", {}).get("test") or data["step"])
             return f"TEST {vm} {name} OK\n"
@@ -180,7 +205,7 @@ class StreamEventProjector:
     def _compact_step(
         step: StepResult,
         *,
-        keep_context: tuple[str, ...] = ("vm", "target", "scenario"),
+        keep_context: tuple[str, ...] = ("vm", "target", "scenario", "phase", "vm_status"),
     ) -> dict[str, Any]:
         context = {key: step.context[key] for key in keep_context if key in step.context}
         return {

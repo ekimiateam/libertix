@@ -24,7 +24,7 @@ namespace Libertix.Pages
         private string _installationPlanPath;
         private string _windowsPreferenceMigrationBundlePath;
 
-        private void InitializeInstallationContext(
+        private async Task InitializeInstallationContextAsync(
             FirmwareType firmware,
             string persistenceRoot,
             string recoveryRoot,
@@ -86,6 +86,16 @@ namespace Libertix.Pages
             WriteProtectedInstallerFile(passwordHashWindowsPath, passwordHash + "\n");
             _installationPlanPath = Path.Combine(persistenceRoot, InstallationPlanFileName);
             InstallationPlanSerializer.WriteAtomic(_installationPlanPath, _installationPlan);
+
+            string inventoryScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
+                "Scripts", "libertix-save-storage-baseline.ps1");
+            var inventory = await Task.Run(() => RunProcess(
+                WindowsProcessRunner.ResolvePowerShell(),
+                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(inventoryScript)} " +
+                $"-InstallationPlanPath {QuoteArgument(_installationPlanPath)}",
+                (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds));
+            if (inventory.exitCode != 0)
+                throw new InvalidOperationException($"Initial storage inventory failed: {inventory.error}");
 
             _executionLedger = InstallationExecutionLedger.Create(
                 planId,

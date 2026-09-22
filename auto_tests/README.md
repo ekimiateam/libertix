@@ -217,21 +217,33 @@ curl -fsS -N -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/v1/automation/full/stream
 ```
 
-This endpoint requires exactly three distinct enabled laboratory VMs. It runs four scenarios
-sequentially, with all three VMs in parallel within each scenario. Each scenario restores the
+This endpoint requires exactly three distinct enabled laboratory VMs and a separate build VM.
+Each test VM runs the four scenarios in order, independently of the other VMs. A slow VM does
+not prevent another VM from starting its next scenario. Each scenario restores the
 configured default snapshot, installs Linux on the default Windows volume, and verifies both
 operating systems and cross-boots. After each scenario, it relaunches Libertix, uninstalls Linux
 through the product UI, and verifies the restored Windows state again after an unattended reboot.
 This covers both distributions and both initial boot orders on all three VMs.
-It does not inject faults or replace the separate storage and
-rollback campaigns. Preference migration can be enabled with `migrate_windows_preferences`.
+Preference migration can be enabled with `migrate_windows_preferences`.
+With `include_storage_scenarios=true`, the existing fourteen-scenario matrix covers 42 VM/scenario
+cells: 36 installation/uninstallation workflows and six BIOS refusal checks. The latter keep the
+secondary disk connected, request the full MBR Windows destination, require the exact product
+refusal before installation, and compare disk layout, BCD configuration, recovery state and data
+witnesses before/after. A different error or an unexpected installation is not a successful refusal.
 
-The campaign holds the existing operation lock throughout. It stops after a failed scenario by
-default so the affected VM state remains available for diagnosis. Set `continue_after_failure`
+The campaign holds the existing operation lock throughout and builds one standalone executable,
+whose hash is checked on every deployment. Each VM has its own isolated controller and retry
+workspace. An interrupted controller is stopped and its diagnostics collected before that VM is
+restored again. The campaign stops the affected VM's lane after a failed scenario by default;
+other VM lanes continue. Set `continue_after_failure`
 to `true` only when restoring those failed VMs for the remaining scenarios is intended.
-The terminal `SCENARIO` records include per-VM verdicts, errors and individual log paths;
+Set `retry_failed_scenarios=true` to permit one additional technical attempt per VM/scenario.
+A confirmed network outage longer than two minutes can replay the same attempt after recovery
+without consuming that technical retry. Previous errors remain recorded even if the retry passes.
+The terminal `SCENARIO` records include per-VM verdicts and a `cells` mapping containing errors,
+individual log paths, attempt numbers, replay generations and previous attempts;
 unexecuted scenarios are marked `not-run`. A persistent `campaign-summary.json` is updated after
-each scenario. Logs and captures stay together under the campaign workspace's normal retention.
+each cell transition. Logs and captures stay together under the campaign workspace's normal retention.
 Use `/api/v1/automation/full` for a JSON result, or append `?format=ndjson` to the streaming endpoint.
 The existing operation-kill endpoint also stops the full campaign without launching another scenario.
 

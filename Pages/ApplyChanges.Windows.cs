@@ -455,6 +455,9 @@ namespace Libertix.Pages
                         Path.Combine("Scripts", "modules", "Libertix.Rollback.psm1"),
                         "Libertix.Rollback.psm1");
                     CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "modules", "Libertix.StorageBaseline.psm1"),
+                        "Libertix.StorageBaseline.psm1");
+                    CopyRequiredRecoveryFile(
                         Path.Combine("Scripts", "modules", "Libertix.StorageTargets.psm1"),
                         "Libertix.StorageTargets.psm1");
                     CopyRequiredRecoveryFile(
@@ -669,6 +672,14 @@ namespace Libertix.Pages
 
         private async Task<bool> RefreshWindowsRecoveryRegistrationAsync()
         {
+            // A separate allocation disk leaves the Windows partition layout intact.
+            // Cycling WinRE here can move its image to an unrelated OEM partition.
+            if (_installationPlan.Allocation != null)
+            {
+                Log("Windows Recovery Environment registration preserved: only the separate allocation disk was partitioned.");
+                return true;
+            }
+
             return await Task.Run(() =>
             {
                 var disable = RunProcess(

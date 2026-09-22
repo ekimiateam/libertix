@@ -127,6 +127,15 @@ $baselinePlanIds = @($ledgerPaths | ForEach-Object {
     [string](Get-Content -LiteralPath $_ -Raw | ConvertFrom-Json).planId
 })
 $bootLoaderEvidence = Get-WindowsBootLoaderEvidence
+if ($config.PSObject.Properties.Name -contains 'include_full_boot_configuration' -and
+    [bool]$config.include_full_boot_configuration) {
+    $bootConfiguration = @(& "$env:SystemRoot\System32\bcdedit.exe" /enum all /v)
+    if ($LASTEXITCODE -ne 0 -or $bootConfiguration.Count -eq 0) {
+        throw 'The complete pre-installation BCD configuration could not be read.'
+    }
+    Write-Output ("WINDOWS_BOOT_CONFIGURATION_JSON={0}" -f
+        (ConvertTo-Json -InputObject @($bootConfiguration | ForEach-Object { ([string]$_).TrimEnd() }) -Compress))
+}
 $installerPartitions = @()
 foreach ($partition in @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop)) {
     $volume = $partition | Get-Volume -ErrorAction SilentlyContinue

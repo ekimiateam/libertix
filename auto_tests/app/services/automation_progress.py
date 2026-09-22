@@ -121,7 +121,13 @@ class OperationProgress:
             token = tuple(
                 str(step.context.get(key, "")) for key in ("test", "stage", "phase", "sequence")
             )
-        signature = (str(step.context.get("scenario", "")), vm, step.step, token)
+        signature = (
+            str(step.context.get("scenario", "")),
+            step.context.get("scenario_attempt", 1),
+            vm,
+            step.step,
+            token,
+        )
         if signature in self._seen:
             return False
         self._seen.add(signature)
@@ -137,3 +143,7 @@ class OperationProgress:
             if self.active
             else ("global", self.global_at)
         )
+
+    def exclude_network_pause(self, seconds: float) -> None:
+        self.global_at += seconds
+        self.active = {vm: observed + seconds for vm, observed in self.active.items()}

@@ -122,14 +122,18 @@ function Get-LinuxDrive {
     param([Parameter(Mandatory = $true)][string]$LinuxUsername)
 
     for ($attempt = 0; $attempt -lt 90; $attempt++) {
-        foreach ($letter in @("L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
-            if (Test-Path -LiteralPath "${letter}:\home\$LinuxUsername" -PathType Container) {
-                return "${letter}:"
+        $statusPath = Join-Path $env:ProgramData 'Libertix\WindowsShare\mount-status.json'
+        if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+            $status = Read-JsonFileWithRetry -LiteralPath $statusPath
+            $drive = [string]$status.drive
+            Assert-Condition ($drive -match '^[L-Z]:$' -and [bool]$status.readOnly) 'Invalid read-only mount status.'
+            if (Test-Path -LiteralPath "$drive\home\$LinuxUsername" -PathType Container) {
+                return $drive
             }
         }
         Start-Sleep -Seconds 1
     }
-    throw "The read-only Linux volume is not mounted on any supported drive letter."
+    throw "The recorded read-only Linux mount is unavailable."
 }
 
 function Get-LibertixRecoveryTasks {
@@ -621,7 +625,7 @@ $installerIsoPattern = [regex]::Escape([string]$config.installer_iso_file_name)
 try {
     switch ($check) {
         "waiting_for_linux" {
-            $deadline = [DateTime]::UtcNow.AddMinutes(3)
+            $waitClock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $session = Get-LibertixRecoverySession `
                     -ExpectedFirmware ([string]$config.expected_firmware)
@@ -649,7 +653,7 @@ try {
                     $promptTasks.Count -eq 1
                 )
                 if ($waitingReady) { break }
-                if ([DateTime]::UtcNow -ge $deadline) {
+                if ($waitClock.Elapsed.TotalSeconds -ge 180) {
                     $waitingStatus = if ($null -eq $waitingResult) {
                         "missing"
                     } else {
@@ -724,7 +728,7 @@ try {
             Write-Output "WINDOWS_CURRENT_BOOT=$currentBootId"
         }
         "finalization" {
-            $deadline = [DateTime]::UtcNow.AddMinutes(5)
+            $clock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $session = Get-LibertixRecoverySession `
                     -ExpectedFirmware ([string]$config.expected_firmware)
@@ -745,7 +749,25 @@ try {
                 $interactiveCheckPassed = -not [bool]$config.share_linux_files_in_windows
                 if ($resultStatus -in @("failed", "rolled-back")) {
                     $failedChecks = @($savedResult.checks | Where-Object { -not [bool]$_.passed } |
-                        ForEach-Object { "{0}: {1}" -f [string]$_.name, [string]$_.message })
+                        ForEach-Object { "{0}: {1}" -f [string]$_.name, [string]$_.detail })
+                    foreach ($logPath in @(
+                        [string]$savedResult.logPath,
+                        (Join-Path $env:ProgramData 'Libertix\WindowsShare\windows-share.log')
+                    )) {
+                        if (-not [string]::IsNullOrWhiteSpace($logPath)) {
+                            try {
+                                if (-not (Test-Path -LiteralPath $logPath -PathType Leaf -ErrorAction Stop)) {
+                                    Write-Output "FINALIZATION_LOG_MISSING=$logPath"
+                                    continue
+                                }
+                                Write-Output "FINALIZATION_LOG=$logPath (last 20 lines)"
+                                Get-Content -LiteralPath $logPath -Tail 20 -ErrorAction Stop |
+                                    ForEach-Object { Write-Output ([string]$_) }
+                            } catch {
+                                Write-Output "FINALIZATION_LOG_UNREADABLE=$logPath ERROR=$($_.Exception.Message)"
+                            }
+                        }
+                    }
                     throw (
                         "Libertix Windows finalization reached terminal status '$resultStatus'. " +
                         "Error='$([string]$savedResult.error)'. " +
@@ -770,7 +792,7 @@ try {
                     Write-Output "LIBERTIX_FINALIZATION=ready"
                     break
                 }
-                if ([DateTime]::UtcNow -ge $deadline) {
+                if ($clock.Elapsed.TotalSeconds -ge 300) {
                     throw (
                         "Libertix Windows finalization timed out: " +
                         "resultStatus=$resultStatus, uefiTransaction=$uefiTransaction, " +
@@ -1402,12 +1424,20 @@ try {
                 $accepted = $true
             } catch {
                 Write-Output ("WRITE_REFUSAL={0}" -f $_.Exception.Message)
+                $failure = $_.Exception
+                while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+                $nativeCode = $failure.HResult -band 0xffff
+                Write-Output "WRITE_REFUSAL_NATIVE_CODE=$nativeCode HRESULT=$($failure.HResult) TYPE=$($failure.GetType().FullName)"
+                Assert-Condition ($nativeCode -eq 19) 'The write failed for a reason other than media write protection.'
             } finally {
                 if ($accepted) {
                     Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
                 }
             }
             Assert-Condition (-not $accepted) "The Linux volume accepted a Windows write."
+            $marker = Join-Path $drive "home\$($config.linux_username)\$($config.linux_relative_path)"
+            $markerHash = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash.ToLowerInvariant()
+            Assert-Condition ($markerHash -eq [string]$config.linux_sha256) 'The Linux witness is no longer readable after the write probe.'
         }
         "explorer_shortcut" {
             $shortcuts = @(Get-RegisteredLinuxShortcuts -LinuxUsername ([string]$config.linux_username))
@@ -1426,25 +1456,43 @@ try {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $resultPath = Join-Path $session.Root "post-install-verification.json"
-            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            $clock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $savedResult = Read-JsonFileWithRetry -LiteralPath $resultPath
                 $checks = @($savedResult.checks | Where-Object {
                     [string]$_.name -eq "explorer-integration"
                 })
-                if ($checks.Count -eq 1 -or [DateTime]::UtcNow -ge $deadline) { break }
+                if ($checks.Count -eq 1 -or $clock.Elapsed.TotalSeconds -ge 120) { break }
                 Start-Sleep -Seconds 2
             } while ($true)
             Assert-Condition ($checks.Count -eq 1) `
                 "Explorer integration was not verified in the interactive user session."
             Assert-Condition ([bool]$checks[0].passed) `
                 "Explorer Home/Quick Access integration failed: $($checks[0].detail)"
+            $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)
+            $expectedHome = Join-Path $drive "home\$($config.linux_username)"
+            $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)
+            Assert-Condition ($explorers.Count -gt 0) 'No interactive Explorer session exists.'
+            foreach ($explorer in $explorers) {
+                $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwnerSid -ErrorAction Stop
+                $userProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$($owner.Sid)'" -ErrorAction Stop
+                $junctionPath = Join-Path ([string]$userProfile.LocalPath) "Linux_$($config.linux_username)_read-only"
+                $junction = Get-Item -LiteralPath $junctionPath -Force -ErrorAction Stop
+                $targets = @($junction.Target)
+                Assert-Condition ([string]$junction.LinkType -eq 'Junction' -and $targets.Count -eq 1) 'The Explorer entry is not an unambiguous junction.'
+                Assert-Condition ([IO.Path]::GetFullPath([string]$targets[0]).TrimEnd('\') -ieq
+                    [IO.Path]::GetFullPath($expectedHome).TrimEnd('\')) 'The Explorer junction points to another directory.'
+                $witness = Join-Path $junctionPath ([string]$config.linux_relative_path)
+                $hash = (Get-FileHash -LiteralPath $witness -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                Assert-Condition ($hash -eq [string]$config.linux_sha256) 'The Linux witness differs when read through the Explorer junction.'
+                Write-Output "EXPLORER_JUNCTION=$junctionPath SHA256=$hash"
+            }
         }
         "post_install_result_ui" {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $expectedFirmware = [string]$config.expected_firmware
-            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            $waitClock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $uiProcesses = @(
                     Get-PostInstallResultUiProcesses `
@@ -1452,7 +1500,7 @@ try {
                         -ExpectedFirmware $expectedFirmware
                 )
             if ($uiProcesses.Count -eq 1) { break }
-                if ([DateTime]::UtcNow -ge $deadline) {
+                if ($waitClock.Elapsed.TotalSeconds -ge 120) {
                     throw "The interactive Windows post-install result window is not running."
                 }
                 Start-Sleep -Seconds 2
@@ -1465,7 +1513,7 @@ try {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $expectedFirmware = [string]$config.expected_firmware
-            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $waitClock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $uiProcesses = @(
                     Get-PostInstallResultUiProcesses `
@@ -1478,7 +1526,7 @@ try {
                 if ($uiProcesses.Count -eq 0 -and $promptTasks.Count -eq 0) {
                     break
                 }
-                if ([DateTime]::UtcNow -ge $deadline) {
+                if ($waitClock.Elapsed.TotalSeconds -ge 30) {
                     throw "The Windows post-install result window or its prompt task is still active."
                 }
                 Start-Sleep -Seconds 1

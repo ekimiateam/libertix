@@ -331,7 +331,7 @@ function Assert-RecoveryOperationsSucceeded {
 }
 
 function Invoke-MinimumRecoveryFallback {
-    if ($script:RecoveryCompensationSequenceStarted) {
+    if ($VerifiedUninstall -or $script:RecoveryCompensationSequenceStarted) {
         return
     }
     $script:RecoveryCompensationSequenceStarted = $true
@@ -1194,6 +1194,23 @@ try {
         exit 2
     }
 
+    if ($VerifiedUninstall) {
+        Import-Module (Join-Path $Root 'Libertix.StorageBaseline.psm1') -ErrorAction Stop
+        Assert-LibertixUninstallStorageBaseline -RecoveryRoot $Root
+        $uninstallPlan = Get-Content -LiteralPath (Join-Path $Root 'installation-plan.json') -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+        $linuxDisk = if ([int]$uninstallPlan.schemaVersion -eq 5) { $uninstallPlan.allocation } else { $uninstallPlan.disk }
+        $linuxOffset = Get-LibertixPlannedLinuxOffset -Plan $uninstallPlan
+        $linuxPartitions = @(Get-Partition -DiskNumber $linuxDisk.number -ErrorAction Stop | Where-Object {
+            [long]$_.Offset -eq $linuxOffset
+        })
+        if ($linuxPartitions.Count -eq 1) {
+            Assert-LibertixInstalledFilesystemIdentity -Partition $linuxPartitions[0] -RecoveryRoot $Root
+        } elseif ($linuxPartitions.Count -gt 1 -or
+            [string]$recoveryExecutionState.status -notin @('rollback-running', 'rolled-back')) {
+            throw 'The installed Linux filesystem is missing before uninstall.'
+        }
+    }
     $script:RecoveryRollbackRequested = $true
     $script:TrackRecoveryExecutionState = Initialize-RecoveryExecutionState `
         -State $recoveryExecutionState
@@ -1266,6 +1283,17 @@ try {
     }
 
     $script:RecoveryCompensationSequenceStarted = $true
+    if ($VerifiedUninstall) {
+        # Restore a bootable Windows path before deleting the filesystem used by GRUB.
+        $mbrRestored = Invoke-RecoveryOperation -Name 'mbr.restore' -Operation {
+            Restore-BiosMbrBootCode -DiskNumber $diskNumber -ExecutionState $recoveryExecutionState
+        }
+        if (-not $mbrRestored) { throw 'Windows boot-code restoration failed; Linux was not removed.' }
+        $bcdRestored = Invoke-RecoveryOperation -Name 'bcd.restore' -Operation {
+            Restore-BcdState -Required:$temporaryBootWasPrepared -PreserveUnrelatedChanges
+        }
+        if (-not $bcdRestored) { throw 'Windows boot-menu restoration failed; Linux was not removed.' }
+    }
     $diskLayoutRestored = Invoke-RecoveryOperation -Name "disk-layout.restore" -Operation {
         $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
         if (
@@ -1324,8 +1352,11 @@ try {
         }
         [int]$sourceDiskNumber = $sourcePlanDisk.number
         [long]$sourceOriginalEnd = $sourceOriginalOffset + $sourceOriginalSize
-        [long]$sourceExpectedTransactionOffset = $sourceOriginalEnd -
-            ($sourceOriginalEnd % $PartitionAlignmentBytes) - $expectedBytes
+        [long]$sourceExpectedTransactionOffset = if ($VerifiedUninstall) {
+            Get-LibertixPlannedLinuxOffset -Plan $rollbackPlan
+        } else {
+            $sourceOriginalEnd - ($sourceOriginalEnd % $PartitionAlignmentBytes) - $expectedBytes
+        }
 
         # Imaging and partitioning tools can use different alignment padding. A
         # transaction candidate must still be wholly owned by the exact extent
@@ -1467,15 +1498,13 @@ try {
         })
     }
 
-    $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
-        Restore-BcdState `
-            -Required:$temporaryBootWasPrepared `
-            -PreserveUnrelatedChanges:$VerifiedUninstall
-    }
-    $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
-        Restore-BiosMbrBootCode `
-            -DiskNumber $diskNumber `
-            -ExecutionState $recoveryExecutionState
+    if (-not $VerifiedUninstall) {
+        $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
+            Restore-BcdState -Required:$temporaryBootWasPrepared
+        }
+        $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
+            Restore-BiosMbrBootCode -DiskNumber $diskNumber -ExecutionState $recoveryExecutionState
+        }
     }
     $null = Invoke-RecoveryOperation -Name "windows-share.cleanup" -Operation {
         if ($rollbackFromSucceeded) {

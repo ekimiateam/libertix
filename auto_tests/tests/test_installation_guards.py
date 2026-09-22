@@ -1956,9 +1956,14 @@ def test_unattended_warning_is_a_single_fail_safe_keyboard_dialog() -> None:
     assert "if (dialog.IsVisible)" in dialog_code
     assert 'self._press_key(client, "tab", 0.25)' in wizard
     assert 'self._press_key(client, "enter", 0.5)' in wizard
-    assert "AddSeconds(5)" in wizard
-    assert "catch [IO.IOException]" in wizard
-    assert "Start-Sleep -Milliseconds 50" in wizard
+    acknowledgement = wizard.split("def send_acknowledgement", 1)[1].split(
+        "if capture is not None:", 1
+    )[0]
+    assert "self._retry_unattended_control(" in acknowledgement
+    assert "lambda: ssh.upload_text(" in acknowledgement
+    assert "str(sequence)" in acknowledgement
+    assert "timeout=20" in acknowledgement
+    assert "powershell.exe" not in acknowledgement
     assert "_set_warning_acknowledgement" not in wizard
     assert "_click_wizard_path" not in wizard
 
@@ -3469,7 +3474,7 @@ def test_uefi_previous_transaction_is_recovered_before_a_new_plan_or_payload() -
 
     recovery_call = apply.index("RecoverPreviousUefiTransactionAsync()")
     share_payload = apply.index("PrepareWindowsSharePayloadAsync()")
-    new_session = uefi.index("CreateUefiRecoverySession()")
+    new_session = uefi.index("await Task.Run(CreateUefiRecoverySession)")
     recovery_method = uefi.index("private async Task<bool> RecoverPreviousUefiTransactionAsync()")
 
     assert recovery_call < share_payload
@@ -4014,9 +4019,9 @@ def test_uefi_preparation_failure_distinguishes_verified_and_incomplete_rollback
     exit_failure = source.split(
         "if (processResult.Completion != StreamingProcessCompletion.Exited", 1
     )[1].split('recovery.Phase = "AwaitingReboot"', 1)[0]
-    recovery_arming = source.split("ArmUefiRecoveryAgent(recovery, powershell);", 1)[1].split(
-        "StreamingProcessResult processResult", 1
-    )[0]
+    recovery_arming = source.split(
+        "await Task.Run(() => ArmUefiRecoveryAgent(recovery, powershell));", 1
+    )[1].split("StreamingProcessResult processResult", 1)[0]
     failure_handler = source.split("private async Task HandleUefiPreparationFailureAsync", 1)[
         1
     ].split("private UefiRecoveryState CreateUefiRecoverySession", 1)[0]
@@ -5266,6 +5271,7 @@ def test_resize_page_keeps_exact_free_space_for_capacity_policy() -> None:
     assert "InstallationSizePolicy.AvailableLinuxSizeGiB(" in page
     assert "InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(" in page
     assert "initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB" in size_policy
+    assert "initialWindowsFreeGiB - MinimumWindowsFreeSpaceGiB" in size_policy
     assert "InstallationPolicy.Current.Storage.TargetWindowsFreeSpaceGiB" in size_policy
     assert "InstallationPolicy.Current.Storage.WindowsFreeSpaceToleranceGiB" in size_policy
     assert "TargetWindowsFreeSpaceGiB - WindowsFreeSpaceToleranceGiB" in size_policy
@@ -5560,7 +5566,9 @@ def test_wpf_runtime_failure_paths_are_bounded_and_recoverable() -> None:
     assert "cleanmgr.exe" not in resize_page
     assert "OpenDiskCleanup" not in resize_page
     assert "OpenDiskCleanup" not in resize_xaml
-    assert 'Message="{DynamicResource FreeUpSpace}"' in resize_xaml
+    assert 'Message="{Binding AllocationErrorMessage}"' in resize_xaml
+    assert 'Localization.GetString("FreeUpSpace")' in resize_page
+    assert 'Localization.GetString("ResizeDiskChooseAvailableTarget")' in resize_page
 
 
 def test_distribution_selection_reuses_compatibility_and_publishes_catalog_atomically() -> None:
@@ -5643,6 +5651,28 @@ def test_long_windows_native_checks_emit_structured_utf8_safe_summaries() -> Non
     assert 'Invoke-NativeCommandDecoded -FilePath "bcdedit.exe"' in checks
     assert "@(& reagentc.exe /info 2>&1)" not in checks
     assert "@(& bcdedit.exe /enum all 2>&1)" not in checks
+
+
+def test_bios_secondary_allocation_preserves_winre_registration() -> None:
+    source = read("Pages/ApplyChanges.Windows.cs")
+    refresh = source.split("private async Task<bool> RefreshWindowsRecoveryRegistrationAsync()", 1)[
+        1
+    ].split("private async Task<string> CreateFat32PartitionSimpleAsync", 1)[0]
+    guard, commands = refresh.split("return await Task.Run", 1)
+    assert "if (_installationPlan.Allocation != null)" in guard
+    assert "return true;" in guard
+    assert "RunProcess(" not in guard
+    assert '"/disable"' in commands
+    assert '"/enable"' in commands
+
+
+def test_installation_preparation_keeps_blocking_work_off_the_ui_thread() -> None:
+    bios = read("Pages/ApplyChanges.Bios.cs")
+    uefi = read("Pages/ApplyChanges.Uefi.cs")
+    assert bios.count("await Task.Run(() => SetHibernateEnabled(false))") == 3
+    assert "await Task.Run(() => MountAndCopyIsoAsync(tempIsoPath))" in bios
+    assert "await Task.Run(CreateUefiRecoverySession)" in uefi
+    assert "await Task.Run(() => ArmUefiRecoveryAgent(recovery, powershell))" in uefi
 
 
 def test_postinstall_winre_and_bios_boot_checks_are_locale_independent() -> None:

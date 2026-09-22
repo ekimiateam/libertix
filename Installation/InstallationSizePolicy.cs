@@ -65,17 +65,21 @@ namespace Libertix.Installation
             if (shrinkAvailableGiB < StagingSizeGiB)
                 return 0;
 
-            double windowsBudget =
+            double downloadBudget =
                 initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB;
-            return Math.Max(0, windowsBudget);
+            if (downloadBudget < 0)
+                return 0;
+
+            // The verified transaction ISO is deleted before the final NTFS
+            // allocation and is credited by both firmware execution paths.
+            return Math.Max(0, initialWindowsFreeGiB - MinimumWindowsFreeSpaceGiB);
         }
 
         public static double RemainingWindowsFreeSpaceGiB(
             double initialWindowsFreeGiB,
-            double installerIsoGiB,
             double linuxSizeGiB)
         {
-            return initialWindowsFreeGiB - installerIsoGiB - linuxSizeGiB;
+            return initialWindowsFreeGiB - linuxSizeGiB;
         }
 
     }

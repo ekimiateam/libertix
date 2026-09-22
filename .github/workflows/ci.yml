@@ -327,9 +327,16 @@ jobs:
             -Scope CurrentUser -Force -Repository PSGallery
           $configuration = New-PesterConfiguration
           $configuration.Run.Path = 'PowerShell.Tests'
-          $configuration.Run.Exit = $true
+          $configuration.Run.Exit = $false
+          $configuration.Run.PassThru = $true
           $configuration.Output.Verbosity = 'Normal'
-          Invoke-Pester -Configuration $configuration
+          $result = Invoke-Pester -Configuration $configuration
+          if ($result.Result -ne 'Passed' -or $result.TotalCount -le 0 -or
+              $result.PassedCount -ne $result.TotalCount -or
+              $result.SkippedCount -ne 0 -or $result.NotRunCount -ne 0 -or
+              $result.InconclusiveCount -ne 0) {
+            throw "Incomplete or failed Pester tests: passed=$($result.PassedCount), total=$($result.TotalCount), skipped=$($result.SkippedCount), notRun=$($result.NotRunCount), inconclusive=$($result.InconclusiveCount)."
+          }
 
       - name: Stamp source revision in the executable
         shell: pwsh
@@ -387,12 +394,13 @@ jobs:
 
       - name: Run C# contract tests
         shell: pwsh
-        run: >-
-          dotnet test Libertix.Tests\Libertix.Tests.csproj
-          --configuration Release
-          --no-build
-          --no-restore
-          --verbosity minimal
+        run: |
+          dotnet test Libertix.Tests\Libertix.Tests.csproj `
+            --configuration Release --no-build --no-restore --verbosity minimal `
+            --logger 'trx;LogFileName=contracts.trx' --results-directory "$env:RUNNER_TEMP/contract-tests"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./auto_tests/app/scripts/assert_vstest_results.ps1 `
+            -TestResultPath "$env:RUNNER_TEMP/contract-tests/contracts.trx"
 
       - name: Verify WPF output
         shell: pwsh

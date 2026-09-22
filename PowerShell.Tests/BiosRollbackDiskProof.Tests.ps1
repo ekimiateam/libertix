@@ -1,5 +1,7 @@
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '../Scripts/modules/Libertix.Rollback.psm1') -Force
+    Import-Module (Join-Path $PSScriptRoot '../Scripts/modules/Libertix.StorageTargets.psm1') -Force
+    function Assert-LibertixInstalledFilesystemIdentity { param($Partition, [string]$RecoveryRoot) }
     $path = Join-Path $PSScriptRoot '../Scripts/libertix-recovery-guard.ps1'
     $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errors)
@@ -96,6 +98,25 @@ Describe 'BIOS rollback validates physical identity before removing a partition'
         Should -Invoke Restore-LibertixSystemDriveInitialSize -Times 1 -ParameterFilter {
             $PlanDisk.partitionTableId -eq 'mbr:12345678' -and $State.OriginalCSize -eq 60GB
         }
+    }
+
+    It 'selects the verified Linux extent using the installation resize mode <Mode>' -TestCases @(
+        @{ Mode = 'windows-online'; Observed = 40GB + 256MB; Final = 40GB + 257MB },
+        @{ Mode = 'live-offline'; Observed = 52GB + 256MB; Final = 40GB + 256MB }
+    ) {
+        param($Mode, $Observed, $Final)
+        $VerifiedUninstall = $true
+        $Root = 'C:\verified-archive'
+        $rollbackPlan.disk.installer | Add-Member resizeMode $Mode
+        $rollbackPlan.disk.installer | Add-Member offsetBytes $Observed
+        $rollbackPlan.disk.installer | Add-Member finalOffsetBytes $Final
+        Mock Assert-LibertixInstalledFilesystemIdentity {}
+        . $restoreDiskLayout
+        Should -Invoke Assert-LibertixInstalledFilesystemIdentity -Times 1 -Exactly
+        Should -Invoke Remove-Partition -Times 1 -Exactly -ParameterFilter {
+            $DiskNumber -eq 3 -and $PartitionNumber -eq 3
+        }
+        Should -Invoke Restore-LibertixSystemDriveInitialSize -Times 1 -Exactly
     }
 
     It 'refuses a clone with the same vendor ID but another MBR signature' {

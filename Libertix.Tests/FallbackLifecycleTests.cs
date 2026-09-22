@@ -34,6 +34,7 @@ namespace Libertix.Tests
                     Localization.SetLanguage("en");
                     VerifyResizeSelectionIsPreserved();
                     VerifySeparateDiskSelection();
+                    InstallationTargetTests.FullWindowsMbrRefusesOnlyTheWindowsDestination();
                     string root = Path.Combine(Path.GetTempPath(), "Libertix-fallback-test-" + Guid.NewGuid().ToString("N"));
                     string scripts = Path.Combine(root, "Scripts");
                     Directory.CreateDirectory(scripts);
@@ -129,8 +130,8 @@ namespace Libertix.Tests
             long reducedFree = (long)((30.8 + 1 +
                 Libertix.Installation.InstallationSizePolicy.MinimumWindowsFreeSpaceGiB) * gib);
             var limited = new ResizeDisk(state, 500 * gib, reducedFree);
-            Assert.AreEqual(30d, limited.SelectedSize, "A restored size must fit the new whole-GiB budget.");
-            Assert.AreEqual("30", limited.ManualSize);
+            Assert.AreEqual(31d, limited.SelectedSize, "A restored size must fit the new whole-GiB budget.");
+            Assert.AreEqual("31", limited.ManualSize);
             Assert.IsFalse(limited.HasSizeError);
             state.SelectedLinuxSizeGiB = null;
             var fresh = new ResizeDisk(state, 500 * gib, reducedFree);
@@ -167,7 +168,8 @@ namespace Libertix.Tests
             Assert.IsTrue(page.HasMultipleTargets);
             Assert.IsFalse(page.IsSecondaryTarget);
             Assert.AreEqual(string.Empty, page.SecondaryDiskWarning);
-            Assert.AreEqual(26d, page.WindowsFreeSpace);
+            Assert.AreEqual(30d, page.WindowsFreeSpace,
+                "The transaction ISO is removed before the final Windows free-space state.");
             page.SelectedTarget = data;
             Assert.AreSame(data, state.SelectedInstallationTarget);
             Assert.IsFalse(page.IsWindowsTarget);
@@ -214,21 +216,25 @@ namespace Libertix.Tests
             Assert.IsNull(state.SelectedInstallationTarget);
             Assert.IsFalse(restored.IsSecondaryTarget);
             Assert.AreEqual(string.Empty, restored.SecondaryDiskWarning);
-            Assert.AreEqual(26d, restored.WindowsFreeSpace);
+            Assert.AreEqual(30d, restored.WindowsFreeSpace);
             state.Compatibility.ShrinkAvailableBytes = 0;
             var secondaryOnly = new ResizeDisk(state, windows.SizeBytes, windows.FreeBytes);
-            Assert.AreSame(windows, secondaryOnly.SelectedTarget);
+            Assert.IsNull(secondaryOnly.SelectedTarget);
+            Assert.IsFalse(secondaryOnly.HasSelectedTarget);
+            Assert.IsTrue(secondaryOnly.IsWindowsTargetUnavailable);
+            StringAssert.Contains(secondaryOnly.WindowsTargetUnavailableMessage, "C:");
             Assert.IsFalse(secondaryOnly.CanAllocateLinux);
             secondaryOnly.SelectedTarget = data;
             Assert.IsTrue(secondaryOnly.CanAllocateLinux);
             Assert.AreSame(data, state.SelectedInstallationTarget);
-            secondaryOnly.SelectedTarget = windows;
-            Assert.IsFalse(secondaryOnly.CanAllocateLinux);
+            Assert.ThrowsException<InvalidOperationException>(() => secondaryOnly.SelectedTarget = windows);
+            Assert.AreSame(data, secondaryOnly.SelectedTarget);
+            Assert.IsTrue(secondaryOnly.CanAllocateLinux);
 
             data.SizeBytes = gib;
             data.FreeBytes = gib / 2;
             data.MinimumSizeBytes = gib / 2;
-            secondaryOnly.SelectedTarget = data;
+            secondaryOnly = new ResizeDisk(state, windows.SizeBytes, windows.FreeBytes);
             Assert.IsFalse(secondaryOnly.CanAllocateLinux);
             Assert.IsTrue(secondaryOnly.HasSizeError);
             Assert.IsTrue(secondaryOnly.HasError);
@@ -239,8 +245,18 @@ namespace Libertix.Tests
             secondaryOnly.SelectedTarget = windows;
             Assert.IsTrue(secondaryOnly.CanAllocateLinux);
             Assert.IsFalse(secondaryOnly.HasError);
-            Assert.AreEqual(76d, secondaryOnly.WindowsPartitionPercentage.Value);
+            Assert.AreEqual(80d, secondaryOnly.WindowsPartitionPercentage.Value);
             Assert.AreEqual(20d, secondaryOnly.LinuxPartitionPercentage.Value);
+
+            state.Compatibility.Firmware = "BIOS";
+            state.Compatibility.WindowsPartitionSlotAvailable = false;
+            windows.PartitionStyle = data.PartitionStyle = "MBR";
+            var fullMbr = new ResizeDisk(state, windows.SizeBytes, windows.FreeBytes);
+            Assert.IsTrue(fullMbr.IsWindowsTargetUnavailable);
+            Assert.IsNull(fullMbr.SelectedTarget);
+            Assert.IsFalse(fullMbr.CanAllocateLinux);
+            Assert.ThrowsException<InvalidOperationException>(() => fullMbr.SelectedTarget = windows);
+            StringAssert.Contains(fullMbr.WindowsTargetUnavailableMessage, "MBR");
         }
     }
 }

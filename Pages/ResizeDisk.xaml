@@ -95,6 +95,20 @@
                 <TextBlock Text="{DynamicResource ResizeDiskTargetTitle}" Foreground="{DynamicResource TextPrimary}"/>
                 <ComboBox x:Name="InstallationTargetComboBox" ItemsSource="{Binding InstallationTargets}"
                           SelectedItem="{Binding SelectedTarget, Mode=TwoWay}" Margin="0,4" MinHeight="28">
+                    <ComboBox.ItemContainerStyle>
+                        <Style TargetType="ComboBoxItem">
+                            <Style.Triggers>
+                                <MultiDataTrigger>
+                                    <MultiDataTrigger.Conditions>
+                                        <Condition Binding="{Binding IsWindows}" Value="True"/>
+                                        <Condition Binding="{Binding DataContext.IsWindowsTargetUnavailable, RelativeSource={RelativeSource AncestorType=ComboBox}}" Value="True"/>
+                                    </MultiDataTrigger.Conditions>
+                                    <Setter Property="IsEnabled" Value="False"/>
+                                    <Setter Property="Opacity" Value="0.5"/>
+                                </MultiDataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ComboBox.ItemContainerStyle>
                     <ComboBox.ItemTemplate>
                         <DataTemplate>
                             <StackPanel Orientation="Horizontal">
@@ -109,6 +123,9 @@
                 <TextBlock Text="{Binding TargetRecommendation}" TextWrapping="Wrap"
                            Foreground="{DynamicResource TextSecondary}" FontSize="12"/>
             </StackPanel>
+            <TextBlock Margin="40,0,40,8" Text="{Binding WindowsTargetUnavailableMessage}"
+                       TextWrapping="Wrap" Foreground="{DynamicResource ErrorColor}"
+                       Visibility="{Binding IsWindowsTargetUnavailable, Converter={StaticResource TargetVisibility}}"/>
             <Border x:Name="SecondaryDiskWarningPanel" Margin="40,0,40,8" Padding="10"
                     BorderBrush="{DynamicResource ErrorColor}" BorderThickness="1" CornerRadius="4"
                     Visibility="{Binding IsSecondaryTarget, Converter={StaticResource TargetVisibility}}">
@@ -275,8 +292,8 @@
                            Visibility="{Binding HasError, Converter={StaticResource BoolToVisibilityConverter}}"
                            MaxWidth="800"
                            Margin="40"
-                           Title="{DynamicResource NotEnoughSpace}"
-                           Message="{DynamicResource FreeUpSpace}"
+                           Title="{Binding AllocationErrorTitle}"
+                           Message="{Binding AllocationErrorMessage}"
                            Details="{Binding SystemRequirements}"
                            AdditionalDetails="{Binding AdditionalSpaceNeeded}"/>
         </Grid>

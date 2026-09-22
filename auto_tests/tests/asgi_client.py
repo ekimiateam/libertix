@@ -4,7 +4,6 @@ import asyncio
 from types import TracebackType
 
 import httpx
-import uvloop
 from fastapi import FastAPI
 
 
@@ -26,7 +25,8 @@ class AsgiTestClient:
         self._lifespan = None
 
     def __enter__(self) -> AsgiTestClient:
-        self._runner = asyncio.Runner(loop_factory=uvloop.new_event_loop)
+        # The observed Linux uvloop starts an io_uring task before test-only fork workers.
+        self._runner = asyncio.Runner(loop_factory=asyncio.new_event_loop)
         self._lifespan = self._app.router.lifespan_context(self._app)
         self._runner.run(self._lifespan.__aenter__())
         self._http_client = httpx.AsyncClient(

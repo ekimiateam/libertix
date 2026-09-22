@@ -94,14 +94,36 @@ function Complete-InteractiveWindowsShareVerification {
         $shareArguments = (
             '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Pin'
         ) -f $shareScript, $configPath
+        $logPrefix = Join-Path (Split-Path -Parent $StatePath) ("explorer-integration-{0}" -f [Guid]::NewGuid().ToString("N"))
+        $clock = [Diagnostics.Stopwatch]::StartNew()
         $process = Start-Process `
             -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -ArgumentList $shareArguments `
-            -Wait `
             -PassThru `
+            -RedirectStandardOutput ($logPrefix + ".stdout.log") `
+            -RedirectStandardError ($logPrefix + ".stderr.log") `
             -WindowStyle Hidden
-        if ($process.ExitCode -ne 0) {
-            throw "Explorer integration verification failed with rc=$($process.ExitCode)."
+        try {
+            # Wait only for our helper, not Explorer or another long-lived descendant.
+            $null = $process.Handle
+            Add-Content -LiteralPath ($logPrefix + ".lifecycle.log") -Value (
+                "plan={0} parentPid={1} helperPid={2} session={3} phase=started" -f `
+                    $Plan.planId, $PID, $process.Id, $process.SessionId
+            )
+            if (-not $process.WaitForExit(120000)) {
+                $process.Kill()
+                $stopped = $process.WaitForExit(5000)
+                throw "Explorer integration helper timed out after 120 seconds; helperStopped=$stopped. Logs: $logPrefix.*.log"
+            }
+            Add-Content -LiteralPath ($logPrefix + ".lifecycle.log") -Value (
+                "phase=exited elapsedSeconds={0:F1} exitCode={1}" -f `
+                    $clock.Elapsed.TotalSeconds, $process.ExitCode
+            )
+            if ($process.ExitCode -ne 0) {
+                throw "Explorer integration verification failed with rc=$($process.ExitCode). Logs: $logPrefix.*.log"
+            }
+        } finally {
+            $process.Dispose()
         }
         Add-InteractiveShareCheck `
             -Result $Result `
@@ -118,7 +140,13 @@ function Complete-InteractiveWindowsShareVerification {
         $Result.status = "failed"
         $Result.error = $_.Exception.Message
         $Result.rollbackAvailable = $true
-        Write-JsonFileAtomic -Path $StatePath -Value $Result
+        try {
+            Write-JsonFileAtomic -Path $StatePath -Value $Result
+        } catch {
+            # Still display a failure when the persisted result cannot be updated.
+            $Result.error += " Result persistence failed: $($_.Exception.Message)"
+            [Console]::Error.WriteLine($Result.error)
+        }
     }
 }
 

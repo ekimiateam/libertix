@@ -26,10 +26,6 @@ public static class StorageFixtureKnownFolder {
 }
 '@
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$interactive = [string](Get-CimInstance Win32_ComputerSystem).UserName
-if ([string]::IsNullOrWhiteSpace($interactive) -or $interactive -ine $identity.Name) {
-    throw 'Document redirection requires SSH to use the logged-in test account.'
-}
 
 function Assert-RegularFixtureTree {
     param([string]$Root)
@@ -71,6 +67,10 @@ function Assert-RegularFixtureTree {
 }
 
 if ($config.phase -eq 'apply') {
+    $interactive = [string](Get-CimInstance Win32_ComputerSystem).UserName
+    if ([string]::IsNullOrWhiteSpace($interactive) -or $interactive -ine $identity.Name) {
+        throw 'Document redirection requires SSH to use the logged-in test account.'
+    }
     $disks = @(Get-Disk | Where-Object { [string]$_.Path -ceq [string]$config.disk_device_path })
     if ($disks.Count -ne 1 -or $disks[0].IsBoot -or $disks[0].IsSystem -or
         $disks[0].IsOffline -or $disks[0].IsReadOnly) {

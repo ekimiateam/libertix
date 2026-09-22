@@ -759,6 +759,7 @@ Describe 'Final uninstall verification' {
             Mock Get-LibertixPlannedLinuxDisk { $script:FinalPlan.disk }
             Mock Get-Partition { [pscustomobject]@{ Offset = 1048576; Size = 40000000000 } }
             Mock Assert-LibertixSourceVolumeIdentity { }
+            Mock Assert-LibertixUninstallStorageBaseline { }
             Mock Get-ScheduledTask { @() }
             Mock Get-Service { @() }
             Mock Write-LibertixPostInstallResult { $script:FinalReport = $Result }
@@ -773,6 +774,16 @@ Describe 'Final uninstall verification' {
             @($script:FinalReport.checks).Count | Should -Be 4
             @($script:FinalReport.checks | Where-Object { -not $_.passed }).Count | Should -Be 0
             Should -Invoke Get-Partition -Times 1 -Exactly
+            Should -Invoke Assert-LibertixUninstallStorageBaseline -Times 1 -Exactly -ParameterFilter { $Restored }
+        }
+
+        It 'fails final verification if an OEM partition differs from the initial inventory' {
+            Mock Assert-LibertixUninstallStorageBaseline { throw 'OEM partition changed' }
+            { Assert-LibertixUninstallComplete -RecoveryRoot $TestDrive `
+                -RecoveryTaskNames @('LibertixInstallRecovery') -VerifyBoot { } -WriteLog { } } |
+                Should -Throw '*OEM partition changed*'
+            $script:FinalReport.status | Should -Be 'failed'
+            $script:FinalReport.checks[-1].name | Should -Be 'restored-storage'
         }
 
         It 'does not trust the rolled-back ledger when the source size is wrong' {

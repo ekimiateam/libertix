@@ -5,6 +5,7 @@ Import-Module (Join-Path $PSScriptRoot "Libertix.InstallationState.psm1") -Force
 Import-Module (Join-Path $PSScriptRoot "Libertix.Process.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.Rollback.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.StorageTargets.psm1") -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.StorageBaseline.psm1") -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.WindowsProfiles.psm1") -ErrorAction Stop
 
 function Set-LibertixShutdownVerificationPriority {
@@ -34,6 +35,30 @@ function Test-LibertixProperty {
     )
 
     return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
+}
+
+function Test-LibertixFileHasReadableContent {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite,
+            4096,
+            $true)
+        $buffer = New-Object byte[] 1
+        $readTask = $stream.ReadAsync($buffer, 0, $buffer.Length)
+        return $readTask.GetAwaiter().GetResult() -gt 0
+    } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        throw "Cannot read '$Path': nativeCode=$($failure.HResult -band 0xffff) hresult=$($failure.HResult) error=$($failure.Message)"
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Get-LibertixNativeProgramFilesPath {
@@ -478,6 +503,7 @@ function Assert-LibertixUninstallComplete {
             }
         Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'restored-storage' `
             -WriteLog $WriteLog -Test {
+                Assert-LibertixUninstallStorageBaseline -RecoveryRoot $RecoveryRoot -Restored
                 $targets = @([pscustomobject]@{
                     Disk = $plan.disk; Partition = $plan.disk.windows
                     Drive = [string]$plan.disk.systemDrive; VolumeId = ''
@@ -642,15 +668,6 @@ function Add-LibertixPostInstallCheck {
             -Context "Post-install check diagnostic: $Name"
         throw
     }
-}
-
-function Get-LibertixPlannedLinuxOffset {
-    param([Parameter(Mandatory = $true)][object]$Plan)
-
-    if ([string]$Plan.disk.installer.resizeMode -eq "live-offline") {
-        return [int64]$Plan.disk.installer.finalOffsetBytes
-    }
-    return [int64]$Plan.disk.installer.offsetBytes
 }
 
 function Get-LibertixWindowsBootIdentity {
@@ -1588,8 +1605,13 @@ function Test-LibertixWindowsReadOnlyShare {
         Set-Content -LiteralPath $writeProbe -Value "write must be refused" -ErrorAction Stop
         $writeAccepted = $true
     } catch {
-        # A denied probe is the expected proof for this security boundary.
-        $writeAccepted = $false
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        $nativeCode = $failure.HResult -band 0xffff
+        # The pinned WinFsp driver reports ERROR_WRITE_PROTECT for its read-only gate.
+        if ($nativeCode -ne 19) {
+            throw "The write probe was inconclusive: type=$($failure.GetType().FullName) hresult=$($failure.HResult) nativeCode=$nativeCode error=$($failure.Message)"
+        }
     } finally {
         if ($writeAccepted) {
             Remove-Item -LiteralPath $writeProbe -Force -ErrorAction SilentlyContinue
@@ -1597,6 +1619,10 @@ function Test-LibertixWindowsReadOnlyShare {
     }
     if ($writeAccepted) {
         throw "SECURITY ERROR: the Windows ext4 mount accepted a write."
+    }
+    # The pinned ext4 driver cannot read the /etc/os-release symlink; read its regular target.
+    if (-not (Test-LibertixFileHasReadableContent -Path "$drive\usr\lib\os-release")) {
+        throw 'The verified Linux mount is no longer readable after the write probe.'
     }
 
     $shortcutPaths = @(

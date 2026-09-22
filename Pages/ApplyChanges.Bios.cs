@@ -112,7 +112,7 @@ namespace Libertix.Pages
             bool hibernationAlreadyDisabled =
                 _installationState.Sharing.ShareWindowsFilesInLinux || forceOfflineResize;
             if (hibernationAlreadyDisabled &&
-                !SetHibernateEnabled(false))
+                !await Task.Run(() => SetHibernateEnabled(false)))
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Windows hibernation could not be disabled safely");
@@ -126,7 +126,7 @@ namespace Libertix.Pages
             if (!forceOfflineResize && maxShrinkMB < requestedLinuxMB &&
                 !hibernationAlreadyDisabled)
             {
-                if (!SetHibernateEnabled(false))
+                if (!await Task.Run(() => SetHibernateEnabled(false)))
                 {
                     await FailBiosPreparationAndRollbackAsync(
                         "Windows hibernation could not be disabled for the final online shrink attempt");
@@ -142,7 +142,7 @@ namespace Libertix.Pages
             bool useOfflineResize = forceOfflineResize || maxShrinkMB < requestedLinuxMB;
             double windowsShrinkMB = useOfflineResize ? stagingMB : requestedLinuxMB;
             if (useOfflineResize && !hibernationAlreadyDisabled &&
-                !SetHibernateEnabled(false))
+                !await Task.Run(() => SetHibernateEnabled(false)))
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Windows hibernation could not be disabled for offline NTFS resize");
@@ -292,7 +292,9 @@ namespace Libertix.Pages
                 ThrowIfCancellationRequested();
                 UpdateProgress(BiosProgress.LiveMediaCopy, Localized("ApplyChangesCopyingIsoContents", "Copying ISO contents..."));
                 Log($"Step 6: Mounting ISO and copying contents to {BiosInstallerRoot}...");
-                bool copySucceeded = await MountAndCopyIsoAsync(tempIsoPath);
+                // The process waits are asynchronous, but the surrounding filesystem
+                // operations can also stall on slow media. Keep the whole copy off the UI thread.
+                bool copySucceeded = await Task.Run(() => MountAndCopyIsoAsync(tempIsoPath));
                 ThrowIfCancellationRequested();
                 if (!copySucceeded)
                 {
@@ -303,7 +305,7 @@ namespace Libertix.Pages
                 bool lowMemoryMode =
                     _installationState.Compatibility is CompatibilityInfo compatibility &&
                     compatibility.LowMemoryMode;
-                if (lowMemoryMode && !ConfigureBiosLowMemoryBoot())
+                if (lowMemoryMode && !await Task.Run(() => ConfigureBiosLowMemoryBoot()))
                 {
                     await FailBiosPreparationAndRollbackAsync(
                         "Failed to configure low-memory live boot");
@@ -313,21 +315,24 @@ namespace Libertix.Pages
                 // The live must consume the same validated plan that authorized the
                 // Windows-side disk changes; no second shell contract is generated.
                 UpdateProgress(BiosProgress.InstallationContextReady, Localized("ApplyChangesWritingConfiguration", "Writing configuration..."));
-                PublishInstallationContextToLive(BiosInstallerRoot);
+                await Task.Run(() => PublishInstallationContextToLive(BiosInstallerRoot));
                 Log($"Installation plan published to {BiosInstallerRoot}installation-plan.json.");
-                CompleteExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
+                await Task.Run(() => CompleteExecutionStep(InstallationStep.WindowsLiveMediaPrepared));
                 return true;
             }
             finally
             {
-                DeleteDownloadArtifactBestEffort(tempIsoPath, "Libertix BIOS ISO");
-                DeleteDownloadDirectoryBestEffort(
-                    tempIsoDirectory,
-                    "Libertix BIOS ISO transaction");
-                if (File.Exists(tempIsoPath) || Directory.Exists(tempIsoDirectory))
-                    Log("WARNING: Libertix BIOS ISO transaction cleanup could not be verified.");
-                else
-                    Log("Libertix BIOS ISO transaction cleanup verified.");
+                await Task.Run(() =>
+                {
+                    DeleteDownloadArtifactBestEffort(tempIsoPath, "Libertix BIOS ISO");
+                    DeleteDownloadDirectoryBestEffort(
+                        tempIsoDirectory,
+                        "Libertix BIOS ISO transaction");
+                    if (File.Exists(tempIsoPath) || Directory.Exists(tempIsoDirectory))
+                        Log("WARNING: Libertix BIOS ISO transaction cleanup could not be verified.");
+                    else
+                        Log("Libertix BIOS ISO transaction cleanup verified.");
+                });
             }
         }
 

@@ -11,6 +11,7 @@ from typing import Literal, TypeVar
 import httpx
 from pydantic import ValidationError
 
+from app.clients import network_recovery
 from app.clients.vision_contracts import (
     INSTALL_PROGRESS_SCHEMA,
     INSTALL_PROGRESS_SYSTEM_PROMPT,
@@ -68,7 +69,11 @@ class VisionLLMClient:
         decode: Callable[[dict[str, object]], VerdictT],
     ) -> VerdictT:
         response: httpx.Response | None = None
-        for attempt in range(1, self.max_attempts + 1):
+        failed_at: float | None = None
+        attempt = 0
+        while attempt < self.max_attempts:
+            attempt += 1
+            network_recovery.checkpoint()
             try:
                 response = httpx.post(
                     self.url,
@@ -98,6 +103,17 @@ class VisionLLMClient:
                 ValueError,
                 ValidationError,
             ) as exc:
+                if network_recovery.active is not None and isinstance(exc, httpx.TransportError):
+                    if failed_at is None:
+                        failed_at = time.monotonic()
+                    if attempt >= min(2, self.max_attempts):
+                        if network_recovery.recover(failed_at):
+                            attempt = 0
+                            failed_at = None
+                            continue
+                        raise self._request_error(
+                            step, failure_message, exc, vm_name, response, attempt
+                        ) from exc
                 if attempt < self.max_attempts:
                     self._wait_before_retry(response, attempt, vm_name)
                     continue

@@ -19,9 +19,19 @@ function Write-AgentLog {
 
     $root = Split-Path -Parent $StatePath
     New-Item -ItemType Directory -Path $root -Force | Out-Null
-    Add-Content -LiteralPath (Join-Path $root "recovery-agent.log") -Value (
-        "[{0}] {1}" -f (Get-Date -Format o), $Message
-    )
+    $line = "[{0}] {1}" -f (Get-Date -Format o), $Message
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            Add-Content -LiteralPath (Join-Path $root "recovery-agent.log") -Value $line -ErrorAction Stop
+            return
+        } catch [IO.IOException] {
+            # Check and Prompt may append concurrently; only sharing/lock conflicts are transient.
+            $nativeError = $_.Exception.HResult -band 0xffff
+            if ($nativeError -notin @(32, 33) -or $deadline.Elapsed.TotalSeconds -ge 5) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
 }
 
 function Write-AgentErrorRecord {
@@ -137,11 +147,10 @@ function Save-State {
             $stream.Dispose()
         }
 
-        if ([IO.File]::Exists($fullPath)) {
-            [IO.File]::Replace($temporaryPath, $fullPath, $backupPath)
-        } else {
-            [IO.File]::Move($temporaryPath, $fullPath)
-        }
+        Publish-RecoveryFileAtomic `
+            -TemporaryPath $temporaryPath `
+            -DestinationPath $fullPath `
+            -BackupPath $backupPath
     } finally {
         if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
         if ([IO.File]::Exists($backupPath)) { [IO.File]::Delete($backupPath) }
@@ -1415,6 +1424,10 @@ try {
     }
 
     if ($Action -eq "Cancel") {
+        if ($VerifiedUninstall) {
+            Import-Module (Join-Path $state.PayloadRoot 'Scripts\modules\Libertix.StorageBaseline.psm1') -ErrorAction Stop
+            Assert-LibertixUninstallStorageBaseline -RecoveryRoot $state.RecoveryRoot
+        }
         $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded" -or
             "target.bootloader-installed" -in @($executionState.completedSteps)
         if ($VerifiedUninstall -and [string]$executionState.status -ne 'rolled-back') {

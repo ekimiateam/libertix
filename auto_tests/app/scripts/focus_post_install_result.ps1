@@ -8,6 +8,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+$script:focusDiagnostic = [ordered]@{}
 
 function Write-AtomicJson {
     param(
@@ -18,7 +19,7 @@ function Write-AtomicJson {
     $temporaryPath = "{0}.tmp-{1}" -f $Path, $PID
     [IO.File]::WriteAllText(
         $temporaryPath,
-        ($Value | ConvertTo-Json -Depth 4 -Compress),
+        ($Value | ConvertTo-Json -Depth 8 -Compress),
         [Text.UTF8Encoding]::new($false)
     )
     Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
@@ -43,6 +44,13 @@ function Invoke-ScheduledTaskCommand {
 function Set-PostInstallResultFocus {
     param([Parameter(Mandatory = $true)][int]$TargetProcessId)
 
+    $script:focusDiagnostic = [ordered]@{
+        target_process_id = $TargetProcessId
+        worker_process_id = $PID
+        worker_session_id = (Get-Process -Id $PID).SessionId
+        is_64_bit_process = [Environment]::Is64BitProcess
+        windows = @()
+    }
     Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
     Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
     if (-not ("LibertixTestKeyboard" -as [type])) {
@@ -82,6 +90,13 @@ public static class LibertixTestKeyboard {
 '@ -ErrorAction Stop
     }
     $process = Get-Process -Id $TargetProcessId -ErrorAction Stop
+    $script:focusDiagnostic.target_process_name = $process.ProcessName
+    $script:focusDiagnostic.target_session_id = $process.SessionId
+    try {
+        $script:focusDiagnostic.target_started_utc = $process.StartTime.ToUniversalTime().ToString('o')
+    } catch {
+        $script:focusDiagnostic.target_start_time_error = $_.Exception.Message
+    }
     $interactiveSessionIds = @(
         Get-Process -Name explorer -ErrorAction Stop |
             ForEach-Object { [int]$_.SessionId }
@@ -90,10 +105,12 @@ public static class LibertixTestKeyboard {
         throw "The post-install result is not running in an interactive Explorer session."
     }
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    $focusClock = [Diagnostics.Stopwatch]::StartNew()
     $visibleWindowCount = 0
     $closeButtonCount = 0
     do {
+        $script:focusDiagnostic.observed_at = [DateTime]::UtcNow.ToString('o')
+        $script:focusDiagnostic.windows = @()
         $visibleWindowCount = 0
         $closeButtonCount = 0
         $processCondition = New-Object Windows.Automation.PropertyCondition(
@@ -107,6 +124,16 @@ public static class LibertixTestKeyboard {
         for ($index = 0; $index -lt $windows.Count; $index++) {
             $window = $windows.Item($index)
             $handle = [int64]$window.Current.NativeWindowHandle
+            $windowDiagnostic = [ordered]@{ handle = $handle; buttons = @() }
+            $script:focusDiagnostic.windows += $windowDiagnostic
+            try {
+                $windowDiagnostic.title = [string]$window.Current.Name
+                $windowDiagnostic.class_name = [string]$window.Current.ClassName
+                $windowDiagnostic.framework = [string]$window.Current.FrameworkId
+                $windowDiagnostic.offscreen = [bool]$window.Current.IsOffscreen
+            } catch {
+                $windowDiagnostic.collection_error = $_.Exception.Message
+            }
             if ($handle -eq 0 -or $window.Current.IsOffscreen) { continue }
             $visibleWindowCount++
             $buttonCondition = New-Object Windows.Automation.PropertyCondition(
@@ -118,9 +145,6 @@ public static class LibertixTestKeyboard {
                 $buttonCondition
             )
             if ($null -eq $button) {
-                # Older deployed payloads predate the explicit automation id.
-                # Their success dialog has exactly one button, so that unique
-                # control is still a deterministic close target.
                 $buttonTypeCondition = New-Object Windows.Automation.PropertyCondition(
                     [Windows.Automation.AutomationElement]::ControlTypeProperty,
                     [Windows.Automation.ControlType]::Button
@@ -129,8 +153,23 @@ public static class LibertixTestKeyboard {
                     [Windows.Automation.TreeScope]::Descendants,
                     $buttonTypeCondition
                 )
-                if ($buttons.Count -ne 1) { continue }
-                $button = $buttons.Item(0)
+                $windowDiagnostic.button_count = $buttons.Count
+                # Record only button metadata, never edit values or a full desktop tree.
+                for ($buttonIndex = 0; $buttonIndex -lt [Math]::Min($buttons.Count, 20); $buttonIndex++) {
+                    try {
+                        $candidate = $buttons.Item($buttonIndex).Current
+                        $windowDiagnostic.buttons += [ordered]@{
+                            automation_id = [string]$candidate.AutomationId
+                            name = [string]$candidate.Name
+                            enabled = [bool]$candidate.IsEnabled
+                            offscreen = [bool]$candidate.IsOffscreen
+                            focused = [bool]$candidate.HasKeyboardFocus
+                        }
+                    } catch {
+                        $windowDiagnostic.buttons += [ordered]@{ collection_error = $_.Exception.Message }
+                    }
+                }
+                continue
             }
             $closeButtonCount++
             $window.SetFocus()
@@ -141,14 +180,14 @@ public static class LibertixTestKeyboard {
                 status = "ok"
                 window_handle = $handle
                 window_title = [string]$window.Current.Name
-                focused_control = "LibertixPostInstallCloseButton"
+                focused_control = [string]$button.Current.AutomationId
                 active_keyboard_identifier = [LibertixTestKeyboard]::Read([IntPtr]$handle, $TargetProcessId)
                 ui_culture = [string](Get-UICulture).Name
                 session_id = [int]$process.SessionId
             }
         }
         Start-Sleep -Milliseconds 100
-    } while ([DateTime]::UtcNow -lt $deadline)
+    } while ($focusClock.Elapsed.TotalSeconds -lt 10)
 
     throw (
         "The visible post-install result could not receive keyboard focus: " +
@@ -180,6 +219,7 @@ if ($InteractiveWorker) {
                 error = $_.Exception.Message
                 exception_type = $_.Exception.GetType().FullName
                 script_stack = $_.ScriptStackTrace
+                focus_diagnostic = $script:focusDiagnostic
             })
         exit 1
     }
@@ -191,7 +231,7 @@ $focusId = [Guid]::NewGuid().ToString("N")
 $shortFocusId = $focusId.Substring(0, 12)
 $workerScriptPath = Join-Path $automationRoot ("p-" + $shortFocusId + ".ps1")
 $workerConfigPath = Join-Path $automationRoot ("p-" + $shortFocusId + ".json")
-$workerResultPath = Join-Path $automationRoot ("p-" + $shortFocusId + ".result")
+$workerResultPath = Join-Path $automationRoot ("p-" + $shortFocusId + ".result.json")
 Copy-Item -LiteralPath $PSCommandPath -Destination $workerScriptPath -Force
 Write-AtomicJson -Path $workerConfigPath -Value ([ordered]@{
         process_id = $targetProcessId
@@ -202,6 +242,7 @@ $taskCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
     '-File "{0}" -ConfigPath "{1}" -InteractiveWorker' -f `
     $workerScriptPath, $workerConfigPath
 $startTime = (Get-Date).AddMinutes(2).ToString("HH:mm")
+$workerResult = $null
 
 try {
     $createResult = Invoke-ScheduledTaskCommand -Arguments @(
@@ -216,7 +257,6 @@ try {
         throw "Failed to start the interactive result focus task: $($runResult.Output -join ' | ')"
     }
 
-    $workerResult = $null
     for ($attempt = 0; $attempt -lt 450 -and $null -eq $workerResult; $attempt++) {
         Start-Sleep -Milliseconds 100
         if (Test-Path -LiteralPath $workerResultPath -PathType Leaf) {
@@ -238,6 +278,8 @@ try {
         )
     }
     if ([string]$workerResult.status -ne "ok") {
+        Write-Output ("FOCUS_FAILURE_JSON=" + ($workerResult | ConvertTo-Json -Depth 8 -Compress))
+        Write-Output ("FOCUS_FAILURE_PATH=" + $workerResultPath)
         throw "The interactive result focus worker failed: $([string]$workerResult.error)"
     }
     Write-Output ("WINDOW_HANDLE={0}" -f [int64]$workerResult.window_handle)
@@ -249,6 +291,9 @@ try {
     Write-Output "RESULT=OK"
 } finally {
     $null = Invoke-ScheduledTaskCommand -Arguments @("/Delete", "/TN", $taskName, "/F")
-    Remove-Item -LiteralPath $workerScriptPath, $workerConfigPath, $workerResultPath `
+    Remove-Item -LiteralPath $workerScriptPath, $workerConfigPath `
         -Force -ErrorAction SilentlyContinue
+    if ($null -ne $workerResult -and [string]$workerResult.status -eq 'ok') {
+        Remove-Item -LiteralPath $workerResultPath -Force -ErrorAction SilentlyContinue
+    }
 }

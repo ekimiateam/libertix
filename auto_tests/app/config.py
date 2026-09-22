@@ -105,13 +105,23 @@ class Settings(BaseSettings):
     automation_monitor_interval_seconds: float = Field(default=30, gt=0)
     automation_monitor_timeout_seconds: float = Field(default=23400, gt=0)
     automation_operation_timeout_seconds: float = Field(default=1800, gt=0)
+    automation_network_ping_hosts: tuple[str, str] | None = None
     automation_stall_timeout_seconds: float = Field(default=900, gt=0)
     post_install_boot_timeout_seconds: float = Field(default=1200, gt=0)
+    post_install_package_timeout_seconds: float = Field(default=3600, ge=360, le=7200)
     post_install_poll_interval_seconds: float = Field(default=10, gt=0)
     post_install_grub_detection_timeout_seconds: float = Field(default=20, gt=0)
     post_install_grub_detection_interval_seconds: float = Field(default=1, gt=0)
     log_level: str = "INFO"
     vms: tuple[VMConfig, ...] = Field(min_length=1)
+
+    @field_validator("automation_network_ping_hosts")
+    @classmethod
+    def validate_network_ping_hosts(cls, value: tuple[str, str] | None) -> tuple[str, str] | None:
+        if value is not None:
+            for host in value:
+                ipaddress.ip_address(host)
+        return value
 
     @field_validator("smb_root")
     @classmethod

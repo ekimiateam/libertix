@@ -30,6 +30,8 @@ EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4
 REMOTE_CHECK_SSH_MAX_ATTEMPTS = 6
 WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS = 5
 LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 5
+PACKAGE_MANAGER_LOCK_POLL_SECONDS = 60
+PACKAGE_MANAGER_RETRY_DELAY_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -52,13 +54,14 @@ class BootGuardianFaultEvidence:
 class PostInstallValidationMixin:
     """Validate both installed operating systems after the installer exits."""
 
+    @staticmethod
     def _run_linux_command_resiliently(
-        self,
         ssh: SSHClient,
         *,
         command: str,
         step: str,
         timeout: float,
+        check: bool = True,
     ) -> CommandResult:
         """Retry an idempotent Linux command after a proven transport failure."""
 
@@ -67,7 +70,7 @@ class PostInstallValidationMixin:
             try:
                 if attempt > 1:
                     ssh.reconnect()
-                return ssh.run(command, step=step, timeout=timeout)
+                return ssh.run(command, step=step, timeout=timeout, check=check, replay_safe=True)
             except WorkflowError as exc:
                 last_error = exc
                 if (
@@ -103,6 +106,7 @@ class PostInstallValidationMixin:
                     arguments=arguments,
                     step=step,
                     timeout=timeout,
+                    replay_safe=True,
                 )
             except WorkflowError as exc:
                 last_error = exc
@@ -138,6 +142,7 @@ class PostInstallValidationMixin:
                     config=config,
                     step=step,
                     timeout=timeout,
+                    replay_safe=True,
                 )
             except WorkflowError as exc:
                 last_error = exc
@@ -253,6 +258,12 @@ class PostInstallValidationMixin:
                 distribution=options.distribution,
             )
             try:
+                result.ok(
+                    "automation.check_started",
+                    "Windows SSH is ready; checking the agent waiting for Linux",
+                    vm=vm.name,
+                    test="windows.waiting_for_linux",
+                )
                 response = self._run_windows_script_resiliently(
                     waiting_windows_ssh,
                     script_name="post_install_windows_check.ps1",
@@ -342,11 +353,11 @@ class PostInstallValidationMixin:
                 "linux",
                 RemoteCheck(
                     "linux.post_install_result_process",
-                    'i=0; while [ "$i" -lt 60 ]; do '
+                    'i=0; while [ "$i" -lt 300 ]; do '
                     "pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
                     ">/dev/null && exit 0; "
                     "i=$((i + 1)); sleep 1; done; exit 1",
-                    timeout=75,
+                    timeout=315,
                 ),
             )
             self._capture_and_dismiss_post_install_result(
@@ -1350,16 +1361,18 @@ class PostInstallValidationMixin:
                 # Leave authentication undisturbed for five minutes before retrying.
                 for _ in range(60):
                     time.sleep(5)
-                    response = linux_ssh.run(
-                        graphical_session_probe,
+                    response = self._run_linux_command_resiliently(
+                        linux_ssh,
+                        command=graphical_session_probe,
                         step="automation.linux_graphical_session",
                         timeout=30,
                         check=False,
                     )
                     if finish_if_desktop(response, attempt - 1):
                         return
-            response = linux_ssh.run(
-                graphical_session_probe,
+            response = self._run_linux_command_resiliently(
+                linux_ssh,
+                command=graphical_session_probe,
                 step="automation.linux_graphical_session",
                 timeout=30,
                 check=False,
@@ -1461,8 +1474,9 @@ class PostInstallValidationMixin:
         # Give the final submission the same settling time as earlier attempts.
         for _ in range(60):
             time.sleep(5)
-            response = linux_ssh.run(
-                graphical_session_probe,
+            response = self._run_linux_command_resiliently(
+                linux_ssh,
+                command=graphical_session_probe,
                 step="automation.linux_graphical_session",
                 timeout=30,
                 check=False,
@@ -1495,8 +1509,12 @@ class PostInstallValidationMixin:
         )
         expected = "LIBERTIX_GDM_PASSWORD_PENDING" if present else "LIBERTIX_GDM_PASSWORD_ABSENT"
         for _ in range(5):
-            response = linux_ssh.run(
-                probe, step="automation.gdm_password_state", timeout=15, check=False
+            response = PostInstallValidationMixin._run_linux_command_resiliently(
+                linux_ssh,
+                command=probe,
+                step="automation.gdm_password_state",
+                timeout=15,
+                check=False,
             )
             if response.exit_code != 0 or response.stdout.strip() not in {
                 "LIBERTIX_GDM_PASSWORD_PENDING",
@@ -1511,16 +1529,18 @@ class PostInstallValidationMixin:
         return False
 
     def _assert_single_gdm_account(self, linux_ssh: SSHClient, username: str) -> None:
-        account_uid = linux_ssh.run(
-            f"id -u -- {shlex.quote(username)}",
+        account_uid = self._run_linux_command_resiliently(
+            linux_ssh,
+            command=f"id -u -- {shlex.quote(username)}",
             step="automation.gdm_account_identity",
             timeout=15,
         ).stdout.strip()
         if not account_uid.isdigit() or int(account_uid) < 1000:
             raise WorkflowError("automation.gdm_account_identity", "Invalid GDM test account UID")
         account_path = f"/org/freedesktop/Accounts/User{account_uid}"
-        reply = linux_ssh.run(
-            "busctl --system call org.freedesktop.Accounts /org/freedesktop/Accounts "
+        reply = self._run_linux_command_resiliently(
+            linux_ssh,
+            command="busctl --system call org.freedesktop.Accounts /org/freedesktop/Accounts "
             "org.freedesktop.Accounts ListCachedUsers && "
             f"busctl --system get-property org.freedesktop.Accounts {account_path} "
             "org.freedesktop.Accounts.User UserName && "
@@ -1548,7 +1568,8 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
     ) -> None:
         password = self.settings.windows_ssh_password.get_secret_value()
-        for attempt in range(1, 6):
+
+        def inspect(attempt: int, phase: str):
             inspection = self._run_windows_script_resiliently(
                 windows_ssh,
                 script_name="inspect_windows_graphical_session.ps1",
@@ -1565,7 +1586,9 @@ class PostInstallValidationMixin:
                     "SESSION_ID",
                 ),
             )
-            capture = self._capture_with_name(vm, f"post-install-windows-login-{attempt:02d}")
+            capture = self._capture_with_name(
+                vm, f"post-install-windows-login-{attempt:02d}-{phase}"
+            )
             context = {
                 "vm": vm.name,
                 "target": vm.vnc,
@@ -1573,6 +1596,15 @@ class PostInstallValidationMixin:
                 "attempt": attempt,
                 "session_id": values.get("SESSION_ID", "-1"),
             }
+            return values, context
+
+        for attempt in range(1, 4):
+            client = self.vnc.connect(vm.vnc)
+            try:
+                client.mouseMove(1, 1)
+            finally:
+                client.disconnect()
+            values, context = inspect(attempt, "before")
             if values.get("SETUP_EXPERIENCE_PRESENT") == "True":
                 response = self._run_windows_script_resiliently(
                     windows_ssh,
@@ -1601,7 +1633,7 @@ class PostInstallValidationMixin:
                     **context,
                 )
                 time.sleep(5)
-                continue
+                values, context = inspect(attempt, "after-setup")
             if values.get("EXPLORER_SESSION_READY") == "True":
                 result.ok(
                     "automation.windows_graphical_session",
@@ -1616,7 +1648,8 @@ class PostInstallValidationMixin:
                     "Windows has not exposed an Explorer desktop or a proven login screen yet",
                     **context,
                 )
-                time.sleep(10)
+                if attempt < 3:
+                    time.sleep(300)
                 continue
 
             client = None
@@ -1630,7 +1663,7 @@ class PostInstallValidationMixin:
                 time.sleep(0.75)
                 client.keyPress("enter")
                 # Keep the transport alive while LogonUI consumes the submit
-                # event; the next loop iteration proves Explorer, not the key.
+                # event; the following inspection proves Explorer, not the key.
                 time.sleep(2)
             finally:
                 if client is not None:
@@ -1641,10 +1674,21 @@ class PostInstallValidationMixin:
                 **context,
             )
             time.sleep(12)
+            values, context = inspect(attempt, "after-submit")
+            if values.get("EXPLORER_SESSION_READY") == "True":
+                result.ok(
+                    "automation.windows_graphical_session",
+                    "Windows Explorer confirmed the interactive session",
+                    **context,
+                )
+                return
+            if attempt < 3:
+                time.sleep(300)
         raise WorkflowError(
             "automation.windows_graphical_session",
-            "The Windows interactive session was not proven available after five attempts",
-            details={"vm": vm.name, "target": vm.vnc},
+            "The Windows interactive session was not proven after three attempts "
+            "spaced five minutes apart",
+            details=context,
         )
 
     def _wait_for_ssh(
@@ -1700,6 +1744,7 @@ class PostInstallValidationMixin:
                     probe,
                     step=f"automation.{phase}_ssh_probe",
                     timeout=30,
+                    replay_safe=True,
                 )
                 if response.stdout.strip() == expected:
                     if previous_windows_boot_id is not None:
@@ -2093,7 +2138,7 @@ class PostInstallValidationMixin:
             RemoteCheck(
                 "linux.grub_regeneration",
                 grub_regeneration_test,
-                timeout=180,
+                timeout=900 if options.installation_target == "secondary" else 180,
                 requires_sudo=True,
             ),
             RemoteCheck("linux.boot_mode_files", boot_mode_test, requires_sudo=True),
@@ -2120,6 +2165,7 @@ class PostInstallValidationMixin:
                 "printf '%s\\n' \"$contents\" | grep -Eq '(^|/)init$'; "
                 "! printf '%s\\n' \"$contents\" | "
                 "grep -Eq '(^|/)conf/uuid$|default-boot-to-casper'",
+                timeout=600 if options.installation_target == "secondary" else 120,
                 requires_sudo=True,
             ),
             RemoteCheck(
@@ -2222,14 +2268,14 @@ class PostInstallValidationMixin:
                 timeout=150,
             ),
             RemoteCheck(
-                "linux.package_database",
-                'test -z "$(dpkg --audit)"; dpkg --audit',
+                "linux.package_dependencies",
+                "apt-get -o DPkg::Lock::Timeout=300 check",
+                timeout=360,
                 requires_sudo=True,
             ),
             RemoteCheck(
-                "linux.package_dependencies",
-                "apt-get check",
-                timeout=180,
+                "linux.package_database",
+                'test -z "$(dpkg --audit)"; dpkg --audit',
                 requires_sudo=True,
             ),
             RemoteCheck(
@@ -2397,35 +2443,94 @@ class PostInstallValidationMixin:
         result.ok(
             "automation.check_started", "Post-install check started", vm=vm.name, test=check.name
         )
-        command = f"sh -eu -c {shlex.quote(check.command)}"
+        package_check = check.name == "linux.package_dependencies"
+        check_command = "LC_ALL=C " + check.command if package_check else check.command
+        command = f"sh -eu -c {shlex.quote(check_command)}"
         stdin_data = None
         sensitive = check.sensitive
         if check.requires_sudo:
             if sudo_password is None:
                 raise ValueError(f"{check.name} requires a sudo password")
-            command = f"sudo -S -p '' sh -eu -c {shlex.quote(check.command)}"
+            command = f"sudo -S -p '' sh -eu -c {shlex.quote(check_command)}"
             stdin_data = sudo_password + "\n"
             sensitive = True
         last_error: WorkflowError | None = None
         response: CommandResult | None = None
+        busy = False
+        package_attempt = 0
+        package_deadline = time.monotonic() + self.settings.post_install_package_timeout_seconds
         for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            response = None
             try:
                 if attempt > 1:
                     ssh.reconnect()
-                response = ssh.run(
-                    command,
-                    step=f"automation.test.{platform}",
-                    timeout=check.timeout,
-                    check=False,
-                    sensitive=sensitive,
-                    stdin_data=stdin_data,
-                )
+                while True:
+                    remaining = package_deadline - time.monotonic()
+                    if package_check and remaining <= PACKAGE_MANAGER_RETRY_DELAY_SECONDS:
+                        break
+                    package_attempt += 1
+                    attempt_command = command
+                    if package_check:
+                        lock_poll_seconds = max(
+                            1,
+                            min(
+                                PACKAGE_MANAGER_LOCK_POLL_SECONDS,
+                                int(remaining) - PACKAGE_MANAGER_RETRY_DELAY_SECONDS,
+                            ),
+                        )
+                        bounded_check = (
+                            f"LC_ALL=C timeout --signal=TERM {lock_poll_seconds}s {check.command}"
+                        )
+                        attempt_command = f"sh -eu -c {shlex.quote(bounded_check)}"
+                        if check.requires_sudo:
+                            attempt_command = (
+                                f"sudo -S -p '' sh -eu -c {shlex.quote(bounded_check)}"
+                            )
+                    response = None
+                    response = ssh.run(
+                        attempt_command,
+                        step=f"automation.test.{platform}",
+                        timeout=min(check.timeout, max(1, remaining))
+                        if package_check
+                        else check.timeout,
+                        check=False,
+                        sensitive=sensitive,
+                        stdin_data=stdin_data,
+                    )
+                    output = f"{response.stdout}\n{response.stderr}"
+                    busy = (
+                        package_check
+                        and response.exit_code in {100, 124}
+                        and any(
+                            text in output
+                            for text in (
+                                "Could not get lock",
+                                "Unable to acquire the dpkg frontend lock",
+                            )
+                        )
+                    )
+                    remaining = package_deadline - time.monotonic()
+                    if not busy or remaining <= PACKAGE_MANAGER_RETRY_DELAY_SECONDS:
+                        break
+                    result.ok(
+                        "automation.package_manager_wait",
+                        "APT is busy; dependency verification is pending. "
+                        "Retrying within its deadline",
+                        vm=vm.name,
+                        test=check.name,
+                        sequence=package_attempt,
+                        exit_code=response.exit_code,
+                        stdout=response.stdout,
+                        stderr=response.stderr,
+                    )
+                    time.sleep(min(PACKAGE_MANAGER_RETRY_DELAY_SECONDS, remaining))
                 break
             except WorkflowError as exc:
                 last_error = exc
                 if (
                     not is_reconnectable_transport_error(exc)
                     or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
+                    or (package_check and time.monotonic() >= package_deadline)
                 ):
                     break
 
@@ -2453,6 +2558,8 @@ class PostInstallValidationMixin:
         if response.exit_code == 0:
             result.ok(f"automation.test.{platform}", f"{check.name}: OK", **context)
         else:
+            if busy:
+                context["failure_kind"] = "package_manager_busy"
             result.error(f"automation.test.{platform}", f"{check.name}: FAILED", **context)
         return response
 
@@ -3348,13 +3455,26 @@ class PostInstallValidationMixin:
 
     @staticmethod
     def _read_windows_boot_id(ssh: SSHClient, vm: VMConfig) -> str:
-        response = ssh.run(
+        command = (
             "powershell.exe -NoProfile -NonInteractive -Command "
             '"(Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).'
-            'LastBootUpTime.ToUniversalTime().Ticks"',
-            step="automation.windows_boot_identity",
-            timeout=30,
+            'LastBootUpTime.ToUniversalTime().Ticks"'
         )
+        for attempt in range(2):
+            try:
+                if attempt:
+                    time.sleep(WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS)
+                    ssh.reconnect()
+                response = ssh.run(
+                    command,
+                    step="automation.windows_boot_identity",
+                    timeout=30,
+                    replay_safe=True,
+                )
+                break
+            except WorkflowError as exc:
+                if attempt or not is_reconnectable_transport_error(exc):
+                    raise
         value = response.stdout.strip()
         if (
             response.exit_code != 0
@@ -3380,10 +3500,20 @@ class PostInstallValidationMixin:
             try:
                 if attempt > 1:
                     ssh.reconnect()
-                response = ssh.run(command, step=step, timeout=30, check=False)
+                # A reboot may close SSH normally; the caller verifies a new boot identity.
+                response = ssh.run(
+                    command, step=step, timeout=30, check=False, expect_disconnect=True
+                )
                 break
             except WorkflowError as exc:
                 if exc.details.get("exception_type") == "MissingExitStatus":
+                    return False
+                if (
+                    exc.details.get("exception_type") == "TimeoutError"
+                    and exc.details.get("transport_error") is True
+                ):
+                    # Shutdown can strand the SSH channel without an exit status.
+                    # Do not resend it; callers must prove the actual power transition.
                     return False
                 # Paramiko raises this before creating the exec channel, so the
                 # shutdown command was never sent. Other failures are ambiguous.

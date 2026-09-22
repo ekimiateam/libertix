@@ -15,6 +15,7 @@ namespace Libertix.Models
         public int LogicalSectorSize { get; set; }
         public int PhysicalSectorSize { get; set; }
         public long ShrinkAvailableBytes { get; set; }
+        public bool WindowsPartitionSlotAvailable { get; set; } = true;
         public bool BitLockerSafe { get; set; }
         public string BitLockerState { get; set; }
         public bool SecureBootEnabled { get; set; }

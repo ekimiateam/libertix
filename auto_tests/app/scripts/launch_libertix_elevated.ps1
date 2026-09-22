@@ -75,6 +75,7 @@ function Invoke-InteractiveWorker {
 
     $launcherProcess = $null
     $runtimeWindowVerified = $false
+    $lastWindowObservation = $null
     try {
         $workerConfig = Get-Content -LiteralPath $WorkerConfigPath -Raw |
             ConvertFrom-Json
@@ -131,6 +132,13 @@ function Invoke-InteractiveWorker {
             }
             if ($runtimeGraphicalProcess) {
                 $runtimeGraphicalProcess.Refresh()
+                $lastWindowObservation = [ordered]@{
+                    observed_at = [DateTime]::UtcNow.ToString("o")
+                    pid = $runtimeGraphicalProcess.Id
+                    session_id = $runtimeGraphicalProcess.SessionId
+                    window_handle = $runtimeGraphicalProcess.MainWindowHandle.ToInt64()
+                    window_title = $runtimeGraphicalProcess.MainWindowTitle
+                }
             }
             if ($runtimeGraphicalProcess -and
                 (Test-VisibleMainWindow -Process $runtimeGraphicalProcess)) {
@@ -188,6 +196,7 @@ function Invoke-InteractiveWorker {
                 exception_type = $launchError.Exception.GetType().FullName
                 script_stack = $launchError.ScriptStackTrace
                 processes_stopped = $processesStopped
+                last_window_observation = $lastWindowObservation
             })
         exit 1
     }
@@ -442,9 +451,11 @@ if ([string]$workerResult.status -ne "ok") {
     if ($unattendedConfigPath -and $workerResult.processes_stopped) {
         Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `
+    # Preserve the credential-free worker report until the campaign archives it.
+    Remove-Item -LiteralPath $workerConfigPath, $workerScriptPath `
         -Force -ErrorAction SilentlyContinue
-    throw ("The interactive Libertix worker failed: " + [string]$workerResult.error)
+    throw ("The interactive Libertix worker failed: " + [string]$workerResult.error +
+        "; diagnostic=" + $workerResultPath)
 }
 
 $process = Get-Process -Id ([int]$workerResult.pid) -ErrorAction Stop

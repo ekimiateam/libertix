@@ -1,5 +1,14 @@
 Set-StrictMode -Version Latest
 
+function Get-LibertixPlannedLinuxOffset {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    if ([string]$Plan.disk.installer.resizeMode -eq "live-offline") {
+        return [int64]$Plan.disk.installer.finalOffsetBytes
+    }
+    return [int64]$Plan.disk.installer.offsetBytes
+}
+
 function Get-LibertixStorageControllerNames {
     param(
         [Parameter(Mandatory = $true)][uint32]$DiskNumber,
@@ -385,6 +394,7 @@ function Get-LibertixInstallationAllocation {
 }
 
 Export-ModuleMember -Function @(
+    'Get-LibertixPlannedLinuxOffset',
     'Get-LibertixStorageControllerNames',
     'Get-LibertixTargetDiskIdentity',
     'Get-LibertixTargetVolumeEncryptionState',
