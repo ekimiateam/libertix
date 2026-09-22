@@ -126,6 +126,10 @@ SCENARIO_MATRIX: tuple[ScenarioSpec, ...] = (
     ),
 )
 
+assert len({spec.id for spec in SCENARIO_MATRIX}) == len(SCENARIO_MATRIX), (
+    "SCENARIO_MATRIX contains duplicate scenario ids"
+)
+
 
 @dataclass(frozen=True)
 class ScenarioRun:
@@ -144,6 +148,7 @@ class ScenarioRunResult:
     reason: str | None
     message: str
     errors: list[dict[str, object]]
+    steps: list[StepResult]
     log: str
     captures: str
     claimed_at: str
@@ -152,9 +157,7 @@ class ScenarioRunResult:
 
 def _fleet_profiles(spec: ScenarioSpec, fleet: Sequence[VMConfig]) -> set[str]:
     return {
-        vm.os
-        for vm in fleet
-        if vm.automation_enabled and _vm_compatible(vm, spec.requirements)
+        vm.os for vm in fleet if vm.automation_enabled and _vm_compatible(vm, spec.requirements)
     }
 
 
@@ -298,8 +301,14 @@ def _classify(outcome: OperationResult, vm_name: str) -> tuple[ScenarioOutcome, 
 
 
 _COUNT_KEYS = (
-    "pending", "running", "passed", "failed", "retryable",
-    "interrupted", "stopped_after_failure", "no_compatible_worker_after_quarantine",
+    "pending",
+    "running",
+    "passed",
+    "failed",
+    "retryable",
+    "interrupted",
+    "stopped_after_failure",
+    "no_compatible_worker_after_quarantine",
 )
 
 
@@ -454,7 +463,7 @@ def _sweep_pending(
         )
 
 
-def _aggregate_result(summary: dict[str, object]) -> OperationResult:
+def _aggregate_result(summary: dict[str, object], steps: list[StepResult]) -> OperationResult:
     entries = list(summary["runs"].values())  # type: ignore[union-attr]
     passed = all(entry["status"] == "passed" for entry in entries)
     counts = _counts(summary["runs"])  # type: ignore[arg-type]
@@ -462,7 +471,7 @@ def _aggregate_result(summary: dict[str, object]) -> OperationResult:
         status="ok" if passed else "error",
         operation="automation",
         message="Campaign passed" if passed else f"Campaign incomplete: {counts}",
-        steps=[],
+        steps=steps,
         campaign_summary=entries,
     )
 
@@ -481,16 +490,27 @@ class CampaignDispatcher:
         workspace: Path,
         on_step: Callable[[StepResult], None] | None = None,
     ) -> OperationResult:
-        fleet = self._configured.vms
-        specs = _resolve_specs(self._matrix, request.scenario_ids, fleet)
-        spec_by_id = {spec.id: spec for spec in specs}
-        vm_pool = _resolve_worker_pool(self._configured, request.selectors())
-        runs = _expand_runs(specs, fleet, vm_pool)
+        # Campaign-global steps (resolve validation failures, the shared
+        # build-once phase) stream through the real on_step and land first in
+        # the final OperationResult.steps -- untagged, since they belong to
+        # the whole campaign, not any one scenario. A WorkflowError here
+        # (unknown scenario_ids, a VM filter dropping required coverage, a
+        # disabled selected VM, an SSH/build failure, ...) becomes a proper
+        # failure result instead of falling through to a generic internal
+        # error; anything else unexpected still propagates as unexpected.
+        result = ResultBuilder("automation", on_step=on_step)
+        try:
+            fleet = self._configured.vms
+            specs = _resolve_specs(self._matrix, request.scenario_ids, fleet)
+            spec_by_id = {spec.id: spec for spec in specs}
+            vm_pool = _resolve_worker_pool(self._configured, request.selectors())
+            runs = _expand_runs(specs, fleet, vm_pool)
 
-        validation = ValidationService(self._configured)
-        build_result = ResultBuilder("automation")
-        posix_path = validation.prepare_server(build_result, source=request.source)
-        windows_path = validation.to_windows_share_path(posix_path)
+            validation = ValidationService(self._configured)
+            posix_path = validation.prepare_server(result, source=request.source)
+            windows_path = validation.to_windows_share_path(posix_path)
+        except WorkflowError as exc:
+            return result.failure(exc)
 
         summary = _build_summary(request, specs, vm_pool, runs)
         _persist_summary(workspace, summary)
@@ -534,6 +554,7 @@ class CampaignDispatcher:
                     ack.set()
             elif kind == "completed":
                 _mark_completed(summary, payload)
+                result.steps.extend(payload.steps)
                 _persist_summary(workspace, summary)
             elif kind == "worker_done":
                 active -= 1
@@ -544,7 +565,7 @@ class CampaignDispatcher:
         _sweep_pending(summary, vm_pool, spec_by_id, state)
         summary["finished_at"] = _now_iso()
         _persist_summary(workspace, summary)
-        return _aggregate_result(summary)
+        return _aggregate_result(summary, result.steps)
 
     @staticmethod
     def _worker(
@@ -565,9 +586,7 @@ class CampaignDispatcher:
                     if vm.name not in state.quarantined and not state.stop_claiming:
                         for candidate in state.pending:
                             spec = spec_by_id[candidate.scenario_id]
-                            if candidate.profile == vm.os and _vm_compatible(
-                                vm, spec.requirements
-                            ):
+                            if candidate.profile == vm.os and _vm_compatible(vm, spec.requirements):
                                 claimed = candidate
                                 state.pending.remove(candidate)
                                 break
@@ -578,95 +597,122 @@ class CampaignDispatcher:
                 updates.put(("claimed", (claimed.run_id, vm.name, _now_iso(), ack)))
                 ack.wait()
 
-                spec = spec_by_id[claimed.scenario_id]
-                scenario_workspace = (
-                    workspace / "scenarios" / f"{claimed.run_id.replace('::', '__')}-{vm.name}"
-                )
-                scenario_workspace.mkdir(parents=True, exist_ok=True)
-                projector = StreamEventProjector("automation", scenario_workspace)
-
-                def publish(
-                    step: StepResult,
-                    *,
-                    scenario_id: str = claimed.scenario_id,
-                    projector: StreamEventProjector = projector,
-                ) -> None:
-                    tagged = step.model_copy(
-                        update={"context": {**step.context, "scenario": scenario_id}}
-                    )
-                    projector.project_step(tagged)
-                    if on_step is not None:
-                        on_step(tagged)
-
-                child_request = AutomationRequest(
-                    vms=[vm.name],
-                    source=request.source,
-                    apply=True,
-                    linux_username=request.linux_username,
-                    linux_password=request.linux_password,
-                    linux_size_gib=request.linux_size_gib,
-                    migrate_windows_preferences=request.migrate_windows_preferences,
-                    distribution=spec.distribution,
-                    first_boot=spec.first_boot,
-                    installation_target=spec.installation_target,
-                    snapshot_mode=spec.snapshot_mode,
-                    storage_fixture=spec.storage_fixture,
-                    boot_guardian_fault=spec.boot_guardian_fault,
-                    simulate_stale_firmware_entries=spec.simulate_stale_firmware_entries,
-                    force_offline_ntfs_resize=spec.force_offline_ntfs_resize,
-                    share_windows_files_in_linux=spec.share_windows_files_in_linux,
-                    share_linux_files_in_windows=spec.share_linux_files_in_windows,
-                    preference_wallpaper=spec.preference_wallpaper,
-                    verify_uninstall=spec.verify_uninstall,
-                )
-
                 claimed_at = _now_iso()
-                # Narrowly scoped: run_scenario() and _classify() are the only
-                # calls that decide the run's outcome. Logging/persistence I/O
-                # (projector.project_result, and publish() in the except
-                # branch) is handled separately below so a secondary I/O fault
-                # there can never misreport a real pass as "failed", nor
-                # prevent a "completed" message from ever being sent (which
-                # would otherwise leave the run's summary entry stuck at
-                # "running" forever -- _sweep_pending only touches "pending").
+                run_steps: list[StepResult] = []
+                # Everything from here through classification is wrapped in one
+                # try/except: a successfully persisted claim must always
+                # produce exactly one terminal "completed" event, even if
+                # workspace/projector/child-request setup itself fails before
+                # run_scenario() can even be attempted -- otherwise that run
+                # stays stuck at "running" forever (_sweep_pending only ever
+                # touches "pending" entries).
                 try:
-                    outcome_result = run_scenario(
-                        child_request, scenario_workspace, publish, windows_path
+                    spec = spec_by_id[claimed.scenario_id]
+                    scenario_workspace = (
+                        workspace / "scenarios" / f"{claimed.run_id.replace('::', '__')}-{vm.name}"
                     )
-                except Exception as exc:
-                    error_step = StepResult(
-                        step="automation.campaign_exception",
-                        status="error",
-                        message="Scenario terminated unexpectedly",
-                        context={"exception_type": type(exc).__name__},
-                    )
-                    outcome, reason = "failed", None
-                    errors = [error_step.model_dump(mode="json")]
-                    message = error_step.message
-                    log_target: OperationResult = OperationResult(
-                        status="error",
-                        operation="automation",
-                        message=message,
-                        steps=[error_step],
-                    )
-                    try:
-                        publish(error_step)
-                    except Exception:
-                        logger.exception("Failed to publish the campaign_exception step")
-                else:
-                    outcome, reason = _classify(outcome_result, vm.name)
-                    errors = [
-                        step.model_dump(mode="json")
-                        for step in outcome_result.steps
-                        if step.status == "error"
-                    ]
-                    message = outcome_result.message
-                    log_target = outcome_result
+                    scenario_workspace.mkdir(parents=True, exist_ok=True)
+                    projector = StreamEventProjector("automation", scenario_workspace)
 
-                try:
-                    projector.project_result(log_target)
-                except Exception:
-                    logger.exception("Failed to persist the scenario's detailed log")
+                    def publish(
+                        step: StepResult,
+                        *,
+                        scenario_id: str = claimed.scenario_id,
+                        projector: StreamEventProjector = projector,
+                        run_steps: list[StepResult] = run_steps,
+                    ) -> None:
+                        tagged = step.model_copy(
+                            update={"context": {**step.context, "scenario": scenario_id}}
+                        )
+                        run_steps.append(tagged)
+                        projector.project_step(tagged)
+                        if on_step is not None:
+                            on_step(tagged)
+
+                    child_request = AutomationRequest(
+                        vms=[vm.name],
+                        source=request.source,
+                        apply=True,
+                        linux_username=request.linux_username,
+                        linux_password=request.linux_password,
+                        linux_size_gib=request.linux_size_gib,
+                        migrate_windows_preferences=request.migrate_windows_preferences,
+                        distribution=spec.distribution,
+                        first_boot=spec.first_boot,
+                        installation_target=spec.installation_target,
+                        snapshot_mode=spec.snapshot_mode,
+                        storage_fixture=spec.storage_fixture,
+                        boot_guardian_fault=spec.boot_guardian_fault,
+                        simulate_stale_firmware_entries=spec.simulate_stale_firmware_entries,
+                        force_offline_ntfs_resize=spec.force_offline_ntfs_resize,
+                        share_windows_files_in_linux=spec.share_windows_files_in_linux,
+                        share_linux_files_in_windows=spec.share_linux_files_in_windows,
+                        preference_wallpaper=spec.preference_wallpaper,
+                        verify_uninstall=spec.verify_uninstall,
+                    )
+
+                    # Narrowly scoped: run_scenario() and _classify() are the
+                    # only calls that decide the run's outcome. Logging I/O
+                    # (projector.project_result, and publish() in the except
+                    # branch) is handled separately so a secondary I/O fault
+                    # there can never misreport a real pass as "failed".
+                    try:
+                        outcome_result = run_scenario(
+                            child_request, scenario_workspace, publish, windows_path
+                        )
+                    except Exception as exc:
+                        error_step = StepResult(
+                            step="automation.campaign_exception",
+                            status="error",
+                            message="Scenario terminated unexpectedly",
+                            context={"exception_type": type(exc).__name__},
+                        )
+                        outcome, reason = "failed", None
+                        errors = [error_step.model_dump(mode="json")]
+                        message = error_step.message
+                        log_target: OperationResult = OperationResult(
+                            status="error",
+                            operation="automation",
+                            message=message,
+                            steps=[error_step],
+                        )
+                        try:
+                            publish(error_step)
+                        except Exception:
+                            logger.exception("Failed to publish the campaign_exception step")
+                    else:
+                        outcome, reason = _classify(outcome_result, vm.name)
+                        errors = [
+                            step.model_dump(mode="json")
+                            for step in outcome_result.steps
+                            if step.status == "error"
+                        ]
+                        message = outcome_result.message
+                        log_target = outcome_result
+
+                    try:
+                        projector.project_result(log_target)
+                    except Exception:
+                        logger.exception("Failed to persist the scenario's detailed log")
+
+                    log_path = str(projector.log_path)
+                    captures_path = str(scenario_workspace / "captures")
+                except Exception as exc:
+                    setup_step = StepResult(
+                        step="automation.campaign_setup_failed",
+                        status="error",
+                        message="Failed to prepare the scenario run",
+                        context={
+                            "exception_type": type(exc).__name__,
+                            "scenario": claimed.scenario_id,
+                        },
+                    )
+                    run_steps.append(setup_step)
+                    outcome, reason = "failed", None
+                    errors = [setup_step.model_dump(mode="json")]
+                    message = setup_step.message
+                    log_path = ""
+                    captures_path = ""
 
                 with state.lock:
                     if outcome == "retryable" and reason in {"restore_failed", "preflight_failed"}:
@@ -686,8 +732,9 @@ class CampaignDispatcher:
                             reason=reason,
                             message=message,
                             errors=errors,
-                            log=str(projector.log_path),
-                            captures=str(scenario_workspace / "captures"),
+                            steps=run_steps,
+                            log=log_path,
+                            captures=captures_path,
                             claimed_at=claimed_at,
                             finished_at=_now_iso(),
                         ),

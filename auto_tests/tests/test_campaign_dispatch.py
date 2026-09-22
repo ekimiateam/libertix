@@ -5,6 +5,7 @@ import threading
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
+from pydantic import ValidationError
 
 import app.services.campaign_dispatch as campaign_dispatch_module
 from app.config import VMConfig
@@ -71,7 +72,10 @@ def test_starter_matrix_preserves_four_nominal_scenarios_with_verify_uninstall()
     nominal = [spec for spec in SCENARIO_MATRIX if "nominal" in spec.tags]
     assert len(nominal) == 4
     assert {(spec.distribution, spec.first_boot) for spec in nominal} == {
-        ("mint", "windows"), ("mint", "linux"), ("zorin", "windows"), ("zorin", "linux"),
+        ("mint", "windows"),
+        ("mint", "linux"),
+        ("zorin", "windows"),
+        ("zorin", "linux"),
     }
     assert all(spec.verify_uninstall for spec in nominal)
     assert all(spec.requirements == ScenarioRequirements() for spec in nominal)
@@ -92,6 +96,23 @@ def test_scenario_spec_storage_fixture_defaults_to_concrete_instance() -> None:
     assert isinstance(spec.storage_fixture, StorageFixtureRequest)
 
 
+def test_scenario_matrix_ids_are_unique() -> None:
+    # Defensive, module-level: a future edit that accidentally reuses a
+    # scenario id would otherwise silently create duplicate ScenarioRuns
+    # with identical run_ids at expansion time.
+    ids = [spec.id for spec in SCENARIO_MATRIX]
+    assert len(ids) == len(set(ids))
+
+
+def test_automation_campaign_request_rejects_duplicate_scenario_ids() -> None:
+    with pytest.raises(ValidationError, match="Duplicate scenario_ids"):
+        AutomationCampaignRequest(
+            apply=True,
+            linux_password="test-passphrase",
+            scenario_ids=["mint-windows-first", "mint-windows-first"],
+        )
+
+
 def _settings_with_vms(*vm_overrides: dict) -> object:
     from tests.test_core import settings
 
@@ -99,8 +120,7 @@ def _settings_with_vms(*vm_overrides: dict) -> object:
     # shared _vm() helper defaults every VM to the same vmid, so assign unique
     # ones here (settings()'s default allowed_proxmox_vmids is (500, 501, 502)).
     vms = tuple(
-        _vm(**{"vmid": 500 + index, **overrides})
-        for index, overrides in enumerate(vm_overrides)
+        _vm(**{"vmid": 500 + index, **overrides}) for index, overrides in enumerate(vm_overrides)
     )
     return settings(vms=vms)
 
@@ -123,7 +143,10 @@ def test_resolve_specs_defaults_to_full_matrix() -> None:
     )
     resolved = _resolve_specs(SCENARIO_MATRIX, None, fleet)
     assert {spec.id for spec in resolved} == {
-        "mint-windows-first", "mint-linux-first", "zorin-windows-first", "zorin-linux-first",
+        "mint-windows-first",
+        "mint-linux-first",
+        "zorin-windows-first",
+        "zorin-linux-first",
     }  # secondary scenario silently dropped: no fleet VM has secondary_disk_boot_order
 
 
@@ -312,9 +335,19 @@ def test_mark_running_then_completed_updates_entry_and_counts() -> None:
     _mark_completed(
         summary,
         ScenarioRunResult(
-            run_id="x::p", scenario_id="x", profile="p", vm="a", outcome="passed", reason=None,
-            message="ok", errors=[], log="log.txt", captures="captures",
-            claimed_at="2026-09-21T00:00:00Z", finished_at="2026-09-21T00:01:00Z",
+            run_id="x::p",
+            scenario_id="x",
+            profile="p",
+            vm="a",
+            outcome="passed",
+            reason=None,
+            message="ok",
+            errors=[],
+            steps=[],
+            log="log.txt",
+            captures="captures",
+            claimed_at="2026-09-21T00:00:00Z",
+            finished_at="2026-09-21T00:01:00Z",
         ),
     )
     assert summary["runs"]["x::p"]["status"] == "passed"
@@ -401,8 +434,9 @@ def _fake_validation_service_class():
         def __init__(self, configured: object) -> None:
             self._configured = configured
 
-        def prepare_server(self, result: object, *, source: str) -> PurePosixPath:
+        def prepare_server(self, result, *, source: str) -> PurePosixPath:
             calls.append("prepare_server")
+            result.ok("server.check_smb", "The SMB share is accessible", target="fake-host")
             return posix_path
 
         def to_windows_share_path(self, path: PurePosixPath) -> PureWindowsPath:
@@ -424,7 +458,9 @@ def _fake_run_scenario_always_ok():
         vm_name = child.vms[0]
         calls.append((vm_name, child.distribution, child.first_boot))
         step = StepResult(
-            step="automation.vm_finished", status="ok", message="done",
+            step="automation.vm_finished",
+            status="ok",
+            message="done",
             context={"vm": vm_name, "vm_status": "ok"},
         )
         publish(step)
@@ -432,6 +468,148 @@ def _fake_run_scenario_always_ok():
 
     run.calls = calls  # type: ignore[attr-defined]
     return run
+
+
+def test_campaign_dispatcher_final_result_includes_tagged_scenario_steps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: _aggregate_result() used to hardcode steps=[], silently
+    dropping every scenario step from the non-stream /api/v1/automation/full
+    response. The old sequential run_campaign() returned every tagged step;
+    the dispatcher must preserve that."""
+
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
+    configured = _settings_with_vms(
+        {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
+    )
+    request = AutomationCampaignRequest(
+        apply=True,
+        linux_password="test-passphrase",
+    ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
+    run_scenario = _fake_run_scenario_always_ok()
+
+    result = CampaignDispatcher(configured).run(request, run_scenario, tmp_path, on_step=None)
+
+    assert result.status == "ok"
+    scenario_steps = [step for step in result.steps if step.step == "automation.vm_finished"]
+    assert scenario_steps
+    assert scenario_steps[0].context["scenario"] == "mint-windows-first"
+
+
+def test_campaign_dispatcher_build_once_progress_reaches_on_step_and_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The build-once phase (prepare_server) must stream through the real
+    on_step callback and land in the final OperationResult.steps, untagged
+    with any scenario -- it's campaign-global, not per-run."""
+
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
+    configured = _settings_with_vms(
+        {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
+    )
+    request = AutomationCampaignRequest(
+        apply=True,
+        linux_password="test-passphrase",
+    ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
+    run_scenario = _fake_run_scenario_always_ok()
+
+    streamed: list[StepResult] = []
+    result = CampaignDispatcher(configured).run(
+        request, run_scenario, tmp_path, on_step=streamed.append
+    )
+
+    assert any(step.step == "server.check_smb" for step in streamed)
+    build_steps = [step for step in result.steps if step.step == "server.check_smb"]
+    assert build_steps
+    assert "scenario" not in build_steps[0].context
+
+
+def test_campaign_dispatcher_unknown_scenario_id_returns_failure_result_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-dispatch WorkflowError (unknown scenario_ids, a VM filter
+    dropping required coverage, a disabled selected VM, or a build/SSH
+    failure) must become a proper failure OperationResult with on_step
+    notified -- not propagate uncaught, which would otherwise be turned
+    into a generic automation.internal_error by the caller."""
+
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
+    configured = _settings_with_vms(
+        {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
+    )
+    request = AutomationCampaignRequest(
+        apply=True,
+        linux_password="test-passphrase",
+    ).model_copy(update={"scenario_ids": ["not-a-real-scenario"]})
+
+    streamed: list[StepResult] = []
+    result = CampaignDispatcher(configured).run(
+        request, _fake_run_scenario_always_ok(), tmp_path, on_step=streamed.append
+    )
+
+    assert result.status == "error"
+    assert result.steps
+    assert result.steps[-1].step == "campaign.unknown_scenario_id"
+    assert streamed  # on_step was notified of the failure
+    assert streamed[-1].step == "campaign.unknown_scenario_id"
+
+
+def test_campaign_dispatcher_post_claim_setup_failure_becomes_terminal_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A setup/construction failure after a claim has already been acked
+    (e.g. workspace mkdir) must still produce exactly one terminal
+    "completed" event -- the run must end up failed, never stuck at
+    "running" forever -- and worker_done must still arrive exactly once
+    so the dispatcher terminates."""
+
+    monkeypatch.setattr(
+        "app.services.campaign_dispatch.ValidationService", _fake_validation_service_class()
+    )
+
+    real_mkdir = Path.mkdir
+
+    def flaky_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        if "scenarios" in self.parts:
+            raise OSError("disk full")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", flaky_mkdir)
+
+    configured = _settings_with_vms(
+        {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
+    )
+    request = AutomationCampaignRequest(
+        apply=True,
+        linux_password="test-passphrase",
+    ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
+    run_scenario = _fake_run_scenario_always_ok()
+
+    completed = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def target() -> None:
+        outcome["result"] = CampaignDispatcher(configured).run(
+            request, run_scenario, tmp_path, on_step=None
+        )
+        completed.set()
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join(timeout=5)
+
+    assert completed.is_set(), "CampaignDispatcher.run() hung -- worker_done not guaranteed"
+    result = outcome["result"]
+    assert result.status == "error"
+    statuses = {entry["status"] for entry in result.campaign_summary}
+    assert statuses == {"failed"}
+    assert run_scenario.calls == []  # run_scenario itself was never reached
 
 
 def test_campaign_dispatcher_runs_every_resolved_run_exactly_once(
@@ -467,7 +645,8 @@ def test_campaign_dispatcher_two_vms_sharing_a_profile_compete_for_the_same_runs
         {"name": "b", "os": "Windows 11 UEFI", "firmware": "uefi", "automation_enabled": True},
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase",
+        apply=True,
+        linux_password="test-passphrase",
     )
     request = request.model_copy(
         update={"scenario_ids": ["mint-windows-first", "mint-linux-first"]}
@@ -488,16 +667,23 @@ def test_campaign_dispatcher_claim_respects_capability_not_just_profile_string(
     )
     configured = _settings_with_vms(
         {
-            "name": "with-secondary", "os": "Windows 11 UEFI", "firmware": "uefi",
-            "automation_enabled": True, "secondary_disk_boot_order": ("scsi1",),
+            "name": "with-secondary",
+            "os": "Windows 11 UEFI",
+            "firmware": "uefi",
+            "automation_enabled": True,
+            "secondary_disk_boot_order": ("scsi1",),
         },
         {
-            "name": "without-secondary", "os": "Windows 11 UEFI", "firmware": "uefi",
-            "automation_enabled": True, "secondary_disk_boot_order": (),
+            "name": "without-secondary",
+            "os": "Windows 11 UEFI",
+            "firmware": "uefi",
+            "automation_enabled": True,
+            "secondary_disk_boot_order": (),
         },
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase",
+        apply=True,
+        linux_password="test-passphrase",
     ).model_copy(update={"scenario_ids": ["mint-secondary-install"]})
     run_scenario = _fake_run_scenario_always_ok()
     result = CampaignDispatcher(configured).run(request, run_scenario, tmp_path, on_step=None)
@@ -515,12 +701,17 @@ def test_campaign_dispatcher_continue_after_failure_false_stops_new_claims(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase", continue_after_failure=False,
+        apply=True,
+        linux_password="test-passphrase",
+        continue_after_failure=False,
     ).model_copy(update={"scenario_ids": ["mint-windows-first", "mint-linux-first"]})
 
     def run(child, workspace, publish, windows_path):
         step = StepResult(
-            step="automation.installer_crash", status="error", message="boom", context={},
+            step="automation.installer_crash",
+            status="error",
+            message="boom",
+            context={},
         )
         publish(step)
         return OperationResult(status="error", operation="automation", message="boom", steps=[step])
@@ -543,21 +734,30 @@ def test_campaign_dispatcher_restore_failure_quarantines_worker_not_whole_campai
         {"name": "b", "os": "Windows 10 UEFI", "firmware": "uefi", "automation_enabled": True},
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase", continue_after_failure=True,
+        apply=True,
+        linux_password="test-passphrase",
+        continue_after_failure=True,
     ).model_copy(update={"scenario_ids": ["mint-windows-first", "mint-linux-first"]})
 
     def run(child, workspace, publish, windows_path):
         if child.vms[0] == "a":
             step = StepResult(
-                step="automation.rollback_preflight", status="error", message="restore broke",
+                step="automation.rollback_preflight",
+                status="error",
+                message="restore broke",
                 context={},
             )
             publish(step)
             return OperationResult(
-                status="error", operation="automation", message="restore broke", steps=[step],
+                status="error",
+                operation="automation",
+                message="restore broke",
+                steps=[step],
             )
         step = StepResult(
-            step="automation.vm_finished", status="ok", message="done",
+            step="automation.vm_finished",
+            status="ok",
+            message="done",
             context={"vm": "b", "vm_status": "ok"},
         )
         publish(step)
@@ -584,7 +784,8 @@ def test_campaign_dispatcher_worker_done_reported_on_every_exit_path(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase",
+        apply=True,
+        linux_password="test-passphrase",
     ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
     run_scenario = _fake_run_scenario_always_ok()
 
@@ -613,14 +814,19 @@ def test_campaign_dispatcher_stop_claiming_visible_before_consumer_drains_queue(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase", continue_after_failure=False,
+        apply=True,
+        linux_password="test-passphrase",
+        continue_after_failure=False,
     ).model_copy(update={"scenario_ids": ["mint-windows-first", "mint-linux-first"]})
     claim_order: list[str] = []
 
     def run(child, workspace, publish, windows_path):
         claim_order.append(child.first_boot)
         step = StepResult(
-            step="automation.installer_crash", status="error", message="boom", context={},
+            step="automation.installer_crash",
+            status="error",
+            message="boom",
+            context={},
         )
         publish(step)
         return OperationResult(status="error", operation="automation", message="boom", steps=[step])
@@ -652,7 +858,8 @@ def test_campaign_dispatcher_project_result_failure_does_not_change_outcome(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase",
+        apply=True,
+        linux_password="test-passphrase",
     ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
     run_scenario = _fake_run_scenario_always_ok()
 
@@ -692,7 +899,8 @@ def test_campaign_dispatcher_persist_summary_failure_still_unblocks_worker(
         {"name": "a", "os": "Windows 10 BIOS", "firmware": "bios", "automation_enabled": True},
     )
     request = AutomationCampaignRequest(
-        apply=True, linux_password="test-passphrase",
+        apply=True,
+        linux_password="test-passphrase",
     ).model_copy(update={"scenario_ids": ["mint-windows-first"]})
     run_scenario = _fake_run_scenario_always_ok()
 
