@@ -715,6 +715,65 @@ def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_run_logs(
     assert all(Path(entry["log"]).is_file() for entry in data["campaign_summary"])
     assert all(entry["status"] == "passed" for entry in data["campaign_summary"])
     assert lock.acquire_calls == lock.release_calls == 1
+    # Note: OperationResult.steps population is verified at the
+    # CampaignDispatcher.run() level in test_campaign_dispatch.py
+    # (test_campaign_dispatcher_final_result_includes_tagged_scenario_steps),
+    # not here. Both /api/v1/automation/full and /api/v1/automation/full/stream
+    # -- like plain /api/v1/automation -- go through execute_isolated_automation,
+    # which always extracts its terminal result from the internal ndjson
+    # stream; StreamEventProjector.project_result filters that terminal
+    # event's steps to error-only regardless of the `stream` query flag. That
+    # filtering is pre-existing and shared by every automation operation, not
+    # specific to campaigns, so a non-error scenario step is never visible in
+    # this endpoint's JSON response even with the fix -- only in the
+    # in-process OperationResult the dispatcher actually returns.
+
+
+def test_full_campaign_endpoint_reports_unknown_scenario_id_not_internal_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    lock = FakeOperationLock()
+    monkeypatch.setattr(main_module, "operation_lock", lock)
+
+    class FakeValidationService:
+        def __init__(self, settings) -> None:
+            self._settings = settings
+
+        def prepare_server(self, result, *, source):
+            return PurePosixPath("/srv/libertix-smb/build/Libertix.exe")
+
+        def to_windows_share_path(self, path):
+            return PureWindowsPath("Z:/build/Libertix.exe")
+
+    monkeypatch.setattr("app.services.campaign_dispatch.ValidationService", FakeValidationService)
+    configured = settings(capture_dir=tmp_path / "captures", operation_log_dir=tmp_path / "logs")
+    configured = configured.model_copy(
+        update={
+            "vms": tuple(
+                vm.model_copy(update={"automation_enabled": True}) for vm in configured.vms
+            )
+        }
+    )
+    with AsgiTestClient(create_app(configured)) as client:
+        response = client.post(
+            "/api/v1/automation/full",
+            json={
+                "apply": True,
+                "linux_password": "test-passphrase",
+                "scenario_ids": ["not-a-real-scenario"],
+            },
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "error"
+    # This must be CampaignDispatcher's own resolve-time validation failure,
+    # not a generic "automation.internal_error" produced by
+    # _stream_operation_worker's catch-all when an unhandled WorkflowError
+    # escapes CampaignDispatcher.run().
+    assert data["steps"]
+    assert data["steps"][-1]["step"] == "campaign.unknown_scenario_id"
+    assert not any(step["step"] == "automation.internal_error" for step in data["steps"])
+    assert lock.acquire_calls == lock.release_calls == 1
 
 
 def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
