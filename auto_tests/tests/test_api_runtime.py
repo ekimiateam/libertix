@@ -7,7 +7,7 @@ import pickle
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -645,32 +645,45 @@ def test_capture_cleanup_refuses_a_workspace_named_symlink(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_scenario_logs(
+def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_run_logs(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stream: bool
 ) -> None:
     lock = FakeOperationLock()
     monkeypatch.setattr(main_module, "operation_lock", lock)
 
     class FakeAutomationService:
-        def __init__(self, _settings):
+        def __init__(self, _settings) -> None:
             pass
 
-        def run(self, selectors, *, on_step, boot_guardian_fault, **_kwargs):
-            assert selectors == ["vm1", "vm2", "vm3"]
-            assert boot_guardian_fault == "none"
-            steps = []
-            for name in selectors:
-                step = StepResult(
-                    step="automation.vm_finished",
-                    status="ok",
-                    message="done",
-                    context={"vm": name, "vm_status": "ok"},
-                )
-                on_step(step)
-                steps.append(step)
-            return OperationResult(status="ok", operation="automation", message="done", steps=steps)
+        def run(self, selectors, *, on_step, windows_path=None, **_kwargs):
+            assert len(selectors) == 1  # one physical VM per campaign run, not three at once
+            vm_name = selectors[0]
+            step = StepResult(
+                step="automation.vm_finished",
+                status="ok",
+                message="done",
+                context={"vm": vm_name, "vm_status": "ok"},
+            )
+            on_step(step)
+            return OperationResult(status="ok", operation="automation", message="done", steps=[step])
+
+    class FakeValidationService:
+        def __init__(self, settings) -> None:
+            self._settings = settings
+
+        def prepare_server(self, result, *, source):
+            return PurePosixPath("/srv/libertix-smb/build/Libertix.exe")
+
+        def to_windows_share_path(self, path):
+            return PureWindowsPath("Z:/build/Libertix.exe")
+
+        def select_vms(self, selectors):
+            from app.services.validation import ValidationService as RealValidationService
+
+            return RealValidationService(self._settings).select_vms(selectors)
 
     monkeypatch.setattr(main_module, "AutomationService", FakeAutomationService)
+    monkeypatch.setattr("app.services.campaign_dispatch.ValidationService", FakeValidationService)
     configured = settings(capture_dir=tmp_path / "captures", operation_log_dir=tmp_path / "logs")
     configured = configured.model_copy(
         update={
@@ -683,7 +696,7 @@ def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_scenario_logs(
     with AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             endpoint,
-            json={"vms": ["vm1", "vm2", "vm3"], "apply": True, "linux_password": "test-passphrase"},
+            json={"apply": True, "linux_password": "test-passphrase"},
         )
     assert response.status_code == 200
     data = (
@@ -692,10 +705,13 @@ def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_scenario_logs(
         else response.json()
     )
     assert data["status"] == "ok"
-    assert len(data["campaign_summary"]) == 4
-    assert len({item["log"] for item in data["campaign_summary"]}) == 4
-    assert all(Path(item["log"]).is_file() for item in data["campaign_summary"])
-    assert all(set(item["vms"].values()) == {"ok"} for item in data["campaign_summary"])
+    # 4 nominal scenarios x 3 configured profiles (BIOS, UEFI-10, UEFI-11 in the test
+    # fixture); the fifth starter-matrix scenario needs secondary_disk_boot_order,
+    # which no fixture VM has, so it contributes 0 runs by design.
+    assert len(data["campaign_summary"]) == 12
+    assert len({entry["log"] for entry in data["campaign_summary"]}) == 12
+    assert all(Path(entry["log"]).is_file() for entry in data["campaign_summary"])
+    assert all(entry["status"] == "passed" for entry in data["campaign_summary"])
     assert lock.acquire_calls == lock.release_calls == 1
 
 
