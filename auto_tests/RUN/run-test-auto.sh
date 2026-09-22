@@ -29,6 +29,7 @@ case "$1" in
         echo "Both attempts are preserved; a second failure remains a failure."
         echo "A prolonged network outage does not consume the technical retry."
         echo "Includes Mint/Zorin, storage, BIOS refusal, uninstall and reboot checks."
+        echo "Also tests BootOrder repair, EFI replacement consent and refusal on UEFI VMs."
         echo "--auto-resume is retained for compatibility and does not allow extra retries."
         exit 0
         ;;
@@ -100,12 +101,15 @@ root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
 from app.config import Settings
 from app.stream_events import StreamEventProjector
-from app.services.automation_campaign import SCENARIOS, STORAGE_SCENARIOS
+from app.services.automation_campaign import SCENARIOS, STORAGE_SCENARIOS, BOOT_GUARDIAN_SCENARIOS
 
 start_scenario = sys.argv[2]
 scenario_names = [f"{distribution}-{first_boot}-first" + (f"-{layout}" if layout else "")
                   for distribution, first_boot, layout in
                   ([(d, b, "") for d, b in SCENARIOS] + list(STORAGE_SCENARIOS))]
+boot_guardian_scenario_names = [f"{distribution}-{first_boot}-first-{fault}"
+                                for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS]
+scenario_names.extend(boot_guardian_scenario_names)
 if start_scenario and start_scenario not in scenario_names:
     print("Unknown scenario. Available choices: " + ", ".join(scenario_names), flush=True)
     sys.exit(2)
@@ -114,6 +118,7 @@ if start_scenario:
 
 settings = Settings(_env_file=root / ".env")
 labels = {vm.name: f"VM{vm.vmid}" for vm in settings.vms}
+firmwares = {vm.name: vm.firmware for vm in settings.vms}
 milestones = {}
 scenarios = []
 completed = set()
@@ -143,7 +148,13 @@ def progress():
         selected = active.get(vm)
         if selected:
             snapshot = settings.secondary_disk_reset_snapshot if selected["snapshot_mode"] == "secondary-disk" else settings.reset_snapshot
-            expectation = "BIOS compatibility refusal" if selected.get("expectations", {}).get(vm) == "compatibility-refusal" else "installation and uninstall"
+            expectation = {
+                "compatibility-refusal": "BIOS compatibility refusal",
+                "install-uninstall": "installation and uninstall",
+                "boot-order": "BootOrder repair",
+                "preferred-path": "EFI replacement consent and repair",
+                "preferred-path-rollback": "EFI replacement refusal and rollback",
+            }.get(selected.get("expectations", {}).get(vm), "installation and uninstall")
             lines.append(f"{labels.get(vm, vm)} · {scenarios.index(selected) + first_scenario_index}/{total_scenarios} · {selected['name']} · {snapshot} · {expectation}")
         lines.append(f"{labels.get(vm, vm)} {bar(count, maximum)} | {stage}")
     if verdict:
@@ -162,10 +173,12 @@ def validate_success(data):
         raise RuntimeError("Invalid campaign verdict: missing, duplicate, or unexpected scenarios.")
     for item in items:
         required = "ok" if item["scenario"] in expected else "not-run"
+        required_vms = [vm for vm in payload["vms"]
+                        if item["scenario"] not in boot_guardian_scenario_names or firmwares.get(vm) == "uefi"]
         cells = item.get("cells", {})
-        if (item.get("status") != required
-                or item.get("vms") != dict.fromkeys(payload["vms"], required)
-                or not isinstance(cells, dict) or set(cells) != set(payload["vms"])
+        if (not required_vms or item.get("status") != required
+                or item.get("vms") != dict.fromkeys(required_vms, required)
+                or not isinstance(cells, dict) or set(cells) != set(required_vms)
                 or any(not isinstance(cell, dict) or cell.get("status") != required for cell in cells.values())):
             raise RuntimeError("Invalid campaign verdict: inconsistent VM results for " + item["scenario"])
 
@@ -180,6 +193,7 @@ try:
         "linux_size_gib": 20, "migrate_windows_preferences": False,
         "continue_after_failure": True,
         "include_storage_scenarios": True,
+        "include_boot_guardian_scenarios": True,
         "retry_failed_scenarios": True,
     }
     if start_scenario:

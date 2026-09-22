@@ -231,6 +231,13 @@ secondary disk connected, request the full MBR Windows destination, require the 
 refusal before installation, and compare disk layout, BCD configuration, recovery state and data
 witnesses before/after. A different error or an unexpected installation is not a successful refusal.
 
+With `include_boot_guardian_scenarios=true`, six additional scenarios exercise `boot-order`,
+`preferred-path` and `preferred-path-rollback` for Mint and Zorin, Windows-first, on UEFI VMs only.
+They verify boot repair, EFI replacement consent (including an unanswered reboot), or refusal with
+rollback. These recovery scenarios use their own evidence contracts instead of the nominal uninstall
+workflow. `RUN/run-test-auto.sh` enables both storage and BootGuardian scenarios: with one BIOS and
+two UEFI VMs, this runs 54 VM/scenario cells. BIOS VMs finish their own lane without waiting for UEFI.
+
 The campaign holds the existing operation lock throughout and builds one standalone executable,
 whose hash is checked on every deployment. Each VM has its own isolated controller and retry
 workspace. An interrupted controller is stopped and its diagnostics collected before that VM is

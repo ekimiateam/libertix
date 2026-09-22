@@ -15,6 +15,8 @@ from app.services.automation_campaign import (
 from app.services.automation_progress import OperationProgress
 from app.stream_events import StreamEventProjector
 
+from .campaign_evidence import successful_campaign_steps
+
 
 def test_extended_campaign_preserves_oem_and_secondary_data_then_uninstalls(tmp_path: Path) -> None:
     names = ["legacy", "uefi-a", "uefi-b"]
@@ -29,15 +31,7 @@ def test_extended_campaign_preserves_oem_and_secondary_data_then_uninstalls(tmp_
         assert child.verify_uninstall == (child.expected_compatibility_refusal is None)
         assert child.boot_guardian_fault == "none"
         assert child.monitor_iso
-        steps = [
-            StepResult(
-                step="automation.vm_finished",
-                status="ok",
-                message="verified",
-                context={"vm": name, "vm_status": "ok"},
-            )
-            for name in child.vms
-        ]
+        steps = successful_campaign_steps(child)
         return OperationResult(status="ok", operation="automation", message="done", steps=steps)
 
     outcome = run_campaign(
@@ -134,22 +128,13 @@ def test_extended_campaign_continues_all_scenarios_but_retains_early_errors(tmp_
             "mint-linux-first",
             "mint-windows-first-ntfs",
         }
+        steps = successful_campaign_steps(child)
+        steps[-1].context["vm_status"] = "error" if failed else "ok"
         return OperationResult(
             status="error" if failed else "ok",
             operation="automation",
             message="done",
-            steps=[
-                StepResult(
-                    step="automation.vm_finished",
-                    status="ok",
-                    message="finished",
-                    context={
-                        "vm": name,
-                        "vm_status": "error" if failed and name == "vm2" else "ok",
-                    },
-                )
-                for name in child.vms
-            ],
+            steps=steps,
         )
 
     outcome = run_campaign(
@@ -195,19 +180,10 @@ def test_campaign_runs_four_nominal_three_vm_scenarios_and_retains_failures(
         assert workspace.parents[2] == tmp_path
         assert workspace.parent.name == vm
         failed = vm == "vm2" and (child.distribution, child.first_boot) == SCENARIOS[1]
-        steps = []
-        for name in child.vms:
-            step = StepResult(
-                step="automation.vm_finished",
-                status="ok",
-                message="finished",
-                context={
-                    "vm": name,
-                    "vm_status": "error" if failed else "ok",
-                },
-            )
+        steps = successful_campaign_steps(child)
+        steps[-1].context["vm_status"] = "error" if failed else "ok"
+        for step in steps:
             publish(step)
-            steps.append(step)
         if failed:
             error = StepResult(
                 step="test.failure", status="error", message="expected", context={"vm": "vm2"}
@@ -287,15 +263,11 @@ def test_campaign_preserves_a_recap_when_the_worker_is_interrupted(tmp_path: Pat
         if child.first_boot == "windows":
             barrier.wait(timeout=5)
             if vm == "vm1":
-                step = StepResult(
-                    step="automation.vm_finished",
-                    status="ok",
-                    message="verified",
-                    context={"vm": vm, "vm_status": "ok"},
-                )
-                publish(step)
+                steps = successful_campaign_steps(child)
+                for step in steps:
+                    publish(step)
                 return OperationResult(
-                    status="ok", operation="automation", message="verified", steps=[step]
+                    status="ok", operation="automation", message="verified", steps=steps
                 )
         publish(
             StepResult(step="automation.deploy", status="ok", message="started", context={"vm": vm})

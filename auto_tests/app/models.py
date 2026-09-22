@@ -85,7 +85,7 @@ class ValidationRequest(BaseModel):
 
 
 class AutomationCampaignRequest(ValidationRequest):
-    """Four nominal installation scenarios, with one shared three-VM scope."""
+    """Nominal campaign with optional storage and UEFI recovery scenarios."""
 
     model_config = ConfigDict(extra="forbid")
     apply: Literal[True]
@@ -95,6 +95,7 @@ class AutomationCampaignRequest(ValidationRequest):
     migrate_windows_preferences: bool = False
     continue_after_failure: bool = False
     include_storage_scenarios: bool = False
+    include_boot_guardian_scenarios: bool = False
     start_scenario: str | None = Field(default=None, min_length=1, max_length=80)
     retry_failed_scenarios: bool = False
     start_scenario_attempt: Literal[1, 2] = 1

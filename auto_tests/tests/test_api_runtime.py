@@ -28,6 +28,7 @@ from app.main import create_app
 from app.models import AutomationCampaignRequest, AutomationRequest, OperationResult, StepResult
 
 from .asgi_client import AsgiTestClient
+from .campaign_evidence import successful_campaign_steps
 from .test_core import settings
 
 
@@ -683,14 +684,10 @@ def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_scenario_logs(
         assert request.boot_guardian_fault == "none"
         assert release[1] == "a" * 64
         assert workspace.parent.name == request.vms[0]
-        step = StepResult(
-            step="automation.vm_finished",
-            status="ok",
-            message="done",
-            context={"vm": request.vms[0], "vm_status": "ok"},
-        )
-        on_step(step)
-        return OperationResult(status="ok", operation="automation", message="done", steps=[step])
+        steps = successful_campaign_steps(request)
+        for step in steps:
+            on_step(step)
+        return OperationResult(status="ok", operation="automation", message="done", steps=steps)
 
     monkeypatch.setattr(main_module, "_run_campaign_vm_attempt", run_cell)
     configured = settings(capture_dir=tmp_path / "captures", operation_log_dir=tmp_path / "logs")

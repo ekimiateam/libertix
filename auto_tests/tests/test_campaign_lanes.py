@@ -18,6 +18,7 @@ from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
 from app.services.validation import ValidationService
 
+from .campaign_evidence import successful_campaign_steps
 from .test_core import settings
 
 
@@ -81,7 +82,9 @@ def test_independent_42_cells_and_retry_budgets(tmp_path):
                 )
                 return result
             result = finished(vm)
-            publish(result.steps[0])
+            result.steps = successful_campaign_steps(child)
+            for step in result.steps:
+                publish(step)
             return result
         finally:
             with lock:
