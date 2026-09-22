@@ -613,6 +613,34 @@ Describe "UEFI post-install rollback compensation" {
         Mock Complete-LibertixTrackedRollback {}
     }
 
+    It 'restores storage without touching EFI when write intent proves boot was untouched' {
+        $state = Get-TransactionPartitionState
+        $state | Add-Member -NotePropertyName TemporaryBootPreparationStarted -NotePropertyValue $false
+        $script:rollbackTestState = $state
+        Mock Get-TransactionPartitionState { $script:rollbackTestState }
+        Invoke-Revert
+        Should -Invoke Mount-Esp -Times 0
+        Should -Invoke Remove-LibertixTemporaryEspFiles -Times 0
+        Should -Invoke Remove-LibertixTemporaryFirmwareEntries -Times 0
+        Should -Invoke Restore-OriginalFirmwareBootOrder -Times 0
+        Should -Invoke Remove-LibertixInstallerPartitionIfPresent -Times 1
+        Should -Invoke Restore-LibertixSystemDriveInitialSize -Times 1
+        Should -Invoke Complete-LibertixTrackedRollback -Times 1
+    }
+
+    It 'does not bypass foreign ownership when boot intent is <Intent>' -ForEach @(
+        @{ Intent = $true }, @{ Intent = 'false' }, @{ Intent = $null }
+    ) {
+        $state = Get-TransactionPartitionState
+        $state | Add-Member -NotePropertyName TemporaryBootPreparationStarted -NotePropertyValue $Intent
+        $script:rollbackTestState = $state
+        Mock Get-TransactionPartitionState { $script:rollbackTestState }
+        Mock Remove-LibertixTemporaryEspFiles { throw 'FOREIGN_OWNER' }
+        { Invoke-Revert } | Should -Throw '*FOREIGN_OWNER*'
+        Should -Invoke Remove-LibertixInstallerPartitionIfPresent -Times 0
+        Should -Invoke Complete-LibertixTrackedRollback -Times 0
+    }
+
     It "records every live and target compensation after the owned partition is removed" {
         Invoke-Revert
 

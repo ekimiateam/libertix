@@ -441,9 +441,11 @@ try {
     Assert-LibertixPlanMatchesCurrentStorage
     Assert-LibertixAllocationMatchesCurrentStorage
     Test-LibertixSecureBootCompatibility -InstallationPlan $installationPlan
-    if ($installationPlan.PSObject.Properties.Name -contains 'allocation' -and $null -ne $installationPlan.allocation) {
+    Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
+    if (-not (Get-TransactionPartitionState)) {
         Save-TransactionPreparationState -SystemPartition (Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop)
     }
+    Assert-LibertixEspPreparationOwnership
     Set-WindowsVolumeReadableFromLinux -VerifyStorageIdentity {
         Assert-LibertixPlanMatchesCurrentStorage
         Assert-LibertixAllocationMatchesCurrentStorage

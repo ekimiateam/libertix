@@ -5,7 +5,13 @@ from pathlib import Path
 
 def test_installed_redirect_preserves_a_foreign_debian_configuration(tmp_path: Path):
     adapter = Path(__file__).resolve().parents[2] / "assets/live/libertix-uefi-adapter.sh"
-    function = adapter.read_text().split("install_signed_uefi_bootloader_or_die() {", 1)[1]
+    source = adapter.read_text()
+    cleanup = source.split("remove_owned_temporary_efi_files() {", 1)[1]
+    cleanup = (
+        "remove_owned_temporary_efi_files() {"
+        + cleanup.split("\ncleanup_final_uefi_bootloader_best_effort()", 1)[0]
+    )
+    function = source.split("install_signed_uefi_bootloader_or_die() {", 1)[1]
     function = function.split("\ncleanup_temporary_uefi_bootentries()", 1)[0]
     function = "install_signed_uefi_bootloader_or_die() {" + function
     # Only the mount location and block-device predicate are replaced; the real
@@ -33,6 +39,7 @@ RECOVERY_RUN_ID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 NEW_PART=/dev/null
 LIBERTIX_BOOT_LOADER='\EFI\Libertix\shimx64.efi'
 """
+        + cleanup
         + function
         + "\ninstall_signed_uefi_bootloader_or_die\n"
     )

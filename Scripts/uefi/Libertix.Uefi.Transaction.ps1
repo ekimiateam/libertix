@@ -98,6 +98,8 @@ function Get-LibertixTransactionStorageBinding {
 function Save-TransactionPreparationState {
     param([Parameter(Mandatory = $true)]$SystemPartition)
 
+    $existing = Get-TransactionPartitionState
+    Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
     $disk = Get-Disk -Number $SystemPartition.DiskNumber -ErrorAction Stop
     Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $installationPlan.disk
     if ([long]$SystemPartition.Offset -ne [long]$installationPlan.disk.windows.offsetBytes -or
@@ -138,6 +140,9 @@ function Save-TransactionPreparationState {
         InstallerBootVariable = ""
         FirmwareEntryId = ""
         EspLoaderSha256 = @{}
+        TemporaryBootPreparationStarted = if (-not $existing) { $false } elseif (
+            $existing.PSObject.Properties.Name -contains 'TemporaryBootPreparationStarted'
+        ) { $existing.TemporaryBootPreparationStarted } else { $true }
         InstallerFileSha256 = @{}
         OriginalHibernateEnabled = Get-HibernateEnabled
         LowMemoryMode = [bool]$LowMemoryMode
@@ -147,9 +152,7 @@ function Save-TransactionPreparationState {
         $state.SourceDrive = $binding.SourceDrive
         $state.SourceVolumeId = $binding.SourceVolumeId
         $state.SourceNtfsUuid = [string]$binding.Disk.sourceNtfsUuid
-        $existing = Get-TransactionPartitionState
         if ($null -ne $existing) {
-            Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
             Get-LibertixTransactionStorageBinding -State $existing | Out-Null
             $state.InitialSourceEncryption = $existing.InitialSourceEncryption
         } else {
@@ -304,6 +307,9 @@ function Save-TransactionPartitionState {
             [bool]$LowMemoryMode
         }
         CreatedUtc = [DateTime]::UtcNow.ToString("o")
+    }
+    if ($existing -and $existing.PSObject.Properties.Name -contains 'TemporaryBootPreparationStarted') {
+        $state.TemporaryBootPreparationStarted = $existing.TemporaryBootPreparationStarted
     }
     if ($binding.Separate) {
         $state.SourceDrive = $existing.SourceDrive
@@ -748,24 +754,32 @@ function Invoke-Revert {
         }
     }
 
+    # Old transactions have no write-intent proof and keep the strict cleanup path.
+    $bootWasUntouched = $rollbackState -and
+        $rollbackState.PSObject.Properties.Name -contains 'TemporaryBootPreparationStarted' -and
+        $rollbackState.TemporaryBootPreparationStarted -is [bool] -and
+        $rollbackState.TemporaryBootPreparationStarted -eq $false
     $esp = $null
     try {
-        $esp = Mount-Esp -Letter $EspLetter
+        if ($bootWasUntouched) {
+            Write-Log "No EFI writes were started by this transaction; preserving existing ESP files and firmware entries." "Gray"
+        } else {
+            $esp = Mount-Esp -Letter $EspLetter
 
-        Remove-LibertixTemporaryEspFiles -EspDrive $esp
+            Remove-LibertixTemporaryEspFiles -EspDrive $esp
 
-        # A post-install rollback also owns the final loader, but only when its
-        # durable ESP marker matches this exact recovery run.
-        if (Assert-LibertixInstalledEspOwnership -EspDrive $esp) {
-            Remove-LibertixInstalledFirmwareEntries -EspDrive $esp
-            Remove-LibertixInstalledEspFiles -EspDrive $esp
+            # A post-install rollback also owns the final loader, but only when its
+            # durable ESP marker matches this exact recovery run.
+            if (Assert-LibertixInstalledEspOwnership -EspDrive $esp) {
+                Remove-LibertixInstalledFirmwareEntries -EspDrive $esp
+                Remove-LibertixInstalledEspFiles -EspDrive $esp
+            }
+
+            Remove-LibertixTemporaryFirmwareEntries `
+                -ExpectedLoaderPath "\$InstallerEspDirectory\BOOTX64.EFI"
+            Restore-OriginalFirmwareBootOrder
+            Complete-LibertixTrackedCompensation -Step "windows.temporary-boot-prepared"
         }
-
-        Remove-LibertixTemporaryFirmwareEntries `
-            -ExpectedLoaderPath "\$InstallerEspDirectory\BOOTX64.EFI"
-        Restore-OriginalFirmwareBootOrder
-        Complete-LibertixTrackedCompensation -Step "windows.temporary-boot-prepared"
-
     } finally {
         if ($esp) { Dismount-Letter -Letter $EspLetter }
     }
