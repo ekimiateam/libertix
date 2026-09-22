@@ -665,7 +665,9 @@ def test_full_campaign_endpoint_keeps_one_lock_and_returns_all_run_logs(
                 context={"vm": vm_name, "vm_status": "ok"},
             )
             on_step(step)
-            return OperationResult(status="ok", operation="automation", message="done", steps=[step])
+            return OperationResult(
+                status="ok", operation="automation", message="done", steps=[step]
+            )
 
     class FakeValidationService:
         def __init__(self, settings) -> None:
