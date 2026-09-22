@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from multiprocessing.connection import Connection
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal
 
 from fastapi import Body, FastAPI, HTTPException, Query
@@ -39,8 +39,12 @@ from app.models import (
     ValidationRequest,
 )
 from app.services.automation import AutomationService
-from app.services.automation_campaign import read_interrupted_campaign_summary, run_campaign
 from app.services.automation_progress import OperationProgress
+from app.services.campaign_dispatch import (
+    SCENARIO_MATRIX,
+    CampaignDispatcher,
+    read_interrupted_campaign_summary,
+)
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
 from app.stream_events import StreamEventProjector
@@ -139,6 +143,7 @@ def _run_operation(
     request: ValidationRequest | AutomationRequest | None,
     on_step: Callable[[StepResult], None] | None = None,
     run_workspace: Path | None = None,
+    windows_path: PureWindowsPath | None = None,
 ) -> OperationResult:
     if operation == "validation":
         validation = request if isinstance(request, ValidationRequest) else ValidationRequest()
@@ -152,16 +157,21 @@ def _run_operation(
         if isinstance(request, AutomationCampaignRequest):
             if run_workspace is None:
                 raise ValueError("The complete campaign requires an isolated operation workspace")
-            selected = ValidationService(configured).select_vms(selectors)
-            if len(selected) != 3 or not all(vm.automation_enabled for vm in selected):
-                raise ValueError("The complete campaign requires exactly three enabled test VMs")
-            return run_campaign(
+            return CampaignDispatcher(configured, SCENARIO_MATRIX).run(
                 request,
-                [vm.name for vm in selected],
-                run_workspace,
-                lambda child, workspace, publish: _run_operation(
-                    configured, "automation", child.selectors(), child, publish, workspace
+                # child is always a plain AutomationRequest (see
+                # CampaignDispatcher._worker), so this recursive call can
+                # never re-enter this isinstance branch.
+                lambda child, workspace, publish, child_windows_path: _run_operation(
+                    configured,
+                    "automation",
+                    child.selectors(),
+                    child,
+                    publish,
+                    workspace,
+                    windows_path=child_windows_path,
                 ),
+                run_workspace,
                 on_step,
             )
         if not isinstance(request, AutomationRequest):
@@ -194,6 +204,7 @@ def _run_operation(
             source=request.source,
             on_step=on_step,
             run_workspace=run_workspace,
+            windows_path=windows_path,
         )
     return ResetService(configured).run(selectors, on_step=on_step)
 
