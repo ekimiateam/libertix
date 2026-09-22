@@ -103,6 +103,15 @@ class AutomationCampaignRequest(ValidationRequest):
         default=None, description="Optional subset of the campaign scenario matrix to run"
     )
 
+    @field_validator("scenario_ids")
+    @classmethod
+    def reject_duplicate_scenario_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None:
+            duplicates = sorted({item for item in value if value.count(item) > 1})
+            if duplicates:
+                raise ValueError(f"Duplicate scenario_ids: {duplicates}")
+        return value
+
     @model_validator(mode="after")
     def validate_installation_options(self) -> AutomationCampaignRequest:
         AutomationRequest(
