@@ -7,11 +7,12 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="$(cd -- "$ROOT/../.." && pwd)/run-test-auto_logs_temps"
 START_SCENARIO=""
 AUTO_RESUME=0
+CLEAN2_ONLY=0
 while (( $# )); do
 case "$1" in
     --step)
         if [[ $# -lt 2 || -z "$2" || "$2" == --* ]]; then
-            echo "Usage: $0 [--step SCENARIO_NAME] [--auto-resume]" >&2
+            echo "Usage: $0 [--step SCENARIO_NAME] [--clean2-only] [--auto-resume]" >&2
             exit 2
         fi
         START_SCENARIO="$2"
@@ -21,15 +22,20 @@ case "$1" in
         AUTO_RESUME=1
         shift
         ;;
+    --clean2-only)
+        CLEAN2_ONLY=1
+        shift
+        ;;
     -h|--help)
-        echo "Usage: $0 [--step SCENARIO_NAME] [--auto-resume]"
+        echo "Usage: $0 [--step SCENARIO_NAME] [--clean2-only] [--auto-resume]"
         echo "Example: $0 --step zorin-linux-first-ntfs"
         echo "Starts the selected scenario from its snapshot, then runs every remaining scenario."
+        echo "--clean2-only runs only the four nominal scenarios and requires the default snapshot to be clean2."
         echo "A failed scenario is retried once from its snapshot."
         echo "Both attempts are preserved; a second failure remains a failure."
         echo "A prolonged network outage does not consume the technical retry."
-        echo "Includes Mint/Zorin, storage, BIOS refusal, uninstall and reboot checks."
-        echo "Also tests BootOrder repair, EFI replacement consent and refusal on UEFI VMs."
+        echo "By default, includes Mint/Zorin, storage, BIOS refusal, uninstall and reboot checks."
+        echo "The default campaign also tests BootOrder and EFI replacement on UEFI VMs."
         echo "--auto-resume is retained for compatibility and does not allow extra retries."
         exit 0
         ;;
@@ -87,7 +93,7 @@ LOG="$(mktemp "$LOG_DIR/$(date +%Y%m%dT%H%M%S%z)-XXXXXX.log")"
     fi
     echo "Code checks passed."
     echo "Starting campaign. Each VM advances independently."
-    "$ROOT/.venv/bin/python" -u - "$ROOT" "$START_SCENARIO" "$LOG" "$AUTO_RESUME" <<'PY'
+    "$ROOT/.venv/bin/python" -u - "$ROOT" "$START_SCENARIO" "$LOG" "$AUTO_RESUME" "$CLEAN2_ONLY" <<'PY'
 import json
 import secrets
 import shutil
@@ -104,12 +110,19 @@ from app.stream_events import StreamEventProjector
 from app.services.automation_campaign import SCENARIOS, STORAGE_SCENARIOS, BOOT_GUARDIAN_SCENARIOS
 
 start_scenario = sys.argv[2]
-scenario_names = [f"{distribution}-{first_boot}-first" + (f"-{layout}" if layout else "")
-                  for distribution, first_boot, layout in
-                  ([(d, b, "") for d, b in SCENARIOS] + list(STORAGE_SCENARIOS))]
-boot_guardian_scenario_names = [f"{distribution}-{first_boot}-first-{fault}"
-                                for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS]
-scenario_names.extend(boot_guardian_scenario_names)
+clean2_only = sys.argv[5] == "1"
+scenario_names = [f"{distribution}-{first_boot}-first" for distribution, first_boot in SCENARIOS]
+boot_guardian_scenario_names = []
+if not clean2_only:
+    scenario_names.extend(
+        f"{distribution}-{first_boot}-first-{layout}"
+        for distribution, first_boot, layout in STORAGE_SCENARIOS
+    )
+    boot_guardian_scenario_names = [
+        f"{distribution}-{first_boot}-first-{fault}"
+        for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS
+    ]
+    scenario_names.extend(boot_guardian_scenario_names)
 if start_scenario and start_scenario not in scenario_names:
     print("Unknown scenario. Available choices: " + ", ".join(scenario_names), flush=True)
     sys.exit(2)
@@ -117,6 +130,9 @@ if start_scenario:
     print(f"Starting at {start_scenario}. Progress covers only this scenario and the remaining scenarios.", flush=True)
 
 settings = Settings(_env_file=root / ".env")
+if clean2_only and settings.reset_snapshot != "clean2":
+    print(f"--clean2-only requires RESET_SNAPSHOT=clean2; configured: {settings.reset_snapshot}", flush=True)
+    sys.exit(2)
 labels = {vm.name: f"VM{vm.vmid}" for vm in settings.vms}
 firmwares = {vm.name: vm.firmware for vm in settings.vms}
 milestones = {}
@@ -192,8 +208,8 @@ try:
         "linux_password": "".join(secrets.choice(string.ascii_lowercase) for _ in range(24)),
         "linux_size_gib": 20, "migrate_windows_preferences": False,
         "continue_after_failure": True,
-        "include_storage_scenarios": True,
-        "include_boot_guardian_scenarios": True,
+        "include_storage_scenarios": not clean2_only,
+        "include_boot_guardian_scenarios": not clean2_only,
         "retry_failed_scenarios": True,
     }
     if start_scenario:

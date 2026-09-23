@@ -177,7 +177,9 @@ def test_real_spawn_worker_is_supervised(monkeypatch, tmp_path, mode, expected):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"status": "collected"}))
     monkeypatch.setattr(main, "_collect_timeout_diagnostics", lambda *args: {"vm1": str(manifest)})
-    cfg = settings().model_copy(update={"automation_operation_timeout_seconds": 2})
+    cfg = settings().model_copy(
+        update={"automation_operation_timeout_seconds": 2 if mode == "stall" else 10}
+    )
     request = AutomationRequest(
         apply=True, vms=["vm1"], linux_password="testpass", linux_username=mode
     )
@@ -185,7 +187,7 @@ def test_real_spawn_worker_is_supervised(monkeypatch, tmp_path, mode, expected):
     result = main._run_campaign_vm_attempt(
         cfg, request, tmp_path, events.append, ("Z:/Libertix-release/Libertix.exe", "a" * 64)
     )
-    assert result.status == expected
+    assert result.status == expected, [step.model_dump(mode="json") for step in result.steps]
     if mode == "network":
         assert any(s.step == "automation.network.vm_restart_required" for s in events)
         assert not any(s.step == "automation.network.restart_required" for s in events)

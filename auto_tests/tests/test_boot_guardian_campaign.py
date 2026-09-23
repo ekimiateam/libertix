@@ -246,13 +246,15 @@ def test_recovery_missing_proof_retries_once_and_preserves_failure(tmp_path):
     assert max(attempts.values()) == 2
 
 
-def test_runner_enables_recovery_and_validates_uefi_only_results(tmp_path):
+@pytest.mark.parametrize("clean2_only", [False, True])
+def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only):
     source = RUNNER.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
     tree = ast.parse(source)
     namespace = {
         "SCENARIOS": SCENARIOS,
         "STORAGE_SCENARIOS": STORAGE_SCENARIOS,
         "BOOT_GUARDIAN_SCENARIOS": BOOT_GUARDIAN_SCENARIOS,
+        "clean2_only": clean2_only,
         "firmwares": FIRMWARES,
         "payload": {"vms": list(FIRMWARES)},
     }
@@ -264,14 +266,26 @@ def test_runner_enables_recovery_and_validates_uefi_only_results(tmp_path):
                 and node.targets[0].id in {"scenario_names", "boot_guardian_scenario_names"}
             )
             or (
-                isinstance(node, ast.Expr)
-                and isinstance(node.value, ast.Call)
-                and isinstance(node.value.func, ast.Attribute)
-                and node.value.func.attr == "extend"
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.UnaryOp)
+                and isinstance(node.test.op, ast.Not)
+                and isinstance(node.test.operand, ast.Name)
+                and node.test.operand.id == "clean2_only"
             )
             or (isinstance(node, ast.FunctionDef) and node.name == "validate_success")
         ):
             exec(compile(ast.Module(body=[node], type_ignores=[]), str(RUNNER), "exec"), namespace)
+    expected = [f"{distribution}-{first_boot}-first" for distribution, first_boot in SCENARIOS]
+    if not clean2_only:
+        expected.extend(
+            f"{distribution}-{first_boot}-first-{layout}"
+            for distribution, first_boot, layout in STORAGE_SCENARIOS
+        )
+        expected.extend(
+            f"{distribution}-{first_boot}-first-{fault}"
+            for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS
+        )
+    assert namespace["scenario_names"] == expected
     payload = next(
         node.value
         for node in ast.walk(tree)
@@ -280,14 +294,23 @@ def test_runner_enables_recovery_and_validates_uefi_only_results(tmp_path):
         and node.targets[0].id == "payload"
     )
     assert isinstance(payload, ast.Dict)
-    flag = next(
-        value
-        for key, value in zip(payload.keys, payload.values, strict=True)
-        if isinstance(key, ast.Constant) and key.value == "include_boot_guardian_scenarios"
-    )
-    assert ast.literal_eval(flag) is True
+    for field in ("include_storage_scenarios", "include_boot_guardian_scenarios"):
+        flag = next(
+            value
+            for key, value in zip(payload.keys, payload.values, strict=True)
+            if isinstance(key, ast.Constant) and key.value == field
+        )
+        assert (
+            eval(compile(ast.Expression(flag), str(RUNNER), "eval"), {}, namespace)
+            is not clean2_only
+        )
     result = run_campaign(
-        campaign_request(include_storage_scenarios=True),
+        AutomationCampaignRequest(
+            apply=True,
+            linux_password="test-pass",
+            include_storage_scenarios=not clean2_only,
+            include_boot_guardian_scenarios=not clean2_only,
+        ),
         list(FIRMWARES),
         tmp_path,
         run_success,
@@ -299,10 +322,10 @@ def test_runner_enables_recovery_and_validates_uefi_only_results(tmp_path):
     with pytest.raises(RuntimeError, match="inconsistent VM results"):
         namespace["validate_success"](corrupted)
     corrupted = json.loads(json.dumps(result))
-    corrupted["campaign_summary"][-1]["vms"]["vm1"] = "ok"
+    corrupted["campaign_summary"][-1]["vms"]["vm1"] = "error" if clean2_only else "ok"
     with pytest.raises(RuntimeError, match="inconsistent VM results"):
         namespace["validate_success"](corrupted)
     corrupted = json.loads(json.dumps(result))
-    corrupted["campaign_summary"] = corrupted["campaign_summary"][:14]
+    corrupted["campaign_summary"] = corrupted["campaign_summary"][:-1]
     with pytest.raises(RuntimeError, match="missing, duplicate, or unexpected"):
         namespace["validate_success"](corrupted)
