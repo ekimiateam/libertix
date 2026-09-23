@@ -50,6 +50,7 @@ namespace Libertix.Pages
             Log("- Next reboot will automatically boot the Linux installer");
             Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
 
+            ExpandedLogsOverlay.Visibility = Visibility.Collapsed;
             RebootButton.Visibility = Visibility.Visible;
             RebootButton.IsDefault = true;
             RebootButton.Focus();

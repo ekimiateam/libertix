@@ -255,6 +255,7 @@ namespace Libertix.Pages
 
                 UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
                 Log("UEFI installation preparation completed successfully.");
+                ExpandedLogsOverlay.Visibility = Visibility.Collapsed;
                 RebootButton.Visibility = Visibility.Visible;
                 RebootButton.IsDefault = true;
                 RebootButton.Focus();
