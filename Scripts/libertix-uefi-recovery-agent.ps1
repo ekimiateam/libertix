@@ -207,6 +207,66 @@ function Read-ValidatedExecutionState {
     return $executionState
 }
 
+function Get-CurrentRunBcdFirmwareEntries {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [switch]$LogUnattributed
+    )
+
+    $transactionPath = Join-Path $State.RecoveryRoot 'uefi-transaction.json'
+    $transaction = Get-Content -LiteralPath $transactionPath -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
+        throw 'The archived UEFI transaction does not belong to this recovery run.'
+    }
+    $trackedIdentifier = if ($transaction.PSObject.Properties.Name -contains 'FirmwareEntryId') {
+        [string]$transaction.FirmwareEntryId
+    } else {
+        ''
+    }
+    if ($trackedIdentifier -and $trackedIdentifier -notmatch `
+        '^\{[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}$') {
+        throw 'The archived BCD firmware entry identifier is invalid.'
+    }
+
+    $result = Invoke-LibertixNativeProcess -FilePath "$env:SystemRoot\System32\bcdedit.exe" `
+        -Arguments '/enum firmware /v' -TimeoutSeconds 60
+    if ($result.ExitCode -ne 0) {
+        throw "Firmware enumeration failed with rc=$($result.ExitCode): $($result.StandardError) $($result.StandardOutput)"
+    }
+
+    $description = "Libertix UEFI Installer $([string]$State.RunId)"
+    $descriptionPattern = "(?m)^[^`r`n]+\s+$([regex]::Escape($description))\s*$"
+    $loaderPathPattern = '(?im)^[^\r\n]+\s+\\EFI\\\S+\s*$'
+    $pathPattern = '(?im)^[^\r\n]+\s+\\EFI\\LibertixInstaller\\BOOTX64\.EFI\s*$'
+    $entries = New-Object System.Collections.Generic.List[string]
+    foreach ($block in ([string]$result.StandardOutput -split "(?:`r?`n){2,}")) {
+        $identifiers = [regex]::Matches(
+            $block,
+            '\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}'
+        )
+        $descriptionMatches = $block -match $descriptionPattern
+        $tracked = $trackedIdentifier -and $block -match $loaderPathPattern -and
+            $identifiers.Count -eq 1 -and
+            $identifiers[0].Value.Equals($trackedIdentifier, [StringComparison]::OrdinalIgnoreCase)
+        if (-not $descriptionMatches -and -not $tracked) {
+            if ($LogUnattributed -and $block -match '(?i)\\EFI\\Libertix(?:Installer)?\\') {
+                $identifier = if ($identifiers.Count -eq 1) { $identifiers[0].Value } else { 'unknown' }
+                Write-AgentLog "Preserving firmware entry $identifier with a Libertix path: no ownership proof for run $($State.RunId)."
+            }
+            continue
+        }
+        if ($block -notmatch $pathPattern) {
+            throw "A firmware entry attributed to recovery run $($State.RunId) has an unexpected loader path; refusing deletion."
+        }
+        if ($identifiers.Count -ne 1) {
+            throw "A firmware entry attributed to recovery run $($State.RunId) has no unique BCD identifier."
+        }
+        $entries.Add($identifiers[0].Value)
+    }
+    return $entries.ToArray()
+}
+
 function Test-RecoveryPayload {
     param([Parameter(Mandatory = $true)]$State)
 
@@ -1506,12 +1566,23 @@ try {
                         }
                     }
                     Import-Module (Join-Path $state.PayloadRoot 'Scripts\modules\Libertix.Process.psm1') -ErrorAction Stop
-                    $bcd = Invoke-LibertixNativeProcess -FilePath "$env:SystemRoot\System32\bcdedit.exe" `
-                        -Arguments '/enum firmware /v' -TimeoutSeconds 60
-                    if ($bcd.ExitCode -ne 0 -or $bcd.StandardOutput -match '(?i)\\EFI\\Libertix(?:Installer)?\\') {
-                        throw 'The final UEFI boot entry verification failed.'
+                    $ownedEntries = @(
+                        Get-CurrentRunBcdFirmwareEntries -State $state -LogUnattributed
+                    )
+                    foreach ($identifier in $ownedEntries) {
+                        Write-AgentLog "Removing residual BCD firmware entry $identifier owned by run $($state.RunId)."
+                        $result = Invoke-LibertixNativeProcess `
+                            -FilePath "$env:SystemRoot\System32\bcdedit.exe" `
+                            -Arguments "/delete $identifier /f" `
+                            -TimeoutSeconds 60
+                        if ($result.ExitCode -ne 0) {
+                            throw "Failed to remove owned BCD firmware entry ${identifier}: rc=$($result.ExitCode); $($result.StandardError) $($result.StandardOutput)"
+                        }
                     }
-                    'Windows EFI loader present; Libertix EFI directories and boot references absent.'
+                    if (@(Get-CurrentRunBcdFirmwareEntries -State $state).Count -ne 0) {
+                        throw 'A firmware entry owned by this recovery run remains after cleanup.'
+                    }
+                    'Windows EFI loader present; Libertix EFI directories and current-run boot references absent.'
                 }
             $null = Set-LibertixPostInstallRolledBack `
                 -RecoveryRoot ([string]$state.RecoveryRoot)

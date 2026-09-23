@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
@@ -24,6 +25,7 @@ namespace Libertix.Pages
         private bool _started;
         private bool _running;
         private bool _terminationUnverified;
+        private bool _logOutputAutoScroll = true;
 
         internal UninstallLinux(
             InstallationState installationState,
@@ -203,11 +205,17 @@ namespace Libertix.Pages
         {
             string normalized = WindowsProcessRunner.NormalizeTerminalText(message);
             string line = $"[{DateTime.Now:HH:mm:ss}] {normalized}";
-            bool atBottom = LogOutput.ExtentHeight <= LogOutput.ViewportHeight ||
-                LogOutput.VerticalOffset >= LogOutput.ExtentHeight - LogOutput.ViewportHeight - 4;
+            double previousOffset = LogOutput.VerticalOffset;
             LogOutput.AppendText(line + Environment.NewLine);
-            if (atBottom)
-                LogOutput.ScrollToEnd();
+            LogOutput.Dispatcher.BeginInvoke(
+                DispatcherPriority.Background,
+                new Action(() =>
+                {
+                    if (_logOutputAutoScroll)
+                        LogOutput.ScrollToEnd();
+                    else
+                        LogOutput.ScrollToVerticalOffset(previousOffset);
+                }));
             try
             {
                 File.AppendAllText(_uiLogPath, line + Environment.NewLine, new UTF8Encoding(false));
@@ -216,6 +224,16 @@ namespace Libertix.Pages
             {
                 // The recovery agent keeps its authoritative log if this UI log is unavailable.
             }
+        }
+
+        private void LogOutput_ScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            if (e.ExtentHeightChange != 0)
+                return;
+
+            _logOutputAutoScroll = LogOutput.ExtentHeight <= LogOutput.ViewportHeight ||
+                LogOutput.VerticalOffset >=
+                    LogOutput.ExtentHeight - LogOutput.ViewportHeight - 4;
         }
 
         private static string Quote(string value) => WindowsProcessRunner.QuoteArgument(value);

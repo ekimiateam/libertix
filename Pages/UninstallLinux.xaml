@@ -30,7 +30,12 @@
                 BorderThickness="1"
                 CornerRadius="8"
                 Padding="22">
-            <StackPanel>
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
                 <TextBlock x:Name="CurrentStepText"
                            Text="{DynamicResource UninstallLinuxPreparing}"
                            Foreground="{DynamicResource TextPrimary}"
@@ -39,6 +44,7 @@
                            TextAlignment="Center"
                            TextWrapping="Wrap"/>
                 <ProgressBar x:Name="ProgressBar"
+                             Grid.Row="1"
                              AutomationProperties.AutomationId="UninstallLinuxProgressBar"
                              Height="22"
                              Minimum="0"
@@ -48,7 +54,7 @@
                              Foreground="{DynamicResource AccentColor}"
                              Background="{DynamicResource PanelBorder}"/>
                 <TextBox x:Name="LogOutput"
-                         Height="250"
+                         Grid.Row="2"
                          Margin="0,18,0,0"
                          Background="{DynamicResource DeepBackground}"
                          Foreground="{DynamicResource TextSecondary}"
@@ -58,8 +64,9 @@
                          FontSize="12"
                          IsReadOnly="True"
                          VerticalScrollBarVisibility="Auto"
+                         ScrollViewer.ScrollChanged="LogOutput_ScrollChanged"
                          TextWrapping="Wrap"/>
-            </StackPanel>
+            </Grid>
         </Border>
 
         <Grid Grid.Row="2" Margin="0,26,0,0">
@@ -75,8 +82,8 @@
                     Content="{DynamicResource UninstallLinuxRetry}"
                     AutomationProperties.AutomationId="UninstallLinuxRetryButton"
                     Style="{StaticResource ModernButton}"
-                    Width="250"
-                    Height="52"
+                    MinWidth="250"
+                    MinHeight="52"
                     HorizontalAlignment="Right"
                     Visibility="Collapsed"
                     Click="RetryButton_Click"/>
