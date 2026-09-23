@@ -2,29 +2,29 @@
   "schemaVersion": 1,
   "channel": "dev",
   "latest": {
-    "version": "dev_3394c4f",
-    "tag": "3394c4f",
-    "commit": "3394c4fed5b76bad4296bae29e8c7ad36db12dc8",
-    "title": "Alpha 3394c4f",
-    "notes": "Automated Libertix alpha build for commit 3394c4f.",
-    "publishedAt": "2026-09-22T17:17:42.825180Z",
-    "releaseUrl": "https://github.com/ekimiateam/libertix/releases/tag/3394c4f",
+    "version": "dev_842a870",
+    "tag": "842a870",
+    "commit": "842a870dc9b76d94cc483fba5dcabc79130f75a1",
+    "title": "Alpha 842a870",
+    "notes": "Automated Libertix alpha build for commit 842a870.",
+    "publishedAt": "2026-09-23T06:34:17.258059Z",
+    "releaseUrl": "https://github.com/ekimiateam/libertix/releases/tag/842a870",
     "wpf": {
-      "url": "https://github.com/ekimiateam/libertix/releases/download/3394c4f/Libertix-3394c4f.zip",
-      "sha256": "5213881c133ef49110378e2b05cd9a3a9da5a89fed650eb594dac6d6e6b9a6c1",
-      "sizeBytes": 3793112,
-      "fileName": "Libertix-3394c4f.zip"
+      "url": "https://github.com/ekimiateam/libertix/releases/download/842a870/Libertix-842a870.zip",
+      "sha256": "3165f64bd4d46e85255bcf59e8941c3ec21774663b44fa46f7748fddcfdc2685",
+      "sizeBytes": 3794101,
+      "fileName": "Libertix-842a870.zip"
     },
     "miniIso": {
       "bios": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/3394c4f/libertix-installer-bios.iso",
-        "sha256": "a64a84db60ff35220e60b849bf99429a6ade9dcb12686fea7bf8bda9281f0de0",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/842a870/libertix-installer-bios.iso",
+        "sha256": "3cb52c28714fc0ef1ba9e0560502ebe96615aec54d109e8ebb171bffa51c9b75",
         "sizeBytes": 524288000,
         "fileName": "libertix-installer-bios.iso"
       },
       "uefi": {
-        "url": "https://github.com/ekimiateam/libertix/releases/download/3394c4f/libertix-installer-uefi.iso",
-        "sha256": "c5d60e19c138d740f981cf840db3abaf1d1ff0c0be3e0d89d36426b575e8a15a",
+        "url": "https://github.com/ekimiateam/libertix/releases/download/842a870/libertix-installer-uefi.iso",
+        "sha256": "d3a1fab517008259cb12df52eae80f75e201340f11c948a98f81d7fd9ed293da",
         "sizeBytes": 558891008,
         "fileName": "libertix-installer-uefi.iso"
       }
