@@ -8,6 +8,8 @@ namespace Libertix.Helpers
     public sealed class StartupOptions
     {
         private const string FilepoolOption = "--filepool-base-url";
+        private const string LocalFilepoolOption = "--local-filepool-dir";
+        private const string DevelopmentModeOption = "--dev";
         private const string DevelopmentSshStaticIpOption = "--dev-ssh-static-ip";
         private const string DevelopmentSshPrefixLengthOption = "--dev-ssh-prefix-length";
         private const string DevelopmentSshGatewayOption = "--dev-ssh-gateway";
@@ -20,6 +22,8 @@ namespace Libertix.Helpers
         private const string ForceOfflineNtfsResizeOption = "--force-offline-ntfs-resize";
 
         public string FilepoolBaseUrlOverride { get; private set; }
+        public string LocalFilepoolDirectory { get; private set; }
+        public bool DevelopmentMode { get; private set; }
         public string DevelopmentSshStaticIpv4Address { get; private set; }
         public int? DevelopmentSshStaticIpv4PrefixLength { get; private set; }
         public string DevelopmentSshStaticIpv4Gateway { get; private set; }
@@ -76,6 +80,27 @@ namespace Libertix.Helpers
                     }
 
                     options.FilepoolBaseUrlOverride = value;
+                    continue;
+                }
+
+                if (string.Equals(option, LocalFilepoolOption, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!TryReadSingleValue(
+                        args, ref index, LocalFilepoolOption,
+                        options.LocalFilepoolDirectory, out string value, out error))
+                        return false;
+                    options.LocalFilepoolDirectory = value;
+                    continue;
+                }
+
+                if (string.Equals(option, DevelopmentModeOption, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (options.DevelopmentMode)
+                    {
+                        error = DevelopmentModeOption + " can only be specified once.";
+                        return false;
+                    }
+                    options.DevelopmentMode = true;
                     continue;
                 }
 

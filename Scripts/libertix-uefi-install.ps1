@@ -11,6 +11,7 @@ param(
     [switch]$RecoverPreviousTransaction = $false,
     [string]$ExpectedRecoveryRunId = "",
     [string]$FilepoolBaseUrl = "",
+    [string]$LocalFilepoolDirectory = "",
     [string]$Aria2ExePath = "",
     [ValidateRange(0, 16)]
     [int]$Aria2Connections = 0,
@@ -91,6 +92,9 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
             $ExecutionStatePath = [string]$config.ExecutionStatePath
         }
         $FilepoolBaseUrl = [string]$config.FilepoolBaseUrl
+        if ($config.PSObject.Properties.Name -contains "LocalFilepoolDirectory") {
+            $LocalFilepoolDirectory = [string]$config.LocalFilepoolDirectory
+        }
         $Aria2ExePath = [string]$config.Aria2ExePath
         $Aria2Connections = [int]$config.Aria2Connections
         if (-not $bootStrategyWasSpecified -and $config.PSObject.Properties.Name -contains "BootStrategy") {
@@ -173,6 +177,12 @@ if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTra
         throw "FilepoolBaseUrl is required and must be an absolute HTTP(S) URL supplied by Libertix."
     }
     $FilepoolBaseUrl = $FilepoolBaseUrl.TrimEnd("/")
+    if (-not [string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+        $LocalFilepoolDirectory = [IO.Path]::GetFullPath($LocalFilepoolDirectory)
+        if (-not (Test-Path -LiteralPath $LocalFilepoolDirectory -PathType Container)) {
+            throw "The selected local filepool is no longer available."
+        }
+    }
 }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

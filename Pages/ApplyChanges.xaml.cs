@@ -28,6 +28,9 @@ namespace Libertix.Pages
     {
         private readonly InstallationState _installationState;
         private FilepoolConfig Filepool => ((App)Application.Current).Filepool;
+        private string LocalArtifactPath(string fileName) => Path.Combine(
+            Filepool.LocalDirectory ?? AppDomain.CurrentDomain.BaseDirectory,
+            fileName);
         private double _linuxSizeGB;
         private static readonly string WindowsSystemDrive =
             Path.GetPathRoot(Environment.SystemDirectory);

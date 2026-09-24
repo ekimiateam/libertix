@@ -260,9 +260,9 @@ namespace Libertix.Pages
             try
             {
                 string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
-                string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
+                string localIsoPath = LocalArtifactPath(localIsoName);
                 bool downloadSuccess;
-                if (File.Exists(localIsoPath))
+                if (Filepool.LocalDirectory != null || File.Exists(localIsoPath))
                 {
                     Log($"Found local ISO: {localIsoName}, copying...");
                     await Task.Run(() => File.Copy(localIsoPath, tempIsoPath, true));
@@ -356,11 +356,9 @@ namespace Libertix.Pages
 
             string installerPath = distribution.InstallerIsoWindowsPath;
             Directory.CreateDirectory(Path.GetDirectoryName(installerPath));
-            string localInstallerPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                distribution.InstallerIsoFileName);
+            string localInstallerPath = LocalArtifactPath(distribution.InstallerIsoFileName);
             bool downloadSuccess;
-            if (File.Exists(localInstallerPath))
+            if (Filepool.LocalDirectory != null || File.Exists(localInstallerPath))
             {
                 Log($"Found local installer ISO: {distribution.InstallerIsoFileName}, copying...");
                 await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
@@ -434,7 +432,7 @@ namespace Libertix.Pages
                 string destinationPath = Path.Combine(
                     preparedBootRoot,
                     file);
-                string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
+                string localPath = LocalArtifactPath(file);
                 bool ready = false;
                 if (File.Exists(localPath))
                 {
@@ -449,7 +447,7 @@ namespace Libertix.Pages
                         Log($"ERROR: Failed to copy local {file}: {ex.Message}");
                     }
                 }
-                if (!ready)
+                if (!ready && Filepool.LocalDirectory == null)
                 {
                     ready = await DownloadFileAsync(
                         $"{Filepool.BaseUrl}/{file}",

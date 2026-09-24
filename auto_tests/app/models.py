@@ -96,6 +96,7 @@ class AutomationCampaignRequest(ValidationRequest):
     continue_after_failure: bool = False
     include_storage_scenarios: bool = False
     include_boot_guardian_scenarios: bool = False
+    include_local_filepool_scenarios: bool = False
     start_scenario: str | None = Field(default=None, min_length=1, max_length=80)
     retry_failed_scenarios: bool = False
     start_scenario_attempt: Literal[1, 2] = 1
@@ -129,6 +130,7 @@ class AutomationRequest(ValidationRequest):
     storage_fixture: StorageFixtureRequest = Field(default_factory=StorageFixtureRequest)
     installation_target: Literal["windows", "secondary"] = "windows"
     expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None
+    local_filepool: bool = False
 
     @model_validator(mode="after")
     def validate_storage_fixture_snapshot(self) -> AutomationRequest:

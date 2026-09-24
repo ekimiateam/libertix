@@ -70,8 +70,8 @@ namespace Libertix.Installation
             if (downloadBudget < 0)
                 return 0;
 
-            // The verified transaction ISO is deleted before the final NTFS
-            // allocation and is credited by both firmware execution paths.
+            // The final free-space budget credits the transaction ISO reclaimed
+            // by cleanup; the live installer still needs it during installation.
             return Math.Max(0, initialWindowsFreeGiB - MinimumWindowsFreeSpaceGiB);
         }
 

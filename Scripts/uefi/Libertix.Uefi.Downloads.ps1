@@ -429,10 +429,26 @@ function Start-RobustDownload {
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Destination,
         [Parameter(Mandatory = $true)][string]$Label,
-        [Parameter(Mandatory = $true)][int64]$MaxBytes
+        [Parameter(Mandatory = $true)][int64]$MaxBytes,
+        [string]$LocalFileName = ""
     )
 
     if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
+    if (-not [string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+        if ($LocalFileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+            throw "The selected local filepool artifact name is invalid: $LocalFileName"
+        }
+        $source = Join-Path $LocalFilepoolDirectory $LocalFileName
+        $item = Get-Item -LiteralPath $source -ErrorAction Stop
+        if ($item.Length -gt $MaxBytes -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The selected local filepool artifact is unsafe: $LocalFileName"
+        }
+        Write-Log "Copying $Label from the selected local filepool..." "Cyan"
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName(
+            [IO.Path]::GetFullPath($Destination))) | Out-Null
+        Copy-Item -LiteralPath $source -Destination $Destination -Force -ErrorAction Stop
+        return
+    }
 
     $maximumAria2Attempts = [int]$script:DownloadPolicy.maximumAttempts
     $retryBaseDelaySeconds = [int]$script:DownloadPolicy.retryBaseDelaySeconds
@@ -504,12 +520,17 @@ function Set-DistributionIsoOnWindows {
         Remove-Item -LiteralPath $DistributionIsoPath -Force
     }
 
-    Write-Log "Downloading distribution ISO to $DistributionIsoPath..." "Cyan"
+    if ([string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+        Write-Log "Downloading distribution ISO to $DistributionIsoPath..." "Cyan"
+    } else {
+        Write-Log "Copying distribution ISO from the selected local filepool..." "Cyan"
+    }
     Start-RobustDownload `
         -Url $DistributionIsoUrl `
         -Destination $DistributionIsoPath `
         -Label "distribution ISO" `
-        -MaxBytes $script:MaximumDistributionIsoBytes
+        -MaxBytes $script:MaximumDistributionIsoBytes `
+        -LocalFileName ([string]$installationPlan.distribution.installerIsoFileName)
 
     $downloadedIso = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction Stop
     if ($downloadedIso.Length -le $script:MinimumDistributionIsoBytes) {

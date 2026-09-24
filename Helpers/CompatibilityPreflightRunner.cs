@@ -26,7 +26,8 @@ namespace Libertix.Helpers
         public static async Task<CompatibilityInfo> RunAsync(
             string connectivityUrl,
             Action<string> onOutput,
-            bool skipNvramWriteProbe = false)
+            bool skipNvramWriteProbe = false,
+            bool skipConnectivityProbe = false)
         {
             if (!Uri.TryCreate(connectivityUrl, UriKind.Absolute, out Uri connectivityUri) ||
                 (connectivityUri.Scheme != Uri.UriSchemeHttp &&
@@ -58,6 +59,7 @@ namespace Libertix.Helpers
                     languageCode,
                     connectivityUri.AbsoluteUri,
                     skipNvramWriteProbe,
+                    skipConnectivityProbe,
                     onOutput));
                 ApplicationLogger.Write("COMPATIBILITY: preflight completed successfully.");
                 return result;
@@ -104,6 +106,7 @@ namespace Libertix.Helpers
             string languageCode,
             string connectivityUrl,
             bool skipNvramWriteProbe,
+            bool skipConnectivityProbe,
             Action<string> onOutput)
         {
             string powershell = WindowsProcessRunner.ResolvePowerShell();
@@ -116,6 +119,8 @@ namespace Libertix.Helpers
                 WindowsProcessRunner.QuoteArgument(connectivityUrl);
             if (skipNvramWriteProbe)
                 arguments += " -SkipNvramWriteProbe";
+            if (skipConnectivityProbe)
+                arguments += " -SkipConnectivityProbe";
 
             var startInfo = new ProcessStartInfo
             {

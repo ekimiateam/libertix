@@ -35,6 +35,8 @@ class StreamEventProjector:
             return full_event
         if step.step.startswith(("automation.diagnostics.", "automation.network.")):
             return full_event
+        if step.step.startswith("automation.local_filepool."):
+            return full_event
         if step.step == "automation.capture":
             return None
         if step.step == "automation.monitor_installation":
@@ -109,6 +111,8 @@ class StreamEventProjector:
             return "NETWORK " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
         if data["step"] == "automation.campaign_retry":
             return "RETRY " + json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
+        if data["step"].startswith("automation.local_filepool."):
+            return f"FILEPOOL {vm} — {data['message']}\n"
         if data["step"].startswith("automation.test."):
             name = str(data.get("context", {}).get("test") or data["step"])
             return f"TEST {vm} {name} OK\n"

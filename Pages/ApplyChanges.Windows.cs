@@ -172,22 +172,29 @@ namespace Libertix.Pages
                             "ext4 Windows setup cache");
                     if (!setupReady)
                     {
-                        string setupUrl =
-                            $"{Filepool.BaseUrl}/{Artifacts.Ext4Driver.FileName}";
-                        if (!await DownloadFileWithRetriesAsync(
-                            setupUrl,
-                            setupPath,
-                            attempts: DownloadMaximumAttempts,
-                            timeout: WindowsProcessTimeouts.SupportArtifactDownload,
-                            bufferSize: 81920,
-                            progressStart: 5,
-                            progressSpan: 3,
-                            label: "ext4 Windows read-only support",
-                            progressMessage: Localized(
-                                "ApplyChangesPreparingWindowsShare",
-                                "Preparing Windows file sharing..."),
-                            maximumBytes: MaximumSupportArtifactBytes))
-                            return false;
+                        if (Filepool.LocalDirectory != null)
+                        {
+                            File.Copy(LocalArtifactPath(Artifacts.Ext4Driver.FileName), setupPath, true);
+                        }
+                        else
+                        {
+                            string setupUrl =
+                                $"{Filepool.BaseUrl}/{Artifacts.Ext4Driver.FileName}";
+                            if (!await DownloadFileWithRetriesAsync(
+                                setupUrl,
+                                setupPath,
+                                attempts: DownloadMaximumAttempts,
+                                timeout: WindowsProcessTimeouts.SupportArtifactDownload,
+                                bufferSize: 81920,
+                                progressStart: 5,
+                                progressSpan: 3,
+                                label: "ext4 Windows read-only support",
+                                progressMessage: Localized(
+                                    "ApplyChangesPreparingWindowsShare",
+                                    "Preparing Windows file sharing..."),
+                                maximumBytes: MaximumSupportArtifactBytes))
+                                return false;
+                        }
                         if (!await VerifySha256Async(
                             setupPath,
                             Artifacts.Ext4Driver.Sha256,

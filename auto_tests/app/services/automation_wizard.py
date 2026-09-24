@@ -194,6 +194,11 @@ class WizardAutomationMixin:
                     sftp_status,
                     after_sequence,
                     (expected_stage,),
+                    timeout_seconds=(
+                        self.settings.automation_monitor_timeout_seconds
+                        if options.local_filepool and expected_stage == "compatibility-passed"
+                        else 180
+                    ),
                 )
                 after_sequence = self._capture_and_acknowledge_unattended_stage(
                     ssh,
@@ -375,6 +380,31 @@ class WizardAutomationMixin:
                     capture=str(capture),
                 )
                 return
+            if options.local_filepool:
+                response = self.validation.run_windows_script(
+                    ssh,
+                    script_name="local_filepool.ps1",
+                    config={
+                        "mode": "verify",
+                        "process_id": process_id,
+                        "directory": str(options.deployed_executable.parent / "filepool"),
+                    },
+                    step="automation.local_filepool.used",
+                    timeout=30,
+                )
+                values = self.validation.parse_powershell_results(
+                    response.stdout, prefixes=("LOCAL_FILEPOOL_USED", "SOURCE_LOG")
+                )
+                if values.get("LOCAL_FILEPOOL_USED") != "True":
+                    raise WorkflowError(
+                        "automation.local_filepool.used", "Local filepool evidence is missing"
+                    )
+                result.ok(
+                    "automation.local_filepool.used",
+                    "Online catalog, local hashes and local ISO copies verified in the product log",
+                    vm=vm.name,
+                    **values,
+                )
             self._capture_and_acknowledge_unattended_stage(
                 ssh,
                 vm,

@@ -182,6 +182,7 @@ namespace Libertix.Pages
                 InstallationPlanPath = _installationPlanPath,
                 ExecutionStatePath = _executionLedger.StatePath,
                 FilepoolBaseUrl = Filepool.BaseUrl,
+                LocalFilepoolDirectory = Filepool.LocalDirectory,
                 Aria2ExePath = aria2Path,
                 Aria2Connections = Aria2MaxConnections
             });

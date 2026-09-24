@@ -30,12 +30,13 @@ case "$1" in
         echo "Usage: $0 [--step SCENARIO_NAME] [--clean2-only] [--auto-resume]"
         echo "Example: $0 --step zorin-linux-first-ntfs"
         echo "Starts the selected scenario from its snapshot, then runs every remaining scenario."
-        echo "--clean2-only runs only the four nominal scenarios and requires the default snapshot to be clean2."
+        echo "--clean2-only runs four nominal scenarios plus two local-filepool cases on one UEFI VM; requires RESET_SNAPSHOT=clean2."
         echo "A failed scenario is retried once from its snapshot."
         echo "Both attempts are preserved; a second failure remains a failure."
         echo "A prolonged network outage does not consume the technical retry."
         echo "By default, includes Mint/Zorin, storage, BIOS refusal, uninstall and reboot checks."
         echo "The default campaign also tests BootOrder and EFI replacement on UEFI VMs."
+        echo "Both campaign modes test the local filepool with Mint and Zorin on one UEFI VM using the default snapshot."
         echo "--auto-resume is retained for compatibility and does not allow extra retries."
         exit 0
         ;;
@@ -107,12 +108,13 @@ root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
 from app.config import Settings
 from app.stream_events import StreamEventProjector
-from app.services.automation_campaign import SCENARIOS, STORAGE_SCENARIOS, BOOT_GUARDIAN_SCENARIOS
+from app.services.automation_campaign import SCENARIOS, STORAGE_SCENARIOS, BOOT_GUARDIAN_SCENARIOS, LOCAL_FILEPOOL_SCENARIOS
 
 start_scenario = sys.argv[2]
 clean2_only = sys.argv[5] == "1"
 scenario_names = [f"{distribution}-{first_boot}-first" for distribution, first_boot in SCENARIOS]
 boot_guardian_scenario_names = []
+local_filepool_scenario_names = []
 if not clean2_only:
     scenario_names.extend(
         f"{distribution}-{first_boot}-first-{layout}"
@@ -123,6 +125,8 @@ if not clean2_only:
         for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS
     ]
     scenario_names.extend(boot_guardian_scenario_names)
+local_filepool_scenario_names = [f"{d}-{b}-first-local-filepool" for d, b in LOCAL_FILEPOOL_SCENARIOS]
+scenario_names = scenario_names + local_filepool_scenario_names
 if start_scenario and start_scenario not in scenario_names:
     print("Unknown scenario. Available choices: " + ", ".join(scenario_names), flush=True)
     sys.exit(2)
@@ -191,6 +195,8 @@ def validate_success(data):
         required = "ok" if item["scenario"] in expected else "not-run"
         required_vms = [vm for vm in payload["vms"]
                         if item["scenario"] not in boot_guardian_scenario_names or firmwares.get(vm) == "uefi"]
+        if item["scenario"] in local_filepool_scenario_names:
+            required_vms = [vm for vm in payload["vms"] if firmwares.get(vm) == "uefi"][:1]
         cells = item.get("cells", {})
         if (not required_vms or item.get("status") != required
                 or item.get("vms") != dict.fromkeys(required_vms, required)
@@ -210,6 +216,7 @@ try:
         "continue_after_failure": True,
         "include_storage_scenarios": not clean2_only,
         "include_boot_guardian_scenarios": not clean2_only,
+        "include_local_filepool_scenarios": True,
         "retry_failed_scenarios": True,
     }
     if start_scenario:
@@ -366,7 +373,8 @@ PY
     fi
     exit "$status"
 } 2>&1 | python3 -u -c '
-import codecs, json, os, re, select, shutil, signal, sys, textwrap
+import codecs, json, os, re, select, shutil, signal, sys, termios, textwrap
+from collections import deque
 
 # The producer handles Ctrl+C; drain its final message before restoring the terminal.
 signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -378,6 +386,9 @@ bottom = 0
 footer = 0
 pending = ""
 decoder = codecs.getincrementaldecoder("utf-8")("replace")
+recent_logs = deque(maxlen=500)
+tty_fd = None
+tty_settings = None
 
 def display_line(line):
     prefix, separator, payload = line.partition(" ")
@@ -479,24 +490,23 @@ def configure():
     new_footer = len(panel_rows(width, max(0, new_size.lines - 3)))
     if new_size == size and new_footer == footer:
         return
-    sys.stdout.write("\0337")
-    if size is not None:
-        for row in range(bottom + 1, new_size.lines + 1):
-            sys.stdout.write(f"\033[{row};1H\033[2K")
+    had_layout = size is not None
     size = new_size
     bottom = max(1, size.lines - new_footer)
-    growth = max(0, new_footer - footer)
-    # DECSTBM confines scrolling logs to the area above the fixed footer.
-    sys.stdout.write("\033[r")
-    if growth:
-        sys.stdout.write(f"\033[{growth}S")
     had_footer = footer > 0
     footer = new_footer
-    sys.stdout.write(f"\033[1;{bottom}r")
-    if footer or had_footer:
-        sys.stdout.write(f"\033[{bottom};1H")
-    else:
-        sys.stdout.write("\0338")
+    # Resize reflows old footer lines and can reset the terminal scroll region.
+    sys.stdout.write("\033[r")
+    if had_layout and (footer or had_footer):
+        rows = []
+        for line in recent_logs:
+            rows.extend(textwrap.wrap(line, width, replace_whitespace=False,
+                                      drop_whitespace=False) or [""])
+        rows = rows[-max(0, bottom - 1):] if bottom > 1 else []
+        sys.stdout.write("\033[2J\033[H")
+        for row, line in enumerate(rows, start=bottom - len(rows)):
+            sys.stdout.write(f"\033[{row};1H\033[2K{line}")
+        sys.stdout.write(f"\033[1;{bottom}r\033[{bottom};1H")
 
 def draw():
     if not footer:
@@ -509,7 +519,24 @@ def draw():
     # Never restore a cursor that may be outside the resized log region.
     sys.stdout.write(f"\033[{bottom};1H")
 
+def write_log_line(line):
+    text = display_line(line)
+    recent_logs.extend(text.splitlines() or [""])
+    if terminal and footer:
+        sys.stdout.write(f"\033[1;{bottom}r\033[{bottom};1H\033[2K")
+    sys.stdout.write(text.replace("\n", "\r\n") + "\r\n" if terminal else text + "\n")
+
 try:
+    if terminal:
+        try:
+            tty_fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+            tty_settings = termios.tcgetattr(tty_fd)
+            quiet = tty_settings.copy()
+            # This display accepts no input; echoed Enter must not scroll the footer.
+            quiet[3] &= ~(termios.ECHO | termios.ECHONL)
+            termios.tcsetattr(tty_fd, termios.TCSANOW, quiet)
+        except (OSError, termios.error):
+            tty_settings = None
     with open(sys.argv[1], "a", encoding="utf-8") as log:
         while True:
             if terminal:
@@ -524,7 +551,7 @@ try:
                 pending += decoder.decode(b"", final=True)
                 if pending:
                     log.write(pending)
-                    sys.stdout.write(display_line(pending))
+                    write_log_line(pending)
                 break
             pending += decoder.decode(chunk)
             while "\n" in pending:
@@ -537,17 +564,20 @@ try:
                             print("\n".join(status))
                 else:
                     log.write(line + "\n")
-                    sys.stdout.write(display_line(line) + "\n")
+                    write_log_line(line)
             log.flush()
             sys.stdout.flush()
         if status:
             log.write("\n".join(status) + "\n")
 finally:
     if terminal and size is not None:
-        sys.stdout.write("\0337")
         for row in range(bottom + 1, size.lines + 1):
             sys.stdout.write(f"\033[{row};1H\033[2K")
-        sys.stdout.write("\033[r\0338")
+        sys.stdout.write(f"\033[r\033[{bottom};1H")
+    if tty_fd is not None:
+        if tty_settings is not None:
+            termios.tcsetattr(tty_fd, termios.TCSANOW, tty_settings)
+        os.close(tty_fd)
     if status:
         print("\n".join(status))
     sys.stdout.flush()

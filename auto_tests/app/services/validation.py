@@ -986,6 +986,7 @@ class ValidationService:
         step: str,
         use_default_filepool: bool = False,
         force_offline_ntfs_resize: bool = False,
+        local_filepool: bool = False,
         unattended_config: dict[str, object] | None = None,
     ) -> dict[str, str]:
         def has_interactive_window_proof(parsed: dict[str, str]) -> bool:
@@ -1023,6 +1024,7 @@ class ValidationService:
                     ),
                     "development_dns_servers": list(self.settings.development_dns_servers),
                     "force_offline_ntfs_resize": force_offline_ntfs_resize,
+                    "local_filepool": local_filepool,
                     "unattended": unattended_config,
                 },
                 step=step,
@@ -1042,8 +1044,11 @@ class ValidationService:
                     "WINDOW_VISIBLE",
                     "UNATTENDED_STATUS_PATH",
                     "UNATTENDED_ACKNOWLEDGEMENT_PATH",
+                    "LOCAL_FILEPOOL_SELECTED",
                 ),
             )
+            if local_filepool and values.get("LOCAL_FILEPOOL_SELECTED") != "True":
+                raise WorkflowError(step, "The local filepool choice was not accepted")
             if not has_interactive_window_proof(values):
                 confirmation = self.run_windows_script(
                     ssh,

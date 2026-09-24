@@ -493,6 +493,7 @@ def _run_operation(
             linux_size_gib=request.linux_size_gib,
             installation_target=request.installation_target,
             expected_compatibility_refusal=request.expected_compatibility_refusal,
+            local_filepool=request.local_filepool,
             distribution=request.distribution,
             monitor_iso=request.monitor_iso,
             share_windows_files_in_linux=request.share_windows_files_in_linux,

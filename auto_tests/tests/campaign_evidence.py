@@ -92,6 +92,9 @@ def successful_campaign_steps(request: AutomationRequest) -> list[StepResult]:
 
     phase("automation.prepare_vm")
     phase("automation.deploy")
+    if request.local_filepool:
+        phase("automation.local_filepool.prepared")
+        phase("automation.local_filepool.used")
     if request.expected_compatibility_refusal:
         phase("automation.compatibility_refusal", error_code=request.expected_compatibility_refusal)
         phase("automation.compatibility_unchanged")

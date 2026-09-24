@@ -1927,8 +1927,10 @@ class PostInstallValidationMixin:
             "grep -Eq '^(fuseblk|ntfs3)$'; "
             "findmnt -n -o OPTIONS /mnt/windows | grep -qw rw"
             if options.share_windows_files_in_linux
-            else "! findmnt /mnt/windows; "
-            "! grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
+            else "status=0; findmnt --mountpoint /mnt/windows || status=$?; "
+            'test "$status" -eq 1; '
+            "status=0; grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' "
+            '/etc/fstab || status=$?; test "$status" -eq 1'
         )
         sharing_policy_test = (
             ("grep -Fx true" if options.share_linux_files_in_windows else "grep -Fx false")

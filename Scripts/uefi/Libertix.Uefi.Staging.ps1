@@ -356,7 +356,11 @@ function Install-LibertixIsoToPartition {
 
     try {
         Write-LibertixProgress -Stage "live-iso-download" -Percent 62
-        Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
+        if ([string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+            Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
+        } else {
+            Write-Log "Using Libertix UEFI ISO from the selected local filepool..." "Cyan"
+        }
         # Keep the configured canonical URL unchanged. Some filepool frontends
         # redirect only that exact resource and return 404 for arbitrary query
         # parameters; integrity is already enforced by the SHA-256 check below.
@@ -366,7 +370,8 @@ function Install-LibertixIsoToPartition {
             -Url $downloadUrl `
             -Destination $isoPath `
             -Label "Libertix UEFI ISO" `
-            -MaxBytes $script:MaximumLiveIsoBytes
+            -MaxBytes $script:MaximumLiveIsoBytes `
+            -LocalFileName $InstallerIsoName
 
         if (-not (Test-Path $isoPath)) {
             throw "ISO download failed."

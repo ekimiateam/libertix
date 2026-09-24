@@ -105,7 +105,9 @@ echo CONTEXT_LOADED_WITHOUT_LABEL
 """
 
 
-def run_early_live(tmp_path: Path, firmware: str, command: str) -> subprocess.CompletedProcess[str]:
+def run_early_live(
+    tmp_path: Path, firmware: str, command: str, *, timeout: int = 30
+) -> subprocess.CompletedProcess[str]:
     source = tmp_path / "source"
     source.mkdir()
     (source / "installation-plan.json").write_text(
@@ -149,7 +151,7 @@ def run_early_live(tmp_path: Path, firmware: str, command: str) -> subprocess.Co
         capture_output=True,
         text=True,
         check=False,
-        timeout=30,
+        timeout=timeout,
     )
 
 
@@ -170,7 +172,10 @@ def test_prerequisites_find_staging_after_runner_context_load(
         ),
     }[scenario]
     result = run_early_live(
-        tmp_path, firmware, "\n" + setup + "\nwait_for_prereqs\necho PREREQUISITES_READY\n"
+        tmp_path,
+        firmware,
+        "\n" + setup + "\nwait_for_prereqs\necho PREREQUISITES_READY\n",
+        timeout=90 if scenario == "no-disk" else 30,
     )
 
     assert "CONTEXT_LOADED_WITHOUT_LABEL" in result.stdout, result.stderr

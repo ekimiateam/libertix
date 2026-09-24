@@ -34,6 +34,7 @@ from app.services.automation_preflight import AutomationPreflight
 from app.services.automation_types import AutomationOptions, WizardProfile
 from app.services.automation_wizard import WizardAutomationMixin
 from app.services.common import ResultBuilder
+from app.services.local_filepool import prepare_local_filepool
 from app.services.validation import ValidationService
 from app.services.windows_lab_login import ensure_secondary_windows_session
 from app.storage_fixtures import (
@@ -92,6 +93,7 @@ class AutomationService(
         linux_size_gib: int = 100,
         installation_target: Literal["windows", "secondary"] = "windows",
         expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None,
+        local_filepool: bool = False,
         distribution: str = "mint",
         monitor_iso: bool,
         share_windows_files_in_linux: bool = True,
@@ -141,6 +143,13 @@ class AutomationService(
                     "Installation automation requires monitoring through post-install validation",
                 )
             selected_vms = self.validation.select_vms(vm_selectors)
+            if local_filepool and (
+                len(selected_vms) != 1 or selected_vms[0].firmware != "uefi" or secondary_snapshot
+            ):
+                raise WorkflowError(
+                    "automation.local_filepool.scope",
+                    "Local filepool tests require one nominal UEFI VM",
+                )
             profiles = self._automation_profiles(selected_vms, vm_selectors)
             fixture = storage_fixture or StorageFixtureRequest()
             if expected_compatibility_refusal and (
@@ -202,7 +211,8 @@ class AutomationService(
                 preference_wallpaper=preference_wallpaper,
                 storage_fixture=fixture,
                 secondary_snapshot=secondary_snapshot,
-                use_default_filepool=source == "published",
+                use_default_filepool=source == "published" or local_filepool,
+                local_filepool=local_filepool,
                 simulate_stale_firmware_entries=simulate_stale_firmware_entries,
                 force_offline_ntfs_resize=force_offline_ntfs_resize,
                 boot_guardian_fault=boot_guardian_fault,
@@ -469,6 +479,8 @@ class AutomationService(
                 vm, executable, expected_sha256=options.release_sha256, on_step=record_step
             )
             vm_options = replace(vm_options, deployed_executable=local_executable)
+            if options.local_filepool:
+                prepare_local_filepool(self.validation, vm, local_executable, result)
             result.ok(
                 "automation.deploy",
                 "Libertix release copied locally before automation",
@@ -1371,6 +1383,7 @@ class AutomationService(
             step="automation.launch_elevated",
             use_default_filepool=use_default_filepool,
             force_offline_ntfs_resize=options.force_offline_ntfs_resize,
+            local_filepool=options.local_filepool,
             unattended_config={
                 "schemaVersion": 1,
                 "distribution": options.distribution.id,

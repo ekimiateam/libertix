@@ -301,6 +301,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows could not fully read the BitLocker state."
         },
         "bootstrapMessages": {
+          "LocalFilepoolChoice": "A filepool folder was found beside Libertix.exe. Use its files for installation? They will be verified during the compatibility check. Choose No to download from the online filepool.",
           "AdministratorRequired": "Libertix must be run as administrator to modify partitions and the Windows boot configuration.",
           "SingleInstanceRequired": "Another Libertix instance is already running.",
           "SleepPreventionFailed": "Windows could not keep the computer and display awake. Libertix will close without starting the installation. Try again.",
@@ -706,6 +707,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows n'a pas pu lire complètement l'état BitLocker."
         },
         "bootstrapMessages": {
+          "LocalFilepoolChoice": "Un dossier filepool a été trouvé à côté de Libertix.exe. Utiliser ses fichiers pour l'installation ? Ils seront vérifiés pendant le contrôle de compatibilité. Choisissez Non pour télécharger depuis le filepool en ligne.",
           "AdministratorRequired": "Libertix doit être lancé en administrateur pour modifier les partitions et le démarrage Windows.",
           "SingleInstanceRequired": "Une autre instance de Libertix est déjà en cours d'exécution.",
           "SleepPreventionFailed": "Windows n’a pas pu maintenir l’ordinateur et l’écran éveillés. Libertix va se fermer sans démarrer l’installation. Réessayez.",
@@ -1111,6 +1113,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows no pudo leer completamente el estado de BitLocker."
         },
         "bootstrapMessages": {
+          "LocalFilepoolChoice": "Se encontró una carpeta filepool junto a Libertix.exe. ¿Usar sus archivos para la instalación? Se verificarán durante la comprobación de compatibilidad. Elija No para descargarlos del filepool en línea.",
           "AdministratorRequired": "Libertix debe ejecutarse como administrador para modificar las particiones y el arranque de Windows.",
           "SingleInstanceRequired": "Ya se está ejecutando otra instancia de Libertix.",
           "SleepPreventionFailed": "Windows no pudo mantener el equipo y la pantalla activos. Libertix se cerrará sin iniciar la instalación. Vuelva a intentarlo.",
@@ -1516,6 +1519,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows가 BitLocker 상태를 완전히 읽지 못했습니다."
         },
         "bootstrapMessages": {
+          "LocalFilepoolChoice": "Libertix.exe 옆에서 filepool 폴더를 찾았습니다. 설치에 로컬 파일을 사용하시겠습니까? 호환성 검사 중에 파일을 확인합니다. 온라인 filepool에서 다운로드하려면 아니요를 선택하세요.",
           "AdministratorRequired": "파티션과 Windows 부팅 구성을 변경하려면 Libertix를 관리자 권한으로 실행해야 합니다.",
           "SingleInstanceRequired": "다른 Libertix 인스턴스가 이미 실행 중입니다.",
           "SleepPreventionFailed": "Windows에서 컴퓨터와 화면을 켜진 상태로 유지할 수 없습니다. Libertix는 설치를 시작하지 않고 종료됩니다. 다시 시도하세요.",

@@ -31,6 +31,25 @@ function Test-VisibleMainWindow {
     return $bounds.Width -ge 100 -and $bounds.Height -ge 100
 }
 
+function Confirm-LocalFilepoolChoice {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+
+    $window = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+    if ($window.Current.ClassName -ne '#32770') { throw 'Expected the local filepool choice dialog' }
+    $children = $window.FindAll([Windows.Automation.TreeScope]::Descendants,
+        [Windows.Automation.Condition]::TrueCondition)
+    $yes = @($children | Where-Object { $_.Current.AutomationId -eq '6' })
+    $no = @($children | Where-Object { $_.Current.AutomationId -eq '7' })
+    $prompt = @($children | Where-Object {
+        $_.Current.ControlType -eq [Windows.Automation.ControlType]::Text -and
+        $_.Current.Name -match '(?i)filepool'
+    })
+    if ($yes.Count -ne 1 -or $no.Count -ne 1 -or $prompt.Count -ne 1) {
+        throw 'The expected filepool Yes/No prompt was not identified'
+    }
+    $yes[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+
 function Write-AtomicJson {
     param(
         [Parameter(Mandatory = $true)]
@@ -98,6 +117,7 @@ function Invoke-InteractiveWorker {
         # The window has a separate deadline once its verified child exists.
         $windowDeadline = [DateTime]::UtcNow.AddSeconds(300)
         $runtimeDetected = $false
+        $localFilepoolSelected = $false
         do {
             $launcherProcess.Refresh()
             if ($launcherProcess.HasExited) {
@@ -142,6 +162,20 @@ function Invoke-InteractiveWorker {
             }
             if ($runtimeGraphicalProcess -and
                 (Test-VisibleMainWindow -Process $runtimeGraphicalProcess)) {
+                if ([bool]$workerConfig.local_filepool -and -not $localFilepoolSelected) {
+                    Confirm-LocalFilepoolChoice -Process $runtimeGraphicalProcess
+                    $localFilepoolSelected = $true
+                    Start-Sleep -Milliseconds 200
+                    continue
+                }
+                if ([bool]$workerConfig.local_filepool) {
+                    $visibleWindow = [Windows.Automation.AutomationElement]::FromHandle(
+                        $runtimeGraphicalProcess.MainWindowHandle)
+                    if ($visibleWindow.Current.ClassName -eq '#32770') {
+                        Start-Sleep -Milliseconds 200
+                        continue
+                    }
+                }
                 break
             }
             Start-Sleep -Milliseconds 200
@@ -154,6 +188,10 @@ function Invoke-InteractiveWorker {
         $runtimeGraphicalProcess.Refresh()
         $element = [Windows.Automation.AutomationElement]::FromHandle(
             $runtimeGraphicalProcess.MainWindowHandle)
+        if ([bool]$workerConfig.local_filepool -and
+            (-not $localFilepoolSelected -or $element.Current.ClassName -eq '#32770')) {
+            throw 'The local filepool choice did not lead to the Libertix main window'
+        }
         $bounds = $element.Current.BoundingRectangle
         $runtimeWindowVerified = $true
         Write-AtomicJson -Path $WorkerResultPath -Value ([ordered]@{
@@ -168,6 +206,7 @@ function Invoke-InteractiveWorker {
                 window_visible = $true
                 window_width = [int]$bounds.Width
                 window_height = [int]$bounds.Height
+                local_filepool_selected = $localFilepoolSelected
             })
 
         # Keep the scheduled action alive with the installer. Some Task
@@ -388,6 +427,8 @@ if ($forceOfflineNtfsResize) {
     ([ordered]@{
             executable = $exe
             argument_string = $applicationArguments.Trim()
+            local_filepool = ($config.PSObject.Properties.Name -contains 'local_filepool' -and
+                [bool]$config.local_filepool)
         } | ConvertTo-Json -Compress),
     [System.Text.UTF8Encoding]::new($false)
 )
@@ -519,6 +560,7 @@ Write-Result -Name "RUNTIME_EXECUTABLE" -Value $runtimeExecutable
 Write-Result -Name "WINDOW_HANDLE" -Value ([long]$workerResult.window_handle)
 Write-Result -Name "WINDOW_TITLE" -Value ([string]$workerResult.window_title)
 Write-Result -Name "WINDOW_VISIBLE" -Value "True"
+Write-Result -Name "LOCAL_FILEPOOL_SELECTED" -Value ([bool]$workerResult.local_filepool_selected)
 Write-Result -Name "WINDOW_WIDTH" -Value ([int]$workerResult.window_width)
 Write-Result -Name "WINDOW_HEIGHT" -Value ([int]$workerResult.window_height)
 if ($unattendedStatusPath) {

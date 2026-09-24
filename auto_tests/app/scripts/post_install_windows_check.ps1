@@ -1552,7 +1552,13 @@ try {
             Assert-Condition ($actual -eq [string]$config.windows_sha256) "The 100 MiB shared-file hash differs between Linux and Windows."
         }
         "dism_check_health" {
-            Invoke-NativeCheck -FilePath "dism.exe" -Arguments @("/Online", "/Cleanup-Image", "/CheckHealth")
+            $health = @(Repair-WindowsImage -Online -CheckHealth -NoRestart -ErrorAction Stop)
+            Assert-Condition ($health.Count -eq 1) "DISM did not return a unique image health result."
+            $state = if ($health[0].PSObject.Properties.Name -contains 'ImageHealthState') {
+                [string]$health[0].ImageHealthState
+            } else { '' }
+            Write-Output ("DISM_CHECK_HEALTH_STATE={0}" -f $state)
+            Assert-Condition ($state -eq "Healthy") "DISM CheckHealth did not report Healthy: '$state'."
         }
         "sfc_verify_only" {
             Invoke-NativeCheck -FilePath "sfc.exe" -Arguments @("/verifyonly")

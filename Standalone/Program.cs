@@ -28,10 +28,16 @@ namespace Libertix.Standalone
             {
                 string runtimeRoot = EnsureRuntime();
                 string executable = Path.Combine(runtimeRoot, "Libertix.exe");
+                string adjacentFilepool = Path.Combine(
+                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    "filepool");
+                IEnumerable<string> launchArgs = args;
+                if (Directory.Exists(adjacentFilepool))
+                    launchArgs = args.Concat(new[] { "--local-filepool-dir", adjacentFilepool });
                 var start = new ProcessStartInfo
                 {
                     FileName = executable,
-                    Arguments = string.Join(" ", args.Select(QuoteArgument)),
+                    Arguments = string.Join(" ", launchArgs.Select(QuoteArgument)),
                     WorkingDirectory = runtimeRoot,
                     UseShellExecute = false
                 };

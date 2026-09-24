@@ -13,6 +13,7 @@ from app.storage_fixtures import StorageFixtureRequest
 from app.stream_events import StreamEventProjector
 
 SCENARIOS = (("mint", "windows"), ("mint", "linux"), ("zorin", "windows"), ("zorin", "linux"))
+LOCAL_FILEPOOL_SCENARIOS = (("mint", "windows"), ("zorin", "linux"))
 STORAGE_SCENARIOS = tuple(
     (distribution, first_boot, layout)
     for layout in ("fat32", "ntfs", "recovery")
@@ -140,6 +141,8 @@ INSTALLATION_TESTS = [
 
 def campaign_evidence_requirements(request: AutomationRequest) -> Counter[str]:
     required = Counter(("automation.prepare_vm", "automation.deploy", "automation.vm_finished"))
+    if request.local_filepool:
+        required.update(("automation.local_filepool.prepared", "automation.local_filepool.used"))
     if request.expected_compatibility_refusal:
         required.update(("automation.compatibility_refusal", "automation.compatibility_unchanged"))
     else:
@@ -251,10 +254,10 @@ def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]
     try:
         summary = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(summary, list) or len(summary) not in {
-            len(SCENARIOS),
-            len(SCENARIOS) + len(STORAGE_SCENARIOS),
-            len(SCENARIOS) + len(BOOT_GUARDIAN_SCENARIOS),
-            len(SCENARIOS) + len(STORAGE_SCENARIOS) + len(BOOT_GUARDIAN_SCENARIOS),
+            len(SCENARIOS) + storage + guardian + local
+            for storage in (0, len(STORAGE_SCENARIOS))
+            for guardian in (0, len(BOOT_GUARDIAN_SCENARIOS))
+            for local in (0, len(LOCAL_FILEPOOL_SCENARIOS))
         }:
             return []
         for item in summary:
@@ -300,7 +303,11 @@ def run_campaign(
     if len(vm_names) != 3 or len(set(vm_names)) != 3:
         raise ValueError("The complete campaign requires exactly three distinct enabled test VMs")
     scenarios = [(distribution, first_boot, "", "none") for distribution, first_boot in SCENARIOS]
-    if (request.include_storage_scenarios or request.include_boot_guardian_scenarios) and (
+    if (
+        request.include_storage_scenarios
+        or request.include_boot_guardian_scenarios
+        or request.include_local_filepool_scenarios
+    ) and (
         vm_firmwares is None
         or any(vm_firmwares.get(name) not in {"bios", "uefi"} for name in vm_names)
     ):
@@ -313,9 +320,18 @@ def run_campaign(
         if not any(vm_firmwares[name] == "uefi" for name in vm_names):
             raise ValueError("Boot guardian scenarios require at least one UEFI test VM")
         scenarios.extend((d, b, "", fault) for d, b, fault in BOOT_GUARDIAN_SCENARIOS)
+    local_filepool_vm = next(
+        (vm for vm in vm_names if (vm_firmwares or {}).get(vm) == "uefi"), None
+    )
+    if request.include_local_filepool_scenarios:
+        if not local_filepool_vm:
+            raise ValueError("Local filepool scenarios require a UEFI VM")
+        scenarios.extend((d, b, "local-filepool", "none") for d, b in LOCAL_FILEPOOL_SCENARIOS)
     scenario_vms = [
-        [vm for vm in vm_names if fault == "none" or vm_firmwares[vm] == "uefi"]
-        for _, _, _, fault in scenarios
+        [local_filepool_vm]
+        if layout == "local-filepool"
+        else [vm for vm in vm_names if fault == "none" or vm_firmwares[vm] == "uefi"]
+        for _, _, layout, fault in scenarios
     ]
     summaries = [
         {
@@ -386,7 +402,9 @@ def run_campaign(
                     "first_boot": first_boot,
                     "layout": layout or "nominal",
                     "boot_guardian_fault": fault,
-                    "snapshot_mode": "secondary-disk" if layout else "default",
+                    "snapshot_mode": "secondary-disk"
+                    if layout and layout != "local-filepool"
+                    else "default",
                     "installation_target": "secondary" if layout == "secondary" else "windows",
                     "vm_milestones": {
                         vm: list(cell_milestones(vm, layout, fault)) for vm in scenario_vms[index]
@@ -487,7 +505,7 @@ def run_campaign(
                     StepResult(step="automation.campaign_scenario", status="ok", message=scenario)
                 )
                 fixture = StorageFixtureRequest()
-                if layout:
+                if layout and layout != "local-filepool":
                     fixture = StorageFixtureRequest(
                         extra_system_partition="recovery" if layout == "secondary" else layout,
                         decrypt_system_volume=True,
@@ -510,10 +528,13 @@ def run_campaign(
                     share_linux_files_in_windows=True,
                     verify_uninstall=not negative and fault == "none",
                     boot_guardian_fault=fault,
+                    local_filepool=layout == "local-filepool",
                     expected_compatibility_refusal="COMPAT_E_MBR_PRIMARY_LIMIT"
                     if negative
                     else None,
-                    snapshot_mode="secondary-disk" if layout else "default",
+                    snapshot_mode="secondary-disk"
+                    if layout and layout != "local-filepool"
+                    else "default",
                     installation_target="secondary" if layout == "secondary" else "windows",
                     storage_fixture=fixture,
                 )

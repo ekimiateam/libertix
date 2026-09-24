@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$ConnectivityUrl,
-    [switch]$SkipNvramWriteProbe
+    [switch]$SkipNvramWriteProbe,
+    [switch]$SkipConnectivityProbe
 )
 
 $ErrorActionPreference = "Stop"
@@ -399,7 +400,9 @@ try {
     }
 
     Write-Check "COMPAT_015_NETWORK"
-    Test-DownloadServiceAccess -Url $ConnectivityUrl
+    if (-not $SkipConnectivityProbe) {
+        Test-DownloadServiceAccess -Url $ConnectivityUrl
+    }
 
     Write-Check "COMPAT_020_PLATFORM"
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop

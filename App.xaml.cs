@@ -192,6 +192,38 @@ namespace Libertix
                 }
             }
 
+            string localDirectory = options.LocalFilepoolDirectory ?? Path.Combine(
+                AppDomain.CurrentDomain.BaseDirectory,
+                "filepool");
+            if (options.LocalFilepoolDirectory != null && !Directory.Exists(localDirectory))
+            {
+                RejectInvalidStartupOptions("The adjacent filepool directory is no longer available.");
+                return false;
+            }
+            if (Directory.Exists(localDirectory))
+            {
+                string prompt = Localization.GetBootstrapString(
+                    "LocalFilepoolChoice",
+                    "A filepool folder was found beside Libertix.exe. Use its files " +
+                    "for installation? They will be verified during the compatibility check. " +
+                    "Choose No to download from the online filepool.");
+                if (MessageBox.Show(
+                    prompt,
+                    "Libertix",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question) == MessageBoxResult.Yes)
+                {
+                    filepool = filepool.WithLocalDirectory(
+                        localDirectory,
+                        options.DevelopmentMode);
+                }
+            }
+            if (options.DevelopmentMode && filepool.LocalDirectory == null)
+            {
+                RejectInvalidStartupOptions("--dev requires choosing the adjacent filepool folder.");
+                return false;
+            }
+
             Filepool = filepool;
 
             bool usesPublishedDevelopmentChannel =
@@ -221,6 +253,8 @@ namespace Libertix
 
             RuntimeOptions = options;
             ApplicationLogger.Write($"Filepool base URL: {Filepool.BaseUrl}");
+            if (Filepool.LocalDirectory != null)
+                ApplicationLogger.Write("Local filepool selected: " + Filepool.LocalDirectory);
             ApplicationLogger.Write($"Build version: {Build.Version}; channel={Build.Channel}.");
             if (!string.IsNullOrEmpty(options.DevelopmentSshStaticIpv4Address))
             {
@@ -238,6 +272,12 @@ namespace Libertix
 
         private async Task<bool> ValidatePublishedVersionAsync()
         {
+            if (RuntimeOptions.DevelopmentMode && Filepool.LocalDirectory != null)
+            {
+                ApplicationLogger.Write("Published version check bypassed for the explicitly selected local filepool in development mode.");
+                return true;
+            }
+
             ReleaseCheckResult result = await ReleaseMetadataClient.CheckAsync(Build, Filepool);
             if (result.IsCurrent)
                 return true;

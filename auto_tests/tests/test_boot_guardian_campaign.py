@@ -11,6 +11,7 @@ import pytest
 from app.models import AutomationCampaignRequest, AutomationRequest, OperationResult, StepResult
 from app.services.automation_campaign import (
     BOOT_GUARDIAN_SCENARIOS,
+    LOCAL_FILEPOOL_SCENARIOS,
     SCENARIOS,
     STORAGE_SCENARIOS,
     missing_campaign_evidence,
@@ -254,6 +255,7 @@ def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only
         "SCENARIOS": SCENARIOS,
         "STORAGE_SCENARIOS": STORAGE_SCENARIOS,
         "BOOT_GUARDIAN_SCENARIOS": BOOT_GUARDIAN_SCENARIOS,
+        "LOCAL_FILEPOOL_SCENARIOS": LOCAL_FILEPOOL_SCENARIOS,
         "clean2_only": clean2_only,
         "firmwares": FIRMWARES,
         "payload": {"vms": list(FIRMWARES)},
@@ -263,7 +265,12 @@ def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only
             (
                 isinstance(node, ast.Assign)
                 and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id in {"scenario_names", "boot_guardian_scenario_names"}
+                and node.targets[0].id
+                in {
+                    "scenario_names",
+                    "boot_guardian_scenario_names",
+                    "local_filepool_scenario_names",
+                }
             )
             or (
                 isinstance(node, ast.If)
@@ -285,6 +292,7 @@ def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only
             f"{distribution}-{first_boot}-first-{fault}"
             for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS
         )
+    expected.extend(f"{d}-{b}-first-local-filepool" for d, b in LOCAL_FILEPOOL_SCENARIOS)
     assert namespace["scenario_names"] == expected
     payload = next(
         node.value
@@ -294,6 +302,12 @@ def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only
         and node.targets[0].id == "payload"
     )
     assert isinstance(payload, ast.Dict)
+    local_flag = next(
+        value
+        for key, value in zip(payload.keys, payload.values, strict=True)
+        if isinstance(key, ast.Constant) and key.value == "include_local_filepool_scenarios"
+    )
+    assert eval(compile(ast.Expression(local_flag), str(RUNNER), "eval"), {}, namespace) is True
     for field in ("include_storage_scenarios", "include_boot_guardian_scenarios"):
         flag = next(
             value
@@ -310,6 +324,7 @@ def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only
             linux_password="test-pass",
             include_storage_scenarios=not clean2_only,
             include_boot_guardian_scenarios=not clean2_only,
+            include_local_filepool_scenarios=True,
         ),
         list(FIRMWARES),
         tmp_path,
@@ -318,7 +333,7 @@ def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only
     ).model_dump(mode="json")
     namespace["validate_success"](result)
     corrupted = json.loads(json.dumps(result))
-    del corrupted["campaign_summary"][-1]["cells"]["vm3"]
+    del corrupted["campaign_summary"][-1]["cells"]["vm2"]
     with pytest.raises(RuntimeError, match="inconsistent VM results"):
         namespace["validate_success"](corrupted)
     corrupted = json.loads(json.dumps(result))
@@ -329,3 +344,45 @@ def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only
     corrupted["campaign_summary"] = corrupted["campaign_summary"][:-1]
     with pytest.raises(RuntimeError, match="missing, duplicate, or unexpected"):
         namespace["validate_success"](corrupted)
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_local_filepool_cases_remain_nominal_and_require_source_evidence(tmp_path, full):
+    seen = []
+
+    def run(child, workspace, publish):
+        if child.local_filepool:
+            assert child.vms == ["vm2"]
+            assert child.snapshot_mode == "default"
+            assert child.installation_target == "windows"
+            assert child.boot_guardian_fault == "none"
+            assert child.verify_uninstall
+            assert child.storage_fixture.extra_system_partition == "none"
+            seen.append(child.distribution)
+            steps = successful_campaign_steps(child)
+            for evidence in (
+                "automation.local_filepool.prepared",
+                "automation.local_filepool.used",
+            ):
+                missing = missing_campaign_evidence(
+                    child, [step for step in steps if step.step != evidence]
+                )
+                assert missing == [evidence]
+        return run_success(child, workspace, publish)
+
+    result = run_campaign(
+        AutomationCampaignRequest(
+            apply=True,
+            linux_password="test-pass",
+            include_storage_scenarios=full,
+            include_boot_guardian_scenarios=full,
+            include_local_filepool_scenarios=True,
+        ),
+        list(FIRMWARES),
+        tmp_path,
+        run,
+        vm_firmwares=FIRMWARES,
+    )
+    assert result.status == "ok"
+    assert seen == ["mint", "zorin"]
+    assert len(read_interrupted_campaign_summary(tmp_path)) == len(result.campaign_summary)

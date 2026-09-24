@@ -24,6 +24,7 @@ class AutomationOptions:
     migrate_windows_preferences: bool = False
     preference_wallpaper: Literal["custom", "windows-default"] = "custom"
     use_default_filepool: bool = False
+    local_filepool: bool = False
     simulate_stale_firmware_entries: bool = False
     force_offline_ntfs_resize: bool = False
     boot_guardian_fault: Literal[
