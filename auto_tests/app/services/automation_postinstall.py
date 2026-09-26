@@ -1894,6 +1894,17 @@ class PostInstallValidationMixin:
         options: AutomationOptions,
         result: ResultBuilder,
     ) -> None:
+        for check in self._linux_checks(vm, options):
+            self._run_remote_check(
+                ssh,
+                vm,
+                result,
+                "linux",
+                check,
+                sudo_password=options.linux_password,
+            )
+
+    def _linux_checks(self, vm: VMConfig, options: AutomationOptions) -> tuple[RemoteCheck, ...]:
         username = shlex.quote(options.linux_username)
         expected_os_release_id = shlex.quote(options.distribution.os_release_id)
         expected_grub_entry = shlex.quote(
@@ -1997,7 +2008,7 @@ class PostInstallValidationMixin:
             )
         )
 
-        checks = (
+        return (
             RemoteCheck("linux.identity", f'test "$(id -un)" = {username}; id'),
             RemoteCheck(
                 "linux.os_release",
@@ -2295,16 +2306,6 @@ class PostInstallValidationMixin:
                 "getent ahostsv4 ekimia.fr | head -1 | grep -q .",
             ),
         )
-
-        for check in checks:
-            self._run_remote_check(
-                ssh,
-                vm,
-                result,
-                "linux",
-                check,
-                sudo_password=options.linux_password,
-            )
 
     def _create_cross_os_artifacts(
         self,

@@ -638,6 +638,360 @@ def _stream_operation_worker(
     fatal_output.close()
 
 
+def _stream_operation(
+    configured: Settings,
+    operation_process: ActiveOperationProcess,
+    operation: OperationName,
+    selectors: list[str] | None = None,
+    request: ValidationRequest | AutomationRequest | None = None,
+    stream_format: Literal["compact", "ndjson"] = "compact",
+):
+    events: queue.Queue[tuple[str, str | int | None]] = queue.Queue()
+
+    terminal_result_seen = threading.Event()
+    independent_lanes_started = threading.Event()
+    terminal_result_lock = threading.Lock()
+    timeout_cleanup_started = threading.Event()
+    timeout_cleanup_finished = threading.Event()
+
+    latest_steps: dict[str, str] = {}
+    latest_steps_lock = threading.Lock()
+    automation_progress = threading.Event()
+    automation_progress_lock = threading.Lock()
+    progress_clock = OperationProgress(time.monotonic())
+
+    network_waiting = threading.Event()
+    network_restart: StepResult | None = None
+    network_paused_at: float | None = None
+
+    if not operation_lock.acquire(blocking=False):
+        result = _operation_busy_result(operation)
+        events.put(
+            (
+                "data",
+                StreamEventProjector.render(
+                    _unpersisted_result_event(result),
+                    stream_format=stream_format,
+                ),
+            )
+        )
+        events.put(("exit", 0))
+
+        async def rejected_generator():
+            while True:
+                event_type, payload = await asyncio.to_thread(events.get)
+                if event_type == "data":
+                    yield str(payload)
+                    continue
+                break
+
+        return rejected_generator()
+
+    try:
+        run_workspace = create_capture_workspace(configured, operation)
+    except BaseException:
+        operation_lock.release()
+        raise
+    projector = StreamEventProjector(operation, run_workspace)
+
+    def publish_result(result: OperationResult, stream_format: str) -> None:
+        with terminal_result_lock:
+            if terminal_result_seen.is_set():
+                return
+            if isinstance(request, AutomationCampaignRequest) and not result.campaign_summary:
+                result.campaign_summary = read_interrupted_campaign_summary(run_workspace)
+            event = projector.project_result(result)
+            terminal_result_seen.set()
+            automation_progress.set()
+            events.put(("data", projector.render(event, stream_format=stream_format)))
+
+    # The worker owns the operation; the relay only publishes its evidence
+    # and tracks progress so an unresponsive worker can be diagnosed.
+    process_context = multiprocessing.get_context("spawn")
+    process_events, worker_events = process_context.Pipe(duplex=False)
+
+    def relay_process_events() -> None:
+        nonlocal network_restart, network_paused_at
+        try:
+            while True:
+                if not process_events.poll(0.1):
+                    if not process.is_alive():
+                        return
+                    continue
+                event_type, payload = process_events.recv()
+                if event_type == "step":
+                    step = StepResult.model_validate(payload)
+                    if step.step == "automation.campaign_plan" and step.context.get(
+                        "independent_vms"
+                    ):
+                        independent_lanes_started.set()
+
+                    with automation_progress_lock:
+                        now = time.monotonic()
+                        if step.step == "automation.network.wait":
+                            if network_paused_at is None:
+                                network_paused_at = now
+                            network_waiting.set()
+                        elif step.step == "automation.network.resumed":
+                            if network_paused_at is not None:
+                                progress_clock.exclude_network_pause(now - network_paused_at)
+                            network_paused_at = None
+                            network_waiting.clear()
+                        elif step.step == "automation.network.restart_required":
+                            network_restart = step
+                        advanced = step.step.startswith(
+                            "automation.network."
+                        ) or progress_clock.observe(step, now)
+                    if advanced:
+                        automation_progress.set()
+
+                    vm = str(step.context.get("vm") or step.context.get("target") or "global")
+                    with latest_steps_lock:
+                        label = step.step
+                        if step.context.get("test"):
+                            label += ":" + str(step.context["test"])
+                        if advanced or step.status == "error":
+                            latest_steps[vm] = label
+                            if "vm" not in step.context:
+                                latest_steps["global"] = label
+                    event = projector.project_step(step)
+                    if event is not None:
+                        events.put(
+                            (
+                                "data",
+                                projector.render(event, stream_format=stream_format),
+                            )
+                        )
+                    continue
+
+                if event_type == "result":
+                    publish_result(OperationResult.model_validate(payload), stream_format)
+                    # All operation cleanup has completed before the worker
+                    # publishes its result. Do not let an unexpected library
+                    # thread keep the global operation lock forever.
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        logger.warning(
+                            "Terminating an operation worker that remained alive "
+                            "after its terminal result",
+                            extra={"step": f"{operation}.process_exit"},
+                        )
+                        process.terminate()
+                    return
+        except (EOFError, OSError):
+            return
+        finally:
+            process_events.close()
+
+    process = process_context.Process(
+        target=_stream_operation_worker,
+        args=(
+            configured,
+            operation,
+            selectors,
+            request,
+            worker_events,
+            run_workspace,
+            _runtime_provenance(),
+        ),
+        daemon=not isinstance(request, AutomationCampaignRequest),
+    )
+    try:
+        process.start()
+        worker_events.close()
+        operation_process.register(process, operation)
+    except Exception:
+        process_events.close()
+        worker_events.close()
+        operation_lock.release()
+        _finalize_operation_workspace(configured, run_workspace)
+        raise
+
+    relay_thread = threading.Thread(target=relay_process_events, daemon=True)
+    relay_thread.start()
+
+    def terminate_and_collect(result: OperationResult) -> None:
+        timeout_cleanup_started.set()
+        try:
+            # Keep the lock until the old controller is stopped and its evidence saved.
+            process.terminate()
+            process.join()
+
+            failure = result.steps[0]
+            event = projector.project_step(
+                StepResult(
+                    step="automation.diagnostics.wait",
+                    status="ok",
+                    message="Interrupted worker stopped; saving VM screenshots and logs "
+                    "before releasing the campaign lock",
+                    context=dict(failure.context),
+                )
+            )
+            events.put(("data", projector.render(event, stream_format=stream_format)))
+            failure.context["diagnostics"] = _collect_timeout_diagnostics(
+                configured, selectors, request, run_workspace, failure
+            )
+        except Exception as exc:
+            result.steps[0].context["diagnostics_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            try:
+                publish_result(result, stream_format)
+            finally:
+                timeout_cleanup_finished.set()
+
+    def enforce_automation_timeout() -> None:
+        if operation != "automation":
+            return
+        while True:
+            automation_progress.clear()
+            if terminal_result_seen.is_set() or not process.is_alive():
+                return
+            if independent_lanes_started.is_set():
+                # Each isolated lane has its own progress clock and network pause budget.
+                automation_progress.wait(5)
+                continue
+            if network_restart is not None:
+                terminate_and_collect(
+                    OperationResult(
+                        status="error",
+                        operation="automation",
+                        message="Network restored; the current scenario needs a clean restart",
+                        steps=[network_restart.model_copy(update={"status": "error"})],
+                    )
+                )
+                return
+            if network_waiting.is_set():
+                automation_progress.wait(5)
+                continue
+            with automation_progress_lock:
+                stalled_vm, last_progress = progress_clock.oldest()
+                idle_seconds = time.monotonic() - last_progress
+            remaining_seconds = configured.automation_operation_timeout_seconds - idle_seconds
+            if remaining_seconds > 0 and automation_progress.wait(remaining_seconds):
+                continue
+            if terminal_result_seen.is_set() or not process.is_alive():
+                return
+            if network_waiting.is_set() or network_restart is not None:
+                continue
+
+            with automation_progress_lock:
+                stalled_vm, last_progress = progress_clock.oldest()
+                idle_seconds = time.monotonic() - last_progress
+            if idle_seconds < configured.automation_operation_timeout_seconds:
+                continue
+            captures, capture_errors = _capture_automation_timeout_screens(
+                configured,
+                selectors,
+                run_workspace,
+            )
+            if terminal_result_seen.is_set() or not process.is_alive():
+                return
+            if network_waiting.is_set() or network_restart is not None:
+                continue
+            with automation_progress_lock:
+                stalled_vm, last_progress = progress_clock.oldest()
+                if (
+                    time.monotonic() - last_progress
+                    < configured.automation_operation_timeout_seconds
+                ):
+                    continue
+            with latest_steps_lock:
+                active_steps = dict(latest_steps)
+
+            result = OperationResult(
+                status="error",
+                operation="automation",
+                message="error: automation made no progress before its configured timeout",
+                steps=[
+                    StepResult(
+                        step="automation.inactivity_timeout",
+                        status="error",
+                        message=(
+                            f"No progress on {stalled_vm}: "
+                            f"{active_steps.get(stalled_vm, 'global preparation')}"
+                        ),
+                        context={
+                            "inactivity_timeout_seconds": (
+                                configured.automation_operation_timeout_seconds
+                            ),
+                            "active_steps": active_steps,
+                            "stalled_vm": stalled_vm,
+                            "stalled_step": active_steps.get(stalled_vm, "global preparation"),
+                            "captures": captures,
+                            "capture_errors": capture_errors,
+                        },
+                    )
+                ],
+            )
+            terminate_and_collect(result)
+            return
+
+    threading.Thread(target=enforce_automation_timeout, daemon=True).start()
+
+    def watch_process() -> None:
+        try:
+            process.join()
+            relay_thread.join()
+            if timeout_cleanup_started.is_set():
+                timeout_cleanup_finished.wait()
+
+            if not terminal_result_seen.is_set():
+                exit_code = process.exitcode if process.exitcode is not None else -1
+                forced = exit_code < 0
+                diagnostic_context = (
+                    _worker_fatal_diagnostic_context(run_workspace) if forced else {}
+                )
+                result = OperationResult(
+                    status="error",
+                    operation=operation,
+                    message=(
+                        "error: operation was forcibly terminated"
+                        if forced
+                        else "error: operation process exited unexpectedly"
+                    ),
+                    steps=[
+                        StepResult(
+                            step=(
+                                f"{operation}.force_killed"
+                                if forced
+                                else f"{operation}.process_exit"
+                            ),
+                            status="error",
+                            message=(
+                                "Operation was forcibly terminated without cleanup"
+                                if forced
+                                else "Operation process exited without a terminal result"
+                            ),
+                            context={"exit_code": exit_code, **diagnostic_context},
+                        )
+                    ],
+                )
+                publish_result(result, stream_format)
+        except Exception:
+            logger.exception(
+                "Operation watcher failed",
+                extra={"step": f"{operation}.watcher"},
+            )
+        finally:
+            operation_process.clear(process)
+            operation_lock.release()
+            _finalize_operation_workspace(configured, run_workspace)
+            events.put(("exit", process.exitcode))
+
+    threading.Thread(target=watch_process, daemon=True).start()
+
+    async def generator():
+        while True:
+            event_type, payload = await asyncio.to_thread(events.get)
+            if event_type == "data":
+                yield str(payload)
+                continue
+            if event_type == "exit":
+                break
+
+    return generator()
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     configured = settings or get_settings()
     operation_process = ActiveOperationProcess()
@@ -705,363 +1059,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             operation_lock.release()
             _finalize_operation_workspace(configured, run_workspace)
 
-    def stream_operation(
-        operation: OperationName,
-        selectors: list[str] | None = None,
-        request: ValidationRequest | AutomationRequest | None = None,
-        stream_format: Literal["compact", "ndjson"] = "compact",
-    ):
-        events: queue.Queue[tuple[str, str | int | None]] = queue.Queue()
-
-        terminal_result_seen = threading.Event()
-        independent_lanes_started = threading.Event()
-        terminal_result_lock = threading.Lock()
-        timeout_cleanup_started = threading.Event()
-        timeout_cleanup_finished = threading.Event()
-
-        latest_steps: dict[str, str] = {}
-        latest_steps_lock = threading.Lock()
-        automation_progress = threading.Event()
-        automation_progress_lock = threading.Lock()
-        progress_clock = OperationProgress(time.monotonic())
-
-        network_waiting = threading.Event()
-        network_restart: StepResult | None = None
-        network_paused_at: float | None = None
-
-        if not operation_lock.acquire(blocking=False):
-            result = _operation_busy_result(operation)
-            events.put(
-                (
-                    "data",
-                    StreamEventProjector.render(
-                        _unpersisted_result_event(result),
-                        stream_format=stream_format,
-                    ),
-                )
-            )
-            events.put(("exit", 0))
-
-            async def rejected_generator():
-                while True:
-                    event_type, payload = await asyncio.to_thread(events.get)
-                    if event_type == "data":
-                        yield str(payload)
-                        continue
-                    break
-
-            return rejected_generator()
-
-        try:
-            run_workspace = create_capture_workspace(configured, operation)
-        except BaseException:
-            operation_lock.release()
-            raise
-        projector = StreamEventProjector(operation, run_workspace)
-
-        def publish_result(result: OperationResult, stream_format: str) -> None:
-            with terminal_result_lock:
-                if terminal_result_seen.is_set():
-                    return
-                if isinstance(request, AutomationCampaignRequest) and not result.campaign_summary:
-                    result.campaign_summary = read_interrupted_campaign_summary(run_workspace)
-                event = projector.project_result(result)
-                terminal_result_seen.set()
-                automation_progress.set()
-                events.put(("data", projector.render(event, stream_format=stream_format)))
-
-        # The worker owns the operation; the relay only publishes its evidence
-        # and tracks progress so an unresponsive worker can be diagnosed.
-        process_context = multiprocessing.get_context("spawn")
-        process_events, worker_events = process_context.Pipe(duplex=False)
-
-        def relay_process_events() -> None:
-            nonlocal network_restart, network_paused_at
-            try:
-                while True:
-                    if not process_events.poll(0.1):
-                        if not process.is_alive():
-                            return
-                        continue
-                    event_type, payload = process_events.recv()
-                    if event_type == "step":
-                        step = StepResult.model_validate(payload)
-                        if step.step == "automation.campaign_plan" and step.context.get(
-                            "independent_vms"
-                        ):
-                            independent_lanes_started.set()
-
-                        with automation_progress_lock:
-                            now = time.monotonic()
-                            if step.step == "automation.network.wait":
-                                if network_paused_at is None:
-                                    network_paused_at = now
-                                network_waiting.set()
-                            elif step.step == "automation.network.resumed":
-                                if network_paused_at is not None:
-                                    progress_clock.exclude_network_pause(now - network_paused_at)
-                                network_paused_at = None
-                                network_waiting.clear()
-                            elif step.step == "automation.network.restart_required":
-                                network_restart = step
-                            advanced = step.step.startswith(
-                                "automation.network."
-                            ) or progress_clock.observe(step, now)
-                        if advanced:
-                            automation_progress.set()
-
-                        vm = str(step.context.get("vm") or step.context.get("target") or "global")
-                        with latest_steps_lock:
-                            label = step.step
-                            if step.context.get("test"):
-                                label += ":" + str(step.context["test"])
-                            if advanced or step.status == "error":
-                                latest_steps[vm] = label
-                                if "vm" not in step.context:
-                                    latest_steps["global"] = label
-                        event = projector.project_step(step)
-                        if event is not None:
-                            events.put(
-                                (
-                                    "data",
-                                    projector.render(event, stream_format=stream_format),
-                                )
-                            )
-                        continue
-
-                    if event_type == "result":
-                        publish_result(OperationResult.model_validate(payload), stream_format)
-                        # All operation cleanup has completed before the worker
-                        # publishes its result. Do not let an unexpected library
-                        # thread keep the global operation lock forever.
-                        process.join(timeout=5)
-                        if process.is_alive():
-                            logger.warning(
-                                "Terminating an operation worker that remained alive "
-                                "after its terminal result",
-                                extra={"step": f"{operation}.process_exit"},
-                            )
-                            process.terminate()
-                        return
-            except (EOFError, OSError):
-                return
-            finally:
-                process_events.close()
-
-        process = process_context.Process(
-            target=_stream_operation_worker,
-            args=(
-                configured,
-                operation,
-                selectors,
-                request,
-                worker_events,
-                run_workspace,
-                _runtime_provenance(),
-            ),
-            daemon=not isinstance(request, AutomationCampaignRequest),
-        )
-        try:
-            process.start()
-            worker_events.close()
-            operation_process.register(process, operation)
-        except Exception:
-            process_events.close()
-            worker_events.close()
-            operation_lock.release()
-            _finalize_operation_workspace(configured, run_workspace)
-            raise
-
-        relay_thread = threading.Thread(target=relay_process_events, daemon=True)
-        relay_thread.start()
-
-        def terminate_and_collect(result: OperationResult) -> None:
-            timeout_cleanup_started.set()
-            try:
-                # Keep the lock until the old controller is stopped and its evidence saved.
-                process.terminate()
-                process.join()
-
-                failure = result.steps[0]
-                event = projector.project_step(
-                    StepResult(
-                        step="automation.diagnostics.wait",
-                        status="ok",
-                        message="Interrupted worker stopped; saving VM screenshots and logs "
-                        "before releasing the campaign lock",
-                        context=dict(failure.context),
-                    )
-                )
-                events.put(("data", projector.render(event, stream_format=stream_format)))
-                failure.context["diagnostics"] = _collect_timeout_diagnostics(
-                    configured, selectors, request, run_workspace, failure
-                )
-            except Exception as exc:
-                result.steps[0].context["diagnostics_error"] = f"{type(exc).__name__}: {exc}"
-            finally:
-                try:
-                    publish_result(result, stream_format)
-                finally:
-                    timeout_cleanup_finished.set()
-
-        def enforce_automation_timeout() -> None:
-            if operation != "automation":
-                return
-            while True:
-                automation_progress.clear()
-                if terminal_result_seen.is_set() or not process.is_alive():
-                    return
-                if independent_lanes_started.is_set():
-                    # Each isolated lane has its own progress clock and network pause budget.
-                    automation_progress.wait(5)
-                    continue
-                if network_restart is not None:
-                    terminate_and_collect(
-                        OperationResult(
-                            status="error",
-                            operation="automation",
-                            message="Network restored; the current scenario needs a clean restart",
-                            steps=[network_restart.model_copy(update={"status": "error"})],
-                        )
-                    )
-                    return
-                if network_waiting.is_set():
-                    automation_progress.wait(5)
-                    continue
-                with automation_progress_lock:
-                    stalled_vm, last_progress = progress_clock.oldest()
-                    idle_seconds = time.monotonic() - last_progress
-                remaining_seconds = configured.automation_operation_timeout_seconds - idle_seconds
-                if remaining_seconds > 0 and automation_progress.wait(remaining_seconds):
-                    continue
-                if terminal_result_seen.is_set() or not process.is_alive():
-                    return
-                if network_waiting.is_set() or network_restart is not None:
-                    continue
-
-                with automation_progress_lock:
-                    stalled_vm, last_progress = progress_clock.oldest()
-                    idle_seconds = time.monotonic() - last_progress
-                if idle_seconds < configured.automation_operation_timeout_seconds:
-                    continue
-                captures, capture_errors = _capture_automation_timeout_screens(
-                    configured,
-                    selectors,
-                    run_workspace,
-                )
-                if terminal_result_seen.is_set() or not process.is_alive():
-                    return
-                if network_waiting.is_set() or network_restart is not None:
-                    continue
-                with automation_progress_lock:
-                    stalled_vm, last_progress = progress_clock.oldest()
-                    if (
-                        time.monotonic() - last_progress
-                        < configured.automation_operation_timeout_seconds
-                    ):
-                        continue
-                with latest_steps_lock:
-                    active_steps = dict(latest_steps)
-
-                result = OperationResult(
-                    status="error",
-                    operation="automation",
-                    message="error: automation made no progress before its configured timeout",
-                    steps=[
-                        StepResult(
-                            step="automation.inactivity_timeout",
-                            status="error",
-                            message=(
-                                f"No progress on {stalled_vm}: "
-                                f"{active_steps.get(stalled_vm, 'global preparation')}"
-                            ),
-                            context={
-                                "inactivity_timeout_seconds": (
-                                    configured.automation_operation_timeout_seconds
-                                ),
-                                "active_steps": active_steps,
-                                "stalled_vm": stalled_vm,
-                                "stalled_step": active_steps.get(stalled_vm, "global preparation"),
-                                "captures": captures,
-                                "capture_errors": capture_errors,
-                            },
-                        )
-                    ],
-                )
-                terminate_and_collect(result)
-                return
-
-        threading.Thread(target=enforce_automation_timeout, daemon=True).start()
-
-        def watch_process() -> None:
-            try:
-                process.join()
-                relay_thread.join()
-                if timeout_cleanup_started.is_set():
-                    timeout_cleanup_finished.wait()
-
-                if not terminal_result_seen.is_set():
-                    exit_code = process.exitcode if process.exitcode is not None else -1
-                    forced = exit_code < 0
-                    diagnostic_context = (
-                        _worker_fatal_diagnostic_context(run_workspace) if forced else {}
-                    )
-                    result = OperationResult(
-                        status="error",
-                        operation=operation,
-                        message=(
-                            "error: operation was forcibly terminated"
-                            if forced
-                            else "error: operation process exited unexpectedly"
-                        ),
-                        steps=[
-                            StepResult(
-                                step=(
-                                    f"{operation}.force_killed"
-                                    if forced
-                                    else f"{operation}.process_exit"
-                                ),
-                                status="error",
-                                message=(
-                                    "Operation was forcibly terminated without cleanup"
-                                    if forced
-                                    else "Operation process exited without a terminal result"
-                                ),
-                                context={"exit_code": exit_code, **diagnostic_context},
-                            )
-                        ],
-                    )
-                    publish_result(result, stream_format)
-            except Exception:
-                logger.exception(
-                    "Operation watcher failed",
-                    extra={"step": f"{operation}.watcher"},
-                )
-            finally:
-                operation_process.clear(process)
-                operation_lock.release()
-                _finalize_operation_workspace(configured, run_workspace)
-                events.put(("exit", process.exitcode))
-
-        threading.Thread(target=watch_process, daemon=True).start()
-
-        async def generator():
-            while True:
-                event_type, payload = await asyncio.to_thread(events.get)
-                if event_type == "data":
-                    yield str(payload)
-                    continue
-                if event_type == "exit":
-                    break
-
-        return generator()
-
     async def execute_isolated_automation(
         selectors: list[str] | None,
         request: AutomationRequest | AutomationCampaignRequest,
     ) -> OperationResult:
         terminal_result: OperationResult | None = None
-        async for payload in stream_operation(
+        async for payload in _stream_operation(
+            configured,
+            operation_process,
             "automation",
             selectors,
             request,
@@ -1150,7 +1155,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         format: Annotated[Literal["compact", "ndjson"], Query()] = "compact",
     ) -> StreamingResponse:
         return StreamingResponse(
-            stream_operation("automation", body.selectors(), body, format),
+            _stream_operation(
+                configured, operation_process, "automation", body.selectors(), body, format
+            ),
             media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
         )
 
@@ -1163,7 +1170,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> StreamingResponse:
         selectors, request = validation_request(body, vm, source)
         return StreamingResponse(
-            stream_operation("validation", selectors, request, format),
+            _stream_operation(
+                configured, operation_process, "validation", selectors, request, format
+            ),
             media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
         )
 
@@ -1176,7 +1185,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ) -> StreamingResponse:
         selectors, request = automation_request(body, vm, source)
         return StreamingResponse(
-            stream_operation("automation", selectors, request, format),
+            _stream_operation(
+                configured, operation_process, "automation", selectors, request, format
+            ),
             media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
         )
 
@@ -1193,7 +1204,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         format: Annotated[Literal["compact", "ndjson"], Query()] = "compact",
     ) -> StreamingResponse:
         return StreamingResponse(
-            stream_operation("reset", vm, stream_format=format),
+            _stream_operation(configured, operation_process, "reset", vm, stream_format=format),
             media_type="application/x-ndjson" if format == "ndjson" else "text/plain",
         )
 

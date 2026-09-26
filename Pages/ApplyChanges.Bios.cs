@@ -450,7 +450,7 @@ namespace Libertix.Pages
                 if (!ready && Filepool.LocalDirectory == null)
                 {
                     ready = await DownloadFileAsync(
-                        $"{Filepool.BaseUrl}/{file}",
+                        Filepool.ResolveArtifactUrl(file, file, grubHashes[file]),
                         destinationPath);
                 }
                 ThrowIfCancellationRequested();

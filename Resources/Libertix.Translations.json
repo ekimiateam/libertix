@@ -301,6 +301,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows could not fully read the BitLocker state."
         },
         "bootstrapMessages": {
+          "LocalServerChoice": "Local installation server {0} ({1}/{2}). Use this server? Files will still be verified using the signed GitHub catalog. Yes: use it. No: next server. Cancel: use official downloads.",
           "LocalFilepoolChoice": "A filepool folder was found beside Libertix.exe. Use its files for installation? They will be verified during the compatibility check. Choose No to download from the online filepool.",
           "AdministratorRequired": "Libertix must be run as administrator to modify partitions and the Windows boot configuration.",
           "SingleInstanceRequired": "Another Libertix instance is already running.",
@@ -707,6 +708,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows n'a pas pu lire complètement l'état BitLocker."
         },
         "bootstrapMessages": {
+          "LocalServerChoice": "Serveur d'installation local {0} ({1}/{2}). Utiliser ce serveur ? Les fichiers seront toujours vérifiés avec le catalogue signé de GitHub. Oui : l'utiliser. Non : serveur suivant. Annuler : téléchargements officiels.",
           "LocalFilepoolChoice": "Un dossier filepool a été trouvé à côté de Libertix.exe. Utiliser ses fichiers pour l'installation ? Ils seront vérifiés pendant le contrôle de compatibilité. Choisissez Non pour télécharger depuis le filepool en ligne.",
           "AdministratorRequired": "Libertix doit être lancé en administrateur pour modifier les partitions et le démarrage Windows.",
           "SingleInstanceRequired": "Une autre instance de Libertix est déjà en cours d'exécution.",
@@ -1113,6 +1115,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows no pudo leer completamente el estado de BitLocker."
         },
         "bootstrapMessages": {
+          "LocalServerChoice": "Servidor de instalación local {0} ({1}/{2}). ¿Usar este servidor? Los archivos se verificarán con el catálogo firmado de GitHub. Sí: usarlo. No: siguiente servidor. Cancelar: descargas oficiales.",
           "LocalFilepoolChoice": "Se encontró una carpeta filepool junto a Libertix.exe. ¿Usar sus archivos para la instalación? Se verificarán durante la comprobación de compatibilidad. Elija No para descargarlos del filepool en línea.",
           "AdministratorRequired": "Libertix debe ejecutarse como administrador para modificar las particiones y el arranque de Windows.",
           "SingleInstanceRequired": "Ya se está ejecutando otra instancia de Libertix.",
@@ -1519,6 +1522,7 @@
           "COMPAT_E_BITLOCKER_UNREADABLE": "Windows가 BitLocker 상태를 완전히 읽지 못했습니다."
         },
         "bootstrapMessages": {
+          "LocalServerChoice": "로컬 설치 서버 {0} ({1}/{2})을 사용하시겠습니까? 파일은 GitHub의 서명된 카탈로그로 계속 검증됩니다. 예: 사용. 아니요: 다음 서버. 취소: 공식 다운로드.",
           "LocalFilepoolChoice": "Libertix.exe 옆에서 filepool 폴더를 찾았습니다. 설치에 로컬 파일을 사용하시겠습니까? 호환성 검사 중에 파일을 확인합니다. 온라인 filepool에서 다운로드하려면 아니요를 선택하세요.",
           "AdministratorRequired": "파티션과 Windows 부팅 구성을 변경하려면 Libertix를 관리자 권한으로 실행해야 합니다.",
           "SingleInstanceRequired": "다른 Libertix 인스턴스가 이미 실행 중입니다.",

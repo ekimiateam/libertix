@@ -15,6 +15,7 @@ namespace Libertix.BootGuardian
     {
         private const string ManifestRelative = @"EFI\Libertix\preferred-boot-path.json";
         private const string JournalName = "preferred-boot-path.sync.json";
+        private const int MaximumJournalBytes = 1024 * 1024;
 
         internal static void Replay(string esp, string runId, Action checkDeadline)
         {
@@ -71,8 +72,23 @@ namespace Libertix.BootGuardian
                 paths.Last() != "EFI/Microsoft/Boot/bootmgfw.efi")
                 throw new InvalidDataException("Pending EFI destinations are invalid.");
 
-            // Verify every source and existing destination before the first copy.
-            // A foreign change must abort before this replay writes another file.
+            VerifyPendingFiles(esp, stage, journal, expected, checkDeadline);
+            CopyPendingFiles(esp, stage, journal, expected, checkDeadline);
+
+            // Publish the manifest only after its files have reached their
+            // verified destinations; the journal remains until then.
+            AtomicFile.CopyVerified(targetManifestPath, manifestPath, journal.AfterManifest, checkDeadline);
+
+            // Keep the verified staging files until removal of the journal is
+            // durable on the ESP. Cleanup can be retried without changing boot.
+            File.Delete(journalPath);
+        }
+
+        private static void VerifyPendingFiles(
+            string esp, string stage, SyncJournal journal, Dictionary<string, string> expected,
+            Action checkDeadline)
+        {
+            // A foreign change must abort before this replay writes any file.
             for (int index = 0; index < journal.Entries.Length; index++)
             {
                 checkDeadline();
@@ -90,7 +106,12 @@ namespace Libertix.BootGuardian
                 if (current != entry.Before && current != hash)
                     throw new InvalidDataException("EFI destination changed outside the pending synchronization.");
             }
+        }
 
+        private static void CopyPendingFiles(
+            string esp, string stage, SyncJournal journal, Dictionary<string, string> expected,
+            Action checkDeadline)
+        {
             for (int index = 0; index < journal.Entries.Length; index++)
             {
                 SyncEntry entry = journal.Entries[index];
@@ -98,14 +119,6 @@ namespace Libertix.BootGuardian
                 string destination = Path.Combine(esp, entry.Target.Replace('/', '\\'));
                 AtomicFile.CopyVerified(source, destination, expected[entry.Target], checkDeadline);
             }
-
-            // Publish the manifest only after its files have reached their
-            // verified destinations; the journal remains until then.
-            AtomicFile.CopyVerified(targetManifestPath, manifestPath, journal.AfterManifest, checkDeadline);
-
-            // Keep the verified staging files until removal of the journal is
-            // durable on the ESP. Cleanup can be retried without changing boot.
-            File.Delete(journalPath);
         }
 
         internal static void PublishWindowsLoaderUpdate(
@@ -197,7 +210,7 @@ namespace Libertix.BootGuardian
             AssertNoReparsePoints(path);
             using (FileStream stream = File.OpenRead(path))
             {
-                if (stream.Length > 1024 * 1024)
+                if (stream.Length > MaximumJournalBytes)
                     throw new InvalidDataException("Pending EFI journal is too large.");
 
                 return (SyncJournal)new DataContractJsonSerializer(typeof(SyncJournal)).ReadObject(stream);

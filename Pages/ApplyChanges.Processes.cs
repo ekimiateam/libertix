@@ -158,6 +158,12 @@ namespace Libertix.Pages
                     _installationCancellation.Token))
                 {
                     timeoutCancellation.CancelAfter(WindowsProcessTimeouts.BootArtifactDownload);
+                    if (Filepool.LocalServer != null)
+                    {
+                        await LocalFilepoolDownload.DownloadAsync(Filepool.LocalServer,
+                            url, destinationPath, MaximumBootArtifactBytes, null, timeoutCancellation.Token);
+                        return true;
+                    }
                     using (var response = await SharedHttpClient.GetAsync(
                         url,
                         HttpCompletionOption.ResponseHeadersRead,

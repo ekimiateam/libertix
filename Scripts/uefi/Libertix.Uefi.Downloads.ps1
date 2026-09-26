@@ -21,6 +21,17 @@ function Invoke-BoundedHttpDownload {
 
     if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
 
+    if (Get-Variable -Name LocalFilepoolServer -ValueOnly -ErrorAction SilentlyContinue) {
+        if (-not ("Libertix.Helpers.LocalFilepoolDownload" -as [type])) {
+            Add-Type -Path (Join-Path $PSScriptRoot "..\native\LocalFilepoolDownload.cs") -ErrorAction Stop
+        }
+        $download = [Libertix.Helpers.LocalFilepoolDownload]::DownloadAsync(
+            $LocalFilepoolServer, $Url, $Destination, $MaxBytes, $null,
+            [Threading.CancellationToken]::None)
+        $download.GetAwaiter().GetResult()
+        return
+    }
+
     $request = [Net.HttpWebRequest]::Create($Url)
     $request.AllowAutoRedirect = $true
     $request.Timeout = $TimeoutSeconds * 1000
@@ -447,6 +458,12 @@ function Start-RobustDownload {
         [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName(
             [IO.Path]::GetFullPath($Destination))) | Out-Null
         Copy-Item -LiteralPath $source -Destination $Destination -Force -ErrorAction Stop
+        return
+    }
+
+    if (Get-Variable -Name LocalFilepoolServer -ValueOnly -ErrorAction SilentlyContinue) {
+        # No aria2/BITS fallback: every request must keep the accepted TLS scope.
+        Invoke-BoundedHttpDownload -Url $Url -Destination $Destination -MaxBytes $MaxBytes
         return
     }
 

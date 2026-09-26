@@ -53,26 +53,9 @@ namespace Libertix.Installation
                         "The local catalog.json differs from the signed online catalog.json.");
             }
 
-            var artifacts = new List<CatalogArtifactJson>
-            {
-                catalog.Artifacts.Wpf,
-                catalog.Artifacts.MiniIso.Bios,
-                catalog.Artifacts.MiniIso.Uefi,
-                catalog.Artifacts.Support.Aria2Archive,
-                catalog.Artifacts.Support.Ext4Driver,
-                catalog.Artifacts.Support.Grub4DosLoader,
-                catalog.Artifacts.Support.Grub4DosMbr
-            };
             foreach (DistroInfoJson distribution in catalog.Distributions)
-            {
                 ValidateDistribution(distribution);
-                artifacts.Add(new CatalogArtifactJson
-                {
-                    FileName = distribution.IsoInstallerFileName,
-                    Sha256 = distribution.IsoInstallerSha256,
-                    SizeBytes = distribution.IsoInstallerSizeBytes
-                });
-            }
+            var artifacts = CatalogFiles.GetAll(catalog);
 
             await Task.Run(() =>
             {
@@ -231,12 +214,15 @@ namespace Libertix.Installation
                     SecureBootMicrosoftAuthorities =
                         source.SecureBootMicrosoftAuthorities.ToList(),
                     Description = source.Description ?? "No description available",
-                    ImageUrl = source.ImageUrl,
-                    IsoUrl = filepool.ResolveUrl(biosMiniIso.Url),
-                    IsoInstaller = filepool.ResolveUrl(source.IsoInstaller),
+                    // Catalog illustrations have no signed artifact hash. Do not fetch
+                    // them from external sites when the local server is selected.
+                    ImageUrl = filepool.LocalServer == null ? source.ImageUrl : null,
+                    IsoUrl = filepool.ResolveArtifactUrl(biosMiniIso.Url, biosMiniIso.FileName, biosMiniIso.Sha256),
+                    IsoInstaller = filepool.ResolveArtifactUrl(source.IsoInstaller,
+                        source.IsoInstallerFileName, source.IsoInstallerSha256),
                     IsoInstallerFileName = source.IsoInstallerFileName,
                     IsoSha256 = biosMiniIso.Sha256,
-                    UefiIsoUrl = filepool.ResolveUrl(uefiMiniIso.Url),
+                    UefiIsoUrl = filepool.ResolveArtifactUrl(uefiMiniIso.Url, uefiMiniIso.FileName, uefiMiniIso.Sha256),
                     UefiIsoSha256 = uefiMiniIso.Sha256,
                     IsoInstallerSha256 = source.IsoInstallerSha256,
                     IsoInstallerSizeBytes = source.IsoInstallerSizeBytes,

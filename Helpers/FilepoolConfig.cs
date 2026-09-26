@@ -13,13 +13,15 @@ namespace Libertix.Helpers
             bool requiresCatalogSignature,
             bool isDevelopmentOverride,
             string localDirectory = null,
-            bool skipWebCatalogComparison = false)
+            bool skipWebCatalogComparison = false,
+            string localServer = null)
         {
             BaseUrl = baseUrl;
             _requiresCatalogSignature = requiresCatalogSignature;
             _isDevelopmentOverride = isDevelopmentOverride;
             LocalDirectory = localDirectory;
             SkipWebCatalogComparison = skipWebCatalogComparison;
+            LocalServer = localServer;
         }
 
         public string BaseUrl { get; }
@@ -39,6 +41,22 @@ namespace Libertix.Helpers
         public string LocalDirectory { get; }
 
         public bool SkipWebCatalogComparison { get; }
+
+        public string LocalServer { get; }
+
+        public FilepoolConfig WithLocalServer(string address)
+        {
+            if (IsDevelopmentMode || LocalDirectory != null)
+                throw new InvalidOperationException("A local server requires the official catalog source.");
+            return new FilepoolConfig(BaseUrl, true, false,
+                localServer: FilepoolProtocol.ValidateServer(address).GetLeftPart(UriPartial.Authority));
+        }
+
+        public string ResolveArtifactUrl(string value, string fileName, string sha256)
+        {
+            return LocalServer == null ? ResolveUrl(value) :
+                LocalServer + FilepoolProtocol.ArtifactPath(fileName, sha256);
+        }
 
         public FilepoolConfig WithLocalDirectory(string path, bool skipWebCatalogComparison)
         {

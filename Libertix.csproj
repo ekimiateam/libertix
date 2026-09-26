@@ -65,6 +65,13 @@
       <SubType>Designer</SubType>
     </ApplicationDefinition>
     <Compile Include="Helpers\FilepoolConfig.cs" />
+    <Compile Include="Helpers\FilepoolProtocol.cs" />
+    <Compile Include="Helpers\LocalFilepoolDiscovery.cs" />
+    <Compile Include="Scripts\native\LocalFilepoolDownload.cs" />
+    <Content Include="Scripts\native\LocalFilepoolDownload.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Compile Include="Installation\CatalogFiles.cs" />
     <Compile Include="Helpers\ApplicationBuild.cs" />
     <Compile Include="Helpers\PowerShellJsonResult.cs" />
     <Compile Include="Helpers\StartupOptions.cs" />

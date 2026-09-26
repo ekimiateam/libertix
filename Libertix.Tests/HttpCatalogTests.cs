@@ -14,6 +14,23 @@ namespace Libertix.Tests
     [TestClass]
     public sealed class HttpCatalogTests
     {
+        [TestMethod]
+        public void LocalServerDoesNotReplaceOfficialMetadataOrDisableSignatures()
+        {
+            var official = FilepoolConfig.ForBuild(ApplicationBuild.Parse("0.3"));
+            var server = official.WithLocalServer("https://127.0.0.1:18080");
+            Assert.AreEqual(official.CatalogUrl, server.CatalogUrl);
+            Assert.AreEqual(official.CatalogSignatureUrl, server.CatalogSignatureUrl);
+            Assert.AreEqual(official.ReleasesUrl, server.ReleasesUrl);
+            Assert.IsTrue(server.RequiresCatalogSignature);
+            Assert.IsFalse(server.IsDevelopmentMode);
+            string hash = new string('a', 64);
+            Assert.AreEqual("https://127.0.0.1:18080/files/" + hash + "/mint.iso",
+                server.ResolveArtifactUrl("https://example.com/mint.iso", "mint.iso", hash));
+            Assert.ThrowsException<ArgumentException>(() =>
+                official.WithLocalServer("http://127.0.0.1:18080"));
+        }
+
         [DataTestMethod]
         [DataRow(false)]
         [DataRow(true)]

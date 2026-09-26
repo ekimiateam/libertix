@@ -30,6 +30,7 @@ def test_legacy_project_compiles_every_application_source_file() -> None:
         "BootGuardian",
         "Libertix.Tests",
         "Standalone",
+        "install-party-kit",
         "bin",
         "obj",
         ".work",

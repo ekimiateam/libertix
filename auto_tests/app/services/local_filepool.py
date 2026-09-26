@@ -7,6 +7,8 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path, PureWindowsPath
 from urllib.parse import urljoin, urlsplit
 
@@ -22,6 +24,27 @@ from app.published_release import (
     _download_bytes,
     _load_public_key,
 )
+
+MAXIMUM_ARTIFACT_BYTES = 16 * 1024**3
+DOWNLOAD_ATTEMPTS = 2
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+PROGRESS_INTERVAL_BYTES = 64 * 1024**2
+DOWNLOAD_RETRY_DELAY_SECONDS = 3
+HTTP_TIMEOUT_SECONDS = 60
+VM_DIRECTORY_TIMEOUT_SECONDS = 30
+RETRYABLE_HTTP_STATUSES = {
+    HTTPStatus.TOO_MANY_REQUESTS,
+    HTTPStatus.INTERNAL_SERVER_ERROR,
+    HTTPStatus.BAD_GATEWAY,
+    HTTPStatus.SERVICE_UNAVAILABLE,
+    HTTPStatus.GATEWAY_TIMEOUT,
+}
+
+
+@dataclass
+class _DownloadAttempt:
+    count: int = 0
+    response: httpx.Response | None = None
 
 
 def catalog_artifacts(catalog: dict) -> list[dict]:
@@ -44,7 +67,7 @@ def catalog_artifacts(catalog: dict) -> list[dict]:
             or name in names
             or not re.fullmatch(r"[0-9a-fA-F]{64}", item["sha256"])
             or not isinstance(item["sizeBytes"], int)
-            or not 0 < item["sizeBytes"] <= 16 * 1024**3
+            or not 0 < item["sizeBytes"] <= MAXIMUM_ARTIFACT_BYTES
         ):
             raise ValueError("Invalid local filepool artifact metadata")
         names.add(name)
@@ -53,74 +76,23 @@ def catalog_artifacts(catalog: dict) -> list[dict]:
 
 def download_artifact(client, url, destination, size, digest, progress, result, vm_name):
     temporary = destination.with_name(destination.name + ".partial")
-    for attempt in range(1, 3):
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         network_recovery.checkpoint()
-        count = 0
-        response = None
+        state = _DownloadAttempt()
         try:
-            if temporary.is_symlink():
-                raise ValueError("Partial download must not be a symbolic link")
-            count = temporary.stat().st_size if temporary.exists() else 0
-            if count > size:
-                raise ValueError("Partial download exceeds signed size")
-            if count < size:
-                headers = {"Accept-Encoding": "identity"}
-                if count:
-                    headers["Range"] = f"bytes={count}-"
-                with client.stream("GET", url, headers=headers) as response:
-                    response.raise_for_status()
-                    if response.status_code == 206:
-                        expected = f"bytes {count}-{size - 1}/{size}"
-                        if response.headers.get("Content-Range") != expected:
-                            raise ValueError("Download range does not match requested bytes")
-                    elif response.status_code == 200:
-                        # A server may ignore Range; never append its full response.
-                        count = 0
-                    else:
-                        raise ValueError("Unexpected download response status")
-                    if response.headers.get("Content-Encoding", "identity") != "identity":
-                        raise ValueError("Download must use identity encoding for byte ranges")
-                    progress("Resuming" if count else "Downloading", destination.name, count, size)
-                    reported = count
-                    with temporary.open("ab" if count else "wb") as stream:
-                        for chunk in response.iter_bytes(1024 * 1024):
-                            if count + len(chunk) > size:
-                                raise ValueError("Download exceeds signed size")
-                            stream.write(chunk)
-                            count += len(chunk)
-                            if count - reported >= 64 * 1024**2:
-                                progress("Downloading", destination.name, count, size)
-                                reported = count
-                if count != size:
-                    raise httpx.RemoteProtocolError("Download ended before the signed size")
-            with temporary.open("rb") as stream:
-                actual = hashlib.file_digest(stream, "sha256").hexdigest()
-            if actual != digest:
-                raise ValueError("Downloaded file does not match signed SHA-256")
-            temporary.replace(destination)
-            progress("Downloaded and verified", destination.name, size, size)
+            _inspect_partial_download(temporary, size, state)
+            if state.count < size:
+                _receive_artifact(client, url, temporary, destination.name, size, progress, state)
+            _publish_verified_artifact(temporary, destination, size, digest, progress)
             return
         except (httpx.HTTPError, OSError, ValueError) as exc:
-            status = response.status_code if response is not None else None
-            details = {
-                "vm": vm_name,
-                "file": destination.name,
-                "host": urlsplit(url).hostname,
-                "attempt": attempt,
-                "bytes_transferred": count,
-                "total_bytes": size,
-                "http_status": status,
-                "exception_type": type(exc).__name__,
-            }
-            reason = f"HTTP {status}" if isinstance(exc, httpx.HTTPStatusError) else str(exc)
-            reason = reason or type(exc).__name__
-            details["error"] = reason
-            retryable = isinstance(exc, httpx.TransportError) or (
-                isinstance(exc, httpx.HTTPStatusError) and status in {429, 500, 502, 503, 504}
+            details, retryable = _download_failure_details(
+                exc, state, vm_name, destination.name, url, attempt, size
             )
+            reason = details["error"]
             if retryable:
                 network_recovery.recover(time.monotonic(), context={"vm": vm_name})
-            if not retryable or attempt == 2:
+            if not retryable or attempt == DOWNLOAD_ATTEMPTS:
                 raise WorkflowError(
                     "automation.local_filepool.download",
                     f"Local filepool download failed for {destination.name}: {reason}",
@@ -128,10 +100,89 @@ def download_artifact(client, url, destination, size, digest, progress, result, 
                 ) from exc
             result.ok(
                 "automation.local_filepool.retry",
-                f"Retrying {destination.name} (attempt 2/2) from {count} bytes: {reason}",
+                f"Retrying {destination.name} (attempt {attempt + 1}/{DOWNLOAD_ATTEMPTS}) "
+                f"from {state.count} bytes: {reason}",
                 **details,
             )
-            time.sleep(3)
+            time.sleep(DOWNLOAD_RETRY_DELAY_SECONDS)
+
+
+def _inspect_partial_download(temporary, size, state):
+    if temporary.is_symlink():
+        raise ValueError("Partial download must not be a symbolic link")
+    state.count = temporary.stat().st_size if temporary.exists() else 0
+    if state.count > size:
+        raise ValueError("Partial download exceeds signed size")
+
+
+def _receive_artifact(client, url, temporary, name, size, progress, state):
+    headers = {"Accept-Encoding": "identity"}
+    if state.count:
+        headers["Range"] = f"bytes={state.count}-"
+    with client.stream("GET", url, headers=headers) as response:
+        state.response = response
+        _validate_download_response(response, size, state)
+        progress("Resuming" if state.count else "Downloading", name, state.count, size)
+        _write_download_body(response, temporary, name, size, progress, state)
+    if state.count != size:
+        raise httpx.RemoteProtocolError("Download ended before the signed size")
+
+
+def _validate_download_response(response, size, state):
+    response.raise_for_status()
+    if response.status_code == HTTPStatus.PARTIAL_CONTENT:
+        expected = f"bytes {state.count}-{size - 1}/{size}"
+        if response.headers.get("Content-Range") != expected:
+            raise ValueError("Download range does not match requested bytes")
+    elif response.status_code == HTTPStatus.OK:
+        # A server may ignore Range; never append its full response.
+        state.count = 0
+    else:
+        raise ValueError("Unexpected download response status")
+    if response.headers.get("Content-Encoding", "identity") != "identity":
+        raise ValueError("Download must use identity encoding for byte ranges")
+
+
+def _write_download_body(response, temporary, name, size, progress, state):
+    reported = state.count
+    with temporary.open("ab" if state.count else "wb") as stream:
+        for chunk in response.iter_bytes(DOWNLOAD_CHUNK_BYTES):
+            if state.count + len(chunk) > size:
+                raise ValueError("Download exceeds signed size")
+            stream.write(chunk)
+            state.count += len(chunk)
+            if state.count - reported >= PROGRESS_INTERVAL_BYTES:
+                progress("Downloading", name, state.count, size)
+                reported = state.count
+
+
+def _publish_verified_artifact(temporary, destination, size, digest, progress):
+    with temporary.open("rb") as stream:
+        actual = hashlib.file_digest(stream, "sha256").hexdigest()
+    if actual != digest:
+        raise ValueError("Downloaded file does not match signed SHA-256")
+    temporary.replace(destination)
+    progress("Downloaded and verified", destination.name, size, size)
+
+
+def _download_failure_details(exc, state, vm_name, name, url, attempt, size):
+    status = state.response.status_code if state.response is not None else None
+    details = {
+        "vm": vm_name,
+        "file": name,
+        "host": urlsplit(url).hostname,
+        "attempt": attempt,
+        "bytes_transferred": state.count,
+        "total_bytes": size,
+        "http_status": status,
+        "exception_type": type(exc).__name__,
+    }
+    reason = f"HTTP {status}" if isinstance(exc, httpx.HTTPStatusError) else str(exc)
+    details["error"] = reason or type(exc).__name__
+    retryable = isinstance(exc, httpx.TransportError) or (
+        isinstance(exc, httpx.HTTPStatusError) and status in RETRYABLE_HTTP_STATUSES
+    )
+    return details, retryable
 
 
 def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) -> None:
@@ -153,15 +204,8 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
             total_bytes=total,
         )
 
-    with httpx.Client(follow_redirects=True, timeout=60) as client:
-        catalog_bytes = _download_bytes(client, base + "catalog.json", MAXIMUM_METADATA_BYTES)
-        signature = _download_bytes(client, base + "catalog.json.sig", MAXIMUM_SIGNATURE_BYTES)
-        _load_public_key(repository / "Scripts/config/Libertix.CatalogPublicKey.xml").verify(
-            base64.b64decode(signature.strip(), validate=True),
-            catalog_bytes,
-            padding.PKCS1v15(),
-            hashes.SHA256(),
-        )
+    with httpx.Client(follow_redirects=True, timeout=HTTP_TIMEOUT_SECONDS) as client:
+        catalog_bytes, signature = _read_verified_catalog(client, base, repository)
         artifacts = catalog_artifacts(json.loads(catalog_bytes))
         cache = settings.runtime_dir / "local-filepool" / hashlib.sha256(catalog_bytes).hexdigest()
         cache.mkdir(parents=True, exist_ok=True)
@@ -170,18 +214,7 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
         paths[1].write_bytes(signature)
         for item in artifacts:
             name, size, digest = item["fileName"], item["sizeBytes"], item["sha256"].lower()
-            selected = None
-            for candidate in (repository / "auto_tests/app/filepool" / name, cache / name):
-                if (
-                    candidate.is_file()
-                    and not candidate.is_symlink()
-                    and candidate.stat().st_size == size
-                ):
-                    with candidate.open("rb") as stream:
-                        if hashlib.file_digest(stream, "sha256").hexdigest() == digest:
-                            selected = candidate
-                            progress("Verified cached", name, size, size)
-                            break
+            selected = _find_cached_artifact(repository, cache, name, size, digest, progress)
             if selected is None:
                 url = urljoin(base, item["url"])
                 parsed = urlsplit(url)
@@ -206,24 +239,10 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
                 script_name="local_filepool.ps1",
                 config={"mode": "prepare", "directory": str(destination)},
                 step="automation.local_filepool.directory",
-                timeout=30,
+                timeout=VM_DIRECTORY_TIMEOUT_SECONDS,
             )
             for path in paths:
-                reported = 0
-                progress("Copying to VM", path.name, 0, path.stat().st_size)
-
-                def upload_progress(done, total, *, name=path.name):
-                    nonlocal reported
-                    if done == total or done - reported >= 64 * 1024**2:
-                        progress("Copying to VM", name, done, total)
-                        reported = done
-
-                ssh.upload_file(
-                    path,
-                    str(destination / path.name),
-                    step="automation.local_filepool.copy",
-                    on_progress=upload_progress,
-                )
+                _upload_artifact(ssh, path, destination, progress)
     result.ok(
         "automation.local_filepool.prepared",
         "Signed catalog and all artifacts copied beside Libertix.exe",
@@ -232,4 +251,45 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
         files=[path.name for path in paths],
         catalog_sha256=hashlib.sha256(catalog_bytes).hexdigest(),
         metadata_url=base,
+    )
+
+
+def _read_verified_catalog(client, base, repository):
+    catalog_bytes = _download_bytes(client, base + "catalog.json", MAXIMUM_METADATA_BYTES)
+    signature = _download_bytes(client, base + "catalog.json.sig", MAXIMUM_SIGNATURE_BYTES)
+    _load_public_key(repository / "Scripts/config/Libertix.CatalogPublicKey.xml").verify(
+        base64.b64decode(signature.strip(), validate=True),
+        catalog_bytes,
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    return catalog_bytes, signature
+
+
+def _find_cached_artifact(repository, cache, name, size, digest, progress):
+    for candidate in (repository / "auto_tests/app/filepool" / name, cache / name):
+        if not candidate.is_file() or candidate.is_symlink() or candidate.stat().st_size != size:
+            continue
+        with candidate.open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() == digest:
+                progress("Verified cached", name, size, size)
+                return candidate
+    return None
+
+
+def _upload_artifact(ssh, path, destination, progress):
+    reported = 0
+    progress("Copying to VM", path.name, 0, path.stat().st_size)
+
+    def upload_progress(done, total, *, name=path.name):
+        nonlocal reported
+        if done == total or done - reported >= PROGRESS_INTERVAL_BYTES:
+            progress("Copying to VM", name, done, total)
+            reported = done
+
+    ssh.upload_file(
+        path,
+        str(destination / path.name),
+        step="automation.local_filepool.copy",
+        on_progress=upload_progress,
     )

@@ -3410,16 +3410,15 @@ def test_uefi_revert_does_not_require_download_configuration() -> None:
     validation = script.split("# Networking defaults", 1)[0].rsplit(
         "# A rollback only consumes", 1
     )[1]
-    downloads = script.split("# Download hashes and names", 1)[1].split("# Defaults", 1)[0]
 
     assert (
         "if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction)"
     ) in validation
     assert "FilepoolBaseUrl is required" in validation
-    assert (
-        "if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction)"
-    ) in downloads
-    assert "New-LibertixDownloadUrls" in downloads
+    # URLs now arrive from C#; recovery never has to construct or fetch one.
+    assert "New-LibertixDownloadUrls" not in script
+    assert '[string]$Aria2ZipUrl = ""' in script
+    assert "$Aria2ZipUrl = [string]$config.Aria2ZipUrl" in script
 
 
 def test_uefi_configuration_requires_the_versioned_installation_plan() -> None:

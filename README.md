@@ -178,6 +178,10 @@ or decrypted. Disable Windows file sharing or resolve the reported dependency be
 
 ## Runtime configuration
 
+To reuse files on several PCs, you can use either an **adjacent `filepool` folder without a server**
+or the **local install-party server**. See the [setup and verification instructions](install-party-kit/README.md).
+The folder is proposed first and remains supported independently of the server.
+
 Without a command-line override, the executable selects a signed GitHub Pages channel from its
 embedded build version:
 

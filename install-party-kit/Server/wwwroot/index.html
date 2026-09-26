@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Libertix Install Party</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <h1>Libertix Install Party</h1>
+  <p>Local installation files. Authenticity remains verified against the official signed catalog.</p>
+  <p>This management page is accessible only from localhost.</p>
+  <section>
+    <h2>Server</h2>
+    <pre id="addresses"></pre>
+    <p id="channel"></p>
+    <p id="discovery"></p>
+  </section>
+  <section>
+    <h2>Filepool</h2>
+    <p id="phase">Connecting…</p>
+    <p id="file"></p>
+    <progress id="progress" max="1" value="0"></progress>
+    <p id="amount"></p>
+    <p id="error" role="alert"></p>
+    <button id="update" class="primary" type="button">Check for updates</button>
+  </section>
+  <section>
+    <h2>Active downloads</h2>
+    <table><thead><tr><th>Client</th><th>File</th><th>Started</th></tr></thead><tbody id="clients"></tbody></table>
+  </section>
+  <section>
+    <h2>Settings</h2>
+    <form id="settings">
+      <label>Branch <select id="branch"><option>main</option><option>dev</option></select></label>
+      <label>HTTPS port <input id="port" type="number" min="1024" max="65535" required></label>
+      <label>Storage directory <input id="storage" type="text" required></label>
+      <p>Saved changes take effect after restarting the server. Active downloads are not interrupted.</p>
+      <button type="submit">Save settings</button>
+    </form>
+    <p id="settings-result" role="status"></p>
+  </section>
+</body>
+</html>

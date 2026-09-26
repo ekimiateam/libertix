@@ -183,6 +183,9 @@ namespace Libertix.Pages
                 ExecutionStatePath = _executionLedger.StatePath,
                 FilepoolBaseUrl = Filepool.BaseUrl,
                 LocalFilepoolDirectory = Filepool.LocalDirectory,
+                LocalFilepoolServer = Filepool.LocalServer,
+                Aria2ZipUrl = Filepool.ResolveArtifactUrl(Artifacts.Aria2.ArchiveFileName,
+                    Artifacts.Aria2.ArchiveFileName, Artifacts.Aria2.ArchiveSha256),
                 Aria2ExePath = aria2Path,
                 Aria2Connections = Aria2MaxConnections
             });

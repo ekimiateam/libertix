@@ -493,9 +493,24 @@ class SSHClient:
 
         payload = base64.b64encode(command.encode("utf-8")).decode("ascii")
 
+        script = self._windows_timeout_script(payload, timeout_seconds)
+        compressed = gzip.compress(script.encode("utf-8"), mtime=0)
+        encoded = base64.b64encode(compressed).decode("ascii")
+        bootstrap = (
+            f"$b=[Convert]::FromBase64String('{encoded}');"
+            "$m=[IO.MemoryStream]::new($b);"
+            "$g=[IO.Compression.GzipStream]::new("
+            "$m,[IO.Compression.CompressionMode]::Decompress);"
+            "$r=[IO.StreamReader]::new($g,[Text.Encoding]::UTF8);"
+            "& ([ScriptBlock]::Create($r.ReadToEnd()))"
+        )
+        return f'powershell.exe -NoProfile -NonInteractive -Command "{bootstrap}"'
+
+    @staticmethod
+    def _windows_timeout_script(payload: str, timeout_seconds: int) -> str:
         # Capture the native command's exit status separately so PowerShell
         # cannot replace it with the status of the output-drain commands.
-        script = f"""
+        return f"""
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $utf8NoBom = New-Object Text.UTF8Encoding($false)
@@ -654,17 +669,6 @@ try {{
 }}
 exit $exitCode
 """.strip()
-        compressed = gzip.compress(script.encode("utf-8"), mtime=0)
-        encoded = base64.b64encode(compressed).decode("ascii")
-        bootstrap = (
-            f"$b=[Convert]::FromBase64String('{encoded}');"
-            "$m=[IO.MemoryStream]::new($b);"
-            "$g=[IO.Compression.GzipStream]::new("
-            "$m,[IO.Compression.CompressionMode]::Decompress);"
-            "$r=[IO.StreamReader]::new($g,[Text.Encoding]::UTF8);"
-            "& ([ScriptBlock]::Create($r.ReadToEnd()))"
-        )
-        return f'powershell.exe -NoProfile -NonInteractive -Command "{bootstrap}"'
 
     @contextmanager
     def _text_sftp(self, timeout: float, *, bound_transfer: bool = True):

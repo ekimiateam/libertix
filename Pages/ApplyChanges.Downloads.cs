@@ -162,6 +162,8 @@ namespace Libertix.Pages
             int attempts,
             long maximumBytes)
         {
+            if (Filepool.LocalServer != null)
+                return false;
             string aria2Path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Tools", "aria2", "aria2c.exe");
             if (!File.Exists(aria2Path))
             {
@@ -474,6 +476,16 @@ namespace Libertix.Pages
                 _installationCancellation.Token))
             {
                 timeoutCancellation.CancelAfter(timeout);
+                if (Filepool.LocalServer != null)
+                {
+                    await LocalFilepoolDownload.DownloadAsync(
+                        Filepool.LocalServer, url, destinationPath, maximumBytes,
+                        (received, size) => Dispatcher.Invoke(() => UpdateProgress(
+                            progressStart + (int)(received * progressSpan / size),
+                            progressMessage + " " + (received * 100 / size) + "%")),
+                        timeoutCancellation.Token);
+                    return;
+                }
                 using (var response = await SharedHttpClient.GetAsync(
                     url,
                     HttpCompletionOption.ResponseHeadersRead,

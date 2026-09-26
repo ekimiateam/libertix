@@ -110,6 +110,10 @@ namespace Libertix
                 ApplicationLogger.Write(
                     "Published version check skipped for the protected cached recovery UI.");
             }
+            if (string.IsNullOrWhiteSpace(recoveryStatePath) &&
+                Filepool.LocalDirectory == null && !Filepool.IsDevelopmentMode &&
+                RuntimeOptions.Unattended == null)
+                await ChooseLocalServerAsync();
             await RunValidatedStartupAsync(
                 () => string.IsNullOrWhiteSpace(recoveryStatePath)
                     ? ValidatePublishedVersionAsync()
@@ -127,6 +131,41 @@ namespace Libertix
             // StartupUri would open the window as soon as async OnStartup yields.
             if (await validate())
                 openWindow();
+        }
+
+        private async Task ChooseLocalServerAsync()
+        {
+            try
+            {
+                var servers = await LocalFilepoolDiscovery.FindAsync(Build.Channel);
+                for (int index = 0; index < servers.Count; index++)
+                {
+                    string prompt = string.Format(Localization.GetBootstrapString(
+                        "LocalServerChoice",
+                        "Local installation server {0} ({1}/{2}). Use this server? " +
+                        "Files will still be verified using the signed GitHub catalog. " +
+                        "Yes: use it. No: next server. Cancel: use official downloads."),
+                        servers[index], index + 1, servers.Count);
+                    var choice = MessageBox.Show(prompt, "Libertix", MessageBoxButton.YesNoCancel,
+                        MessageBoxImage.Question, MessageBoxResult.No);
+                    if (choice == MessageBoxResult.Cancel)
+                        return;
+                    if (choice == MessageBoxResult.Yes)
+                    {
+                        Filepool = Filepool.WithLocalServer(servers[index]);
+                        ApplicationLogger.Write("Accepted local filepool: " + Filepool.LocalServer);
+                        return;
+                    }
+                }
+            }
+            catch (System.Net.Sockets.SocketException error)
+            {
+                ApplicationLogger.Write("Local server discovery unavailable: " + error.Message);
+            }
+            catch (System.Net.NetworkInformation.NetworkInformationException error)
+            {
+                ApplicationLogger.Write("Local network enumeration unavailable: " + error.Message);
+            }
         }
 
         private static bool IsRecoveryUiInvocation(string[] args)

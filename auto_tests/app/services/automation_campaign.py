@@ -290,6 +290,39 @@ def _persist_summary(workspace: Path, summary: list[dict[str, object]]) -> None:
     temporary.replace(workspace / "campaign-summary.json")
 
 
+def _scenario_request(request, vm, distribution, first_boot, layout, fault, negative):
+    fixture = StorageFixtureRequest()
+    if layout and layout != "local-filepool":
+        fixture = StorageFixtureRequest(
+            extra_system_partition="recovery" if layout == "secondary" else layout,
+            decrypt_system_volume=True,
+            secondary_data=True,
+            decrypt_secondary_volume=True,
+            redirect_documents=True,
+        )
+
+    return AutomationRequest(
+        vms=[vm],
+        source=request.source,
+        apply=True,
+        distribution=distribution,
+        first_boot=first_boot,
+        linux_username=request.linux_username,
+        linux_password=request.linux_password,
+        linux_size_gib=request.linux_size_gib,
+        migrate_windows_preferences=request.migrate_windows_preferences,
+        share_windows_files_in_linux=True,
+        share_linux_files_in_windows=True,
+        verify_uninstall=not negative and fault == "none",
+        boot_guardian_fault=fault,
+        local_filepool=layout == "local-filepool",
+        expected_compatibility_refusal="COMPAT_E_MBR_PRIMARY_LIMIT" if negative else None,
+        snapshot_mode="secondary-disk" if layout and layout != "local-filepool" else "default",
+        installation_target="secondary" if layout == "secondary" else "windows",
+        storage_fixture=fixture,
+    )
+
+
 def run_campaign(
     request: AutomationCampaignRequest,
     vm_names: list[str],
@@ -512,40 +545,9 @@ def run_campaign(
                     StepResult(step="automation.campaign_scenario", status="ok", message=scenario)
                 )
 
-                fixture = StorageFixtureRequest()
-                if layout and layout != "local-filepool":
-                    fixture = StorageFixtureRequest(
-                        extra_system_partition="recovery" if layout == "secondary" else layout,
-                        decrypt_system_volume=True,
-                        secondary_data=True,
-                        decrypt_secondary_volume=True,
-                        redirect_documents=True,
-                    )
-
                 negative = is_negative(vm, layout)
-                child = AutomationRequest(
-                    vms=[vm],
-                    source=request.source,
-                    apply=True,
-                    distribution=distribution,
-                    first_boot=first_boot,
-                    linux_username=request.linux_username,
-                    linux_password=request.linux_password,
-                    linux_size_gib=request.linux_size_gib,
-                    migrate_windows_preferences=request.migrate_windows_preferences,
-                    share_windows_files_in_linux=True,
-                    share_linux_files_in_windows=True,
-                    verify_uninstall=not negative and fault == "none",
-                    boot_guardian_fault=fault,
-                    local_filepool=layout == "local-filepool",
-                    expected_compatibility_refusal="COMPAT_E_MBR_PRIMARY_LIMIT"
-                    if negative
-                    else None,
-                    snapshot_mode="secondary-disk"
-                    if layout and layout != "local-filepool"
-                    else "default",
-                    installation_target="secondary" if layout == "secondary" else "windows",
-                    storage_fixture=fixture,
+                child = _scenario_request(
+                    request, vm, distribution, first_boot, layout, fault, negative
                 )
 
                 try:

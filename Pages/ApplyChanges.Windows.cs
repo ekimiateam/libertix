@@ -179,7 +179,8 @@ namespace Libertix.Pages
                         else
                         {
                             string setupUrl =
-                                $"{Filepool.BaseUrl}/{Artifacts.Ext4Driver.FileName}";
+                                Filepool.ResolveArtifactUrl(Artifacts.Ext4Driver.FileName,
+                                    Artifacts.Ext4Driver.FileName, Artifacts.Ext4Driver.Sha256);
                             if (!await DownloadFileWithRetriesAsync(
                                 setupUrl,
                                 setupPath,
