@@ -359,9 +359,14 @@ def _run_campaign_vm_attempt(
         ),
         default=-1,
     )
-    if outcome.status != "ok" and not any(
-        step.step == "automation.diagnostics.saved"
-        for step in outcome.steps[last_failure_index + 1 :]
+    source_changed = any(step.step == "automation.source_changed" for step in outcome.steps)
+    if (
+        outcome.status != "ok"
+        and not source_changed
+        and not any(
+            step.step == "automation.diagnostics.saved"
+            for step in outcome.steps[last_failure_index + 1 :]
+        )
     ):
         failures = [step for step in outcome.steps if step.status == "error"]
         failure = (
@@ -476,6 +481,12 @@ def _run_operation(
             automation_settings = configured.model_copy(
                 update={"reset_snapshot": configured.secondary_disk_reset_snapshot}
             )
+        elif request.local_filepool:
+            selected = ValidationService(configured).select_vms(selectors)
+            if len(selected) == 1 and selected[0].local_filepool_snapshot:
+                automation_settings = configured.model_copy(
+                    update={"reset_snapshot": selected[0].local_filepool_snapshot}
+                )
         if prepared_release is not None:
             # Each lane still reserves headroom for all three concurrently running test VMs.
             automation_settings = automation_settings.model_copy(
@@ -568,22 +579,35 @@ def _stream_operation_worker(
             and server_provenance is not None
             and (server_provenance.get("source_sha256_at_import") != SOURCE_AT_IMPORT)
         ):
-            raise ValueError(
+            message = (
                 "The Python sources changed after campaign startup; refusing mixed controllers"
             )
-        if campaign_cell and configured.automation_network_ping_hosts:
-            network_recovery.active = network_recovery.NetworkRecovery(
-                configured.automation_network_ping_hosts, on_step
+            result = OperationResult(
+                status="error",
+                operation=operation,
+                message=message,
+                steps=[
+                    StepResult(
+                        step=f"{operation}.source_changed",
+                        status="error",
+                        message=message,
+                    )
+                ],
             )
-        result = _run_operation(
-            configured,
-            operation,
-            selectors,
-            request,
-            on_step,
-            run_workspace,
-            prepared_release,
-        )
+        else:
+            if campaign_cell and configured.automation_network_ping_hosts:
+                network_recovery.active = network_recovery.NetworkRecovery(
+                    configured.automation_network_ping_hosts, on_step
+                )
+            result = _run_operation(
+                configured,
+                operation,
+                selectors,
+                request,
+                on_step,
+                run_workspace,
+                prepared_release,
+            )
     except Exception as exc:
         logger.exception("Unexpected internal error in %s stream", operation)
         result = OperationResult(
@@ -688,16 +712,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         stream_format: Literal["compact", "ndjson"] = "compact",
     ):
         events: queue.Queue[tuple[str, str | int | None]] = queue.Queue()
+
         terminal_result_seen = threading.Event()
         independent_lanes_started = threading.Event()
         terminal_result_lock = threading.Lock()
         timeout_cleanup_started = threading.Event()
         timeout_cleanup_finished = threading.Event()
+
         latest_steps: dict[str, str] = {}
         latest_steps_lock = threading.Lock()
         automation_progress = threading.Event()
         automation_progress_lock = threading.Lock()
         progress_clock = OperationProgress(time.monotonic())
+
         network_waiting = threading.Event()
         network_restart: StepResult | None = None
         network_paused_at: float | None = None
@@ -743,6 +770,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 automation_progress.set()
                 events.put(("data", projector.render(event, stream_format=stream_format)))
 
+        # The worker owns the operation; the relay only publishes its evidence
+        # and tracks progress so an unresponsive worker can be diagnosed.
         process_context = multiprocessing.get_context("spawn")
         process_events, worker_events = process_context.Pipe(duplex=False)
 
@@ -761,6 +790,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "independent_vms"
                         ):
                             independent_lanes_started.set()
+
                         with automation_progress_lock:
                             now = time.monotonic()
                             if step.step == "automation.network.wait":
@@ -779,6 +809,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             ) or progress_clock.observe(step, now)
                         if advanced:
                             automation_progress.set()
+
                         vm = str(step.context.get("vm") or step.context.get("target") or "global")
                         with latest_steps_lock:
                             label = step.step
@@ -797,6 +828,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 )
                             )
                         continue
+
                     if event_type == "result":
                         publish_result(OperationResult.model_validate(payload), stream_format)
                         # All operation cleanup has completed before the worker
@@ -849,6 +881,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # Keep the lock until the old controller is stopped and its evidence saved.
                 process.terminate()
                 process.join()
+
                 failure = result.steps[0]
                 event = projector.project_step(
                     StepResult(
@@ -905,6 +938,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     return
                 if network_waiting.is_set() or network_restart is not None:
                     continue
+
                 with automation_progress_lock:
                     stalled_vm, last_progress = progress_clock.oldest()
                     idle_seconds = time.monotonic() - last_progress
@@ -928,6 +962,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         continue
                 with latest_steps_lock:
                     active_steps = dict(latest_steps)
+
                 result = OperationResult(
                     status="error",
                     operation="automation",
@@ -964,6 +999,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 relay_thread.join()
                 if timeout_cleanup_started.is_set():
                     timeout_cleanup_finished.wait()
+
                 if not terminal_result_seen.is_set():
                     exit_code = process.exitcode if process.exitcode is not None else -1
                     forced = exit_code < 0

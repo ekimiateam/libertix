@@ -302,6 +302,7 @@ def run_campaign(
 ) -> OperationResult:
     if len(vm_names) != 3 or len(set(vm_names)) != 3:
         raise ValueError("The complete campaign requires exactly three distinct enabled test VMs")
+
     scenarios = [(distribution, first_boot, "", "none") for distribution, first_boot in SCENARIOS]
     if (
         request.include_storage_scenarios
@@ -316,10 +317,12 @@ def run_campaign(
         )
     if request.include_storage_scenarios:
         scenarios.extend((d, b, layout, "none") for d, b, layout in STORAGE_SCENARIOS)
+
     if request.include_boot_guardian_scenarios:
         if not any(vm_firmwares[name] == "uefi" for name in vm_names):
             raise ValueError("Boot guardian scenarios require at least one UEFI test VM")
         scenarios.extend((d, b, "", fault) for d, b, fault in BOOT_GUARDIAN_SCENARIOS)
+
     local_filepool_vm = next(
         (vm for vm in vm_names if (vm_firmwares or {}).get(vm) == "uefi"), None
     )
@@ -327,6 +330,7 @@ def run_campaign(
         if not local_filepool_vm:
             raise ValueError("Local filepool scenarios require a UEFI VM")
         scenarios.extend((d, b, "local-filepool", "none") for d, b in LOCAL_FILEPOOL_SCENARIOS)
+
     scenario_vms = [
         [local_filepool_vm]
         if layout == "local-filepool"
@@ -346,12 +350,14 @@ def run_campaign(
         }
         for index, (distribution, first_boot, layout, fault) in enumerate(scenarios)
     ]
+
     names = [str(item["scenario"]) for item in summaries]
     start_index = 0
     if request.start_scenario is not None:
         if request.start_scenario not in names:
             raise ValueError("Unknown start scenario; choose one of: " + ", ".join(names))
         start_index = names.index(request.start_scenario)
+
     negative_milestones = {
         key: label
         for key, label in CAMPAIGN_MILESTONES.items()
@@ -434,15 +440,14 @@ def run_campaign(
         cells = summary["cells"]
         summary["vms"] = {vm: cell["status"] for vm, cell in cells.items()}
         states = set(summary["vms"].values())
-        summary["status"] = (
-            "ok"
-            if states == {"ok"}
-            else "running"
-            if "running" in states or states == {"ok", "not-run"}
-            else "error"
-            if "error" in states
-            else "not-run"
-        )
+        if states == {"ok"}:
+            summary["status"] = "ok"
+        elif "running" in states or states == {"ok", "not-run"}:
+            summary["status"] = "running"
+        elif "error" in states:
+            summary["status"] = "error"
+        else:
+            summary["status"] = "not-run"
         summary["previous_attempts"] = [
             {"vm": vm, **attempt}
             for vm, cell in cells.items()
@@ -459,11 +464,13 @@ def run_campaign(
             attempt = request.start_scenario_attempt if index == start_index else 1
             generation = 0
             history = []
+
             while True:
                 generation += 1
                 cell_workspace = workspace / scenario / vm / f"attempt-{attempt}-run-{generation}"
                 cell_workspace.mkdir(mode=0o700, parents=True)
                 projector = StreamEventProjector("automation", cell_workspace)
+
                 cell = {
                     "status": "running",
                     "attempt": attempt,
@@ -504,6 +511,7 @@ def run_campaign(
                 publish(
                     StepResult(step="automation.campaign_scenario", status="ok", message=scenario)
                 )
+
                 fixture = StorageFixtureRequest()
                 if layout and layout != "local-filepool":
                     fixture = StorageFixtureRequest(
@@ -513,6 +521,7 @@ def run_campaign(
                         decrypt_secondary_volume=True,
                         redirect_documents=True,
                     )
+
                 negative = is_negative(vm, layout)
                 child = AutomationRequest(
                     vms=[vm],
@@ -538,6 +547,7 @@ def run_campaign(
                     installation_target="secondary" if layout == "secondary" else "windows",
                     storage_fixture=fixture,
                 )
+
                 try:
                     outcome = run_scenario(child, cell_workspace, publish)
                 except Exception as exc:
@@ -551,6 +561,7 @@ def run_campaign(
                     outcome = OperationResult(
                         status="error", operation="automation", message=error.message, steps=[error]
                     )
+
                 terminal = [
                     step
                     for step in outcome.steps
@@ -569,6 +580,7 @@ def run_campaign(
                     publish(error)
                     outcome.status = "error"
                     outcome.steps.append(error)
+
                 if outcome.status == "ok":
                     missing = missing_campaign_evidence(child, outcome.steps)
                     if missing:
@@ -583,6 +595,7 @@ def run_campaign(
                         outcome.status = "error"
                         outcome.message = error.message
                         outcome.steps.append(error)
+
                 errors = [
                     step.model_dump(mode="json") for step in outcome.steps if step.status == "error"
                 ]
@@ -590,16 +603,23 @@ def run_campaign(
                 with lock:
                     cell.update(status=outcome.status, message=outcome.message, errors=errors)
                     save(index)
+
+                source_changed = any(
+                    step.step == "automation.source_changed" for step in outcome.steps
+                )
                 prolonged = any(
                     step.context.get("restart_reason") == "prolonged_outage"
                     for step in outcome.steps
                     if step.step == "automation.network.restart_required"
                 )
-                retry = outcome.status != "ok" and (
-                    prolonged or (request.retry_failed_scenarios and attempt < 2)
+                retry = (
+                    outcome.status != "ok"
+                    and not source_changed
+                    and (prolonged or (request.retry_failed_scenarios and attempt < 2))
                 )
                 if not retry:
                     break
+
                 next_attempt = attempt if prolonged else attempt + 1
                 publish(
                     StepResult(
@@ -620,7 +640,8 @@ def run_campaign(
                     {key: value for key, value in cell.items() if key != "previous_attempts"},
                 ]
                 attempt = next_attempt
-            if outcome.status != "ok" and not request.continue_after_failure:
+
+            if source_changed or (outcome.status != "ok" and not request.continue_after_failure):
                 break
 
     # Each callback owns one isolated VM worker. The lock protects only the journal, never a VM run.

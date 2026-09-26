@@ -574,6 +574,8 @@ function Resolve-LibertixTransactionPartition {
     }
     Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
 
+    # Windows may renumber a partition after live expansion. Its saved offset
+    # and size, then its GPT identity, must still identify exactly one owner.
     $stateChanged = $false
     $partitionWasCommitted = [int]$state.PartitionNumber -ne 0
     $partitionCandidates = @(
@@ -619,6 +621,7 @@ function Resolve-LibertixTransactionPartition {
             ) "Yellow"
         }
     }
+
     $savedPartitionGuid = if (
         $state.PSObject.Properties.Name -contains 'PartitionGuid'
     ) {
@@ -656,6 +659,7 @@ function Resolve-LibertixTransactionPartition {
         }
         $partitionMatches = @($partitionCandidates)
     }
+
     if ($partitionMatches.Count -eq 0 -and $AllowMissing) {
         Write-Log (
             "The saved UEFI transaction partition is already absent: " +
@@ -670,6 +674,7 @@ function Resolve-LibertixTransactionPartition {
             "matches=$($partitionMatches.Count)."
         )
     }
+
     $partition = $partitionMatches[0]
     if ([string]$disk.PartitionStyle -eq 'GPT' -and
         [string]::IsNullOrWhiteSpace($savedPartitionGuid)) {
@@ -693,6 +698,9 @@ function Resolve-LibertixTransactionPartition {
         $state.PartitionSize = [int64]$partition.Size
         $stateChanged = $true
     }
+
+    # Persist a newly resolved GUID or Windows partition number before any
+    # rollback step relies on the updated identity.
     if ($stateChanged) {
         Save-LibertixTransactionStateAtomic -State $state
     }

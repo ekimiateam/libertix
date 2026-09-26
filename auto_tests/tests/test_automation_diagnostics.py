@@ -252,3 +252,48 @@ def test_missing_root_is_recorded_and_not_created_remotely(tmp_path):
 def test_linux_collection_includes_the_package_update_logs():
     assert "/var/log/apt" in diagnostics.LINUX_LOG_ROOTS
     assert "/var/log/unattended-upgrades" in diagnostics.LINUX_LOG_ROOTS
+
+
+@pytest.mark.parametrize(
+    "step", ["automation.local_filepool.download", "automation.launch_elevated"]
+)
+@pytest.mark.parametrize("context_status", ["collected", "incomplete"])
+def test_absent_product_logs_are_expected_only_before_deployment(
+    monkeypatch, tmp_path, step, context_status
+):
+    ssh = SimpleNamespace(_text_sftp=lambda _timeout: nullcontext(FakeSftp()))
+    monkeypatch.setattr(diagnostics, "SSHClient", lambda *a, **k: nullcontext(ssh))
+    monkeypatch.setattr(diagnostics, "WINDOWS_LOG_ROOTS", ("/absent",))
+    monkeypatch.setattr(diagnostics.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        diagnostics,
+        "collect_system_context",
+        lambda ssh, os, bundle, manifest, password: manifest.update(
+            system_context={"status": context_status}
+        ),
+    )
+    settings = SimpleNamespace(
+        windows_ssh_password=SimpleNamespace(get_secret_value=lambda: "unit-secret"),
+        ssh_known_hosts=tmp_path / "known-hosts",
+        ssh_port=22,
+        ssh_timeout_seconds=1,
+    )
+    vm = SimpleNamespace(name="vm2", vmid=501, username="test", host="example.invalid")
+    error = {"step": step, "message": "download failed"}
+    path = diagnostics.collect_failure_diagnostics(
+        settings,
+        vm,
+        AutomationOptions("test", "unit-secret", True),
+        tmp_path / "scenario/captures",
+        [error],
+        lambda path: path.write_bytes(b"screen"),
+    )
+    report = json.loads(path.read_text())
+    expected_absence = step == "automation.local_filepool.download"
+    assert report["status"] == (
+        "collected" if expected_absence and context_status == "collected" else "incomplete"
+    )
+    assert (
+        report.get("product_logs_status") == "not-created-before-deployment"
+    ) == expected_absence
+    assert report["errors"] == [error]

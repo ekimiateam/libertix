@@ -80,6 +80,7 @@ class AutomationService(
             settings.llm_model,
             settings.llm_timeout_seconds,
             reasoning_effort=settings.llm_reasoning_effort,
+            provider_only=settings.llm_provider_only,
             max_attempts=settings.llm_max_attempts,
             retry_base_seconds=settings.llm_retry_base_seconds,
         )

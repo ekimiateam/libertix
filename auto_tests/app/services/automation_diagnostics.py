@@ -227,7 +227,10 @@ def collect_failure_diagnostics(
     manifest["collection_finished_at"] = datetime.now(UTC).isoformat()
     before_deployment = (
         manifest.get("remote_os") == "windows"
-        and all(error["step"] == "automation.prepare_vm" for error in errors)
+        and all(
+            error["step"] in {"automation.prepare_vm", "automation.local_filepool.download"}
+            for error in errors
+        )
         and bool(manifest["files"])
         and all(item["status"] == "absent" for item in manifest["files"])
     )

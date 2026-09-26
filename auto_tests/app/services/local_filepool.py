@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 from pathlib import Path, PureWindowsPath
 from urllib.parse import urljoin, urlsplit
 
@@ -13,6 +14,8 @@ import httpx
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 
+from app.clients import network_recovery
+from app.errors import WorkflowError
 from app.published_release import (
     MAXIMUM_METADATA_BYTES,
     MAXIMUM_SIGNATURE_BYTES,
@@ -46,6 +49,89 @@ def catalog_artifacts(catalog: dict) -> list[dict]:
             raise ValueError("Invalid local filepool artifact metadata")
         names.add(name)
     return files
+
+
+def download_artifact(client, url, destination, size, digest, progress, result, vm_name):
+    temporary = destination.with_name(destination.name + ".partial")
+    for attempt in range(1, 3):
+        network_recovery.checkpoint()
+        count = 0
+        response = None
+        try:
+            if temporary.is_symlink():
+                raise ValueError("Partial download must not be a symbolic link")
+            count = temporary.stat().st_size if temporary.exists() else 0
+            if count > size:
+                raise ValueError("Partial download exceeds signed size")
+            if count < size:
+                headers = {"Accept-Encoding": "identity"}
+                if count:
+                    headers["Range"] = f"bytes={count}-"
+                with client.stream("GET", url, headers=headers) as response:
+                    response.raise_for_status()
+                    if response.status_code == 206:
+                        expected = f"bytes {count}-{size - 1}/{size}"
+                        if response.headers.get("Content-Range") != expected:
+                            raise ValueError("Download range does not match requested bytes")
+                    elif response.status_code == 200:
+                        # A server may ignore Range; never append its full response.
+                        count = 0
+                    else:
+                        raise ValueError("Unexpected download response status")
+                    if response.headers.get("Content-Encoding", "identity") != "identity":
+                        raise ValueError("Download must use identity encoding for byte ranges")
+                    progress("Resuming" if count else "Downloading", destination.name, count, size)
+                    reported = count
+                    with temporary.open("ab" if count else "wb") as stream:
+                        for chunk in response.iter_bytes(1024 * 1024):
+                            if count + len(chunk) > size:
+                                raise ValueError("Download exceeds signed size")
+                            stream.write(chunk)
+                            count += len(chunk)
+                            if count - reported >= 64 * 1024**2:
+                                progress("Downloading", destination.name, count, size)
+                                reported = count
+                if count != size:
+                    raise httpx.RemoteProtocolError("Download ended before the signed size")
+            with temporary.open("rb") as stream:
+                actual = hashlib.file_digest(stream, "sha256").hexdigest()
+            if actual != digest:
+                raise ValueError("Downloaded file does not match signed SHA-256")
+            temporary.replace(destination)
+            progress("Downloaded and verified", destination.name, size, size)
+            return
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            status = response.status_code if response is not None else None
+            details = {
+                "vm": vm_name,
+                "file": destination.name,
+                "host": urlsplit(url).hostname,
+                "attempt": attempt,
+                "bytes_transferred": count,
+                "total_bytes": size,
+                "http_status": status,
+                "exception_type": type(exc).__name__,
+            }
+            reason = f"HTTP {status}" if isinstance(exc, httpx.HTTPStatusError) else str(exc)
+            reason = reason or type(exc).__name__
+            details["error"] = reason
+            retryable = isinstance(exc, httpx.TransportError) or (
+                isinstance(exc, httpx.HTTPStatusError) and status in {429, 500, 502, 503, 504}
+            )
+            if retryable:
+                network_recovery.recover(time.monotonic(), context={"vm": vm_name})
+            if not retryable or attempt == 2:
+                raise WorkflowError(
+                    "automation.local_filepool.download",
+                    f"Local filepool download failed for {destination.name}: {reason}",
+                    details=details,
+                ) from exc
+            result.ok(
+                "automation.local_filepool.retry",
+                f"Retrying {destination.name} (attempt 2/2) from {count} bytes: {reason}",
+                **details,
+            )
+            time.sleep(3)
 
 
 def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) -> None:
@@ -107,27 +193,7 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
                 ):
                     raise ValueError("Signed artifacts must use HTTPS without credentials")
                 selected = cache / name
-                temporary = cache / (name + ".partial")
-                count, reported = 0, 0
-                actual = hashlib.sha256()
-                progress("Downloading", name, 0, size)
-                with client.stream("GET", url) as response, temporary.open("wb") as stream:
-                    response.raise_for_status()
-                    for chunk in response.iter_bytes(1024 * 1024):
-                        count += len(chunk)
-                        if count > size:
-                            raise ValueError("Local filepool download exceeds signed size: " + name)
-                        stream.write(chunk)
-                        actual.update(chunk)
-                        if count - reported >= 64 * 1024**2:
-                            progress("Downloading", name, count, size)
-                            reported = count
-                if count != size or actual.hexdigest() != digest:
-                    raise ValueError(
-                        "Local filepool download failed size/hash verification: " + name
-                    )
-                temporary.replace(selected)
-                progress("Downloaded and verified", name, size, size)
+                download_artifact(client, url, selected, size, digest, progress, result, vm.name)
             paths.append(selected)
         with validation.ssh(
             vm.host,

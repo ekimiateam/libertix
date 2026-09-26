@@ -219,6 +219,7 @@ function Get-CurrentRunBcdFirmwareEntries {
     if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
         throw 'The archived UEFI transaction does not belong to this recovery run.'
     }
+
     $trackedIdentifier = if ($transaction.PSObject.Properties.Name -contains 'FirmwareEntryId') {
         [string]$transaction.FirmwareEntryId
     } else {
@@ -235,6 +236,8 @@ function Get-CurrentRunBcdFirmwareEntries {
         throw "Firmware enumeration failed with rc=$($result.ExitCode): $($result.StandardError) $($result.StandardOutput)"
     }
 
+    # A matching description or archived ID only attributes an entry to this
+    # run when its loader path also matches the temporary Libertix path.
     $description = "Libertix UEFI Installer $([string]$State.RunId)"
     $descriptionPattern = "(?m)^[^`r`n]+\s+$([regex]::Escape($description))\s*$"
     $loaderPathPattern = '(?im)^[^\r\n]+\s+\\EFI\\\S+\s*$'
@@ -264,6 +267,7 @@ function Get-CurrentRunBcdFirmwareEntries {
         }
         $entries.Add($identifiers[0].Value)
     }
+
     return $entries.ToArray()
 }
 
@@ -338,6 +342,7 @@ function Test-LinuxPartitionPresent {
     foreach ($module in @('Libertix.Rollback.psm1', 'Libertix.InstallationPolicy.psm1')) {
         Import-Module (Join-Path $State.PayloadRoot "Scripts\modules\$module") -ErrorAction Stop
     }
+
     # The ESP remains on Windows even when Linux uses another physical disk.
     $plannedDisk = if ([int]$plan.schemaVersion -eq 5) { $plan.allocation } else { $plan.disk }
     $disk = Get-Disk -Number ([int]$plannedDisk.number) -ErrorAction Stop
@@ -378,6 +383,7 @@ function Test-LinuxPartitionPresent {
         }
         return $false
     }
+
     if ($VerifiedUninstall) {
         Assert-LibertixInstalledFilesystemIdentity -Partition $installerPartitions[0] -RecoveryRoot $State.RecoveryRoot
         if ([string]$disk.PartitionStyle -eq 'GPT' -and $expectedPartitionGuid -eq '') {
@@ -397,6 +403,7 @@ function Test-LinuxPartitionPresent {
     } elseif ([string]$disk.PartitionStyle -eq 'GPT' -and $expectedPartitionGuid -eq '') {
         throw 'The UEFI GPT partition identity is missing.'
     }
+
     return $true
 }
 
@@ -583,6 +590,8 @@ function Get-FirmwareBootBypassEvidence {
             throw "Installed Libertix ESP ownership marker does not match the recorded transaction."
         }
 
+        # A Windows boot here is not evidence of firmware bypass when the user
+        # selected Windows manually or Libertix still heads BootOrder.
         [uint16]$ownedBootNumber = [Convert]::ToUInt16($ownedBootText, 16)
         $bootCurrent = @(
             ConvertFrom-BootOrderBytes `
@@ -611,6 +620,8 @@ function Get-FirmwareBootBypassEvidence {
             return $null
         }
 
+        # Both entries must target the recorded ESP and their exact loaders
+        # before offering a change to the preferred Windows boot path.
         $disk = Get-Disk -Number ([int]$State.SystemDiskNumber) -ErrorAction Stop
         $windowsBytes = Get-LibertixFirmwareVariableBytes -Name (
             "Boot{0:X4}" -f $currentBootNumber
@@ -1264,29 +1275,38 @@ function Invoke-VerifiedInstallationSuccess {
             }
             return
         }
+
+        # Persist each checkpoint after its effect so startup recovery can
+        # resume without repeating completed finalization work.
         if ((Get-FinalizationStepRank -State $State) -lt 1) {
             Set-FinalizationStep -State $State -Step "Started"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 2) {
             Save-UefiTransactionArchive -State $State
             Set-FinalizationStep -State $State -Step "TransactionArchived"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 3) {
             $null = Install-BootGuardianForCurrentBootPath -State $State
             Set-FinalizationStep -State $State -Step "BootGuardianInstalled"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 4) {
             Invoke-WindowsShareFinalize
             Set-FinalizationStep -State $State -Step "WindowsShareFinalized"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 5) {
             Restore-HibernationAfterInstallation -State $State
             Set-FinalizationStep -State $State -Step "HibernationRestored"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 6) {
             Remove-TemporaryRecoveryArtifacts -State $State
             Set-FinalizationStep -State $State -Step "TemporaryArtifactsRemoved"
         }
+
         $null = Invoke-LibertixPostInstallVerification `
             -RecoveryRoot ([string]$State.RecoveryRoot) `
             -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
@@ -1295,6 +1315,7 @@ function Invoke-VerifiedInstallationSuccess {
         if ((Get-FinalizationStepRank -State $State) -lt 7) {
             Set-FinalizationStep -State $State -Step "PostInstallVerified"
         }
+
         $State.Phase = "Verified"
         Save-State -State $State
     } catch {
@@ -1397,6 +1418,7 @@ try {
         $successRunIdForPrompt = Read-EnvValue `
             -Path $installSuccess `
             -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
+
         if ($successRunIdForPrompt -eq [string]$state.RunId) {
             $linuxBootEvidencePresent = Test-Path `
                 -LiteralPath $linuxBootEvidence `
@@ -1418,11 +1440,13 @@ try {
                     )
                     exit 0
                 }
+
                 $preferredPathRequired = [string]$state.Phase -in @(
                     "InstalledBootBypassed",
                     "PreferredPathPrompted",
                     "PreferredPathPreparationFailed"
                 )
+
                 if (-not $preferredPathRequired) {
                     try {
                         $firmwareBypassEvidence = Get-FirmwareBootBypassEvidence -State $state
@@ -1450,11 +1474,13 @@ try {
                         throw
                     }
                 }
+
                 if ($preferredPathRequired) {
                     Start-FallbackUi -State $state -Mode PreferredPath
                     exit 0
                 }
             }
+
             if (
                 $linuxBootEvidencePresent -or
                 (Test-Path -LiteralPath $postInstallResult -PathType Leaf)
@@ -1468,10 +1494,12 @@ try {
             )
             exit 0
         }
+
         if (Test-Path -LiteralPath $postInstallResult -PathType Leaf) {
             Start-PostInstallResultUi -State $state
             exit 0
         }
+
         $startedRunIdForPrompt = Read-EnvValue `
             -Path $liveStarted `
             -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
@@ -1497,6 +1525,9 @@ try {
                 throw 'The installed Linux partition identity could not be verified before uninstall.'
             }
         }
+
+        # Remove the maintenance service and preferred boot path before the
+        # transaction rollback restores the original Windows boot state.
         $null = Remove-BootGuardianIfPresent -State $state
         if ([string]$executionState.status -ne "rolled-back") {
             $null = Restore-PreferredBootPathIfPresent -State $state
@@ -1542,15 +1573,19 @@ try {
         } else {
             Write-AgentLog "UEFI transaction was already rolled back; cleanup is continuing."
         }
+
         if ($rollbackFromSucceeded) {
             Remove-WindowsShareAfterRollback -State $state
         } else {
             Remove-PendingWindowsSharePayload
         }
+
         Save-RecoveryLogs -State $state
         Remove-TemporaryRecoveryArtifacts -State $state
         Remove-RecoveryTasks -State $state
         if ($VerifiedUninstall) {
+            # Do not report uninstall success until the ESP, firmware entries
+            # and permanent rollback evidence agree on the final boot state.
             Assert-LibertixUninstallComplete -RecoveryRoot ([string]$state.RecoveryRoot) `
                 -RecoveryTaskNames @([string]$state.TaskName, [string]$state.PromptTaskName) `
                 -WriteLog { param($Message) Write-AgentLog $Message } -VerifyBoot {
@@ -1610,6 +1645,7 @@ try {
         if (-not $firmwareBypassEvidence) {
             throw "Firmware boot bypass could not be reproven immediately before mutation."
         }
+
         Save-FirmwareBootBypassEvidence `
             -State $state `
             -Evidence $firmwareBypassEvidence

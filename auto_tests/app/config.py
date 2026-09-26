@@ -27,6 +27,9 @@ class VMConfig(BaseModel):
     vnc_keyboard_layout: Literal["fr", "us"] = "us"
     automation_enabled: bool = False
     secondary_disk_boot_order: tuple[str, ...] = ()
+    local_filepool_snapshot: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    )
 
     @field_validator("secondary_disk_boot_order")
     @classmethod
@@ -84,6 +87,7 @@ class Settings(BaseSettings):
     llm_api_url: str
     llm_api_key: SecretStr
     llm_model: str
+    llm_provider_only: str | None = Field(default=None, min_length=1)
     llm_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     llm_timeout_seconds: float = Field(default=180, gt=0)
     llm_max_attempts: int = Field(default=3, ge=1, le=10)

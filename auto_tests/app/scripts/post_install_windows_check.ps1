@@ -237,6 +237,7 @@ function Assert-LibertixPostInstallResult {
         "The post-install verification did not succeed: $($result.error)"
     Assert-Condition ([string]$result.planId -eq [string]$Session.Plan.planId) `
         "The post-install verification belongs to another plan."
+
     $expectedChecks = @(
         "execution-ledger",
         "installed-linux-boot",
@@ -264,6 +265,9 @@ function Assert-LibertixPostInstallResult {
         Assert-Condition ($actualChecks -contains $expectedCheck) `
             "The post-install verification omitted '$expectedCheck'."
     }
+
+    # A successful result is not enough if the evidence needed for later
+    # verification and rollback has disappeared.
     foreach ($relativePath in @(
         "installation-plan.json",
         "installation-state.json",
@@ -301,6 +305,7 @@ function Assert-LibertixPostInstallResult {
         [string]$evidence.localization.keyboardLayout -eq [string]$Session.Plan.locale.keyboardLayout -and
         [string]$evidence.localization.keyboardVariant -eq [string]$Session.Plan.locale.keyboardVariant
     ) "The first Linux boot did not prove the planned locale and keyboard configuration."
+
     if ($ExpectedFirmware -eq "uefi") {
         $bootChainType = [string]$evidence.grub.bootChain.type
         $bootCurrentVerified = $bootChainType -eq "uefi-boot-current"
@@ -368,6 +373,7 @@ function Assert-LibertixPostInstallResult {
         Assert-Condition (Test-Path -LiteralPath (Join-Path $root "bcd-backup") -PathType Leaf) `
             "The permanent BIOS BCD backup is missing."
     }
+
     return $result
 }
 
@@ -746,6 +752,7 @@ try {
                         $_.TaskName -like "LibertixUefiRecovery_*"
                     ) -and $_.TaskName -notmatch "Prompt"
                 })
+
                 $interactiveCheckPassed = -not [bool]$config.share_linux_files_in_windows
                 if ($resultStatus -in @("failed", "rolled-back")) {
                     $failedChecks = @($savedResult.checks | Where-Object { -not [bool]$_.passed } |
@@ -775,6 +782,7 @@ try {
                         "LogPath='$([string]$savedResult.logPath)'."
                     )
                 }
+
                 if ($resultStatus -eq "succeeded" -and [bool]$config.share_linux_files_in_windows) {
                     $interactiveCheckPassed = @($savedResult.checks | Where-Object {
                         [string]$_.name -eq "explorer-integration" -and [bool]$_.passed
@@ -792,6 +800,7 @@ try {
                     Write-Output "LIBERTIX_FINALIZATION=ready"
                     break
                 }
+
                 if ($clock.Elapsed.TotalSeconds -ge 300) {
                     throw (
                         "Libertix Windows finalization timed out: " +
@@ -843,6 +852,8 @@ try {
             Write-Output ("DEFAULT_ROUTES={0}" -f $defaultRoutes.Count)
             Write-Output ("SSHD={0}" -f $sshService.Status)
 
+            # The terminal result is valid only if both Windows itself and the
+            # durable Libertix evidence survived the final reboot.
             Assert-Condition ($os.ProductType -eq 1) "The final system is not a Windows workstation."
             if ([string]$config.expected_firmware -eq "uefi") {
                 Assert-Condition ($firmware -match "UEFI") "The final Windows boot is not UEFI."
@@ -967,12 +978,16 @@ try {
                 [int64]$_.Offset -eq [int64]$plan.disk.recovery.offsetBytes -and
                 [int64]$_.Size -eq [int64]$plan.disk.recovery.sizeBytes
             })
+
             Write-Output ("WINDOWS_OFFSET={0} WINDOWS_SIZE={1}" -f `
                 $systemPartition.Offset, $systemPartition.Size)
             Write-Output ("LINUX_OFFSET={0} LINUX_SIZE={1}" -f `
                 $installerOffset, $observedLinuxSize)
             Write-Output ("RECOVERY_OFFSET={0} RECOVERY_SIZE={1}" -f `
                 $plan.disk.recovery.offsetBytes, $plan.disk.recovery.sizeBytes)
+
+            # Check Windows, Linux and Recovery against the original geometry;
+            # a healthy volume alone would not reveal a moved partition.
             Assert-Condition ([int]$systemDisk.Number -eq [int]$plan.disk.number) `
                 "The installed system disk number differs from the installation plan."
             Assert-Condition (([string]$systemDisk.UniqueId).Trim() -eq `
@@ -1060,6 +1075,7 @@ try {
             $promptTasks = @($recoveryTasks | Where-Object {
                 $_.TaskName -match "Prompt"
             })
+
             Write-Output ("INSTALLER_VOLUMES={0}" -f $installerVolumes.Count)
             Write-Output ("UEFI_TRANSACTION={0}" -f $uefiTransaction)
             Write-Output ("BIOS_PENDING={0}" -f $biosPending)
@@ -1067,6 +1083,9 @@ try {
             Write-Output ("PREFERENCE_BUNDLE_PRESENT={0}" -f $preferenceBundlePresent)
             Write-Output ("STARTUP_RECOVERY_TASKS={0}" -f $startupRecoveryTasks.Count)
             Write-Output ("RESULT_PROMPT_TASKS={0}" -f $promptTasks.Count)
+
+            # Recovery metadata must remain available, while temporary media,
+            # secrets and startup tasks must be gone after installation.
             Assert-Condition ($installerVolumes.Count -eq 0) "The temporary installer volume still exists."
             Assert-Condition (-not $uefiTransaction) "The UEFI transaction file still exists."
             Assert-Condition (-not $accountSecretPresent) `
@@ -1129,19 +1148,48 @@ try {
                 { $_ -in @("en", "fr", "es", "ko") } { $_; break }
                 default { "en" }
             }
+
+            # Windows input-method IDs must map to the Linux layout recorded in
+            # the installation plan; a matching UI language alone is not proof.
             $exactKeyboardMappings = @{
-                "00000409" = "us|"; "00010409" = "us|dvorak"; "00020409" = "us|intl"
-                "00030409" = "us|dvorak-l"; "00040409" = "us|dvorak-r"; "00000809" = "gb|"
-                "0000040C" = "fr|"; "0000080C" = "be|"; "00000C0C" = "ca|fr-legacy"
-                "00001009" = "ca|"; "00011009" = "ca|multix"; "0000100C" = "ch|fr"
-                "0000040A" = "es|winkeys"; "0000080A" = "latam|"; "00000412" = "kr|"
+                "00000409" = "us|"
+                "00010409" = "us|dvorak"
+                "00020409" = "us|intl"
+                "00030409" = "us|dvorak-l"
+                "00040409" = "us|dvorak-r"
+                "00000809" = "gb|"
+                "0000040C" = "fr|"
+                "0000080C" = "be|"
+                "00000C0C" = "ca|fr-legacy"
+                "00001009" = "ca|"
+                "00011009" = "ca|multix"
+                "0000100C" = "ch|fr"
+                "0000040A" = "es|winkeys"
+                "0000080A" = "latam|"
+                "00000412" = "kr|"
             }
+
             $languageKeyboardMappings = @{
-                "0409" = "us|"; "0809" = "gb|"; "040C" = "fr|"; "080C" = "be|"
-                "0C0C" = "ca|fr-legacy"; "1009" = "ca|"; "1109" = "ca|multix"
-                "100C" = "ch|fr"; "040A" = "es|winkeys"; "080A" = "latam|"; "0412" = "kr|"
+                "0409" = "us|"
+                "0809" = "gb|"
+                "040C" = "fr|"
+                "080C" = "be|"
+                "0C0C" = "ca|fr-legacy"
+                "1009" = "ca|"
+                "1109" = "ca|multix"
+                "100C" = "ch|fr"
+                "040A" = "es|winkeys"
+                "080A" = "latam|"
+                "0412" = "kr|"
             }
-            $uiKeyboardFallbacks = @{ "en" = "us|"; "fr" = "fr|"; "es" = "es|"; "ko" = "kr|" }
+
+            $uiKeyboardFallbacks = @{
+                "en" = "us|"
+                "fr" = "fr|"
+                "es" = "es|"
+                "ko" = "kr|"
+            }
+
             $windowsKeyboardMappings = @(
                 foreach ($tip in $inputMethodTips) {
                     $identifier = (($tip -split ":")[-1]).ToUpperInvariant()
@@ -1155,13 +1203,16 @@ try {
                     }
                 }
             )
+
             $plannedKeyboard = "{0}|{1}" -f `
                 [string]$plannedLocale.keyboardLayout, [string]$plannedLocale.keyboardVariant
+
             Write-Output ("SYSTEM_LOCALE={0}" -f $systemLocale.Name)
             Write-Output ("UI_CULTURE={0}" -f $uiCulture.Name)
             Write-Output ("LANGUAGES={0}" -f (($languages.LanguageTag) -join ","))
             Write-Output ("INPUT_METHOD_TIPS={0}" -f ($inputMethodTips -join ","))
             Write-Output ("TIME_ZONE={0}" -f $timeZone.Id)
+
             Assert-Condition (-not [string]::IsNullOrWhiteSpace($systemLocale.Name)) "Windows has no system locale."
             Assert-Condition ($languages.Count -ge 1) "Windows has no user language."
             Assert-Condition ($inputMethodTips.Count -ge 1) "Windows has no configured input method."
@@ -1375,6 +1426,9 @@ try {
                     ExpectedPartition, `
                     Tokens |
                 Format-List
+
+            # A read-only flag is insufficient if the process mounted a
+            # different disk, partition or drive letter.
             $ownedProcesses = @($processIdentityResults | Where-Object {
                 $_.ExecutableMatches -and
                 $_.DiskMatches -and
@@ -1384,6 +1438,7 @@ try {
             })
             Assert-Condition ($ownedProcesses.Count -eq 1) `
                 "The active ext4 mount is not uniquely tied to the planned disk and partition."
+
             $mountStatusPath = Join-Path $env:ProgramData "Libertix\WindowsShare\mount-status.json"
             Assert-Condition (Test-Path -LiteralPath $mountStatusPath -PathType Leaf) `
                 "The durable ext4 mount status is missing."
@@ -1499,7 +1554,7 @@ try {
                         -Session $session `
                         -ExpectedFirmware $expectedFirmware
                 )
-            if ($uiProcesses.Count -eq 1) { break }
+                if ($uiProcesses.Count -eq 1) { break }
                 if ($waitClock.Elapsed.TotalSeconds -ge 120) {
                     throw "The interactive Windows post-install result window is not running."
                 }

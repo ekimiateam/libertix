@@ -601,6 +601,7 @@ class PostInstallValidationMixin:
             task_name=task_name,
             step="automation.installed_linux_uninstall.launch",
             use_default_filepool=options.use_default_filepool,
+            local_filepool=options.local_filepool,
         )
         process_id = int(launch["PID"])
         result.ok(
@@ -1903,6 +1904,7 @@ class PostInstallValidationMixin:
             + " --class "
         )
         windows_grub_entry_pattern = shlex.quote("""menuentry ['\"]Windows( Boot Manager)?['\"]""")
+
         firmware_test = (
             "test -d /sys/firmware/efi" if vm.firmware == "uefi" else "test ! -d /sys/firmware/efi"
         )
@@ -1915,6 +1917,7 @@ class PostInstallValidationMixin:
         dns_checks = "; ".join(
             f"resolvectl dns | grep -Fq -- {shlex.quote(server)}" for server in dns_servers
         )
+
         boot_mode_test = (
             "findmnt /boot/efi; "
             'test "$(findmnt -n -o FSTYPE /boot/efi)" = vfat; '
@@ -1922,6 +1925,7 @@ class PostInstallValidationMixin:
             if vm.firmware == "uefi"
             else "test -s /boot/grub/i386-pc/core.img"
         )
+
         windows_mount_test = (
             "findmnt /mnt/windows; findmnt -n -o FSTYPE /mnt/windows | "
             "grep -Eq '^(fuseblk|ntfs3)$'; "
@@ -1932,6 +1936,7 @@ class PostInstallValidationMixin:
             "status=0; grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' "
             '/etc/fstab || status=$?; test "$status" -eq 1'
         )
+
         sharing_policy_test = (
             ("grep -Fx true" if options.share_linux_files_in_windows else "grep -Fx false")
             + " /etc/libertix/share-linux-in-windows; "
@@ -1941,6 +1946,9 @@ class PostInstallValidationMixin:
                 else "! grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
             )
         )
+
+        # A failed regeneration must leave grub.cfg untouched before the
+        # ordinary regeneration proves the installed boot hooks still work.
         grub_regeneration_test = (
             "for generator in 10_linux 30_uefi-firmware 20_memtest86+ 20_memtest86; do "
             "source=/etc/grub.d/$generator; "
@@ -1979,6 +1987,7 @@ class PostInstallValidationMixin:
                 else ""
             )
         )
+
         profile_shortcut_test = (
             "python3 /usr/local/lib/libertix/libertix-first-boot-verify.py --verify-windows-sharing"
             if options.share_windows_files_in_linux
@@ -1987,6 +1996,7 @@ class PostInstallValidationMixin:
                 "-print -quit | grep -q ."
             )
         )
+
         checks = (
             RemoteCheck("linux.identity", f'test "$(id -un)" = {username}; id'),
             RemoteCheck(
@@ -2285,6 +2295,7 @@ class PostInstallValidationMixin:
                 "getent ahostsv4 ekimia.fr | head -1 | grep -q .",
             ),
         )
+
         for check in checks:
             self._run_remote_check(
                 ssh,

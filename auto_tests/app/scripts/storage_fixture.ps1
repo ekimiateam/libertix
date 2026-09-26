@@ -320,6 +320,7 @@ if ($config.phase -eq 'apply') {
         $observed.system_disk_number -ne $baseline.system_disk_number) {
         throw 'The test storage layout changed after the fixture dry-run.'
     }
+
     $witnesses = @()
     foreach ($action in @($config.plan.actions)) {
         $disk = Resolve-FixtureDisk ([string]$action.disk_device_path)
@@ -342,16 +343,21 @@ if ($config.phase -eq 'apply') {
                     [string]$action.format -notin @('fat32', 'ntfs', 'recovery')) {
                     throw 'The fixture shrink geometry is invalid.'
                 }
+
                 if ([string]$disk.PartitionStyle -eq 'MBR') {
                     $existing = @(Get-Partition -DiskNumber $disk.Number)
                     if ($existing.Count -ge 4 -or @($existing | Where-Object { [int]$_.MbrType -in @(5, 15, 133) }).Count -gt 0) {
                         throw 'The fixture has no free primary MBR partition slot.'
                     }
                 }
+
+                # A clean NTFS scan is required before this test fixture shrinks
+                # the real Windows volume in the VM.
                 Write-FixtureJournal -Stage 'apply.shrink.scan'
                 if ([string](Repair-Volume -DriveLetter $observed.system_drive -Scan) -ne 'NoErrorsFound') {
                     throw 'The fixture NTFS scan did not succeed.'
                 }
+
                 Write-FixtureJournal -Stage 'apply.shrink.resize'
                 Resize-Partition -DiskNumber $disk.Number -PartitionNumber $windows.PartitionNumber -Size $newSize
                 Write-FixtureJournal -Stage 'apply.shrink.verify'
@@ -359,11 +365,13 @@ if ($config.phase -eq 'apply') {
                 if ($updated.Offset -ne $windows.Offset -or $updated.Size -ne $newSize) {
                     throw 'The fixture Windows shrink was not verified.'
                 }
+
                 Write-FixtureJournal -Stage 'apply.partition.create'
                 $part = New-FixtureSystemPartition -Disk $disk -Offset $offset -Size $size -Recovery:($action.format -eq 'recovery')
                 $filesystem = if ($action.format -eq 'fat32') { 'FAT32' } else { 'NTFS' }
                 Write-FixtureJournal -Stage 'apply.partition.format'
                 $part | Format-Volume -FileSystem $filesystem -NewFileSystemLabel 'LIBERTIX_TEST' -Confirm:$false | Out-Null
+
                 if ($action.format -eq 'recovery' -and [string]$disk.PartitionStyle -eq 'MBR') {
                     # NTFS formatting can reset the MBR type to 0x07; restore Recovery after formatting.
                     $current = Resolve-FixtureDisk ([string]$disk.Path)
@@ -383,6 +391,7 @@ if ($config.phase -eq 'apply') {
                         throw 'The fixture Recovery type was not preserved after formatting.'
                     }
                 }
+
                 Write-FixtureJournal -Stage 'apply.partition.witness'
                 $witnesses += New-FixtureWitness -Disk $disk -Partition $part -Name ([string]$action.format)
             }
@@ -397,6 +406,7 @@ if ($config.phase -eq 'apply') {
                     @(Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Name -ieq $letter }).Count -ne 0) {
                     throw 'The fixture drive letter is invalid or already occupied.'
                 }
+
                 Write-FixtureJournal -Stage 'apply.secondary.initialize' -Details $action
                 Initialize-Disk -Number $disk.Number -PartitionStyle GPT | Out-Null
                 $disk = Resolve-FixtureDisk ([string]$action.disk_device_path)
@@ -404,6 +414,7 @@ if ($config.phase -eq 'apply') {
                 $part = New-Partition -DiskNumber $disk.Number -UseMaximumSize -DriveLetter $letter
                 Write-FixtureJournal -Stage 'apply.secondary.format'
                 $part | Format-Volume -FileSystem NTFS -NewFileSystemLabel 'LIBERTIX_DATA_TEST' -Confirm:$false | Out-Null
+
                 Write-FixtureJournal -Stage 'apply.secondary.witness'
                 $witnesses += New-FixtureWitness -Disk $disk -Partition $part -Name 'secondary-data'
             }
@@ -421,6 +432,7 @@ if ($config.phase -eq 'apply') {
                     [string]$volumes[0].HealthStatus -ne 'Healthy') {
                     throw 'The existing secondary data volume is not healthy NTFS.'
                 }
+
                 # Existing snapshot data is never reformatted, relabelled or assigned another letter.
                 Write-FixtureJournal -Stage 'apply.secondary.witness'
                 $witnesses += New-FixtureWitness -Disk $disk -Partition $parts[0] -Name 'existing-secondary-data'

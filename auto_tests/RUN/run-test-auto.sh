@@ -36,7 +36,7 @@ case "$1" in
         echo "A prolonged network outage does not consume the technical retry."
         echo "By default, includes Mint/Zorin, storage, BIOS refusal, uninstall and reboot checks."
         echo "The default campaign also tests BootOrder and EFI replacement on UEFI VMs."
-        echo "Both campaign modes test the local filepool with Mint and Zorin on one UEFI VM using the default snapshot."
+        echo "Both campaign modes test the local filepool with Mint and Zorin on one UEFI VM, using its local_filepool_snapshot when configured."
         echo "--auto-resume is retained for compatibility and does not allow extra retries."
         exit 0
         ;;
@@ -168,6 +168,8 @@ def progress():
         selected = active.get(vm)
         if selected:
             snapshot = settings.secondary_disk_reset_snapshot if selected["snapshot_mode"] == "secondary-disk" else settings.reset_snapshot
+            if selected.get("layout") == "local-filepool":
+                snapshot = next(item for item in settings.vms if item.name == vm).local_filepool_snapshot or snapshot
             expectation = {
                 "compatibility-refusal": "BIOS compatibility refusal",
                 "install-uninstall": "installation and uninstall",

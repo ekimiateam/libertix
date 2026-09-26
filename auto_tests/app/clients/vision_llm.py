@@ -42,6 +42,7 @@ class VisionLLMClient:
         timeout: float,
         *,
         reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None,
+        provider_only: str | None = None,
         max_attempts: int = 3,
         retry_base_seconds: float = 3,
     ) -> None:
@@ -50,6 +51,7 @@ class VisionLLMClient:
         self.model = model
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort
+        self.provider_only = provider_only
         self.max_attempts = max_attempts
         self.retry_base_seconds = retry_base_seconds
 
@@ -68,6 +70,8 @@ class VisionLLMClient:
         failure_message: str,
         decode: Callable[[dict[str, object]], VerdictT],
     ) -> VerdictT:
+        if self.provider_only is not None:
+            payload["provider"] = {"only": [self.provider_only], "allow_fallbacks": False}
         response: httpx.Response | None = None
         failed_at: float | None = None
         attempt = 0

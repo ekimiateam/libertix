@@ -34,20 +34,40 @@ function Test-VisibleMainWindow {
 function Confirm-LocalFilepoolChoice {
     param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
 
+    # Native message-box controls can expose only Pane through UI Automation.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class FilepoolDialogNative {
+    public const uint BM_CLICK = 0x00F5;
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+}
+'@
     $window = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
     if ($window.Current.ClassName -ne '#32770') { throw 'Expected the local filepool choice dialog' }
     $children = $window.FindAll([Windows.Automation.TreeScope]::Descendants,
         [Windows.Automation.Condition]::TrueCondition)
-    $yes = @($children | Where-Object { $_.Current.AutomationId -eq '6' })
-    $no = @($children | Where-Object { $_.Current.AutomationId -eq '7' })
+    $yes = @($children | Where-Object {
+        $_.Current.AutomationId -eq '6' -and $_.Current.ClassName -eq 'Button'
+    })
+    $no = @($children | Where-Object {
+        $_.Current.AutomationId -eq '7' -and $_.Current.ClassName -eq 'Button'
+    })
     $prompt = @($children | Where-Object {
-        $_.Current.ControlType -eq [Windows.Automation.ControlType]::Text -and
+        $_.Current.AutomationId -eq '65535' -and $_.Current.ClassName -eq 'Static' -and
         $_.Current.Name -match '(?i)filepool'
     })
     if ($yes.Count -ne 1 -or $no.Count -ne 1 -or $prompt.Count -ne 1) {
-        throw 'The expected filepool Yes/No prompt was not identified'
+        throw ("The expected filepool Yes/No prompt was not identified; yes={0}, no={1}, prompt={2}" -f
+            $yes.Count, $no.Count, $prompt.Count)
     }
-    $yes[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    if (-not [FilepoolDialogNative]::PostMessage(
+        [IntPtr]$yes[0].Current.NativeWindowHandle, [FilepoolDialogNative]::BM_CLICK,
+        [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
 }
 
 function Write-AtomicJson {

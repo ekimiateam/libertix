@@ -271,6 +271,9 @@ function Publish-LibertixInstallationContext {
             Destination = Join-Path $PartitionDrive "installation-state.json"
         }
     )
+
+    # The optional secret bundle must be verified separately from the public
+    # plan and state before it crosses into the live environment.
     $preferenceMigration = $installationPlan.features.windowsPreferenceMigration
     $preferenceBundleSource = $null
     if ([bool]$preferenceMigration.enabled) {
@@ -310,6 +313,7 @@ function Publish-LibertixInstallationContext {
             throw "The protected Windows preference migration bundle is missing."
         }
     }
+
     foreach ($contextFile in $contextFiles) {
         $source = [IO.Path]::GetFullPath([string]$contextFile.Source)
         $destination = [IO.Path]::GetFullPath([string]$contextFile.Destination)
@@ -351,6 +355,7 @@ function Publish-LibertixInstallationContext {
             if ($sourceHash -ne $temporaryHash) {
                 throw "Installation context staging hash mismatch for $([IO.Path]::GetFileName($destination))."
             }
+
             Publish-LibertixFileAtomic `
                 -TemporaryPath $temporary `
                 -DestinationPath $destination `
@@ -364,6 +369,9 @@ function Publish-LibertixInstallationContext {
             if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
         }
     }
+
+    # Retire the protected Windows copy only after every destination has been
+    # published and checked; an interrupted handoff can still be retried.
     if ($null -ne $preferenceBundleSource) {
         [IO.File]::Delete($preferenceBundleSource)
         if ([IO.File]::Exists($preferenceBundleSource)) {

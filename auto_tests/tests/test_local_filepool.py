@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pydantic import SecretStr
 
+from app.errors import WorkflowError
 from app.services import local_filepool
 from app.services.common import ResultBuilder
 from app.stream_events import StreamEventProjector
@@ -91,7 +92,7 @@ def test_signed_filepool_preparation_verifies_before_upload(monkeypatch, tmp_pat
         )
 
     if failure:
-        with pytest.raises(InvalidSignature if failure == "signature" else ValueError):
+        with pytest.raises(InvalidSignature if failure == "signature" else WorkflowError):
             prepare()
         assert not uploaded and not actions
         assert not any(step.step == "automation.local_filepool.prepared" for step in result.steps)
@@ -112,3 +113,138 @@ def test_signed_filepool_preparation_verifies_before_upload(monkeypatch, tmp_pat
             assert step.message in rendered
         assert any("Downloading test-distro.iso" in step.message for step in result.steps)
         assert any("Copying to VM test-distro.iso" in step.message for step in result.steps)
+
+
+@pytest.mark.parametrize(
+    "outcome", ["resume", "ignored-range", "bad-range", "hash", "timeout", "not-found"]
+)
+def test_download_retry_preserves_bytes_and_requires_signed_integrity(
+    monkeypatch, tmp_path, outcome
+):
+    prefix = b"A" * (1024 * 1024)
+    content = prefix + b"end"
+    destination = tmp_path / "distro.iso"
+    requests = []
+    progress = []
+    result = ResultBuilder("automation")
+    monkeypatch.setattr(local_filepool.time, "sleep", lambda _seconds: None)
+    recoveries = []
+    monkeypatch.setattr(
+        local_filepool.network_recovery, "recover", lambda *a, **k: recoveries.append(k)
+    )
+
+    class InterruptedStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield prefix
+            raise httpx.ReadTimeout("test download stalled")
+
+    def respond(request):
+        requests.append(request)
+        assert request.headers["Accept-Encoding"] == "identity"
+        if len(requests) == 1:
+            assert "Range" not in request.headers
+            return httpx.Response(200, stream=InterruptedStream())
+        assert request.headers["Range"] == f"bytes={len(prefix)}-"
+        if outcome == "timeout":
+            raise httpx.ReadTimeout("test download still stalled")
+        if outcome == "not-found":
+            return httpx.Response(404)
+        if outcome == "ignored-range":
+            return httpx.Response(200, content=content)
+        start = 0 if outcome == "bad-range" else len(prefix)
+        return httpx.Response(
+            206,
+            headers={"Content-Range": f"bytes {start}-{len(content) - 1}/{len(content)}"},
+            content=b"bad" if outcome == "hash" else b"end",
+        )
+
+    def download():
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            local_filepool.download_artifact(
+                client,
+                "https://example.invalid/distro.iso",
+                destination,
+                len(content),
+                hashlib.sha256(content).hexdigest(),
+                lambda *a: progress.append(a),
+                result,
+                "vm2",
+            )
+
+    if outcome in {"resume", "ignored-range"}:
+        download()
+        assert destination.read_bytes() == content
+        assert progress[-1][0] == "Downloaded and verified"
+    else:
+        with pytest.raises(WorkflowError) as caught:
+            download()
+        assert caught.value.step == "automation.local_filepool.download"
+        assert caught.value.details["file"] == "distro.iso"
+        assert caught.value.details["attempt"] == 2
+        assert not destination.exists()
+        assert not any(p[0] == "Downloaded and verified" for p in progress)
+    assert len(requests) == 2
+    assert recoveries
+    assert result.steps[0].step == "automation.local_filepool.retry"
+    assert "test download stalled" in result.steps[0].message
+
+
+def test_download_reuses_complete_verified_partial_without_http(tmp_path):
+    destination = tmp_path / "distro.iso"
+    destination.with_name("distro.iso.partial").write_bytes(b"complete")
+    local_filepool.download_artifact(
+        None,
+        "https://example.invalid/distro.iso",
+        destination,
+        8,
+        hashlib.sha256(b"complete").hexdigest(),
+        lambda *a: None,
+        ResultBuilder("test"),
+        "vm2",
+    )
+    assert destination.read_bytes() == b"complete"
+
+
+@pytest.mark.parametrize("response_kind", ["resume", "not-found", "compressed"])
+def test_download_resumes_previous_run_and_does_not_retry_permanent_errors(
+    monkeypatch, tmp_path, response_kind
+):
+    destination = tmp_path / "distro.iso"
+    partial = destination.with_name("distro.iso.partial")
+    partial.write_bytes(b"part")
+    requests = []
+    monkeypatch.setattr(local_filepool.time, "sleep", lambda _: pytest.fail("Unexpected retry"))
+
+    def respond(request):
+        requests.append(request)
+        assert request.headers["Range"] == "bytes=4-"
+        if response_kind == "not-found":
+            return httpx.Response(404)
+        headers = {"Content-Range": "bytes 4-7/8"}
+        if response_kind == "compressed":
+            headers["Content-Encoding"] = "gzip"
+        return httpx.Response(206, headers=headers, stream=httpx.ByteStream(b"done"))
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+
+        def download():
+            local_filepool.download_artifact(
+                client,
+                "https://example.invalid/distro.iso",
+                destination,
+                8,
+                hashlib.sha256(b"partdone").hexdigest(),
+                lambda *a: None,
+                ResultBuilder("test"),
+                "vm2",
+            )
+
+        if response_kind == "resume":
+            download()
+            assert destination.read_bytes() == b"partdone"
+        else:
+            with pytest.raises(WorkflowError):
+                download()
+            assert not destination.exists()
+            assert partial.read_bytes() == b"part"
+    assert len(requests) == 1

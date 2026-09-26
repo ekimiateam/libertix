@@ -492,6 +492,9 @@ class SSHClient:
             )
 
         payload = base64.b64encode(command.encode("utf-8")).decode("ascii")
+
+        # Capture the native command's exit status separately so PowerShell
+        # cannot replace it with the status of the output-drain commands.
         script = f"""
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -513,19 +516,23 @@ function ConvertFrom-NativeOutputBytes {{
         $Bytes[2] -eq 0x00 -and $Bytes[3] -eq 0x00) {{
         return [Text.Encoding]::UTF32.GetString($Bytes, 4, $Bytes.Length - 4)
     }}
+
     if ($Bytes.Length -ge 4 -and
         $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x00 -and
         $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF) {{
         $utf32BigEndian = New-Object Text.UTF32Encoding($true, $false, $true)
         return $utf32BigEndian.GetString($Bytes, 4, $Bytes.Length - 4)
     }}
+
     if ($Bytes.Length -ge 3 -and
         $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {{
         return $utf8NoBom.GetString($Bytes, 3, $Bytes.Length - 3)
     }}
+
     if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {{
         return [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
     }}
+
     if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {{
         return [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
     }}
@@ -548,6 +555,7 @@ function ConvertFrom-NativeOutputBytes {{
         }}
     }}
 
+    # Native tools without a BOM may still emit OEM-encoded output.
     try {{
         return $strictUtf8.GetString($Bytes)
     }} catch [Text.DecoderFallbackException] {{
@@ -566,6 +574,7 @@ function Read-NativeOutputText {{
     if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {{
         return ''
     }}
+
     # Timed WaitForExit does not wait for Start-Process output handlers to close files.
     while ($true) {{
         try {{
@@ -576,6 +585,7 @@ function Read-NativeOutputText {{
             if ($DrainClock.ElapsedMilliseconds -ge $DrainTimeoutMilliseconds) {{
                 throw "SSH output drain timed out: $LiteralPath remained locked."
             }}
+
             Start-Sleep -Milliseconds 25
         }}
     }}
@@ -596,6 +606,7 @@ try {{
         "`r`necho %ERRORLEVEL% > `"$statusPath`"`r`n"
     )
     [IO.File]::WriteAllText($commandPath, $commandText, [Text.Encoding]::Default)
+
     $startArguments = @{{
         FilePath = $env:ComSpec
         ArgumentList = @('/d', '/s', '/c', ('"' + $commandPath + '"'))

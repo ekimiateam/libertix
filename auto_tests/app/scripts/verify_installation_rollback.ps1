@@ -142,6 +142,7 @@ function Get-RollbackState {
             $installerPartitions += $partition
         }
     }
+
     $recoveryTasks = @(
         Get-ScheduledTask -ErrorAction Stop |
             Where-Object {
@@ -151,6 +152,7 @@ function Get-RollbackState {
                 $_.TaskName -like "LibertixLinuxReadOnlyPin_*"
             }
     )
+
     $firmwareEntries = @(bcdedit.exe /enum firmware)
     if ($LASTEXITCODE -ne 0) {
         throw "bcdedit could not enumerate firmware entries after rollback."
@@ -163,6 +165,8 @@ function Get-RollbackState {
     if ($LASTEXITCODE -ne 0 -or $windowsBootManager.Count -eq 0) {
         throw "Windows Boot Manager could not be enumerated after rollback."
     }
+    # BCD text alone cannot prove that a recovery loader still points to the
+    # same partition, so compare its qualified WMI identity as well.
     $bootLoaderEvidence = Get-WindowsBootLoaderEvidence
     $bootLoadersMatch = (ConvertTo-Json -InputObject @($bootLoaderEvidence.Lines) -Compress) -ceq
         (ConvertTo-Json -InputObject @($config.windows_boot_loaders) -Compress)
@@ -171,6 +175,7 @@ function Get-RollbackState {
     ) -ceq (
         ConvertTo-Json -InputObject @($config.windows_boot_loader_partitions) -Compress
     )
+
     $bootGuardian = Get-Service -Name "LibertixBootGuardian" -ErrorAction SilentlyContinue
     $layout = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop |
         Sort-Object PartitionNumber | Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
@@ -178,6 +183,7 @@ function Get-RollbackState {
         Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
     $layoutMatches = Test-RollbackPartitionLayout -Actual $layout -Expected $expectedLayout
     $storageMatches = Test-RollbackStorageLayout -Expected @($config.storage_layout)
+
     $ledgerPaths = @()
     $biosLedger = Join-Path $env:SystemDrive "LibertixInstallRecovery\installation-state.json"
     if (Test-Path -LiteralPath $biosLedger) { $ledgerPaths += $biosLedger }
@@ -192,6 +198,9 @@ function Get-RollbackState {
         -Paths $ledgerPaths `
         -ExcludedPlanIds @($config.baseline_plan_ids) `
         -RequireClosedPostInstallResult $requireClosedPostInstallResult
+
+    # A successful uninstall requires storage, boot and durable execution
+    # evidence to agree; no single check can establish the final state.
     $geometryMatches =
         [int]$systemDisk.Number -eq $expectedDiskNumber -and
         [int]$systemPartition.PartitionNumber -eq $expectedPartitionNumber -and
@@ -206,6 +215,7 @@ function Get-RollbackState {
         $recoveryTasks.Count -eq 0 -and
         $temporaryBootReferences.Count -eq 0 -and
         $null -eq $bootGuardian
+
     return [pscustomobject]@{
         GeometryMatches = [bool]$geometryMatches
         PartitionLayoutMatches = [bool]$layoutMatches
