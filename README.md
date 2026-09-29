@@ -136,7 +136,7 @@ flowchart TB
 - BIOS with an MBR disk, or UEFI with a GPT disk
 - .NET Framework 4.8
 - Administrator privileges
-- Linux Mint 22.3 Cinnamon or Zorin OS 18.1 Core
+- Linux Mint 22.3 Cinnamon, Zorin OS 18.1 Core or ThoxOS 26.10 Workstation
 - At least 20 GiB of shrinkable space on the Windows system disk
 - A storage layout accepted by the compatibility preflight
 
@@ -147,6 +147,21 @@ disks, unsupported RAID controllers and unsupported Intel RST/VMD or AMD RAID co
 BitLocker or Device Encryption must be fully decrypted before the live installer boots. Libertix
 can request decryption and waits for it to finish. The detected Windows Recovery partition is kept
 outside the Linux allocation and is checked again before the live environment writes to disk.
+
+## ThoxOS
+
+[`ThoxOS 26.10 Workstation`](docs/THOXOS.md) is a supported distribution. It installs a branded
+Ubuntu 26.10 + KDE Plasma 6.7 workstation next to Windows through the same plan, live installer and
+dual-boot configuration as every other catalog entry, and then applies an additive brand and desktop
+layer: `/etc/thoxos-release` identity, Xolonium brand typography with the OFL notice, the official
+THOX marks and wallpaper, a `thoxos-info` launcher and a first-boot report.
+
+The distribution card in the wizard, the GRUB menu entry and the application chrome all use the
+ThoxOS design system (dark-first zinc surfaces, emerald accent). Brand artwork keeps the official
+brand-library colours; interface surfaces keep readable semantic roles. The distribution identity
+stays `ubuntu`, because the installer verifies the extracted rootfs `os-release` before writing
+anything — see [`docs/THOXOS.md`](docs/THOXOS.md) for the identity rule, the pinned ISO and its
+recorded provenance, and the exact payload the ISO stages.
 
 ## Optional file sharing
 
@@ -247,7 +262,7 @@ recorded in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 The automated test service is located in `auto_tests`. Its runtime configuration is loaded from a
 local `.env` file; `auto_tests/.env.example` documents the required fields.
-The complete developer environment, API reference, build workflow, and copy-paste Mint/Zorin
+The complete developer environment, API reference, build workflow, and copy-paste Mint/Zorin/ThoxOS
 commands are documented in [`auto_tests/README.md`](auto_tests/README.md).
 
 ```bash

@@ -103,6 +103,6 @@ def test_every_catalog_grub_icon_is_packaged_in_the_shared_theme() -> None:
         "distributions"
     ]
 
-    assert {entry["id"] for entry in catalog} == {"mint", "zorin"}
+    assert {entry["id"] for entry in catalog} == {"mint", "zorin", "thoxos"}
     for entry in catalog:
         assert (REPO_ROOT / "assets/grub-theme/icons" / f"{entry['grubIcon']}.png").is_file()

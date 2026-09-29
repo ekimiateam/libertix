@@ -4508,6 +4508,7 @@ def test_grub_submenu_entries_always_have_a_transparent_icon_class() -> None:
     [
         ("Linux Mint 22.3 Cinnamon", "linuxmint"),
         ("Zorin OS 18.1 Core", "zorin"),
+        ("ThoxOS 26.10 (Kubuntu 26.10 Plasma)", "thoxos"),
     ],
 )
 def test_grub_renderer_uses_plan_presentation_without_flattening_advanced_entries(

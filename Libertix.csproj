@@ -359,6 +359,7 @@
   </ItemGroup>
   <ItemGroup>
     <Resource Include="Resources\Images\icon.ico" />
+    <Resource Include="Resources\Images\thoxos-icon.png" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="BootGuardian\Libertix.BootGuardian.csproj">
@@ -381,6 +382,10 @@
     <MakeDir Directories="$(TargetDir)Resources\Images" />
     <Copy
       SourceFiles="Resources\Images\icon.ico"
+      DestinationFolder="$(TargetDir)Resources\Images"
+      SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="Resources\Images\thoxos-icon.png"
       DestinationFolder="$(TargetDir)Resources\Images"
       SkipUnchangedFiles="true" />
   </Target>

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "distribution": "thoxos",
+  "purpose": "Installer ISO pin for the ThoxOS 26.10 Workstation catalog entry.",
+  "flavor": "kubuntu",
+  "codename": "stonking",
+  "release": "26.10",
+  "snapshot": "snapshot-4",
+  "channel": "release (not daily): Canonical publishes the released Kubuntu 26.10 image under /kubuntu/releases/26.10/release/",
+  "isoUrl": "https://cdimage.ubuntu.com/kubuntu/releases/26.10/release/snapshot-4/kubuntu-26.10-snapshot4-desktop-amd64.iso",
+  "isoFileName": "kubuntu-26.10-snapshot4-desktop-amd64.iso",
+  "sha256SumsUrl": "https://cdimage.ubuntu.com/kubuntu/releases/26.10/release/snapshot-4/SHA256SUMS",
+  "sha256SumsGpgUrl": "https://cdimage.ubuntu.com/kubuntu/releases/26.10/release/snapshot-4/SHA256SUMS.gpg",
+  "isoInstallerSha256": "423208af871a9eea8810c43c0e60c71eefb7ae9d0db1c22e32eabab2945d0994",
+  "isoInstallerSizeBytes": 5237479424,
+  "upstreamLastModified": "Thu, 17 Sep 2026 07:10:14 GMT",
+  "verifiedAt": "2026-09-29T17:05:19Z",
+  "notes": [
+    "The SHA-256 above is copied verbatim from Canonical's published SHA256SUMS for this exact ISO path.",
+    "Libertix re-verifies the ISO against this hash on the target machine before extraction.",
+    "Refresh this record together with release-config.json when Canonical publishes a new snapshot."
+  ]
+}

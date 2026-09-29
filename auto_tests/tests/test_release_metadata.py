@@ -30,7 +30,7 @@ def test_release_config_matches_schema_and_packages_every_grub_icon() -> None:
         config
     )
 
-    assert {entry["id"] for entry in config["distributions"]} == {"mint", "zorin"}
+    assert {entry["id"] for entry in config["distributions"]} == {"mint", "zorin", "thoxos"}
     for distribution in config["distributions"]:
         assert (REPO_ROOT / "assets/grub-theme/icons" / f"{distribution['grubIcon']}.png").is_file()
 

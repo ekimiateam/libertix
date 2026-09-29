@@ -103,6 +103,33 @@ install_target_configuration_payload() {
         /mnt/target/tmp/libertix-development-ssh-first-boot.sh
     install -m 0644 /usr/local/lib/libertix/libertix-development-ssh.service \
         /mnt/target/tmp/libertix-development-ssh.service
+
+    install_thoxos_variant_payload
+}
+
+# The ThoxOS brand + desktop layer travels with the installer unconditionally so
+# both firmware modes carry the same payload. It is only applied when the signed
+# catalog selected DISTRIBUTION_ID=thoxos.
+install_thoxos_variant_payload() {
+    local source_dir=/usr/local/lib/libertix/thoxos-layer
+
+    [ -d "$source_dir" ] || {
+        echo "ThoxOS brand layer source is missing: $source_dir" >&2
+        return 1
+    }
+    [ -f "$source_dir/tokens/thoxos-tokens.json" ] || {
+        echo "ThoxOS brand layer payload is empty: $source_dir" >&2
+        return 1
+    }
+
+    install -d -m 0755 /mnt/target/tmp/thoxos-layer
+    cp -a "$source_dir/." /mnt/target/tmp/thoxos-layer/
+    chmod 0755 /mnt/target/tmp/thoxos-layer/configure-thoxos-target.sh
+
+    install -m 0755 /usr/local/lib/libertix/libertix-configure-thoxos.sh \
+        /mnt/target/tmp/libertix-configure-thoxos.sh
+    install -m 0755 /usr/local/lib/libertix/libertix-thoxos-configure-target.sh \
+        /mnt/target/tmp/thoxos-configure-target.sh
 }
 
 run_target_configuration() {

@@ -46,6 +46,7 @@ TEST_RUNTIME_ROOT = REPO_ROOT / "auto_tests" / "runtime" / "test-harness"
 def test_distribution_profiles_are_loaded_from_the_versioned_catalog() -> None:
     mint = load_distribution_profile("mint")
     zorin = load_distribution_profile("zorin")
+    thoxos = load_distribution_profile("thoxos")
 
     assert (mint.catalog_index, mint.os_release_id, mint.grub_icon) == (
         0,
@@ -57,8 +58,16 @@ def test_distribution_profiles_are_loaded_from_the_versioned_catalog() -> None:
         "zorin",
         "zorin",
     )
+    # ThoxOS is a branded Ubuntu base, so it keeps the upstream os-release ID
+    # while presenting its own GRUB name and icon.
+    assert (thoxos.catalog_index, thoxos.os_release_id, thoxos.grub_icon) == (
+        2,
+        "ubuntu",
+        "thoxos",
+    )
     assert mint.installer_iso_file_name == "mint.iso"
     assert zorin.installer_iso_file_name == "zorin.iso"
+    assert thoxos.installer_iso_file_name == "kubuntu-26.10-snapshot4-desktop-amd64.iso"
 
 
 def test_wizard_pages_expose_deterministic_keyboard_navigation() -> None:

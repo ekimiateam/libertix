@@ -216,6 +216,8 @@ install_live_installer_assets() {
         "0644|$ROOT_DIR/assets/live/first-boot-resize.service|/usr/local/lib/libertix/first-boot-resize.service"
         "0644|$ISO_DIR/systemd/libertix-install.service|/etc/systemd/system/libertix-install.service"
         "0644|$ROOT_DIR/assets/live/getty-tty2-override.conf|/etc/systemd/system/getty@tty2.service.d/override.conf"
+        "0755|$ROOT_DIR/assets/live/configure-thoxos-target.sh|/usr/local/lib/libertix/libertix-configure-thoxos.sh"
+        "0755|$ROOT_DIR/assets/live/thoxos-configure-target.sh|/usr/local/lib/libertix/libertix-thoxos-configure-target.sh"
     )
     local asset mode source destination
     for asset in "${assets[@]}"; do
@@ -238,6 +240,20 @@ install_live_installer_assets() {
 
     cp -a "$ROOT_DIR/assets/grub-theme" \
         "$WORKDIR/chroot/usr/local/lib/libertix/grub-theme-source"
+    # The ThoxOS brand + desktop layer is staged into the live system so the
+    # target configuration step can copy it into the installed system when the
+    # signed catalog selected DistributionId=thoxos.
+    [ -d "$ROOT_DIR/assets/thoxos" ] || {
+        echo "ThoxOS brand layer is missing: $ROOT_DIR/assets/thoxos" >&2
+        exit 1
+    }
+    [ -f "$ROOT_DIR/assets/thoxos/tokens/thoxos-tokens.json" ] || {
+        echo "ThoxOS brand layer has no token set" >&2
+        exit 1
+    }
+    rm -rf "$WORKDIR/chroot/usr/local/lib/libertix/thoxos-layer"
+    cp -a "$ROOT_DIR/assets/thoxos" \
+        "$WORKDIR/chroot/usr/local/lib/libertix/thoxos-layer"
     mkdir -p "$WORKDIR/chroot/etc/systemd/system/getty.target.wants"
     ln -sf /lib/systemd/system/getty@.service \
         "$WORKDIR/chroot/etc/systemd/system/getty.target.wants/getty@tty2.service"

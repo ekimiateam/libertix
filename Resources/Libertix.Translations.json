@@ -196,7 +196,11 @@
         "AboutDonorsBody": "Public campaign supporters: Olivier, Boyka, Coin des Geeks, and Matthieu.\nThe campaign passed its €3,000 goal with 41 donations. Thank you to every donor, including those who chose not to be named.",
         "AboutWebsiteButton": "Project website",
         "AboutDonateButton": "Support Libertix",
-        "AboutLinkError": "The link could not be opened: {0}"
+        "AboutLinkError": "The link could not be opened: {0}",
+        "ThoxOSReleaseName": "ThoxOS 26.10 Workstation",
+        "ThoxOSGrubDisplayName": "ThoxOS 26.10 (Kubuntu 26.10 Plasma)",
+        "ThoxOSDescription": "ThoxOS is a local-first workstation built on Ubuntu 26.10 with KDE Plasma 6.7, the ThoxOS emerald design system and the THOX agent stack. Libertix installs it next to Windows and builds the dual-boot menu.",
+        "ThoxOSSecureBootMicrosoftAuthorities": "2011, 2023"
       },
       "compatibility": {
         "checkMessages": {

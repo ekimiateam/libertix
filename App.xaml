@@ -4,6 +4,18 @@
              xmlns:local="clr-namespace:Libertix"
              xmlns:converters="clr-namespace:Libertix.Converters"
              StartupUri="MainWindow.xaml">
+    <!--
+        ThoxOS design system.
+
+        Dark-first zinc surfaces with the emerald brand accent: the same role
+        tokens used by ThoxOS Desk, the ThoxOS desktop shell and the ThoxOS
+        workstation. Brand artwork keeps the official THOX brand-library values
+        (green #05A451, light text #F9F9F9); the interface keeps the semantic
+        zinc/emerald roles so text contrast stays WCAG AA.
+
+        Resource keys are unchanged from the previous theme, so every page keeps
+        working. Only the values, plus the ThoxOS additions, are different.
+    -->
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -15,13 +27,18 @@
                                     Opacity="0.2"
                                     BlurRadius="4"/>
 
+                    <!-- ThoxOS brand mark and brand typeface for branded surfaces. -->
+                    <BitmapImage x:Key="ThoxOSLogoSource"
+                                 UriSource="pack://application:,,,/Resources/Images/thoxos-icon.png"/>
+                    <FontFamily x:Key="ThoxFontFamily">Xolonium, Segoe UI, sans-serif</FontFamily>
+
                     <Style x:Key="ModernButton" TargetType="Button">
-                        <Setter Property="Background" Value="#2a273f"/>
-                        <Setter Property="Foreground" Value="#E0DEF4"/>
+                        <Setter Property="Background" Value="#18181B"/>
+                        <Setter Property="Foreground" Value="#FAFAFA"/>
                         <Setter Property="Padding" Value="20,10"/>
                         <Setter Property="FontSize" Value="16"/>
                         <Setter Property="FontWeight" Value="SemiBold"/>
-                        <Setter Property="BorderBrush" Value="#f6c177"/>
+                        <Setter Property="BorderBrush" Value="#3F3F46"/>
                         <Setter Property="BorderThickness" Value="0"/>
                         <Setter Property="Template">
                             <Setter.Value>
@@ -36,14 +53,22 @@
                                                         VerticalAlignment="Center"/>
                                     </Border>
                                     <ControlTemplate.Triggers>
+                                        <!-- Emerald fill carries dark text: light text on
+                                             #34D399 would not pass contrast. -->
                                         <Trigger Property="IsMouseOver" Value="True">
-                                            <Setter Property="Background" Value="#3e8fb0"/>
+                                            <Setter Property="Background" Value="#34D399"/>
+                                            <Setter Property="Foreground" Value="#09090B"/>
                                         </Trigger>
                                         <Trigger Property="IsPressed" Value="True">
-                                            <Setter Property="Background" Value="#2d7a9e"/>
+                                            <Setter Property="Background" Value="#059669"/>
+                                            <Setter Property="Foreground" Value="#09090B"/>
                                         </Trigger>
                                         <Trigger Property="IsKeyboardFocused" Value="True">
                                             <Setter TargetName="ButtonBorder" Property="BorderThickness" Value="2"/>
+                                            <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#10B981"/>
+                                        </Trigger>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Opacity" Value="0.5"/>
                                         </Trigger>
                                     </ControlTemplate.Triggers>
                                 </ControlTemplate>
@@ -51,28 +76,35 @@
                         </Setter>
                     </Style>
 
-                    <SolidColorBrush x:Key="PrimaryBackground" Color="#232136"/>
-                    <SolidColorBrush x:Key="SecondaryBackground" Color="#2a273f"/>
-                    <SolidColorBrush x:Key="AccentColor" Color="#3e8fb0"/>
-                    <SolidColorBrush x:Key="TextPrimary" Color="#e0def4"/>
-                    <SolidColorBrush x:Key="TextSecondary" Color="#908caa"/>
-                    <SolidColorBrush x:Key="ErrorColor" Color="#eb6f92"/>
-                    <SolidColorBrush x:Key="WarningColor" Color="#f6c177"/>
-                    <SolidColorBrush x:Key="PanelBorder" Color="#363252"/>
-                    <SolidColorBrush x:Key="HighlightColor" Color="#c4a7e7"/>
-                    <SolidColorBrush x:Key="DeepBackground" Color="#1e1c31"/>
-                    <SolidColorBrush x:Key="OverlayBackground" Color="#ee1e1c31"/>
-                    <SolidColorBrush x:Key="CompatibilityBorder" Color="#44415a"/>
-                    <SolidColorBrush x:Key="WindowsPartitionColor" Color="#1e5570"/>
-                    <SolidColorBrush x:Key="WindowsPartitionDetailColor" Color="#2d7090"/>
+                    <SolidColorBrush x:Key="PrimaryBackground" Color="#09090B"/>
+                    <SolidColorBrush x:Key="SecondaryBackground" Color="#18181B"/>
+                    <SolidColorBrush x:Key="AccentColor" Color="#10B981"/>
+                    <SolidColorBrush x:Key="TextPrimary" Color="#FAFAFA"/>
+                    <SolidColorBrush x:Key="TextSecondary" Color="#A1A1AA"/>
+                    <SolidColorBrush x:Key="ErrorColor" Color="#EF4444"/>
+                    <SolidColorBrush x:Key="WarningColor" Color="#F59E0B"/>
+                    <SolidColorBrush x:Key="PanelBorder" Color="#3F3F46"/>
+                    <SolidColorBrush x:Key="HighlightColor" Color="#34D399"/>
+                    <SolidColorBrush x:Key="DeepBackground" Color="#0B0F12"/>
+                    <SolidColorBrush x:Key="OverlayBackground" Color="#E609090B"/>
+                    <SolidColorBrush x:Key="CompatibilityBorder" Color="#27272A"/>
+                    <!-- Partition hues stay deliberately non-brand: they encode which
+                         region belongs to Windows versus ThoxOS on the disk map. -->
+                    <SolidColorBrush x:Key="WindowsPartitionColor" Color="#1E4A6B"/>
+                    <SolidColorBrush x:Key="WindowsPartitionDetailColor" Color="#2D6E96"/>
+
+                    <!-- ThoxOS brand additions -->
+                    <SolidColorBrush x:Key="ThoxBrandGreen" Color="#05A451"/>
+                    <SolidColorBrush x:Key="ThoxSurfaceElevated" Color="#27272A"/>
+                    <SolidColorBrush x:Key="ThoxTextMuted" Color="#71717A"/>
 
                     <converters:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter"/>
                     <converters:StringToVisibilityConverter x:Key="StringToVisibilityConverter"/>
 
                     <Style x:Key="ModernComboBox" TargetType="ComboBox">
-                        <Setter Property="Background" Value="#2a273f"/>
-                        <Setter Property="Foreground" Value="#E0DEF4"/>
-                        <Setter Property="BorderBrush" Value="#363252"/>
+                        <Setter Property="Background" Value="#18181B"/>
+                        <Setter Property="Foreground" Value="#FAFAFA"/>
+                        <Setter Property="BorderBrush" Value="#3F3F46"/>
                         <Setter Property="BorderThickness" Value="1"/>
                         <Setter Property="Height" Value="36"/>
                         <Setter Property="Template">
@@ -107,7 +139,7 @@
                                                             </ContentPresenter>
                                                             <Path Grid.Column="1"
                                                                   Data="M0,0 L8,8 L16,0"
-                                                                  Stroke="#908caa"
+                                                                  Stroke="#A1A1AA"
                                                                   StrokeThickness="2"
                                                                   HorizontalAlignment="Center"
                                                                   VerticalAlignment="Center"/>
@@ -115,11 +147,11 @@
                                                     </Border>
                                                     <ControlTemplate.Triggers>
                                                         <Trigger Property="IsMouseOver" Value="True">
-                                                            <Setter Property="BorderBrush" Value="#3e8fb0"/>
-                                                            <Setter TargetName="Border" Property="Background" Value="#363252"/>
+                                                            <Setter Property="BorderBrush" Value="#10B981"/>
+                                                            <Setter TargetName="Border" Property="Background" Value="#27272A"/>
                                                         </Trigger>
                                                         <Trigger Property="IsChecked" Value="True">
-                                                            <Setter Property="BorderBrush" Value="#3e8fb0"/>
+                                                            <Setter Property="BorderBrush" Value="#10B981"/>
                                                         </Trigger>
                                                     </ControlTemplate.Triggers>
                                                 </ControlTemplate>
@@ -130,8 +162,8 @@
                                                PlacementTarget="{Binding ElementName=ToggleButton}"
                                                Width="{TemplateBinding ActualWidth}"
                                                AllowsTransparency="True">
-                                            <Border Background="#2a273f"
-                                                    BorderBrush="#363252"
+                                            <Border Background="#18181B"
+                                                    BorderBrush="#3F3F46"
                                                     BorderThickness="1"
                                                     CornerRadius="4"
                                                     Effect="{StaticResource DropShadowEffect}"
@@ -154,7 +186,7 @@
                     <Style x:Key="ModernComboBoxItem" TargetType="ComboBoxItem">
                         <Setter Property="Height" Value="32"/>
                         <Setter Property="Background" Value="Transparent"/>
-                        <Setter Property="Foreground" Value="#E0DEF4"/>
+                        <Setter Property="Foreground" Value="#FAFAFA"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="ComboBoxItem">
@@ -167,11 +199,14 @@
                                                         HorizontalAlignment="Left"/>
                                     </Border>
                                     <ControlTemplate.Triggers>
+                                        <!-- Emerald selection uses dark text for contrast. -->
                                         <Trigger Property="IsMouseOver" Value="True">
-                                            <Setter Property="Background" Value="#3e8fb0"/>
+                                            <Setter Property="Background" Value="#10B981"/>
+                                            <Setter Property="Foreground" Value="#09090B"/>
                                         </Trigger>
                                         <Trigger Property="IsSelected" Value="True">
-                                            <Setter Property="Background" Value="#3e8fb0"/>
+                                            <Setter Property="Background" Value="#34D399"/>
+                                            <Setter Property="Foreground" Value="#09090B"/>
                                         </Trigger>
                                         <Trigger Property="IsEnabled" Value="False">
                                             <Setter Property="Opacity" Value="0.5"/>

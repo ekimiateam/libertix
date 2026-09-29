@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "product": "ThoxOS",
+  "variant": "ThoxOS 26.10 Workstation",
+  "identity": {
+    "distributionName": "ThoxOS 26.10 Workstation",
+    "distributionId": "thoxos",
+    "osReleaseName": "ThoxOS",
+    "osReleasePrettyName": "ThoxOS 26.10 Workstation",
+    "baseDistribution": "Ubuntu 26.10 (Stonking Stingray)",
+    "desktopEnvironment": "KDE Plasma 6.7",
+    "osReleaseLogo": "thoxos-logo"
+  },
+  "palette": {
+    "brandGreen": "#05a451",
+    "brandGreenGlow": "#00ffa3",
+    "emeraldPrimary": "#10b981",
+    "emeraldLight": "#34d399",
+    "emeraldDeep": "#059669",
+    "neon": "#00ff88",
+    "lightText": "#f9f9f9",
+    "monoBlack": "#000000",
+    "surfaceBase": "#09090b",
+    "surfaceCanvas": "#0b0f12",
+    "surfacePanel": "#11161c",
+    "surfaceRaised": "#18181b",
+    "surfaceElevated": "#27272a",
+    "borderDefault": "#3f3f46",
+    "borderSubtle": "#27272a",
+    "textPrimary": "#fafafa",
+    "textSecondary": "#a1a1aa",
+    "textMuted": "#71717a",
+    "warning": "#f59e0b",
+    "error": "#ef4444",
+    "info": "#3b82f6"
+  },
+  "typography": {
+    "uiFamily": "Xolonium",
+    "uiRegularFile": "Xolonium-Regular.otf",
+    "uiBoldFile": "Xolonium-Bold.otf",
+    "uiFallback": "DejaVu Sans",
+    "monoFamily": "DejaVu Sans Mono",
+    "monoFallback": "Liberation Mono"
+  },
+  "boot": {
+    "grubCanvas": "#0b0f12",
+    "grubTimeoutSeconds": -1,
+    "plymouthBackground": [0.043137254, 0.058823529, 0.070588235]
+  },
+  "dualBoot": {
+    "note": "ThoxOS uses the shared Libertix GRUB layout. The branded entry takes the thoxos icon class through the signed catalog entry's grubIcon; the Windows entry, generator diversions and rollback behaviour are unchanged.",
+    "grubIconClass": "thoxos",
+    "secureBootMicrosoftAuthorities": ["2011", "2023"],
+    "secureBootNote": "The pinned Kubuntu image is shim-signed, so the UEFI chain verifies against both the 2011 and the 2023 Microsoft UEFI CA."
+  },
+  "provenance": {
+    "brandLibrary": "THOX_brand_library.zip",
+    "brandLibrarySha256": "8bb8ef68b0721227221bc8bcca9ec1ccae51cd8874101bc4b8e1dd52e739436e",
+    "brandGreenSource": "branding/library/README.md",
+    "surfaceTokensSource": "ThoxOS Desk docs/OS-THEME.md + TXF semantic tokens",
+    "note": "Brand mark artwork keeps the official library values; interface surfaces keep the TXF semantic zinc/emerald role tokens."
+  }
+}

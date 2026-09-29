@@ -1,3 +1,14 @@
 # Detached signatures cover the exact LF bytes, including on Windows runners.
 Libertix.Tests/TestData/catalog.json text eol=lf
 auto_tests/app/filepool/catalog.json text eol=lf
+
+# Files whose exact bytes are installed verbatim on a Linux target. A CRLF
+# checkout corrupts them on the installed system: a script or .desktop entry
+# fails to execute, and an os-release key keeps a stray carriage return that
+# `hostnamectl` and shell sourcing then quote literally.
+assets/thoxos/os-release text eol=lf
+assets/thoxos/tokens/thoxos-tokens.json text eol=lf
+assets/thoxos/plymouth/thoxos.script text eol=lf
+assets/thoxos/iso-provenance.json text eol=lf
+assets/live/thoxos-configure-target.sh text eol=lf
+assets/live/configure-thoxos-target.sh text eol=lf

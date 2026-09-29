@@ -39,6 +39,24 @@
       "isoInstallerSha256": "44649b97bd307fc4c8529205d098ebbf98575a1e1ba2ee7d7005b697af1721d5",
       "isoInstallerSizeBytes": 3909091328,
       "sizeInGB": 20
+    },
+    {
+      "id": "thoxos",
+      "name": "ThoxOS 26.10 Workstation",
+      "osReleaseId": "ubuntu",
+      "grubDisplayName": "ThoxOS 26.10 (Kubuntu 26.10 Plasma)",
+      "grubIcon": "thoxos",
+      "secureBootMicrosoftAuthorities": [
+        "2011",
+        "2023"
+      ],
+      "description": "ThoxOS 26.10 Workstation pairs Ubuntu 26.10 with KDE Plasma 6.7, the ThoxOS emerald dark look and feel, THOX brand typography and the local-first THOX agent stack. Libertix installs it alongside Windows and builds the ThoxOS/Windows dual-boot menu. Source: ttracx/thoxos-ubuntu-26-10 and ttracx/thoxos-desktop.",
+      "imageUrl": "https://raw.githubusercontent.com/ttracx/libertix/main/assets/thoxos/card/thoxos-workstation-2610.png",
+      "isoInstaller": "https://cdimage.ubuntu.com/kubuntu/releases/26.10/release/snapshot-4/kubuntu-26.10-snapshot4-desktop-amd64.iso",
+      "isoInstallerFileName": "kubuntu-26.10-snapshot4-desktop-amd64.iso",
+      "isoInstallerSha256": "423208af871a9eea8810c43c0e60c71eefb7ae9d0db1c22e32eabab2945d0994",
+      "isoInstallerSizeBytes": 5237479424,
+      "sizeInGB": 40
     }
   ]
 }

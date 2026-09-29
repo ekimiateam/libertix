@@ -485,6 +485,34 @@ enable_first_boot_resize() {
     systemctl enable first-boot-resize.service
 }
 
+# -----------------------------------------------------------------------------
+# ThoxOS variant layer
+#
+# ThoxOS is the branded Ubuntu 26.10 workstation base. The generic steps above
+# already configured the account, locale, keyboard, Windows sharing and GRUB;
+# this layer adds product identity, brand typography/marks, the desktop
+# defaults, the ThoxOS launcher and the first-boot report on top.
+#
+# It is selected by the signed catalog entry (DISTRIBUTION_ID=thoxos) and it is
+# additive by construction: nothing above is skipped, so an installation that
+# fails before this point is still a complete, bootable Ubuntu system.
+# -----------------------------------------------------------------------------
+configure_thoxos_variant() {
+    local layer=/tmp/libertix-configure-thoxos.sh
+
+    [ "$DISTRIBUTION_ID" = "thoxos" ] || return 0
+    [ -x "$layer" ] || {
+        echo "ThoxOS variant selected but the brand layer payload is missing: $layer" >&2
+        return 1
+    }
+
+    LIBERTIX_FIRMWARE_MODE="$LIBERTIX_FIRMWARE_MODE" \
+        DISTRIBUTION_OS_RELEASE_ID="$DISTRIBUTION_OS_RELEASE_ID" \
+        USERNAME="$USERNAME" \
+        THOXOS_LAYER_DIR=/tmp/thoxos-layer \
+        "$layer"
+}
+
 main() {
     assert_target_distribution_identity
     configure_user
@@ -497,6 +525,7 @@ main() {
     configure_development_access
     cleanup_live_boot_artifacts
     refresh_installed_initramfs
+    configure_thoxos_variant
     configure_grub
     enable_first_boot_resize
 }
