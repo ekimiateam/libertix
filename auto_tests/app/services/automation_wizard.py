@@ -18,6 +18,7 @@ from app.clients.ssh import SSHClient, is_reconnectable_transport_error
 from app.clients.vision_models import InstallProgressVerdict
 from app.config import VMConfig
 from app.errors import WorkflowError
+from app.models import BOOTNEXT_FAULTS, CANCELLED_INSTALLATION_FAULTS
 from app.services.automation_progress import InstallationProgress, assert_installation_progress
 from app.services.automation_types import (
     AutomationOptions,
@@ -149,9 +150,9 @@ class WizardAutomationMixin:
             str(unattended_status_path),
             str(unattended_acknowledgement_path),
         )
-        if options.boot_guardian_fault in {"bios-rollback", "bios-controller-disconnect"}:
+        if options.boot_guardian_fault in CANCELLED_INSTALLATION_FAULTS:
             return "installation-rollback"
-        if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
+        if options.boot_guardian_fault in BOOTNEXT_FAULTS:
             return "bootnext-fallback"
         return self._monitor_until_live_boot(
             vm,
@@ -208,154 +209,11 @@ class WizardAutomationMixin:
                     observed,
                 )
 
-            warning_attempt = 0
-            observed = self._wait_for_unattended_stage(
-                ssh,
-                vm,
-                sftp_status,
-                after_sequence,
-                ("warning-ready",),
+            after_sequence = self._accept_unattended_warning(
+                ssh, vm, result, process_id, sftp_status, sftp_acknowledgement, after_sequence
             )
-            warning_client = None
-            try:
-                warning_client = self.vnc.connect(vm.vnc)
-                while True:
-                    warning_attempt += 1
-                    if warning_attempt > UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS:
-                        raise WorkflowError(
-                            "automation.unattended_warning",
-                            "The unattended warning dialog was not accepted after "
-                            "three keyboard attempts",
-                            details={"vm": vm.name, "target": vm.host, **observed},
-                        )
-                    try:
-                        capture = self._accept_unattended_warning_dialog(
-                            ssh,
-                            warning_client,
-                            vm,
-                            result,
-                            process_id,
-                            int(observed["sequence"]),
-                            warning_attempt,
-                        )
-                    except WorkflowError as exc:
-                        if (
-                            exc.step != "automation.capture"
-                            or warning_attempt >= UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS
-                        ):
-                            raise
-                        # Capture failure occurs before any acceptance key is sent.
-                        # A timed-out VNC proxy must not be reused for keyboard input.
-                        try:
-                            warning_client.disconnect()
-                        except Exception:
-                            logger.warning("Failed to close the timed-out warning VNC connection")
-                        warning_client = self.vnc.connect(vm.vnc)
-                        current = self._wait_for_unattended_stage(
-                            ssh,
-                            vm,
-                            sftp_status,
-                            after_sequence,
-                            ("warning-ready",),
-                            timeout_seconds=10,
-                        )
-                        if current["sequence"] != observed["sequence"]:
-                            raise WorkflowError(
-                                "automation.unattended_warning",
-                                "The warning changed during capture reconnection",
-                                details={"vm": vm.name},
-                            ) from exc
-                        result.ok(
-                            "automation.unattended_warning_capture_retry",
-                            "VNC reconnected before any warning acceptance key was sent",
-                            vm=vm.name,
-                            attempt=warning_attempt,
-                        )
-                        continue
-                    # Keep this VNC connection alive until the coordination files
-                    # prove acceptance. Some VNC transports take long enough to
-                    # disconnect that Libertix can otherwise expire first.
-                    after_sequence = self._capture_and_acknowledge_unattended_stage(
-                        ssh,
-                        vm,
-                        result,
-                        sftp_acknowledgement,
-                        observed,
-                        capture=capture,
-                    )
-
-                    observed = self._wait_for_unattended_stage(
-                        ssh,
-                        vm,
-                        sftp_status,
-                        after_sequence,
-                        ("warning-ready", "installation-started"),
-                        timeout_seconds=UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS,
-                    )
-                    if observed["stage"] == "installation-started":
-                        after_sequence = self._capture_and_acknowledge_unattended_stage(
-                            ssh,
-                            vm,
-                            result,
-                            sftp_acknowledgement,
-                            observed,
-                        )
-                        break
-            finally:
-                if warning_client is not None:
-                    try:
-                        warning_client.disconnect()
-                    except Exception:
-                        logger.warning(
-                            "VNC connection did not close cleanly",
-                            extra={"step": "automation.vnc_close", "target": vm.vnc},
-                        )
-
             if options.boot_guardian_fault == "bios-rollback":
-                cancellation = self.validation.run_windows_script(
-                    ssh,
-                    script_name="request_installation_cancellation.ps1",
-                    config={
-                        "process_id": process_id,
-                        "wait_for_state_path": (
-                            r"C:\LibertixInstallRecovery\installation-state.json"
-                        ),
-                        "wait_for_completed_step": "windows.installer-partition-created",
-                        "wait_timeout_seconds": 900,
-                    },
-                    step="automation.bios_rollback.request",
-                    timeout=960,
-                )
-                values = self.validation.parse_powershell_results(
-                    cancellation.stdout,
-                    prefixes=(
-                        "MAIN_WINDOW_HANDLE",
-                        "CONFIRMATION_WINDOW_HANDLE",
-                        "CANCELLATION_CONTROL",
-                        "CONFIRMATION_CONTROL",
-                        "WAITED_COMPLETED_STEP",
-                        "RESULT",
-                    ),
-                )
-                if (
-                    values.get("CANCELLATION_CONTROL") != "ApplyChangesCancelButton"
-                    or values.get("CONFIRMATION_CONTROL") != "LocalizedConfirmationYesButton"
-                    or values.get("WAITED_COMPLETED_STEP") != "windows.installer-partition-created"
-                    or values.get("RESULT") != "OK"
-                ):
-                    raise WorkflowError(
-                        "automation.bios_rollback.request",
-                        "The BIOS cancellation was not requested after proven disk mutation",
-                        details={"vm": vm.name, "target": vm.host, **values},
-                    )
-                result.ok(
-                    "automation.bios_rollback.request",
-                    "The translated cancellation was confirmed after the installer "
-                    "partition existed",
-                    vm=vm.name,
-                    target=vm.host,
-                    **values,
-                )
+                self._request_bios_rollback_cancellation(ssh, vm, result, process_id)
                 return
 
             observed = self._wait_for_unattended_stage(
@@ -381,30 +239,7 @@ class WizardAutomationMixin:
                 )
                 return
             if options.local_filepool:
-                response = self.validation.run_windows_script(
-                    ssh,
-                    script_name="local_filepool.ps1",
-                    config={
-                        "mode": "verify",
-                        "process_id": process_id,
-                        "directory": str(options.deployed_executable.parent / "filepool"),
-                    },
-                    step="automation.local_filepool.used",
-                    timeout=30,
-                )
-                values = self.validation.parse_powershell_results(
-                    response.stdout, prefixes=("LOCAL_FILEPOOL_USED", "SOURCE_LOG")
-                )
-                if values.get("LOCAL_FILEPOOL_USED") != "True":
-                    raise WorkflowError(
-                        "automation.local_filepool.used", "Local filepool evidence is missing"
-                    )
-                result.ok(
-                    "automation.local_filepool.used",
-                    "Online catalog, local hashes and local ISO copies verified in the product log",
-                    vm=vm.name,
-                    **values,
-                )
+                self._verify_local_filepool_used(ssh, vm, result, options, process_id)
             self._capture_and_acknowledge_unattended_stage(
                 ssh,
                 vm,
@@ -420,10 +255,206 @@ class WizardAutomationMixin:
                 int(observed["sequence"]) - 1,
                 ("reboot-ready",),
             )
-            if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
+            if options.boot_guardian_fault in BOOTNEXT_FAULTS:
                 self._force_bootnext_failure(ssh, vm, result)
 
         self._request_reboot_after_preparation(vm, result)
+
+    def _accept_unattended_warning(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        process_id: int,
+        sftp_status: str,
+        sftp_acknowledgement: str,
+        after_sequence: int,
+    ) -> int:
+        """Accept the destructive warning by keyboard and return the next stage sequence."""
+
+        warning_attempt = 0
+        observed = self._wait_for_unattended_stage(
+            ssh,
+            vm,
+            sftp_status,
+            after_sequence,
+            ("warning-ready",),
+        )
+        warning_client = None
+        try:
+            warning_client = self.vnc.connect(vm.vnc)
+            while True:
+                warning_attempt += 1
+                if warning_attempt > UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS:
+                    raise WorkflowError(
+                        "automation.unattended_warning",
+                        "The unattended warning dialog was not accepted after "
+                        "three keyboard attempts",
+                        details={"vm": vm.name, "target": vm.host, **observed},
+                    )
+                try:
+                    capture = self._accept_unattended_warning_dialog(
+                        ssh,
+                        warning_client,
+                        vm,
+                        result,
+                        process_id,
+                        int(observed["sequence"]),
+                        warning_attempt,
+                    )
+                except WorkflowError as exc:
+                    if (
+                        exc.step != "automation.capture"
+                        or warning_attempt >= UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS
+                    ):
+                        raise
+                    # Capture failure occurs before any acceptance key is sent.
+                    # A timed-out VNC proxy must not be reused for keyboard input.
+                    try:
+                        warning_client.disconnect()
+                    except Exception:
+                        logger.warning("Failed to close the timed-out warning VNC connection")
+                    warning_client = self.vnc.connect(vm.vnc)
+                    current = self._wait_for_unattended_stage(
+                        ssh,
+                        vm,
+                        sftp_status,
+                        after_sequence,
+                        ("warning-ready",),
+                        timeout_seconds=10,
+                    )
+                    if current["sequence"] != observed["sequence"]:
+                        raise WorkflowError(
+                            "automation.unattended_warning",
+                            "The warning changed during capture reconnection",
+                            details={"vm": vm.name},
+                        ) from exc
+                    result.ok(
+                        "automation.unattended_warning_capture_retry",
+                        "VNC reconnected before any warning acceptance key was sent",
+                        vm=vm.name,
+                        attempt=warning_attempt,
+                    )
+                    continue
+                # Keep this VNC connection alive until the coordination files
+                # prove acceptance. Some VNC transports take long enough to
+                # disconnect that Libertix can otherwise expire first.
+                after_sequence = self._capture_and_acknowledge_unattended_stage(
+                    ssh,
+                    vm,
+                    result,
+                    sftp_acknowledgement,
+                    observed,
+                    capture=capture,
+                )
+
+                observed = self._wait_for_unattended_stage(
+                    ssh,
+                    vm,
+                    sftp_status,
+                    after_sequence,
+                    ("warning-ready", "installation-started"),
+                    timeout_seconds=UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS,
+                )
+                if observed["stage"] == "installation-started":
+                    after_sequence = self._capture_and_acknowledge_unattended_stage(
+                        ssh,
+                        vm,
+                        result,
+                        sftp_acknowledgement,
+                        observed,
+                    )
+                    break
+        finally:
+            if warning_client is not None:
+                try:
+                    warning_client.disconnect()
+                except Exception:
+                    logger.warning(
+                        "VNC connection did not close cleanly",
+                        extra={"step": "automation.vnc_close", "target": vm.vnc},
+                    )
+        return after_sequence
+
+    def _request_bios_rollback_cancellation(
+        self, ssh: SSHClient, vm: VMConfig, result: ResultBuilder, process_id: int
+    ) -> None:
+        """Cancel through the product UI only after the installer partition exists."""
+
+        cancellation = self.validation.run_windows_script(
+            ssh,
+            script_name="request_installation_cancellation.ps1",
+            config={
+                "process_id": process_id,
+                "wait_for_state_path": (r"C:\LibertixInstallRecovery\installation-state.json"),
+                "wait_for_completed_step": "windows.installer-partition-created",
+                "wait_timeout_seconds": 900,
+            },
+            step="automation.bios_rollback.request",
+            timeout=960,
+        )
+        values = self.validation.parse_powershell_results(
+            cancellation.stdout,
+            prefixes=(
+                "MAIN_WINDOW_HANDLE",
+                "CONFIRMATION_WINDOW_HANDLE",
+                "CANCELLATION_CONTROL",
+                "CONFIRMATION_CONTROL",
+                "WAITED_COMPLETED_STEP",
+                "RESULT",
+            ),
+        )
+        if (
+            values.get("CANCELLATION_CONTROL") != "ApplyChangesCancelButton"
+            or values.get("CONFIRMATION_CONTROL") != "LocalizedConfirmationYesButton"
+            or values.get("WAITED_COMPLETED_STEP") != "windows.installer-partition-created"
+            or values.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                "automation.bios_rollback.request",
+                "The BIOS cancellation was not requested after proven disk mutation",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        result.ok(
+            "automation.bios_rollback.request",
+            "The translated cancellation was confirmed after the installer partition existed",
+            vm=vm.name,
+            target=vm.host,
+            **values,
+        )
+
+    def _verify_local_filepool_used(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        options: AutomationOptions,
+        process_id: int,
+    ) -> None:
+        response = self.validation.run_windows_script(
+            ssh,
+            script_name="local_filepool.ps1",
+            config={
+                "mode": "verify",
+                "process_id": process_id,
+                "directory": str(options.deployed_executable.parent / "filepool"),
+            },
+            step="automation.local_filepool.used",
+            timeout=30,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout, prefixes=("LOCAL_FILEPOOL_USED", "SOURCE_LOG")
+        )
+        if values.get("LOCAL_FILEPOOL_USED") != "True":
+            raise WorkflowError(
+                "automation.local_filepool.used", "Local filepool evidence is missing"
+            )
+        result.ok(
+            "automation.local_filepool.used",
+            "Online catalog, local hashes and local ISO copies verified in the product log",
+            vm=vm.name,
+            **values,
+        )
 
     def _force_bootnext_failure(
         self,

@@ -1,73 +1,27 @@
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Globalization;
-using System.Linq;
-using System.Net.Http;
-using System.Runtime.InteropServices;
-using System.Security.Principal;
-using System.Security.Cryptography;
-using System.Security.AccessControl;
 using System.Text;
-using System.Text.Json;
-using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
-using Libertix.Helpers;
 using Libertix.Dialogs;
+using Libertix.Helpers;
 using Libertix.Installation;
 using Libertix.Models;
 
 namespace Libertix.Pages
 {
-    public partial class ApplyChanges : Page
+    /// <summary>
+    /// Installation progress screen. <see cref="InstallationEngine"/> performs
+    /// the installation; this page only renders its progress and forwards the
+    /// user's cancel, retry and restart decisions.
+    /// </summary>
+    public partial class ApplyChanges : Page, IInstallationView
     {
         private readonly InstallationState _installationState;
-        private FilepoolConfig Filepool => ((App)Application.Current).Filepool;
-        private string LocalArtifactPath(string fileName) => Path.Combine(
-            Filepool.LocalDirectory ?? AppDomain.CurrentDomain.BaseDirectory,
-            fileName);
-        private double _linuxSizeGB;
-        private static readonly string WindowsSystemDrive =
-            Path.GetPathRoot(Environment.SystemDirectory);
-        private static readonly string RecoveryRoot =
-            Path.Combine(WindowsSystemDrive, RuntimeNames.BiosRecoveryDirectory);
-        private const string UefiRecoveryTaskPrefix = "LibertixUefiRecovery_";
-        private const string UefiRecoveryPromptTaskPrefix = "LibertixUefiRecoveryPrompt_";
-        private static int Aria2MaxConnections =>
-            InstallationPolicy.Current.Download.Aria2MaximumConnections;
-        private static int DownloadMaximumAttempts =>
-            InstallationPolicy.Current.Download.MaximumAttempts;
-        private static int DownloadRetryBaseDelaySeconds =>
-            InstallationPolicy.Current.Download.RetryBaseDelaySeconds;
-        private static readonly string WindowsShareRoot =
-            Path.Combine(WindowsSystemDrive, @"ProgramData\Libertix\WindowsShare");
-        private static readonly Lazy<ArtifactCatalog> ArtifactCatalogHolder =
-            new Lazy<ArtifactCatalog>(ArtifactCatalog.LoadFromApplicationDirectory);
-        private static ArtifactCatalog Artifacts => ArtifactCatalogHolder.Value;
-        private bool _isRunning = false;
-        private int _lastUefiProgressRevision = -1;
-        private StoragePreflightInfo _storagePreflight;
-        private bool _biosRecoveryGuardInstalled;
-        private string _biosInstallerDriveLetter;
+        private readonly InstallationEngine _engine;
         private bool _logOutputAutoScroll = true;
         private bool _expandedLogOutputAutoScroll = true;
-        private bool _unattendedRebootReady;
-        private bool _unattendedFailurePublished;
-
-        private string BiosInstallerRoot
-        {
-            get
-            {
-                if (string.IsNullOrWhiteSpace(_biosInstallerDriveLetter))
-                    throw new InvalidOperationException("BIOS installer drive is not mounted.");
-                return _biosInstallerDriveLetter + @":\";
-            }
-        }
 
         public ApplyChanges() : this(((App)Application.Current).InstallationState)
         {
@@ -77,50 +31,26 @@ namespace Libertix.Pages
         {
             _installationState = installationState ?? throw new ArgumentNullException(nameof(installationState));
             InitializeComponent();
-            InitializeInstallationControls();
-            LoadSummary();
+            var app = (App)Application.Current;
+            _engine = new InstallationEngine(_installationState, app.Filepool, app.RuntimeOptions, this);
             Loaded += ApplyChanges_Loaded;
             Unloaded += ApplyChanges_Unloaded;
         }
 
         private void ApplyChanges_Unloaded(object sender, RoutedEventArgs e)
         {
-            if (_isRunning || _cancellationDisposed)
-                return;
-
-            _installationCancellation.Dispose();
-            _cancellationDisposed = true;
+            _engine.DisposeIfIdle();
         }
 
         private async void ApplyChanges_Loaded(object sender, RoutedEventArgs e)
         {
             Loaded -= ApplyChanges_Loaded;
-            try
-            {
-                await UnattendedWorkflow.PublishStageAndWaitAsync("installation-started");
-                await StartInstallationAsync();
-            }
-            catch (Exception ex)
-            {
-                Log($"ERROR: Installation startup failed: {ex.Message}");
-                UpdateProgress(0, _rollbackVerificationPending
-                    ? Localized("ApplyChangesRollbackIncomplete", "Rollback incomplete. Manual intervention is required.")
-                    : Localized("ApplyChangesError", "Error occurred"));
-                PublishUnattendedFailure("installation-start-failed", ex.Message);
-                FinishInstallation(enableBackButton: true);
-            }
-        }
-
-        private void LoadSummary()
-        {
-            if (_installationState.SelectedLinuxSizeGiB is double linuxSize)
-                _linuxSizeGB = linuxSize;
+            await _engine.RunAsync();
         }
 
         private void BackButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_isRunning || !CanRetryAfterFailure(
-                true, _processTerminationUnverified, _rollbackVerificationPending)) return;
+            if (_engine.IsRunning || !_engine.CanRetry) return;
 
             Page retryPage = _installationState.Account?.HasPassword == true
                 ? (Page)new WarningConfirmation(_installationState)
@@ -132,140 +62,33 @@ namespace Libertix.Pages
                 slideLeft: false);
         }
 
-        private async Task StartInstallationAsync()
+        private void CancelInstallationButton_Click(object sender, RoutedEventArgs e)
         {
-            if (_isRunning) return;
+            if (!_engine.CanRequestCancellation)
+                return;
 
-            SetInstallationRunning(true);
-            BackButton.IsEnabled = false;
-
-            try
-            {
-                if (_linuxSizeGB < InstallationSizePolicy.MinimumFinalSizeGiB ||
-                    double.IsNaN(_linuxSizeGB) ||
-                    double.IsInfinity(_linuxSizeGB))
-                {
-                    Log($"ERROR: Invalid Linux partition size: {_linuxSizeGB:N1}GB");
-                    UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                    PublishUnattendedFailure(
-                        "invalid-linux-partition-size",
-                        $"Invalid Linux partition size: {_linuxSizeGB:N1}GB");
-                    FinishInstallation(enableBackButton: true);
-                    return;
-                }
-
-                FirmwareType firmware = DetectFirmwareTypeOrThrow();
-                if (_installationState.SelectedInstallationTarget != null)
-                    Log("WARNING: " + string.Format(CultureInfo.CurrentCulture,
-                        Localization.GetString("ResizeDiskSecondaryWarning"),
-                        _installationState.SelectedInstallationTarget.Drive,
-                        WindowsSystemDrive));
-                _activeFirmware = firmware;
-                if (firmware == FirmwareType.Uefi)
-                    AssertSelectedDistroSecureBootCompatibility();
-                ThrowIfCancellationRequested();
-                // The wizard preflight prevents an invalid topology from being selected.
-                // Re-run it immediately before mutation because disk layout and BitLocker
-                // state may have changed while the user completed the remaining pages.
-                // The first pass is deliberately read-only. Firmware-specific
-                // recovery must be armed before BitLocker or storage is changed.
-                _storagePreflight = await RunStoragePreflightAsync(
-                    firmware,
-                    decryptBitLocker: false);
-                ThrowIfCancellationRequested();
-                if (firmware == FirmwareType.Uefi)
-                {
-                    if (!await RecoverPreviousUefiTransactionAsync())
-                        return;
-                    // Recovery may have restored the Windows partition and power
-                    // settings. Re-read the topology before creating a new plan.
-                    _storagePreflight = await RunStoragePreflightAsync(
-                        firmware,
-                        decryptBitLocker: false);
-                    ThrowIfCancellationRequested();
-                }
-                await ReadWindowsSharingInventoryAsync();
-                ThrowIfCancellationRequested();
-                if (!await PrepareWindowsSharePayloadAsync())
-                    throw new InvalidOperationException("Windows read-only Linux sharing payload preparation failed.");
-                ThrowIfCancellationRequested();
-
-                if (firmware == FirmwareType.Uefi)
-                {
-                    Log("UEFI firmware detected. Using Libertix UEFI workflow.");
-                    await ExecuteUefiInstallationAsync();
-                }
-                else if (firmware == FirmwareType.Bios)
-                {
-                    Log("BIOS firmware detected. Using existing BIOS workflow.");
-                    ArchivePreviousBiosRecoverySession();
-                    string biosRecoveryRunId = Guid.NewGuid().ToString("N");
-                    await InitializeInstallationContextAsync(
-                        firmware,
-                        RecoveryRoot,
-                        RecoveryRoot,
-                        biosRecoveryRunId);
-                    await ExecutePartitioningAsync();
-                }
-                else
-                {
-                    throw new InvalidOperationException("Unsupported firmware type.");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                await HandleCancellationAsync();
-            }
-            catch (UnterminatedProcessException ex)
-            {
-                _processTerminationUnverified = true;
-                RecordExecutionFailure(
-                    "WINDOWS_PROCESS_TERMINATION_UNVERIFIED",
-                    ex.Message,
-                    InstallationPhase.Windows);
-                Log($"CRITICAL: {ex.Message} Rollback and retry are disabled while the process state is unknown.");
-                UpdateProgress(
-                    0,
-                    Localized(
-                        "ApplyChangesRollbackIncomplete",
-                        "Rollback incomplete. Manual intervention is required."));
-                PublishUnattendedFailure(
-                    "windows-process-termination-unverified",
-                    ex.Message);
-                FinishInstallation(enableBackButton: false);
-            }
-            catch (Exception ex)
-            {
-                if (_biosRecoveryGuardInstalled)
-                {
-                    await FailBiosPreparationAndRollbackAsync($"Unexpected preparation failure: {ex.Message}");
-                    return;
-                }
-                RecordExecutionFailure(
-                    "WINDOWS_PREPARATION_FAILED",
-                    ex.Message,
-                    InstallationPhase.Windows);
-                Log($"ERROR: {ex.Message}");
-                CleanupPendingWindowsSharePayload();
-                CleanupPendingWindowsPreferenceMigrationBundle();
-                UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                PublishUnattendedFailure(
-                    "windows-preparation-failed",
-                    ex.Message);
-                FinishInstallation(enableBackButton: true);
-            }
+            bool confirmed = LocalizedConfirmationDialog.Show(
+                Application.Current.MainWindow,
+                Localization.GetString("WarningTitle", "Warning"),
+                Localization.GetString(
+                    "ApplyChangesCancelConfirm",
+                    "Cancel the installation and restore Windows?"),
+                Localization.GetString("ConfirmationYes", "Yes"),
+                Localization.GetString("ConfirmationNo", "No"));
+            if (confirmed)
+                _engine.RequestCancellation();
         }
 
         private async void RebootButton_Click(object sender, RoutedEventArgs e)
         {
             bool confirmed = LocalizedConfirmationDialog.Show(
                 Application.Current.MainWindow,
-                Localized("WarningTitle", "Warning"),
-                Localized(
+                Localization.GetString("WarningTitle", "Warning"),
+                Localization.GetString(
                     "ApplyChangesRebootConfirm",
                     "The computer will restart to complete the installation. Continue?"),
-                Localized("ConfirmationYes", "Yes"),
-                Localized("ConfirmationNo", "No"));
+                Localization.GetString("ConfirmationYes", "Yes"),
+                Localization.GetString("ConfirmationNo", "No"));
 
             if (confirmed)
             {
@@ -291,17 +114,27 @@ namespace Libertix.Pages
                 {
                     mainWindow?.CancelSystemRestartPreparation();
                     RebootButton.IsEnabled = true;
-                    Log($"ERROR: Restart request failed: {ex.Message}");
-                    UpdateProgress(
+                    _engine.Log($"ERROR: Restart request failed: {ex.Message}");
+                    _engine.UpdateProgress(
                         100,
-                        Localized(
+                        Localization.GetString(
                             "ApplyChangesRebootFailed",
                             "Windows refused the restart request. Try again."));
                 }
             }
         }
 
-        private void UpdateProgress(int percent, string step)
+        void IInstallationView.AppendLog(string line)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                AppendLogLine(LogOutput, line);
+                if (ExpandedLogsOverlay.Visibility == Visibility.Visible)
+                    AppendLogLine(ExpandedLogOutput, line);
+            });
+        }
+
+        void IInstallationView.ShowProgress(int percent, string step)
         {
             Dispatcher.Invoke(() =>
             {
@@ -311,36 +144,58 @@ namespace Libertix.Pages
             });
         }
 
-        /// <summary>
-        /// Resolves runtime status text from the active language dictionary.
-        /// Progress messages are created in code, so normal XAML bindings do
-        /// not translate them automatically.
-        /// </summary>
-        private static string Localized(string key, string englishFallback)
+        void IInstallationView.SetCancellationAvailable(bool available)
         {
-            return Localization.GetString(key, englishFallback);
-        }
-
-        private static string LocalizedFormat(string key, string englishFallback, params object[] args)
-        {
-            return string.Format(
-                CultureInfo.CurrentCulture,
-                Localized(key, englishFallback),
-                args);
-        }
-
-        private void Log(string message)
-        {
-            message = WindowsProcessRunner.NormalizeTerminalText(message);
-            string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
             Dispatcher.Invoke(() =>
             {
-                AppendLogLine(LogOutput, line);
-                if (ExpandedLogsOverlay.Visibility == Visibility.Visible)
-                    AppendLogLine(ExpandedLogOutput, line);
+                CancelInstallationButton.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+                if (available)
+                    CancelInstallationButton.IsEnabled = true;
             });
-            AppendPersistentLog(line);
-            ApplicationLogger.Write($"INSTALLATION: {message}");
+        }
+
+        void IInstallationView.DisableCancellation()
+        {
+            Dispatcher.Invoke(() => CancelInstallationButton.IsEnabled = false);
+        }
+
+        void IInstallationView.SetRetryEnabled(bool enabled)
+        {
+            Dispatcher.Invoke(() => BackButton.IsEnabled = enabled);
+        }
+
+        void IInstallationView.ShowRebootAction()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                ExpandedLogsOverlay.Visibility = Visibility.Collapsed;
+                RebootButton.Visibility = Visibility.Visible;
+                RebootButton.IsDefault = true;
+                RebootButton.Focus();
+            });
+        }
+
+        void IInstallationView.HideRebootAction()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                RebootButton.Visibility = Visibility.Collapsed;
+                RebootButton.IsDefault = false;
+            });
+        }
+
+        void IInstallationView.SetRebootEnabled(bool enabled)
+        {
+            Dispatcher.Invoke(() => RebootButton.IsEnabled = enabled);
+        }
+
+        void IInstallationView.ShowBlockingMessage(string title, string message, bool isError)
+        {
+            Dispatcher.Invoke(() => MessageBox.Show(
+                message,
+                title,
+                MessageBoxButton.OK,
+                isError ? MessageBoxImage.Error : MessageBoxImage.Warning));
         }
 
         private void AppendLogLine(TextBox output, string line)

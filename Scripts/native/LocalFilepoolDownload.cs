@@ -6,8 +6,8 @@ using System.Threading.Tasks;
 
 namespace Libertix.Helpers
 {
-    // Shared by WPF and Windows PowerShell: the exception belongs to one request,
-    // never to ServicePointManager or the Windows certificate store.
+    // Shared by WPF and Windows PowerShell. Plain HTTP is enough: every artifact is
+    // verified against the signed official catalog before use.
     public static class LocalFilepoolDownload
     {
         private const int BufferSize = 81920;
@@ -33,7 +33,7 @@ namespace Libertix.Helpers
             var server = new Uri(acceptedServer);
             var target = new Uri(url);
             IPAddress address;
-            if (server.Scheme != Uri.UriSchemeHttps ||
+            if (server.Scheme != Uri.UriSchemeHttp ||
                 !IPAddress.TryParse(server.Host.Trim('[', ']'), out address) ||
                 target.Scheme != server.Scheme || target.Host != server.Host ||
                 target.Port != server.Port || target.UserInfo.Length != 0 ||
@@ -49,8 +49,6 @@ namespace Libertix.Helpers
             var request = (HttpWebRequest)WebRequest.Create(target);
             request.AllowAutoRedirect = false;
             request.Proxy = null;
-            request.ServerCertificateValidationCallback = (sender, certificate, chain, errors) =>
-                certificate != null && request.RequestUri == target;
             return request;
         }
 

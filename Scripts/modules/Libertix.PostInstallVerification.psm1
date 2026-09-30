@@ -1318,7 +1318,7 @@ function Test-LibertixBootGuardian {
             throw "Boot guardian preferred Windows boot entry contract differs from its manifest."
         }
         $firmwareModule = Join-Path $PSScriptRoot "Libertix.Firmware.psm1"
-        $firmwareReadModule = Join-Path $PSScriptRoot "Libertix.FirmwareRead.psm1"
+        $firmwareReadModule = Join-Path $PSScriptRoot "Libertix.FirmwareVariables.psm1"
         Import-Module -Name $firmwareModule -Force -ErrorAction Stop
         Import-Module -Name $firmwareReadModule -Force -ErrorAction Stop
         try {

@@ -77,7 +77,7 @@ def build_windows_validation_plan(
         expensive_checks_index = check_names.index("dism_check_health")
     if options.share_windows_files_in_linux:
         check_names.insert(expensive_checks_index, "cross_os_hash")
-    if not (options.share_windows_files_in_linux and options.share_linux_files_in_windows):
+    if not options.share_linux_files_in_windows:
         check_names.insert(check_names.index("dism_check_health"), "sharing_disabled")
 
     return WindowsValidationPlan(

@@ -1,9 +1,9 @@
 Set-StrictMode -Version Latest
 
-$script:FirmwareReadPrivilegeEnabled = $false
+$script:FirmwareVariablePrivilegeEnabled = $false
 
-function Initialize-LibertixFirmwareReadApi {
-    if (([System.Management.Automation.PSTypeName]"LibertixFirmwareReadApi").Type) {
+function Initialize-LibertixFirmwareVariableApi {
+    if (([System.Management.Automation.PSTypeName]"LibertixFirmwareVariableApi").Type) {
         return
     }
 
@@ -12,7 +12,7 @@ using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
-public static class LibertixFirmwareReadApi {
+public static class LibertixFirmwareVariableApi {
     private const UInt32 TOKEN_ADJUST_PRIVILEGES = 0x0020;
     private const UInt32 TOKEN_QUERY = 0x0008;
     private const UInt32 SE_PRIVILEGE_ENABLED = 0x00000002;
@@ -77,6 +77,14 @@ public static class LibertixFirmwareReadApi {
         UInt32 dwAttributes
     );
 
+    public static bool DeleteFirmwareEnvironmentVariable(
+        string lpName,
+        string lpGuid,
+        UInt32 dwAttributes
+    ) {
+        return SetFirmwareEnvironmentVariableEx(lpName, lpGuid, null, 0, dwAttributes);
+    }
+
     public static void EnableSystemEnvironmentPrivilege() {
         IntPtr token;
         if (!OpenProcessToken(
@@ -122,29 +130,29 @@ public static class LibertixFirmwareReadApi {
 "@
 }
 
-function Enable-LibertixFirmwareReadAccess {
-    if ($script:FirmwareReadPrivilegeEnabled) {
+function Enable-LibertixFirmwareVariableAccess {
+    if ($script:FirmwareVariablePrivilegeEnabled) {
         return
     }
-    Initialize-LibertixFirmwareReadApi
-    [LibertixFirmwareReadApi]::EnableSystemEnvironmentPrivilege()
-    $script:FirmwareReadPrivilegeEnabled = $true
+    Initialize-LibertixFirmwareVariableApi
+    [LibertixFirmwareVariableApi]::EnableSystemEnvironmentPrivilege()
+    $script:FirmwareVariablePrivilegeEnabled = $true
 }
 
 function Get-LibertixFirmwareVariableBytes {
     param([Parameter(Mandatory = $true)][string]$Name)
 
-    Enable-LibertixFirmwareReadAccess
+    Enable-LibertixFirmwareVariableAccess
     $globalVariableGuid = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $buffer = New-Object byte[] 65536
-    $size = [LibertixFirmwareReadApi]::GetFirmwareEnvironmentVariable(
+    $size = [LibertixFirmwareVariableApi]::GetFirmwareEnvironmentVariable(
         $Name,
         $globalVariableGuid,
         $buffer,
         [uint32]$buffer.Length
     )
     if ($size -eq 0) {
-        $errorCode = [LibertixFirmwareReadApi]::LastError()
+        $errorCode = [LibertixFirmwareVariableApi]::LastError()
         if ($errorCode -in @(2, 203)) {
             return $null
         }
@@ -164,20 +172,22 @@ function Set-LibertixFirmwareVariableBytes {
     if ($Bytes.Length -eq 0) {
         throw "Firmware variable value must not be empty."
     }
-    Enable-LibertixFirmwareReadAccess
+    Enable-LibertixFirmwareVariableAccess
     $globalVariableGuid = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $attributes = [uint32]0x00000007
-    if (-not [LibertixFirmwareReadApi]::SetFirmwareEnvironmentVariableEx(
+    if (-not [LibertixFirmwareVariableApi]::SetFirmwareEnvironmentVariableEx(
         $Name,
         $globalVariableGuid,
         $Bytes,
         [uint32]$Bytes.Length,
         $attributes
     )) {
-        $errorCode = [LibertixFirmwareReadApi]::LastError()
+        $errorCode = [LibertixFirmwareVariableApi]::LastError()
         throw "SetFirmwareEnvironmentVariableEx failed for ${Name}: Win32 error ${errorCode}"
     }
 }
 
 Export-ModuleMember -Function `
-    Get-LibertixFirmwareVariableBytes, Set-LibertixFirmwareVariableBytes
+    Initialize-LibertixFirmwareVariableApi, `
+    Get-LibertixFirmwareVariableBytes, `
+    Set-LibertixFirmwareVariableBytes

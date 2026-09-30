@@ -291,12 +291,7 @@ class ValidationService:
         command = " ".join(
             ["python3", shlex.quote(remote_script), *(shlex.quote(value) for value in arguments)]
         )
-        cleanup_command = (
-            "python3 -c "
-            + shlex.quote("import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)")
-            + " "
-            + shlex.quote(remote_script)
-        )
+        cleanup_command = f"rm -f -- {shlex.quote(remote_script)}"
         try:
             ssh.upload_text(
                 remote_script,

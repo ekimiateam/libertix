@@ -1,8 +1,10 @@
 BeforeAll {
-    $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot "../auto_tests/app/clients/ssh.py") -Raw
-    $match = [regex]::Match($source, '(?s)function Read-NativeOutputText \{\{.*?(?=\r?\n\$payload =)')
+    $source = Get-Content -LiteralPath (
+        Join-Path $PSScriptRoot "../auto_tests/app/scripts/ssh_command_wrapper.ps1"
+    ) -Raw
+    $match = [regex]::Match($source, '(?s)function Read-NativeOutputText \{.*?(?=\r?\n\$payload =)')
     if (-not $match.Success) { throw "SSH output reader was not found." }
-    . ([scriptblock]::Create($match.Value.Replace('{{', '{').Replace('}}', '}')))
+    . ([scriptblock]::Create($match.Value))
     function ConvertFrom-NativeOutputBytes {
         param([byte[]]$Bytes)
         return [Text.Encoding]::UTF8.GetString($Bytes)

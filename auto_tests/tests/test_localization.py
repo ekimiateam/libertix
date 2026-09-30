@@ -319,7 +319,7 @@ printf '%s\n' "$LIBERTIX_I18N_AUTOMATIC_INSTALLATION"
 
 
 def test_bios_and_uefi_project_the_language_code_to_the_live() -> None:
-    bios = (ROOT / "Pages/ApplyChanges.Plan.cs").read_text(encoding="utf-8-sig")
+    bios = (ROOT / "Installation/InstallationEngine.Plan.cs").read_text(encoding="utf-8-sig")
     plan_exporter = (ROOT / "assets/live/libertix-installation-plan.py").read_text(
         encoding="utf-8-sig"
     )
@@ -454,7 +454,7 @@ def test_confirmations_use_libertix_language_instead_of_windows_button_captions(
         for relative in (
             "MainWindow.xaml.cs",
             "Pages/ApplyChanges.xaml.cs",
-            "Pages/ApplyChanges.Cancellation.cs",
+            "Installation/InstallationEngine.Cancellation.cs",
         )
     )
 
@@ -466,13 +466,13 @@ def test_confirmations_use_libertix_language_instead_of_windows_button_captions(
 
 
 def test_bcdedit_output_is_decoded_with_the_windows_oem_code_page() -> None:
-    system = (ROOT / "Pages/ApplyChanges.System.cs").read_text(encoding="utf-8-sig")
+    system = (ROOT / "Installation/InstallationEngine.System.cs").read_text(encoding="utf-8-sig")
     bcd_sources = "\n".join(
         (ROOT / relative).read_text(encoding="utf-8-sig")
         for relative in (
-            "Pages/ApplyChanges.Bios.cs",
-            "Pages/ApplyChanges.Processes.cs",
-            "Pages/ApplyChanges.Windows.cs",
+            "Installation/InstallationEngine.Bios.cs",
+            "Installation/InstallationEngine.Processes.cs",
+            "Installation/InstallationEngine.Windows.cs",
         )
     )
 
@@ -482,7 +482,11 @@ def test_bcdedit_output_is_decoded_with_the_windows_oem_code_page() -> None:
 
 def test_apply_changes_progress_does_not_embed_french_fallbacks() -> None:
     sources = "\n".join(
-        path.read_text(encoding="utf-8-sig") for path in (ROOT / "Pages").glob("ApplyChanges*.cs")
+        path.read_text(encoding="utf-8-sig")
+        for path in [
+            *(ROOT / "Pages").glob("ApplyChanges*.cs"),
+            *(ROOT / "Installation").glob("InstallationEngine*.cs"),
+        ]
     )
     forbidden = (
         'UpdateProgress(5, "Préparation',

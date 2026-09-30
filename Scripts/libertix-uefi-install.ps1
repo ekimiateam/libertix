@@ -46,6 +46,7 @@ $requiredModules = @(
     "Libertix.StorageTargets.psm1",
     "Libertix.Process.psm1",
     "Libertix.Firmware.psm1",
+    "Libertix.FirmwareVariables.psm1",
     "Libertix.Download.psm1",
     "Libertix.TemporaryArtifacts.psm1",
     "Libertix.Transaction.psm1",

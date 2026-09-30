@@ -3,18 +3,16 @@ using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
-using System.Windows;
 using Libertix.Helpers;
-using Libertix.Installation;
 using Libertix.Models;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
     /// <summary>
     /// Owns the firmware-neutral installation contract and durable execution
     /// ledger used by the Windows, live, target, and rollback stages.
     /// </summary>
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private const string InstallationPlanFileName = "installation-plan.json";
         private const string InstallationStateFileName = "installation-state.json";
@@ -55,7 +53,6 @@ namespace Libertix.Pages
                 PrepareWindowsPreferenceMigrationBundle(persistenceRoot, planId);
             LinuxKeyboardConfiguration keyboard = WindowsKeyboardLayout.ResolveActive(
                 Localization.GetKeyboardLayout());
-            StartupOptions startupOptions = ((App)Application.Current).RuntimeOptions;
             _installationPlan = InstallationPlanFactory.Create(new InstallationPlanCreationOptions
             {
                 PlanId = planId,
@@ -68,7 +65,7 @@ namespace Libertix.Pages
                 Allocation = _storagePreflight.Allocation,
                 Sizes = sizes,
                 Keyboard = keyboard,
-                StartupOptions = startupOptions,
+                StartupOptions = RuntimeOptions,
                 LanguageCode = Localization.CurrentLanguage,
                 SystemLanguage = Localization.GetLinuxLocale(),
                 Timezone = Localization.GetWindowsTimezoneAsLinux(),
@@ -87,13 +84,12 @@ namespace Libertix.Pages
             _installationPlanPath = Path.Combine(persistenceRoot, InstallationPlanFileName);
             InstallationPlanSerializer.WriteAtomic(_installationPlanPath, _installationPlan);
 
-            string inventoryScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
-                "Scripts", "libertix-save-storage-baseline.ps1");
+            string inventoryScript = ApplicationFiles.Resolve("Scripts", "libertix-save-storage-baseline.ps1");
             var inventory = await Task.Run(() => RunProcess(
                 WindowsProcessRunner.ResolvePowerShell(),
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(inventoryScript)} " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(inventoryScript)} " +
                 $"-InstallationPlanPath {QuoteArgument(_installationPlanPath)}",
-                (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds));
+                WindowsProcessTimeouts.QuickCommand));
             if (inventory.exitCode != 0)
                 throw new InvalidOperationException($"Initial storage inventory failed: {inventory.error}");
 
@@ -129,7 +125,7 @@ namespace Libertix.Pages
             var result = await Task.Run(() => RunProcess(
                 powershell,
                 $"-NoProfile -Command {QuoteArgument(command)}",
-                (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds));
+                WindowsProcessTimeouts.QuickCommand));
             if (result.exitCode != 0)
                 throw new InvalidOperationException($"Installer partition identity query failed: {result.error}");
 

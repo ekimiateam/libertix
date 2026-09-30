@@ -38,8 +38,7 @@ namespace Libertix.Helpers
                     nameof(connectivityUrl));
             }
 
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-compatibility-preflight.ps1");
             if (!File.Exists(scriptPath))
@@ -113,8 +112,8 @@ namespace Libertix.Helpers
             var output = new StringBuilder();
             var error = new StringBuilder();
 
-            string arguments = "-NoProfile -ExecutionPolicy Bypass -File " +
-                WindowsProcessRunner.QuoteArgument(scriptPath) + " -LanguageCode " +
+            string arguments = WindowsProcessRunner.PowerShellFileArguments(scriptPath) +
+                " -LanguageCode " +
                 WindowsProcessRunner.QuoteArgument(languageCode) + " -ConnectivityUrl " +
                 WindowsProcessRunner.QuoteArgument(connectivityUrl);
             if (skipNvramWriteProbe)

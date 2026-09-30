@@ -55,6 +55,69 @@ namespace Libertix.Helpers
             Unattended = null;
         }
 
+        private delegate bool OptionHandler(
+            StartupOptions options,
+            string[] args,
+            ref int index,
+            out string error);
+
+        private static readonly Dictionary<string, OptionHandler> OptionHandlers =
+            new Dictionary<string, OptionHandler>(StringComparer.OrdinalIgnoreCase)
+            {
+                [FilepoolOption] = SingleValue(
+                    FilepoolOption,
+                    options => options.FilepoolBaseUrlOverride,
+                    (options, value) => options.FilepoolBaseUrlOverride = value),
+                [LocalFilepoolOption] = SingleValue(
+                    LocalFilepoolOption,
+                    options => options.LocalFilepoolDirectory,
+                    (options, value) => options.LocalFilepoolDirectory = value),
+                [DevelopmentModeOption] = OnceFlag(
+                    DevelopmentModeOption,
+                    options => options.DevelopmentMode,
+                    options => options.DevelopmentMode = true),
+                [DevelopmentSshStaticIpOption] = SingleValue(
+                    DevelopmentSshStaticIpOption,
+                    options => options.DevelopmentSshStaticIpv4Address,
+                    (options, value) => options.DevelopmentSshStaticIpv4Address = value),
+                [DevelopmentSshPrefixLengthOption] = SingleParsedValue(
+                    DevelopmentSshPrefixLengthOption,
+                    options => options.DevelopmentSshStaticIpv4PrefixLength?.ToString(
+                        CultureInfo.InvariantCulture),
+                    SetDevelopmentSshPrefixLength),
+                [DevelopmentSshGatewayOption] = SingleValue(
+                    DevelopmentSshGatewayOption,
+                    options => options.DevelopmentSshStaticIpv4Gateway,
+                    (options, value) => options.DevelopmentSshStaticIpv4Gateway = value),
+                [DevelopmentSshDnsOption] = RepeatableValue(
+                    DevelopmentSshDnsOption,
+                    "requires an IPv4 address.",
+                    (options, value) => options.DevelopmentSshDnsServers =
+                        new List<string>(options.DevelopmentSshDnsServers) { value }),
+                [SkipNvramWriteProbeOption] = OnceFlag(
+                    SkipNvramWriteProbeOption,
+                    options => options.SkipNvramWriteProbe,
+                    options => options.SkipNvramWriteProbe = true),
+                [UefiBootNextFailedOption] = RepeatableFlag(
+                    options => options.UefiBootNextFailed = true),
+                [UefiRecoveryStateOption] = RepeatableValue(
+                    UefiRecoveryStateOption,
+                    "requires a state-file path.",
+                    (options, value) => options.UefiRecoveryStatePath = value),
+                [UnattendedOption] = OnceFlag(
+                    UnattendedOption,
+                    options => options.UnattendedRequested,
+                    options => options.UnattendedRequested = true),
+                [UnattendedConfigOption] = SingleValue(
+                    UnattendedConfigOption,
+                    options => options.UnattendedConfigPath,
+                    (options, value) => options.UnattendedConfigPath = value),
+                [ForceOfflineNtfsResizeOption] = OnceFlag(
+                    ForceOfflineNtfsResizeOption,
+                    options => options.ForceOfflineNtfsResize,
+                    options => options.ForceOfflineNtfsResize = true),
+            };
+
         public static bool TryParse(string[] args, out StartupOptions options, out string error)
         {
             options = new StartupOptions();
@@ -66,223 +129,16 @@ namespace Libertix.Helpers
             for (int index = 0; index < args.Length; index++)
             {
                 string option = args[index];
-                if (string.Equals(option, FilepoolOption, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!TryReadSingleValue(
-                        args,
-                        ref index,
-                        FilepoolOption,
-                        options.FilepoolBaseUrlOverride,
-                        out string value,
-                        out error))
-                    {
-                        return false;
-                    }
-
-                    options.FilepoolBaseUrlOverride = value;
-                    continue;
-                }
-
-                if (string.Equals(option, LocalFilepoolOption, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!TryReadSingleValue(
-                        args, ref index, LocalFilepoolOption,
-                        options.LocalFilepoolDirectory, out string value, out error))
-                        return false;
-                    options.LocalFilepoolDirectory = value;
-                    continue;
-                }
-
-                if (string.Equals(option, DevelopmentModeOption, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (options.DevelopmentMode)
-                    {
-                        error = DevelopmentModeOption + " can only be specified once.";
-                        return false;
-                    }
-                    options.DevelopmentMode = true;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    DevelopmentSshStaticIpOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!TryReadSingleValue(
-                        args,
-                        ref index,
-                        DevelopmentSshStaticIpOption,
-                        options.DevelopmentSshStaticIpv4Address,
-                        out string value,
-                        out error))
-                    {
-                        return false;
-                    }
-
-                    options.DevelopmentSshStaticIpv4Address = value;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    DevelopmentSshPrefixLengthOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!TryReadSingleValue(
-                        args,
-                        ref index,
-                        DevelopmentSshPrefixLengthOption,
-                        options.DevelopmentSshStaticIpv4PrefixLength?.ToString(
-                            CultureInfo.InvariantCulture),
-                        out string value,
-                        out error))
-                    {
-                        return false;
-                    }
-
-                    if (!int.TryParse(
-                        value,
-                        NumberStyles.None,
-                        CultureInfo.InvariantCulture,
-                        out int prefixLength))
-                    {
-                        error = DevelopmentSshPrefixLengthOption +
-                            " requires an integer between 1 and 30.";
-                        return false;
-                    }
-
-                    options.DevelopmentSshStaticIpv4PrefixLength = prefixLength;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    DevelopmentSshGatewayOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!TryReadSingleValue(
-                        args,
-                        ref index,
-                        DevelopmentSshGatewayOption,
-                        options.DevelopmentSshStaticIpv4Gateway,
-                        out string value,
-                        out error))
-                    {
-                        return false;
-                    }
-
-                    options.DevelopmentSshStaticIpv4Gateway = value;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    DevelopmentSshDnsOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (index + 1 >= args.Length || string.IsNullOrWhiteSpace(args[index + 1]))
-                    {
-                        error = DevelopmentSshDnsOption + " requires an IPv4 address.";
-                        return false;
-                    }
-
-                    var dnsServers = new List<string>(options.DevelopmentSshDnsServers)
-                    {
-                        args[++index]
-                    };
-                    options.DevelopmentSshDnsServers = dnsServers;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    SkipNvramWriteProbeOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (options.SkipNvramWriteProbe)
-                    {
-                        error = SkipNvramWriteProbeOption + " can only be specified once.";
-                        return false;
-                    }
-
-                    options.SkipNvramWriteProbe = true;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    UefiBootNextFailedOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    options.UefiBootNextFailed = true;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    UefiRecoveryStateOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (index + 1 >= args.Length || string.IsNullOrWhiteSpace(args[index + 1]))
-                    {
-                        error = UefiRecoveryStateOption + " requires a state-file path.";
-                        return false;
-                    }
-
-                    options.UefiRecoveryStatePath = args[++index];
-                    continue;
-                }
-
-                if (string.Equals(option, UnattendedOption, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (options.UnattendedRequested)
-                    {
-                        error = UnattendedOption + " can only be specified once.";
-                        return false;
-                    }
-                    options.UnattendedRequested = true;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    UnattendedConfigOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!TryReadSingleValue(
-                        args,
-                        ref index,
-                        UnattendedConfigOption,
-                        options.UnattendedConfigPath,
-                        out string value,
-                        out error))
-                    {
-                        return false;
-                    }
-                    options.UnattendedConfigPath = value;
-                    continue;
-                }
-
-                if (string.Equals(
-                    option,
-                    ForceOfflineNtfsResizeOption,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    if (options.ForceOfflineNtfsResize)
-                    {
-                        error = ForceOfflineNtfsResizeOption + " can only be specified once.";
-                        return false;
-                    }
-                    options.ForceOfflineNtfsResize = true;
-                    continue;
-                }
-
                 // Ignoring a misspelled safety or development option can run a
                 // materially different workflow from the one the caller
                 // requested. Reject every option outside the explicit contract.
-                error = "Unknown Libertix option: " + option;
-                return false;
+                if (!OptionHandlers.TryGetValue(option, out OptionHandler handler))
+                {
+                    error = "Unknown Libertix option: " + option;
+                    return false;
+                }
+                if (!handler(options, args, ref index, out error))
+                    return false;
             }
 
             if (!options.ValidateDevelopmentNetwork(out error))
@@ -309,30 +165,102 @@ namespace Libertix.Helpers
             return true;
         }
 
-        private static bool TryReadSingleValue(
+        private static OptionHandler OnceFlag(
+            string option,
+            Func<StartupOptions, bool> isSet,
+            Action<StartupOptions> set)
+        {
+            return (StartupOptions options, string[] args, ref int index, out string error) =>
+            {
+                error = isSet(options) ? option + " can only be specified once." : null;
+                if (error != null)
+                    return false;
+                set(options);
+                return true;
+            };
+        }
+
+        private static OptionHandler RepeatableFlag(Action<StartupOptions> set)
+        {
+            return (StartupOptions options, string[] args, ref int index, out string error) =>
+            {
+                error = null;
+                set(options);
+                return true;
+            };
+        }
+
+        /// <summary>Reads the next argument once; <paramref name="apply"/> returns an error or null.</summary>
+        private static OptionHandler SingleParsedValue(
+            string option,
+            Func<StartupOptions, string> existingValue,
+            Func<StartupOptions, string, string> apply)
+        {
+            return (StartupOptions options, string[] args, ref int index, out string error) =>
+            {
+                if (!string.IsNullOrEmpty(existingValue(options)))
+                {
+                    error = option + " can only be specified once.";
+                    return false;
+                }
+                if (!TryReadNextValue(args, ref index, option + " requires a value.", out string value, out error))
+                    return false;
+                error = apply(options, value);
+                return error == null;
+            };
+        }
+
+        private static OptionHandler SingleValue(
+            string option,
+            Func<StartupOptions, string> existingValue,
+            Action<StartupOptions, string> set)
+        {
+            return SingleParsedValue(option, existingValue, (options, value) =>
+            {
+                set(options, value);
+                return null;
+            });
+        }
+
+        private static OptionHandler RepeatableValue(
+            string option,
+            string requirement,
+            Action<StartupOptions, string> set)
+        {
+            return (StartupOptions options, string[] args, ref int index, out string error) =>
+            {
+                if (!TryReadNextValue(args, ref index, option + " " + requirement, out string value, out error))
+                    return false;
+                set(options, value);
+                return true;
+            };
+        }
+
+        private static bool TryReadNextValue(
             string[] args,
             ref int index,
-            string option,
-            string existingValue,
+            string missingValueError,
             out string value,
             out string error)
         {
             value = null;
             error = null;
-            if (!string.IsNullOrEmpty(existingValue))
-            {
-                error = option + " can only be specified once.";
-                return false;
-            }
-
             if (index + 1 >= args.Length || string.IsNullOrWhiteSpace(args[index + 1]))
             {
-                error = option + " requires a value.";
+                error = missingValueError;
                 return false;
             }
 
             value = args[++index];
             return true;
+        }
+
+        private static string SetDevelopmentSshPrefixLength(StartupOptions options, string value)
+        {
+            if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int prefixLength))
+                return DevelopmentSshPrefixLengthOption + " requires an integer between 1 and 30.";
+            options.DevelopmentSshStaticIpv4PrefixLength = prefixLength;
+            return null;
         }
 
         private bool ValidateDevelopmentNetwork(out string error)

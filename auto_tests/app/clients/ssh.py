@@ -33,22 +33,36 @@ SUPPORTED_HOST_KEY_TYPES = {
 MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
 SSH_CONNECT_ATTEMPTS = 3
 SSH_CONNECT_RETRY_SECONDS = 5
-RECONNECTABLE_TRANSPORT_EXCEPTIONS = frozenset(
+# Exact types only: subclasses such as FileNotFoundError or AuthenticationException describe
+# a remote state, not a lost network, and must not trigger network recovery.
+RECONNECTABLE_TRANSPORT_EXCEPTIONS: frozenset[type[BaseException]] = frozenset(
     {
-        "BrokenPipeError",
-        "ConnectionAbortedError",
-        "ConnectionRefusedError",
-        "ConnectionResetError",
-        "EOFError",
-        "NoValidConnectionsError",
-        "OSError",
-        "SSHException",
-        "TimeoutError",
+        BrokenPipeError,
+        ConnectionAbortedError,
+        ConnectionRefusedError,
+        ConnectionResetError,
+        EOFError,
+        paramiko.ssh_exception.NoValidConnectionsError,
+        OSError,
+        paramiko.SSHException,
+        TimeoutError,
     }
+)
+RECONNECTABLE_TRANSPORT_EXCEPTION_NAMES = frozenset(
+    exception.__name__ for exception in RECONNECTABLE_TRANSPORT_EXCEPTIONS
+)
+TRANSPORT_EXCEPTIONS = (EOFError, TimeoutError, paramiko.SSHException, OSError)
+REDACTED_COMMAND = "[SENSITIVE COMMAND REDACTED]"
+WINDOWS_COMMAND_WRAPPER = (
+    Path(__file__).resolve().parents[1] / "scripts" / "ssh_command_wrapper.ps1"
 )
 POWERSHELL_CLIXML_MARKER = "#< CLIXML"
 POWERSHELL_ESCAPE_PATTERN = re.compile(r"_x([0-9A-Fa-f]{4})_")
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _is_reconnectable(error: BaseException) -> bool:
+    return type(error) in RECONNECTABLE_TRANSPORT_EXCEPTIONS
 
 
 class PersistAuthenticatedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
@@ -117,89 +131,56 @@ class SSHClient:
     def __enter__(self) -> SSHClient:
         network_recovery.checkpoint()
         logger.info("SSH connection attempt", extra={"step": "ssh.connect", "target": self.host})
-        last_error: Exception | None = None
         connection_id = uuid.uuid4().hex
-        attempt_diagnostics = []
-        attempts_made = 0
+        attempt_diagnostics: list[dict[str, object]] = []
         max_attempts = 2 if network_recovery.active is not None else SSH_CONNECT_ATTEMPTS
+        while True:
+            error, failed_at, attempts_made = self._connect_attempts(
+                max_attempts, connection_id, attempt_diagnostics
+            )
+            if error is None:
+                return self
+            # A confirmed and resolved network outage earns a new series of attempts;
+            # any other failure, including a changed host key, is final.
+            if isinstance(error, paramiko.BadHostKeyException) or not network_recovery.recover(
+                failed_at, context={"failed_step": "ssh.connect", "target": self.host}
+            ):
+                break
+        raise WorkflowError(
+            "ssh.connect",
+            "SSH connection failed",
+            details={
+                "host": self.host,
+                "port": self.port,
+                "attempts": attempts_made,
+                "exception_type": type(error).__name__,
+                "error": str(error),
+                "connection_id": connection_id,
+                "attempt_diagnostics": attempt_diagnostics,
+            },
+        ) from error
+
+    def _connect_attempts(
+        self,
+        max_attempts: int,
+        connection_id: str,
+        attempt_diagnostics: list[dict[str, object]],
+    ) -> tuple[Exception | None, float | None, int]:
+        """Return (error, first failure time, attempts made); error is None once connected."""
+
+        error: Exception | None = None
         failed_at: float | None = None
-        attempt = 0
-        while attempt < max_attempts:
-            attempt += 1
-            attempts_made = attempt
+        for attempt in range(1, max_attempts + 1):
             client = paramiko.SSHClient()
             attempt_started = time.monotonic()
-            authenticated_key_policy: PersistAuthenticatedHostKeyPolicy | None = None
             try:
-                # Automation controls disks and boot state, so a first-seen host key
-                # must never be trusted implicitly. The operator owns this file and
-                # must update it deliberately when a VM or server key changes.
-                if not self.trust_on_first_use:
-                    client.load_host_keys(str(self.known_hosts_path))
-                    client.set_missing_host_key_policy(paramiko.RejectPolicy())
-                else:
-                    # A reinstall creates a new Linux host key. Record the first
-                    # authenticated key in this run's isolated workspace. The
-                    # other OS can answer briefly on the same IP during a reboot,
-                    # so persisting before authentication would pin the wrong OS.
-                    if self.known_hosts_path.is_file():
-                        client.load_host_keys(str(self.known_hosts_path))
-                    authenticated_key_policy = PersistAuthenticatedHostKeyPolicy(
-                        self.known_hosts_path
-                    )
-                    client.set_missing_host_key_policy(authenticated_key_policy)
-                client.connect(
-                    self.host,
-                    port=self.port,
-                    username=self.username,
-                    password=self.password,
-                    timeout=self.connect_timeout,
-                    banner_timeout=self.connect_timeout,
-                    auth_timeout=self.connect_timeout,
-                    channel_timeout=self.connect_timeout,
-                    look_for_keys=False,
-                    allow_agent=False,
-                )
-                if authenticated_key_policy is not None:
-                    authenticated_key_policy.persist_authenticated_key(client)
-                transport = client.get_transport()
-                if transport is not None:
-                    self.server_key_sha256 = hashlib.sha256(
-                        transport.get_remote_server_key().asbytes()
-                    ).hexdigest()
-                self._client = client
-                logger.info(
-                    "SSH connection established",
-                    extra={"step": "ssh.connect", "target": self.host},
-                )
-                return self
+                self._connect_client(client)
             except paramiko.BadHostKeyException as exc:
                 client.close()
-                last_error = exc
-                break
-            except (EOFError, TimeoutError, paramiko.SSHException, OSError) as exc:
-                snapshot = {}
-                try:
-                    transport = client.get_transport()
-                    snapshot = {
-                        "transport_present": transport is not None,
-                        "transport_active": bool(transport and transport.is_active()),
-                        "authenticated": bool(transport and transport.is_authenticated()),
-                        "key_exchange_complete": bool(
-                            transport and getattr(transport, "initial_kex_done", False)
-                        ),
-                    }
-                except Exception as diagnostic_error:
-                    snapshot["metadata_error"] = type(diagnostic_error).__name__
+                return exc, failed_at, attempt
+            except (*TRANSPORT_EXCEPTIONS,) as exc:
                 attempt_diagnostics.append(
-                    {
-                        "attempt": attempt,
-                        "elapsed_seconds": round(time.monotonic() - attempt_started, 3),
-                        "exception_type": type(exc).__name__,
-                        "error": str(exc),
-                        "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else None,
-                        **snapshot,
-                    }
+                    self._attempt_diagnostic(client, attempt, attempt_started, exc)
                 )
                 logger.warning(
                     "SSH connect failure context",
@@ -211,9 +192,8 @@ class SSHClient:
                     },
                 )
                 client.close()
-                last_error = exc
-                if failed_at is None:
-                    failed_at = time.monotonic()
+                error = exc
+                failed_at = failed_at or time.monotonic()
                 if attempt < max_attempts:
                     logger.warning(
                         "SSH connection attempt %s/%s failed; retrying",
@@ -222,28 +202,82 @@ class SSHClient:
                         extra={"step": "ssh.connect_retry", "target": self.host},
                     )
                     time.sleep(SSH_CONNECT_RETRY_SECONDS)
-                elif network_recovery.recover(
-                    failed_at,
-                    context={"failed_step": "ssh.connect", "target": self.host},
-                ):
-                    attempt = 0
-                    failed_at = None
+                continue
+            self._client = client
+            logger.info(
+                "SSH connection established",
+                extra={"step": "ssh.connect", "target": self.host},
+            )
+            return None, None, attempt
+        return error, failed_at, max_attempts
 
-        assert last_error is not None
-        raise WorkflowError(
-            "ssh.connect",
-            "SSH connection failed",
-            details={
-                "host": self.host,
-                "attempts": attempts_made,
-                "exception_type": type(last_error).__name__,
-                "error": str(last_error),
-                "connection_id": connection_id,
-                "attempt_diagnostics": attempt_diagnostics,
-            },
-        ) from last_error
+    def _connect_client(self, client: paramiko.SSHClient) -> None:
+        authenticated_key_policy: PersistAuthenticatedHostKeyPolicy | None = None
+        # Automation controls disks and boot state, so a first-seen host key
+        # must never be trusted implicitly. The operator owns this file and
+        # must update it deliberately when a VM or server key changes.
+        if not self.trust_on_first_use:
+            client.load_host_keys(str(self.known_hosts_path))
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        else:
+            # A reinstall creates a new Linux host key. Record the first
+            # authenticated key in this run's isolated workspace. The
+            # other OS can answer briefly on the same IP during a reboot,
+            # so persisting before authentication would pin the wrong OS.
+            if self.known_hosts_path.is_file():
+                client.load_host_keys(str(self.known_hosts_path))
+            authenticated_key_policy = PersistAuthenticatedHostKeyPolicy(self.known_hosts_path)
+            client.set_missing_host_key_policy(authenticated_key_policy)
+        client.connect(
+            self.host,
+            port=self.port,
+            username=self.username,
+            password=self.password,
+            timeout=self.connect_timeout,
+            banner_timeout=self.connect_timeout,
+            auth_timeout=self.connect_timeout,
+            channel_timeout=self.connect_timeout,
+            look_for_keys=False,
+            allow_agent=False,
+        )
+        if authenticated_key_policy is not None:
+            authenticated_key_policy.persist_authenticated_key(client)
+        transport = client.get_transport()
+        if transport is not None:
+            self.server_key_sha256 = hashlib.sha256(
+                transport.get_remote_server_key().asbytes()
+            ).hexdigest()
+
+    @staticmethod
+    def _attempt_diagnostic(
+        client: paramiko.SSHClient, attempt: int, started: float, error: BaseException
+    ) -> dict[str, object]:
+        snapshot: dict[str, object] = {}
+        try:
+            transport = client.get_transport()
+            snapshot = {
+                "transport_present": transport is not None,
+                "transport_active": bool(transport and transport.is_active()),
+                "authenticated": bool(transport and transport.is_authenticated()),
+                "key_exchange_complete": bool(
+                    transport and getattr(transport, "initial_kex_done", False)
+                ),
+            }
+        except Exception as diagnostic_error:
+            snapshot["metadata_error"] = type(diagnostic_error).__name__
+        return {
+            "attempt": attempt,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "exception_type": type(error).__name__,
+            "error": str(error),
+            "cause_type": type(error.__cause__).__name__ if error.__cause__ else None,
+            **snapshot,
+        }
 
     def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
         if self._client:
             self._client.close()
             self._client = None
@@ -252,7 +286,7 @@ class SSHClient:
     def reconnect(self) -> SSHClient:
         """Replace a dead transport while preserving the verified host policy."""
 
-        self.__exit__(None, None, None)
+        self.close()
         return self.__enter__()
 
     def run(
@@ -271,9 +305,62 @@ class SSHClient:
         if not self._client:
             raise WorkflowError(step, "SSH client is not connected", details={"host": self.host})
         logger.info("Remote command started", extra={"step": step, "target": self.host})
-        remote_command = self._remote_timeout_command(command, timeout)
+        shown_command = REDACTED_COMMAND if sensitive else command
+        replay_safe = expect_disconnect or replay_safe
+        try:
+            exit_code, out, err = self._exchange(
+                self._client, self._remote_timeout_command(command, timeout), stdin_data, timeout
+            )
+        except TRANSPORT_EXCEPTIONS as exc:
+            if _is_reconnectable(exc):
+                self._recover_transport(step, type(exc).__name__, replay_safe)
+            raise WorkflowError(
+                step,
+                "Remote command execution failed",
+                details={
+                    "host": self.host,
+                    "command": shown_command,
+                    "exception_type": type(exc).__name__,
+                    "error": str(exc),
+                    "transport_error": True,
+                },
+            ) from exc
+        logger.info(
+            "Remote command completed (code=%s)",
+            exit_code,
+            extra={"step": step, "target": self.host},
+        )
+        if exit_code < 0:
+            self._recover_transport(step, "MissingExitStatus", replay_safe)
+            raise WorkflowError(
+                step,
+                "Remote command ended without an SSH exit status",
+                details={
+                    **self._command_failure_details(shown_command, exit_code, out, err),
+                    "exception_type": "MissingExitStatus",
+                    "transport_error": True,
+                },
+            )
+        if check and exit_code != 0:
+            raise WorkflowError(
+                step,
+                "Remote command failed",
+                details=self._command_failure_details(shown_command, exit_code, out, err),
+            )
+        return CommandResult(out, err, exit_code)
+
+    def _exchange(
+        self,
+        client: paramiko.SSHClient,
+        remote_command: str,
+        stdin_data: str | None,
+        timeout: float,
+    ) -> tuple[int, str, str]:
         transport_timeout = timeout + 30
-        client = self._client
+        timeout_message = (
+            f"SSH command transport timed out after {transport_timeout} seconds "
+            f"(remote execution limit: {timeout} seconds)"
+        )
         deadline = time.monotonic() + transport_timeout
         expired = threading.Event()
 
@@ -287,119 +374,87 @@ class SSHClient:
         watchdog.daemon = True
         watchdog.start()
         try:
-            stdin, stdout, stderr = client.exec_command(remote_command, timeout=transport_timeout)
+            stdin, stdout, _stderr = client.exec_command(remote_command, timeout=transport_timeout)
             if stdin_data is not None:
                 stdin.write(stdin_data)
                 stdin.flush()
                 stdin.channel.shutdown_write()
-            channel = stdout.channel
-            out_buffer = bytearray()
-            err_buffer = bytearray()
-            out_truncated = False
-            err_truncated = False
-            while True:
-                while channel.recv_ready():
-                    out_truncated |= self._append_bounded(out_buffer, channel.recv(65536))
-                while channel.recv_stderr_ready():
-                    err_truncated |= self._append_bounded(err_buffer, channel.recv_stderr(65536))
-                if (
-                    channel.exit_status_ready()
-                    and not channel.recv_ready()
-                    and not channel.recv_stderr_ready()
-                ):
-                    break
-                if time.monotonic() >= deadline:
-                    channel.close()
-                    raise TimeoutError(
-                        f"SSH command transport timed out after {transport_timeout} seconds "
-                        f"(remote execution limit: {timeout} seconds)"
-                    )
-                time.sleep(0.02)
-            exit_code = channel.recv_exit_status()
-            out = self._decode_bounded(out_buffer, out_truncated)
-            err = self._decode_bounded(err_buffer, err_truncated)
+            result = self._drain_channel(stdout.channel, deadline, timeout_message)
+        except AttributeError:
+            transport = client.get_transport()
+            if transport is not None and transport.is_active():
+                raise
+            # Paramiko dereferences its transport after close() has set it to None.
             if expired.is_set():
-                raise TimeoutError("SSH transport deadline expired")
-        except (EOFError, TimeoutError, paramiko.SSHException, OSError, AttributeError) as exc:
-            if isinstance(exc, AttributeError):
-                transport = client.get_transport()
-                if transport is not None and transport.is_active():
-                    raise
-                # Paramiko dereferences its transport after close() has set it to None.
-                exc = EOFError("SSH transport closed before command negotiation completed")
-            watchdog.cancel()
-            if type(exc).__name__ in RECONNECTABLE_TRANSPORT_EXCEPTIONS:
-                network_recovery.recover(
-                    time.monotonic(),
-                    replay_safe=expect_disconnect or replay_safe,
-                    context={
-                        "failed_step": step,
-                        "target": self.host,
-                        "transport_error": type(exc).__name__,
-                    },
-                )
-            error = (
-                TimeoutError(
-                    f"SSH command transport timed out after {transport_timeout} seconds "
-                    f"(remote execution limit: {timeout} seconds)"
-                )
-                if expired.is_set()
-                else exc
-            )
-            raise WorkflowError(
-                step,
-                "Remote command execution failed",
-                details={
-                    "host": self.host,
-                    "command": "[SENSITIVE COMMAND REDACTED]" if sensitive else command,
-                    "exception_type": type(error).__name__,
-                    "error": str(error),
-                    "transport_error": True,
-                },
-            ) from exc
+                raise TimeoutError(timeout_message) from None
+            raise EOFError("SSH transport closed before command negotiation completed") from None
+        except TRANSPORT_EXCEPTIONS as exc:
+            if expired.is_set():
+                raise TimeoutError(timeout_message) from exc
+            raise
         finally:
             watchdog.cancel()
-        logger.info(
-            "Remote command completed (code=%s)",
+        if expired.is_set():
+            raise TimeoutError(timeout_message)
+        return result
+
+    def _drain_channel(
+        self, channel: paramiko.Channel, deadline: float, timeout_message: str
+    ) -> tuple[int, str, str]:
+        out_buffer = bytearray()
+        err_buffer = bytearray()
+        out_truncated = False
+        err_truncated = False
+        while True:
+            while channel.recv_ready():
+                out_truncated |= self._append_bounded(out_buffer, channel.recv(65536))
+            while channel.recv_stderr_ready():
+                err_truncated |= self._append_bounded(err_buffer, channel.recv_stderr(65536))
+            if (
+                channel.exit_status_ready()
+                and not channel.recv_ready()
+                and not channel.recv_stderr_ready()
+            ):
+                break
+            if time.monotonic() >= deadline:
+                channel.close()
+                raise TimeoutError(timeout_message)
+            time.sleep(0.02)
+        exit_code = channel.recv_exit_status()
+        return (
             exit_code,
-            extra={"step": step, "target": self.host},
+            self._decode_bounded(out_buffer, out_truncated),
+            self._decode_bounded(err_buffer, err_truncated),
         )
-        if exit_code < 0:
-            network_recovery.recover(
-                time.monotonic(),
-                replay_safe=expect_disconnect or replay_safe,
-                context={
-                    "failed_step": step,
-                    "target": self.host,
-                    "transport_error": "MissingExitStatus",
-                },
-            )
-            raise WorkflowError(
-                step,
-                "Remote command ended without an SSH exit status",
-                details={
-                    "host": self.host,
-                    "command": "[SENSITIVE COMMAND REDACTED]" if sensitive else command,
-                    "exit_code": exit_code,
-                    "stdout": out[-4000:],
-                    "stderr": err[-4000:],
-                    "exception_type": "MissingExitStatus",
-                    "transport_error": True,
-                },
-            )
-        if check and exit_code != 0:
-            raise WorkflowError(
-                step,
-                "Remote command failed",
-                details={
-                    "host": self.host,
-                    "command": "[SENSITIVE COMMAND REDACTED]" if sensitive else command,
-                    "exit_code": exit_code,
-                    "stdout": out[-4000:],
-                    "stderr": err[-4000:],
-                },
-            )
-        return CommandResult(out, err, exit_code)
+
+    def _recover_transport(
+        self,
+        step: str,
+        transport_error: str,
+        replay_safe: bool,
+        **extra_context: object,
+    ) -> None:
+        network_recovery.recover(
+            time.monotonic(),
+            replay_safe=replay_safe,
+            context={
+                "failed_step": step,
+                "target": self.host,
+                "transport_error": transport_error,
+                **extra_context,
+            },
+        )
+
+    def _command_failure_details(
+        self, shown_command: str, exit_code: int, out: str, err: str
+    ) -> dict[str, object]:
+        return {
+            "host": self.host,
+            "command": shown_command,
+            "exit_code": exit_code,
+            "stdout": out[-4000:],
+            "stderr": err[-4000:],
+        }
 
     @staticmethod
     def _append_bounded(buffer: bytearray, chunk: bytes) -> bool:
@@ -508,167 +563,12 @@ class SSHClient:
 
     @staticmethod
     def _windows_timeout_script(payload: str, timeout_seconds: int) -> str:
-        # Capture the native command's exit status separately so PowerShell
-        # cannot replace it with the status of the output-drain commands.
-        return f"""
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$utf8NoBom = New-Object Text.UTF8Encoding($false)
-$strictUtf8 = New-Object Text.UTF8Encoding($false, $true)
-[Console]::InputEncoding = $utf8NoBom
-[Console]::OutputEncoding = $utf8NoBom
-$OutputEncoding = $utf8NoBom
-
-function ConvertFrom-NativeOutputBytes {{
-    param([byte[]]$Bytes)
-
-    if ($null -eq $Bytes -or $Bytes.Length -eq 0) {{
-        return ''
-    }}
-
-    if ($Bytes.Length -ge 4 -and
-        $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE -and
-        $Bytes[2] -eq 0x00 -and $Bytes[3] -eq 0x00) {{
-        return [Text.Encoding]::UTF32.GetString($Bytes, 4, $Bytes.Length - 4)
-    }}
-
-    if ($Bytes.Length -ge 4 -and
-        $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x00 -and
-        $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF) {{
-        $utf32BigEndian = New-Object Text.UTF32Encoding($true, $false, $true)
-        return $utf32BigEndian.GetString($Bytes, 4, $Bytes.Length - 4)
-    }}
-
-    if ($Bytes.Length -ge 3 -and
-        $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {{
-        return $utf8NoBom.GetString($Bytes, 3, $Bytes.Length - 3)
-    }}
-
-    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {{
-        return [Text.Encoding]::Unicode.GetString($Bytes, 2, $Bytes.Length - 2)
-    }}
-
-    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {{
-        return [Text.Encoding]::BigEndianUnicode.GetString($Bytes, 2, $Bytes.Length - 2)
-    }}
-
-    $sampleLength = [Math]::Min($Bytes.Length, 4096)
-    $pairCount = [Math]::Floor($sampleLength / 2)
-    if ($pairCount -gt 0) {{
-        $evenNulls = 0
-        $oddNulls = 0
-        for ($index = 0; $index -lt ($pairCount * 2); $index += 2) {{
-            if ($Bytes[$index] -eq 0) {{ $evenNulls++ }}
-            if ($Bytes[$index + 1] -eq 0) {{ $oddNulls++ }}
-        }}
-        $nullThreshold = [Math]::Max(2, [Math]::Floor($pairCount / 4))
-        if ($oddNulls -ge $nullThreshold -and $oddNulls -gt ($evenNulls * 2)) {{
-            return [Text.Encoding]::Unicode.GetString($Bytes)
-        }}
-        if ($evenNulls -ge $nullThreshold -and $evenNulls -gt ($oddNulls * 2)) {{
-            return [Text.Encoding]::BigEndianUnicode.GetString($Bytes)
-        }}
-    }}
-
-    # Native tools without a BOM may still emit OEM-encoded output.
-    try {{
-        return $strictUtf8.GetString($Bytes)
-    }} catch [Text.DecoderFallbackException] {{
-        $oemCodePage = [Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage
-        return [Text.Encoding]::GetEncoding($oemCodePage).GetString($Bytes)
-    }}
-}}
-
-function Read-NativeOutputText {{
-    param(
-        [string]$LiteralPath,
-        [Diagnostics.Stopwatch]$DrainClock,
-        [int]$DrainTimeoutMilliseconds = 10000
-    )
-
-    if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) {{
-        return ''
-    }}
-
-    # Timed WaitForExit does not wait for Start-Process output handlers to close files.
-    while ($true) {{
-        try {{
-            return ConvertFrom-NativeOutputBytes ([IO.File]::ReadAllBytes($LiteralPath))
-        }} catch [IO.IOException] {{
-            $nativeError = $_.Exception.HResult -band 0xFFFF
-            if ($nativeError -notin @(32, 33)) {{ throw }}
-            if ($DrainClock.ElapsedMilliseconds -ge $DrainTimeoutMilliseconds) {{
-                throw "SSH output drain timed out: $LiteralPath remained locked."
-            }}
-
-            Start-Sleep -Milliseconds 25
-        }}
-    }}
-}}
-
-$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{payload}'))
-$root = Join-Path $env:TEMP ('libertix-ssh-' + [Guid]::NewGuid().ToString('N'))
-$commandPath = $root + '.cmd'
-$stdoutPath = $root + '.out'
-$stderrPath = $root + '.err'
-$statusPath = $root + '.status'
-$exitCode = 1
-try {{
-    $commandText = (
-        "@echo off`r`n" +
-        "chcp 65001 >nul`r`n" +
-        $payload +
-        "`r`necho %ERRORLEVEL% > `"$statusPath`"`r`n"
-    )
-    [IO.File]::WriteAllText($commandPath, $commandText, [Text.Encoding]::Default)
-
-    $startArguments = @{{
-        FilePath = $env:ComSpec
-        ArgumentList = @('/d', '/s', '/c', ('"' + $commandPath + '"'))
-        PassThru = $true
-        WindowStyle = 'Hidden'
-        RedirectStandardOutput = $stdoutPath
-        RedirectStandardError = $stderrPath
-    }}
-    $process = Start-Process @startArguments
-    if (-not $process.WaitForExit({timeout_seconds * 1000})) {{
-        $taskkill = Join-Path $env:SystemRoot 'System32\\taskkill.exe'
-        & $taskkill /PID $process.Id /T /F 2>&1 | Out-Null
-        $taskkillExitCode = $LASTEXITCODE
-        $process.WaitForExit(10000) | Out-Null
-        if ($taskkillExitCode -ne 0 -or -not $process.HasExited) {{
-            $exitCode = 125
-        }} else {{
-            $exitCode = 124
-        }}
-    }} else {{
-        $reportedExitCode = 0
-        $statusText = if (Test-Path -LiteralPath $statusPath) {{
-            (Get-Content -LiteralPath $statusPath -Raw).Trim()
-        }} else {{
-            ''
-        }}
-        if (-not [int]::TryParse($statusText, [ref]$reportedExitCode)) {{
-            $exitCode = 126
-        }} else {{
-            $exitCode = $reportedExitCode
-        }}
-    }}
-    $outputDrainClock = [Diagnostics.Stopwatch]::StartNew()
-    if (Test-Path -LiteralPath $stdoutPath) {{
-        [Console]::Out.Write((Read-NativeOutputText -LiteralPath $stdoutPath `
-            -DrainClock $outputDrainClock))
-    }}
-    if (Test-Path -LiteralPath $stderrPath) {{
-        [Console]::Error.Write((Read-NativeOutputText -LiteralPath $stderrPath `
-            -DrainClock $outputDrainClock))
-    }}
-}} finally {{
-    $temporaryPaths = @($commandPath, $stdoutPath, $stderrPath, $statusPath)
-    Remove-Item -LiteralPath $temporaryPaths -Force -ErrorAction SilentlyContinue
-}}
-exit $exitCode
-""".strip()
+        template = WINDOWS_COMMAND_WRAPPER.read_text(encoding="utf-8")
+        return (
+            template.replace("__PAYLOAD_BASE64__", payload)
+            .replace("__TIMEOUT_MILLISECONDS__", str(timeout_seconds * 1000))
+            .strip()
+        )
 
     @contextmanager
     def _text_sftp(self, timeout: float, *, bound_transfer: bool = True):
@@ -782,17 +682,10 @@ exit $exitCode
                     "attempt": attempt,
                     **self._sftp_details,
                 }
-                reconnectable = type(exc).__name__ in RECONNECTABLE_TRANSPORT_EXCEPTIONS
+                reconnectable = _is_reconnectable(exc)
                 if reconnectable:
-                    network_recovery.recover(
-                        time.monotonic(),
-                        replay_safe=replay_safe,
-                        context={
-                            "failed_step": step,
-                            "target": self.host,
-                            "transport_error": type(exc).__name__,
-                            **self._sftp_details,
-                        },
+                    self._recover_transport(
+                        step, type(exc).__name__, replay_safe, **self._sftp_details
                     )
                 if reconnectable and attempt < max_attempts:
                     logger.warning(
@@ -828,16 +721,8 @@ exit $exitCode
                 sftp.get_channel().settimeout(stall_timeout_seconds)
                 sftp.put(str(local), remote_path, callback=on_progress)
         except (EOFError, TimeoutError, paramiko.SSHException, OSError) as exc:
-            if type(exc).__name__ in RECONNECTABLE_TRANSPORT_EXCEPTIONS:
-                network_recovery.recover(
-                    time.monotonic(),
-                    replay_safe=False,
-                    context={
-                        "failed_step": step,
-                        "target": self.host,
-                        "transport_error": type(exc).__name__,
-                    },
-                )
+            if _is_reconnectable(exc):
+                self._recover_transport(step, type(exc).__name__, replay_safe=False)
             raise WorkflowError(
                 step,
                 "SSH file upload failed",
@@ -857,5 +742,5 @@ def is_reconnectable_transport_error(error: WorkflowError) -> bool:
     """Return whether a failed SSH operation can be retried on a fresh transport."""
 
     return error.details.get("transport_error") is True or (
-        error.details.get("exception_type") in RECONNECTABLE_TRANSPORT_EXCEPTIONS
+        error.details.get("exception_type") in RECONNECTABLE_TRANSPORT_EXCEPTION_NAMES
     )

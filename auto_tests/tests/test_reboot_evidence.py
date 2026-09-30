@@ -54,6 +54,9 @@ def test_windows_ssh_wait_rejects_the_old_boot_session(monkeypatch, changes: boo
         def __exit__(self, *_args):
             self.closed = True
 
+        def close(self) -> None:
+            self.__exit__()
+
         def run(self, *_args, **_kwargs):
             return CommandResult("WINDOWS_READY", "", 0)
 

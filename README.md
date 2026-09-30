@@ -110,10 +110,10 @@ flowchart TB
   calculate its own disk values.
 - `Installation/` contains the typed plan, size policy, validation and persisted state machine used
   to keep BIOS and UEFI behavior consistent.
-- `Pages/ApplyChanges.Bios.cs` owns the complete Windows-side BIOS preparation: recovery guard,
+- `Installation/InstallationEngine.Bios.cs` owns the complete Windows-side BIOS preparation: recovery guard,
   hibernation policy, shrink validation, FAT32 staging, live and distribution media, GRUB4DOS and
   the temporary BCD boot sequence.
-- `Pages/ApplyChanges.Uefi.cs`, `Scripts/modules/` and `Scripts/uefi/` own the Windows-side UEFI
+- `Installation/InstallationEngine.Uefi.cs`, `Scripts/modules/` and `Scripts/uefi/` own the Windows-side UEFI
   preparation. The C# layer starts and observes the operation; the PowerShell modules implement
   staging, EFI media, firmware variables, transaction state and Windows-side rollback.
 - `assets/live/` contains the shared live orchestrator and the small BIOS/UEFI adapters used after
@@ -301,8 +301,10 @@ The complete versioning, signing, release and Pages workflow is documented in
 ## Source layout
 
 - `Installation/` — typed installation plan, validation, size policy and persisted state machine
-- `Pages/ApplyChanges.*.cs` — Windows orchestration, including the complete BIOS preparation and
-  the C# control layer for the PowerShell UEFI workflow
+- `Installation/InstallationEngine*.cs` — Windows orchestration, including the complete BIOS
+  preparation and the C# control layer for the PowerShell UEFI workflow; it has no WPF dependency
+- `Pages/ApplyChanges.xaml.cs` — installation progress screen that renders the engine's log and
+  progress and forwards cancel, retry and restart decisions
 - `Scripts/modules/` — shared PowerShell plan, state, download, storage and rollback functions
 - `Scripts/uefi/` — operations that are specific to UEFI preparation
 - `assets/live/` — shared live installer, runner, target configuration and firmware adapters

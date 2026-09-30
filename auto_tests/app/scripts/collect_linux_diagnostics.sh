@@ -14,7 +14,18 @@ collect processes ps -eo pid,ppid,uid,stat,etimes,pcpu,pmem,wchan:32,comm
 collect sessions loginctl list-sessions --no-pager
 collect session_properties sh -eu -c 'sessions=$(loginctl list-sessions --no-legend); for sid in $(printf "%s\n" "$sessions" | awk "{print \$1}"); do loginctl show-session "$sid" -p Id -p User -p Name -p Type -p Class -p Active -p State -p LockedHint -p Leader -p Seat -p TTY; done'
 collect failed_units systemctl --failed --no-pager
+collect failed_unit_properties sh -eu -c '
+    units=$(systemctl --failed --no-legend --plain --no-pager)
+    for unit in $(printf "%s\n" "$units" | awk "{print \$1}"); do
+        systemctl show "$unit" --property=Id,ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,ActiveEnterTimestamp,InactiveEnterTimestamp,TimeoutStopUSec
+        journalctl -b --no-pager -o short-monotonic -n 80 -u "$unit"
+    done
+'
 collect services systemctl show display-manager ssh libertix-first-boot --property=Id,ActiveState,SubState,Result,ExecMainStatus
+# Manager messages preserve the cause of failed scopes without dumping process arguments.
+collect unit_manager_journal journalctl -b --no-pager -o short-monotonic -n 200 _PID=1
+collect login_journal journalctl -b --no-pager -o short-monotonic -n 100 -u systemd-logind -u lightdm -u display-manager
+collect kernel_errors journalctl -b -k --no-pager -o short-monotonic -n 100 -p err
 collect storage lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS,RO
 collect space df -h
 collect mounts findmnt -o TARGET,SOURCE,FSTYPE

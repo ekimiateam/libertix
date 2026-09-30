@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
@@ -14,7 +15,6 @@ Directory.CreateDirectory(stateDirectory);
 var settings = KitSettings.Load(stateDirectory);
 using var loggerFactory = LoggerFactory.Create(logging => logging.AddSimpleConsole());
 var logger = loggerFactory.CreateLogger("InstallParty");
-using var certificates = new ServerCertificate(stateDirectory, logger);
 using var store = new FilepoolStore(settings, logger);
 using var discovery = new UdpClient(new IPEndPoint(IPAddress.Any, FilepoolProtocol.DiscoveryPort));
 var updates = Channel.CreateBounded<bool>(new BoundedChannelOptions(1)
@@ -24,8 +24,7 @@ builder.Logging.SetMinimumLevel(LogLevel.Warning);
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Limits.MaxRequestBodySize = MaximumRequestBodyBytes;
-    options.ListenAnyIP(settings.HttpsPort, listen => listen.UseHttps(https =>
-        https.ServerCertificateSelector = (_, _) => certificates.Select()));
+    options.ListenAnyIP(settings.HttpPort);
 });
 var app = builder.Build();
 app.Use(async (context, next) =>
@@ -50,8 +49,8 @@ app.MapGet("/api/status", () => Results.Json(new
     settings,
     pendingSettings = KitSettings.Load(stateDirectory),
     discoveryPort = FilepoolProtocol.DiscoveryPort,
-    addresses = ServerCertificate.Addresses().Select(address =>
-        new UriBuilder("https", address.ToString(), settings.HttpsPort).Uri.AbsoluteUri),
+    addresses = LocalAddresses().Select(address =>
+        new UriBuilder("http", address.ToString(), settings.HttpPort).Uri.AbsoluteUri),
     pool = store.Status()
 }));
 app.MapGet("/files/{hash}/{name}", store.ServeAsync);
@@ -73,8 +72,8 @@ app.MapPost("/api/settings", (KitSettings requested) =>
 });
 
 await app.StartAsync();
-logger.LogInformation("Libertix install-party: HTTPS {HttpsPort}, UDP {DiscoveryPort}, channel {Channel}",
-    settings.HttpsPort, FilepoolProtocol.DiscoveryPort, settings.Channel);
+logger.LogInformation("Libertix install-party: HTTP {HttpPort}, UDP {DiscoveryPort}, channel {Channel}",
+    settings.HttpPort, FilepoolProtocol.DiscoveryPort, settings.Channel);
 using var stopping = CancellationTokenSource.CreateLinkedTokenSource(app.Lifetime.ApplicationStopping);
 updates.Writer.TryWrite(true);
 Task downloads = RunUpdatesAsync(stopping.Token);
@@ -95,6 +94,14 @@ async Task RunUpdatesAsync(CancellationToken token)
     }
     catch (OperationCanceledException) when (token.IsCancellationRequested) { }
 }
+
+static IPAddress[] LocalAddresses() => NetworkInterface.GetAllNetworkInterfaces()
+    .Where(network => network.OperationalStatus == OperationalStatus.Up)
+    .SelectMany(network => network.GetIPProperties().UnicastAddresses)
+    .Select(item => item.Address)
+    .Select(address => new IPAddress(address.GetAddressBytes()))
+    .Append(IPAddress.Loopback).Append(IPAddress.IPv6Loopback)
+    .Distinct().OrderBy(address => address.ToString(), StringComparer.Ordinal).ToArray();
 
 static bool IsLocalManagementRequest(HttpContext context)
 {
@@ -124,7 +131,7 @@ async Task RunDiscoveryAsync(CancellationToken token)
             if (fields.Length != 3 || fields[0] != FilepoolProtocol.DiscoveryRequest ||
                 !Guid.TryParseExact(fields[1], "N", out _) || fields[2] != settings.Channel)
                 continue;
-            byte[] reply = Encoding.ASCII.GetBytes(string.Join("|", fields) + "|" + settings.HttpsPort);
+            byte[] reply = Encoding.ASCII.GetBytes(string.Join("|", fields) + "|" + settings.HttpPort);
             await discovery.SendAsync(reply, packet.RemoteEndPoint, token);
         }
     }

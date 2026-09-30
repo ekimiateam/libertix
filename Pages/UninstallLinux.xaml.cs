@@ -65,7 +65,7 @@ namespace Libertix.Pages
             try
             {
                 await Task.Run(() => RecoveryCodeUpgrade.Prepare(_candidate,
-                    Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Scripts")));
+                    ApplicationFiles.Resolve("Scripts")));
                 Task<int> processTask = RunRecoveryProcessAsync();
                 try
                 {
@@ -131,9 +131,9 @@ namespace Libertix.Pages
         private async Task<int> RunRecoveryProcessAsync()
         {
             string arguments = _candidate.Firmware == InstallationFirmware.Uefi
-                ? $"-NoProfile -ExecutionPolicy Bypass -File {Quote(_candidate.RecoveryScriptPath)} " +
+                ? $"{WindowsProcessRunner.PowerShellFileArguments(_candidate.RecoveryScriptPath)} " +
                   $"-StatePath {Quote(_candidate.RecoveryStatePath)} -Action Cancel -VerifiedUninstall"
-                : $"-NoProfile -ExecutionPolicy Bypass -File {Quote(_candidate.RecoveryScriptPath)} " +
+                : $"{WindowsProcessRunner.PowerShellFileArguments(_candidate.RecoveryScriptPath)} " +
                   "-Action Revert -VerifiedUninstall";
 
             return await Task.Run(() =>

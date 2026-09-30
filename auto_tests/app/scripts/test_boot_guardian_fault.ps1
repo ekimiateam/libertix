@@ -109,12 +109,14 @@ Assert-Condition (
 ) "The active guardian configuration differs from its permanent archive."
 
 $firmwareModule = Join-Path $recoveryRoot "payload\Scripts\modules\Libertix.Firmware.psm1"
+$firmwareVariablesModule = Join-Path $recoveryRoot "payload\Scripts\modules\Libertix.FirmwareVariables.psm1"
 $firmwareScript = Join-Path $recoveryRoot "payload\Scripts\uefi\Libertix.Uefi.Firmware.ps1"
 Assert-Condition (Test-Path -LiteralPath $firmwareModule -PathType Leaf) `
     "The recovery payload firmware parser is missing."
 Assert-Condition (Test-Path -LiteralPath $firmwareScript -PathType Leaf) `
     "The recovery payload firmware writer is missing."
 Import-Module -Name $firmwareModule -Force -ErrorAction Stop
+Import-Module -Name $firmwareVariablesModule -Force -ErrorAction Stop
 . $firmwareScript
 
 $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='LibertixBootGuardian'"

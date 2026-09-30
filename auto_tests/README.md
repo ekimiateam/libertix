@@ -231,12 +231,45 @@ secondary disk connected, request the full MBR Windows destination, require the 
 refusal before installation, and compare disk layout, BCD configuration, recovery state and data
 witnesses before/after. A different error or an unexpected installation is not a successful refusal.
 
+To run only the ten storage scenarios (OEM FAT32/NTFS/Recovery and secondary-disk
+installations), use `bash RUN/run-test-auto.sh --clean3-only`. This requires the
+`SECONDARY_DISK_RESET_SNAPSHOT` value configured for this mode in `RUN/campaign.toml` and
+excludes nominal clean2, local-filepool and BootGuardian scenarios. It cannot be combined with `--clean2-only`. The API equivalent
+sets `include_nominal_scenarios=false` and `include_storage_scenarios=true`, leaving
+the other scenario groups disabled. `--step` still starts at the selected scenario
+and runs the remaining scenarios within the selected group.
+
+After the existing Windows Update stop and pending-restart checks, and before file
+cleanup or installation, `DISM ScanHealth` verifies the restored guest's component
+store without repairing it. An unhealthy baseline blocks installation;
+the preparation command has a 15-minute timeout. Its dedicated DISM log is kept in
+`C:\ProgramData\Libertix\Automation`, with the initial state, start time and elapsed
+time recorded in the campaign log. Failure diagnostics also preserve CBS/DISM logs
+(including rotated CBS CAB archives), servicing package and task state, and recent
+component-store hash errors. No `RestoreHealth`, component cleanup or automatic
+repair is performed by these diagnostics.
+Preparation also records `CheckHealth` checkpoints after temporary-file cleanup,
+clock synchronization and final preparation. A newly flagged unhealthy state stops
+before installation, with the phase recorded in a separate preparation health log.
+Temporary-file cleanup is skipped and its reason recorded while TrustedInstaller
+or BITS is active; stopping Windows Update alone does not end an existing servicing
+transaction.
+Failure collection searches the complete recent CBS text logs, records service
+startup-mode changes, and reads Linux failed-unit properties and bounded system
+journals with administrator access. Diagnostic failures remain marked incomplete;
+they never replace the original test failure.
+Windows preparation/product logs take priority over large servicing archives.
+The manifest records partial transfer sizes and SFTP deadline
+details when collection cannot finish within its bounded transfer time.
+
 With `include_boot_guardian_scenarios=true`, six additional scenarios exercise `boot-order`,
 `preferred-path` and `preferred-path-rollback` for Mint and Zorin, Windows-first, on UEFI VMs only.
 They verify boot repair, EFI replacement consent (including an unanswered reboot), or refusal with
 rollback. These recovery scenarios use their own evidence contracts instead of the nominal uninstall
 workflow. `RUN/run-test-auto.sh` enables both storage and BootGuardian scenarios: with one BIOS and
 two UEFI VMs, this runs 54 VM/scenario cells. BIOS VMs finish their own lane without waiting for UEFI.
+The launcher reads its API address, VM names, test account and the snapshots required by its
+restricted modes from the versioned `RUN/campaign.toml`; addresses and credentials stay in `.env`.
 
 The campaign holds the existing operation lock throughout and builds one standalone executable,
 whose hash is checked on every deployment. Each VM has its own isolated controller and retry

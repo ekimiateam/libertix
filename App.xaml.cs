@@ -231,9 +231,7 @@ namespace Libertix
                 }
             }
 
-            string localDirectory = options.LocalFilepoolDirectory ?? Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                "filepool");
+            string localDirectory = options.LocalFilepoolDirectory ?? ApplicationFiles.Resolve("filepool");
             if (options.LocalFilepoolDirectory != null && !Directory.Exists(localDirectory))
             {
                 RejectInvalidStartupOptions("The adjacent filepool directory is no longer available.");

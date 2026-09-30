@@ -358,14 +358,13 @@ function Invoke-MinimumRecoveryFallback {
 
 function Read-EnvValue {
     param(
-        [string]$Path,
-        [string]$Name
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
-
     $line = @(
         Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop |
             Where-Object { $_ -match "^$([regex]::Escape($Name))=" }
@@ -373,7 +372,6 @@ function Read-EnvValue {
     if (-not $line) {
         return $null
     }
-
     return ($line -replace "^$([regex]::Escape($Name))=", "").Trim()
 }
 
@@ -570,47 +568,17 @@ function Remove-TransactionArtifacts {
 
 function Restore-OriginalHibernationSetting {
     $originalHibernate = Read-EnvValue -Path $Pending -Name "ORIGINAL_HIBERNATE_ENABLED"
-    if ($originalHibernate -eq "true") {
-        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
-        $hibernate = Invoke-LibertixNativeCommand `
-            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-            -ArgumentList @("/hibernate", "on") `
-            -TimeoutSeconds 60
-        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
-        if ($hibernate.ExitCode -ne 0) {
-            throw "Hibernation restore failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
-        }
-        $hibernateEnabled = (
-            Get-ItemProperty `
-                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-                -Name "HibernateEnabled" `
-                -ErrorAction Stop
-        ).HibernateEnabled
-        if ($hibernateEnabled -ne 1) {
-            throw "Hibernation restore did not enable HibernateEnabled."
-        }
-    } elseif ($originalHibernate -eq "false") {
-        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
-        $hibernate = Invoke-LibertixNativeCommand `
-            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-            -ArgumentList @("/hibernate", "off") `
-            -TimeoutSeconds 60
-        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
-        if ($hibernate.ExitCode -ne 0) {
-            throw "Hibernation disable failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
-        }
-        $hibernateEnabled = (
-            Get-ItemProperty `
-                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-                -Name "HibernateEnabled" `
-                -ErrorAction Stop
-        ).HibernateEnabled
-        if ($hibernateEnabled -ne 0) {
-            throw "Hibernation restore did not disable HibernateEnabled."
-        }
-    } else {
+    if ($originalHibernate -notin @("true", "false")) {
         Write-RecoveryLog "Original hibernation state unknown; left unchanged."
+        return
     }
+    $enabled = $originalHibernate -eq "true"
+    if ($enabled) {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
+    } else {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
+    }
+    Set-LibertixHibernateEnabled -Enabled $enabled
 }
 
 function Restore-HibernationAfterInstallation {

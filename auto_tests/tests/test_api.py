@@ -168,12 +168,12 @@ def test_web_ui_is_served() -> None:
     assert "distribution" in response.text
     assert "Zorin OS 18.1 Core" in response.text
     assert "source" in response.text
-    assert "Working tree local" in response.text
-    assert "Le partage SMB sera conservé" in response.text
-    assert "Installation automatique" in response.text
+    assert "Local working tree" in response.text
+    assert "The SMB share is kept" in response.text
+    assert "Automated installation" in response.text
     assert "apply: true" in response.text
     assert 'id="requestPreview"' in response.text
-    assert 'linux_password: preview ? "<masqué>" : linuxPasswordInput.value' in response.text
+    assert 'linux_password: preview ? "<masked>" : linuxPasswordInput.value' in response.text
     for field in (
         "automationMode",
         "snapshotMode",

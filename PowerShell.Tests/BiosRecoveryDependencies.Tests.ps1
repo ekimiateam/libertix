@@ -1,6 +1,6 @@
 BeforeAll {
     $repository = Split-Path -Parent $PSScriptRoot
-    $source = Get-Content (Join-Path $repository 'Pages/ApplyChanges.Windows.cs') -Raw
+    $source = Get-Content (Join-Path $repository 'Installation/InstallationEngine.Windows.cs') -Raw
     $start = $source.IndexOf('private async Task<bool> InstallWindowsRecoveryGuardAsync')
     $end = $source.IndexOf('private async Task<double> QueryShrinkSpaceAsync', $start)
     $method = $source.Substring($start, $end - $start)

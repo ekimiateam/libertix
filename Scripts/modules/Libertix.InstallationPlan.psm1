@@ -425,35 +425,9 @@ function Assert-LibertixWindowsSharingPlan {
     }
 }
 
-function Assert-LibertixInstallationPlan {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][object]$Plan)
+function Assert-LibertixPlanDistribution {
+    param([Parameter(Mandatory = $true)][object]$Distribution)
 
-    Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
-
-    $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
-    $hasAllocation = Test-LibertixPlanProperty -Object $Plan -Name 'allocation'
-    if (([int]$schemaVersion -eq 4 -and $hasAllocation) -or
-        ([int]$schemaVersion -eq 5 -and -not $hasAllocation) -or [int]$schemaVersion -notin @(4, 5)) {
-        throw "Unsupported installation plan schemaVersion: $schemaVersion."
-    }
-
-    $planId = [string](Assert-LibertixPlanProperty -Object $Plan -Name "planId" -Path "planId")
-    if ($planId -notmatch '^[0-9a-f]{32}$') {
-        throw "Installation plan planId must contain 32 lowercase hexadecimal characters."
-    }
-    $createdAtUtc = [string](Assert-LibertixPlanProperty -Object $Plan -Name "createdAtUtc" -Path "createdAtUtc")
-    [DateTimeOffset]$createdAt = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse($createdAtUtc, [ref]$createdAt) -or $createdAt.Offset -ne [TimeSpan]::Zero) {
-        throw "Installation plan createdAtUtc must be a valid UTC date-time."
-    }
-
-    $firmware = [string](Assert-LibertixPlanProperty -Object $Plan -Name "firmware" -Path "firmware")
-    if ($firmware -notin @("bios", "uefi")) {
-        throw "Installation plan firmware must be 'bios' or 'uefi'."
-    }
-
-    $distribution = Assert-LibertixPlanProperty -Object $Plan -Name "distribution" -Path "distribution"
     Assert-LibertixExactPlanProperties `
         -Object $distribution `
         -Path "distribution" `
@@ -505,8 +479,11 @@ function Assert-LibertixInstallationPlan {
     Assert-LibertixSha256 `
         -Value (Assert-LibertixPlanProperty -Object $distribution -Name "liveIsoSha256" -Path "distribution.liveIsoSha256") `
         -Path "distribution.liveIsoSha256"
+}
 
-    $locale = Assert-LibertixPlanProperty -Object $Plan -Name "locale" -Path "locale"
+function Assert-LibertixPlanLocale {
+    param([Parameter(Mandatory = $true)][object]$Locale)
+
     Assert-LibertixExactPlanProperties -Object $locale -Path "locale" -PropertySet "locale"
     $languageCode = [string](Assert-LibertixPlanProperty -Object $locale -Name "languageCode" -Path "locale.languageCode")
     if ($languageCode -notin @("en", "fr", "es", "ko")) {
@@ -534,8 +511,11 @@ function Assert-LibertixInstallationPlan {
     if ($keyboardVariant -notmatch '^[a-z0-9_-]*$') {
         throw "Installation plan field locale.keyboardVariant is not a valid XKB variant name."
     }
+}
 
-    $account = Assert-LibertixPlanProperty -Object $Plan -Name "account" -Path "account"
+function Assert-LibertixPlanAccount {
+    param([Parameter(Mandatory = $true)][object]$Account)
+
     Assert-LibertixExactPlanProperties -Object $account -Path "account" -PropertySet "account"
     $username = [string](Assert-LibertixPlanProperty -Object $account -Name "username" -Path "account.username")
     $passwordHashWindowsPath = [string](Assert-LibertixPlanProperty -Object $account -Name "passwordHashWindowsPath" -Path "account.passwordHashWindowsPath")
@@ -552,6 +532,44 @@ function Assert-LibertixInstallationPlan {
     if ($computerName -notmatch '^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
         throw "Installation plan account.computerName is not a valid Linux hostname."
     }
+}
+
+function Assert-LibertixInstallationPlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
+
+    $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
+    $hasAllocation = Test-LibertixPlanProperty -Object $Plan -Name 'allocation'
+    if (([int]$schemaVersion -eq 4 -and $hasAllocation) -or
+        ([int]$schemaVersion -eq 5 -and -not $hasAllocation) -or [int]$schemaVersion -notin @(4, 5)) {
+        throw "Unsupported installation plan schemaVersion: $schemaVersion."
+    }
+
+    $planId = [string](Assert-LibertixPlanProperty -Object $Plan -Name "planId" -Path "planId")
+    if ($planId -notmatch '^[0-9a-f]{32}$') {
+        throw "Installation plan planId must contain 32 lowercase hexadecimal characters."
+    }
+    $createdAtUtc = [string](Assert-LibertixPlanProperty -Object $Plan -Name "createdAtUtc" -Path "createdAtUtc")
+    [DateTimeOffset]$createdAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($createdAtUtc, [ref]$createdAt) -or $createdAt.Offset -ne [TimeSpan]::Zero) {
+        throw "Installation plan createdAtUtc must be a valid UTC date-time."
+    }
+
+    $firmware = [string](Assert-LibertixPlanProperty -Object $Plan -Name "firmware" -Path "firmware")
+    if ($firmware -notin @("bios", "uefi")) {
+        throw "Installation plan firmware must be 'bios' or 'uefi'."
+    }
+
+    $distribution = Assert-LibertixPlanProperty -Object $Plan -Name "distribution" -Path "distribution"
+    Assert-LibertixPlanDistribution -Distribution $distribution
+    Assert-LibertixPlanLocale -Locale (
+        Assert-LibertixPlanProperty -Object $Plan -Name "locale" -Path "locale"
+    )
+    $account = Assert-LibertixPlanProperty -Object $Plan -Name "account" -Path "account"
+    Assert-LibertixPlanAccount -Account $account
+    $passwordHashWindowsPath = [string]$account.passwordHashWindowsPath
 
     $disk = Assert-LibertixPlanProperty -Object $Plan -Name "disk" -Path "disk"
     Assert-LibertixExactPlanProperties -Object $disk -Path "disk" -PropertySet "disk"

@@ -1289,24 +1289,24 @@ try {
             }
         }
         "sharing_disabled" {
-            if (-not [bool]$config.share_linux_files_in_windows) {
-                $mountTasks = @(Get-ScheduledTask `
-                    -TaskName "LibertixLinuxReadOnly" `
-                    -ErrorAction SilentlyContinue)
-                $pinTasks = @(Get-ScheduledTask `
-                    -TaskName "LibertixLinuxReadOnlyPin_*" `
-                    -ErrorAction SilentlyContinue)
-                $mountProcesses = @(Get-CimInstance `
-                    Win32_Process `
-                    -Filter "Name='ext4.exe'" `
-                    -ErrorAction SilentlyContinue)
-                Assert-Condition ($mountTasks.Count -eq 0) `
-                    "The disabled Linux-to-Windows share still has a mount task."
-                Assert-Condition ($pinTasks.Count -eq 0) `
-                    "The disabled Linux-to-Windows share still has a shortcut task."
-                Assert-Condition ($mountProcesses.Count -eq 0) `
-                    "The disabled Linux-to-Windows share still has an ext4 mount process."
-            }
+            Assert-Condition (-not [bool]$config.share_linux_files_in_windows) `
+                "sharing_disabled only applies when the Linux-to-Windows share is disabled."
+            $mountTasks = @(Get-ScheduledTask `
+                -TaskName "LibertixLinuxReadOnly" `
+                -ErrorAction SilentlyContinue)
+            $pinTasks = @(Get-ScheduledTask `
+                -TaskName "LibertixLinuxReadOnlyPin_*" `
+                -ErrorAction SilentlyContinue)
+            $mountProcesses = @(Get-CimInstance `
+                Win32_Process `
+                -Filter "Name='ext4.exe'" `
+                -ErrorAction SilentlyContinue)
+            Assert-Condition ($mountTasks.Count -eq 0) `
+                "The disabled Linux-to-Windows share still has a mount task."
+            Assert-Condition ($pinTasks.Count -eq 0) `
+                "The disabled Linux-to-Windows share still has a shortcut task."
+            Assert-Condition ($mountProcesses.Count -eq 0) `
+                "The disabled Linux-to-Windows share still has an ext4 mount process."
         }
         "ext4_driver" {
             $ext4 = Join-Path $nativeProgramFiles "ext4-win-driver\ext4.exe"

@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Libertix.Helpers;
 
 namespace Libertix.Installation
 {
@@ -27,7 +28,7 @@ namespace Libertix.Installation
 
         private static InstallationPolicy LoadCurrent()
         {
-            string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, RelativePolicyPath);
+            string path = ApplicationFiles.Resolve(RelativePolicyPath);
             InstallationPolicy policy = JsonSerializer.Deserialize<InstallationPolicy>(
                 File.ReadAllText(path),
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });

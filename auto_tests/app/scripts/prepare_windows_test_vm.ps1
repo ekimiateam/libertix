@@ -80,7 +80,33 @@ function Assert-NoPendingServicingRestart {
     throw "Windows servicing requires a restart before test preparation can continue: $($pendingRestart -join ', ')."
 }
 
+function Assert-PreparationImageHealthy {
+    param([Parameter(Mandatory = $true)][string]$Phase)
+
+    $health = @(Repair-WindowsImage -Online -CheckHealth -NoRestart -ErrorAction Stop)
+    if ($health.Count -ne 1 -or $health[0].PSObject.Properties.Name -notcontains 'ImageHealthState') {
+        throw "DISM did not return a unique preparation image health state."
+    }
+    $state = [string]$health[0].ImageHealthState
+    $checkpoint = [ordered]@{
+        phase = $Phase
+        observed_at = [DateTime]::UtcNow.ToString('o')
+        elapsed_ms = $preparationClock.ElapsedMilliseconds
+        image_health_state = $state
+        servicing_processes = @(Get-Process -Name TiWorker, TrustedInstaller, dism -ErrorAction SilentlyContinue |
+            Select-Object Name, Id, StartTime)
+    }
+    # Persist phase boundaries: guest wall clocks change after snapshot restoration.
+    $checkpoint | ConvertTo-Json -Depth 3 -Compress | Add-Content -LiteralPath $preparationHealthLog -Encoding UTF8
+    Write-Output "WINDOWS_IMAGE_PREPARATION_HEALTH_STATE=$state"
+    Write-Output "WINDOWS_IMAGE_PREPARATION_PHASE=$Phase"
+    if ($state -ne 'Healthy') {
+        throw "Windows image became unhealthy during preparation ($Phase): $state; installation not started."
+    }
+}
+
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$preparationClock = [Diagnostics.Stopwatch]::StartNew()
 $pendingRestartPaths = @(
     "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired",
     "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
@@ -139,6 +165,10 @@ try {
     Write-Output "WINDOWS_UPDATE_STOP_ELAPSED_MS=$($updateStopClock.ElapsedMilliseconds)"
 }
 Write-WindowsUpdateServiceDiagnostic -Phase 'after-stop'
+# Windows servicing can change the startup mode while the service stops.
+# Reapply once, then retain the strict state check rather than accepting a race.
+Set-Service -Name wuauserv -StartupType Disabled -ErrorAction Stop
+Write-WindowsUpdateServiceDiagnostic -Phase 'after-disable'
 $observedUpdateService = Get-CimInstance Win32_Service -Filter "Name='wuauserv'" -ErrorAction Stop
 if ($observedUpdateService.State -ne "Stopped" -or $observedUpdateService.StartMode -ne "Disabled") {
     throw "Windows Update must be stopped and disabled before the test starts."
@@ -146,6 +176,29 @@ if ($observedUpdateService.State -ne "Stopped" -or $observedUpdateService.StartM
 
 # Do not clean update downloads while Windows still requires servicing completion.
 Assert-NoPendingServicingRestart -Paths $pendingRestartPaths
+
+# CheckHealth only reads a stored flag. Scan the image before file cleanup.
+$diagnosticRoot = Join-Path $env:ProgramData 'Libertix\Automation'
+New-Item -ItemType Directory -Path $diagnosticRoot -Force | Out-Null
+$healthLog = Join-Path $diagnosticRoot ("auto-tests-initial-image-health-{0}.log" -f [guid]::NewGuid().ToString('N'))
+$preparationHealthLog = Join-Path $diagnosticRoot ("auto-tests-preparation-health-{0}.log" -f [guid]::NewGuid().ToString('N'))
+Write-Output "WINDOWS_IMAGE_PREPARATION_HEALTH_LOG=$preparationHealthLog"
+Write-Output "WINDOWS_IMAGE_INITIAL_SCAN_LOG=$healthLog"
+Write-Output "WINDOWS_IMAGE_INITIAL_SCAN_STARTED_UTC=$([DateTime]::UtcNow.ToString('o'))"
+$healthClock = [Diagnostics.Stopwatch]::StartNew()
+try {
+    $initialHealth = @(Repair-WindowsImage -Online -ScanHealth -NoRestart -LogPath $healthLog -ErrorAction Stop)
+} finally {
+    Write-Output "WINDOWS_IMAGE_INITIAL_SCAN_ELAPSED_MS=$($healthClock.ElapsedMilliseconds)"
+}
+if ($initialHealth.Count -ne 1 -or
+    $initialHealth[0].PSObject.Properties.Name -notcontains 'ImageHealthState') {
+    throw "DISM did not return a unique initial image health state."
+}
+Write-Output ("WINDOWS_IMAGE_INITIAL_HEALTH_STATE={0}" -f $initialHealth[0].ImageHealthState)
+if ([string]$initialHealth[0].ImageHealthState -ne 'Healthy') {
+    throw "The restored Windows image is not healthy before file cleanup and installation; installation not started."
+}
 
 $explorer = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop |
     Sort-Object CreationDate -Descending |
@@ -170,17 +223,26 @@ if (-not $interactiveProfile -or
     throw "The interactive Windows user profile path could not be resolved."
 }
 
-$temporaryBytesReclaimed = Clear-TestVmTemporaryFiles -Paths @(
-    $env:TEMP,
-    (Join-Path ([string]$interactiveProfile.LocalPath) "AppData\Local\Temp"),
-    "C:\Windows\Temp",
-    "C:\Windows\SoftwareDistribution\Download"
-)
+$activeServicingServices = @(Get-Service -Name TrustedInstaller, BITS -ErrorAction Stop |
+    Where-Object { $_.Status -ne 'Stopped' })
+$temporaryBytesReclaimed = 0
+if ($activeServicingServices.Count -eq 0) {
+    $temporaryBytesReclaimed = Clear-TestVmTemporaryFiles -Paths @(
+        $env:TEMP,
+        (Join-Path ([string]$interactiveProfile.LocalPath) "AppData\Local\Temp"),
+        "C:\Windows\Temp",
+        "C:\Windows\SoftwareDistribution\Download"
+    )
+} else {
+    # Stopping Windows Update does not stop an already running servicing transaction.
+    Write-Output ("TEMPORARY_FILE_CLEANUP_SKIPPED=Active services: " + ($activeServicingServices.Name -join ', '))
+}
+Assert-PreparationImageHealthy -Phase 'after-temporary-cleanup'
 $target = [DateTimeOffset]::Parse(
     [string]$config.utc_now,
     [Globalization.CultureInfo]::InvariantCulture,
     [Globalization.DateTimeStyles]::RoundtripKind
-)
+).AddSeconds($preparationClock.Elapsed.TotalSeconds)
 $before = [DateTimeOffset]::Now
 $beforeSkew = [math]::Abs(($before - $target).TotalSeconds)
 
@@ -196,6 +258,7 @@ $afterSkew = [math]::Abs(($after - $target).TotalSeconds)
 if ($afterSkew -gt 300) {
     throw "Windows test VM clock remains $([math]::Round($afterSkew)) seconds from the controller."
 }
+Assert-PreparationImageHealthy -Phase 'after-clock-sync'
 
 # Disable toast notifications for the exact interactive profile so a transient
 # banner cannot take focus from deterministic unattended keyboard actions.
@@ -283,6 +346,7 @@ Get-Process -Name SystemSettings, ShellExperienceHost -ErrorAction SilentlyConti
 Start-Sleep -Seconds 3
 
 Assert-NoPendingServicingRestart -Paths $pendingRestartPaths
+Assert-PreparationImageHealthy -Phase 'preparation-complete'
 Write-Output "UTC_NOW=$($after.UtcDateTime.ToString('o'))"
 Write-Output "CLOCK_SKEW_SECONDS=$([math]::Round($afterSkew))"
 Write-Output "TOAST_NOTIFICATIONS_DISABLED=True"

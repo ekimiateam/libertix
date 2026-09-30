@@ -19,13 +19,16 @@ from app.errors import WorkflowError
 from app.services.automation_types import AutomationOptions
 
 WINDOWS_LOG_ROOTS = (
+    # Large servicing archives must not exhaust the deadline before the failure evidence.
+    "/ProgramData/Libertix/Automation",
     "/LibertixInstallLogs",
     "/LibertixInstallRecovery",
     "/LibertixTools",
     "/ProgramData/Libertix/UefiRecovery",
     "/ProgramData/Libertix/WindowsShare",
     "/ProgramData/Libertix/BootGuardian",
-    "/ProgramData/Libertix/Automation",
+    "/Windows/Logs/DISM",
+    "/Windows/Logs/CBS",
 )
 LINUX_LOG_ROOTS = (
     "/var/log/libertix",
@@ -73,6 +76,7 @@ def is_diagnostic_file(name: str) -> bool:
         return False
     return (
         lowered in PUBLIC_STATE_FILES
+        or bool(re.fullmatch(r"cbspersist_\d+\.cab", lowered))
         or lowered.endswith((".status.json", ".result.json"))
         or bool(re.fullmatch(r"[a-z0-9_.-]+\.(?:log(?:\.[a-z0-9_-]+)*|txt)", lowered))
     )
@@ -104,10 +108,10 @@ def download_diagnostics(
         elif stat.S_ISREG(entry.st_mode or 0) and is_diagnostic_file(name):
             record = {"remote_path": remote_path, "local_path": str(local_path)}
             records.append(record)
+            size = 0
             try:
                 local_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 digest = hashlib.sha256()
-                size = 0
                 with sftp.open(remote_path, "rb") as incoming, local_path.open("xb") as outgoing:
                     local_path.chmod(0o600)
                     initial_size = incoming.stat().st_size
@@ -127,7 +131,7 @@ def download_diagnostics(
                     sha256=digest.hexdigest(),
                 )
             except (OSError, EOFError, paramiko.SSHException) as exc:
-                record.update(status="error", error=str(exc))
+                record.update(status="error", bytes=size, **diagnostic_error(exc))
         else:
             records.append({"remote_path": remote_path, "status": "excluded"})
 
@@ -220,6 +224,8 @@ def collect_failure_diagnostics(
                     manifest["files"].append(
                         {"status": "error", "phase": "sftp", **diagnostic_error(exc)}
                     )
+                finally:
+                    manifest["sftp"] = dict(getattr(ssh, "_sftp_details", {}))
                 collect_system_context(ssh, remote_os, bundle, manifest, password)
             break
         except (WorkflowError, OSError, EOFError, paramiko.SSHException) as exc:
@@ -284,7 +290,8 @@ def collect_system_context(
             )
         else:
             source = (scripts / "collect_linux_diagnostics.sh").read_text(encoding="utf-8")
-            command = "sh -c " + shlex.quote(source)
+            # An unprivileged journal query can silently omit system and greeter events.
+            command = "sudo -S -p '' -- sh -c " + shlex.quote(source)
         context["phase"] = "execute"
         result = ssh.run(
             command,
@@ -292,6 +299,8 @@ def collect_system_context(
             timeout=240,
             check=False,
             replay_safe=True,
+            sensitive=remote_os == "linux",
+            stdin_data=password + "\n" if remote_os == "linux" else None,
         )
         context["phase"] = "save_output"
         report = bundle / remote_os / "system-context.txt"

@@ -82,6 +82,12 @@ namespace Libertix.Helpers
             return "powershell.exe";
         }
 
+        /// <summary>Returns the powershell.exe arguments that run one script file.</summary>
+        public static string PowerShellFileArguments(string scriptPath)
+        {
+            return "-NoProfile -ExecutionPolicy Bypass -File " + QuoteArgument(scriptPath);
+        }
+
         public static string QuoteArgument(string value)
         {
             if (value == null)

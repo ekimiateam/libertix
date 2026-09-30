@@ -95,7 +95,7 @@ def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
         def __init__(self, _settings):
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs):
+        def run(self, _selectors, request, *, on_step, **_kwargs):
             def send(name, vm, **context):
                 on_step(
                     StepResult(
@@ -176,7 +176,7 @@ def test_progress_during_timeout_capture_rearms_the_watchdog(
         def __init__(self, _settings):
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs):
+        def run(self, _selectors, request, *, on_step, **_kwargs):
             on_step(StepResult(step="first", status="ok", message="first"))
             assert resume.wait(5)
             on_step(StepResult(step="second", status="ok", message="second"))
@@ -734,7 +734,7 @@ def test_stream_emits_steps_then_one_terminal_result_and_releases_lock(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, selectors, request, *, on_step, **_kwargs) -> OperationResult:
             assert selectors == ["vm1"]
             step = StepResult(
                 step="automation.deploy",
@@ -800,7 +800,7 @@ def test_stream_timeout_captures_selected_vms_and_returns_a_terminal_error(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, _selectors, request, *, on_step, **_kwargs) -> OperationResult:
             on_step(
                 StepResult(
                     step="automation.installed_boot_menu_seen",
@@ -975,7 +975,7 @@ def test_json_automation_uses_isolated_timeout_and_captures_selected_vms(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, _selectors, request, *, on_step, **_kwargs) -> OperationResult:
             on_step(
                 StepResult(
                     step="automation.installed_boot_menu_seen",
@@ -1056,7 +1056,7 @@ def test_stream_inactivity_timeout_resets_after_each_progress_step(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, _selectors, request, *, on_step, **_kwargs) -> OperationResult:
             steps: list[StepResult] = []
             for index in range(4):
                 step = StepResult(
@@ -1114,7 +1114,7 @@ def test_synchronous_operation_persists_steps_and_result_in_its_run_workspace(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, _selectors, request, *, on_step, **_kwargs) -> OperationResult:
             step = StepResult(
                 step="automation.deploy",
                 status="ok",
@@ -1170,7 +1170,7 @@ def test_stream_converts_worker_exception_to_safe_terminal_result(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, **_kwargs):
+        def run(self, _selectors, request, **_kwargs):
             raise RuntimeError("private diagnostic detail")
 
     monkeypatch.setattr(main_module, "AutomationService", FailingAutomationService)
@@ -1276,7 +1276,7 @@ def test_workspace_finalization_failure_does_not_hide_operation_result_or_hold_l
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, **_kwargs) -> OperationResult:
+        def run(self, _selectors, request, **_kwargs) -> OperationResult:
             return OperationResult(
                 status="ok",
                 operation="automation",
@@ -1328,7 +1328,7 @@ def test_stream_keeps_full_log_but_emits_only_phase_changes(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, selectors, request, *, on_step, **_kwargs) -> OperationResult:
             assert selectors == ["vm1"]
             steps = [
                 StepResult(
@@ -1424,7 +1424,7 @@ def test_stream_preserves_complete_installation_errors(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, _selectors, request, *, on_step, **_kwargs) -> OperationResult:
             capture = StepResult(
                 step="automation.capture",
                 status="ok",
@@ -1487,7 +1487,7 @@ def test_compact_stream_uses_short_success_lines_and_verbose_errors(
         def __init__(self, _settings) -> None:
             pass
 
-        def run(self, _selectors, *, on_step, **_kwargs) -> OperationResult:
+        def run(self, _selectors, request, *, on_step, **_kwargs) -> OperationResult:
             checks = [
                 StepResult(
                     step="automation.test.linux",

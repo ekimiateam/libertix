@@ -77,7 +77,7 @@ namespace Libertix.Helpers
                 if (parts.Length == 4 && parts[0] == FilepoolProtocol.DiscoveryRequest &&
                     parts[1] == nonce && parts[2] == channel &&
                     int.TryParse(parts[3], out port) && port > 0 && port <= IPEndPoint.MaxPort)
-                    servers.Add(new UriBuilder("https", sender.Address.ToString(), port)
+                    servers.Add(new UriBuilder("http", sender.Address.ToString(), port)
                         .Uri.GetLeftPart(UriPartial.Authority));
             }
             return servers.ToArray();

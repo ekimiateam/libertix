@@ -10,19 +10,16 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows;
 using Libertix.Helpers;
-using Libertix.Installation;
 using Libertix.Models;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private async Task<bool> RecoverPreviousUefiTransactionAsync()
         {
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-uefi-install.ps1");
             if (!File.Exists(scriptPath))
@@ -36,7 +33,7 @@ namespace Libertix.Pages
             int recoveryDispositionSeen = 0;
             StreamingProcessResult result = await RunStreamingProcessAsync(
                 WindowsProcessRunner.ResolvePowerShell(),
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} " +
                 "-RecoverPreviousTransaction",
                 WindowsProcessTimeouts.DiskImageOperation,
                 line =>
@@ -69,18 +66,17 @@ namespace Libertix.Pages
                 Localized(
                     "ApplyChangesRollbackIncomplete",
                     "Rollback incomplete. Manual intervention is required."));
-            FinishInstallation(enableBackButton: false);
-            MessageBox.Show(
+            FinishInstallation(allowRetry: false);
+            _view.ShowBlockingMessage(
+                Localized(
+                    "ApplyChangesRollbackIncompleteTitle",
+                    "Libertix - Incomplete rollback"),
                 LocalizedFormat(
                     "ApplyChangesPreviousUefiRecoveryFailedDetails",
                     "A previous unfinished installation could not be restored safely. " +
                     "No new installation was started. Do not restart; review {0}.",
                     Path.Combine(WindowsSystemDrive, RuntimeNames.InstallationLogDirectory)),
-                Localized(
-                    "ApplyChangesRollbackIncompleteTitle",
-                    "Libertix - Incomplete rollback"),
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+                isError: true);
             return false;
         }
 
@@ -118,16 +114,14 @@ namespace Libertix.Pages
             {
                 Log("ERROR: Administrator privileges are required for UEFI installation.");
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return;
             }
 
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-uefi-install.ps1");
-            string aria2Path = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string aria2Path = ApplicationFiles.Resolve(
                 "Tools",
                 "aria2",
                 "aria2c.exe");
@@ -136,14 +130,14 @@ namespace Libertix.Pages
             {
                 Log($"ERROR: UEFI installer script missing: {scriptPath}");
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return;
             }
             if (!File.Exists(aria2Path))
             {
                 Log($"ERROR: bundled aria2 missing: {aria2Path}");
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return;
             }
             if (!(_installationState.Account is AccountInfo account) ||
@@ -153,7 +147,7 @@ namespace Libertix.Pages
             {
                 Log("ERROR: Linux account configuration is missing.");
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return;
             }
 
@@ -209,7 +203,7 @@ namespace Libertix.Pages
                     CleanupUefiRecoveryBeforeMutationBestEffort(recovery);
                 });
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return;
             }
 
@@ -217,7 +211,7 @@ namespace Libertix.Pages
             try
             {
                 string arguments =
-                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                    $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} " +
                     $"-ConfigPath {QuoteArgument(configPath)} -Force -PreserveConfig";
                 processResult = await RunStreamingProcessAsync(
                     powershell,
@@ -259,10 +253,7 @@ namespace Libertix.Pages
 
                 UpdateProgress(100, Localized("ApplyChangesComplete", "Partitioning complete!"));
                 Log("UEFI installation preparation completed successfully.");
-                ExpandedLogsOverlay.Visibility = Visibility.Collapsed;
-                RebootButton.Visibility = Visibility.Visible;
-                RebootButton.IsDefault = true;
-                RebootButton.Focus();
+                _view.ShowRebootAction();
                 await PublishUnattendedRebootReadyAsync();
             }
             catch (OperationCanceledException)
@@ -289,8 +280,7 @@ namespace Libertix.Pages
             string reason,
             string failureCode = "UEFI_PREPARATION_FAILED")
         {
-            RebootButton.Visibility = Visibility.Collapsed;
-            RebootButton.IsDefault = false;
+            _view.HideRebootAction();
             _rollbackVerificationPending = true;
             ReloadExecutionState();
             bool rollbackVerified = _executionLedger != null &&
@@ -302,7 +292,7 @@ namespace Libertix.Pages
                 BeginExecutionRollback();
                 StreamingProcessResult revertResult = await RunStreamingProcessAsync(
                     powershell,
-                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert " +
+                    $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} -Revert " +
                     $"-ExpectedRecoveryRunId {QuoteArgument(_activeUefiRecovery.RunId)}",
                     WindowsProcessTimeouts.DiskImageOperation,
                     line => Log($"ROLLBACK: {line}"),
@@ -339,7 +329,7 @@ namespace Libertix.Pages
                     failureCode.ToLowerInvariant().Replace('_', '-'),
                     $"{reason} Automatic rollback was verified.");
                 _rollbackVerificationPending = false;
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return;
             }
 
@@ -352,18 +342,17 @@ namespace Libertix.Pages
             PublishUnattendedFailure(
                 "uefi-rollback-incomplete",
                 $"{reason} Automatic rollback could not be verified.");
-            FinishInstallation(enableBackButton: false);
-            MessageBox.Show(
+            FinishInstallation(allowRetry: false);
+            _view.ShowBlockingMessage(
+                Localized(
+                    "ApplyChangesRollbackIncompleteTitle",
+                    "Libertix - Incomplete rollback"),
                 LocalizedFormat(
                     "ApplyChangesPreparationRollbackIncompleteDetails",
                     "Preparation failed and automatic rollback could not be verified. " +
                     "Do not restart; review {0}.",
                     Path.Combine(WindowsSystemDrive, RuntimeNames.InstallationLogDirectory)),
-                Localized(
-                    "ApplyChangesRollbackIncompleteTitle",
-                    "Libertix - Incomplete rollback"),
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+                isError: true);
         }
 
         private UefiRecoveryState CreateUefiRecoverySession()
@@ -457,7 +446,7 @@ namespace Libertix.Pages
 
             StreamingProcessResult result = await RunStreamingProcessAsync(
                 WindowsProcessRunner.ResolvePowerShell(),
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agentPath)} " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(agentPath)} " +
                 $"-StatePath {QuoteArgument(Path.Combine(_activeUefiRecovery.RecoveryRoot, "state.json"))} " +
                 "-Action Cancel",
                 WindowsProcessTimeouts.DiskImageOperation,
@@ -485,7 +474,7 @@ namespace Libertix.Pages
                     RunProcess(
                         schtasks,
                         $"/Delete /TN {QuoteArgument(taskName)} /F",
-                        (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
+                        WindowsProcessTimeouts.QuickCommand,
                         GetWindowsConsoleEncoding());
                 }
             }
@@ -545,7 +534,7 @@ namespace Libertix.Pages
                 recovery.PayloadRoot,
                 "Scripts",
                 "modules",
-                "Libertix.FirmwareRead.psm1");
+                "Libertix.FirmwareVariables.psm1");
             string preferredBootPathModule = Path.Combine(
                 recovery.PayloadRoot,
                 "Scripts",
@@ -585,7 +574,7 @@ namespace Libertix.Pages
             WriteUefiRecoveryState(recovery);
 
             string registrationArguments =
-                $"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {QuoteArgument(taskRegistrationScript)} " +
+                $"-WindowStyle Hidden {WindowsProcessRunner.PowerShellFileArguments(taskRegistrationScript)} " +
                 $"-StartupTaskName {QuoteArgument(recovery.TaskName)} " +
                 $"-AgentPath {QuoteArgument(agent)} " +
                 $"-HiddenHostPath {QuoteArgument(bootGuardianExecutable)} " +
@@ -595,7 +584,7 @@ namespace Libertix.Pages
             var result = RunProcess(
                 powershell,
                 registrationArguments,
-                waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds);
+                timeout: WindowsProcessTimeouts.QuickCommand);
             if (result.exitCode != 0)
                 throw new InvalidOperationException($"Cannot create UEFI recovery tasks: {result.output} {result.error}".Trim());
 

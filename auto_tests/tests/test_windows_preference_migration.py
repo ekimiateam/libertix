@@ -478,7 +478,9 @@ def test_apply_desktop_command_keeps_a_successful_zero_exit(
 
 
 def test_secret_bundle_is_verified_retired_and_never_installed_persistently() -> None:
-    windows_plan = (ROOT / "Pages/ApplyChanges.Plan.cs").read_text(encoding="utf-8-sig")
+    windows_plan = (ROOT / "Installation/InstallationEngine.Plan.cs").read_text(
+        encoding="utf-8-sig"
+    )
     uefi_publisher = (ROOT / "Scripts/uefi/Libertix.Uefi.Execution.ps1").read_text(
         encoding="utf-8-sig"
     )

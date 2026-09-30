@@ -93,6 +93,21 @@ class OperationProgress:
         self.global_at = now
         self.active: dict[str, float] = {}
         self._seen: set[tuple[object, ...]] = set()
+        self.network_paused_at: float | None = None
+
+    @property
+    def network_paused(self) -> bool:
+        return self.network_paused_at is not None
+
+    def observe_network(self, step: StepResult, now: float) -> None:
+        """Keep a lab network outage out of every inactivity budget."""
+
+        if step.step == "automation.network.wait" and self.network_paused_at is None:
+            self.network_paused_at = now
+        elif step.step == "automation.network.resumed":
+            if self.network_paused_at is not None:
+                self.exclude_network_pause(now - self.network_paused_at)
+            self.network_paused_at = None
 
     def observe(self, step: StepResult, now: float) -> bool:
         vm = str(step.context.get("vm") or "global")

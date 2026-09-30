@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Libertix.Helpers;
 
 namespace Libertix.Installation
 {
@@ -27,8 +28,7 @@ namespace Libertix.Installation
 
         public static ArtifactCatalog LoadFromApplicationDirectory()
         {
-            return Load(Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            return Load(ApplicationFiles.Resolve(
                 "Scripts",
                 "config",
                 "Libertix.Artifacts.json"));

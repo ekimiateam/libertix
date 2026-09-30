@@ -1,4 +1,3 @@
-import ast
 import hashlib
 import json
 import re
@@ -23,7 +22,7 @@ from app.clients.vnc import VNCClient
 from app.config import Settings
 from app.distributions import load_distribution_profile
 from app.errors import WorkflowError
-from app.models import ValidationRequest
+from app.models import AutomationRequest, ValidationRequest
 from app.services.automation import AutomationService
 from app.services.automation_postinstall import (
     BootGuardianFaultEvidence,
@@ -89,8 +88,8 @@ def test_wizard_pages_expose_deterministic_keyboard_navigation() -> None:
 
 def test_apply_changes_reboot_is_a_focused_keyboard_default() -> None:
     xaml = read_repo("Pages/ApplyChanges.xaml")
-    bios = read_repo("Pages/ApplyChanges.Bios.cs")
-    uefi = read_repo("Pages/ApplyChanges.Uefi.cs")
+    bios = read_repo("Installation/InstallationEngine.Bios.cs")
+    uefi = read_repo("Installation/InstallationEngine.Uefi.cs")
 
     reboot_button = xaml.split('<Button x:Name="RebootButton"', maxsplit=1)[1].split(
         "/>\n",
@@ -98,13 +97,22 @@ def test_apply_changes_reboot_is_a_focused_keyboard_default() -> None:
     )[0]
     assert 'KeyboardNavigation.TabNavigation="Cycle"' in xaml
     assert 'AutomationProperties.AutomationId="ApplyChangesRebootButton"' in reboot_button
-    visible_and_focused = (
+    page = read_repo("Pages/ApplyChanges.xaml.cs")
+    show_reboot = page.split("void IInstallationView.ShowRebootAction()", 1)[1].split(
+        "void IInstallationView.HideRebootAction()", 1
+    )[0]
+    assert (
         "RebootButton.Visibility = Visibility.Visible;\n"
-        "            RebootButton.IsDefault = true;\n"
-        "            RebootButton.Focus();"
+        "                RebootButton.IsDefault = true;\n"
+        "                RebootButton.Focus();"
+    ) in show_reboot
+    assert (
+        "_view.ShowRebootAction();\n            await PublishUnattendedRebootReadyAsync();" in bios
     )
-    assert visible_and_focused in bios
-    assert " ".join(visible_and_focused.split()) in " ".join(uefi.split())
+    assert (
+        "_view.ShowRebootAction();\n                await PublishUnattendedRebootReadyAsync();"
+        in uefi
+    )
 
 
 def test_installed_linux_disables_the_hidden_default_install_action() -> None:
@@ -251,11 +259,14 @@ def settings(**overrides: object) -> Settings:
 
 
 def apply_changes_source() -> str:
-    """Return all files that form the ApplyChanges partial class."""
+    """Return the installation screen and the engine it drives."""
 
     return "\n".join(
         path.read_text(encoding="utf-8-sig")
-        for path in sorted((REPO_ROOT / "Pages").glob("ApplyChanges*.cs"))
+        for path in [
+            *sorted((REPO_ROOT / "Pages").glob("ApplyChanges*.cs")),
+            *sorted((REPO_ROOT / "Installation").glob("InstallationEngine*.cs")),
+        ]
     )
 
 
@@ -1752,7 +1763,7 @@ def test_verified_install_uninstall_drives_product_ui_then_proves_exact_rollback
         service,
         "_wait_for_ssh",
         lambda *_args, **kwargs: (
-            events.append(("boot", kwargs)) or SimpleNamespace(__exit__=lambda *_: None)
+            events.append(("boot", kwargs)) or SimpleNamespace(close=lambda: None)
         ),
     )
 
@@ -1774,7 +1785,7 @@ def test_verified_install_uninstall_drives_product_ui_then_proves_exact_rollback
     assert len([item for item in events if item[0] == "verify"]) == 2
     boot = next(item for item in events if item[0] == "boot")
     assert boot[1]["previous_windows_boot_id"] == "old-boot"
-    assert "grub_entry" not in boot[1]
+    assert boot[1].get("grub_entry") is None
 
 
 def test_uninstall_ssh_wait_requires_new_windows_boot_without_keyboard_input(monkeypatch):
@@ -1787,7 +1798,7 @@ def test_uninstall_ssh_wait_requires_new_windows_boot_without_keyboard_input(mon
         assert kwargs["remote_os"] == "windows"
         client = SimpleNamespace(
             __enter__=lambda: None,
-            __exit__=lambda *_: None,
+            close=lambda: None,
             run=lambda *_args, **_kwargs: CommandResult("LIBERTIX_WINDOWS_READY", "", 0),
         )
         clients.append(client)
@@ -2568,10 +2579,13 @@ def test_automation_reports_configured_storage_headroom() -> None:
 def test_automation_requires_visual_monitoring() -> None:
     result = AutomationService(settings()).run(
         ["vm1"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=False,
-        source="local",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=False,
+            source="local",
+        ),
     )
 
     assert result.status == "error"
@@ -2581,23 +2595,29 @@ def test_automation_requires_visual_monitoring() -> None:
 def test_boot_guardian_fault_scope_is_rejected_before_vm_mutation() -> None:
     bios_result = AutomationService(settings()).run(
         ["vm1"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=True,
-        source="local",
-        boot_guardian_fault="boot-order",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+            boot_guardian_fault="boot-order",
+        ),
     )
     assert bios_result.status == "error"
     assert bios_result.steps[-1].step == "automation.boot_guardian_fault_scope"
 
     linux_first_result = AutomationService(settings()).run(
         ["vm2"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=True,
-        source="local",
-        first_boot="linux",
-        boot_guardian_fault="boot-order",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+            first_boot="linux",
+            boot_guardian_fault="boot-order",
+        ),
     )
     assert linux_first_result.status == "error"
     assert linux_first_result.steps[-1].step == "automation.boot_guardian_fault_order"
@@ -2680,6 +2700,9 @@ def test_boot_guardian_fault_is_repaired_during_a_real_shutdown_cycle(
 
         def __exit__(self, *_args: object) -> None:
             calls.append("ssh-close")
+
+        def close(self) -> None:
+            self.__exit__()
 
     class FakeProxmox:
         def __enter__(self) -> "FakeProxmox":
@@ -3121,10 +3144,13 @@ def test_automation_run_retains_completed_capture_workspace(
 
     result = service.run(
         ["vm1"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=True,
-        source="local",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+        ),
     )
 
     assert result.status == "ok"
@@ -3208,10 +3234,13 @@ def test_preparation_failure_collects_diagnostics_and_preserves_other_vm_runs(
     monkeypatch.setattr(service, "_run_vm_isolated", run_vm)
     result = service.run(
         ["vm1", "vm2", "vm3"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=True,
-        source="local",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+        ),
     )
     assert sorted(launched) == ["vm1", "vm3"]
     assert result.status == "error"
@@ -4393,9 +4422,9 @@ def test_uefi_recovery_tasks_are_not_clock_boundary_dependent() -> None:
 
 
 def test_recovery_is_armed_before_any_bitlocker_mutation() -> None:
-    workflow = read_repo("Pages/ApplyChanges.xaml.cs")
-    bios = read_repo("Pages/ApplyChanges.Bios.cs")
-    uefi = read_repo("Pages/ApplyChanges.Uefi.cs")
+    workflow = read_repo("Installation/InstallationEngine.cs")
+    bios = read_repo("Installation/InstallationEngine.Bios.cs")
+    uefi = read_repo("Installation/InstallationEngine.Uefi.cs")
     installer = read_repo("Scripts/libertix-uefi-install.ps1")
     transaction = read_repo("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
 
@@ -4415,21 +4444,21 @@ def test_recovery_is_armed_before_any_bitlocker_mutation() -> None:
 
 
 def test_bios_recovery_payload_includes_atomic_state_dependency() -> None:
-    source = read_repo("Pages/ApplyChanges.Windows.cs")
+    source = read_repo("Installation/InstallationEngine.Windows.cs")
     method_start = source.index("private async Task<bool> InstallWindowsRecoveryGuardAsync")
     method_end = source.index("private async Task<double> QueryShrinkSpaceAsync", method_start)
     method = source[method_start:method_end]
 
-    assert '"Libertix.InstallationState.psm1"' in method
-    assert method.count('"Libertix.AtomicFile.psm1"') == 2
-    assert method.count('"Libertix.BiosMbr.psm1"') == 2
-    assert method.count('"Libertix.Rollback.psm1"') == 2
+    modules = source.split("BiosRecoveryModules =", 1)[1].split("};", 1)[0]
+    assert "foreach (string module in BiosRecoveryModules)" in method
+    for module in ("InstallationState", "AtomicFile", "BiosMbr", "Rollback"):
+        assert f'"Libertix.{module}.psm1"' in modules
     project = read_repo("Libertix.csproj")
     assert 'Include="Scripts\\modules\\Libertix.BiosMbr.psm1"' in project
 
 
 def test_bios_live_ledger_is_detached_before_drive_letter_removal() -> None:
-    bios = read_repo("Pages/ApplyChanges.Bios.cs")
+    bios = read_repo("Installation/InstallationEngine.Bios.cs")
     method = bios.split("private async Task<bool> PrepareBiosTemporaryBootAsync()", 1)[1].split(
         "private async Task<bool> RemoveBiosInstallerAccessPathAsync()", 1
     )[0]
@@ -4588,18 +4617,8 @@ def test_linux_post_install_ack_matches_real_result_producer(
         None, vm, AutomationOptions("test", "test-passphrase", True), ResultBuilder("automation")
     )
     check = next(check for check in checks if check.name == "linux.first_boot_verification")
-    script = shlex.split(check.command)[2]
-    statements = ast.parse(script).body
-    start = next(
-        index
-        for index, node in enumerate(statements)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == "fields"
-    )
-    fingerprint_check = compile(
-        ast.Module(body=statements[start:], type_ignores=[]), "<ack>", "exec"
-    )
+    assert " first-boot-evidence " in check.command
+    helper = runpy.run_path(str(REPO_ROOT / "auto_tests/app/scripts/linux_check_helper.py"))
     producer = runpy.run_path(str(REPO_ROOT / "assets/live/libertix-first-boot-result.py"))
     status = {
         "planId": "a" * 32,
@@ -4608,12 +4627,11 @@ def test_linux_post_install_ack_matches_real_result_producer(
         "error": None,
         "attemptId": attempt_id,
     }
-    acknowledgement = {"fingerprint": producer["status_fingerprint"](status)}
-    namespace = {"s": status, "a": acknowledgement, "hashlib": hashlib, "json": json}
-    exec(fingerprint_check, namespace)
-    namespace["s"] = dict(status, attemptId="different-attempt")
-    with pytest.raises(AssertionError):
-        exec(fingerprint_check, namespace)
+    acknowledgement = producer["status_fingerprint"](status)
+    assert helper["result_fingerprint"](status) == acknowledgement
+    assert helper["result_fingerprint"](dict(status, attemptId="different-attempt")) != (
+        acknowledgement
+    )
 
 
 def test_linux_post_install_check_requires_selected_distribution_identity() -> None:
@@ -4794,6 +4812,9 @@ def test_wait_for_ssh_retries_a_still_visible_grub_menu(
 
         def __exit__(self, *_args) -> None:
             pass
+
+        def close(self) -> None:
+            self.__exit__()
 
     monkeypatch.setattr(automation_postinstall_module, "SSHClient", FakeSSH)
     monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
@@ -5006,6 +5027,12 @@ def test_post_install_flow_proves_windows_before_first_linux_boot(
         def __exit__(self, *_args) -> None:
             events.append("ssh-close")
 
+        def close(self) -> None:
+            self.__exit__()
+
+        def upload_text(self, *_args, **_kwargs) -> None:
+            pass
+
     def fake_wait_for_ssh(_vm, *, phase, grub_entry, **_kwargs):
         events.append(f"wait:{phase}:{grub_entry}")
         return FakeSSH()
@@ -5129,6 +5156,12 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
         def __exit__(self, *_args: object) -> None:
             return None
 
+        def close(self) -> None:
+            self.__exit__()
+
+        def upload_text(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
     def wait_for_ssh(_vm: object, *, phase: str, grub_entry: str, **_kwargs: object):
         events.append(f"wait:{phase}:{grub_entry}")
         return FakeSSH()
@@ -5198,6 +5231,9 @@ def test_windows_filesystem_repair_waits_for_reboot_then_resumes(
 
         def __exit__(self, *_args: object) -> None:
             closed.append(self.name)
+
+        def close(self) -> None:
+            self.__exit__()
 
     responses = iter(
         (
@@ -5911,7 +5947,7 @@ def test_linux_result_dialog_dismissal_requires_process_exit_and_acknowledgement
     assert "pgrep -fo" in commands[0]
     assert "first-boot-result.py" in commands[0]
     assert "first-boot-result.py" in commands[1]
-    assert "first-boot-result-ack.json" in commands[1]
+    assert "linux-check-helper.py result-acknowledged" in commands[1]
     assert linux_scripts == [
         {
             "script_name": "focus_linux_post_install_result.py",

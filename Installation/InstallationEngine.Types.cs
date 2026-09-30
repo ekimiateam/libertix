@@ -1,11 +1,10 @@
 using System;
 using System.IO;
 using System.Net.Http;
-using Libertix.Installation;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private volatile bool _processTerminationUnverified;
         private bool _rollbackVerificationPending;

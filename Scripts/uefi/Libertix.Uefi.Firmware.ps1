@@ -126,122 +126,8 @@ function Invoke-BcdeditCommand {
 }
 
 function Initialize-FirmwareApi {
-    if (([System.Management.Automation.PSTypeName]"LibertixFirmwareApi").Type) {
-        return
-    }
-
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-
-public static class LibertixFirmwareApi {
-    private const UInt32 TOKEN_ADJUST_PRIVILEGES = 0x0020;
-    private const UInt32 TOKEN_QUERY = 0x0008;
-    private const UInt32 SE_PRIVILEGE_ENABLED = 0x00000002;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct LUID {
-        public UInt32 LowPart;
-        public Int32 HighPart;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct TOKEN_PRIVILEGES {
-        public UInt32 PrivilegeCount;
-        public LUID Luid;
-        public UInt32 Attributes;
-    }
-
-    [DllImport("advapi32.dll", SetLastError=true)]
-    private static extern bool OpenProcessToken(
-        IntPtr ProcessHandle,
-        UInt32 DesiredAccess,
-        out IntPtr TokenHandle
-    );
-
-    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    private static extern bool LookupPrivilegeValue(
-        string lpSystemName,
-        string lpName,
-        out LUID lpLuid
-    );
-
-    [DllImport("advapi32.dll", SetLastError=true)]
-    private static extern bool AdjustTokenPrivileges(
-        IntPtr TokenHandle,
-        bool DisableAllPrivileges,
-        ref TOKEN_PRIVILEGES NewState,
-        UInt32 BufferLength,
-        IntPtr PreviousState,
-        IntPtr ReturnLength
-    );
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", SetLastError=true)]
-    private static extern bool CloseHandle(IntPtr hObject);
-
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern UInt32 GetFirmwareEnvironmentVariable(
-        string lpName,
-        string lpGuid,
-        byte[] pBuffer,
-        UInt32 nSize
-    );
-
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-    public static extern bool SetFirmwareEnvironmentVariableEx(
-        string lpName,
-        string lpGuid,
-        byte[] pValue,
-        UInt32 nSize,
-        UInt32 dwAttributes
-    );
-
-    public static bool DeleteFirmwareEnvironmentVariable(
-        string lpName,
-        string lpGuid,
-        UInt32 dwAttributes
-    ) {
-        return SetFirmwareEnvironmentVariableEx(lpName, lpGuid, null, 0, dwAttributes);
-    }
-
-    public static void EnableSystemEnvironmentPrivilege() {
-        IntPtr token;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out token)) {
-            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        }
-
-        try {
-            LUID luid;
-            if (!LookupPrivilegeValue(null, "SeSystemEnvironmentPrivilege", out luid)) {
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            }
-
-            TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES();
-            tp.PrivilegeCount = 1;
-            tp.Luid = luid;
-            tp.Attributes = SE_PRIVILEGE_ENABLED;
-
-            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) {
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            }
-
-            int error = Marshal.GetLastWin32Error();
-            if (error != 0) {
-                throw new System.ComponentModel.Win32Exception(error);
-            }
-        } finally {
-            CloseHandle(token);
-        }
-    }
-
-    public static int LastError() {
-        return Marshal.GetLastWin32Error();
-    }
-}
-"@
+    # The caller imports Libertix.FirmwareVariables.psm1, the single P/Invoke definition.
+    Initialize-LibertixFirmwareVariableApi
 }
 
 function Enable-FirmwareAccessOnce {
@@ -249,7 +135,7 @@ function Enable-FirmwareAccessOnce {
         return
     }
     Initialize-FirmwareApi
-    [LibertixFirmwareApi]::EnableSystemEnvironmentPrivilege()
+    [LibertixFirmwareVariableApi]::EnableSystemEnvironmentPrivilege()
     $script:LibertixFirmwarePrivilegeEnabled = $true
 }
 
@@ -259,9 +145,9 @@ function Get-FirmwareVariableReadResult {
     Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $buffer = New-Object byte[] 65536
-    $size = [LibertixFirmwareApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
+    $size = [LibertixFirmwareVariableApi]::GetFirmwareEnvironmentVariable($Name, $global, $buffer, [uint32]$buffer.Length)
     if ($size -eq 0) {
-        $errorCode = [LibertixFirmwareApi]::LastError()
+        $errorCode = [LibertixFirmwareVariableApi]::LastError()
         if ($errorCode -in @(
             $script:Win32ErrorEnvironmentVariableNotFound,
             $script:Win32ErrorNotFound
@@ -307,7 +193,7 @@ function Set-FirmwareVariable {
     Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $attributes = [uint32]0x00000007
-    $ok = [LibertixFirmwareApi]::SetFirmwareEnvironmentVariableEx(
+    $ok = [LibertixFirmwareVariableApi]::SetFirmwareEnvironmentVariableEx(
         $Name,
         $global,
         $Value,
@@ -316,7 +202,7 @@ function Set-FirmwareVariable {
     )
 
     if (-not $ok) {
-        $err = [LibertixFirmwareApi]::LastError()
+        $err = [LibertixFirmwareVariableApi]::LastError()
         throw "SetFirmwareEnvironmentVariableEx failed for ${Name}: Win32 error ${err}"
     }
 }
@@ -331,9 +217,9 @@ function Remove-FirmwareVariable {
     Enable-FirmwareAccessOnce
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $attributes = [uint32]0x00000007
-    $ok = [LibertixFirmwareApi]::DeleteFirmwareEnvironmentVariable($Name, $global, $attributes)
+    $ok = [LibertixFirmwareVariableApi]::DeleteFirmwareEnvironmentVariable($Name, $global, $attributes)
     if (-not $ok) {
-        $errorCode = [LibertixFirmwareApi]::LastError()
+        $errorCode = [LibertixFirmwareVariableApi]::LastError()
         throw "SetFirmwareEnvironmentVariableEx failed to delete ${Name}: Win32 error ${errorCode}"
     }
     if (Test-FirmwareVariableExists -Name $Name) {

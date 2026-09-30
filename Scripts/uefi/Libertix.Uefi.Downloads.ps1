@@ -441,15 +441,24 @@ function Start-RobustDownload {
         [Parameter(Mandatory = $true)][string]$Destination,
         [Parameter(Mandatory = $true)][string]$Label,
         [Parameter(Mandatory = $true)][int64]$MaxBytes,
-        [string]$LocalFileName = ""
+        [string]$LocalFileName = "",
+        # Distribution ISOs may be absent from the selected folder; download them instead.
+        [switch]$LocalFileOptional
     )
 
     if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
+    $source = $null
     if (-not [string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
         if ($LocalFileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
             throw "The selected local filepool artifact name is invalid: $LocalFileName"
         }
         $source = Join-Path $LocalFilepoolDirectory $LocalFileName
+        if ($LocalFileOptional -and -not (Test-Path -LiteralPath $source)) {
+            Write-Log "$Label is not in the selected local filepool; downloading it." "Cyan"
+            $source = $null
+        }
+    }
+    if ($source) {
         $item = Get-Item -LiteralPath $source -ErrorAction Stop
         if ($item.Length -gt $MaxBytes -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "The selected local filepool artifact is unsafe: $LocalFileName"
@@ -462,7 +471,7 @@ function Start-RobustDownload {
     }
 
     if (Get-Variable -Name LocalFilepoolServer -ValueOnly -ErrorAction SilentlyContinue) {
-        # No aria2/BITS fallback: every request must keep the accepted TLS scope.
+        # No aria2/BITS fallback: every request must stay on the accepted server.
         Invoke-BoundedHttpDownload -Url $Url -Destination $Destination -MaxBytes $MaxBytes
         return
     }
@@ -539,15 +548,14 @@ function Set-DistributionIsoOnWindows {
 
     if ([string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
         Write-Log "Downloading distribution ISO to $DistributionIsoPath..." "Cyan"
-    } else {
-        Write-Log "Copying distribution ISO from the selected local filepool..." "Cyan"
     }
     Start-RobustDownload `
         -Url $DistributionIsoUrl `
         -Destination $DistributionIsoPath `
         -Label "distribution ISO" `
         -MaxBytes $script:MaximumDistributionIsoBytes `
-        -LocalFileName ([string]$installationPlan.distribution.installerIsoFileName)
+        -LocalFileName ([string]$installationPlan.distribution.installerIsoFileName) `
+        -LocalFileOptional
 
     $downloadedIso = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction Stop
     if ($downloadedIso.Length -le $script:MinimumDistributionIsoBytes) {

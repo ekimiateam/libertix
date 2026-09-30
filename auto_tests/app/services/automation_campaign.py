@@ -6,6 +6,7 @@ import threading
 from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 from app.models import AutomationCampaignRequest, AutomationRequest, OperationResult, StepResult
@@ -24,6 +25,80 @@ BOOT_GUARDIAN_SCENARIOS = tuple(
     for fault in ("boot-order", "preferred-path", "preferred-path-rollback")
     for distribution in ("mint", "zorin")
 )
+STORAGE_LAYOUTS = frozenset({"fat32", "ntfs", "recovery", "secondary"})
+# BIOS cannot add the extra primary partition these layouts need, so Libertix must refuse them.
+BIOS_REFUSAL_LAYOUTS = frozenset({"fat32", "ntfs", "recovery"})
+
+
+@dataclass(frozen=True)
+class CampaignScenario:
+    distribution: str
+    first_boot: str
+    layout: str = "nominal"
+    fault: str = "none"
+
+    @property
+    def name(self) -> str:
+        variant = self.layout if self.layout != "nominal" else self.fault
+        suffix = "" if variant == "none" else f"-{variant}"
+        return f"{self.distribution}-{self.first_boot}-first{suffix}"
+
+    @property
+    def snapshot_mode(self) -> str:
+        return "secondary-disk" if self.layout in STORAGE_LAYOUTS else "default"
+
+    @property
+    def installation_target(self) -> str:
+        return "secondary" if self.layout == "secondary" else "windows"
+
+    def expects_bios_refusal(self, firmware: str | None) -> bool:
+        return self.layout in BIOS_REFUSAL_LAYOUTS and firmware == "bios"
+
+    def vms(self, vm_names: list[str], vm_firmwares: dict[str, str]) -> list[str]:
+        uefi_vms = [vm for vm in vm_names if vm_firmwares.get(vm) == "uefi"]
+        if self.layout == "local-filepool":
+            return uefi_vms[:1]
+        if self.fault != "none":
+            return uefi_vms
+        return list(vm_names)
+
+
+def campaign_scenarios(
+    *,
+    nominal: bool = True,
+    storage: bool = True,
+    boot_guardian: bool = True,
+    local_filepool: bool = True,
+) -> list[CampaignScenario]:
+    scenarios: list[CampaignScenario] = []
+    if nominal:
+        scenarios += [CampaignScenario(d, b) for d, b in SCENARIOS]
+    if storage:
+        scenarios += [CampaignScenario(d, b, layout) for d, b, layout in STORAGE_SCENARIOS]
+    if boot_guardian:
+        scenarios += [
+            CampaignScenario(d, b, fault=fault) for d, b, fault in BOOT_GUARDIAN_SCENARIOS
+        ]
+    if local_filepool:
+        scenarios += [CampaignScenario(d, b, "local-filepool") for d, b in LOCAL_FILEPOOL_SCENARIOS]
+    return scenarios
+
+
+def requested_campaign_scenarios(request: AutomationCampaignRequest) -> list[CampaignScenario]:
+    return campaign_scenarios(
+        nominal=request.include_nominal_scenarios,
+        storage=request.include_storage_scenarios,
+        boot_guardian=request.include_boot_guardian_scenarios,
+        local_filepool=request.include_local_filepool_scenarios,
+    )
+
+
+def find_campaign_scenario(name: str) -> CampaignScenario:
+    for scenario in campaign_scenarios():
+        if scenario.name == name:
+            return scenario
+    raise ValueError(f"Unknown campaign scenario: {name}")
+
 
 # Equal-weight completed checkpoints, not a prediction of elapsed or remaining time.
 CAMPAIGN_MILESTONES = {
@@ -254,7 +329,8 @@ def read_interrupted_campaign_summary(workspace: Path) -> list[dict[str, object]
     try:
         summary = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(summary, list) or len(summary) not in {
-            len(SCENARIOS) + storage + guardian + local
+            nominal + storage + guardian + local
+            for nominal in (0, len(SCENARIOS))
             for storage in (0, len(STORAGE_SCENARIOS))
             for guardian in (0, len(BOOT_GUARDIAN_SCENARIOS))
             for local in (0, len(LOCAL_FILEPOOL_SCENARIOS))
@@ -290,11 +366,15 @@ def _persist_summary(workspace: Path, summary: list[dict[str, object]]) -> None:
     temporary.replace(workspace / "campaign-summary.json")
 
 
-def _scenario_request(request, vm, distribution, first_boot, layout, fault, negative):
+def _scenario_request(
+    request: AutomationCampaignRequest, vm: str, scenario: CampaignScenario, negative: bool
+) -> AutomationRequest:
     fixture = StorageFixtureRequest()
-    if layout and layout != "local-filepool":
+    if scenario.snapshot_mode == "secondary-disk":
         fixture = StorageFixtureRequest(
-            extra_system_partition="recovery" if layout == "secondary" else layout,
+            extra_system_partition=(
+                "recovery" if scenario.layout == "secondary" else scenario.layout
+            ),
             decrypt_system_volume=True,
             secondary_data=True,
             decrypt_secondary_volume=True,
@@ -305,22 +385,76 @@ def _scenario_request(request, vm, distribution, first_boot, layout, fault, nega
         vms=[vm],
         source=request.source,
         apply=True,
-        distribution=distribution,
-        first_boot=first_boot,
+        distribution=scenario.distribution,
+        first_boot=scenario.first_boot,
         linux_username=request.linux_username,
         linux_password=request.linux_password,
         linux_size_gib=request.linux_size_gib,
         migrate_windows_preferences=request.migrate_windows_preferences,
         share_windows_files_in_linux=True,
         share_linux_files_in_windows=True,
-        verify_uninstall=not negative and fault == "none",
-        boot_guardian_fault=fault,
-        local_filepool=layout == "local-filepool",
+        verify_uninstall=not negative and scenario.fault == "none",
+        boot_guardian_fault=scenario.fault,
+        local_filepool=scenario.layout == "local-filepool",
         expected_compatibility_refusal="COMPAT_E_MBR_PRIMARY_LIMIT" if negative else None,
-        snapshot_mode="secondary-disk" if layout and layout != "local-filepool" else "default",
-        installation_target="secondary" if layout == "secondary" else "windows",
+        snapshot_mode=scenario.snapshot_mode,
+        installation_target=scenario.installation_target,
         storage_fixture=fixture,
     )
+
+
+def _verified_outcome(
+    child: AutomationRequest,
+    vm: str,
+    outcome: OperationResult,
+    publish: Callable[[StepResult], None],
+) -> OperationResult:
+    """Downgrade a claimed success that lacks its unique verdict or required evidence."""
+
+    terminal = [
+        step
+        for step in outcome.steps
+        if step.step == "automation.vm_finished" and step.context.get("vm") == vm
+    ]
+    if outcome.status == "ok" and (
+        len(terminal) != 1
+        or terminal[0].context.get("vm_status") != "ok"
+        or any(step.status == "error" for step in outcome.steps)
+    ):
+        error = StepResult(
+            step="automation.campaign_missing_verdict",
+            status="error",
+            message="The VM scenario lacks a unique successful terminal verdict",
+        )
+        publish(error)
+        outcome.status = "error"
+        outcome.steps.append(error)
+
+    if outcome.status == "ok":
+        missing = missing_campaign_evidence(child, outcome.steps)
+        if missing:
+            error = StepResult(
+                step="automation.campaign_missing_evidence",
+                status="error",
+                message="The VM scenario is missing required successful checks: "
+                + ", ".join(missing),
+                context={"vm": vm, "missing_evidence": missing},
+            )
+            publish(error)
+            outcome.status = "error"
+            outcome.message = error.message
+            outcome.steps.append(error)
+    return outcome
+
+
+def _summary_status(cell_states: set[str]) -> str:
+    if cell_states == {"ok"}:
+        return "ok"
+    if "running" in cell_states or cell_states == {"ok", "not-run"}:
+        return "running"
+    if "error" in cell_states:
+        return "error"
+    return "not-run"
 
 
 def run_campaign(
@@ -336,7 +470,6 @@ def run_campaign(
     if len(vm_names) != 3 or len(set(vm_names)) != 3:
         raise ValueError("The complete campaign requires exactly three distinct enabled test VMs")
 
-    scenarios = [(distribution, first_boot, "", "none") for distribution, first_boot in SCENARIOS]
     if (
         request.include_storage_scenarios
         or request.include_boot_guardian_scenarios
@@ -348,32 +481,18 @@ def run_campaign(
         raise ValueError(
             "Storage and boot scenarios require the configured firmware of each test VM"
         )
-    if request.include_storage_scenarios:
-        scenarios.extend((d, b, layout, "none") for d, b, layout in STORAGE_SCENARIOS)
+    firmwares = vm_firmwares or {}
+    has_uefi_vm = any(firmwares.get(name) == "uefi" for name in vm_names)
+    if request.include_boot_guardian_scenarios and not has_uefi_vm:
+        raise ValueError("Boot guardian scenarios require at least one UEFI test VM")
+    if request.include_local_filepool_scenarios and not has_uefi_vm:
+        raise ValueError("Local filepool scenarios require a UEFI VM")
 
-    if request.include_boot_guardian_scenarios:
-        if not any(vm_firmwares[name] == "uefi" for name in vm_names):
-            raise ValueError("Boot guardian scenarios require at least one UEFI test VM")
-        scenarios.extend((d, b, "", fault) for d, b, fault in BOOT_GUARDIAN_SCENARIOS)
-
-    local_filepool_vm = next(
-        (vm for vm in vm_names if (vm_firmwares or {}).get(vm) == "uefi"), None
-    )
-    if request.include_local_filepool_scenarios:
-        if not local_filepool_vm:
-            raise ValueError("Local filepool scenarios require a UEFI VM")
-        scenarios.extend((d, b, "local-filepool", "none") for d, b in LOCAL_FILEPOOL_SCENARIOS)
-
-    scenario_vms = [
-        [local_filepool_vm]
-        if layout == "local-filepool"
-        else [vm for vm in vm_names if fault == "none" or vm_firmwares[vm] == "uefi"]
-        for _, _, layout, fault in scenarios
-    ]
+    scenarios = requested_campaign_scenarios(request)
+    scenario_vms = [scenario.vms(vm_names, firmwares) for scenario in scenarios]
     summaries = [
         {
-            "scenario": f"{distribution}-{first_boot}-first"
-            + (f"-{layout}" if layout else f"-{fault}" if fault != "none" else ""),
+            "scenario": scenario.name,
             "status": "not-run",
             "vms": {name: "not-run" for name in scenario_vms[index]},
             "cells": {
@@ -381,7 +500,7 @@ def run_campaign(
             },
             "previous_attempts": [],
         }
-        for index, (distribution, first_boot, layout, fault) in enumerate(scenarios)
+        for index, scenario in enumerate(scenarios)
     ]
 
     names = [str(item["scenario"]) for item in summaries]
@@ -400,11 +519,12 @@ def run_campaign(
         "automation.compatibility_unchanged": "Storage and boot unchanged",
     }
 
-    def is_negative(vm: str, layout: str) -> bool:
-        return layout in {"fat32", "ntfs", "recovery"} and (vm_firmwares or {}).get(vm) == "bios"
+    def is_negative(vm: str, scenario: CampaignScenario) -> bool:
+        return scenario.expects_bios_refusal(firmwares.get(vm))
 
-    def cell_milestones(vm: str, layout: str, fault: str) -> dict[str, str]:
-        if is_negative(vm, layout):
+    def cell_milestones(vm: str, scenario: CampaignScenario) -> dict[str, str]:
+        fault = scenario.fault
+        if is_negative(vm, scenario):
             return negative_milestones
         if fault == "none":
             return CAMPAIGN_MILESTONES
@@ -417,6 +537,11 @@ def run_campaign(
             )
         }
         return common | BOOT_GUARDIAN_MILESTONES[fault]
+
+    def cell_expectation(vm: str, scenario: CampaignScenario) -> str:
+        if is_negative(vm, scenario):
+            return "compatibility-refusal"
+        return scenario.fault if scenario.fault != "none" else "install-uninstall"
 
     plan = StepResult(
         step="automation.campaign_plan",
@@ -435,29 +560,22 @@ def run_campaign(
             "independent_vms": True,
             "scenarios": [
                 {
-                    "name": names[index],
+                    "name": scenario.name,
                     "vms": scenario_vms[index],
-                    "distribution": distribution,
-                    "first_boot": first_boot,
-                    "layout": layout or "nominal",
-                    "boot_guardian_fault": fault,
-                    "snapshot_mode": "secondary-disk"
-                    if layout and layout != "local-filepool"
-                    else "default",
-                    "installation_target": "secondary" if layout == "secondary" else "windows",
+                    "distribution": scenario.distribution,
+                    "first_boot": scenario.first_boot,
+                    "layout": scenario.layout,
+                    "boot_guardian_fault": scenario.fault,
+                    "snapshot_mode": scenario.snapshot_mode,
+                    "installation_target": scenario.installation_target,
                     "vm_milestones": {
-                        vm: list(cell_milestones(vm, layout, fault)) for vm in scenario_vms[index]
+                        vm: list(cell_milestones(vm, scenario)) for vm in scenario_vms[index]
                     },
                     "expectations": {
-                        vm: "compatibility-refusal"
-                        if is_negative(vm, layout)
-                        else fault
-                        if fault != "none"
-                        else "install-uninstall"
-                        for vm in scenario_vms[index]
+                        vm: cell_expectation(vm, scenario) for vm in scenario_vms[index]
                     },
                 }
-                for index, (distribution, first_boot, layout, fault) in enumerate(scenarios)
+                for index, scenario in enumerate(scenarios)
                 if index >= start_index
             ],
         },
@@ -472,15 +590,7 @@ def run_campaign(
         summary = summaries[index]
         cells = summary["cells"]
         summary["vms"] = {vm: cell["status"] for vm, cell in cells.items()}
-        states = set(summary["vms"].values())
-        if states == {"ok"}:
-            summary["status"] = "ok"
-        elif "running" in states or states == {"ok", "not-run"}:
-            summary["status"] = "running"
-        elif "error" in states:
-            summary["status"] = "error"
-        else:
-            summary["status"] = "not-run"
+        summary["status"] = _summary_status(set(summary["vms"].values()))
         summary["previous_attempts"] = [
             {"vm": vm, **attempt}
             for vm, cell in cells.items()
@@ -492,15 +602,17 @@ def run_campaign(
         for index in range(start_index, len(scenarios)):
             if vm not in scenario_vms[index]:
                 continue
-            distribution, first_boot, layout, fault = scenarios[index]
-            scenario = names[index]
+            scenario = scenarios[index]
+            scenario_name = scenario.name
             attempt = request.start_scenario_attempt if index == start_index else 1
             generation = 0
             history = []
 
             while True:
                 generation += 1
-                cell_workspace = workspace / scenario / vm / f"attempt-{attempt}-run-{generation}"
+                cell_workspace = (
+                    workspace / scenario_name / vm / f"attempt-{attempt}-run-{generation}"
+                )
                 cell_workspace.mkdir(mode=0o700, parents=True)
                 projector = StreamEventProjector("automation", cell_workspace)
 
@@ -519,7 +631,7 @@ def run_campaign(
                 def publish(
                     step: StepResult,
                     *,
-                    scenario=scenario,
+                    scenario_name=scenario_name,
                     attempt=attempt,
                     generation=generation,
                     projector=projector,
@@ -528,7 +640,7 @@ def run_campaign(
                         update={
                             "context": {
                                 **step.context,
-                                "scenario": scenario,
+                                "scenario": scenario_name,
                                 "vm": vm,
                                 "scenario_attempt": attempt,
                                 "scenario_generation": generation,
@@ -542,13 +654,12 @@ def run_campaign(
                             on_step(tagged)
 
                 publish(
-                    StepResult(step="automation.campaign_scenario", status="ok", message=scenario)
+                    StepResult(
+                        step="automation.campaign_scenario", status="ok", message=scenario_name
+                    )
                 )
 
-                negative = is_negative(vm, layout)
-                child = _scenario_request(
-                    request, vm, distribution, first_boot, layout, fault, negative
-                )
+                child = _scenario_request(request, vm, scenario, is_negative(vm, scenario))
 
                 try:
                     outcome = run_scenario(child, cell_workspace, publish)
@@ -564,39 +675,7 @@ def run_campaign(
                         status="error", operation="automation", message=error.message, steps=[error]
                     )
 
-                terminal = [
-                    step
-                    for step in outcome.steps
-                    if step.step == "automation.vm_finished" and step.context.get("vm") == vm
-                ]
-                if outcome.status == "ok" and (
-                    len(terminal) != 1
-                    or terminal[0].context.get("vm_status") != "ok"
-                    or any(step.status == "error" for step in outcome.steps)
-                ):
-                    error = StepResult(
-                        step="automation.campaign_missing_verdict",
-                        status="error",
-                        message="The VM scenario lacks a unique successful terminal verdict",
-                    )
-                    publish(error)
-                    outcome.status = "error"
-                    outcome.steps.append(error)
-
-                if outcome.status == "ok":
-                    missing = missing_campaign_evidence(child, outcome.steps)
-                    if missing:
-                        error = StepResult(
-                            step="automation.campaign_missing_evidence",
-                            status="error",
-                            message="The VM scenario is missing required successful checks: "
-                            + ", ".join(missing),
-                            context={"vm": vm, "missing_evidence": missing},
-                        )
-                        publish(error)
-                        outcome.status = "error"
-                        outcome.message = error.message
-                        outcome.steps.append(error)
+                outcome = _verified_outcome(child, vm, outcome, publish)
 
                 errors = [
                     step.model_dump(mode="json") for step in outcome.steps if step.status == "error"

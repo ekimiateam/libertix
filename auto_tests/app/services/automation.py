@@ -8,6 +8,7 @@ import time
 import traceback
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
@@ -24,9 +25,15 @@ from app.clients.ssh import SSHClient
 from app.clients.vision_llm import VisionLLMClient
 from app.clients.vnc import VNCClient
 from app.config import Settings, VMConfig
-from app.distributions import load_distribution_profile
 from app.errors import WorkflowError
-from app.models import STAGING_VOLUME_LABELS, OperationResult, SourceMode, StepResult
+from app.models import (
+    BIOS_BOOT_GUARDIAN_FAULTS,
+    ROLLBACK_FAULTS,
+    STAGING_VOLUME_LABELS,
+    AutomationRequest,
+    OperationResult,
+    StepResult,
+)
 from app.services.automation_diagnostics import collect_failure_diagnostics
 from app.services.automation_monitoring import InstallationMonitoringMixin
 from app.services.automation_postinstall import PostInstallValidationMixin
@@ -39,7 +46,6 @@ from app.services.validation import ValidationService
 from app.services.windows_lab_login import ensure_secondary_windows_session
 from app.storage_fixtures import (
     StorageFixtureInventory,
-    StorageFixtureRequest,
     plan_storage_fixture,
     verify_storage_fixture_creation,
 )
@@ -87,39 +93,9 @@ class AutomationService(
 
     def run(
         self,
-        vm_selectors: Sequence[str] | None = None,
+        vm_selectors: Sequence[str] | None,
+        request: AutomationRequest,
         *,
-        linux_username: str,
-        linux_password: str,
-        linux_size_gib: int = 100,
-        installation_target: Literal["windows", "secondary"] = "windows",
-        expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None,
-        local_filepool: bool = False,
-        distribution: str = "mint",
-        monitor_iso: bool,
-        share_windows_files_in_linux: bool = True,
-        share_linux_files_in_windows: bool = True,
-        migrate_windows_preferences: bool = False,
-        preference_wallpaper: Literal["custom", "windows-default"] = "custom",
-        storage_fixture: StorageFixtureRequest | None = None,
-        secondary_snapshot: bool = False,
-        simulate_stale_firmware_entries: bool = False,
-        force_offline_ntfs_resize: bool = False,
-        boot_guardian_fault: Literal[
-            "none",
-            "bios-rollback",
-            "bios-controller-disconnect",
-            "bios-postinstall-rollback",
-            "uefi-postinstall-rollback",
-            "boot-order",
-            "bootnext-fallback",
-            "bootnext-rollback",
-            "preferred-path",
-            "preferred-path-rollback",
-        ] = "none",
-        verify_uninstall: bool = False,
-        first_boot: Literal["windows", "linux"] = "windows",
-        source: SourceMode = "remote",
         on_step: Callable[[StepResult], None] | None = None,
         run_workspace: Path | None = None,
         prepared_release: tuple[str, str] | None = None,
@@ -138,93 +114,21 @@ class AutomationService(
                 path=str(workspace),
                 capture_path=str(capture_dir),
             )
-            if not monitor_iso:
+            if not request.monitor_iso:
                 raise WorkflowError(
                     "automation.monitor_required",
                     "Installation automation requires monitoring through post-install validation",
                 )
-            selected_vms = self.validation.select_vms(vm_selectors)
-            if local_filepool and (
-                len(selected_vms) != 1 or selected_vms[0].firmware != "uefi" or secondary_snapshot
-            ):
-                raise WorkflowError(
-                    "automation.local_filepool.scope",
-                    "Local filepool tests require one nominal UEFI VM",
-                )
-            profiles = self._automation_profiles(selected_vms, vm_selectors)
-            fixture = storage_fixture or StorageFixtureRequest()
-            if expected_compatibility_refusal and (
-                len(selected_vms) != 1
-                or selected_vms[0].firmware != "bios"
-                or installation_target != "windows"
-                or not secondary_snapshot
-                or fixture.extra_system_partition == "none"
-                or verify_uninstall
-            ):
-                raise WorkflowError(
-                    "automation.compatibility_refusal", "Invalid BIOS refusal scope"
-                )
-            if installation_target not in {"windows", "secondary"} or (
-                installation_target == "secondary" and not secondary_snapshot
-            ):
-                raise WorkflowError(
-                    "automation.installation_target.scope",
-                    "Secondary installation requires the secondary-disk snapshot mode",
-                )
-            if fixture.secondary_data and not secondary_snapshot:
-                raise WorkflowError(
-                    "automation.storage_fixture.scope",
-                    "A secondary-data fixture requires the secondary-disk snapshot mode",
-                )
-            if boot_guardian_fault != "none":
-                expected_firmware = (
-                    "bios"
-                    if boot_guardian_fault
-                    in {"bios-rollback", "bios-postinstall-rollback", "bios-controller-disconnect"}
-                    else "uefi"
-                )
-                if len(selected_vms) != 1 or selected_vms[0].firmware != expected_firmware:
-                    raise WorkflowError(
-                        "automation.boot_guardian_fault_scope",
-                        "The selected recovery test requires exactly one matching firmware VM",
-                        details={
-                            "selected_vms": [vm.name for vm in selected_vms],
-                            "fault": boot_guardian_fault,
-                        },
-                    )
-                if first_boot != "windows":
-                    raise WorkflowError(
-                        "automation.boot_guardian_fault_order",
-                        "A boot guardian fault test requires first_boot=windows",
-                        details={"fault": boot_guardian_fault, "first_boot": first_boot},
-                    )
-            options = AutomationOptions(
-                linux_username=linux_username,
-                linux_password=linux_password,
-                linux_size_gib=linux_size_gib,
-                installation_target=installation_target,
-                expected_compatibility_refusal=expected_compatibility_refusal,
-                monitor_iso=monitor_iso,
-                distribution=load_distribution_profile(distribution),
-                share_windows_files_in_linux=share_windows_files_in_linux,
-                share_linux_files_in_windows=share_linux_files_in_windows,
-                migrate_windows_preferences=migrate_windows_preferences,
-                preference_wallpaper=preference_wallpaper,
-                storage_fixture=fixture,
-                secondary_snapshot=secondary_snapshot,
-                use_default_filepool=source == "published" or local_filepool,
-                local_filepool=local_filepool,
-                simulate_stale_firmware_entries=simulate_stale_firmware_entries,
-                force_offline_ntfs_resize=force_offline_ntfs_resize,
-                boot_guardian_fault=boot_guardian_fault,
-                verify_uninstall=verify_uninstall,
-                first_boot=first_boot,
-                release_sha256=prepared_release[1] if prepared_release else None,
+            options = AutomationOptions.from_request(
+                request, release_sha256=prepared_release[1] if prepared_release else None
             )
+            selected_vms = self.validation.select_vms(vm_selectors)
+            self._assert_vm_scope(selected_vms, options)
+            profiles = self._automation_profiles(selected_vms, vm_selectors)
             # Restore every selected VM after one all-VM preflight barrier so
             # parallel nominal runs start from one coherent clean baseline.
             self._restore_clean_snapshots(result, [profiles[vm.name] for vm in selected_vms])
-            if secondary_snapshot and installation_target == "secondary":
+            if options.secondary_snapshot and options.installation_target == "secondary":
                 self._prepare_secondary_boot_devices(result, selected_vms, profiles)
             failed_preparations: set[str] = set()
             with ThreadPoolExecutor(max_workers=len(selected_vms)) as executor:
@@ -260,7 +164,7 @@ class AutomationService(
             if not ready_vms:
                 return result.success("VM preparation completed")
             if prepared_release is None:
-                executable = self.validation.prepare_server(result, source=source)
+                executable = self.validation.prepare_server(result, source=request.source)
                 windows_path = self.validation.to_windows_share_path(executable)
             else:
                 windows_path = PureWindowsPath(prepared_release[0])
@@ -324,6 +228,41 @@ class AutomationService(
             if owns_workspace:
                 mark_capture_workspace_complete(workspace)
                 cleanup_operation_artifacts(self.settings)
+
+    @staticmethod
+    def _assert_vm_scope(selected_vms: list[VMConfig], options: AutomationOptions) -> None:
+        """Reject scenarios whose firmware or VM count cannot prove the requested behavior."""
+
+        single_vm_firmware = selected_vms[0].firmware if len(selected_vms) == 1 else None
+        if options.local_filepool and (single_vm_firmware != "uefi" or options.secondary_snapshot):
+            raise WorkflowError(
+                "automation.local_filepool.scope",
+                "Local filepool tests require one nominal UEFI VM",
+            )
+        if options.expected_compatibility_refusal and (
+            single_vm_firmware != "bios"
+            or options.installation_target != "windows"
+            or not options.secondary_snapshot
+            or options.storage_fixture.extra_system_partition == "none"
+            or options.verify_uninstall
+        ):
+            raise WorkflowError("automation.compatibility_refusal", "Invalid BIOS refusal scope")
+        fault = options.boot_guardian_fault
+        if fault == "none":
+            return
+        expected_firmware = "bios" if fault in BIOS_BOOT_GUARDIAN_FAULTS else "uefi"
+        if single_vm_firmware != expected_firmware:
+            raise WorkflowError(
+                "automation.boot_guardian_fault_scope",
+                "The selected recovery test requires exactly one matching firmware VM",
+                details={"selected_vms": [vm.name for vm in selected_vms], "fault": fault},
+            )
+        if options.first_boot != "windows":
+            raise WorkflowError(
+                "automation.boot_guardian_fault_order",
+                "A boot guardian fault test requires first_boot=windows",
+                details={"fault": fault, "first_boot": options.first_boot},
+            )
 
     def _automation_profile_for_vm(self, vm: VMConfig) -> WizardProfile | None:
         if not vm.automation_enabled:
@@ -456,15 +395,7 @@ class AutomationService(
             if (
                 options.verify_uninstall
                 or options.expected_compatibility_refusal
-                or options.boot_guardian_fault
-                in {
-                    "bios-rollback",
-                    "bios-controller-disconnect",
-                    "bios-postinstall-rollback",
-                    "uefi-postinstall-rollback",
-                    "bootnext-rollback",
-                    "preferred-path-rollback",
-                }
+                or options.boot_guardian_fault in ROLLBACK_FAULTS
             ):
                 vm_options = replace(
                     vm_options,
@@ -1197,7 +1128,7 @@ class AutomationService(
                             "expected_username": vm.username,
                         },
                         step="automation.prepare_vm",
-                        timeout=300,
+                        timeout=900,
                     )
                 values = self.validation.parse_powershell_results(
                     response.stdout,
@@ -1213,6 +1144,12 @@ class AutomationService(
                         "TEMPORARY_FILES_RECLAIMED_BYTES",
                         "WINDOWS_SERVICING_INITIAL_PENDING_PATHS",
                         "WINDOWS_UPDATE_STOP_ELAPSED_MS",
+                        "WINDOWS_IMAGE_INITIAL_HEALTH_STATE",
+                        "WINDOWS_IMAGE_INITIAL_SCAN_LOG",
+                        "WINDOWS_IMAGE_INITIAL_SCAN_ELAPSED_MS",
+                        "WINDOWS_IMAGE_INITIAL_SCAN_STARTED_UTC",
+                        "WINDOWS_IMAGE_PREPARATION_HEALTH_LOG",
+                        "TEMPORARY_FILE_CLEANUP_SKIPPED",
                     ),
                 )
                 if (
@@ -1241,8 +1178,32 @@ class AutomationService(
                         "WINDOWS_SERVICING_PENDING_PATHS",
                         "WINDOWS_SERVICING_INITIAL_PENDING_PATHS",
                         "WINDOWS_UPDATE_STOP_ELAPSED_MS",
+                        "WINDOWS_IMAGE_INITIAL_HEALTH_STATE",
+                        "WINDOWS_IMAGE_PREPARATION_HEALTH_STATE",
+                        "WINDOWS_IMAGE_PREPARATION_PHASE",
                     ),
                 )
+                if servicing.get("WINDOWS_IMAGE_INITIAL_HEALTH_STATE") in {
+                    "Repairable",
+                    "NonRepairable",
+                }:
+                    raise WorkflowError(
+                        "automation.prepare_vm",
+                        "The restored Windows image failed ScanHealth before file cleanup; "
+                        "installation not started",
+                        details=exc.details,
+                    ) from exc
+                if servicing.get("WINDOWS_IMAGE_PREPARATION_HEALTH_STATE") in {
+                    "Repairable",
+                    "NonRepairable",
+                }:
+                    raise WorkflowError(
+                        "automation.prepare_vm",
+                        "Windows image became unhealthy during preparation at "
+                        f"{servicing.get('WINDOWS_IMAGE_PREPARATION_PHASE')}; "
+                        "installation not started",
+                        details=exc.details,
+                    ) from exc
                 if servicing.get("WINDOWS_SERVICING_RESTART_REQUIRED") == "True":
                     if servicing_restarted:
                         raise WorkflowError(
@@ -1277,8 +1238,14 @@ class AutomationService(
             windows_updates_disabled=True,
             smart_app_control_state=values["SMART_APP_CONTROL_STATE"],
             temporary_files_reclaimed_bytes=int(values["TEMPORARY_FILES_RECLAIMED_BYTES"]),
+            temporary_file_cleanup_skipped=values.get("TEMPORARY_FILE_CLEANUP_SKIPPED", ""),
             initial_pending_paths=values.get("WINDOWS_SERVICING_INITIAL_PENDING_PATHS", ""),
             update_stop_elapsed_ms=values.get("WINDOWS_UPDATE_STOP_ELAPSED_MS", ""),
+            initial_image_health_state=values.get("WINDOWS_IMAGE_INITIAL_HEALTH_STATE", ""),
+            initial_image_scan_log=values.get("WINDOWS_IMAGE_INITIAL_SCAN_LOG", ""),
+            initial_image_scan_elapsed_ms=values.get("WINDOWS_IMAGE_INITIAL_SCAN_ELAPSED_MS", ""),
+            initial_image_scan_started_utc=values.get("WINDOWS_IMAGE_INITIAL_SCAN_STARTED_UTC", ""),
+            preparation_image_health_log=values.get("WINDOWS_IMAGE_PREPARATION_HEALTH_LOG", ""),
         )
 
     def _restart_windows_test_vm_for_servicing(
@@ -1303,21 +1270,15 @@ class AutomationService(
             self._request_windows_power_transition(
                 ssh, vm, "shutdown.exe /r /t 0 /d p:2:17", "automation.prepare_vm.servicing_restart"
             )
-        restarted = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=password,
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="prepare_vm_servicing_return",
-            previous_windows_boot_id=previous_boot_id,
-        )
-        try:
+        with closing(
+            self._wait_for_windows_ssh(
+                vm,
+                result,
+                "prepare_vm_servicing_return",
+                previous_windows_boot_id=previous_boot_id,
+            )
+        ) as restarted:
             self._prepare_windows_graphical_session(restarted, vm, result)
-        finally:
-            restarted.__exit__(None, None, None)
 
     def _inject_stale_firmware_entry(
         self,

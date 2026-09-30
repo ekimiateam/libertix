@@ -4,14 +4,11 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows;
-using Libertix.Dialogs;
 using Libertix.Helpers;
-using Libertix.Installation;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private readonly CancellationTokenSource _installationCancellation =
             new CancellationTokenSource();
@@ -24,7 +21,7 @@ namespace Libertix.Pages
         private bool _cancellationDisposed;
         private string _persistentLogPath;
 
-        private void InitializeInstallationControls()
+        private void InitializePersistentLog()
         {
             try
             {
@@ -51,18 +48,16 @@ namespace Libertix.Pages
         {
             _isRunning = running;
             _installationState.SetInstallationRunning(running);
-            CancelInstallationButton.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
-            if (running)
-                CancelInstallationButton.IsEnabled = true;
+            _view.SetCancellationAvailable(running);
         }
 
-        private void FinishInstallation(bool enableBackButton)
+        private void FinishInstallation(bool allowRetry)
         {
             PublishUnattendedFailure(
                 "installation-preparation-failed",
                 "Installation preparation did not reach the verified reboot-ready state.");
-            BackButton.IsEnabled = CanRetryAfterFailure(
-                enableBackButton, _processTerminationUnverified, _rollbackVerificationPending);
+            _view.SetRetryEnabled(CanRetryAfterFailure(
+                allowRetry, _processTerminationUnverified, _rollbackVerificationPending));
             SetInstallationRunning(false);
         }
 
@@ -85,12 +80,12 @@ namespace Libertix.Pages
         private async Task PublishUnattendedRebootReadyAsync()
         {
             _unattendedRebootReady = true;
-            FinishInstallation(enableBackButton: false);
-            RebootButton.IsEnabled = false;
+            FinishInstallation(allowRetry: false);
+            _view.SetRebootEnabled(false);
             try
             {
                 await UnattendedWorkflow.PublishStageAndWaitAsync("reboot-ready");
-                RebootButton.IsEnabled = true;
+                _view.SetRebootEnabled(true);
             }
             catch (Exception ex)
             {
@@ -105,43 +100,13 @@ namespace Libertix.Pages
             _installationCancellation.Token.ThrowIfCancellationRequested();
         }
 
-        private async void CancelInstallationButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (!_isRunning || _installationCancellation.IsCancellationRequested)
-                return;
-
-            bool confirmed = LocalizedConfirmationDialog.Show(
-                Application.Current.MainWindow,
-                Localized("WarningTitle", "Warning"),
-                Localized(
-                    "ApplyChangesCancelConfirm",
-                    "Cancel the installation and restore Windows?"),
-                Localized("ConfirmationYes", "Yes"),
-                Localized("ConfirmationNo", "No"));
-            if (!confirmed)
-                return;
-
-            CancelInstallationButton.IsEnabled = false;
-            UpdateProgress(
-                (int)ProgressBar.Value,
-                Localized(
-                    "ApplyChangesCancelInProgress",
-                    "Cancellation requested. Restoring Windows..."));
-            Log("User requested installation cancellation.");
-            _installationCancellation.Cancel();
-            // The tracked streaming loop owns termination and does not return
-            // until it has verified that the process tree stopped. A second
-            // concurrent taskkill here can race that verification.
-            await Task.Yield();
-        }
-
         private async Task HandleCancellationAsync()
         {
             if (_cancellationHandled)
                 return;
 
             _cancellationHandled = true;
-            CancelInstallationButton.IsEnabled = false;
+            _view.DisableCancellation();
             Log("Cancellation acknowledged; starting controlled rollback.");
             UpdateProgress(
                 0,
@@ -177,14 +142,13 @@ namespace Libertix.Pages
             PublishUnattendedFailure(
                 "installation-cancelled-before-disk-change",
                 "Installation cancelled before any disk change.");
-            FinishInstallation(enableBackButton: true);
+            FinishInstallation(allowRetry: true);
         }
 
         private async Task RollbackUefiCancellationAsync()
         {
             _rollbackVerificationPending = true;
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-uefi-install.ps1");
             string powershell = WindowsProcessRunner.ResolvePowerShell();
@@ -201,7 +165,7 @@ namespace Libertix.Pages
 
             StreamingProcessResult processResult = await RunStreamingProcessAsync(
                 powershell,
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} -Revert " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} -Revert " +
                 $"-ExpectedRecoveryRunId {QuoteArgument(_activeUefiRecovery.RunId)}",
                 WindowsProcessTimeouts.DiskImageOperation,
                 line => Log($"ROLLBACK: {line}"),
@@ -236,7 +200,7 @@ namespace Libertix.Pages
                     "uefi-installation-cancelled",
                     "Installation cancelled. Windows was restored and the rollback was verified.");
                 _rollbackVerificationPending = false;
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return;
             }
 
@@ -249,16 +213,15 @@ namespace Libertix.Pages
             PublishUnattendedFailure(
                 "uefi-cancellation-rollback-incomplete",
                 "Installation cancellation rollback could not be verified.");
-            FinishInstallation(enableBackButton: false);
-            MessageBox.Show(
+            FinishInstallation(allowRetry: false);
+            _view.ShowBlockingMessage(
+                Localized("ApplyChangesRollbackIncompleteTitle", "Libertix - Incomplete rollback"),
                 LocalizedFormat(
                     "ApplyChangesUefiRollbackIncompleteDetails",
                     "The installation was cancelled, but the UEFI rollback could not be verified. " +
                     "Do not restart; review {0}.",
                     Path.Combine(WindowsSystemDrive, RuntimeNames.InstallationLogDirectory)),
-                Localized("ApplyChangesRollbackIncompleteTitle", "Libertix - Incomplete rollback"),
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+                isError: true);
         }
 
         private async Task<bool> BitLockerMatchesInitialPreflightStateAfterRollbackAsync()
@@ -316,18 +279,17 @@ namespace Libertix.Pages
                 Localized(
                     "ApplyChangesBitLockerReenable",
                     "Disk and boot restored, but BitLocker must be re-enabled in Windows."));
-            FinishInstallation(enableBackButton: false);
-            MessageBox.Show(
+            FinishInstallation(allowRetry: false);
+            _view.ShowBlockingMessage(
+                Localized(
+                    "ApplyChangesBitLockerReenableTitle",
+                    "Libertix - Re-enable BitLocker"),
                 Localized(
                     "ApplyChangesBitLockerReenableDetails",
                     "Disk and boot changes were restored, but BitLocker continued or completed " +
                     "decryption and cannot be re-enabled automatically on this Windows edition. " +
                     "Re-enable encryption in Windows settings before considering recovery complete."),
-                Localized(
-                    "ApplyChangesBitLockerReenableTitle",
-                    "Libertix - Re-enable BitLocker"),
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
+                isError: false);
         }
 
         private void SetActiveStreamingProcess(Process process)

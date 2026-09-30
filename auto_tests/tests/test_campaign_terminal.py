@@ -13,10 +13,7 @@ import termios
 import time
 from pathlib import Path
 
-
-def renderer_source():
-    runner = Path(__file__).resolve().parents[1] / "RUN/run-test-auto.sh"
-    return runner.read_text().split("} 2>&1 | python3 -u -c '\n", 1)[1].rsplit('\' "$LOG"', 1)[0]
+DISPLAY = Path(__file__).resolve().parents[1] / "tools/campaign_display.py"
 
 
 def test_terminal_resize_redraws_logs_and_restores_input(tmp_path):
@@ -40,7 +37,8 @@ def test_terminal_resize_redraws_logs_and_restores_input(tmp_path):
 
     resize(30, 90)
     child_source = (
-        "import fcntl, termios\nfcntl.ioctl(1, termios.TIOCSCTTY, 0)\n" + renderer_source()
+        "import fcntl, runpy, termios\nfcntl.ioctl(1, termios.TIOCSCTTY, 0)\n"
+        f"runpy.run_path({str(DISPLAY)!r}, run_name='__main__')\n"
     )
     process = subprocess.Popen(
         [sys.executable, "-u", "-c", child_source, str(log)],
@@ -79,7 +77,7 @@ def test_terminal_resize_redraws_logs_and_restores_input(tmp_path):
 def test_redirected_logs_remain_plain_and_complete(tmp_path):
     log = tmp_path / "display.log"
     result = subprocess.run(
-        [sys.executable, "-u", "-c", renderer_source(), str(log)],
+        [sys.executable, "-u", str(DISPLAY), str(log)],
         input="first line\nlast line",
         capture_output=True,
         text=True,

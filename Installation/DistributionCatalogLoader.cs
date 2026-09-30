@@ -56,6 +56,11 @@ namespace Libertix.Installation
             foreach (DistroInfoJson distribution in catalog.Distributions)
                 ValidateDistribution(distribution);
             var artifacts = CatalogFiles.GetAll(catalog);
+            // Distribution ISOs may be left out of the folder; the installer then downloads
+            // the selected one from its catalog URL. Every other artifact is required.
+            var optionalFileNames = new HashSet<string>(
+                catalog.Distributions.Select(distribution => distribution.IsoInstallerFileName),
+                StringComparer.OrdinalIgnoreCase);
 
             await Task.Run(() =>
             {
@@ -68,6 +73,12 @@ namespace Libertix.Installation
 
                     string path = Path.Combine(filepool.LocalDirectory, artifact.FileName);
                     var file = new FileInfo(path);
+                    if (!file.Exists && optionalFileNames.Contains(artifact.FileName))
+                    {
+                        onProgress?.Invoke(
+                            "CHECK=LOCAL_FILEPOOL: " + artifact.FileName + " absent; download if selected");
+                        continue;
+                    }
                     if (!file.Exists || file.Length != artifact.SizeBytes ||
                         (file.Attributes & FileAttributes.ReparsePoint) != 0)
                         throw new InvalidDataException(

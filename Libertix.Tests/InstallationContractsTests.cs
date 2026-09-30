@@ -25,7 +25,7 @@ namespace Libertix.Tests
         [TestMethod]
         public void Aria2UsesOneNonResumableConnectionWithoutByteRangeSupport()
         {
-            string[] arguments = ApplyChanges.CreateAria2DownloadArguments(
+            string[] arguments = InstallationEngine.CreateAria2DownloadArguments(
                 "https://example.test/live.iso",
                 @"C:\LibertixTools\downloads",
                 "live.iso",
@@ -58,13 +58,13 @@ namespace Libertix.Tests
         [TestMethod]
         public void RangeProbeRequiresAnExactOneBytePartialResponse()
         {
-            Assert.IsTrue(ApplyChanges.IsExactSingleByteRangeResponse(
+            Assert.IsTrue(InstallationEngine.IsExactSingleByteRangeResponse(
                 HttpStatusCode.PartialContent,
                 ContentRangeHeaderValue.Parse("bytes 0-0/524288000")));
-            Assert.IsFalse(ApplyChanges.IsExactSingleByteRangeResponse(
+            Assert.IsFalse(InstallationEngine.IsExactSingleByteRangeResponse(
                 HttpStatusCode.OK,
                 null));
-            Assert.IsFalse(ApplyChanges.IsExactSingleByteRangeResponse(
+            Assert.IsFalse(InstallationEngine.IsExactSingleByteRangeResponse(
                 HttpStatusCode.PartialContent,
                 ContentRangeHeaderValue.Parse("bytes 0-524287999/524288000")));
         }
@@ -263,7 +263,7 @@ namespace Libertix.Tests
                     "System.Text.Json.dll",
                     Path.Combine("Scripts", "libertix-uefi-install.ps1"),
                     Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
-                    Path.Combine("Scripts", "modules", "Libertix.FirmwareRead.psm1"),
+                    Path.Combine("Scripts", "modules", "Libertix.FirmwareVariables.psm1"),
                     Path.Combine("Scripts", "modules", "Libertix.PreferredBootPath.psm1"),
                     Path.Combine("Scripts", "modules", "Libertix.StorageGeometry.psm1"),
                     Path.Combine("Tools", "aria2", "aria2c.exe"),
@@ -289,7 +289,7 @@ namespace Libertix.Tests
                     File.WriteAllText(path, relativePath);
                 }
 
-                string[] selected = ApplyChanges
+                string[] selected = InstallationEngine
                     .EnumerateUefiRecoveryPayloadFiles(root)
                     .Select(path => path.Substring(root.Length).TrimStart(
                         Path.DirectorySeparatorChar,

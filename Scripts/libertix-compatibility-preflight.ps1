@@ -283,45 +283,16 @@ function Get-SecureBootDbCertificates {
 }
 
 function Initialize-NvramApi {
-    if (([System.Management.Automation.PSTypeName]"LibertixCompatibilityNvram").Type) { return }
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class LibertixCompatibilityNvram {
-    private const UInt32 TOKEN_ADJUST_PRIVILEGES = 0x20;
-    private const UInt32 TOKEN_QUERY = 0x8;
-    private const UInt32 SE_PRIVILEGE_ENABLED = 0x2;
-    [StructLayout(LayoutKind.Sequential)] private struct LUID { public UInt32 LowPart; public Int32 HighPart; }
-    [StructLayout(LayoutKind.Sequential)] private struct TOKEN_PRIVILEGES { public UInt32 Count; public LUID Luid; public UInt32 Attributes; }
-    [DllImport("advapi32.dll", SetLastError=true)] private static extern bool OpenProcessToken(IntPtr p, UInt32 a, out IntPtr t);
-    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] private static extern bool LookupPrivilegeValue(string s, string n, out LUID l);
-    [DllImport("advapi32.dll", SetLastError=true)] private static extern bool AdjustTokenPrivileges(IntPtr t, bool d, ref TOKEN_PRIVILEGES n, UInt32 b, IntPtr p, IntPtr r);
-    [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern bool CloseHandle(IntPtr h);
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern UInt32 GetFirmwareEnvironmentVariable(string n, string g, byte[] b, UInt32 s);
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool SetFirmwareEnvironmentVariableEx(string n, string g, byte[] b, UInt32 s, UInt32 a);
-    public static int LastError() { return Marshal.GetLastWin32Error(); }
-    public static void EnablePrivilege() {
-        IntPtr token;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out token)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        try {
-            LUID luid;
-            if (!LookupPrivilegeValue(null, "SeSystemEnvironmentPrivilege", out luid)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES(); tp.Count = 1; tp.Luid = luid; tp.Attributes = SE_PRIVILEGE_ENABLED;
-            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            int error = Marshal.GetLastWin32Error(); if (error != 0) throw new System.ComponentModel.Win32Exception(error);
-        } finally { CloseHandle(token); }
-    }
-}
-"@
+    Import-Module (Join-Path $PSScriptRoot 'modules\Libertix.FirmwareVariables.psm1') -ErrorAction Stop
+    Initialize-LibertixFirmwareVariableApi
 }
 
 function Get-NvramVariable {
     param([string]$Name, [string]$Guid)
     $buffer = New-Object byte[] 65536
-    $size = [LibertixCompatibilityNvram]::GetFirmwareEnvironmentVariable($Name, $Guid, $buffer, [uint32]$buffer.Length)
+    $size = [LibertixFirmwareVariableApi]::GetFirmwareEnvironmentVariable($Name, $Guid, $buffer, [uint32]$buffer.Length)
     if ($size -eq 0) {
-        $errorCode = [LibertixCompatibilityNvram]::LastError()
+        $errorCode = [LibertixFirmwareVariableApi]::LastError()
         if ($errorCode -ne 203) {
             throw "GetFirmwareEnvironmentVariable($Name) failed with Win32 error $errorCode."
         }
@@ -335,15 +306,15 @@ function Get-NvramVariable {
 function Set-NvramVariable {
     param([string]$Name, [string]$Guid, [AllowNull()][byte[]]$Bytes)
     $size = if ($null -eq $Bytes) { 0 } else { $Bytes.Length }
-    if (-not [LibertixCompatibilityNvram]::SetFirmwareEnvironmentVariableEx(
+    if (-not [LibertixFirmwareVariableApi]::SetFirmwareEnvironmentVariableEx(
         $Name, $Guid, $Bytes, [uint32]$size, [uint32]7)) {
-        throw "SetFirmwareEnvironmentVariableEx($Name) failed with Win32 error $([LibertixCompatibilityNvram]::LastError())."
+        throw "SetFirmwareEnvironmentVariableEx($Name) failed with Win32 error $([LibertixFirmwareVariableApi]::LastError())."
     }
 }
 
 function Test-NvramAndBootNext {
     Initialize-NvramApi
-    [LibertixCompatibilityNvram]::EnablePrivilege()
+    [LibertixFirmwareVariableApi]::EnableSystemEnvironmentPrivilege()
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $originalBootNext = Get-NvramVariable -Name "BootNext" -Guid $global
     try {

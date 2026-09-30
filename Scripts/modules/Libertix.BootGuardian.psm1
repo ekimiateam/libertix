@@ -312,7 +312,7 @@ function Install-LibertixBootGuardian {
     $firmware = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.Firmware.psm1"
     Import-Module -Name $firmware -Force -ErrorAction Stop
     if ($Mode -eq "firmware-boot-order") {
-        $firmwareRead = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.FirmwareRead.psm1"
+        $firmwareRead = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.FirmwareVariables.psm1"
         Import-Module -Name $firmwareRead -Force -ErrorAction Stop
         $entryName = "Boot{0:X4}" -f [uint16]$owner.BootNumber
         $entryBytes = Get-LibertixFirmwareVariableBytes -Name $entryName

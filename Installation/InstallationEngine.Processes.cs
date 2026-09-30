@@ -9,9 +9,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Libertix.Helpers;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private async Task<StreamingProcessResult> RunStreamingProcessAsync(
             string fileName,
@@ -49,7 +49,7 @@ namespace Libertix.Pages
                         else
                         {
                             captureStandardOutput?.Invoke(e.Data);
-                            Dispatcher.BeginInvoke(new Action(() => onLine(e.Data)));
+                            PostEvent(() => onLine(e.Data));
                         }
                     };
                     process.ErrorDataReceived += (_, e) =>
@@ -60,7 +60,7 @@ namespace Libertix.Pages
                         }
                         else
                         {
-                            Dispatcher.BeginInvoke(new Action(() => onLine($"ERROR: {e.Data}")));
+                            PostEvent(() => onLine($"ERROR: {e.Data}"));
                         }
                     };
 
@@ -106,7 +106,7 @@ namespace Libertix.Pages
                             {
                                 bool stopped = WindowsProcessRunner.TerminateProcessTree(process);
                                 _processTerminationUnverified |= !stopped;
-                                Dispatcher.Invoke(() => Log($"ERROR: process timed out after {timeout.TotalMinutes:N0} minutes"));
+                                Log($"ERROR: process timed out after {timeout.TotalMinutes:N0} minutes");
                                 return new StreamingProcessResult
                                 {
                                     ExitCode = process.HasExited ? process.ExitCode : -1,
@@ -211,8 +211,7 @@ namespace Libertix.Pages
                 when (!_installationCancellation.IsCancellationRequested)
             {
                 DeleteDownloadArtifactBestEffort(destinationPath, "boot artifact");
-                Dispatcher.Invoke(() =>
-                    Log($"Boot artifact download timed out after 5 minutes: {url}"));
+                Log($"Boot artifact download timed out after 5 minutes: {url}");
                 return false;
             }
             catch (OperationCanceledException)
@@ -223,7 +222,7 @@ namespace Libertix.Pages
             catch (Exception ex)
             {
                 DeleteDownloadArtifactBestEffort(destinationPath, "boot artifact");
-                Dispatcher.Invoke(() => Log($"Download failed for {url}: {ex.Message}"));
+                Log($"Download failed for {url}: {ex.Message}");
                 return false;
             }
         }
@@ -260,7 +259,7 @@ namespace Libertix.Pages
             var result = await Task.Run(() => RunProcess(
                 bcdeditPath,
                 arguments,
-                (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
+                WindowsProcessTimeouts.QuickCommand,
                 GetWindowsConsoleEncoding()));
             if (!string.IsNullOrWhiteSpace(result.output))
                 Log($"bcdedit output: {result.output.Trim()}");

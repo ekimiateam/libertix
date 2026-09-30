@@ -17,7 +17,7 @@ BeforeAll {
         $archive = [IO.Compression.ZipArchive]::new($stream, [IO.Compression.ZipArchiveMode]::Create)
         $records = @()
         try {
-            foreach ($name in @("Scripts/modules/Libertix.Firmware.psm1", "Scripts/uefi/Libertix.Uefi.Firmware.ps1")) {
+            foreach ($name in @("Scripts/modules/Libertix.Firmware.psm1", "Scripts/modules/Libertix.FirmwareVariables.psm1", "Scripts/uefi/Libertix.Uefi.Firmware.ps1")) {
                 $bytes = [Text.Encoding]::UTF8.GetBytes("function Test-Fixture { 'read-only fixture' }")
                 $entry = $archive.CreateEntry($name).Open()
                 try { $entry.Write($bytes, 0, $bytes.Length) } finally { $entry.Dispose() }
@@ -49,7 +49,7 @@ Describe "Firmware fixture with standalone releases" {
         $root = Join-Path $TestDrive "valid"
         New-TestFirmwareExecutable -Root $root -BadHash $false
         $scripts = Get-FirmwareFixtureScripts -ReleaseRoot $root
-        $scripts.Count | Should -Be 2
+        $scripts.Count | Should -Be 3
         $scripts["Scripts/modules/Libertix.Firmware.psm1"] | Should -Match "read-only fixture"
         Test-Path (Join-Path $root "Scripts") | Should -BeFalse
     }
@@ -62,11 +62,11 @@ Describe "Firmware fixture with standalone releases" {
 
     It "keeps unpacked development releases supported" {
         $root = Join-Path $TestDrive "unpacked"
-        foreach ($name in @("Scripts/modules/Libertix.Firmware.psm1", "Scripts/uefi/Libertix.Uefi.Firmware.ps1")) {
+        foreach ($name in @("Scripts/modules/Libertix.Firmware.psm1", "Scripts/modules/Libertix.FirmwareVariables.psm1", "Scripts/uefi/Libertix.Uefi.Firmware.ps1")) {
             $path = Join-Path $root $name
             [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path)) | Out-Null
             Set-Content -LiteralPath $path -Value 'function Test-Fixture {}'
         }
-        (Get-FirmwareFixtureScripts -ReleaseRoot $root).Count | Should -Be 2
+        (Get-FirmwareFixtureScripts -ReleaseRoot $root).Count | Should -Be 3
     }
 }

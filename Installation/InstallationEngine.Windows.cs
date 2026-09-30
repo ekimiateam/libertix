@@ -9,12 +9,11 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Libertix.Helpers;
-using Libertix.Installation;
 using Libertix.Models;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private WindowsSharingPlan _windowsSharingPlan;
 
@@ -22,9 +21,8 @@ namespace Libertix.Pages
         {
             _windowsSharingPlan = null;
             if (!_installationState.Sharing.ShareWindowsFilesInLinux) return;
-            string script = Path.Combine(AppDomain.CurrentDomain.BaseDirectory,
-                "Scripts", "libertix-windows-sharing-inventory.ps1");
-            string arguments = "-NoProfile -ExecutionPolicy Bypass -File " + QuoteArgument(script) +
+            string script = ApplicationFiles.Resolve("Scripts", "libertix-windows-sharing-inventory.ps1");
+            string arguments = WindowsProcessRunner.PowerShellFileArguments(script) +
                 " -SystemDrive " + QuoteArgument(_storagePreflight.SystemDrive);
             if (_storagePreflight.Allocation != null)
                 arguments += " -AllocationDrive " + QuoteArgument(_storagePreflight.Allocation.SourceDrive);
@@ -123,16 +121,14 @@ namespace Libertix.Pages
             try
             {
                 Directory.CreateDirectory(WindowsShareRoot);
-                string sourceScript = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
+                string sourceScript = ApplicationFiles.Resolve(
                     "Scripts",
                     "libertix-configure-windows-share.ps1");
                 string targetScript = Path.Combine(WindowsShareRoot, "mount-linux-readonly.ps1");
                 if (!File.Exists(sourceScript))
                     throw new FileNotFoundException("Windows sharing script is missing.", sourceScript);
                 File.Copy(sourceScript, targetScript, true);
-                string processModuleSource = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
+                string processModuleSource = ApplicationFiles.Resolve(
                     "Scripts",
                     "modules",
                     "Libertix.Process.psm1");
@@ -144,15 +140,11 @@ namespace Libertix.Pages
                         "The native-process module is missing.",
                         processModuleSource);
                 File.Copy(processModuleSource, processModuleTarget, true);
-                string profilesModuleSource = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "Scripts", "modules", "Libertix.WindowsProfiles.psm1");
+                string profilesModuleSource = ApplicationFiles.Resolve("Scripts", "modules", "Libertix.WindowsProfiles.psm1");
                 if (!File.Exists(profilesModuleSource))
                     throw new FileNotFoundException("The Windows-profile module is missing.", profilesModuleSource);
                 File.Copy(profilesModuleSource, Path.Combine(WindowsShareRoot, "Libertix.WindowsProfiles.psm1"), true);
-                string hiddenHostSource = Path.Combine(
-                    AppDomain.CurrentDomain.BaseDirectory,
-                    "Libertix.BootGuardian.exe");
+                string hiddenHostSource = ApplicationFiles.Resolve("Libertix.BootGuardian.exe");
                 string hiddenHostTarget = Path.Combine(
                     WindowsShareRoot,
                     "Libertix.BootGuardian.exe");
@@ -357,7 +349,7 @@ namespace Libertix.Pages
             var result = RunProcess(
                 ResolveSystemExecutable("powercfg.exe", "powercfg.exe"),
                 enabled ? "/hibernate on" : "/hibernate off",
-                waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
+                timeout: WindowsProcessTimeouts.QuickCommand,
                 encoding: GetWindowsConsoleEncoding());
             Log($"Windows hibernation and Fast Startup set to {(enabled ? "on" : "off")}: " +
                 $"{(result.exitCode == 0 ? "OK" : "rc=" + result.exitCode)}");
@@ -377,106 +369,22 @@ namespace Libertix.Pages
             {
                 try
                 {
+                    if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
+                    {
+                        Log("ERROR: BIOS storage preflight is missing.");
+                        return false;
+                    }
+
                     Directory.CreateDirectory(RecoveryRoot);
-
-                    string sourceScript = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Scripts", "libertix-recovery-guard.ps1");
                     string targetScript = Path.Combine(RecoveryRoot, "recover.ps1");
-                    if (!File.Exists(sourceScript))
-                    {
-                        Dispatcher.Invoke(() => Log($"ERROR: Recovery guard script missing: {sourceScript}"));
-                        return false;
-                    }
-
-                    File.Copy(sourceScript, targetScript, true);
-                    string stateModuleSource = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory,
-                        "Scripts",
-                        "modules",
-                        "Libertix.InstallationState.psm1");
-                    string stateModuleTarget = Path.Combine(
-                        RecoveryRoot,
-                        "Libertix.InstallationState.psm1");
-                    if (!File.Exists(stateModuleSource))
-                    {
-                        Dispatcher.Invoke(() => Log(
-                            $"ERROR: Recovery state module missing: {stateModuleSource}"));
-                        return false;
-                    }
-                    File.Copy(stateModuleSource, stateModuleTarget, true);
-
-                    string atomicFileModuleSource = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory,
-                        "Scripts",
-                        "modules",
-                        "Libertix.AtomicFile.psm1");
-                    string atomicFileModuleTarget = Path.Combine(
-                        RecoveryRoot,
-                        "Libertix.AtomicFile.psm1");
-                    if (!File.Exists(atomicFileModuleSource))
-                    {
-                        Dispatcher.Invoke(() => Log(
-                            $"ERROR: Atomic-file module missing: {atomicFileModuleSource}"));
-                        return false;
-                    }
-                    File.Copy(atomicFileModuleSource, atomicFileModuleTarget, true);
-
-                    string policySource = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory,
-                        "Scripts",
-                        "config",
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "libertix-recovery-guard.ps1"),
+                        "recover.ps1");
+                    foreach (string module in BiosRecoveryModules)
+                        CopyRequiredRecoveryFile(Path.Combine("Scripts", "modules", module), module);
+                    CopyRequiredRecoveryFile(
+                        Path.Combine("Scripts", "config", "Libertix.InstallationPolicy.json"),
                         "Libertix.InstallationPolicy.json");
-                    string policyTarget = Path.Combine(
-                        RecoveryRoot,
-                        "Libertix.InstallationPolicy.json");
-                    if (!File.Exists(policySource))
-                    {
-                        Dispatcher.Invoke(() => Log(
-                            $"ERROR: Installation policy missing: {policySource}"));
-                        return false;
-                    }
-                    File.Copy(policySource, policyTarget, true);
-
-                    string artifactCleanupModuleSource = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory,
-                        "Scripts",
-                        "modules",
-                        "Libertix.TemporaryArtifacts.psm1");
-                    string artifactCleanupModuleTarget = Path.Combine(
-                        RecoveryRoot,
-                        "Libertix.TemporaryArtifacts.psm1");
-                    if (!File.Exists(artifactCleanupModuleSource))
-                    {
-                        Dispatcher.Invoke(() => Log(
-                            $"ERROR: Temporary-artifact module missing: " +
-                            artifactCleanupModuleSource));
-                        return false;
-                    }
-                    File.Copy(
-                        artifactCleanupModuleSource,
-                        artifactCleanupModuleTarget,
-                        true);
-
-                    CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
-                        "Libertix.PostInstallVerification.psm1");
-                    CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "modules", "Libertix.Rollback.psm1"),
-                        "Libertix.Rollback.psm1");
-                    CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "modules", "Libertix.StorageBaseline.psm1"),
-                        "Libertix.StorageBaseline.psm1");
-                    CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "modules", "Libertix.StorageTargets.psm1"),
-                        "Libertix.StorageTargets.psm1");
-                    CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
-                        "Libertix.Process.psm1");
-                    CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "modules", "Libertix.WindowsProfiles.psm1"),
-                        "Libertix.WindowsProfiles.psm1");
-                    CopyRequiredRecoveryFile(
-                        Path.Combine("Scripts", "modules", "Libertix.BiosMbr.psm1"),
-                        "Libertix.BiosMbr.psm1");
                     CopyRequiredRecoveryFile(
                         Path.Combine("Scripts", "libertix-post-install-result.ps1"),
                         "libertix-post-install-result.ps1");
@@ -490,24 +398,18 @@ namespace Libertix.Pages
                         "Libertix.BootGuardian.exe",
                         "Libertix.BootGuardian.exe");
 
-                    if (_storagePreflight == null || _storagePreflight.Firmware != FirmwareType.Bios)
-                    {
-                        Dispatcher.Invoke(() => Log("ERROR: BIOS storage preflight is missing."));
-                        return false;
-                    }
-
                     string bcdBackupPath = Path.Combine(RecoveryRoot, "bcd-backup");
                     if (File.Exists(bcdBackupPath))
                         File.Delete(bcdBackupPath);
                     var bcdBackup = RunProcess(
                         ResolveSystemExecutable("bcdedit.exe", "bcdedit.exe"),
                         $"/export {QuoteArgument(bcdBackupPath)}",
-                        waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
+                        timeout: WindowsProcessTimeouts.QuickCommand,
                         encoding: GetWindowsConsoleEncoding());
                     if (bcdBackup.exitCode != 0 || !File.Exists(bcdBackupPath))
                     {
-                        Dispatcher.Invoke(() => Log(
-                            $"ERROR: BCD backup failed rc={bcdBackup.exitCode}: {bcdBackup.error}"));
+                        Log(
+                            $"ERROR: BCD backup failed rc={bcdBackup.exitCode}: {bcdBackup.error}");
                         return false;
                     }
 
@@ -554,15 +456,14 @@ namespace Libertix.Pages
                             }));
                     }
 
-                    string registrationScript = Path.Combine(
-                        AppDomain.CurrentDomain.BaseDirectory,
+                    string registrationScript = ApplicationFiles.Resolve(
                         "Scripts",
                         "libertix-register-bios-recovery-task.ps1");
                     if (!File.Exists(registrationScript))
                     {
-                        Dispatcher.Invoke(() => Log(
+                        Log(
                             $"ERROR: BIOS recovery task registration script missing: " +
-                            registrationScript));
+                            registrationScript);
                         return false;
                     }
 
@@ -571,8 +472,7 @@ namespace Libertix.Pages
                     // that boundary and silently suppress recovery. The ScheduledTasks
                     // API creates a boot trigger without a wall-clock dependency.
                     string powershell = WindowsProcessRunner.ResolvePowerShell();
-                    string args = $"-NoProfile -ExecutionPolicy Bypass -File " +
-                        $"{QuoteArgument(registrationScript)} " +
+                    string args = $"{WindowsProcessRunner.PowerShellFileArguments(registrationScript)} " +
                         $"-TaskName {QuoteArgument(RuntimeNames.BiosRecoveryTask)} " +
                         $"-RecoveryScriptPath {QuoteArgument(targetScript)} " +
                         $"-HiddenHostPath {QuoteArgument(Path.Combine(RecoveryRoot, "Libertix.BootGuardian.exe"))} " +
@@ -583,33 +483,46 @@ namespace Libertix.Pages
                     var result = RunProcess(
                         powershell,
                         args,
-                        waitMs: (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds);
-                    Dispatcher.Invoke(() =>
-                    {
-                        Log($"BIOS recovery task registration: " +
-                            $"{(result.exitCode == 0 ? "OK" : "Failed")}");
-                        if (!string.IsNullOrWhiteSpace(result.output))
-                            Log(result.output.Trim());
-                        if (!string.IsNullOrWhiteSpace(result.error))
-                            Log($"ERROR: {result.error.Trim()}");
-                    });
+                        timeout: WindowsProcessTimeouts.QuickCommand);
+                    Log($"BIOS recovery task registration: " +
+                        $"{(result.exitCode == 0 ? "OK" : "Failed")}");
+                    if (!string.IsNullOrWhiteSpace(result.output))
+                        Log(result.output.Trim());
+                    if (!string.IsNullOrWhiteSpace(result.error))
+                        Log($"ERROR: {result.error.Trim()}");
 
                     _biosRecoveryGuardInstalled = result.exitCode == 0;
                     return _biosRecoveryGuardInstalled;
                 }
                 catch (Exception ex)
                 {
-                    Dispatcher.Invoke(() => Log($"Recovery guard setup failed: {ex.Message}"));
+                    Log(
+                        $"ERROR: Recovery guard setup failed: {ex.GetType().Name}: {ex.Message}");
                     return false;
                 }
             });
         }
 
+        // Modules the BIOS startup guard imports from RecoveryRoot after Windows restarts.
+        private static readonly string[] BiosRecoveryModules =
+        {
+            "Libertix.InstallationState.psm1",
+            "Libertix.AtomicFile.psm1",
+            "Libertix.TemporaryArtifacts.psm1",
+            "Libertix.PostInstallVerification.psm1",
+            "Libertix.Rollback.psm1",
+            "Libertix.StorageBaseline.psm1",
+            "Libertix.StorageTargets.psm1",
+            "Libertix.Process.psm1",
+            "Libertix.WindowsProfiles.psm1",
+            "Libertix.BiosMbr.psm1",
+        };
+
         private static void CopyRequiredRecoveryFile(string sourceRelativePath, string targetRelativePath)
         {
-            string source = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, sourceRelativePath);
+            string source = ApplicationFiles.Resolve(sourceRelativePath);
             if (!File.Exists(source))
-                throw new FileNotFoundException("Required recovery file is missing.", source);
+                throw new FileNotFoundException($"Required recovery file is missing: {source}", source);
             string target = Path.Combine(RecoveryRoot, targetRelativePath);
             Directory.CreateDirectory(Path.GetDirectoryName(target));
             File.Copy(source, target, true);
@@ -693,7 +606,7 @@ namespace Libertix.Pages
                 var disable = RunProcess(
                     "reagentc.exe",
                     "/disable",
-                    waitMs: (int)WindowsProcessTimeouts.ServiceCommand.TotalMilliseconds);
+                    timeout: WindowsProcessTimeouts.ServiceCommand);
                 if (disable.exitCode != 0)
                 {
                     Log($"WinRE disable was not required: {disable.output} {disable.error}".Trim());
@@ -702,7 +615,7 @@ namespace Libertix.Pages
                 var enable = RunProcess(
                     "reagentc.exe",
                     "/enable",
-                    waitMs: (int)WindowsProcessTimeouts.ServiceCommand.TotalMilliseconds);
+                    timeout: WindowsProcessTimeouts.ServiceCommand);
                 if (enable.exitCode != 0)
                 {
                     Log($"ERROR: reagentc /enable failed rc={enable.exitCode}: {enable.output} {enable.error}".Trim());
@@ -741,8 +654,7 @@ namespace Libertix.Pages
             if (_storagePreflight == null)
                 throw new InvalidOperationException("Storage preflight is missing.");
 
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-bios-storage.ps1");
             if (!File.Exists(scriptPath))
@@ -758,7 +670,7 @@ namespace Libertix.Pages
                 ? _storagePreflight.RecoveryPartitionOffset
                 : checked(sourcePartition.OffsetBytes + sourcePartition.SizeBytes);
             string arguments =
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} " +
                 $"-Action {QuoteArgument(action)} " +
                 $"-SystemDrive {QuoteArgument(sourceDrive)} " +
                 $"-DiskNumber {allocation?.Number ?? _storagePreflight.SystemDiskNumber} " +
@@ -776,7 +688,7 @@ namespace Libertix.Pages
             var processResult = await Task.Run(() => RunProcess(
                 powershell,
                 arguments,
-                (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds,
+                WindowsProcessTimeouts.DiskOperation,
                 GetWindowsConsoleEncoding()));
             if (processResult.exitCode != 0)
             {

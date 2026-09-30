@@ -116,7 +116,7 @@ namespace Libertix.Pages
                         "libertix-uefi-recovery-agent.ps1");
                     exitCode = await RunProcessAsync(
                         powershell,
-                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agent)} " +
+                        $"{WindowsProcessRunner.PowerShellFileArguments(agent)} " +
                         $"-StatePath {QuoteArgument(_statePath)} -Action InstallPreferredPath");
                 }
                 else
@@ -125,7 +125,7 @@ namespace Libertix.Pages
                     SaveState();
                     exitCode = await RunProcessAsync(
                         powershell,
-                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(script)} " +
+                        $"{WindowsProcessRunner.PowerShellFileArguments(script)} " +
                         $"-ConfigPath {QuoteArgument(_state.ConfigPath)} -PreserveConfig " +
                         "-BootStrategy FirmwareBootOrder -ReusePreparedInstaller");
                 }
@@ -250,7 +250,7 @@ namespace Libertix.Pages
             string powershell = WindowsProcessRunner.ResolvePowerShell();
             return await RunProcessAsync(
                 powershell,
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(agent)} " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(agent)} " +
                 $"-StatePath {QuoteArgument(_statePath)} -Action Cancel");
         }
 

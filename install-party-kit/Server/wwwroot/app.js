@@ -59,7 +59,7 @@ function renderClients(transfers) {
 function initializeSettings(settings) {
     if (settingsLoaded) return;
     element("branch").value = settings.channel;
-    element("port").value = settings.httpsPort;
+    element("port").value = settings.httpPort;
     element("storage").value = settings.storageDirectory;
     settingsLoaded = true;
 }
@@ -73,7 +73,7 @@ element("settings").addEventListener("submit", async event => {
   try {
     const result = await request("/api/settings", {
       channel: element("branch").value,
-      httpsPort: Number(element("port").value),
+      httpPort: Number(element("port").value),
       storageDirectory: element("storage").value
     });
     element("settings-result").textContent = result.message;

@@ -1,10 +1,8 @@
 """Campaign routing and evidence contracts; these tests do not operate real VMs."""
 
-import ast
 import json
 import threading
 from collections import Counter
-from pathlib import Path
 
 import pytest
 
@@ -18,12 +16,17 @@ from app.services.automation_campaign import (
     read_interrupted_campaign_summary,
     run_campaign,
 )
+from tools.campaign_client import (
+    campaign_payload,
+    load_config,
+    payload_scenarios,
+    validate_success,
+)
 
 from .campaign_evidence import successful_campaign_steps
 
 MODES = ("boot-order", "preferred-path", "preferred-path-rollback")
 FIRMWARES = {"vm1": "bios", "vm2": "uefi", "vm3": "uefi"}
-RUNNER = Path(__file__).resolve().parents[1] / "RUN/run-test-auto.sh"
 
 
 def recovery_steps(child):
@@ -247,103 +250,57 @@ def test_recovery_missing_proof_retries_once_and_preserves_failure(tmp_path):
     assert max(attempts.values()) == 2
 
 
-@pytest.mark.parametrize("clean2_only", [False, True])
-def test_runner_validates_full_and_clean2_campaign_results(tmp_path, clean2_only):
-    source = RUNNER.read_text().split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    tree = ast.parse(source)
-    namespace = {
-        "SCENARIOS": SCENARIOS,
-        "STORAGE_SCENARIOS": STORAGE_SCENARIOS,
-        "BOOT_GUARDIAN_SCENARIOS": BOOT_GUARDIAN_SCENARIOS,
-        "LOCAL_FILEPOOL_SCENARIOS": LOCAL_FILEPOOL_SCENARIOS,
-        "clean2_only": clean2_only,
-        "firmwares": FIRMWARES,
-        "payload": {"vms": list(FIRMWARES)},
-    }
-    for node in tree.body:
-        if (
-            (
-                isinstance(node, ast.Assign)
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id
-                in {
-                    "scenario_names",
-                    "boot_guardian_scenario_names",
-                    "local_filepool_scenario_names",
-                }
-            )
-            or (
-                isinstance(node, ast.If)
-                and isinstance(node.test, ast.UnaryOp)
-                and isinstance(node.test.op, ast.Not)
-                and isinstance(node.test.operand, ast.Name)
-                and node.test.operand.id == "clean2_only"
-            )
-            or (isinstance(node, ast.FunctionDef) and node.name == "validate_success")
-        ):
-            exec(compile(ast.Module(body=[node], type_ignores=[]), str(RUNNER), "exec"), namespace)
-    expected = [f"{distribution}-{first_boot}-first" for distribution, first_boot in SCENARIOS]
-    if not clean2_only:
-        expected.extend(
-            f"{distribution}-{first_boot}-first-{layout}"
-            for distribution, first_boot, layout in STORAGE_SCENARIOS
-        )
-        expected.extend(
-            f"{distribution}-{first_boot}-first-{fault}"
-            for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS
-        )
-    expected.extend(f"{d}-{b}-first-local-filepool" for d, b in LOCAL_FILEPOOL_SCENARIOS)
-    assert namespace["scenario_names"] == expected
-    payload = next(
-        node.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == "payload"
-    )
-    assert isinstance(payload, ast.Dict)
-    local_flag = next(
-        value
-        for key, value in zip(payload.keys, payload.values, strict=True)
-        if isinstance(key, ast.Constant) and key.value == "include_local_filepool_scenarios"
-    )
-    assert eval(compile(ast.Expression(local_flag), str(RUNNER), "eval"), {}, namespace) is True
-    for field in ("include_storage_scenarios", "include_boot_guardian_scenarios"):
-        flag = next(
-            value
-            for key, value in zip(payload.keys, payload.values, strict=True)
-            if isinstance(key, ast.Constant) and key.value == field
-        )
-        assert (
-            eval(compile(ast.Expression(flag), str(RUNNER), "eval"), {}, namespace)
-            is not clean2_only
-        )
+@pytest.mark.parametrize("mode", ["full", "clean2-only", "clean3-only"])
+def test_runner_validates_full_and_restricted_campaign_results(tmp_path, mode):
+    payload = campaign_payload(load_config(), mode)
+    scenarios = payload_scenarios(payload)
+    nominal = [f"{distribution}-{first_boot}-first" for distribution, first_boot in SCENARIOS]
+    storage = [
+        f"{distribution}-{first_boot}-first-{layout}"
+        for distribution, first_boot, layout in STORAGE_SCENARIOS
+    ]
+    guardian = [
+        f"{distribution}-{first_boot}-first-{fault}"
+        for distribution, first_boot, fault in BOOT_GUARDIAN_SCENARIOS
+    ]
+    local = [f"{d}-{b}-first-local-filepool" for d, b in LOCAL_FILEPOOL_SCENARIOS]
+    expected = {
+        "full": nominal + storage + guardian + local,
+        "clean2-only": nominal + local,
+        "clean3-only": storage,
+    }[mode]
+    assert [scenario.name for scenario in scenarios] == expected
+    assert payload["vms"] == list(FIRMWARES)
     result = run_campaign(
         AutomationCampaignRequest(
             apply=True,
             linux_password="test-pass",
-            include_storage_scenarios=not clean2_only,
-            include_boot_guardian_scenarios=not clean2_only,
-            include_local_filepool_scenarios=True,
+            include_nominal_scenarios=payload["include_nominal_scenarios"],
+            include_storage_scenarios=payload["include_storage_scenarios"],
+            include_boot_guardian_scenarios=payload["include_boot_guardian_scenarios"],
+            include_local_filepool_scenarios=payload["include_local_filepool_scenarios"],
         ),
         list(FIRMWARES),
         tmp_path,
         run_success,
         vm_firmwares=FIRMWARES,
     ).model_dump(mode="json")
-    namespace["validate_success"](result)
+    validate_success(result, payload, scenarios, FIRMWARES)
     corrupted = json.loads(json.dumps(result))
-    del corrupted["campaign_summary"][-1]["cells"]["vm2"]
+    last_vm = next(iter(corrupted["campaign_summary"][-1]["cells"]))
+    del corrupted["campaign_summary"][-1]["cells"][last_vm]
     with pytest.raises(RuntimeError, match="inconsistent VM results"):
-        namespace["validate_success"](corrupted)
+        validate_success(corrupted, payload, scenarios, FIRMWARES)
     corrupted = json.loads(json.dumps(result))
-    corrupted["campaign_summary"][-1]["vms"]["vm1"] = "error" if clean2_only else "ok"
+    corrupted["campaign_summary"][-1]["vms"]["vm1"] = (
+        "ok" if "vm1" not in corrupted["campaign_summary"][-1]["vms"] else "error"
+    )
     with pytest.raises(RuntimeError, match="inconsistent VM results"):
-        namespace["validate_success"](corrupted)
+        validate_success(corrupted, payload, scenarios, FIRMWARES)
     corrupted = json.loads(json.dumps(result))
     corrupted["campaign_summary"] = corrupted["campaign_summary"][:-1]
     with pytest.raises(RuntimeError, match="missing, duplicate, or unexpected"):
-        namespace["validate_success"](corrupted)
+        validate_success(corrupted, payload, scenarios, FIRMWARES)
 
 
 @pytest.mark.parametrize("full", [False, True])

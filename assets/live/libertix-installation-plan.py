@@ -201,9 +201,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise PlanValidationError(f"installation plan schema validation failed: {error}") from error
 
+    # The schema already enforced structure, types and enumerations. JSON Schema patterns
+    # use re.search, where "$" still accepts a trailing newline, so values that reach
+    # paths or commands are re-checked with fullmatch. The rest are cross-field rules.
     root = require_mapping(plan, "plan")
-    if root.get("schemaVersion") not in {4, 5}:
-        raise PlanValidationError("unsupported installation plan schemaVersion")
     if not HEX_ID_PATTERN.fullmatch(str(root.get("planId", ""))):
         raise PlanValidationError("planId must contain 32 lowercase hexadecimal characters")
     created_at = require_text(root.get("createdAtUtc"), "createdAtUtc")
@@ -214,9 +215,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     if parsed_created_at.utcoffset() != dt.timedelta(0):
         raise PlanValidationError("createdAtUtc must use UTC")
 
-    firmware = root.get("firmware")
-    if firmware not in {"bios", "uefi"}:
-        raise PlanValidationError("firmware must be 'bios' or 'uefi'")
+    firmware = root["firmware"]
 
     distribution = require_mapping(root.get("distribution"), "distribution")
     for name in (
@@ -257,9 +256,6 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
             raise PlanValidationError(f"distribution.{name} must be an absolute HTTP(S) URL")
 
     locale = require_mapping(root.get("locale"), "locale")
-    language_code = require_text(locale.get("languageCode"), "locale.languageCode")
-    if language_code not in {"en", "fr", "es", "ko"}:
-        raise PlanValidationError("locale.languageCode must be one of: en, fr, es, ko")
     for name in ("systemLanguage", "keyboardLayout", "keyboardModel", "timezone"):
         require_text(require_property(locale, name, "locale"), f"locale.{name}")
     for name in ("keyboardLayout", "keyboardModel"):
@@ -306,8 +302,6 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     logical_sector_size = require_positive_integer(
         disk.get("logicalSectorSizeBytes"), "disk.logicalSectorSizeBytes"
     )
-    if logical_sector_size not in (512, 4096):
-        raise PlanValidationError("disk.logicalSectorSizeBytes must be either 512 or 4096")
     if disk_size % logical_sector_size != 0:
         raise PlanValidationError("disk.sizeBytes must align to disk.logicalSectorSizeBytes")
     system_drive = require_text(disk.get("systemDrive"), "disk.systemDrive")
@@ -391,11 +385,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     final_offset = require_positive_integer(
         installer.get("finalOffsetBytes"), "disk.installer.finalOffsetBytes"
     )
-    resize_mode = installer.get("resizeMode")
-    if resize_mode not in {"windows-online", "live-offline"}:
-        raise PlanValidationError(
-            "disk.installer.resizeMode must be windows-online or live-offline"
-        )
+    resize_mode = installer["resizeMode"]
     if final_size % GIB != 0 or staging_size % GIB != 0:
         raise PlanValidationError("installer sizes must be whole numbers of GiB")
     final_size_gib = final_size // GIB

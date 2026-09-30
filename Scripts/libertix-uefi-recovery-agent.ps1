@@ -101,9 +101,10 @@ function Read-EnvValue {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
-    $line = Get-Content -LiteralPath $Path | Where-Object {
-        $_ -match "^$([regex]::Escape($Name))="
-    } | Select-Object -First 1
+    $line = @(
+        Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop |
+            Where-Object { $_ -match "^$([regex]::Escape($Name))=" }
+    ) | Select-Object -First 1
     if (-not $line) {
         return $null
     }
@@ -559,7 +560,7 @@ function Get-FirmwareBootBypassEvidence {
     $firmwareModule = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.Firmware.psm1"
     $firmwareReadModule = Join-Path `
         $State.PayloadRoot `
-        "Scripts\modules\Libertix.FirmwareRead.psm1"
+        "Scripts\modules\Libertix.FirmwareVariables.psm1"
     foreach ($modulePath in @($firmwareModule, $firmwareReadModule)) {
         if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
             throw "Firmware evidence module is missing: $modulePath"
@@ -1066,27 +1067,11 @@ function Restore-HibernationAfterInstallation {
         return
     }
 
-    $expected = [bool]$transaction.OriginalHibernateEnabled
-    $argument = if ($expected) { "on" } else { "off" }
     $processModule = Resolve-VerifiedPayloadPath -State $State -RelativePath (
         "Scripts\modules\Libertix.Process.psm1"
     )
     Import-Module -Name $processModule -Force -ErrorAction Stop
-    $powercfg = Invoke-LibertixNativeCommand `
-        -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-        -ArgumentList @("/hibernate", $argument) `
-        -TimeoutSeconds 60
-    $output = ($powercfg.StandardOutput + [Environment]::NewLine + $powercfg.StandardError).Trim()
-    if ($powercfg.ExitCode -ne 0) {
-        throw "Hibernation finalization failed with rc=$($powercfg.ExitCode) output=$output"
-    }
-    $observed = [int](Get-ItemProperty `
-        -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-        -Name "HibernateEnabled" `
-        -ErrorAction Stop).HibernateEnabled
-    if (($observed -ne 0) -ne $expected) {
-        throw "Hibernation finalization did not apply the recorded original state."
-    }
+    Set-LibertixHibernateEnabled -Enabled ([bool]$transaction.OriginalHibernateEnabled)
     Write-AgentLog "Original hibernation state restored after verified installation."
 }
 
