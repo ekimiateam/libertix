@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -18,6 +19,11 @@ namespace Libertix.Pages
     /// </summary>
     public partial class ApplyChanges : Page, IInstallationView
     {
+        private const int SmShuttingDown = 0x2000;
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int index);
+
         private readonly InstallationState _installationState;
         private readonly InstallationEngine _engine;
         private bool _logOutputAutoScroll = true;
@@ -105,8 +111,12 @@ namespace Libertix.Pages
                             Encoding.UTF8));
                     if (result.ExitCode != 0)
                     {
-                        throw new InvalidOperationException(
-                            $"shutdown.exe failed with rc={result.ExitCode}: {result.StandardError}".Trim());
+                        // Windows can terminate shutdown.exe while ending the session it requested.
+                        if (GetSystemMetrics(SmShuttingDown) == 0)
+                        {
+                            throw new InvalidOperationException(
+                                $"shutdown.exe failed with rc={result.ExitCode}: {result.StandardError}".Trim());
+                        }
                     }
                     UnattendedWorkflow.Complete();
                 }
