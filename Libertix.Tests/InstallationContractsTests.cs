@@ -1985,7 +1985,7 @@ namespace Libertix.Tests
             string firstPlanId = PlanId;
             string secondPlanId = new string('e', 32);
             string temporaryRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp",
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
                 "libertix-recovery-detection-" + Guid.NewGuid().ToString("N"));
             string systemRoot = Path.Combine(temporaryRoot, "system");
             string programData = Path.Combine(temporaryRoot, "program-data");

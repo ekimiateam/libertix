@@ -80,8 +80,9 @@ namespace Libertix.Tests
 
         private static string NewProtectedDirectory()
         {
+            // Windows Temp allows untrusted writes on CI runners and is not a protected parent.
             string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-                "Temp", "libertix-security-test-" + Guid.NewGuid().ToString("N"));
+                "libertix-security-test-" + Guid.NewGuid().ToString("N"));
             ProtectedFiles.CreateDirectory(root, true);
             Assert.AreEqual("S-1-5-32-544", Directory.GetAccessControl(root)
                 .GetOwner(typeof(SecurityIdentifier)).Value);
