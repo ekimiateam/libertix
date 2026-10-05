@@ -38,6 +38,7 @@ REMOTE_CHECK_SSH_MAX_ATTEMPTS = 6
 WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS = 5
 LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 5
 PACKAGE_MANAGER_RETRY_DELAY_SECONDS = 5
+PACKAGE_TIMER_TIMEOUT_SECONDS = 30
 WINDOWS_READY_MARKER = "LIBERTIX_WINDOWS_READY"
 LINUX_READY_MARKER = "LIBERTIX_LINUX_READY"
 LINUX_CHECK_HELPER_SOURCE = (
@@ -76,6 +77,8 @@ class PostInstallValidationMixin:
         step: str,
         timeout: float,
         check: bool = True,
+        sensitive: bool = False,
+        stdin_data: str | None = None,
     ) -> CommandResult:
         """Retry an idempotent Linux command after a proven transport failure."""
 
@@ -84,7 +87,15 @@ class PostInstallValidationMixin:
             try:
                 if attempt > 1:
                     ssh.reconnect()
-                return ssh.run(command, step=step, timeout=timeout, check=check, replay_safe=True)
+                return ssh.run(
+                    command,
+                    step=step,
+                    timeout=timeout,
+                    check=check,
+                    replay_safe=True,
+                    sensitive=sensitive,
+                    stdin_data=stdin_data,
+                )
             except WorkflowError as exc:
                 last_error = exc
                 if (
@@ -1899,15 +1910,79 @@ class PostInstallValidationMixin:
         options: AutomationOptions,
         result: ResultBuilder,
     ) -> None:
-        for check in self._linux_checks(vm, options):
-            self._run_remote_check(
-                ssh,
-                vm,
-                result,
-                "linux",
-                check,
-                sudo_password=options.linux_password,
-            )
+        timers = ("apt-daily.timer", "apt-daily-upgrade.timer")
+        timer_list = self._run_linux_command_resiliently(
+            ssh,
+            command="sh -eu -c "
+            + shlex.quote(
+                "systemctl list-units --type=timer --state=active "
+                "--no-legend --plain --no-pager " + " ".join(timers)
+            ),
+            step="automation.package_manager_timers",
+            timeout=PACKAGE_TIMER_TIMEOUT_SECONDS,
+        )
+        active_timers = tuple(
+            line.split()[0]
+            for line in timer_list.stdout.splitlines()
+            if line.split() and line.split()[0] in timers
+        )
+        checks = self._linux_checks(vm, options)
+        package_checks = ("linux.package_dependencies", "linux.package_database")
+        ordered_checks = tuple(check for check in checks if check.name in package_checks) + tuple(
+            check for check in checks if check.name not in package_checks
+        )
+        try:
+            if active_timers:
+                self._set_linux_update_timers(ssh, vm, options, result, active_timers, "stop")
+            # Let an existing update finish before checking files it may still replace.
+            for check in ordered_checks:
+                response = self._run_remote_check(
+                    ssh,
+                    vm,
+                    result,
+                    "linux",
+                    check,
+                    sudo_password=options.linux_password,
+                )
+                if check.name == "linux.package_dependencies" and (
+                    response is None or response.exit_code != 0
+                ):
+                    raise WorkflowError(
+                        "automation.package_manager_wait",
+                        "The Linux package manager is not ready; "
+                        "post-install checks cannot continue",
+                        details={"vm": vm.name, "test": check.name},
+                    )
+        finally:
+            if active_timers:
+                self._set_linux_update_timers(ssh, vm, options, result, active_timers, "start")
+
+    def _set_linux_update_timers(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+        timers: tuple[str, ...],
+        action: str,
+    ) -> None:
+        self._run_linux_command_resiliently(
+            ssh,
+            command="sudo -S -p '' sh -eu -c "
+            + shlex.quote(f"systemctl {action} " + " ".join(timers)),
+            step="automation.package_manager_timers",
+            timeout=PACKAGE_TIMER_TIMEOUT_SECONDS,
+            sensitive=True,
+            stdin_data=options.linux_password + "\n",
+        )
+        result.ok(
+            "automation.package_manager_timers",
+            "Paused automatic APT timers during Linux checks"
+            if action == "stop"
+            else "Restored automatic APT timers after Linux checks",
+            vm=vm.name,
+            timers=timers,
+        )
 
     def _linux_checks(self, vm: VMConfig, options: AutomationOptions) -> tuple[RemoteCheck, ...]:
         username = shlex.quote(options.linux_username)
@@ -2247,13 +2322,20 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck(
                 "linux.package_dependencies",
+                "while :; do "
+                "states=$(systemctl show apt-daily.service apt-daily-upgrade.service "
+                "--property=ActiveState --value); "
+                "if ! printf '%s\\n' \"$states\" | "
+                "grep -Eq '^(active|activating|deactivating|reloading)$'; then break; fi; "
+                "printf 'Waiting for automatic APT services to finish.\\n'; "
+                f"sleep {PACKAGE_MANAGER_RETRY_DELAY_SECONDS}; done; "
                 "apt-get -o DPkg::Lock::Timeout=300 check",
                 timeout=360,
                 requires_sudo=True,
             ),
             RemoteCheck(
                 "linux.package_database",
-                'test -z "$(dpkg --audit)"; dpkg --audit',
+                'audit=$(dpkg --audit); printf "%s\\n" "$audit"; test -z "$audit"',
                 requires_sudo=True,
             ),
             RemoteCheck(
@@ -2413,7 +2495,7 @@ class PostInstallValidationMixin:
             "automation.check_started", "Post-install check started", vm=vm.name, test=check.name
         )
         package_check = check.name == "linux.package_dependencies"
-        check_command = "LC_ALL=C " + check.command if package_check else check.command
+        check_command = "export LC_ALL=C; " + check.command if package_check else check.command
         command = f"sh -eu -c {shlex.quote(check_command)}"
         stdin_data = None
         sensitive = check.sensitive
@@ -2458,6 +2540,7 @@ class PostInstallValidationMixin:
                             for text in (
                                 "Could not get lock",
                                 "Unable to acquire the dpkg frontend lock",
+                                "Waiting for automatic APT services to finish.",
                             )
                         )
                     )

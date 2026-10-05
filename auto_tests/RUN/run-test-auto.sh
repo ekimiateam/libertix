@@ -92,12 +92,14 @@ run_quality_checks() {
     local -a python_paths=(app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py)
     set -e
     cd "$ROOT"
+    run_quality_check "Deployment audit" python3 -m tools.deployment_audit
     run_quality_check "dependencies" uv sync --frozen --extra dev
     run_quality_check "Ruff lint" uv run --frozen python -m ruff check "${python_paths[@]}"
     run_quality_check "Ruff format" \
         uv run --frozen python -m ruff format --check "${python_paths[@]}"
     run_quality_check "Python tests and coverage" \
-        uv run --frozen python -u -m pytest tests --cov=app --cov-report=term --cov-fail-under=70
+        uv run --frozen python -u -m pytest tests -vv \
+            --cov=app --cov-report=term --cov-fail-under=70
 }
 
 {

@@ -10,6 +10,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# The UEFI payload keeps modules under Scripts\modules; the BIOS recovery root is flat.
+# Each layout has exactly one module location, selected by the firmware the task passes.
+$atomicFileModulePath = if ($Firmware -eq "uefi") {
+    Join-Path $PSScriptRoot "modules\Libertix.AtomicFile.psm1"
+} else {
+    Join-Path $PSScriptRoot "Libertix.AtomicFile.psm1"
+}
+Import-Module -Name $atomicFileModulePath -Force -ErrorAction Stop
+
 function Read-JsonFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -33,11 +42,7 @@ function Write-JsonFileAtomic {
             (($Value | ConvertTo-Json -Depth 8) + "`n"),
             $encoding
         )
-        if ([IO.File]::Exists($Path)) {
-            [IO.File]::Replace($temporary, $Path, $backup)
-        } else {
-            [IO.File]::Move($temporary, $Path)
-        }
+        Publish-LibertixFileAtomic -TemporaryPath $temporary -DestinationPath $Path -BackupPath $backup
     } finally {
         if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
         if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
@@ -84,6 +89,7 @@ function Complete-InteractiveWindowsShareVerification {
     $shareRoot = Join-Path $env:ProgramData "Libertix\WindowsShare"
     $configPath = Join-Path $shareRoot "config.json"
     $shareScript = Join-Path $shareRoot "mount-linux-readonly.ps1"
+    $checkName = "explorer-integration"
     try {
         if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
             throw "Windows read-only Linux sharing configuration is missing."
@@ -130,11 +136,12 @@ function Complete-InteractiveWindowsShareVerification {
             -Name "explorer-integration" `
             -Passed $true `
             -Detail "Linux read-only shortcut is accessible in Explorer Home/Quick Access."
+        $checkName = "result-persistence"
         Write-JsonFileAtomic -Path $StatePath -Value $Result
     } catch {
         Add-InteractiveShareCheck `
             -Result $Result `
-            -Name "explorer-integration" `
+            -Name $checkName `
             -Passed $false `
             -Detail $_.Exception.Message
         $Result.status = "failed"

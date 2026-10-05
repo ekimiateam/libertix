@@ -22,12 +22,25 @@ Import-Module (Join-Path $PSScriptRoot 'Libertix.WindowsProfiles.psm1') -ErrorAc
 
 function Write-ShareLog {
     param([string]$Message)
-    $root = Split-Path -Parent $ConfigPath
-    New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } finally {
+        $identity.Dispose()
+    }
+    if ($elevated) {
+        $logRoots = @(
+            (Split-Path -Parent $ConfigPath),
+            (Join-Path $env:SystemDrive "LibertixInstallLogs\Windows")
+        )
+    } else {
+        # Per-user pinning must not need write access to the privileged script payload.
+        $logRoots = @((Join-Path $env:LOCALAPPDATA "Libertix\Logs"))
+    }
     $line = "[{0}] pid={1} session={2} {3}" -f (Get-Date -Format o), $PID, ([Diagnostics.Process]::GetCurrentProcess().SessionId), $Message
-    $archiveRoot = Join-Path $env:SystemDrive "LibertixInstallLogs\Windows"
-    New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
-    foreach ($logRoot in @($root, $archiveRoot)) {
+    foreach ($logRoot in $logRoots) {
+        New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
         $logPath = Join-Path $logRoot "windows-share.log"
         # Add-Content races with other writers while detecting the existing encoding.
         for ($attempt = 1; $attempt -le 50; $attempt++) {

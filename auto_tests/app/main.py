@@ -282,7 +282,13 @@ def _run_campaign_vm_attempt(
         sender.close()
         while True:
             if events.poll(0.25):
-                kind, payload = events.recv()
+                try:
+                    kind, payload = events.recv()
+                except EOFError as exc:
+                    worker.join(timeout=5)
+                    raise RuntimeError(
+                        f"VM worker closed its event pipe without a result (exit={worker.exitcode})"
+                    ) from exc
                 if kind == "result":
                     outcome = OperationResult.model_validate(payload)
                     break
@@ -334,6 +340,8 @@ def _run_campaign_vm_attempt(
                 "exception_type": type(exc).__name__,
                 "error": str(exc),
                 "last_step": last_step,
+                "exit_code": worker.exitcode,
+                **_worker_fatal_diagnostic_context(workspace),
             },
         )
         received.append(failure)

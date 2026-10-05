@@ -447,6 +447,12 @@ write_windows_recovery_marker_file_best_effort() {
         } > "$temporary"
     ) 2>/dev/null || true
     if [ -s "$temporary" ]; then
+        if ! python3 /usr/local/lib/libertix/libertix-ntfs-permissions.py "$temporary"; then
+            echo "WARNING: cannot preserve Windows recovery marker permissions for $state"
+            rm -f "$temporary" 2>/dev/null || true
+            umount "$mountpoint" 2>/dev/null || true
+            return 0
+        fi
         sync "$temporary" 2>/dev/null || sync || true
         mv -f "$temporary" "$marker" 2>/dev/null || true
         sync "$marker" 2>/dev/null || sync || true

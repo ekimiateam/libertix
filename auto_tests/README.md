@@ -248,8 +248,9 @@ time recorded in the campaign log. Failure diagnostics also preserve CBS/DISM lo
 (including rotated CBS CAB archives), servicing package and task state, and recent
 component-store hash errors. No `RestoreHealth`, component cleanup or automatic
 repair is performed by these diagnostics.
-Preparation also records `CheckHealth` checkpoints after temporary-file cleanup,
-clock synchronization and final preparation. A newly flagged unhealthy state stops
+Preparation sets the controller's time on the restored guest after the Windows Update
+service is stopped and disabled, then records `CheckHealth` checkpoints after temporary-file
+cleanup and final preparation. A newly flagged unhealthy state stops
 before installation, with the phase recorded in a separate preparation health log.
 Temporary-file cleanup is skipped and its reason recorded while TrustedInstaller
 or BITS is active; stopping Windows Update alone does not end an existing servicing
@@ -406,10 +407,16 @@ Run the local Python and cross-runtime contract checks:
 
 ```bash
 cd auto_tests
+python3 -m tools.deployment_audit
 uv run --frozen python -m ruff check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
 uv run --frozen python -m ruff format --check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
 uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 ```
+
+`RUN/run-test-auto.sh` runs the deployment audit before dependency and test checks.
+Missing deployed files, unprotected privileged deployment folders, or source structures the audit
+cannot resolve stop the launcher before any campaign request. This static check does not replace
+runtime permission checks or installation tests.
 
 After changing `catalog.json`, sign and synchronize its two versioned copies and detached
 signatures with the interactive tool:

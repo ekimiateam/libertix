@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
@@ -597,29 +596,9 @@ namespace Libertix.Installation
             return path;
         }
 
-        private static void ProtectDirectoryForInstallerAndSystem(string directory)
+        private static void ProtectDirectoryForInstallerAndSystem(string directory, bool readableByUsers = false)
         {
-            Directory.CreateDirectory(directory);
-            using (var identity = WindowsIdentity.GetCurrent())
-            {
-                var security = new DirectorySecurity();
-                security.SetAccessRuleProtection(true, false);
-                security.SetOwner(identity.User);
-                var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-                security.AddAccessRule(new FileSystemAccessRule(
-                    identity.User,
-                    FileSystemRights.FullControl,
-                    inheritance,
-                    PropagationFlags.None,
-                    AccessControlType.Allow));
-                security.AddAccessRule(new FileSystemAccessRule(
-                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
-                    FileSystemRights.FullControl,
-                    inheritance,
-                    PropagationFlags.None,
-                    AccessControlType.Allow));
-                Directory.SetAccessControl(directory, security);
-            }
+            Security.ProtectedFiles.CreateDirectory(directory, readableByUsers);
         }
 
         private static void WriteProtectedInstallerFile(string path, string content)
@@ -627,24 +606,8 @@ namespace Libertix.Installation
             string directory = Path.GetDirectoryName(path);
             if (string.IsNullOrWhiteSpace(directory))
                 throw new InvalidOperationException("Protected installer file has no parent directory.");
-            Directory.CreateDirectory(directory);
+            ProtectDirectoryForInstallerAndSystem(directory);
             File.WriteAllText(path, content, new UTF8Encoding(false));
-
-            using (var identity = WindowsIdentity.GetCurrent())
-            {
-                var security = new FileSecurity();
-                security.SetAccessRuleProtection(true, false);
-                security.SetOwner(identity.User);
-                security.AddAccessRule(new FileSystemAccessRule(
-                    identity.User,
-                    FileSystemRights.FullControl,
-                    AccessControlType.Allow));
-                security.AddAccessRule(new FileSystemAccessRule(
-                    new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
-                    FileSystemRights.FullControl,
-                    AccessControlType.Allow));
-                File.SetAccessControl(path, security);
-            }
         }
 
         private void HandleUefiInstallerOutput(string line)

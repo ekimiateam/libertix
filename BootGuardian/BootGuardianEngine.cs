@@ -16,7 +16,11 @@ namespace Libertix.BootGuardian
             try
             {
                 var deadline = new RepairDeadline(timeout);
+                Security.ProtectedFiles.RequireFile(configPath);
                 BootGuardianConfig config = BootGuardianConfig.Read(configPath);
+                Security.ProtectedFiles.RequireDirectory(Path.GetDirectoryName(configPath));
+                Security.ProtectedFiles.RequireDirectory(config.ArchiveDirectory);
+                Security.ProtectedFiles.RequireDirectory(config.LogDirectory);
                 VerifyServiceExecutable(config);
                 journal = new RepairJournal(config);
                 attempt = GuardianAttemptState.Begin(configPath, config);

@@ -168,12 +168,17 @@ def test_failure_bundle_waits_then_collects_and_records_original_error(
             assert kwargs["replay_safe"] is True
             events.append(("upload", path))
 
+        def reconnect(self):
+            events.append(("reconnect", self.remote_os))
+
         def run(self, command, **kwargs):
             assert kwargs["replay_safe"] is True
             if kwargs["step"] == "automation.diagnostics.cleanup_script":
                 events.append(("cleanup", self.remote_os))
                 return SimpleNamespace(exit_code=0, stdout="", stderr="")
             assert kwargs["step"] == "automation.diagnostics.context"
+            if command.endswith(" -ListSections"):
+                return SimpleNamespace(exit_code=0, stdout='["time"]', stderr="")
             assert kwargs["check"] is False
             events.append(("context", self.remote_os))
             if context_outcome == "command-error":
@@ -219,13 +224,17 @@ def test_failure_bundle_waits_then_collects_and_records_original_error(
         )
         assert context["status"] == expected_context
         assert context["elapsed_seconds"] >= 0
-        if context_outcome == "command-error":
+        if context_outcome == "command-error" and available_os == "linux":
             assert context["phase"] == "execute"
             assert context["failure"]["details"]["error"] == "context deadline"
         else:
             assert context["phase"] == "finished"
             assert Path(context["path"]).is_file()
-            assert "STDERR:" in Path(context["path"]).read_text()
+            if context_outcome == "command-error":
+                assert context["sections"][0]["failure"]["details"]["error"] == "context deadline"
+                assert "COLLECTION_ERROR:" in Path(context["path"]).read_text()
+            else:
+                assert "STDERR:" in Path(context["path"]).read_text()
         if available_os == "windows":
             assert ("cleanup", "windows") in events
         if context_outcome == "sftp-error":
@@ -247,6 +256,51 @@ def test_missing_root_is_recorded_and_not_created_remotely(tmp_path):
     diagnostics.download_diagnostics(FakeSftp(), "/absent", tmp_path, records)
     assert records == [{"remote_path": "/absent", "status": "absent"}]
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("reconnect_fails", [False, True])
+def test_windows_context_keeps_sections_after_a_transport_timeout(tmp_path, reconnect_fails):
+    calls = []
+
+    class FakeSSH:
+        def upload_text(self, *_args, **_kwargs):
+            pass
+
+        def run(self, command, **kwargs):
+            calls.append(command)
+            if command.endswith(" -ListSections"):
+                return SimpleNamespace(stdout='["time", "image_health", "boot"]', exit_code=0)
+            if command.endswith(" -Section image_health"):
+                assert kwargs["timeout"] == diagnostics.WINDOWS_SECTION_TIMEOUT_SECONDS
+                raise WorkflowError(
+                    "automation.diagnostics.context",
+                    "SSH command transport timed out",
+                    details={"exception_type": "TimeoutError", "transport_error": True},
+                )
+            section = command.rsplit(" ", 1)[-1]
+            return SimpleNamespace(
+                stdout=f"=== {section} ===\n{section} evidence\nLIBERTIX_DIAGNOSTICS_COMPLETED\n",
+                stderr="",
+                exit_code=0,
+            )
+
+        def reconnect(self):
+            calls.append("reconnect")
+            if reconnect_fails:
+                raise WorkflowError("ssh.connect", "SSH connection failed")
+
+    manifest = {}
+    diagnostics.collect_system_context(FakeSSH(), "windows", tmp_path, manifest, "unused")
+    context = manifest["system_context"]
+    report = Path(context["path"]).read_text()
+    assert "time evidence" in report and "COLLECTION_ERROR" in report
+    assert context["status"] == "incomplete"
+    assert context["sections"][0]["status"] == "collected"
+    assert context["sections"][1]["failure"]["details"]["exception_type"] == "TimeoutError"
+    assert "reconnect" in calls
+    assert ("boot evidence" in report) is (not reconnect_fails)
+    if not reconnect_fails:
+        assert context["sections"][2]["status"] == "collected"
 
 
 def test_linux_collection_includes_the_package_update_logs():

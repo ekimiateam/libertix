@@ -31,7 +31,7 @@ namespace Libertix.Installation
 
             byte[] manifest = filepool.LocalDirectory == null
                 ? await DownloadCatalogAsync(filepool)
-                : ReadLocalCatalog(filepool.LocalDirectory);
+                : ReadLocalCatalog(filepool);
             DistributionCatalogJson catalog = ParseCatalog(manifest);
             return CreateDistributions(catalog, filepool);
         }
@@ -43,7 +43,7 @@ namespace Libertix.Installation
             if (filepool == null || filepool.LocalDirectory == null)
                 throw new ArgumentException("A local filepool must be selected.", nameof(filepool));
 
-            byte[] localManifest = ReadLocalCatalog(filepool.LocalDirectory);
+            byte[] localManifest = ReadLocalCatalog(filepool);
             DistributionCatalogJson catalog = ParseCatalog(localManifest);
             if (!filepool.SkipWebCatalogComparison)
             {
@@ -56,11 +56,13 @@ namespace Libertix.Installation
             foreach (DistroInfoJson distribution in catalog.Distributions)
                 ValidateDistribution(distribution);
             var artifacts = CatalogFiles.GetAll(catalog);
-            // Distribution ISOs may be left out of the folder; the installer then downloads
-            // the selected one from its catalog URL. Every other artifact is required.
+            // Missing distribution ISOs are downloaded only if selected.
             var optionalFileNames = new HashSet<string>(
                 catalog.Distributions.Select(distribution => distribution.IsoInstallerFileName),
                 StringComparer.OrdinalIgnoreCase);
+            // The lab builds and deploys the executable independently of the filepool.
+            if (filepool.IsDevelopmentMode)
+                optionalFileNames.Add(catalog.Artifacts.Wpf.FileName);
 
             await Task.Run(() =>
             {
@@ -76,7 +78,10 @@ namespace Libertix.Installation
                     if (!file.Exists && optionalFileNames.Contains(artifact.FileName))
                     {
                         onProgress?.Invoke(
-                            "CHECK=LOCAL_FILEPOOL: " + artifact.FileName + " absent; download if selected");
+                            "CHECK=LOCAL_FILEPOOL: " + artifact.FileName +
+                            (filepool.IsDevelopmentMode && artifact == catalog.Artifacts.Wpf
+                                ? " absent; executable built separately"
+                                : " absent; download if selected"));
                         continue;
                     }
                     if (!file.Exists || file.Length != artifact.SizeBytes ||
@@ -101,22 +106,24 @@ namespace Libertix.Installation
             });
         }
 
-        private static byte[] ReadLocalCatalog(string directory)
+        private static byte[] ReadLocalCatalog(FilepoolConfig filepool)
         {
-            string manifestPath = Path.Combine(directory, "catalog.json");
+            string manifestPath = Path.Combine(filepool.LocalDirectory, "catalog.json");
             string signaturePath = manifestPath + ".sig";
             var manifest = new FileInfo(manifestPath);
             var signature = new FileInfo(signaturePath);
             if (!manifest.Exists || manifest.Length > MaximumCatalogBytes ||
                 (manifest.Attributes & FileAttributes.ReparsePoint) != 0 ||
-                !signature.Exists || signature.Length > MaximumCatalogSignatureBytes ||
-                (signature.Attributes & FileAttributes.ReparsePoint) != 0)
+                (filepool.RequiresCatalogSignature &&
+                    (!signature.Exists || signature.Length > MaximumCatalogSignatureBytes ||
+                    (signature.Attributes & FileAttributes.ReparsePoint) != 0)))
                 throw new InvalidDataException(
                     "The local catalog.json or catalog.json.sig is missing or too large.");
             byte[] bytes = File.ReadAllBytes(manifestPath);
-            DistributionCatalogTrust.VerifyWithApplicationKey(
-                bytes,
-                File.ReadAllText(signaturePath, Encoding.UTF8));
+            if (filepool.RequiresCatalogSignature)
+                DistributionCatalogTrust.VerifyWithApplicationKey(
+                    bytes,
+                    File.ReadAllText(signaturePath, Encoding.UTF8));
             return bytes;
         }
 

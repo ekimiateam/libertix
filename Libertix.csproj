@@ -74,6 +74,7 @@
     <Compile Include="Installation\CatalogFiles.cs" />
     <Compile Include="Helpers\ApplicationBuild.cs" />
     <Compile Include="Helpers\ApplicationFiles.cs" />
+    <Compile Include="Helpers\ProtectedFiles.cs" />
     <Compile Include="Installation\IInstallationView.cs" />
     <Compile Include="Installation\InstallationEngine.cs" />
     <Compile Include="Installation\InstallationEngine.Bios.cs" />

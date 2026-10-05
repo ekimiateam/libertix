@@ -45,10 +45,17 @@
     <Compile Include="Hashing.cs" />
     <Compile Include="NativeMethods.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="TrustedScripts.cs" />
+    <Compile Include="..\Helpers\ProtectedFiles.cs"><Link>ProtectedFiles.cs</Link></Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="RepairJournal.cs" />
     <Compile Include="RepairDeadline.cs" />
     <Compile Include="ServiceHost.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <ItemGroup>
+    <EmbeddedResource Include="..\Scripts\**\*.ps1;..\Scripts\**\*.psm1;..\Scripts\native\*.cs">
+      <LogicalName>Libertix.TrustedScripts.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
 </Project>

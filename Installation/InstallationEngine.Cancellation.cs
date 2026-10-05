@@ -29,7 +29,7 @@ namespace Libertix.Installation
                     WindowsSystemDrive,
                     RuntimeNames.InstallationLogDirectory,
                     RuntimeNames.WindowsLogDirectory);
-                Directory.CreateDirectory(logRoot);
+                Security.ProtectedFiles.CreateDirectory(logRoot);
                 _persistentLogPath = Path.Combine(
                     logRoot,
                     $"windows-preparation-{DateTime.Now:yyyyMMdd-HHmmss}.log");

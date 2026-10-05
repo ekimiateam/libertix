@@ -93,3 +93,52 @@ Describe "Explorer shortcuts use the task user's profile" {
             Should -Throw '*targets another location*'
     }
 }
+
+Describe "Windows sharing log permissions" {
+    BeforeAll {
+        $tokens = $null; $errors = $null
+        $path = Join-Path $PSScriptRoot "../Scripts/libertix-configure-windows-share.ps1"
+        $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+        $function = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Write-ShareLog"
+        }, $true)
+        . ([scriptblock]::Create($function.Extent.Text))
+    }
+
+    BeforeEach {
+        $script:originalLocalAppData = $env:LOCALAPPDATA
+        $script:originalSystemDrive = $env:SystemDrive
+        $env:LOCALAPPDATA = Join-Path $TestDrive "user"
+        $env:SystemDrive = Join-Path $TestDrive "system"
+        $script:ConfigPath = Join-Path $TestDrive "payload\config.json"
+        $script:logElevated = $false
+        $principal = [pscustomobject]@{}
+        $principal | Add-Member ScriptMethod IsInRole { return $script:logElevated }
+        Mock New-Object { $principal } -ParameterFilter {
+            $TypeName -eq 'Security.Principal.WindowsPrincipal'
+        }
+    }
+
+    AfterEach {
+        $env:LOCALAPPDATA = $script:originalLocalAppData
+        $env:SystemDrive = $script:originalSystemDrive
+    }
+
+    It "keeps standard-user logs outside the privileged payload" {
+        Write-ShareLog 'user pinning'
+        Get-Content (Join-Path $env:LOCALAPPDATA "Libertix\Logs\windows-share.log") |
+            Should -Match 'user pinning'
+        Test-Path (Split-Path -Parent $script:ConfigPath) | Should -BeFalse
+        Test-Path $env:SystemDrive | Should -BeFalse
+    }
+
+    It "preserves both administrative logs" {
+        $script:logElevated = $true
+        Write-ShareLog 'system mount'
+        Get-Content (Join-Path $TestDrive "payload\windows-share.log") | Should -Match 'system mount'
+        Get-Content (Join-Path $env:SystemDrive "LibertixInstallLogs\Windows\windows-share.log") |
+            Should -Match 'system mount'
+    }
+}

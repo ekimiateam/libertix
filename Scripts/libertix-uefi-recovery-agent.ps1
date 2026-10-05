@@ -19,11 +19,13 @@ function Write-AgentLog {
 
     $root = Split-Path -Parent $StatePath
     New-Item -ItemType Directory -Path $root -Force | Out-Null
+    $logPath = Join-Path $root "recovery-agent.log"
     $line = "[{0}] {1}" -f (Get-Date -Format o), $Message
     $deadline = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
         try {
-            Add-Content -LiteralPath (Join-Path $root "recovery-agent.log") -Value $line -ErrorAction Stop
+            # Add-Content can retain an unreadable stream when concurrent writers race.
+            [IO.File]::AppendAllText($logPath, $line + [Environment]::NewLine, [Text.Encoding]::Default)
             return
         } catch [IO.IOException] {
             # Check and Prompt may append concurrently; only sharing/lock conflicts are transient.
@@ -59,6 +61,26 @@ function Write-AgentErrorRecord {
         $innerException = $innerException.InnerException
     }
     Write-AgentLog "ERROR DotNetException: $($exception.ToString())"
+}
+
+function Get-AgentLogLockReport {
+    $logPath = Join-Path (Split-Path -Parent $StatePath) "recovery-agent.log"
+    # The module path is only known once the recovery payload has been validated.
+    if (
+        [string]::IsNullOrWhiteSpace($script:AtomicFileModulePath) -or
+        -not (Test-Path -LiteralPath $script:AtomicFileModulePath -PathType Leaf)
+    ) {
+        return "unavailable before the recovery payload was validated"
+    }
+    $atomicFileModule = Import-Module `
+        -Name $script:AtomicFileModulePath `
+        -Force `
+        -PassThru `
+        -ErrorAction Stop
+    return & $atomicFileModule {
+        param([string]$Path)
+        Get-LibertixFileLockReport -Path $Path
+    } $logPath
 }
 
 function Publish-RecoveryFileAtomic {
@@ -1761,7 +1783,29 @@ try {
     try {
         Write-AgentErrorRecord -ErrorRecord $fatalError
     } catch {
-        Write-Verbose "Unable to persist the recovery failure: $($_.Exception.Message)"
+        # Scheduled tasks discard this process's error stream, so a shared log that
+        # stays unwritable would otherwise hide both failures.
+        $logError = $_.Exception
+        $failurePath = Join-Path (Split-Path -Parent $StatePath) (
+            "recovery-agent-failure-{0}-{1}.log" -f $PID, [Guid]::NewGuid().ToString("N")
+        )
+        try {
+            $logHolders = Get-AgentLogLockReport
+        } catch {
+            $logHolders = "holder lookup failed: $($_.Exception.Message)"
+        }
+        try {
+            Set-Content -LiteralPath $failurePath -Encoding UTF8 -ErrorAction Stop -Value @(
+                "[$(Get-Date -Format o)] action=$Action",
+                "ERROR: $($fatalError | Out-String)",
+                "ERROR PowerShellStack: $($fatalError.ScriptStackTrace)",
+                ("LOG WRITE ERROR: {0} HResult=0x{1:X8}: {2}" -f
+                    $logError.GetType().FullName, $logError.HResult, $logError.Message),
+                "LOG HOLDERS: $logHolders"
+            )
+        } catch {
+            Write-Verbose "Unable to persist the recovery failure: $($_.Exception.Message)"
+        }
     }
     try {
         if ($null -ne (Get-Variable -Name state -ValueOnly -ErrorAction SilentlyContinue)) {

@@ -174,6 +174,20 @@ if ($observedUpdateService.State -ne "Stopped" -or $observedUpdateService.StartM
     throw "Windows Update must be stopped and disabled before the test starts."
 }
 
+# Take the ScanHealth baseline at the controller's current time, not the snapshot's date.
+# Disabling wuauserv does not stop servicing work that is already running.
+$target = [DateTimeOffset]::Parse(
+    [string]$config.utc_now,
+    [Globalization.CultureInfo]::InvariantCulture,
+    [Globalization.DateTimeStyles]::RoundtripKind
+).AddSeconds($preparationClock.Elapsed.TotalSeconds)
+Set-Date -Date $target.LocalDateTime | Out-Null
+$after = [DateTimeOffset]::Now
+$afterSkew = [math]::Abs(($after - $target).TotalSeconds)
+if ($afterSkew -gt 300) {
+    throw "Windows test VM clock remains $([math]::Round($afterSkew)) seconds from the controller."
+}
+
 # Do not clean update downloads while Windows still requires servicing completion.
 Assert-NoPendingServicingRestart -Paths $pendingRestartPaths
 
@@ -238,27 +252,6 @@ if ($activeServicingServices.Count -eq 0) {
     Write-Output ("TEMPORARY_FILE_CLEANUP_SKIPPED=Active services: " + ($activeServicingServices.Name -join ', '))
 }
 Assert-PreparationImageHealthy -Phase 'after-temporary-cleanup'
-$target = [DateTimeOffset]::Parse(
-    [string]$config.utc_now,
-    [Globalization.CultureInfo]::InvariantCulture,
-    [Globalization.DateTimeStyles]::RoundtripKind
-).AddSeconds($preparationClock.Elapsed.TotalSeconds)
-$before = [DateTimeOffset]::Now
-$beforeSkew = [math]::Abs(($before - $target).TotalSeconds)
-
-# Restored test snapshots keep their historical RTC value. Correct only a
-# material skew so HTTPS validation exercises the server certificate rather
-# than an obsolete snapshot date.
-if ($beforeSkew -gt 120) {
-    Set-Date -Date $target.LocalDateTime | Out-Null
-}
-
-$after = [DateTimeOffset]::Now
-$afterSkew = [math]::Abs(($after - $target).TotalSeconds)
-if ($afterSkew -gt 300) {
-    throw "Windows test VM clock remains $([math]::Round($afterSkew)) seconds from the controller."
-}
-Assert-PreparationImageHealthy -Phase 'after-clock-sync'
 
 # Disable toast notifications for the exact interactive profile so a transient
 # banner cannot take focus from deterministic unattended keyboard actions.

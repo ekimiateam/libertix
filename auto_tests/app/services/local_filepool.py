@@ -1,4 +1,4 @@
-"""Prepare a complete signed filepool beside the executable under test."""
+"""Prepare a filepool matching the published or development source under test."""
 
 from __future__ import annotations
 
@@ -185,10 +185,16 @@ def _download_failure_details(exc, state, vm_name, name, url, attempt, size):
     return details, retryable
 
 
-def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) -> None:
+def prepare_local_filepool(
+    validation, vm, executable: PureWindowsPath, result, *, use_default_filepool: bool = True
+) -> None:
     settings = validation.settings
     repository = Path(__file__).resolve().parents[3]
-    base = settings.published_dev_metadata_base_url.rstrip("/") + "/"
+    base = (
+        settings.published_dev_metadata_base_url
+        if use_default_filepool
+        else settings.filepool_base_url
+    ).rstrip("/") + "/"
     destination = executable.parent / "filepool"
 
     def progress(action, name, transferred, total):
@@ -205,13 +211,23 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
         )
 
     with httpx.Client(follow_redirects=True, timeout=HTTP_TIMEOUT_SECONDS) as client:
-        catalog_bytes, signature = _read_verified_catalog(client, base, repository)
-        artifacts = catalog_artifacts(json.loads(catalog_bytes))
+        if use_default_filepool:
+            catalog_bytes, signature = _read_verified_catalog(client, base, repository)
+        else:
+            catalog_bytes = _download_bytes(client, base + "catalog.json", MAXIMUM_METADATA_BYTES)
+            signature = None
+        catalog = json.loads(catalog_bytes)
+        artifacts = catalog_artifacts(catalog)
+        if not use_default_filepool:
+            artifacts.remove(catalog["artifacts"]["wpf"])
         cache = settings.runtime_dir / "local-filepool" / hashlib.sha256(catalog_bytes).hexdigest()
         cache.mkdir(parents=True, exist_ok=True)
-        paths = [cache / "catalog.json", cache / "catalog.json.sig"]
+        paths = [cache / "catalog.json"]
         paths[0].write_bytes(catalog_bytes)
-        paths[1].write_bytes(signature)
+        if signature is not None:
+            signature_path = cache / "catalog.json.sig"
+            signature_path.write_bytes(signature)
+            paths.append(signature_path)
         for item in artifacts:
             name, size, digest = item["fileName"], item["sizeBytes"], item["sha256"].lower()
             selected = _find_cached_artifact(repository, cache, name, size, digest, progress)
@@ -219,12 +235,16 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
                 url = urljoin(base, item["url"])
                 parsed = urlsplit(url)
                 if (
-                    parsed.scheme != "https"
+                    parsed.scheme not in (("https",) if use_default_filepool else ("http", "https"))
                     or not parsed.hostname
                     or parsed.username
                     or parsed.password
                 ):
-                    raise ValueError("Signed artifacts must use HTTPS without credentials")
+                    raise ValueError(
+                        "Signed artifacts must use HTTPS without credentials"
+                        if use_default_filepool
+                        else "Development artifacts must use HTTP(S) without credentials"
+                    )
                 selected = cache / name
                 download_artifact(client, url, selected, size, digest, progress, result, vm.name)
             paths.append(selected)
@@ -245,7 +265,11 @@ def prepare_local_filepool(validation, vm, executable: PureWindowsPath, result) 
                 _upload_artifact(ssh, path, destination, progress)
     result.ok(
         "automation.local_filepool.prepared",
-        "Signed catalog and all artifacts copied beside Libertix.exe",
+        (
+            "Signed catalog and all artifacts copied beside Libertix.exe"
+            if use_default_filepool
+            else "Development catalog and installation artifacts copied beside Libertix.exe"
+        ),
         vm=vm.name,
         directory=str(destination),
         files=[path.name for path in paths],

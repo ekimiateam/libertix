@@ -68,7 +68,7 @@ namespace Libertix.BootGuardian
                 "LibertixInstallLogs",
                 "Windows",
                 "BootGuardian-Uncorrelated");
-            Directory.CreateDirectory(directory);
+            Security.ProtectedFiles.CreateDirectory(directory);
             string path = Path.Combine(
                 directory,
                 DateTime.UtcNow.ToString("yyyyMMddTHHmmss.fffffffZ", CultureInfo.InvariantCulture) +

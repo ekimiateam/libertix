@@ -78,7 +78,8 @@ def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
 ) -> None:
     lock = FakeOperationLock()
     monkeypatch.setattr(main_module, "operation_lock", lock)
-    relayed = multiprocessing.Barrier(2)
+    # Terminating the worker must not leave the event relay holding a shared lock.
+    relayed_read, relayed_write = multiprocessing.Pipe(duplex=False)
     now = [0.0]
     monkeypatch.setattr(main_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
     original = main_module.StreamEventProjector.project_step
@@ -88,7 +89,7 @@ def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
         if step.context.get("test", "").startswith("working-"):
             now[0] += 0.4
         if not step.step.startswith("automation.diagnostics."):
-            relayed.wait(timeout=5)
+            relayed_write.send(None)
         return event
 
     class Service:
@@ -102,7 +103,8 @@ def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
                         step=name, status="ok", message="progress", context={"vm": vm, **context}
                     )
                 )
-                relayed.wait(timeout=5)
+                assert relayed_read.poll(5), "the event relay did not acknowledge progress"
+                relayed_read.recv()
 
             send("automation.vm_started", "vm1")
             send("automation.vm_started", "vm2")
@@ -129,7 +131,7 @@ def test_stream_times_out_one_vm_while_another_keeps_reporting_progress(
         operation_log_dir=tmp_path / "logs",
         automation_operation_timeout_seconds=1,
     )
-    with AsgiTestClient(create_app(configured)) as client:
+    with relayed_read, relayed_write, AsgiTestClient(create_app(configured)) as client:
         response = client.post(
             "/api/v1/automation/stream?format=ndjson",
             json={

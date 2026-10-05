@@ -120,7 +120,9 @@ namespace Libertix.Installation
             SharingOptions options = _installationState.Sharing;
             try
             {
-                Directory.CreateDirectory(WindowsShareRoot);
+                ProtectDirectoryForInstallerAndSystem(WindowsShareRoot, readableByUsers: true);
+                ProtectDirectoryForInstallerAndSystem(Path.Combine(WindowsSystemDrive,
+                    RuntimeNames.InstallationLogDirectory, RuntimeNames.WindowsLogDirectory));
                 string sourceScript = ApplicationFiles.Resolve(
                     "Scripts",
                     "libertix-configure-windows-share.ps1");

@@ -67,6 +67,9 @@ log_dir="$log_root/$RUN_ID"
 latest_dir="$log_root/latest"
 latest_staging="$log_root/.latest-$RUN_ID"
 latest_backup="$log_root/.latest-previous"
+mkdir -p "$log_root" || fail "cannot create $log_root"
+python3 /usr/local/lib/libertix/libertix-ntfs-permissions.py "$log_root" || \
+    fail "cannot preserve Windows log directory permissions"
 mkdir -p "$log_dir" || fail "cannot create $log_dir"
 printf 'copying: %s\n' "$log_dir" > "$STATUS_FILE"
 python3 /usr/local/lib/libertix/libertix-log-archive.py "$LOG_DIR" "$log_dir" || \
@@ -81,6 +84,8 @@ rm -rf -- "$latest_staging" || fail "cannot clear latest log staging directory"
 mkdir -p "$latest_staging" || fail "cannot create latest log staging directory"
 python3 /usr/local/lib/libertix/libertix-log-archive.py "$log_dir" "$latest_staging" || \
     fail "cannot stage latest public diagnostics"
+python3 /usr/local/lib/libertix/libertix-ntfs-permissions.py --recursive "$log_dir" "$latest_staging" || \
+    fail "cannot preserve Windows log permissions"
 if [ ! -e "$latest_dir" ] && [ -d "$latest_backup" ]; then
     mv -- "$latest_backup" "$latest_dir" || fail "cannot recover previous latest log directory"
 fi

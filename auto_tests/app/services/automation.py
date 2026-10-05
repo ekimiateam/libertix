@@ -412,7 +412,13 @@ class AutomationService(
             )
             vm_options = replace(vm_options, deployed_executable=local_executable)
             if options.local_filepool:
-                prepare_local_filepool(self.validation, vm, local_executable, result)
+                prepare_local_filepool(
+                    self.validation,
+                    vm,
+                    local_executable,
+                    result,
+                    use_default_filepool=options.use_default_filepool,
+                )
             result.ok(
                 "automation.deploy",
                 "Libertix release copied locally before automation",

@@ -1,7 +1,11 @@
+param(
+    [switch]$ListSections,
+    [string]$Section
+)
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $failed = $false
-Write-Output 'LIBERTIX_DIAGNOSTICS_STARTED'
 
 function Get-DiagnosticSessions {
     $native = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) { 'Sysnative' } else { 'System32' }
@@ -184,6 +188,17 @@ $sections = [ordered]@{
         Get-WinEvent -LogName Application -MaxEvents 100 | Select-Object TimeCreated, RecordId, Id, ActivityId, LevelDisplayName, ProviderName
     }
 }
+if ($ListSections) {
+    ConvertTo-Json -InputObject @($sections.Keys) -Compress
+    exit 0
+}
+if ($Section) {
+    if (-not $sections.Contains($Section)) { throw "Unknown diagnostic section: $Section" }
+    $selection = [ordered]@{}
+    $selection[$Section] = $sections[$Section]
+    $sections = $selection
+}
+Write-Output 'LIBERTIX_DIAGNOSTICS_STARTED'
 foreach ($entry in $sections.GetEnumerator()) {
     Write-Output ("=== {0} ===" -f $entry.Key)
     Write-Output ("COLLECTION_SECTION_STARTED_UTC={0:o}" -f [DateTime]::UtcNow)

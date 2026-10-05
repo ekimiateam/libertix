@@ -75,26 +75,14 @@ function Get-LibertixBootGuardianVolumePath {
 }
 
 function Protect-LibertixBootGuardianDirectory {
-    param([Parameter(Mandatory = $true)][string]$Path)
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$VerifiedHostPath
+    )
 
-    [IO.Directory]::CreateDirectory($Path) | Out-Null
-    $security = New-Object Security.AccessControl.DirectorySecurity
-    $security.SetAccessRuleProtection($true, $false)
-    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor `
-        [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    $propagation = [Security.AccessControl.PropagationFlags]::None
-    foreach ($sidValue in @("S-1-5-18", "S-1-5-32-544")) {
-        $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
-        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
-            $sid,
-            [Security.AccessControl.FileSystemRights]::FullControl,
-            $inheritance,
-            $propagation,
-            [Security.AccessControl.AccessControlType]::Allow
-        )
-        $security.AddAccessRule($rule)
-    }
-    [IO.Directory]::SetAccessControl($Path, $security)
+    # The payload is verified; loading its bytes leaves rollback free to remove the file.
+    [Reflection.Assembly]::Load([IO.File]::ReadAllBytes($VerifiedHostPath)) | Out-Null
+    [Libertix.Security.ProtectedFiles]::CreateDirectory($Path, $false)
 }
 
 function Write-LibertixBootGuardianJsonAtomic {
@@ -281,12 +269,12 @@ function Install-LibertixBootGuardian {
         -EspPartition $EspPartition `
         -EspRoot $EspRoot
     $volumePath = Get-LibertixBootGuardianVolumePath -EspPartition $EspPartition
+    Protect-LibertixBootGuardianDirectory -Path $script:GuardianRoot -VerifiedHostPath $sourceExe
     Stop-LibertixBootGuardianServiceForUpdate -RunId ([string]$State.RunId)
     $archiveRoot = Join-Path $State.RecoveryRoot "boot-guardian"
     $logRoot = Join-Path $env:SystemDrive "LibertixInstallLogs\Windows\$($State.RunId)\BootGuardian"
-    Protect-LibertixBootGuardianDirectory -Path $script:GuardianRoot
-    Protect-LibertixBootGuardianDirectory -Path $archiveRoot
-    Protect-LibertixBootGuardianDirectory -Path $logRoot
+    Protect-LibertixBootGuardianDirectory -Path $archiveRoot -VerifiedHostPath $sourceExe
+    Protect-LibertixBootGuardianDirectory -Path $logRoot -VerifiedHostPath $sourceExe
 
     $destinationExe = Join-Path $script:GuardianRoot "Libertix.BootGuardian.exe"
     $sourceHash = (Get-FileHash -LiteralPath $sourceExe -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
@@ -474,6 +462,8 @@ function Remove-LibertixBootGuardian {
     }
     $exe = Join-Path $script:GuardianRoot "Libertix.BootGuardian.exe"
     if (Test-Path -LiteralPath $exe -PathType Leaf) {
+        Protect-LibertixBootGuardianDirectory -Path $script:GuardianRoot `
+            -VerifiedHostPath (Join-Path $State.PayloadRoot "Libertix.BootGuardian.exe")
         $rollbackExitCode = Invoke-LibertixBootGuardianCommand `
             -Executable $exe `
             -Argument "--uninstall-service"

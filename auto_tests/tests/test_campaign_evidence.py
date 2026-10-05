@@ -7,7 +7,6 @@ from app.services.automation import AutomationService
 from app.services.automation_campaign import missing_campaign_evidence, run_campaign
 from app.services.automation_types import AutomationOptions
 from app.services.automation_windows_checks import CrossOsArtifacts, build_windows_validation_plan
-from app.services.common import ResultBuilder
 from app.storage_fixtures import StorageFixtureRequest
 
 from .campaign_evidence import LINUX_CHECKS, WINDOWS_CHECKS, successful_campaign_steps
@@ -132,17 +131,11 @@ def test_failed_attempt_evidence_cannot_complete_the_retry(tmp_path):
         ]
 
 
-def test_fixture_covers_the_actual_linux_and_windows_check_plans(monkeypatch):
+def test_fixture_covers_the_actual_linux_and_windows_check_plans():
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
     options = AutomationOptions("test", "test-pass", True)
-    checks = []
-    monkeypatch.setattr(
-        service,
-        "_run_remote_check",
-        lambda _ssh, _vm, _result, _os, check, **_kw: checks.append(check),
-    )
-    service._run_linux_checks(None, vm, options, ResultBuilder("automation"))  # noqa: SLF001
+    checks = service._linux_checks(vm, options)  # noqa: SLF001
     assert {check.name for check in checks} == {f"linux.{name}" for name in LINUX_CHECKS}
     plan = build_windows_validation_plan(vm, options, CrossOsArtifacts("a", "b", "c", "d"))
     assert set(plan.check_names) == set(WINDOWS_CHECKS)

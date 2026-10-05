@@ -152,8 +152,16 @@ def test_install_progress_prefers_final_content_over_reasoning(monkeypatch, tmp_
     assert verdict.still_in_progress is True
 
 
+@pytest.mark.parametrize(
+    ("api_url", "reasoning_key", "reasoning_value"),
+    [
+        ("https://openrouter.ai/api/v1", "reasoning", {"effort": "medium"}),
+        ("http://example.test:8000/v1", "reasoning_effort", "medium"),
+    ],
+)
+@pytest.mark.parametrize("provider_only", [None, "openai/flex"])
 def test_install_progress_uses_short_english_prompt_and_thinking_budget(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, api_url, reasoning_key, reasoning_value, provider_only
 ) -> None:
     image = tmp_path / "screen.png"
     Image.new("RGB", (32, 32), "white").save(image)
@@ -181,10 +189,11 @@ def test_install_progress_uses_short_english_prompt_and_thinking_budget(
     monkeypatch.setattr(httpx, "post", fake_post)
     VisionLLMClient(
         "key",
-        "https://example.test/v1",
+        api_url,
         "thinking-model",
         1,
         reasoning_effort="medium",
+        provider_only=provider_only,
         max_attempts=1,
     ).analyze_install_progress(image, "vm2", "Windows UEFI")
 
@@ -193,7 +202,18 @@ def test_install_progress_uses_short_english_prompt_and_thinking_budget(
     assert messages[0]["content"] == INSTALL_PROGRESS_SYSTEM_PROMPT
     assert len(INSTALL_PROGRESS_SYSTEM_PROMPT) < 1400
     assert captured_payload["max_tokens"] == 2048
-    assert captured_payload["reasoning"] == {"effort": "medium"}
+    assert captured_payload[reasoning_key] == reasoning_value
+    other_key = "reasoning_effort" if reasoning_key == "reasoning" else "reasoning"
+    assert other_key not in captured_payload
+    if reasoning_key == "reasoning":
+        assert captured_payload["provider"]["require_parameters"] is True
+        if provider_only:
+            assert captured_payload["provider"]["only"] == [provider_only]
+            assert captured_payload["provider"]["allow_fallbacks"] is False
+        else:
+            assert "only" not in captured_payload["provider"]
+    else:
+        assert "provider" not in captured_payload
 
 
 def test_install_progress_normalizes_contradictory_final_reboot_json(
@@ -228,6 +248,57 @@ def test_install_progress_normalizes_contradictory_final_reboot_json(
     assert verdict.installation_finished is True
     assert verdict.reboot_prompt_visible is True
     assert verdict.still_in_progress is False
+
+
+@pytest.mark.parametrize("corrected", [True, False])
+@pytest.mark.parametrize("api_url", ["https://openrouter.ai/api/v1", "http://example.test:8000/v1"])
+def test_invalid_windows_path_requests_format_correction(
+    monkeypatch, tmp_path: Path, caplog, corrected, api_url
+) -> None:
+    image = tmp_path / "screen.png"
+    Image.new("RGB", (32, 32), "white").save(image)
+    valid = json.dumps(
+        {
+            "iso_download_finished": False,
+            "installation_finished": False,
+            "reboot_prompt_visible": False,
+            "still_in_progress": True,
+            "error_visible": False,
+            "summary": "Copying the UEFI installer.",
+            "visible_text": r"Copying to D:\ UEFI copy phase",
+        }
+    )
+    invalid = valid.replace("\\\\", "\\")
+    calls = []
+    delays = []
+
+    def fake_post(*_args, **kwargs):
+        calls.append(json.loads(json.dumps(kwargs["json"])))
+        content = valid if corrected and len(calls) > 1 else invalid
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": content}}]},
+            request=httpx.Request("POST", "https://example.test"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr("app.clients.vision_llm.time.sleep", delays.append)
+    client = VisionLLMClient("key", api_url, "model", 1)
+    if corrected:
+        verdict = client.analyze_install_progress(image, "vm3", "Windows UEFI")
+        assert verdict.visible_text == r"Copying to D:\ UEFI copy phase"
+        assert len(calls) == 2 and delays == [3]
+    else:
+        with pytest.raises(WorkflowError) as failure:
+            client.analyze_install_progress(image, "vm3", "Windows UEFI")
+        assert failure.value.details["attempt"] == 3
+        assert len(calls) == 3 and delays == [3, 6]
+    assert calls[1]["messages"][-2] == {"role": "assistant", "content": invalid}
+    correction = calls[1]["messages"][-1]
+    assert correction["role"] == "user"
+    assert "Escape backslashes" in correction["content"]
+    feedback = [record for record in caplog.records if record.step == "llm.format_correction"]
+    assert len(feedback) == len(calls) - 1
 
 
 @pytest.mark.parametrize(

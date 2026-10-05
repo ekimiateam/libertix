@@ -3432,7 +3432,7 @@ def test_uefi_revert_does_not_require_download_configuration() -> None:
         "if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction)"
     ) in validation
     assert "FilepoolBaseUrl is required" in validation
-    # URLs now arrive from C#; recovery never has to construct or fetch one.
+    # C# resolves every download URL; recovery never constructs or fetches one.
     assert "New-LibertixDownloadUrls" not in script
     assert '[string]$Aria2ZipUrl = ""' in script
     assert "$Aria2ZipUrl = [string]$config.Aria2ZipUrl" in script
@@ -3453,8 +3453,11 @@ def test_uefi_configuration_requires_the_versioned_installation_plan() -> None:
 def test_powershell_atomic_writers_use_real_same_directory_backups() -> None:
     atomic_module = read("Scripts/modules/Libertix.AtomicFile.psm1")
     assert "$script:AtomicPublishAttempts = 8" in atomic_module
+    assert "$script:AtomicPublishRetryDelayMilliseconds = 100" in atomic_module
     assert "Test-LibertixTransientAtomicPublishFailure" in atomic_module
-    assert "Start-Sleep -Milliseconds (25 * $attempt)" in atomic_module
+    assert (
+        "Start-Sleep -Milliseconds ($script:AtomicPublishRetryDelayMilliseconds * $attempt)"
+    ) in atomic_module
 
     for module_path in (
         "Scripts/modules/Libertix.InstallationPlan.psm1",

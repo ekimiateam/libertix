@@ -8,9 +8,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
-using System.Security.AccessControl;
 using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
 using System.Windows.Forms;
 
@@ -240,20 +238,7 @@ namespace Libertix.Standalone
 
         private static void ProtectDirectory(string path)
         {
-            Directory.CreateDirectory(path);
-            var security = new DirectorySecurity();
-            security.SetAccessRuleProtection(true, false);
-            var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-            foreach (string sidValue in new[] { "S-1-5-18", "S-1-5-32-544" })
-            {
-                security.AddAccessRule(new FileSystemAccessRule(
-                    new SecurityIdentifier(sidValue),
-                    FileSystemRights.FullControl,
-                    inheritance,
-                    PropagationFlags.None,
-                    AccessControlType.Allow));
-            }
-            Directory.SetAccessControl(path, security);
+            Security.ProtectedFiles.CreateDirectory(path);
         }
 
         private static string ResolveUnderRoot(string root, string relative)

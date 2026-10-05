@@ -55,7 +55,7 @@ class AutomationOptions:
             share_linux_files_in_windows=request.share_linux_files_in_windows,
             migrate_windows_preferences=request.migrate_windows_preferences,
             preference_wallpaper=request.preference_wallpaper,
-            use_default_filepool=request.source == "published" or request.local_filepool,
+            use_default_filepool=request.source == "published",
             local_filepool=request.local_filepool,
             simulate_stale_firmware_entries=request.simulate_stale_firmware_entries,
             force_offline_ntfs_resize=request.force_offline_ntfs_resize,

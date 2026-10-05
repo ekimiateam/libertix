@@ -1,3 +1,5 @@
+extern alias Guardian;
+
 using System;
 using System.IO;
 using System.Net;
@@ -1821,6 +1823,30 @@ namespace Libertix.Tests
             }, firmware, PlanId);
         }
 
+        [DataTestMethod]
+        [DataRow("bios")]
+        [DataRow("uefi")]
+        public void UninstallRejectsRecoveryRecordsWritableByStandardUsers(string firmware)
+        {
+            WithRecoveryRoots((systemRoot, programData, root) =>
+            {
+                CreateSuccessfulRecoveryArchive(root, firmware, PlanId);
+                string path = Path.Combine(root, "post-install-verification.json");
+                var security = File.GetAccessControl(path);
+                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
+                    System.Security.AccessControl.FileSystemRights.Modify,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                File.SetAccessControl(path, security);
+
+                var detection = InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.Blocked, detection.Status);
+                StringAssert.Contains(detection.Diagnostic, "untrusted account");
+            }, firmware, PlanId);
+        }
+
         [TestMethod]
         public void InstalledLinuxRecoveryOffersToResumeAnInterruptedRollback()
         {
@@ -1959,12 +1985,13 @@ namespace Libertix.Tests
             string firstPlanId = PlanId;
             string secondPlanId = new string('e', 32);
             string temporaryRoot = Path.Combine(
-                Path.GetTempPath(),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp",
                 "libertix-recovery-detection-" + Guid.NewGuid().ToString("N"));
             string systemRoot = Path.Combine(temporaryRoot, "system");
             string programData = Path.Combine(temporaryRoot, "program-data");
             try
             {
+                Guardian::Libertix.Security.ProtectedFiles.CreateDirectory(temporaryRoot);
                 Directory.CreateDirectory(systemRoot);
                 string uefiRoot = Path.Combine(programData, "Libertix", "UefiRecovery");
                 CreateSuccessfulRecoveryArchive(

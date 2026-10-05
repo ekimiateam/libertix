@@ -10,13 +10,17 @@ import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import TextIO
 
 import paramiko
 
-from app.clients.ssh import SSHClient
+from app.clients.ssh import SSHClient, is_reconnectable_transport_error
 from app.config import Settings, VMConfig
 from app.errors import WorkflowError
 from app.services.automation_types import AutomationOptions
+
+SYSTEM_CONTEXT_TIMEOUT_SECONDS = 240
+WINDOWS_SECTION_TIMEOUT_SECONDS = 30
 
 WINDOWS_LOG_ROOTS = (
     # Large servicing archives must not exhaust the deadline before the failure evidence.
@@ -264,6 +268,67 @@ def diagnostic_error(exc: Exception) -> dict[str, object]:
     return details
 
 
+def _collect_windows_context(ssh: SSHClient, command: str, output: TextIO, context: dict) -> int:
+    deadline = time.monotonic() + SYSTEM_CONTEXT_TIMEOUT_SECONDS
+    listing = ssh.run(
+        command + " -ListSections",
+        step="automation.diagnostics.context",
+        timeout=WINDOWS_SECTION_TIMEOUT_SECONDS,
+        replay_safe=True,
+    )
+    sections = json.loads(listing.stdout)
+    if (
+        not isinstance(sections, list)
+        or not sections
+        or any(not isinstance(name, str) or not re.fullmatch(r"[a-z_]+", name) for name in sections)
+    ):
+        raise ValueError("The Windows diagnostic section list is invalid")
+
+    failed = False
+    context["sections"] = records = []
+    for section in sections:
+        record = {"name": section, "status": "incomplete"}
+        records.append(record)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            record["error"] = "System context collection deadline expired"
+            output.write(f"=== {section} ===\nCOLLECTION_ERROR: {record['error']}\n")
+            failed = True
+            continue
+        try:
+            # A slow DISM/CIM query must not discard the other sections' evidence.
+            response = ssh.run(
+                command + f" -Section {section}",
+                step="automation.diagnostics.context",
+                timeout=min(WINDOWS_SECTION_TIMEOUT_SECONDS, remaining),
+                check=False,
+                replay_safe=True,
+            )
+        except WorkflowError as exc:
+            record.update(diagnostic_error(exc))
+            output.write(f"=== {section} ===\nCOLLECTION_ERROR: {exc}\n")
+            output.flush()
+            failed = True
+            if is_reconnectable_transport_error(exc):
+                ssh.reconnect()
+            continue
+        output.write(response.stdout + "\nSTDERR:\n" + response.stderr + "\n")
+        output.flush()
+        complete = (
+            response.exit_code == 0
+            and "LIBERTIX_DIAGNOSTICS_COMPLETED" in response.stdout.splitlines()
+            and not any(
+                value.startswith("[earlier remote output truncated]")
+                for value in (response.stdout, response.stderr)
+            )
+        )
+        record.update(
+            status="collected" if complete else "incomplete", exit_code=response.exit_code
+        )
+        failed |= not complete
+    return 1 if failed else 0
+
+
 def collect_system_context(
     ssh: SSHClient, remote_os: str, bundle: Path, manifest: dict, password: str
 ) -> None:
@@ -293,34 +358,33 @@ def collect_system_context(
             # An unprivileged journal query can silently omit system and greeter events.
             command = "sudo -S -p '' -- sh -c " + shlex.quote(source)
         context["phase"] = "execute"
-        result = ssh.run(
-            command,
-            step="automation.diagnostics.context",
-            timeout=240,
-            check=False,
-            replay_safe=True,
-            sensitive=remote_os == "linux",
-            stdin_data=password + "\n" if remote_os == "linux" else None,
-        )
-        context["phase"] = "save_output"
         report = bundle / remote_os / "system-context.txt"
         report.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        context["path"] = str(report)
         with report.open("x", encoding="utf-8") as output:
             report.chmod(0o600)
-            output.write(result.stdout + "\nSTDERR:\n" + result.stderr)
+            if remote_os == "windows":
+                exit_code = _collect_windows_context(ssh, command, output, context)
+                complete = exit_code == 0
+            else:
+                result = ssh.run(
+                    command,
+                    step="automation.diagnostics.context",
+                    timeout=SYSTEM_CONTEXT_TIMEOUT_SECONDS,
+                    check=False,
+                    replay_safe=True,
+                    sensitive=True,
+                    stdin_data=password + "\n",
+                )
+                output.write(result.stdout + "\nSTDERR:\n" + result.stderr)
+                exit_code = result.exit_code
+                complete = exit_code == 0 and not any(
+                    value.startswith("[earlier remote output truncated]")
+                    for value in (result.stdout, result.stderr)
+                )
         context.update(
-            status="collected"
-            if result.exit_code == 0
-            and (
-                remote_os != "windows"
-                or "LIBERTIX_DIAGNOSTICS_COMPLETED" in result.stdout.splitlines()
-            )
-            and not any(
-                value.startswith("[earlier remote output truncated]")
-                for value in (result.stdout, result.stderr)
-            )
-            else "incomplete",
-            exit_code=result.exit_code,
+            status="collected" if complete else "incomplete",
+            exit_code=exit_code,
             path=str(report),
             phase="finished",
         )

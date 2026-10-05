@@ -564,13 +564,26 @@ def test_live_state_transition_is_published_to_the_windows_recovery_root(
     state.write_text('{"revision":7}\n', encoding="utf-8")
     windows.mkdir()
     context = REPO_ROOT / "assets/live/libertix-live-context.sh"
-    command = (
-        'windows_path_to_relative() { printf "%s\\n" "Recovery/Current"; }; '
-        'source "$1"; INSTALLATION_STATE_PATH="$2"; '
-        'RECOVERY_ROOT_WINDOWS="C:\\\\Recovery\\\\Current"; '
-        'publish_installation_state_mirror "$3"; '
-        'cmp "$2" "$3/Recovery/Current/installation-state.json"'
-    )
+    command = r"""
+windows_path_to_relative() { printf '%s\n' 'Recovery/Current'; }
+source "$1"
+INSTALLATION_STATE_PATH="$2"
+RECOVERY_ROOT_WINDOWS='C:\Recovery\Current'
+TEST_WINDOWS_ROOT="$3"
+# The host temporary directory has no Windows ACL metadata.
+python3() {
+    if [ "$1" != /usr/local/lib/libertix/libertix-ntfs-permissions.py ]; then
+        command python3 "$@"
+        return $?
+    fi
+    [ "$#" -eq 2 ] && [ -f "$2" ] || return 1
+    [[ "$2" == "$TEST_WINDOWS_ROOT/Recovery/Current/.installation-state."*.tmp ]] || return 1
+    cmp "$INSTALLATION_STATE_PATH" "$2" || return 1
+    printf '%s\n' "$2" > "$TEST_WINDOWS_ROOT/permissions-checked"
+}
+publish_installation_state_mirror "$TEST_WINDOWS_ROOT" || exit 1
+cmp "$INSTALLATION_STATE_PATH" "$TEST_WINDOWS_ROOT/Recovery/Current/installation-state.json"
+"""
 
     completed = subprocess.run(
         ["bash", "-c", command, "bash", str(context), str(state), str(windows)],
@@ -580,6 +593,7 @@ def test_live_state_transition_is_published_to_the_windows_recovery_root(
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert (windows / "permissions-checked").is_file()
 
 
 @pytest.mark.parametrize(
@@ -4508,6 +4522,138 @@ def test_wpf_storage_preflight_fails_closed() -> None:
     ) < preflight.index("if ($DecryptBitLocker)")
 
 
+@pytest.mark.parametrize(
+    "outcome", ["update-finishes", "update-stays-busy", "stop-fails", "restore-loses-connection"]
+)
+def test_linux_checks_restore_update_timers(monkeypatch, outcome) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    result = ResultBuilder("automation")
+    clock = [0.0]
+    calls = []
+    apt_attempts = 0
+    restore_attempts = 0
+    reconnects = []
+    monkeypatch.setattr(automation_postinstall_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda seconds: None)
+
+    class FakeSSH:
+        def reconnect(self):
+            reconnects.append(True)
+
+        def run(self, command, **kwargs):
+            nonlocal apt_attempts, restore_attempts
+            calls.append(command)
+            if "systemctl list-units" in command:
+                return CommandResult("apt-daily-upgrade.timer loaded active waiting\n", "", 0)
+            if "systemctl stop" in command and outcome == "stop-fails":
+                raise WorkflowError(kwargs["step"], "Timer stop failed")
+            if "systemctl start" in command:
+                restore_attempts += 1
+                if outcome == "restore-loses-connection" and restore_attempts == 1:
+                    raise WorkflowError(
+                        kwargs["step"], "SSH connection lost", details={"transport_error": True}
+                    )
+            if "apt-get" in command:
+                apt_attempts += 1
+                if apt_attempts == 1:
+                    if outcome == "update-stays-busy":
+                        clock[0] += service.settings.post_install_package_timeout_seconds
+                    return CommandResult("", "Could not get lock /var/lib/dpkg/lock-frontend", 100)
+            return CommandResult("", "", 0)
+
+    if outcome in {"stop-fails", "update-stays-busy"}:
+        message = "Timer stop failed" if outcome == "stop-fails" else "package manager is not ready"
+        with pytest.raises(WorkflowError, match=message):
+            service._run_linux_checks(
+                FakeSSH(), vm, AutomationOptions("test", "password", True), result
+            )
+    else:
+        service._run_linux_checks(
+            FakeSSH(), vm, AutomationOptions("test", "password", True), result
+        )
+    assert "systemctl stop apt-daily-upgrade.timer" in calls[1]
+    assert "systemctl start apt-daily-upgrade.timer" in calls[-1]
+    assert not any("systemctl stop apt-daily.timer" in command for command in calls)
+    assert not any("kill" in command or "rm " in command for command in calls)
+    checks = [step for step in result.steps if step.step == "automation.test.linux"]
+    if outcome in {"update-finishes", "restore-loses-connection"}:
+        assert apt_attempts == 2
+        assert [step.context["test"] for step in checks[:2]] == [
+            "linux.package_dependencies",
+            "linux.package_database",
+        ]
+        assert all(step.status == "ok" for step in checks)
+        assert len(reconnects) == (1 if outcome == "restore-loses-connection" else 0)
+        assert restore_attempts == (2 if outcome == "restore-loses-connection" else 1)
+    elif outcome == "update-stays-busy":
+        assert len(checks) == 1
+        assert checks[0].status == "error"
+        assert checks[0].context["failure_kind"] == "package_manager_busy"
+
+
+def test_package_checks_wait_for_an_activating_update(tmp_path, monkeypatch) -> None:
+    systemctl = tmp_path / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\nif [ -e "$APT_WAIT_STATE" ]; then '
+        "printf 'inactive\\ninactive\\n'; else "
+        ": > \"$APT_WAIT_STATE\"; printf 'activating\\ninactive\\n'; fi\n"
+    )
+    sleep = tmp_path / "sleep"
+    sleep.write_text('#!/bin/sh\nprintf "DELAY=%s\\n" "$1"\n')
+    apt = tmp_path / "apt-get"
+    apt.write_text("#!/bin/sh\nset -eu\ntest \"$LC_ALL\" = C\nprintf 'DEPENDENCIES_CHECKED\\n'\n")
+    for executable in (systemctl, sleep, apt):
+        executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("APT_WAIT_STATE", str(tmp_path / "update-finished"))
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    check = next(
+        check
+        for check in service._linux_checks(vm, AutomationOptions("test", "password", True))
+        if check.name == "linux.package_dependencies"
+    )
+
+    class LocalSSH:
+        def run(self, command, **kwargs):
+            arguments = shlex.split(command)
+            assert arguments[:4] == ["sudo", "-S", "-p", ""]
+            # Exercise the complete shell command without elevating the local test process.
+            response = subprocess.run(arguments[4:], capture_output=True, text=True, timeout=5)
+            return CommandResult(response.stdout, response.stderr, response.returncode)
+
+    response = service._run_remote_check(
+        LocalSSH(), vm, ResultBuilder("automation"), "linux", check, sudo_password="password"
+    )
+    assert response is not None
+    assert response.exit_code == 0, response.stderr
+    assert response.stdout == (
+        "Waiting for automatic APT services to finish.\n"
+        f"DELAY={automation_postinstall_module.PACKAGE_MANAGER_RETRY_DELAY_SECONDS}\n"
+        "DEPENDENCIES_CHECKED\n"
+    )
+
+
+def test_package_database_prints_its_failure_before_exiting(tmp_path, monkeypatch) -> None:
+    dpkg = tmp_path / "dpkg"
+    dpkg.write_text("#!/bin/sh\nprintf '%s\\n' 'package-example awaits configuration'\n")
+    dpkg.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    check = next(
+        check
+        for check in service._linux_checks(vm, AutomationOptions("test", "password", True))
+        if check.name == "linux.package_database"
+    )
+    response = subprocess.run(
+        ["/bin/sh", "-eu", "-c", check.command], capture_output=True, text=True
+    )
+    assert response.returncode == 1
+    assert response.stdout == "package-example awaits configuration\n"
+
+
 def test_linux_post_install_checks_continue_after_one_failure() -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
@@ -4563,7 +4709,9 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
         ).status
         == "error"
     )
-    assert len(ssh.calls) == len(tests)
+    assert len(ssh.calls) == len(tests) + 1
+    assert "systemctl list-units --type=timer --state=active" in ssh.calls[0][0]
+    assert tests[:2] == ["linux.package_dependencies", "linux.package_database"]
     sudo_calls = [(command, kwargs) for command, kwargs in ssh.calls if command.startswith("sudo ")]
     assert len(sudo_calls) == 12
     assert any("--verify-windows-sharing" in command for command, _ in sudo_calls)
@@ -4602,20 +4750,10 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
 
 
 @pytest.mark.parametrize("attempt_id", [None, "first-attempt", "second-attempt"])
-def test_linux_post_install_ack_matches_real_result_producer(
-    monkeypatch: pytest.MonkeyPatch, attempt_id: str | None
-) -> None:
+def test_linux_post_install_ack_matches_real_result_producer(attempt_id: str | None) -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
-    checks: list[RemoteCheck] = []
-    monkeypatch.setattr(
-        service,
-        "_run_remote_check",
-        lambda _ssh, _vm, _result, _os, check, **_kw: checks.append(check),
-    )
-    service._run_linux_checks(  # noqa: SLF001
-        None, vm, AutomationOptions("test", "test-passphrase", True), ResultBuilder("automation")
-    )
+    checks = service._linux_checks(vm, AutomationOptions("test", "test-passphrase", True))  # noqa: SLF001
     check = next(check for check in checks if check.name == "linux.first_boot_verification")
     assert " first-boot-evidence " in check.command
     helper = runpy.run_path(str(REPO_ROOT / "auto_tests/app/scripts/linux_check_helper.py"))

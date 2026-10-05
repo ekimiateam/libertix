@@ -182,6 +182,7 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-gui.py|/usr/local/sbin/libertix-gui"
         "0755|$ROOT_DIR/assets/live/libertix-copy-logs.sh|/usr/local/sbin/libertix-copy-logs"
         "0755|$ROOT_DIR/assets/live/libertix-log-archive.py|/usr/local/lib/libertix/libertix-log-archive.py"
+        "0755|$ROOT_DIR/assets/live/libertix-ntfs-permissions.py|/usr/local/lib/libertix/libertix-ntfs-permissions.py"
         "0755|$ROOT_DIR/assets/live/libertix-install-platform-common.sh|/usr/local/lib/libertix/libertix-install-platform-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-storage-common.sh|/usr/local/lib/libertix/libertix-storage-common.sh"
         "0755|$ROOT_DIR/assets/live/libertix-install-runtime-common.sh|/usr/local/lib/libertix/libertix-install-runtime-common.sh"

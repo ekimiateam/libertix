@@ -39,7 +39,7 @@ namespace Libertix.Helpers
 
                 try
                 {
-                    Directory.CreateDirectory(LogRoot);
+                    Security.ProtectedFiles.CreateDirectory(LogRoot);
                     _logPath = Path.Combine(
                         LogRoot,
                         $"libertix-exe-{DateTime.Now:yyyyMMdd-HHmmss}-pid{Process.GetCurrentProcess().Id}.log");

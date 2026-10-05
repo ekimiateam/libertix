@@ -249,6 +249,7 @@ namespace Libertix.Helpers
                     Path.AltDirectorySeparatorChar);
                 if ((File.GetAttributes(canonicalRoot) & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidOperationException("Recovery root is a reparse point.");
+                Security.ProtectedFiles.RequireRecoveryTree(canonicalRoot);
 
                 string planPath = Path.Combine(canonicalRoot, "installation-plan.json");
                 InstallationPlan plan = InstallationPlanSerializer.ReadValidated(planPath);
