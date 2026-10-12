@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -60,7 +61,28 @@ namespace Libertix
                 Shutdown(3);
                 return;
             }
+            var permissionChoices = new Dictionary<string, bool>(StringComparer.Ordinal);
+            Security.ProtectedFiles.ConfirmPermissions = warning => Dispatcher.Invoke(() =>
+            {
+                if (!permissionChoices.TryGetValue(warning, out bool accepted))
+                {
+                    accepted = MessageBox.Show(
+                        Localization.GetBootstrapString("UnsafePermissionsConfirmation",
+                            "The permissions on this path do not guarantee Libertix's security. " +
+                            "Another user could modify or replace code run as administrator. " +
+                            "Continue despite this risk?") + "\n\n" + warning,
+                        "Libertix", MessageBoxButton.YesNo, MessageBoxImage.Warning,
+                        MessageBoxResult.No) == MessageBoxResult.Yes;
+                    permissionChoices.Add(warning, accepted);
+                }
+                return accepted;
+            });
             ApplicationLogger.Initialize();
+            if (permissionChoices.ContainsValue(false))
+            {
+                Shutdown(1);
+                return;
+            }
             ApplicationLogger.Write("Libertix.exe startup.");
             RegisterApplicationErrorLogging();
 

@@ -1,6 +1,6 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
 
@@ -8,12 +8,14 @@ namespace Libertix.Security
 {
     public static class ProtectedFiles
     {
+        internal static Func<string, bool> ConfirmPermissions { get; set; }
         private const FileSystemRights ReplacementRights = FileSystemRights.Delete |
             FileSystemRights.DeleteSubdirectoriesAndFiles | FileSystemRights.ChangePermissions |
             FileSystemRights.TakeOwnership;
         private const FileSystemRights WriteRights = ReplacementRights | FileSystemRights.Write;
 
-        public static void CreateDirectory(string path, bool readableByUsers = false)
+        public static void CreateDirectory(string path, bool readableByUsers = false,
+            Func<string, bool> confirmUnsafePermissions = null)
         {
             path = Path.GetFullPath(path);
             string parent = Path.GetDirectoryName(path);
@@ -22,15 +24,16 @@ namespace Libertix.Security
                 if (parent == null)
                     throw new IOException("A protected directory must be on an existing volume.");
                 if (!Directory.Exists(parent))
-                    CreateDirectory(parent, readableByUsers);
-                RequireAncestors(parent);
+                    CreateDirectory(parent, readableByUsers, confirmUnsafePermissions);
+                RequireAncestors(parent, confirmUnsafePermissions: confirmUnsafePermissions);
                 // Supply the ACL at creation: an inherited writable interval is unsafe.
                 Directory.CreateDirectory(path, DirectorySecurity(readableByUsers));
             }
             string administrator = CurrentAdministrator();
-            RequireTree(path, administrator);
-            ProtectLegacyOwnership(path, administrator, readableByUsers);
+            RequireTree(path, administrator, confirmUnsafePermissions);
             Directory.SetAccessControl(path, DirectorySecurity(readableByUsers));
+            foreach (string child in Directory.GetFileSystemEntries(path))
+                ProtectTree(child, readableByUsers);
         }
 
         internal static void RequireRecoveryTree(string path)
@@ -38,15 +41,16 @@ namespace Libertix.Security
             RequireTree(path, CurrentAdministrator());
         }
 
-        internal static void RequireTree(string path, string administrator = null)
+        internal static void RequireTree(string path, string administrator = null,
+            Func<string, bool> confirmUnsafePermissions = null)
         {
-            RequireAncestors(Path.GetDirectoryName(Path.GetFullPath(path)), administrator);
-            RequireItem(path, WriteRights, administrator);
+            RequireAncestors(Path.GetDirectoryName(Path.GetFullPath(path)), administrator, confirmUnsafePermissions);
+            RequireItem(path, WriteRights, administrator, confirmUnsafePermissions);
             foreach (string child in Directory.GetFileSystemEntries(path))
             {
-                RequireItem(child, WriteRights, administrator);
+                RequireItem(child, WriteRights, administrator, confirmUnsafePermissions);
                 if (Directory.Exists(child))
-                    RequireTree(child, administrator);
+                    RequireTree(child, administrator, confirmUnsafePermissions);
             }
         }
 
@@ -78,13 +82,15 @@ namespace Libertix.Security
             return security;
         }
 
-        private static void RequireAncestors(string path, string administrator = null)
+        private static void RequireAncestors(string path, string administrator = null,
+            Func<string, bool> confirmUnsafePermissions = null)
         {
             for (string current = path; current != null; current = Path.GetDirectoryName(current))
-                RequireItem(current, ReplacementRights, administrator);
+                RequireItem(current, ReplacementRights, administrator, confirmUnsafePermissions);
         }
 
-        private static void RequireItem(string path, FileSystemRights forbidden, string administrator = null)
+        private static void RequireItem(string path, FileSystemRights forbidden, string administrator = null,
+            Func<string, bool> confirmUnsafePermissions = null)
         {
             FileAttributes attributes = File.GetAttributes(path);
             if ((attributes & FileAttributes.ReparsePoint) != 0)
@@ -93,18 +99,86 @@ namespace Libertix.Security
                 ? (FileSystemSecurity)Directory.GetAccessControl(path)
                 : File.GetAccessControl(path);
             if (!IsTrusted(security.GetOwner(typeof(SecurityIdentifier)), administrator))
-                throw new UnauthorizedAccessException("A privileged path has an untrusted owner: " + path);
-            // Do not adopt an existing writable object: an earlier writer may still hold it open.
+                RequireConsent("A privileged path has an untrusted owner: " + path +
+                    " | owner=" + security.GetOwner(typeof(SecurityIdentifier)).Value, confirmUnsafePermissions);
+            // Consent does not establish content integrity or revoke an earlier writer's open handles.
             var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
             if (descriptor.DiscretionaryAcl == null)
-                throw new UnauthorizedAccessException("A privileged path has no access restrictions: " + path);
-            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
             {
-                if (rule.AccessControlType == AccessControlType.Allow &&
-                    (rule.PropagationFlags & PropagationFlags.InheritOnly) == 0 &&
-                    !IsTrusted(rule.IdentityReference, administrator) && (rule.FileSystemRights & forbidden) != 0)
-                    throw new UnauthorizedAccessException("A privileged path is writable by an untrusted account: " + path);
+                RequireConsent("A privileged path has no access restrictions: " + path, confirmUnsafePermissions);
+                return;
             }
+            var inspected = new HashSet<SecurityIdentifier>();
+            foreach (GenericAce entry in descriptor.DiscretionaryAcl)
+            {
+                var rule = entry as CommonAce;
+                if (rule == null || rule.IsCallback ||
+                    (rule.AceQualifier != AceQualifier.AccessAllowed && rule.AceQualifier != AceQualifier.AccessDenied))
+                {
+                    RequireConsent("A privileged path has permissions that cannot be evaluated: " + path,
+                        confirmUnsafePermissions);
+                    continue;
+                }
+                if (rule.AceQualifier != AceQualifier.AccessAllowed ||
+                    (rule.AceFlags & AceFlags.InheritOnly) != 0 ||
+                    IsTrusted(rule.SecurityIdentifier, administrator) || IsCapability(rule.SecurityIdentifier) ||
+                    !inspected.Add(rule.SecurityIdentifier))
+                    continue;
+                FileSystemRights granted = GrantedRights(descriptor.DiscretionaryAcl, rule.SecurityIdentifier, forbidden);
+                if (granted != 0)
+                    RequireConsent("A privileged path may be writable by an untrusted account: " + path +
+                        " | identity=" + rule.SecurityIdentifier.Value + " | rights=" + granted,
+                        confirmUnsafePermissions);
+            }
+        }
+
+        private static void RequireConsent(string warning, Func<string, bool> confirm)
+        {
+            confirm = confirm ?? ConfirmPermissions;
+            if (confirm == null)
+                throw new UnauthorizedAccessException(warning);
+            if (!confirm(warning))
+                throw new OperationCanceledException(warning);
+        }
+
+        private static bool IsCapability(SecurityIdentifier identity)
+        {
+            // Capabilities restrict an AppContainer in addition to its user's rights;
+            // they cannot independently grant that user access to privileged files.
+            return identity.Value.StartsWith("S-1-15-3-", StringComparison.Ordinal);
+        }
+
+        internal static FileSystemRights GrantedRights(RawAcl acl, SecurityIdentifier identity,
+            FileSystemRights requested)
+        {
+            FileSystemRights remaining = requested;
+            FileSystemRights granted = 0;
+            foreach (GenericAce entry in acl)
+            {
+                var rule = entry as CommonAce;
+                if (rule == null || rule.IsCallback || (rule.AceFlags & AceFlags.InheritOnly) != 0 ||
+                    (rule.SecurityIdentifier != identity &&
+                     !rule.SecurityIdentifier.IsWellKnown(WellKnownSidType.WorldSid)))
+                    continue;
+                FileSystemRights rights = ExpandRights(rule.AccessMask) & remaining;
+                if (rule.AceQualifier == AceQualifier.AccessAllowed)
+                    granted |= rights;
+                if (rule.AceQualifier == AceQualifier.AccessAllowed || rule.AceQualifier == AceQualifier.AccessDenied)
+                    remaining &= ~rights;
+            }
+            // Only unconditional denies covering this entire principal prove safety.
+            // A deny for one user must not hide a grant to the rest of a group.
+            return granted;
+        }
+
+        private static FileSystemRights ExpandRights(int mask)
+        {
+            FileSystemRights rights = (FileSystemRights)(mask & 0x0fffffff);
+            if ((mask & unchecked((int)0x80000000)) != 0) rights |= FileSystemRights.Read;
+            if ((mask & 0x40000000) != 0) rights |= FileSystemRights.Write;
+            if ((mask & 0x20000000) != 0) rights |= FileSystemRights.ReadAndExecute;
+            if ((mask & 0x10000000) != 0) rights |= FileSystemRights.FullControl;
+            return rights;
         }
 
         private static bool IsTrusted(IdentityReference identity, string administrator = null)
@@ -122,32 +196,21 @@ namespace Libertix.Security
                     ? identity.User.Value : null;
         }
 
-        private static void ProtectLegacyOwnership(string path, string administrator, bool readableByUsers)
+        private static void ProtectTree(string path, bool readableByUsers)
         {
-            if (administrator == null)
-                return;
             bool directory = Directory.Exists(path);
-            FileSystemSecurity security = directory
-                ? (FileSystemSecurity)Directory.GetAccessControl(path) : File.GetAccessControl(path);
-            // Older recovery archives granted their installing administrator an explicit SID.
-            // Migrate only that authenticated administrator, never an arbitrary previous owner.
-            if (security.GetOwner(typeof(SecurityIdentifier)).Value == administrator ||
-                security.GetAccessRules(true, true, typeof(SecurityIdentifier))
-                    .Cast<FileSystemAccessRule>().Any(rule => rule.IdentityReference.Value == administrator))
+            if (directory)
+                Directory.SetAccessControl(path, DirectorySecurity(readableByUsers));
+            else
             {
-                if (directory)
-                    Directory.SetAccessControl(path, DirectorySecurity(readableByUsers));
-                else
-                {
-                    var fileSecurity = new FileSecurity();
-                    fileSecurity.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
-                    fileSecurity.SetAccessRuleProtection(false, false);
-                    File.SetAccessControl(path, fileSecurity);
-                }
+                var security = new FileSecurity();
+                security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
+                security.SetAccessRuleProtection(false, false);
+                File.SetAccessControl(path, security);
             }
             if (directory)
                 foreach (string child in Directory.GetFileSystemEntries(path))
-                    ProtectLegacyOwnership(child, administrator, readableByUsers);
+                    ProtectTree(child, readableByUsers);
         }
     }
 }

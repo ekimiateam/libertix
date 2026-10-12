@@ -608,7 +608,8 @@ def protected_root_expressions() -> set[str]:
         delegated != [["directory", "readableByUsers"]]
         or applied_acl != [["path", "DirectorySecurity(readableByUsers)"]]
         or inheritance != [["true", "false"]]
-        or call_arguments(create_body, "RequireTree") != [["path", "administrator"]]
+        or call_arguments(create_body, "RequireTree")
+        != [["path", "administrator", "confirmUnsafePermissions"]]
         or not call_arguments(acl_body, "security.SetOwner")
     ):
         raise AuditStructureError(

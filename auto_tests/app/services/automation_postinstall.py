@@ -2083,7 +2083,7 @@ class PostInstallValidationMixin:
             "python3 /usr/local/lib/libertix/libertix-first-boot-verify.py --verify-windows-sharing"
             if options.share_windows_files_in_linux
             else (
-                f"! find /home/{username} -maxdepth 1 -type l -name 'User_*' "
+                f"! find /home/{username} -maxdepth 1 \\( -name 'User_*' -o -name 'Win_*' \\) "
                 "-print -quit | grep -q ."
             )
         )

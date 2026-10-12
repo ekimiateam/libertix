@@ -173,10 +173,28 @@ are mounted read-only on Windows. Both directions are optional and selected befo
 Windows folders are resolved from each registered profile, including redirected Documents and other
 known folders on another supported internal NTFS volume. The installation records the volume and
 disk identities, then rechecks them under Linux before creating the corresponding shortcuts.
+Each Windows profile has one real `Win_<profile>` folder in the Linux home directory and one
+file-manager bookmark. Inside it, shortcuts open that profile's Windows Desktop, Documents,
+Downloads and other available known folders. Linux user folders and existing bookmarks are kept;
+they are not redirected to Windows.
 Unavailable, network, external, or separately encrypted data dependencies are not silently ignored
 or decrypted. Disable Windows file sharing or resolve the reported dependency before installation.
 
+When Windows preference migration is selected, Libertix starts the Windows WLAN AutoConfig service
+if it is stopped and waits at most 30 seconds for it to run before reading saved Wi-Fi profiles.
+Its startup type is not changed. A disabled service or a startup failure remains an explicit error.
+
 ## Runtime configuration
+
+Libertix checks that untrusted accounts cannot modify or replace privileged code through its files
+or parent directories. The interactive launcher and installer ask for explicit confirmation if
+permissions are unsafe or cannot be evaluated; No is selected by default. Continuing accepts a
+possible administrator-level code execution risk, does not change the permissions of `C:\`, and
+does not disable file integrity checks. Consent lasts only for the interactive process. BootGuardian
+and unattended privileged hosts keep their blocking permission checks.
+Libertix reapplies its protected permissions to its own existing directories and their contents,
+including those left by an older version. Potentially unsafe permissions require consent before
+repair; repairing them does not establish that existing files are authentic.
 
 To reuse files on several PCs, you can use either an **adjacent `filepool` folder without a server**
 or the **local install-party server**. See the [setup and verification instructions](install-party-kit/README.md).

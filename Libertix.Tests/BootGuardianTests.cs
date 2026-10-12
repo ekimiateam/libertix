@@ -89,6 +89,109 @@ namespace Libertix.Tests
             return root;
         }
 
+        [DataTestMethod]
+        [DataRow("D:(D;;0x2;;;BU)(A;;GW;;;BU)", false)]
+        [DataRow("D:(A;;GW;;;BU)(D;;0x2;;;BU)", true)]
+        [DataRow("D:(D;;0x2;;;WD)(A;;GW;;;BU)", false)]
+        [DataRow("D:(D;;0x2;;;S-1-5-21-1-2-3-1001)(A;;GW;;;BU)", true)]
+        [DataRow("D:(A;OICIIO;GA;;;BU)", false)]
+        public void PermissionChecksRespectApplicableDenies(string sddl, bool writable)
+        {
+            var descriptor = new RawSecurityDescriptor(sddl);
+            var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+            Assert.AreEqual(writable ? FileSystemRights.WriteData : 0,
+                ProtectedFiles.GrantedRights(descriptor.DiscretionaryAcl, users, FileSystemRights.WriteData));
+        }
+
+        [TestMethod]
+        public void CapabilitiesDoNotAuthorizeOrdinaryUsers()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                DirectorySecurity security = Directory.GetAccessControl(root);
+                security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(
+                    "S-1-15-3-65536-1888954469-739942743-1668119174-2468466756-4239452838-1296943325-355587736-700089176"),
+                    FileSystemRights.FullControl, AccessControlType.Allow));
+                Directory.SetAccessControl(root, security);
+                ProtectedFiles.RequireTree(root);
+
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.DeleteSubdirectoriesAndFiles, AccessControlType.Allow));
+                Directory.SetAccessControl(root, security);
+                var error = Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
+                StringAssert.Contains(error.Message, "identity=S-1-5-32-545");
+                StringAssert.Contains(error.Message, "DeleteSubdirectoriesAndFiles");
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void PermissionConsentIsExplicitAndNotPersistent()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                DirectorySecurity security = Directory.GetAccessControl(root);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.WriteData, AccessControlType.Allow));
+                Directory.SetAccessControl(root, security);
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    ProtectedFiles.RequireTree(root, confirmUnsafePermissions: warning => false));
+                int confirmations = 0;
+                ProtectedFiles.RequireTree(root, confirmUnsafePermissions: warning =>
+                {
+                    StringAssert.Contains(warning, root);
+                    confirmations++;
+                    return true;
+                });
+                Assert.AreEqual(1, confirmations);
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void RepairsExistingPermissionsAfterConsent()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                string parent = Path.GetDirectoryName(root);
+                string before = Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access | AccessControlSections.Owner);
+                string child = Path.Combine(root, "existing");
+                Directory.CreateDirectory(child);
+                string file = Path.Combine(child, "config.json");
+                File.WriteAllText(file, "{}");
+                FileSecurity security = File.GetAccessControl(file);
+                security.SetAccessRuleProtection(true, true);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.Modify, AccessControlType.Allow));
+                File.SetAccessControl(file, security);
+                int confirmations = 0;
+
+                ProtectedFiles.CreateDirectory(root, true, warning =>
+                {
+                    confirmations++;
+                    return true;
+                });
+
+                Assert.IsTrue(confirmations > 0);
+                ProtectedFiles.RequireTree(root);
+                Assert.IsFalse(File.GetAccessControl(file).AreAccessRulesProtected);
+                Assert.AreEqual("S-1-5-32-544", File.GetAccessControl(file)
+                    .GetOwner(typeof(SecurityIdentifier)).Value);
+                Assert.AreEqual("{}", File.ReadAllText(file));
+                Assert.AreEqual(before, Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access | AccessControlSections.Owner));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
         [TestMethod]
         public void ProtectedDirectoryRejectsJunctionsWithoutTouchingTheirTarget()
         {

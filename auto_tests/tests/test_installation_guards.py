@@ -2762,8 +2762,11 @@ def test_sharing_options_reach_both_live_installers() -> None:
 
 def test_mint_shortcuts_and_windows_mount_are_read_only_by_contract() -> None:
     target = read("assets/live/configure-target-main.sh")
-    assert 'shortcut="User_$profile"' in target
-    assert ".config/gtk-3.0/bookmarks" in target
+    assert "xdg-user-dirs-update" in target
+    assert "libertix_windows_sharing.py configure" in target
+    sharing = read("assets/live/libertix_windows_sharing.py")
+    assert '"Win_" + root.removeprefix("User_")' in sharing
+    assert ".config/gtk-3.0/bookmarks" in sharing
 
     windows_share = read("Scripts/libertix-configure-windows-share.ps1")
     assert "--ro" in windows_share
@@ -4478,7 +4481,8 @@ def test_standalone_release_contains_and_verifies_the_complete_runtime() -> None
     assert "Libertix.Standalone.Payload.zip" in project
     assert "Libertix.Standalone.PayloadManifest.json" in project
     assert 'requestedExecutionLevel level="requireAdministrator"' in read("Standalone/app.manifest")
-    assert "ProtectDirectory(parent)" in launcher
+    assert "ProtectDirectory(parent, confirm)" in launcher
+    assert "MessageBoxDefaultButton.Button2" in launcher
     assert 'Path.Combine(parent, ".extraction.lock")' in launcher
     assert "FileShare.None" in launcher
     assert "EnsureRuntimeLocked" in launcher

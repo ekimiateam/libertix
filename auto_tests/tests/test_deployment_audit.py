@@ -101,7 +101,7 @@ def test_a_probe_into_an_unprotected_folder_is_an_error(
         "security.SetAccessRuleProtection(true, false);",
         "security.SetOwner(new SecurityIdentifier("
         "WellKnownSidType.BuiltinAdministratorsSid, null));",
-        "RequireTree(path, administrator);",
+        "RequireTree(path, administrator, confirmUnsafePermissions);",
     ],
 )
 def test_missing_acl_enforcement_stops_the_audit(monkeypatch, statement):

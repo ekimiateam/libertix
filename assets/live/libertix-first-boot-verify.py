@@ -833,19 +833,35 @@ def verify_windows_sharing(plan: dict[str, object], windows_device: Path) -> dic
         account = pwd.getpwnam(username)
         home = Path(account.pw_dir)
         bookmarks = (home / ".config/gtk-3.0/bookmarks").read_text(encoding="utf-8").splitlines()
+        from libertix_windows_sharing import PROFILE_FOLDERS
+
         for profile in profiles:
-            shortcut = home / f"User_{profile}"
+            shortcut = home / f"Win_{profile}"
             target = mount / "Users" / profile
-            if not shortcut.is_symlink() or os.readlink(shortcut) != str(target):
-                raise VerificationError("A Linux Windows-profile shortcut has the wrong target")
-            if shortcut.lstat().st_uid != account.pw_uid or not target.is_dir():
+            if shortcut.is_symlink() or not shortcut.is_dir():
+                raise VerificationError("A Linux Windows-profile folder is missing or is a symlink")
+            if shortcut.stat().st_uid != account.pw_uid or not target.is_dir():
                 raise VerificationError(
                     "A Linux Windows-profile shortcut is inaccessible or has the wrong owner"
                 )
-            if f"{shortcut.as_uri()} User_{profile}" not in bookmarks:
+            if f"{shortcut.as_uri()} Win_{profile}" not in bookmarks:
                 raise VerificationError(
                     "A Linux Windows-profile bookmark is missing or incorrectly encoded"
                 )
+            for name in PROFILE_FOLDERS:
+                if not (target / name).is_dir():
+                    continue
+                link = shortcut / name
+                if (
+                    not link.is_symlink()
+                    or os.readlink(link) != str(target / name)
+                    or link.lstat().st_uid != account.pw_uid
+                ):
+                    raise VerificationError(
+                        "A Windows known-folder shortcut has the wrong target or owner"
+                    )
+                run("runuser", "-u", username, "--", "test", "-r", str(link))
+                run("runuser", "-u", username, "--", "test", "-x", str(link))
             run("runuser", "-u", username, "--", "test", "-r", str(shortcut))
             run("runuser", "-u", username, "--", "test", "-x", str(shortcut))
         return {"enabled": True, "device": str(source), "profileCount": len(profiles)}
