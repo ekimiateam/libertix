@@ -166,6 +166,14 @@ BitLocker or Device Encryption must be fully decrypted before the live installer
 can request decryption and waits for it to finish. The detected Windows Recovery partition is kept
 outside the Linux allocation and is checked again before the live environment writes to disk.
 
+## Live installer diagnostics
+
+The temporary boot menu offers diagnostic entries for text mode, including a `nomodeset`
+variant that avoids graphics-driver mode changes. These entries do not start installation.
+Use Ctrl+Alt+F2 to open the diagnostic console. Early logs are saved on the temporary FAT
+partition under `LibertixInstallLogs/Linux/<boot-id>/early`; runtime logs are in `/run/libertix`.
+During a normal installation, an unresponsive graphical startup falls back to the text interface.
+
 ## Optional file sharing
 
 The installer can expose Windows user folders in Linux and Linux user files in Windows. Linux files

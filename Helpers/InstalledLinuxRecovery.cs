@@ -252,7 +252,7 @@ namespace Libertix.Helpers
                 Security.ProtectedFiles.RequireRecoveryTree(canonicalRoot);
 
                 string planPath = Path.Combine(canonicalRoot, "installation-plan.json");
-                InstallationPlan plan = InstallationPlanSerializer.ReadValidated(planPath);
+                InstallationPlan plan = InstallationPlanSerializer.ReadForRecovery(planPath, out _);
                 if (!string.Equals(plan.PlanId, execution.PlanId, StringComparison.Ordinal) ||
                     !string.Equals(plan.Firmware, firmware, StringComparison.Ordinal) ||
                     !string.Equals(

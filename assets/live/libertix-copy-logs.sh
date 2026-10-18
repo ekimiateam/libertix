@@ -35,6 +35,27 @@ dmesg > "$LOG_DIR/dmesg.log" 2>&1 || true
 systemctl status libertix-install.service --no-pager -l > "$LOG_DIR/systemctl-libertix.log" 2>&1 || true
 cp -f /var/log/Xorg.*.log "$LOG_DIR/" 2>/dev/null || true
 
+if [ "${2:-}" = --early ]; then
+    . /usr/local/lib/libertix/libertix-installation-plan.sh
+    . /usr/local/lib/libertix/libertix-storage-common.sh
+    load_libertix_installation_plan "$LOG_DIR/installation-plan.json" || fail "early diagnostic plan is invalid"
+    disk="$(resolve_allocation_disk_from_manifest)" || fail "early diagnostic disk identity is unavailable"
+    staging="$(partition_at_offset "$disk" "$INSTALLER_PARTITION_OFFSET_BYTES")" || fail "staging partition is unavailable"
+    [ "$(blockdev --getsize64 "$staging")" = "$INSTALLER_STAGING_SIZE_BYTES" ] || fail "staging geometry changed"
+    [ "$(blkid -s TYPE -o value "$staging")" = vfat ] || fail "staging filesystem is not FAT"
+    target=/mnt/libertix-early-logs
+    mkdir -p "$target"
+    mount -t vfat -o rw,nosuid,nodev,noexec,umask=0077 "$staging" "$target" || fail "cannot mount early diagnostic staging"
+    mounted_here=true
+    # A matching disk and extent are insufficient if the medium holds another plan.
+    cmp -s "$LOG_DIR/installation-plan.json" "$target/installation-plan.json" || fail "staging plan changed"
+    log_dir="$target/LibertixInstallLogs/Linux/$RUN_ID/early"
+    python3 /usr/local/lib/libertix/libertix-log-archive.py "$LOG_DIR" "$log_dir" || fail "cannot archive early diagnostics"
+    sync -f "$target" || fail "cannot flush early diagnostics"
+    printf 'success: %s\n' "$log_dir" > "$STATUS_FILE"
+    exit 0
+fi
+
 [ -n "$win" ] && [ -b "$win" ] || fail "Windows partition is unavailable"
 fs="$(blkid -s TYPE -o value "$win" 2>/dev/null || true)"
 case "$fs" in

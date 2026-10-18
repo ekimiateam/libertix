@@ -56,10 +56,8 @@ function Get-LibertixStagingGrubConfig {
 
     return @"
 set default=0
-set timeout=0
-set timeout_style=hidden
-set hidden_timeout=0
-set hidden_timeout_quiet=true
+set timeout=5
+set timeout_style=menu
 
 search --no-floppy --label $InstallerLabel --set=root
 

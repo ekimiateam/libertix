@@ -64,8 +64,12 @@ namespace Libertix.Pages
             Log(Localization.GetString("UninstallLinuxStartingLog"));
             try
             {
-                await Task.Run(() => RecoveryCodeUpgrade.Prepare(_candidate,
-                    ApplicationFiles.Resolve("Scripts")));
+                await Task.Run(() =>
+                {
+                    RecoveryCodeUpgrade.Prepare(_candidate, ApplicationFiles.Resolve("Scripts"));
+                    InstallationPlanSerializer.UpgradeRecoveryPlan(
+                        Path.Combine(_candidate.RecoveryRoot, "installation-plan.json"), _candidate.PlanId);
+                });
                 Task<int> processTask = RunRecoveryProcessAsync();
                 try
                 {

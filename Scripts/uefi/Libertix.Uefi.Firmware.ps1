@@ -450,7 +450,10 @@ function Remove-TrackedLibertixFirmwareEntry {
     $bytes = Get-FirmwareVariableBytes -Name $savedVariable
     if ($bytes) {
         if ((Get-EfiLoadOptionDescription -Bytes $bytes) -ne $InstallerBootDescription) {
-            throw "$savedVariable exists but its description is not owned by this recovery run."
+            Write-LibertixFirmwareOwnershipLog `
+                -Message "Preserving reused ${savedVariable}: it is no longer owned by this recovery run." `
+                -Color "Yellow"
+            return $null
         }
         if (-not (Test-EfiLoadOptionLoaderPath -Bytes $bytes -ExpectedPath $ExpectedLoaderPath)) {
             throw "$savedVariable exists but its loader path is not owned by this recovery run."
@@ -690,12 +693,16 @@ function Restore-OriginalFirmwareBootOrder {
         }
     }
 
-    Set-FirmwareVariable -Name "BootOrder" -Value (ConvertTo-BootOrderBytes -Order $original)
+    # Firmware can add or reuse entries after preparation. Keep those entries
+    # while restoring the relative order of the saved, still-existing entries.
+    $current = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder"))
+    $restored = @($original) + @($current | Where-Object { $_ -notin $original })
+    Set-FirmwareVariable -Name "BootOrder" -Value (ConvertTo-BootOrderBytes -Order $restored)
     $verified = @(ConvertFrom-BootOrderBytes -Bytes (Get-FirmwareVariableBytes -Name "BootOrder"))
-    if (($verified -join ",") -ne ($original -join ",")) {
+    if (($verified -join ",") -ne ($restored -join ",")) {
         throw "UEFI BootOrder restore verification failed."
     }
-    Write-Log "Original UEFI BootOrder restored." "Green"
+    Write-Log "Saved UEFI BootOrder restored; current unrelated entries preserved." "Green"
 }
 
 function Assert-LibertixFirmwareEntry {

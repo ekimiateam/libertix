@@ -82,7 +82,7 @@ bootstrap_live_system() {
     echo "=== Creating minimal Debian system ==="
     debootstrap "${options[@]}" "$suite" "$WORKDIR/chroot" "$mirror"
     cat > "$WORKDIR/chroot/etc/apt/sources.list" <<EOF
-deb [check-valid-until=no] $mirror $suite main
+deb [check-valid-until=no] $mirror $suite main non-free-firmware
 EOF
 }
 

@@ -28,5 +28,28 @@ namespace Libertix.Installation
             InstallationPlanValidator.Validate(plan);
             return plan;
         }
+
+        internal static InstallationPlan ReadForRecovery(string path, out bool upgraded)
+        {
+            InstallationPlan plan = JsonSerializer.Deserialize<InstallationPlan>(File.ReadAllText(path));
+            upgraded = plan != null && plan.SchemaVersion == 3 && plan.Allocation == null &&
+                plan.Features != null && plan.Features.WindowsPreferenceMigration == null;
+            if (upgraded)
+            {
+                // Version 3 predates preference migration; its absence means disabled.
+                plan.SchemaVersion = InstallationPlan.CurrentSchemaVersion;
+                plan.Features.WindowsPreferenceMigration = new InstallationPreferenceMigration { Enabled = false };
+            }
+            InstallationPlanValidator.Validate(plan);
+            return plan;
+        }
+
+        internal static void UpgradeRecoveryPlan(string path, string planId)
+        {
+            InstallationPlan plan = ReadForRecovery(path, out bool upgraded);
+            if (plan.PlanId != planId)
+                throw new System.InvalidOperationException("Recovery plan changed before its upgrade.");
+            if (upgraded) WriteAtomic(path, plan);
+        }
     }
 }

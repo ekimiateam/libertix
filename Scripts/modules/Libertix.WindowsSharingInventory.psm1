@@ -12,7 +12,11 @@ function Initialize-LibertixSharingPathReader {
 function Get-LibertixProfileFolderValues {
     param([Parameter(Mandatory = $true)]$UserProfile)
     Initialize-LibertixSharingPathReader
-    $values = [Libertix.Native.WindowsSharingPaths]::ReadProfile($UserProfile.SID, $UserProfile.LocalPath)
+    try {
+        $values = [Libertix.Native.WindowsSharingPaths]::ReadProfile($UserProfile.SID, $UserProfile.LocalPath)
+    } catch {
+        throw "Windows sharing profile '$($UserProfile.LocalPath)' (SID=$($UserProfile.SID), loaded=$($UserProfile.Loaded)): $($_.Exception.Message)"
+    }
     [pscustomobject]@{ Folders = $values[0]; Environment = $values[1] }
 }
 

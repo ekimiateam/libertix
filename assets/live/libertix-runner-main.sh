@@ -27,6 +27,7 @@ SUCCESS_REBOOT_DELAY=5
 XORG_START_TIMEOUT=30
 GUI_READY_TIMEOUT=30
 GUI_CLIENT_ATTEMPTS=5
+DISPLAY_COMMAND_TIMEOUT=5
 TTY_SCREEN_FILE="$LOG_DIR/tty1-screen"
 TTY_SCREEN_LAST="$LOG_DIR/tty1-screen.last"
 # Display :0 can already be owned by the live system on some UEFI boots.
@@ -105,7 +106,8 @@ terminal_full_clear() {
 }
 
 prepare_terminal_ui() {
-    chvt 1 2>/dev/null || true
+    timeout -k 1 "$DISPLAY_COMMAND_TIMEOUT" chvt 1 2>> "$GUI_LOG" || \
+        echo "Could not activate tty1; diagnostics remain available on tty2" >> "$LOG"
     sleep 0.25
     printf '\033[?25l\033[H\033[2J' > /dev/tty1 2>/dev/null || true
     rm -f "$TTY_SCREEN_LAST"
@@ -367,7 +369,22 @@ start_gui() {
     if [ -S "$GUI_SOCKET" ]; then
         sleep 1
         if command -v xsetroot >/dev/null 2>&1; then
-            DISPLAY="$GUI_DISPLAY" XAUTHORITY=/dev/null xsetroot -cursor_name left_ptr >> "$GUI_LOG" 2>&1 || true
+            echo "Checking graphical display responsiveness" >> "$LOG"
+            if ! DISPLAY="$GUI_DISPLAY" XAUTHORITY=/dev/null \
+                timeout -k 1 "$DISPLAY_COMMAND_TIMEOUT" xsetroot -cursor_name left_ptr >> "$GUI_LOG" 2>&1; then
+                echo "Graphical display did not respond; falling back to terminal UI" >> "$LOG"
+                stop_graphical_ui
+                prepare_terminal_ui
+                return 1
+            fi
+        fi
+        if ! DISPLAY="$GUI_DISPLAY" XAUTHORITY=/dev/null \
+            timeout -k 1 "$DISPLAY_COMMAND_TIMEOUT" xrandr --current > "$LOG_DIR/display.log" 2>&1 \
+            || ! grep -Eq ' connected (primary )?[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+' "$LOG_DIR/display.log"; then
+            echo "No active graphical output; falling back to terminal UI" >> "$LOG"
+            stop_graphical_ui
+            prepare_terminal_ui
+            return 1
         fi
         for attempt in $(seq 1 "$GUI_CLIENT_ATTEMPTS"); do
             echo "Starting graphical installer client, attempt $attempt/$GUI_CLIENT_ATTEMPTS" >> "$LOG"
@@ -376,7 +393,12 @@ start_gui() {
             GUI_PID="$!"
             for _ in $(seq 1 "$GUI_READY_TIMEOUT"); do
                 if gui_running; then
-                    chvt "$GUI_VT" 2>/dev/null || true
+                    if ! timeout -k 1 "$DISPLAY_COMMAND_TIMEOUT" chvt "$GUI_VT" >> "$GUI_LOG" 2>&1; then
+                        echo "Graphical console activation failed; falling back to terminal UI" >> "$LOG"
+                        stop_graphical_ui
+                        prepare_terminal_ui
+                        return 1
+                    fi
                     echo "Graphical installer UI ready" >> "$LOG"
                     return 0
                 fi
@@ -465,6 +487,17 @@ copy_logs_to_windows_best_effort() {
         LOG_COPY_STATUS="success"
     else
         LOG_COPY_STATUS="failed"
+    fi
+}
+
+save_early_diagnostics() {
+    {
+        printf '\n===== live startup %s =====\n' "$(date -Is)"
+        printf 'build=%s\nkernel=%s\n' "$(build_id)" "$(uname -r)"
+        printf 'cmdline=%s\n' "$(cat /proc/cmdline)"
+    } >> "$GUI_LOG"
+    if ! timeout -k 2 20 /usr/local/sbin/libertix-copy-logs "$RUN_ID" --early >> "$DEBUG_LOG" 2>&1; then
+        echo "WARNING: early diagnostics could not be saved to the staging partition" >> "$LOG"
     fi
 }
 
@@ -636,11 +669,29 @@ request_graceful_stop() {
     fi
 
     collect_debug
-    copy_logs_to_windows_best_effort
+    if [ -s "$LOG_DIR/windows-partition" ]; then
+        copy_logs_to_windows_best_effort
+    else
+        save_early_diagnostics
+    fi
     stop_graphical_ui
     sync
     exit "$child_rc"
 }
+
+trap 'request_graceful_stop TERM' TERM
+trap 'request_graceful_stop INT' INT
+
+save_early_diagnostics
+if grep -qw 'libertix.diagnostics=1' /proc/cmdline; then
+    prepare_terminal_ui
+    printf '%s\n' \
+        'Libertix diagnostic mode: automatic installation is disabled.' \
+        'Press Ctrl+Alt+F2 for the root diagnostic console.' \
+        "Logs: staging partition /LibertixInstallLogs/Linux/$RUN_ID/early" \
+        'Runtime logs: /run/libertix; kernel messages: dmesg' > /dev/tty1
+    while sleep 60; do :; done
+fi
 
 render_boot_logo
 sleep 1
@@ -648,6 +699,7 @@ sleep 1
 if ! start_gui; then
     render_progress
 fi
+save_early_diagnostics
 
 (
     echo "===== libertix installer started $(date -Is 2>/dev/null || date) ====="
@@ -655,8 +707,6 @@ fi
     exec /libertix-install.sh
 ) >> "$LOG" 2>&1 &
 INSTALLER_PID="$!"
-trap 'request_graceful_stop TERM' TERM
-trap 'request_graceful_stop INT' INT
 
 while kill -0 "$INSTALLER_PID" 2>/dev/null; do
     if switch_to_terminal_ui_if_requested; then
