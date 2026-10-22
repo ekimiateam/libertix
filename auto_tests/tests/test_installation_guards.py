@@ -2258,7 +2258,9 @@ def test_all_download_transports_enforce_bounded_file_sizes() -> None:
     assert "MaximumDistributionIsoBytes = 8GB" in uefi_downloads
     assert "MaximumLiveIsoBytes = 2GB" in uefi_downloads
     assert "MinimumDistributionIsoBytes = 100MB" in uefi_downloads
-    assert uefi_downloads.count("$script:MinimumDistributionIsoBytes") == 3
+    assert uefi_downloads.count("$script:MinimumDistributionIsoBytes") == 4
+    assert "-MinimumBytes $script:MinimumDistributionIsoBytes" in uefi_downloads
+    assert "-MaximumBytes $script:MaximumDistributionIsoBytes" in uefi_downloads
     assert "-MaxBytes $script:MaximumLiveIsoBytes" in uefi_staging
     assert "MaximumFileBytes" in process_module
     assert "Stop-LibertixNativeProcessTree" in process_module
