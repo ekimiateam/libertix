@@ -71,6 +71,12 @@ Describe "Libertix temporary artifact ownership" {
 
 Describe "Libertix distribution ISO reuse" {
     BeforeEach {
+        # TestDrive persists across the It blocks of one Describe, so clear the
+        # previous test's downloads and recovery owners before arranging this one.
+        foreach ($leftover in @("ProgramData", "LibertixInstallRecovery")) {
+            Remove-Item -LiteralPath (Join-Path $TestDrive $leftover) -Recurse -Force `
+                -ErrorAction SilentlyContinue
+        }
         & subst.exe T: $TestDrive
         if ($LASTEXITCODE -ne 0) {
             throw "Could not map the Pester test directory to T:."
@@ -111,6 +117,7 @@ Describe "Libertix distribution ISO reuse" {
 
         & $invokeReuse | Should -BeNullOrEmpty
         Test-Path -LiteralPath $orphan | Should -BeTrue
+        Test-Path -LiteralPath $destination | Should -BeFalse
     }
 
     It "leaves an ISO whose hash does not match in place" {
@@ -125,6 +132,7 @@ Describe "Libertix distribution ISO reuse" {
 
         & $invokeReuse | Should -BeNullOrEmpty
         Test-Path -LiteralPath $orphan | Should -BeTrue
+        Test-Path -LiteralPath $destination | Should -BeFalse
     }
 
     It "skips a plan that still has a UEFI recovery task" {
@@ -134,14 +142,17 @@ Describe "Libertix distribution ISO reuse" {
 
         & $invokeReuse | Should -BeNullOrEmpty
         Test-Path -LiteralPath $orphan | Should -BeTrue
+        Test-Path -LiteralPath $destination | Should -BeFalse
     }
 
     It "respects the BIOS recovery owner and refuses an unreadable one" {
         New-Item -ItemType Directory -Path "T:\LibertixInstallRecovery" -Force | Out-Null
         & $invokeReuse | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $destination | Should -BeFalse
 
         Set-Content -LiteralPath "T:\LibertixInstallRecovery\pending.env" -Value "PLAN_ID=$orphanId"
         & $invokeReuse | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $destination | Should -BeFalse
 
         Set-Content -LiteralPath "T:\LibertixInstallRecovery\pending.env" -Value ("PLAN_ID=" + "c" * 32)
         & $invokeReuse | Should -Be $orphan
