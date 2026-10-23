@@ -58,6 +58,7 @@ from app.services.automation_campaign import (
 from app.services.automation_diagnostics import collect_failure_diagnostics
 from app.services.automation_progress import OperationProgress
 from app.services.automation_types import AutomationOptions
+from app.services.campaign_dispatch import worker_profiles
 from app.services.common import ResultBuilder
 from app.services.reset import ResetService
 from app.services.validation import ValidationService
@@ -188,6 +189,7 @@ def _collect_timeout_diagnostics(
                 for vm, cell in item.get("cells", {}).items():
                     if cell.get("status") != "interrupted":
                         continue
+                    vm = cell.get("worker", vm)
                     child = AutomationRequest(
                         apply=True,
                         vms=[vm],
@@ -485,22 +487,35 @@ def _run_operation(
             if run_workspace is None:
                 raise ValueError("The complete campaign requires an isolated operation workspace")
             selected = ValidationService(configured).select_vms(selectors)
-            if len(selected) != 3 or not all(vm.automation_enabled for vm in selected):
-                raise ValueError("The complete campaign requires exactly three enabled test VMs")
+            if len(set(worker_profiles(selected).values())) != 3 or not all(
+                vm.automation_enabled for vm in selected
+            ):
+                raise ValueError(
+                    "The complete campaign requires exactly three enabled platform profiles"
+                )
             if any(vm.host == configured.build_vm_host for vm in selected):
                 raise ValueError("Independent campaign lanes require a separate build VM")
             prepared_release = _prepare_campaign_release(
                 configured, request.source, run_workspace, on_step
+            )
+            campaign_settings = configured.model_copy(
+                update={
+                    "proxmox_storage_min_free_gib": max(
+                        configured.proxmox_storage_min_free_gib,
+                        len(selected) * configured.proxmox_storage_min_free_per_vm_gib,
+                    ),
+                }
             )
             return run_campaign(
                 request,
                 [vm.name for vm in selected],
                 run_workspace,
                 lambda child, workspace, publish: _run_campaign_vm_attempt(
-                    configured, child, workspace, publish, prepared_release
+                    campaign_settings, child, workspace, publish, prepared_release
                 ),
                 on_step,
                 vm_firmwares={vm.name: vm.firmware for vm in selected},
+                vm_configs=list(selected),
             )
         if not isinstance(request, AutomationRequest):
             raise ValueError("Automation request body is required")

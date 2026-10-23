@@ -217,9 +217,13 @@ curl -fsS -N -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/v1/automation/full/stream
 ```
 
-This endpoint requires exactly three distinct enabled laboratory VMs and a separate build VM.
-Each test VM runs the four scenarios in order, independently of the other VMs. A slow VM does
-not prevent another VM from starting its next scenario. Each scenario restores the
+This endpoint requires three platform profiles and a separate build VM. A profile is the
+configured Windows OS label plus BIOS/UEFI mode. With one VM per profile, each VM runs the four
+scenarios in order, independently of the others. Additional configured clones with the same
+profile share that profile's pending scenarios instead of duplicating its required coverage.
+Their VM IDs must be explicitly allowed, and their snapshots and guest settings must be prepared
+before use. Local-filepool clones must use the same configured snapshot; secondary-disk clones
+must support the boot-order preparation required by their profile. Each scenario restores the
 configured default snapshot, installs Linux on the default Windows volume, and verifies both
 operating systems and cross-boots. After each scenario, it relaunches Libertix, uninstalls Linux
 through the product UI, and verifies the restored Windows state again after an unattended reboot.
@@ -281,8 +285,12 @@ to `true` only when restoring those failed VMs for the remaining scenarios is in
 Set `retry_failed_scenarios=true` to permit one additional technical attempt per VM/scenario.
 A confirmed network outage longer than two minutes can replay the same attempt after recovery
 without consuming that technical retry. Previous errors remain recorded even if the retry passes.
+When clones are available, a VM that exhausts those attempts on a preparation failure is retired
+from the pool; a compatible clone can retry its scenario. Installation or validation failures are
+not transferred this way. If no compatible worker remains, the campaign cannot pass.
 The terminal `SCENARIO` records include per-VM verdicts and a `cells` mapping containing errors,
 individual log paths, attempt numbers, replay generations and previous attempts;
+cell keys identify the profile's representative VM, and `worker` records the physical VM used.
 unexecuted scenarios are marked `not-run`. A persistent `campaign-summary.json` is updated after
 each cell transition. Logs and captures stay together under the campaign workspace's normal retention.
 Use `/api/v1/automation/full` for a JSON result, or append `?format=ndjson` to the streaming endpoint.

@@ -17,6 +17,8 @@ from pathlib import Path
 
 from app.config import Settings
 from app.services.automation_campaign import CampaignScenario, campaign_scenarios
+from app.services.campaign_dispatch import worker_profiles
+from app.services.validation import ValidationService
 from app.stream_events import StreamEventProjector
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -77,6 +79,7 @@ def validate_success(
     payload: dict[str, object],
     scenarios: list[CampaignScenario],
     firmwares: dict[str, str],
+    profiles: dict[str, str] | None = None,
 ) -> None:
     """Reject a server success whose summary does not match the requested scenarios."""
 
@@ -94,7 +97,10 @@ def validate_success(
         raise RuntimeError("Invalid campaign verdict: missing, duplicate, or unexpected scenarios.")
     for scenario, item in zip(scenarios, items, strict=True):
         required = "ok" if scenario.name in expected else "not-run"
-        required_vms = scenario.vms(list(payload["vms"]), firmwares)
+        representatives = (
+            list(dict.fromkeys(profiles.values())) if profiles else list(payload["vms"])
+        )
+        required_vms = scenario.vms(representatives, firmwares)
         cells = item.get("cells", {})
         if (
             not required_vms
@@ -105,6 +111,11 @@ def validate_success(
             or any(
                 not isinstance(cell, dict) or cell.get("status") != required
                 for cell in cells.values()
+            )
+            or (
+                profiles is not None
+                and required == "ok"
+                and any(profiles.get(cell.get("worker", vm)) != vm for vm, cell in cells.items())
             )
         ):
             raise RuntimeError(
@@ -133,17 +144,18 @@ class CampaignProgress:
         self.current: dict[str, str] = {}
         self.active: dict[str, dict[str, object]] = {}
         self.verdict: str | None = None
+        self.profiles = {vm: vm for vm in vm_names}
 
     def observe_step(self, data: dict[str, object]) -> None:
         step = data["step"]
         context = data.get("context", {})
+        campaign_vm = context.get("campaign_vm", context.get("vm"))
         if step == "automation.campaign_retry":
             self.completed = {
                 key
                 for key in self.completed
                 if not (
-                    key[0] == context["scenario"]
-                    and (not context.get("vm") or key[1] == context["vm"])
+                    key[0] == context["scenario"] and (not campaign_vm or key[1] == campaign_vm)
                 )
             }
         if step == "automation.campaign_plan" and not self.scenarios:
@@ -151,8 +163,19 @@ class CampaignProgress:
             self.scenarios = context["scenarios"]
             self.first_scenario_index = context.get("first_scenario_index", 1)
             self.total_scenarios = context.get("total_scenarios", len(self.scenarios))
+            self.profiles = context.get("worker_profiles", self.profiles)
         elif step == "automation.campaign_scenario":
             selected = next(item for item in self.scenarios if item["name"] == context["scenario"])
+            self.completed = {
+                key for key in self.completed if key[:2] != (context["scenario"], campaign_vm)
+            }
+            for previous_vm, active in list(self.active.items()):
+                if (
+                    previous_vm != context.get("vm")
+                    and active is selected
+                    and self.profiles[previous_vm] == campaign_vm
+                ):
+                    del self.active[previous_vm]
             for vm in [context["vm"]] if context.get("vm") else selected["vms"]:
                 self.active[vm] = selected
                 self.current[vm] = "preparing"
@@ -166,13 +189,15 @@ class CampaignProgress:
         checkpoint = step
         if step.startswith("automation.test.") and "test" in context:
             checkpoint = "automation.test." + context["test"]
-        eligible = self.active.get(vm, {}).get("vm_milestones", {}).get(vm, self.milestones)
+        eligible = (
+            self.active.get(vm, {}).get("vm_milestones", {}).get(campaign_vm, self.milestones)
+        )
         finished_ok = step != "automation.vm_finished" or context.get("vm_status") == "ok"
         if checkpoint in eligible and data["status"] == "ok" and finished_ok:
-            self.completed.add((context["scenario"], vm, checkpoint))
+            self.completed.add((context["scenario"], campaign_vm, checkpoint))
 
     def _vm_milestones(self, item: dict[str, object], vm: str) -> dict[str, str]:
-        return item.get("vm_milestones", {}).get(vm, self.milestones)
+        return item.get("vm_milestones", {}).get(self.profiles.get(vm, vm), self.milestones)
 
     def _scenario_line(self, vm: str, selected: dict[str, object]) -> str:
         snapshot = (
@@ -184,7 +209,8 @@ class CampaignProgress:
             configured = next(item for item in self.settings.vms if item.name == vm)
             snapshot = configured.local_filepool_snapshot or snapshot
         expectation = EXPECTATION_LABELS.get(
-            selected.get("expectations", {}).get(vm), "installation and uninstall"
+            selected.get("expectations", {}).get(self.profiles.get(vm, vm)),
+            "installation and uninstall",
         )
         position = self.scenarios.index(selected) + self.first_scenario_index
         return (
@@ -206,6 +232,16 @@ class CampaignProgress:
             )
             count = sum(key[1] == vm for key in self.completed)
             selected = self.active.get(vm)
+            if len(set(self.profiles.values())) < len(self.profiles):
+                maximum = len(self._vm_milestones(selected, vm)) if selected else 0
+                count = (
+                    sum(
+                        key[0] == selected["name"] and key[1] == self.profiles[vm]
+                        for key in self.completed
+                    )
+                    if selected
+                    else 0
+                )
             if selected:
                 lines.append(self._scenario_line(vm, selected))
             label = self.labels.get(vm, vm)
@@ -233,7 +269,10 @@ def stream_campaign(
         for raw in response:
             event = json.loads(raw)
             if event.get("event") == "result":
-                validate_success(event["data"], payload, scenarios, firmwares)
+                selected = ValidationService(progress.settings).select_vms(payload["vms"])
+                validate_success(
+                    event["data"], payload, scenarios, firmwares, worker_profiles(selected)
+                )
             print(StreamEventProjector.render(event, stream_format="compact"), end="", flush=True)
             if event["event"] == "result":
                 terminal = event["data"]

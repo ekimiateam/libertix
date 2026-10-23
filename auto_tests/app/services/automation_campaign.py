@@ -9,7 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.config import VMConfig
 from app.models import AutomationCampaignRequest, AutomationRequest, OperationResult, StepResult
+from app.services.campaign_dispatch import CampaignDispatcher, preparation_failed, worker_profiles
 from app.storage_fixtures import StorageFixtureRequest
 from app.stream_events import StreamEventProjector
 
@@ -466,9 +468,18 @@ def run_campaign(
     ],
     on_step: Callable[[StepResult], None] | None = None,
     vm_firmwares: dict[str, str] | None = None,
+    vm_configs: list[VMConfig] | None = None,
 ) -> OperationResult:
-    if len(vm_names) != 3 or len(set(vm_names)) != 3:
-        raise ValueError("The complete campaign requires exactly three distinct enabled test VMs")
+    profiles = (
+        worker_profiles(vm_configs) if vm_configs is not None else {name: name for name in vm_names}
+    )
+    representatives = list(dict.fromkeys(profiles.values()))
+    if (
+        len(representatives) != 3
+        or len(set(vm_names)) != len(vm_names)
+        or set(profiles) != set(vm_names)
+    ):
+        raise ValueError("The complete campaign requires exactly three distinct platform profiles")
 
     if (
         request.include_storage_scenarios
@@ -489,7 +500,25 @@ def run_campaign(
         raise ValueError("Local filepool scenarios require a UEFI VM")
 
     scenarios = requested_campaign_scenarios(request)
-    scenario_vms = [scenario.vms(vm_names, firmwares) for scenario in scenarios]
+    scenario_vms = [scenario.vms(representatives, firmwares) for scenario in scenarios]
+    configurations = {vm.name: vm for vm in vm_configs or []}
+
+    def compatible_workers(index: int, representative: str) -> set[str]:
+        peers = {vm for vm in vm_names if profiles[vm] == representative}
+        if not configurations:
+            return peers
+        baseline = configurations[representative]
+        scenario = scenarios[index]
+        if scenario.layout == "local-filepool":
+            peers = {
+                vm
+                for vm in peers
+                if configurations[vm].local_filepool_snapshot == baseline.local_filepool_snapshot
+            }
+        if scenario.snapshot_mode == "secondary-disk" and baseline.secondary_disk_boot_order:
+            peers = {vm for vm in peers if configurations[vm].secondary_disk_boot_order}
+        return peers
+
     summaries = [
         {
             "scenario": scenario.name,
@@ -558,6 +587,7 @@ def run_campaign(
             "first_scenario_index": start_index + 1,
             "total_scenarios": len(scenarios),
             "independent_vms": True,
+            "worker_profiles": profiles,
             "scenarios": [
                 {
                     "name": scenario.name,
@@ -586,6 +616,14 @@ def run_campaign(
     if on_step:
         on_step(plan)
 
+    dispatcher = CampaignDispatcher(
+        {
+            (index, vm): compatible_workers(index, vm)
+            for index in range(start_index, len(scenarios))
+            for vm in scenario_vms[index]
+        }
+    )
+
     def save(index: int) -> None:
         summary = summaries[index]
         cells = summary["cells"]
@@ -599,14 +637,20 @@ def run_campaign(
         _persist_summary(workspace, summaries)
 
     def lane(vm: str) -> None:
-        for index in range(start_index, len(scenarios)):
-            if vm not in scenario_vms[index]:
-                continue
+        try:
+            worker_lane(vm)
+        finally:
+            dispatcher.retire(vm)
+
+    def worker_lane(vm: str) -> None:
+        while (job := dispatcher.claim(vm)) is not None:
+            index, campaign_vm = job
             scenario = scenarios[index]
             scenario_name = scenario.name
             attempt = request.start_scenario_attempt if index == start_index else 1
             generation = 0
-            history = []
+            with lock:
+                history = list(summaries[index]["cells"][campaign_vm]["previous_attempts"])
 
             while True:
                 generation += 1
@@ -623,15 +667,17 @@ def run_campaign(
                     "log": str(projector.log_path),
                     "captures": str(cell_workspace / "captures"),
                     "previous_attempts": history,
+                    "worker": vm,
                 }
                 with lock:
-                    summaries[index]["cells"][vm] = cell
+                    summaries[index]["cells"][campaign_vm] = cell
                     save(index)
 
                 def publish(
                     step: StepResult,
                     *,
                     scenario_name=scenario_name,
+                    campaign_vm=campaign_vm,
                     attempt=attempt,
                     generation=generation,
                     projector=projector,
@@ -642,6 +688,7 @@ def run_campaign(
                                 **step.context,
                                 "scenario": scenario_name,
                                 "vm": vm,
+                                "campaign_vm": campaign_vm,
                                 "scenario_attempt": attempt,
                                 "scenario_generation": generation,
                             }
@@ -722,7 +769,40 @@ def run_campaign(
                 ]
                 attempt = next_attempt
 
-            if source_changed or (outcome.status != "ok" and not request.continue_after_failure):
+            quarantine = (
+                len(vm_names) > len(representatives)
+                and outcome.status != "ok"
+                and preparation_failed(outcome)
+            )
+            with lock:
+                reassigned = dispatcher.finish(vm, quarantine=quarantine)
+                if reassigned:
+                    cell["previous_attempts"] = [
+                        *history,
+                        {key: value for key, value in cell.items() if key != "previous_attempts"},
+                    ]
+                    cell["status"] = "not-run"
+                    cell["worker"] = None
+                    save(index)
+            if quarantine:
+                publish(
+                    StepResult(
+                        step="automation.campaign_worker_quarantined",
+                        status="error",
+                        message="VM preparation retries exhausted; "
+                        + (
+                            "another compatible clone will retry the scenario"
+                            if reassigned
+                            else "no compatible clone remains for this scenario"
+                        ),
+                        context={"previous_log": str(projector.log_path)},
+                    )
+                )
+            if (
+                quarantine
+                or source_changed
+                or (outcome.status != "ok" and not request.continue_after_failure)
+            ):
                 break
 
     # Each callback owns one isolated VM worker. The lock protects only the journal, never a VM run.
