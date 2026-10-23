@@ -217,21 +217,82 @@ curl -fsS -N -H 'Content-Type: application/json' \
   http://127.0.0.1:8000/api/v1/automation/full/stream
 ```
 
-This endpoint requires exactly three distinct enabled laboratory VMs. It runs four scenarios
-sequentially, with all three VMs in parallel within each scenario. Each scenario restores the
+This endpoint requires three platform profiles and a separate build VM. A profile is the
+configured Windows OS label plus BIOS/UEFI mode. With one VM per profile, each VM runs the four
+scenarios in order, independently of the others. Additional configured clones with the same
+profile share that profile's pending scenarios instead of duplicating its required coverage.
+Their VM IDs must be explicitly allowed, and their snapshots and guest settings must be prepared
+before use. Local-filepool clones must use the same configured snapshot; secondary-disk clones
+must support the boot-order preparation required by their profile. Each scenario restores the
 configured default snapshot, installs Linux on the default Windows volume, and verifies both
 operating systems and cross-boots. After each scenario, it relaunches Libertix, uninstalls Linux
 through the product UI, and verifies the restored Windows state again after an unattended reboot.
 This covers both distributions and both initial boot orders on all three VMs.
-It does not inject faults or replace the separate storage and
-rollback campaigns. Preference migration can be enabled with `migrate_windows_preferences`.
+Preference migration can be enabled with `migrate_windows_preferences`.
+With `include_storage_scenarios=true`, the existing fourteen-scenario matrix covers 42 VM/scenario
+cells: 36 installation/uninstallation workflows and six BIOS refusal checks. The latter keep the
+secondary disk connected, request the full MBR Windows destination, require the exact product
+refusal before installation, and compare disk layout, BCD configuration, recovery state and data
+witnesses before/after. A different error or an unexpected installation is not a successful refusal.
 
-The campaign holds the existing operation lock throughout. It stops after a failed scenario by
-default so the affected VM state remains available for diagnosis. Set `continue_after_failure`
+To run only the ten storage scenarios (OEM FAT32/NTFS/Recovery and secondary-disk
+installations), use `bash RUN/run-test-auto.sh --clean3-only`. This requires the
+`SECONDARY_DISK_RESET_SNAPSHOT` value configured for this mode in `RUN/campaign.toml` and
+excludes nominal clean2, local-filepool and BootGuardian scenarios. It cannot be combined with `--clean2-only`. The API equivalent
+sets `include_nominal_scenarios=false` and `include_storage_scenarios=true`, leaving
+the other scenario groups disabled. `--step` still starts at the selected scenario
+and runs the remaining scenarios within the selected group.
+
+After the existing Windows Update stop and pending-restart checks, and before file
+cleanup or installation, `DISM ScanHealth` verifies the restored guest's component
+store without repairing it. An unhealthy baseline blocks installation;
+the preparation command has a 15-minute timeout. Its dedicated DISM log is kept in
+`C:\ProgramData\Libertix\Automation`, with the initial state, start time and elapsed
+time recorded in the campaign log. Failure diagnostics also preserve CBS/DISM logs
+(including rotated CBS CAB archives), servicing package and task state, and recent
+component-store hash errors. No `RestoreHealth`, component cleanup or automatic
+repair is performed by these diagnostics.
+Preparation sets the controller's time on the restored guest after the Windows Update
+service is stopped and disabled, then records `CheckHealth` checkpoints after temporary-file
+cleanup and final preparation. A newly flagged unhealthy state stops
+before installation, with the phase recorded in a separate preparation health log.
+Temporary-file cleanup is skipped and its reason recorded while TrustedInstaller
+or BITS is active; stopping Windows Update alone does not end an existing servicing
+transaction.
+Failure collection searches the complete recent CBS text logs, records service
+startup-mode changes, and reads Linux failed-unit properties and bounded system
+journals with administrator access. Diagnostic failures remain marked incomplete;
+they never replace the original test failure.
+Windows preparation/product logs take priority over large servicing archives.
+The manifest records partial transfer sizes and SFTP deadline
+details when collection cannot finish within its bounded transfer time.
+
+With `include_boot_guardian_scenarios=true`, six additional scenarios exercise `boot-order`,
+`preferred-path` and `preferred-path-rollback` for Mint and Zorin, Windows-first, on UEFI VMs only.
+They verify boot repair, EFI replacement consent (including an unanswered reboot), or refusal with
+rollback. These recovery scenarios use their own evidence contracts instead of the nominal uninstall
+workflow. `RUN/run-test-auto.sh` enables both storage and BootGuardian scenarios: with one BIOS and
+two UEFI VMs, this runs 54 VM/scenario cells. BIOS VMs finish their own lane without waiting for UEFI.
+The launcher reads its API address, VM names, test account and the snapshots required by its
+restricted modes from the versioned `RUN/campaign.toml`; addresses and credentials stay in `.env`.
+
+The campaign holds the existing operation lock throughout and builds one standalone executable,
+whose hash is checked on every deployment. Each VM has its own isolated controller and retry
+workspace. An interrupted controller is stopped and its diagnostics collected before that VM is
+restored again. The campaign stops the affected VM's lane after a failed scenario by default;
+other VM lanes continue. Set `continue_after_failure`
 to `true` only when restoring those failed VMs for the remaining scenarios is intended.
-The terminal `SCENARIO` records include per-VM verdicts, errors and individual log paths;
+Set `retry_failed_scenarios=true` to permit one additional technical attempt per VM/scenario.
+A confirmed network outage longer than two minutes can replay the same attempt after recovery
+without consuming that technical retry. Previous errors remain recorded even if the retry passes.
+When clones are available, a VM that exhausts those attempts on a preparation failure is retired
+from the pool; a compatible clone can retry its scenario. Installation or validation failures are
+not transferred this way. If no compatible worker remains, the campaign cannot pass.
+The terminal `SCENARIO` records include per-VM verdicts and a `cells` mapping containing errors,
+individual log paths, attempt numbers, replay generations and previous attempts;
+cell keys identify the profile's representative VM, and `worker` records the physical VM used.
 unexecuted scenarios are marked `not-run`. A persistent `campaign-summary.json` is updated after
-each scenario. Logs and captures stay together under the campaign workspace's normal retention.
+each cell transition. Logs and captures stay together under the campaign workspace's normal retention.
 Use `/api/v1/automation/full` for a JSON result, or append `?format=ndjson` to the streaming endpoint.
 The existing operation-kill endpoint also stops the full campaign without launching another scenario.
 
@@ -354,10 +415,16 @@ Run the local Python and cross-runtime contract checks:
 
 ```bash
 cd auto_tests
+python3 -m tools.deployment_audit
 uv run --frozen python -m ruff check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
 uv run --frozen python -m ruff format --check app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
 uv run --frozen python -m pytest --cov=app --cov-report=term-missing --cov-fail-under=70
 ```
+
+`RUN/run-test-auto.sh` runs the deployment audit before dependency and test checks.
+Missing deployed files, unprotected privileged deployment folders, or source structures the audit
+cannot resolve stop the launcher before any campaign request. This static check does not replace
+runtime permission checks or installation tests.
 
 After changing `catalog.json`, sign and synchronize its two versioned copies and detached
 signatures with the interactive tool:

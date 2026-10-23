@@ -105,7 +105,9 @@ echo CONTEXT_LOADED_WITHOUT_LABEL
 """
 
 
-def run_early_live(tmp_path: Path, firmware: str, command: str) -> subprocess.CompletedProcess[str]:
+def run_early_live(
+    tmp_path: Path, firmware: str, command: str, *, timeout: int = 30
+) -> subprocess.CompletedProcess[str]:
     source = tmp_path / "source"
     source.mkdir()
     (source / "installation-plan.json").write_text(
@@ -149,7 +151,7 @@ def run_early_live(tmp_path: Path, firmware: str, command: str) -> subprocess.Co
         capture_output=True,
         text=True,
         check=False,
-        timeout=30,
+        timeout=timeout,
     )
 
 
@@ -170,7 +172,10 @@ def test_prerequisites_find_staging_after_runner_context_load(
         ),
     }[scenario]
     result = run_early_live(
-        tmp_path, firmware, "\n" + setup + "\nwait_for_prereqs\necho PREREQUISITES_READY\n"
+        tmp_path,
+        firmware,
+        "\n" + setup + "\nwait_for_prereqs\necho PREREQUISITES_READY\n",
+        timeout=90 if scenario == "no-disk" else 30,
     )
 
     assert "CONTEXT_LOADED_WITHOUT_LABEL" in result.stdout, result.stderr
@@ -190,6 +195,18 @@ def test_early_rollback_completes_real_state_after_disk_resolution(
 ) -> None:
     command = r"""
 REQUIRED_SETTLES="$5"
+# The host temporary directory has no Windows ACL metadata.
+python3() {
+    if [ "$1" != /usr/local/lib/libertix/libertix-ntfs-permissions.py ]; then
+        "$TEST_PYTHON" "$@"
+        return $?
+    fi
+    [ "$#" -eq 2 ] && [ -f "$2" ] || return 1
+    [[ "$2" == "$LOG_DIR/windows/ProgramData/Libertix/Recovery/.installation-state."*.tmp ]] ||
+        return 1
+    cmp "$INSTALLATION_STATE_PATH" "$2" || return 1
+    printf '%s\n' "$2" >> "$LOG_DIR/permissions-checked"
+}
 # Fail before the real mirroring implementation could mount a host filesystem.
 # Successful mirror calls retain the actual atomic state publication in tmp_path.
 mount() {
@@ -222,6 +239,7 @@ rollback_windows_layout_best_effort
 
     assert "CONTEXT_LOADED_WITHOUT_LABEL" in result.stdout, result.stderr
     assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "permissions-checked").is_file()
     assert int((tmp_path / "settles").read_text()) == required_settles
     runtime_state = json.loads((tmp_path / "installation-state.json").read_text())
     mirror = tmp_path / "windows/ProgramData/Libertix/Recovery/installation-state.json"

@@ -1,0 +1,12 @@
+services:
+  install-party:
+    build:
+      context: ../..
+      dockerfile: install-party-kit/Docker/Dockerfile
+    network_mode: host
+    volumes:
+      - filepool:/data
+    restart: unless-stopped
+
+volumes:
+  filepool:

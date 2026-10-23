@@ -10,6 +10,22 @@
       Loaded="AccountCreation_Loaded"
       PreviewKeyDown="AccountCreation_PreviewKeyDown">
 
+    <Page.Resources>
+        <!-- An empty message must not reserve height: the form only fits the fixed
+             window when space is spent on errors that are actually shown. The fixed
+             gap between fields belongs to the labels so it survives a hidden message. -->
+        <Style x:Key="FieldErrorText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource ErrorColor}"/>
+            <Setter Property="Margin" Value="0,5,0,0"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Style.Triggers>
+                <Trigger Property="Text" Value="">
+                    <Setter Property="Visibility" Value="Collapsed"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Page.Resources>
+
     <Grid Background="{DynamicResource PrimaryBackground}">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -25,8 +41,10 @@
                FontWeight="Light"
                Foreground="{DynamicResource TextPrimary}"/>
 
-        <StackPanel Grid.Row="1"
-                    Width="400"
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Width="400"
                     VerticalAlignment="Center">
 
             <Label Content="{DynamicResource Username}"
@@ -60,14 +78,12 @@
                 </TextBox.Style>
             </TextBox>
             <TextBlock x:Name="UsernameError"
-                       Foreground="{DynamicResource ErrorColor}"
-                       Margin="0,5,0,15"
-                       TextWrapping="Wrap"/>
+                       Style="{StaticResource FieldErrorText}"/>
 
             <Label Content="{DynamicResource Password}"
                    Foreground="{DynamicResource TextPrimary}"
                    FontSize="16"
-                   Margin="0,0,0,5"/>
+                   Margin="0,15,0,5"/>
             <PasswordBox x:Name="PasswordBox"
                          MaxLength="128"
                          TabIndex="1"
@@ -95,14 +111,12 @@
                 </PasswordBox.Style>
             </PasswordBox>
             <TextBlock x:Name="PasswordError"
-                       Foreground="{DynamicResource ErrorColor}"
-                       Margin="0,5,0,15"
-                       TextWrapping="Wrap"/>
+                       Style="{StaticResource FieldErrorText}"/>
 
             <Label Content="{DynamicResource ConfirmPassword}"
                    Foreground="{DynamicResource TextPrimary}"
                    FontSize="16"
-                   Margin="0,0,0,5"/>
+                   Margin="0,15,0,5"/>
             <PasswordBox x:Name="ConfirmPasswordBox"
                          MaxLength="128"
                          TabIndex="2"
@@ -130,14 +144,12 @@
                 </PasswordBox.Style>
             </PasswordBox>
             <TextBlock x:Name="ConfirmPasswordError"
-                       Foreground="{DynamicResource ErrorColor}"
-                       Margin="0,5,0,15"
-                       TextWrapping="Wrap"/>
+                       Style="{StaticResource FieldErrorText}"/>
 
             <Label Content="{DynamicResource ComputerName}"
                    Foreground="{DynamicResource TextPrimary}"
                    FontSize="16"
-                   Margin="0,0,0,5"/>
+                   Margin="0,15,0,5"/>
             <TextBox x:Name="HostnameBox"
                      MaxLength="63"
                      TabIndex="3"
@@ -165,10 +177,9 @@
                 </TextBox.Style>
             </TextBox>
             <TextBlock x:Name="HostnameError"
-                       Foreground="{DynamicResource ErrorColor}"
-                       Margin="0,5,0,15"
-                       TextWrapping="Wrap"/>
+                       Style="{StaticResource FieldErrorText}"/>
         </StackPanel>
+        </ScrollViewer>
 
         <Grid Grid.Row="2" Margin="20">
             <Grid.ColumnDefinitions>

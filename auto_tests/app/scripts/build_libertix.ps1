@@ -150,7 +150,10 @@ function Invoke-PowerShellQualityChecks {
     $configuration.Run.PassThru = $true
     $configuration.Output.Verbosity = "Normal"
     $pesterResult = Invoke-Pester -Configuration $configuration
-    if ($pesterResult.FailedCount -ne 0 -or $pesterResult.Result -ne "Passed") {
+    if ($pesterResult.Result -ne "Passed" -or $pesterResult.TotalCount -le 0 -or
+        $pesterResult.PassedCount -ne $pesterResult.TotalCount -or
+        $pesterResult.SkippedCount -ne 0 -or $pesterResult.NotRunCount -ne 0 -or
+        $pesterResult.InconclusiveCount -ne 0) {
         $failureSummaries = @()
         foreach ($failedTest in @($pesterResult.Tests | Where-Object Result -eq "Failed")) {
             $failureMessage = if (@($failedTest.ErrorRecord).Count -gt 0) {
@@ -178,6 +181,8 @@ function Invoke-PowerShellQualityChecks {
         throw (
             "Pester failed: result=$($pesterResult.Result), " +
             "failed=$($pesterResult.FailedCount), total=$($pesterResult.TotalCount). " +
+            "skipped=$($pesterResult.SkippedCount), notRun=$($pesterResult.NotRunCount), " +
+            "inconclusive=$($pesterResult.InconclusiveCount). " +
             "Failures: $($failureSummaries -join ' || ')"
         )
     }
@@ -441,16 +446,21 @@ try {
         throw "MSTest adapter was not found after NuGet restore"
     }
 
+    $testResultsDirectory = Join-Path $temp "test-results"
     Invoke-Native `
         -FilePath $testRunner `
         -Arguments @(
             $testAssembly,
             "/TestAdapterPath:$adapterPath",
             "/Platform:x64",
-            "/Logger:console;verbosity=minimal"
+            "/Logger:console;verbosity=minimal",
+            "/Logger:trx;LogFileName=contracts.trx",
+            "/ResultsDirectory:$testResultsDirectory"
         ) `
         -FailureMessage "Libertix C# tests failed" |
         Out-Null
+    & (Join-Path $srcLocal "auto_tests\app\scripts\assert_vstest_results.ps1") `
+        -TestResultPath (Join-Path $testResultsDirectory "contracts.trx")
 
     $exePath = Join-Path $srcLocal "Standalone\bin\Release\Libertix.exe"
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {

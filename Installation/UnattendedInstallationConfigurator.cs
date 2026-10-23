@@ -66,6 +66,13 @@ namespace Libertix.Installation
         {
             if (mode == "windows")
             {
+                if (!state.Compatibility.WindowsPartitionSlotAvailable)
+                    throw new CompatibilityPreflightException(
+                        "COMPAT_E_MBR_PRIMARY_LIMIT",
+                        string.Format(System.Globalization.CultureInfo.CurrentCulture,
+                            Localization.GetString("ResizeDiskWindowsMbrUnavailable"),
+                            state.Compatibility.InstallationTargets.Single(target => target.IsWindows).Drive),
+                        "The requested Windows target has no free primary partition slot.");
                 state.SelectedInstallationTarget = null;
                 return;
             }

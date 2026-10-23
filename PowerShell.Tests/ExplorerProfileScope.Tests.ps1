@@ -45,7 +45,12 @@ Describe "Explorer shortcuts use the task user's profile" {
         Mock New-Object { $script:fakeExplorer } -ParameterFilter { $ComObject -eq 'Shell.Application' }
         Mock New-Item {}
         Mock Test-Path { $true }
-        Mock Get-Item { [pscustomobject]@{ Attributes = [IO.FileAttributes]::ReparsePoint } }
+        $script:junction = [pscustomobject]@{
+            Attributes = [IO.FileAttributes]::ReparsePoint
+            LinkType = 'Junction'
+            Target = @('L:\home\test')
+        }
+        Mock Get-Item { $script:junction }
         $script:config = [pscustomobject]@{ LinuxUsername = 'test'; ShortcutDescription = 'Linux read-only' }
     }
 
@@ -66,5 +71,74 @@ Describe "Explorer shortcuts use the task user's profile" {
         { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
             Should -Throw '*missing or ambiguous*'
         @($script:shortcuts.Keys).Count | Should -Be 0
+    }
+
+    It "rejects a stale junction without replacing the existing path" {
+        $script:junction.Target = @('M:\home\test')
+        { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
+            Should -Throw '*targets another location*'
+        Should -Invoke New-Item -Times 0 -ParameterFilter { $ItemType -eq 'Junction' }
+        $script:junction.Target[0] | Should -Be 'M:\home\test'
+    }
+
+    It "does not treat another reparse-point type as the owned junction" {
+        $script:junction.LinkType = 'SymbolicLink'
+        { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
+            Should -Throw '*targets another location*'
+    }
+
+    It "rejects ambiguous junction targets" {
+        $script:junction.Target = @('L:\home\test', 'M:\home\test')
+        { Install-ExplorerShortcuts -Config $script:config -LinuxHome 'L:\home\test' -CurrentUserOnly } |
+            Should -Throw '*targets another location*'
+    }
+}
+
+Describe "Windows sharing log permissions" {
+    BeforeAll {
+        $tokens = $null; $errors = $null
+        $path = Join-Path $PSScriptRoot "../Scripts/libertix-configure-windows-share.ps1"
+        $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+        $function = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Write-ShareLog"
+        }, $true)
+        . ([scriptblock]::Create($function.Extent.Text))
+    }
+
+    BeforeEach {
+        $script:originalLocalAppData = $env:LOCALAPPDATA
+        $script:originalSystemDrive = $env:SystemDrive
+        $env:LOCALAPPDATA = Join-Path $TestDrive "user"
+        $env:SystemDrive = Join-Path $TestDrive "system"
+        $script:ConfigPath = Join-Path $TestDrive "payload\config.json"
+        $script:logElevated = $false
+        $principal = [pscustomobject]@{}
+        $principal | Add-Member ScriptMethod IsInRole { return $script:logElevated }
+        Mock New-Object { $principal } -ParameterFilter {
+            $TypeName -eq 'Security.Principal.WindowsPrincipal'
+        }
+    }
+
+    AfterEach {
+        $env:LOCALAPPDATA = $script:originalLocalAppData
+        $env:SystemDrive = $script:originalSystemDrive
+    }
+
+    It "keeps standard-user logs outside the privileged payload" {
+        Write-ShareLog 'user pinning'
+        Get-Content (Join-Path $env:LOCALAPPDATA "Libertix\Logs\windows-share.log") |
+            Should -Match 'user pinning'
+        Test-Path (Split-Path -Parent $script:ConfigPath) | Should -BeFalse
+        Test-Path $env:SystemDrive | Should -BeFalse
+    }
+
+    It "preserves both administrative logs" {
+        $script:logElevated = $true
+        Write-ShareLog 'system mount'
+        Get-Content (Join-Path $TestDrive "payload\windows-share.log") | Should -Match 'system mount'
+        Get-Content (Join-Path $env:SystemDrive "LibertixInstallLogs\Windows\windows-share.log") |
+            Should -Match 'system mount'
     }
 }

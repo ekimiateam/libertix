@@ -149,6 +149,9 @@ jobs:
             printf 'This is a recommendation, not a gate: see AI_POLICY.md.\n'
           fi
 
+      - name: Audit deployed scripts and their protection
+        run: python3 auto_tests/tools/deployment_audit.py
+
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -327,9 +330,16 @@ jobs:
             -Scope CurrentUser -Force -Repository PSGallery
           $configuration = New-PesterConfiguration
           $configuration.Run.Path = 'PowerShell.Tests'
-          $configuration.Run.Exit = $true
+          $configuration.Run.Exit = $false
+          $configuration.Run.PassThru = $true
           $configuration.Output.Verbosity = 'Normal'
-          Invoke-Pester -Configuration $configuration
+          $result = Invoke-Pester -Configuration $configuration
+          if ($result.Result -ne 'Passed' -or $result.TotalCount -le 0 -or
+              $result.PassedCount -ne $result.TotalCount -or
+              $result.SkippedCount -ne 0 -or $result.NotRunCount -ne 0 -or
+              $result.InconclusiveCount -ne 0) {
+            throw "Incomplete or failed Pester tests: passed=$($result.PassedCount), total=$($result.TotalCount), skipped=$($result.SkippedCount), notRun=$($result.NotRunCount), inconclusive=$($result.InconclusiveCount)."
+          }
 
       - name: Stamp source revision in the executable
         shell: pwsh
@@ -387,12 +397,13 @@ jobs:
 
       - name: Run C# contract tests
         shell: pwsh
-        run: >-
-          dotnet test Libertix.Tests\Libertix.Tests.csproj
-          --configuration Release
-          --no-build
-          --no-restore
-          --verbosity minimal
+        run: |
+          dotnet test Libertix.Tests\Libertix.Tests.csproj `
+            --configuration Release --no-build --no-restore --verbosity minimal `
+            --logger 'trx;LogFileName=contracts.trx' --results-directory "$env:RUNNER_TEMP/contract-tests"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./auto_tests/app/scripts/assert_vstest_results.ps1 `
+            -TestResultPath "$env:RUNNER_TEMP/contract-tests/contracts.trx"
 
       - name: Verify WPF output
         shell: pwsh
@@ -433,11 +444,42 @@ jobs:
           retention-days: 14
           compression-level: 9
 
+  install-party:
+    name: Install-party tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run install-party tests
+        shell: pwsh
+        run: |
+          dotnet test install-party-kit/Tests/Libertix.InstallParty.Tests.csproj `
+            --configuration Release --verbosity minimal `
+            --logger 'trx;LogFileName=install-party.trx' --results-directory "$env:RUNNER_TEMP/install-party-tests"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./auto_tests/app/scripts/assert_vstest_results.ps1 `
+            -TestResultPath "$env:RUNNER_TEMP/install-party-tests/install-party.trx"
+
   iso:
     name: Build and verify BIOS and UEFI mini-ISO
     needs:
       - quality
       - wpf
+      - install-party
     # The ISO builder requires a privileged Docker container. Do not execute
     # untrusted pull-request code with that privilege.
     if: >-

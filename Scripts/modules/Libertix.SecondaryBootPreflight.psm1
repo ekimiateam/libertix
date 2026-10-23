@@ -1,7 +1,7 @@
 Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'Libertix.Process.psm1') -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot 'Libertix.Firmware.psm1') -ErrorAction Stop
-Import-Module (Join-Path $PSScriptRoot 'Libertix.FirmwareRead.psm1') -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Libertix.FirmwareVariables.psm1') -ErrorAction Stop
 
 function Test-LibertixWindowsBootOptionPartition {
     param(

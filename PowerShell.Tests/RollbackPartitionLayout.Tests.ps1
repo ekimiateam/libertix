@@ -3,12 +3,40 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
     if (@($errors).Count) { throw $errors[0] }
-    foreach ($name in @('Test-RollbackPartitionLayout', 'Test-RollbackStorageLayout')) {
+    foreach ($name in @('Test-RollbackPartitionLayout', 'Test-RollbackStorageLayout', 'Test-ProductStorageBaseline')) {
     $function = $ast.Find({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -eq $name
     }, $true)
     . ([scriptblock]::Create($function.Extent.Text))
+    }
+}
+
+Describe 'Independent comparison of the product inventory with the pre-install test baseline' {
+    BeforeEach {
+        $expected = @([pscustomobject]@{
+            Number = 0; UniqueId = 'disk'; Size = 80GB; PartitionStyle = 'GPT'; LogicalSectorSize = 512
+            Guid = '12345678-1234-1234-1234-123456789000'; Signature = ''
+            Partitions = @([pscustomobject]@{ Offset = 1MB; Size = 60GB; GptType = 'basic'; MbrType = 0 })
+        })
+        $saved = [pscustomobject]@{
+            schemaVersion = 1; planId = 'this-installation'
+            disks = @([pscustomobject]@{
+                number = 0; uniqueId = 'disk'; sizeBytes = 80GB; partitionStyle = 'GPT'
+                logicalSectorSizeBytes = 512; guid = $expected[0].Guid; signature = 0; inventoryError = $null
+                partitions = @([pscustomobject]@{ offsetBytes = 1MB; sizeBytes = 60GB; gptType = 'basic'; mbrType = 0 })
+            })
+        }
+    }
+    It 'accepts the original GPT layout without confusing its null MBR signature' {
+        Test-ProductStorageBaseline -Baseline $saved -Expected $expected -PlanId 'this-installation' | Should -BeTrue
+    }
+    It 'rejects an inventory captured after shrinking Windows' {
+        $saved.disks[0].partitions[0].sizeBytes = 40GB
+        Test-ProductStorageBaseline -Baseline $saved -Expected $expected -PlanId 'this-installation' | Should -BeFalse
+    }
+    It 'rejects evidence from a different installation' {
+        Test-ProductStorageBaseline -Baseline $saved -Expected $expected -PlanId 'different-installation' | Should -BeFalse
     }
 }
 

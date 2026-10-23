@@ -41,6 +41,25 @@ BootGuardianFault = Literal[
     "preferred-path",
     "preferred-path-rollback",
 ]
+BIOS_BOOT_GUARDIAN_FAULTS = frozenset(
+    {"bios-rollback", "bios-controller-disconnect", "bios-postinstall-rollback"}
+)
+# The live installer is cancelled before Linux boots; the monitor must observe a rollback.
+CANCELLED_INSTALLATION_FAULTS = frozenset({"bios-rollback", "bios-controller-disconnect"})
+BOOTNEXT_FAULTS = frozenset({"bootnext-fallback", "bootnext-rollback"})
+PREFERRED_PATH_FAULTS = frozenset({"preferred-path", "preferred-path-rollback"})
+BOOT_GUARDIAN_REPAIR_FAULTS = frozenset({"boot-order", "preferred-path"})
+# Scenarios that must end with Windows restored exactly as captured before installation.
+ROLLBACK_FAULTS = frozenset(
+    {
+        "bios-rollback",
+        "bios-controller-disconnect",
+        "bios-postinstall-rollback",
+        "uefi-postinstall-rollback",
+        "bootnext-rollback",
+        "preferred-path-rollback",
+    }
+)
 
 
 class StepResult(BaseModel):
@@ -85,12 +104,7 @@ class ValidationRequest(BaseModel):
 
 
 class AutomationCampaignRequest(ValidationRequest):
-    """A campaign run: the code-defined scenario matrix, expanded across
-    every compatible logical platform profile, dispatched to whichever
-    configured automation-enabled VM claims each pending run. `vms`/`vm`
-    (inherited from ValidationRequest) restrict the worker pool, not the
-    required coverage; `scenario_ids` restricts which matrix scenarios run.
-    """
+    """Nominal campaign with optional storage and UEFI recovery scenarios."""
 
     model_config = ConfigDict(extra="forbid")
     apply: Literal[True]
@@ -99,21 +113,25 @@ class AutomationCampaignRequest(ValidationRequest):
     linux_size_gib: int = Field(default=20, ge=_MINIMUM_LINUX_SIZE_GIB, le=16384)
     migrate_windows_preferences: bool = False
     continue_after_failure: bool = False
-    scenario_ids: list[str] | None = Field(
-        default=None, description="Optional subset of the campaign scenario matrix to run"
-    )
-
-    @field_validator("scenario_ids")
-    @classmethod
-    def reject_duplicate_scenario_ids(cls, value: list[str] | None) -> list[str] | None:
-        if value is not None:
-            duplicates = sorted({item for item in value if value.count(item) > 1})
-            if duplicates:
-                raise ValueError(f"Duplicate scenario_ids: {duplicates}")
-        return value
+    include_nominal_scenarios: bool = True
+    include_storage_scenarios: bool = False
+    include_boot_guardian_scenarios: bool = False
+    include_local_filepool_scenarios: bool = False
+    start_scenario: str | None = Field(default=None, min_length=1, max_length=80)
+    retry_failed_scenarios: bool = False
+    start_scenario_attempt: Literal[1, 2] = 1
 
     @model_validator(mode="after")
     def validate_installation_options(self) -> AutomationCampaignRequest:
+        if not any(
+            (
+                self.include_nominal_scenarios,
+                self.include_storage_scenarios,
+                self.include_boot_guardian_scenarios,
+                self.include_local_filepool_scenarios,
+            )
+        ):
+            raise ValueError("At least one campaign scenario group must be enabled")
         AutomationRequest(
             apply=True,
             linux_username=self.linux_username,
@@ -140,6 +158,8 @@ class AutomationRequest(ValidationRequest):
     )
     storage_fixture: StorageFixtureRequest = Field(default_factory=StorageFixtureRequest)
     installation_target: Literal["windows", "secondary"] = "windows"
+    expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None
+    local_filepool: bool = False
 
     @model_validator(mode="after")
     def validate_storage_fixture_snapshot(self) -> AutomationRequest:

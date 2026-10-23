@@ -42,6 +42,7 @@
   <ItemGroup>
     <Compile Include="AssemblyInfo.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="..\Helpers\ProtectedFiles.cs"><Link>ProtectedFiles.cs</Link></Compile>
     <None Include="app.manifest" />
     <None Include="Create-Payload.ps1" />
     <EmbeddedResource Include="$(IntermediateOutputPath)payload.zip">

@@ -63,6 +63,7 @@
     <ProjectReference Include="..\BootGuardian\Libertix.BootGuardian.csproj">
       <Project>{A147B320-A380-4E00-B8FC-8DB44410C6F5}</Project>
       <Name>Libertix.BootGuardian</Name>
+      <Aliases>global,Guardian</Aliases>
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>

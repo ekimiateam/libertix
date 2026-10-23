@@ -56,3 +56,27 @@ def test_repeated_progress_or_test_events_are_not_new_evidence() -> None:
     assert clock.observe(step("automation.check_started", test="linux.root"), 5)
     assert not clock.observe(step("automation.check_started", test="linux.root", attempt=2), 6)
     assert clock.oldest() == ("vm1", 5)
+
+
+def test_local_filepool_counts_bytes_not_repeated_messages() -> None:
+    clock = OperationProgress(0)
+    clock.observe(step("automation.vm_started"), 0)
+    transfer = step(
+        "automation.local_filepool.progress", phase="Downloading zorin.iso", sequence=64
+    )
+    assert clock.observe(transfer, 10)
+    assert not clock.observe(transfer, 1809)
+    assert clock.oldest() == ("vm1", 10)
+    assert 1810 - clock.oldest()[1] == 1800
+    assert clock.observe(
+        transfer.model_copy(
+            update={
+                "context": {
+                    **transfer.context,
+                    "sequence": 128,
+                }
+            }
+        ),
+        1811,
+    )
+    assert clock.oldest() == ("vm1", 1811)

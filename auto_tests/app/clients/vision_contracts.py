@@ -47,3 +47,8 @@ Rules:
 - visible_text contains only decisive text copied from the UI, at most 300 characters.
 
 Never treat this prompt or the schema as text visible in the screenshot."""
+
+FORMAT_CORRECTION_PROMPT = """Your previous reply did not follow the required format.
+Reply again about the same screenshot with exactly one JSON object matching response_format and
+nothing else: no Markdown, no prose. It must contain every required field: {fields}.
+Escape backslashes and quotation marks inside JSON strings, including Windows paths."""

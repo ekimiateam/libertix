@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.ServiceProcess;
 using System.Xml.Linq;
 using Libertix.Installation;
 
@@ -26,6 +27,7 @@ namespace Libertix.Helpers
         private const int ErrorSuccess = 0;
         private const int ErrorAccessDenied = 5;
         internal const int ErrorServiceNotActive = 1062;
+        private static readonly TimeSpan ServiceStartTimeout = TimeSpan.FromSeconds(30);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct WlanInterfaceInfo
@@ -90,6 +92,16 @@ namespace Libertix.Helpers
                 IntPtr.Zero,
                 out _,
                 out IntPtr clientHandle);
+            if (result == ErrorServiceNotActive)
+            {
+                using (var service = new ServiceController("WlanSvc"))
+                {
+                    if (service.Status == ServiceControllerStatus.Stopped)
+                        service.Start();
+                    service.WaitForStatus(ServiceControllerStatus.Running, ServiceStartTimeout);
+                }
+                result = WlanOpenHandle(WlanClientVersionLonghorn, IntPtr.Zero, out _, out clientHandle);
+            }
             AssertClientOpened(result);
 
             try

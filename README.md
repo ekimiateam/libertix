@@ -110,10 +110,10 @@ flowchart TB
   calculate its own disk values.
 - `Installation/` contains the typed plan, size policy, validation and persisted state machine used
   to keep BIOS and UEFI behavior consistent.
-- `Pages/ApplyChanges.Bios.cs` owns the complete Windows-side BIOS preparation: recovery guard,
+- `Installation/InstallationEngine.Bios.cs` owns the complete Windows-side BIOS preparation: recovery guard,
   hibernation policy, shrink validation, FAT32 staging, live and distribution media, GRUB4DOS and
   the temporary BCD boot sequence.
-- `Pages/ApplyChanges.Uefi.cs`, `Scripts/modules/` and `Scripts/uefi/` own the Windows-side UEFI
+- `Installation/InstallationEngine.Uefi.cs`, `Scripts/modules/` and `Scripts/uefi/` own the Windows-side UEFI
   preparation. The C# layer starts and observes the operation; the PowerShell modules implement
   staging, EFI media, firmware variables, transaction state and Windows-side rollback.
 - `assets/live/` contains the shared live orchestrator and the small BIOS/UEFI adapters used after
@@ -166,6 +166,14 @@ BitLocker or Device Encryption must be fully decrypted before the live installer
 can request decryption and waits for it to finish. The detected Windows Recovery partition is kept
 outside the Linux allocation and is checked again before the live environment writes to disk.
 
+## Live installer diagnostics
+
+The temporary boot menu offers diagnostic entries for text mode, including a `nomodeset`
+variant that avoids graphics-driver mode changes. These entries do not start installation.
+Use Ctrl+Alt+F2 to open the diagnostic console. Early logs are saved on the temporary FAT
+partition under `LibertixInstallLogs/Linux/<boot-id>/early`; runtime logs are in `/run/libertix`.
+During a normal installation, an unresponsive graphical startup falls back to the text interface.
+
 ## Optional file sharing
 
 The installer can expose Windows user folders in Linux and Linux user files in Windows. Linux files
@@ -173,10 +181,32 @@ are mounted read-only on Windows. Both directions are optional and selected befo
 Windows folders are resolved from each registered profile, including redirected Documents and other
 known folders on another supported internal NTFS volume. The installation records the volume and
 disk identities, then rechecks them under Linux before creating the corresponding shortcuts.
+Each Windows profile has one real `Win_<profile>` folder in the Linux home directory and one
+file-manager bookmark. Inside it, shortcuts open that profile's Windows Desktop, Documents,
+Downloads and other available known folders. Linux user folders and existing bookmarks are kept;
+they are not redirected to Windows.
 Unavailable, network, external, or separately encrypted data dependencies are not silently ignored
 or decrypted. Disable Windows file sharing or resolve the reported dependency before installation.
 
+When Windows preference migration is selected, Libertix starts the Windows WLAN AutoConfig service
+if it is stopped and waits at most 30 seconds for it to run before reading saved Wi-Fi profiles.
+Its startup type is not changed. A disabled service or a startup failure remains an explicit error.
+
 ## Runtime configuration
+
+Libertix checks that untrusted accounts cannot modify or replace privileged code through its files
+or parent directories. The interactive launcher and installer ask for explicit confirmation if
+permissions are unsafe or cannot be evaluated; No is selected by default. Continuing accepts a
+possible administrator-level code execution risk, does not change the permissions of `C:\`, and
+does not disable file integrity checks. Consent lasts only for the interactive process. BootGuardian
+and unattended privileged hosts keep their blocking permission checks.
+Libertix reapplies its protected permissions to its own existing directories and their contents,
+including those left by an older version. Potentially unsafe permissions require consent before
+repair; repairing them does not establish that existing files are authentic.
+
+To reuse files on several PCs, you can use either an **adjacent `filepool` folder without a server**
+or the **local install-party server**. See the [setup and verification instructions](install-party-kit/README.md).
+The folder is proposed first and remains supported independently of the server.
 
 Without a command-line override, the executable selects a signed GitHub Pages channel from its
 embedded build version:
@@ -297,8 +327,10 @@ The complete versioning, signing, release and Pages workflow is documented in
 ## Source layout
 
 - `Installation/` — typed installation plan, validation, size policy and persisted state machine
-- `Pages/ApplyChanges.*.cs` — Windows orchestration, including the complete BIOS preparation and
-  the C# control layer for the PowerShell UEFI workflow
+- `Installation/InstallationEngine*.cs` — Windows orchestration, including the complete BIOS
+  preparation and the C# control layer for the PowerShell UEFI workflow; it has no WPF dependency
+- `Pages/ApplyChanges.xaml.cs` — installation progress screen that renders the engine's log and
+  progress and forwards cancel, retry and restart decisions
 - `Scripts/modules/` — shared PowerShell plan, state, download, storage and rollback functions
 - `Scripts/uefi/` — operations that are specific to UEFI preparation
 - `assets/live/` — shared live installer, runner, target configuration and firmware adapters

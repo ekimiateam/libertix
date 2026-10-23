@@ -13,6 +13,7 @@ namespace Libertix.Helpers
         internal static void Prepare(InstalledLinuxRecoveryCandidate candidate, string scriptsRoot)
         {
             string root = Path.GetFullPath(candidate.RecoveryRoot);
+            Security.ProtectedFiles.CreateDirectory(root);
             bool uefi = candidate.Firmware == InstallationFirmware.Uefi;
             string payload = uefi
                 ? Path.GetDirectoryName(Path.GetDirectoryName(candidate.RecoveryScriptPath))
@@ -23,7 +24,8 @@ namespace Libertix.Helpers
             {
                 foreach (string source in Directory.GetFiles(scriptsRoot, "*", SearchOption.AllDirectories)
                     .Where(path => path.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase) ||
-                        path.EndsWith(".psm1", StringComparison.OrdinalIgnoreCase)))
+                        path.EndsWith(".psm1", StringComparison.OrdinalIgnoreCase) ||
+                        path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)))
                     sources.Add(Path.Combine("Scripts", source.Substring(scriptsRoot.TrimEnd('\\').Length + 1)), source);
             }
             else
@@ -31,7 +33,14 @@ namespace Libertix.Helpers
                 sources.Add("recover.ps1", Path.Combine(scriptsRoot, "libertix-recovery-guard.ps1"));
                 foreach (string source in Directory.GetFiles(Path.Combine(scriptsRoot, "modules"), "*.psm1"))
                     sources.Add(Path.GetFileName(source), source);
+                string resultScript = "libertix-post-install-result.ps1";
+                if (File.Exists(Path.Combine(payload, resultScript)))
+                    sources.Add(resultScript, Path.Combine(scriptsRoot, resultScript));
             }
+            // The host embeds the script identities; upgrade both from the same build.
+            const string host = "Libertix.BootGuardian.exe";
+            if (File.Exists(Path.Combine(payload, host)))
+                sources.Add(host, ApplicationFiles.Resolve(host));
             if (sources.Count == 0 || sources.Values.Any(path => !File.Exists(path)))
                 throw new InvalidOperationException("Current recovery code is incomplete.");
 

@@ -27,6 +27,7 @@ namespace Libertix.Tests
 
         [DataTestMethod]
         [DataRow(20, 20.0, true)]
+        [DataRow(20, 20.01, true)]
         [DataRow(20, 20.99, true)]
         [DataRow(19, 20.0, false)]
         [DataRow(21, 20.99, false)]
@@ -93,6 +94,30 @@ namespace Libertix.Tests
             state.Compatibility.Firmware = "BIOS";
             Assert.ThrowsException<InvalidOperationException>(() =>
                 UnattendedInstallationConfigurator.SelectInstallationTarget(state, "secondary"));
+        }
+
+        internal static void FullWindowsMbrRefusesOnlyTheWindowsDestination()
+        {
+            var windows = CreateTarget(true);
+            var data = CreateTarget(false);
+            windows.PartitionStyle = data.PartitionStyle = "MBR";
+            windows.PartitionTableId = "mbr:12345678";
+            data.PartitionTableId = "mbr:87654321";
+            var state = new InstallationState
+            {
+                Compatibility = new CompatibilityInfo
+                {
+                    Firmware = "BIOS", WindowsPartitionSlotAvailable = false,
+                    InstallationTargets = InstallationTargetSelection.ValidateInventory(
+                        new[] { windows, data }, "C:", windows.DiskNumber, windows.PartitionTableId)
+                }
+            };
+            var failure = Assert.ThrowsException<Libertix.Helpers.CompatibilityPreflightException>(() =>
+                UnattendedInstallationConfigurator.SelectInstallationTarget(state, "windows"));
+            Assert.AreEqual("COMPAT_E_MBR_PRIMARY_LIMIT", failure.Code);
+            Assert.IsNull(state.SelectedInstallationTarget);
+            UnattendedInstallationConfigurator.SelectInstallationTarget(state, "secondary");
+            Assert.AreSame(data, state.SelectedInstallationTarget);
         }
 
         [TestMethod]

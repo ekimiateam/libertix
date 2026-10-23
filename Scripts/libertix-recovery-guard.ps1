@@ -331,7 +331,7 @@ function Assert-RecoveryOperationsSucceeded {
 }
 
 function Invoke-MinimumRecoveryFallback {
-    if ($script:RecoveryCompensationSequenceStarted) {
+    if ($VerifiedUninstall -or $script:RecoveryCompensationSequenceStarted) {
         return
     }
     $script:RecoveryCompensationSequenceStarted = $true
@@ -358,14 +358,13 @@ function Invoke-MinimumRecoveryFallback {
 
 function Read-EnvValue {
     param(
-        [string]$Path,
-        [string]$Name
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
-
     $line = @(
         Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop |
             Where-Object { $_ -match "^$([regex]::Escape($Name))=" }
@@ -373,7 +372,6 @@ function Read-EnvValue {
     if (-not $line) {
         return $null
     }
-
     return ($line -replace "^$([regex]::Escape($Name))=", "").Trim()
 }
 
@@ -570,47 +568,17 @@ function Remove-TransactionArtifacts {
 
 function Restore-OriginalHibernationSetting {
     $originalHibernate = Read-EnvValue -Path $Pending -Name "ORIGINAL_HIBERNATE_ENABLED"
-    if ($originalHibernate -eq "true") {
-        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
-        $hibernate = Invoke-LibertixNativeCommand `
-            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-            -ArgumentList @("/hibernate", "on") `
-            -TimeoutSeconds 60
-        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
-        if ($hibernate.ExitCode -ne 0) {
-            throw "Hibernation restore failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
-        }
-        $hibernateEnabled = (
-            Get-ItemProperty `
-                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-                -Name "HibernateEnabled" `
-                -ErrorAction Stop
-        ).HibernateEnabled
-        if ($hibernateEnabled -ne 1) {
-            throw "Hibernation restore did not enable HibernateEnabled."
-        }
-    } elseif ($originalHibernate -eq "false") {
-        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
-        $hibernate = Invoke-LibertixNativeCommand `
-            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-            -ArgumentList @("/hibernate", "off") `
-            -TimeoutSeconds 60
-        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
-        if ($hibernate.ExitCode -ne 0) {
-            throw "Hibernation disable failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
-        }
-        $hibernateEnabled = (
-            Get-ItemProperty `
-                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-                -Name "HibernateEnabled" `
-                -ErrorAction Stop
-        ).HibernateEnabled
-        if ($hibernateEnabled -ne 0) {
-            throw "Hibernation restore did not disable HibernateEnabled."
-        }
-    } else {
+    if ($originalHibernate -notin @("true", "false")) {
         Write-RecoveryLog "Original hibernation state unknown; left unchanged."
+        return
     }
+    $enabled = $originalHibernate -eq "true"
+    if ($enabled) {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
+    } else {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
+    }
+    Set-LibertixHibernateEnabled -Enabled $enabled
 }
 
 function Restore-HibernationAfterInstallation {
@@ -1194,6 +1162,23 @@ try {
         exit 2
     }
 
+    if ($VerifiedUninstall) {
+        Import-Module (Join-Path $Root 'Libertix.StorageBaseline.psm1') -ErrorAction Stop
+        Assert-LibertixUninstallStorageBaseline -RecoveryRoot $Root
+        $uninstallPlan = Get-Content -LiteralPath (Join-Path $Root 'installation-plan.json') -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+        $linuxDisk = if ([int]$uninstallPlan.schemaVersion -eq 5) { $uninstallPlan.allocation } else { $uninstallPlan.disk }
+        $linuxOffset = Get-LibertixPlannedLinuxOffset -Plan $uninstallPlan
+        $linuxPartitions = @(Get-Partition -DiskNumber $linuxDisk.number -ErrorAction Stop | Where-Object {
+            [long]$_.Offset -eq $linuxOffset
+        })
+        if ($linuxPartitions.Count -eq 1) {
+            Assert-LibertixInstalledFilesystemIdentity -Partition $linuxPartitions[0] -RecoveryRoot $Root
+        } elseif ($linuxPartitions.Count -gt 1 -or
+            [string]$recoveryExecutionState.status -notin @('rollback-running', 'rolled-back')) {
+            throw 'The installed Linux filesystem is missing before uninstall.'
+        }
+    }
     $script:RecoveryRollbackRequested = $true
     $script:TrackRecoveryExecutionState = Initialize-RecoveryExecutionState `
         -State $recoveryExecutionState
@@ -1266,6 +1251,17 @@ try {
     }
 
     $script:RecoveryCompensationSequenceStarted = $true
+    if ($VerifiedUninstall) {
+        # Restore a bootable Windows path before deleting the filesystem used by GRUB.
+        $mbrRestored = Invoke-RecoveryOperation -Name 'mbr.restore' -Operation {
+            Restore-BiosMbrBootCode -DiskNumber $diskNumber -ExecutionState $recoveryExecutionState
+        }
+        if (-not $mbrRestored) { throw 'Windows boot-code restoration failed; Linux was not removed.' }
+        $bcdRestored = Invoke-RecoveryOperation -Name 'bcd.restore' -Operation {
+            Restore-BcdState -Required:$temporaryBootWasPrepared -PreserveUnrelatedChanges
+        }
+        if (-not $bcdRestored) { throw 'Windows boot-menu restoration failed; Linux was not removed.' }
+    }
     $diskLayoutRestored = Invoke-RecoveryOperation -Name "disk-layout.restore" -Operation {
         $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
         if (
@@ -1324,8 +1320,11 @@ try {
         }
         [int]$sourceDiskNumber = $sourcePlanDisk.number
         [long]$sourceOriginalEnd = $sourceOriginalOffset + $sourceOriginalSize
-        [long]$sourceExpectedTransactionOffset = $sourceOriginalEnd -
-            ($sourceOriginalEnd % $PartitionAlignmentBytes) - $expectedBytes
+        [long]$sourceExpectedTransactionOffset = if ($VerifiedUninstall) {
+            Get-LibertixPlannedLinuxOffset -Plan $rollbackPlan
+        } else {
+            $sourceOriginalEnd - ($sourceOriginalEnd % $PartitionAlignmentBytes) - $expectedBytes
+        }
 
         # Imaging and partitioning tools can use different alignment padding. A
         # transaction candidate must still be wholly owned by the exact extent
@@ -1467,15 +1466,13 @@ try {
         })
     }
 
-    $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
-        Restore-BcdState `
-            -Required:$temporaryBootWasPrepared `
-            -PreserveUnrelatedChanges:$VerifiedUninstall
-    }
-    $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
-        Restore-BiosMbrBootCode `
-            -DiskNumber $diskNumber `
-            -ExecutionState $recoveryExecutionState
+    if (-not $VerifiedUninstall) {
+        $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
+            Restore-BcdState -Required:$temporaryBootWasPrepared
+        }
+        $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
+            Restore-BiosMbrBootCode -DiskNumber $diskNumber -ExecutionState $recoveryExecutionState
+        }
     }
     $null = Invoke-RecoveryOperation -Name "windows-share.cleanup" -Operation {
         if ($rollbackFromSucceeded) {

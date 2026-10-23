@@ -120,8 +120,14 @@ function Test-RollbackPartitionLayout {
     if ($Actual.Count -eq 0 -or $Actual.Count -ne $Expected.Count) { return $false }
     # MSFT_Partition numbers can retain the pre-removal enumeration until reboot.
     # Compare every physical extent and type, not that volatile Windows identifier.
-    $actualLayout = @($Actual | Sort-Object Offset | Select-Object Offset, Size, GptType, MbrType)
-    $expectedLayout = @($Expected | Sort-Object Offset | Select-Object Offset, Size, GptType, MbrType)
+    $normalize = {
+        [pscustomobject]@{
+            Offset = [long]$_.Offset; Size = [long]$_.Size
+            GptType = [string]$_.GptType; MbrType = [int]$_.MbrType
+        }
+    }
+    $actualLayout = @($Actual | Sort-Object Offset | ForEach-Object $normalize)
+    $expectedLayout = @($Expected | Sort-Object Offset | ForEach-Object $normalize)
     return (ConvertTo-Json -InputObject $actualLayout -Compress) -ceq
         (ConvertTo-Json -InputObject $expectedLayout -Compress)
 }
@@ -136,6 +142,7 @@ function Get-RollbackState {
             $installerPartitions += $partition
         }
     }
+
     $recoveryTasks = @(
         Get-ScheduledTask -ErrorAction Stop |
             Where-Object {
@@ -145,6 +152,7 @@ function Get-RollbackState {
                 $_.TaskName -like "LibertixLinuxReadOnlyPin_*"
             }
     )
+
     $firmwareEntries = @(bcdedit.exe /enum firmware)
     if ($LASTEXITCODE -ne 0) {
         throw "bcdedit could not enumerate firmware entries after rollback."
@@ -157,6 +165,8 @@ function Get-RollbackState {
     if ($LASTEXITCODE -ne 0 -or $windowsBootManager.Count -eq 0) {
         throw "Windows Boot Manager could not be enumerated after rollback."
     }
+    # BCD text alone cannot prove that a recovery loader still points to the
+    # same partition, so compare its qualified WMI identity as well.
     $bootLoaderEvidence = Get-WindowsBootLoaderEvidence
     $bootLoadersMatch = (ConvertTo-Json -InputObject @($bootLoaderEvidence.Lines) -Compress) -ceq
         (ConvertTo-Json -InputObject @($config.windows_boot_loaders) -Compress)
@@ -165,6 +175,7 @@ function Get-RollbackState {
     ) -ceq (
         ConvertTo-Json -InputObject @($config.windows_boot_loader_partitions) -Compress
     )
+
     $bootGuardian = Get-Service -Name "LibertixBootGuardian" -ErrorAction SilentlyContinue
     $layout = @(Get-Partition -DiskNumber $systemDisk.Number -ErrorAction Stop |
         Sort-Object PartitionNumber | Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
@@ -172,6 +183,7 @@ function Get-RollbackState {
         Select-Object PartitionNumber, Offset, Size, GptType, MbrType)
     $layoutMatches = Test-RollbackPartitionLayout -Actual $layout -Expected $expectedLayout
     $storageMatches = Test-RollbackStorageLayout -Expected @($config.storage_layout)
+
     $ledgerPaths = @()
     $biosLedger = Join-Path $env:SystemDrive "LibertixInstallRecovery\installation-state.json"
     if (Test-Path -LiteralPath $biosLedger) { $ledgerPaths += $biosLedger }
@@ -186,6 +198,9 @@ function Get-RollbackState {
         -Paths $ledgerPaths `
         -ExcludedPlanIds @($config.baseline_plan_ids) `
         -RequireClosedPostInstallResult $requireClosedPostInstallResult
+
+    # A successful uninstall requires storage, boot and durable execution
+    # evidence to agree; no single check can establish the final state.
     $geometryMatches =
         [int]$systemDisk.Number -eq $expectedDiskNumber -and
         [int]$systemPartition.PartitionNumber -eq $expectedPartitionNumber -and
@@ -200,6 +215,7 @@ function Get-RollbackState {
         $recoveryTasks.Count -eq 0 -and
         $temporaryBootReferences.Count -eq 0 -and
         $null -eq $bootGuardian
+
     return [pscustomobject]@{
         GeometryMatches = [bool]$geometryMatches
         PartitionLayoutMatches = [bool]$layoutMatches
@@ -239,6 +255,36 @@ function Test-RollbackStorageLayout {
     return $true
 }
 
+function Test-ProductStorageBaseline {
+    param(
+        [Parameter(Mandatory = $true)][object]$Baseline,
+        [Parameter(Mandatory = $true)][object[]]$Expected,
+        [Parameter(Mandatory = $true)][string]$PlanId
+    )
+    if ([int]$Baseline.schemaVersion -ne 1 -or [string]$Baseline.planId -cne $PlanId -or
+        @($Baseline.disks | Where-Object sizeBytes -GT 0).Count -ne $Expected.Count) { return $false }
+    foreach ($disk in $Expected) {
+        $savedDisks = @($Baseline.disks | Where-Object number -EQ $disk.Number)
+        if ($savedDisks.Count -ne 1) { return $false }
+        $saved = $savedDisks[0]
+        if ($null -ne $saved.inventoryError -or
+            ([string]$saved.uniqueId).Trim() -cne ([string]$disk.UniqueId).Trim() -or
+            [long]$saved.sizeBytes -ne [long]$disk.Size -or
+            [string]$saved.partitionStyle -cne [string]$disk.PartitionStyle -or
+            [int]$saved.logicalSectorSizeBytes -ne [int]$disk.LogicalSectorSize) { return $false }
+        if ([string]$disk.PartitionStyle -eq 'GPT' -and [guid]$saved.guid -ne [guid]$disk.Guid) { return $false }
+        if ([string]$disk.PartitionStyle -eq 'MBR' -and [uint32]$saved.signature -ne [uint32]$disk.Signature) { return $false }
+        $partitions = @($saved.partitions | ForEach-Object {
+            [pscustomobject]@{
+                Offset = [long]$_.offsetBytes; Size = [long]$_.sizeBytes
+                GptType = $_.gptType; MbrType = $_.mbrType
+            }
+        })
+        if (-not (Test-RollbackPartitionLayout -Actual $partitions -Expected @($disk.Partitions))) { return $false }
+    }
+    return $true
+}
+
 function Get-RollbackLedgerEvidence {
     param(
         [AllowEmptyCollection()][string[]]$Paths,
@@ -262,12 +308,17 @@ function Get-RollbackLedgerEvidence {
     $state = Read-LibertixExecutionState -Path $candidates[0]
     $resultVerified = $true
     if ($RequireClosedPostInstallResult) {
+        $storagePath = Join-Path $directory 'storage-before-installation.json'
+        $storageBaseline = Get-Content -LiteralPath $storagePath -Raw -Encoding UTF8 -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $resultVerified = Test-ProductStorageBaseline -Baseline $storageBaseline `
+            -Expected @($config.storage_layout) -PlanId ([string]$state.planId)
         $resultPath = Join-Path $directory "post-install-verification.json"
         if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
             $resultVerified = $false
         } else {
             $result = Get-Content -LiteralPath $resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $resultVerified =
+            $resultVerified = $resultVerified -and
                 [string]$result.planId -ceq [string]$state.planId -and
                 [string]$result.status -ceq "rolled-back" -and
                 $result.rollbackAvailable -eq $false -and

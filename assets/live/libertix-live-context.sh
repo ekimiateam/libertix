@@ -271,6 +271,12 @@ with_windows_mounted_for_mbr_backup() {
         load) load_durable_bios_mbr_backup "$mountpoint" "$local_backup" || result=$? ;;
         *) result=2 ;;
     esac
+    if [ "$operation" = publish ] && [ "$result" -eq 0 ]; then
+        local backup_directory
+        backup_directory="$(durable_bios_mbr_backup_directory "$mountpoint")" || result=$?
+        [ "$result" -ne 0 ] || \
+            python3 /usr/local/lib/libertix/libertix-ntfs-permissions.py --recursive "$backup_directory" || result=1
+    fi
     sync
     umount "$mountpoint" || result=1
     return "$result"
@@ -305,6 +311,7 @@ publish_installation_state_mirror() {
     mkdir -p "$(dirname "$destination")" || return 1
     temporary="$(dirname "$destination")/.installation-state.$$.tmp"
     cp -f "$INSTALLATION_STATE_PATH" "$temporary" || return 1
+    python3 /usr/local/lib/libertix/libertix-ntfs-permissions.py "$temporary" || return 1
     sync "$temporary" 2>/dev/null || sync
     mv -f "$temporary" "$destination" || return 1
     sync "$destination" 2>/dev/null || sync

@@ -57,11 +57,11 @@ def test_secondary_disk_mode_does_not_change_later_default_runs(monkeypatch) -> 
         def __init__(self, configuration):
             self.configuration = configuration
 
-        def run(self, selectors, **kwargs):
+        def run(self, selectors, request, **_kwargs):
             observed.append((self.configuration.reset_snapshot, selectors))
-            assert kwargs["linux_password"] == "test-password"
-            assert kwargs["preference_wallpaper"] == "windows-default"
-            assert kwargs["installation_target"] == (
+            assert request.linux_password == "test-password"
+            assert request.preference_wallpaper == "windows-default"
+            assert request.installation_target == (
                 "secondary"
                 if self.configuration.reset_snapshot == "two-disk-baseline"
                 else "windows"

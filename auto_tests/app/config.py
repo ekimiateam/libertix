@@ -27,6 +27,9 @@ class VMConfig(BaseModel):
     vnc_keyboard_layout: Literal["fr", "us"] = "us"
     automation_enabled: bool = False
     secondary_disk_boot_order: tuple[str, ...] = ()
+    local_filepool_snapshot: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    )
 
     @field_validator("secondary_disk_boot_order")
     @classmethod
@@ -84,6 +87,7 @@ class Settings(BaseSettings):
     llm_api_url: str
     llm_api_key: SecretStr
     llm_model: str
+    llm_provider_only: str | None = Field(default=None, min_length=1)
     llm_reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None
     llm_timeout_seconds: float = Field(default=180, gt=0)
     llm_max_attempts: int = Field(default=3, ge=1, le=10)
@@ -105,13 +109,23 @@ class Settings(BaseSettings):
     automation_monitor_interval_seconds: float = Field(default=30, gt=0)
     automation_monitor_timeout_seconds: float = Field(default=23400, gt=0)
     automation_operation_timeout_seconds: float = Field(default=1800, gt=0)
+    automation_network_ping_hosts: tuple[str, str] | None = None
     automation_stall_timeout_seconds: float = Field(default=900, gt=0)
     post_install_boot_timeout_seconds: float = Field(default=1200, gt=0)
+    post_install_package_timeout_seconds: float = Field(default=3600, ge=360, le=7200)
     post_install_poll_interval_seconds: float = Field(default=10, gt=0)
     post_install_grub_detection_timeout_seconds: float = Field(default=20, gt=0)
     post_install_grub_detection_interval_seconds: float = Field(default=1, gt=0)
     log_level: str = "INFO"
     vms: tuple[VMConfig, ...] = Field(min_length=1)
+
+    @field_validator("automation_network_ping_hosts")
+    @classmethod
+    def validate_network_ping_hosts(cls, value: tuple[str, str] | None) -> tuple[str, str] | None:
+        if value is not None:
+            for host in value:
+                ipaddress.ip_address(host)
+        return value
 
     @field_validator("smb_root")
     @classmethod

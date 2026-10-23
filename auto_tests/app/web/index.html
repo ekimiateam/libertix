@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -234,46 +234,46 @@
   </head>
   <body>
     <h1>Libertix Auto Tests</h1>
-    <p class="muted">Outil de laboratoire : sélectionnez les VM, choisissez un scénario, puis vérifiez la requête avant de lancer. Les installations restaurent les snapshots et remplacent les données de test.</p>
+    <p class="muted">Laboratory tool: select the VMs, choose a scenario, then review the request before starting. Installations restore snapshots and replace test data.</p>
 
     <div class="layout">
       <aside>
         <section class="panel stack">
           <h2>Options</h2>
-          <label for="sourceMode">Source build</label>
+          <label for="sourceMode">Build source</label>
           <select id="sourceMode">
-            <option value="local">Working tree local</option>
-            <option value="remote">dev distant</option>
-            <option value="published">Dernier build GitHub dev publié</option>
+            <option value="local">Local working tree</option>
+            <option value="remote">Remote dev</option>
+            <option value="published">Latest published GitHub dev build</option>
           </select>
           <div class="buttons">
-            <button id="saveOptions">Enregistrer</button>
-            <button id="health">Tester /health</button>
-            <button id="loadVms">Charger les VM</button>
+            <button id="saveOptions">Save</button>
+            <button id="health">Test /health</button>
+            <button id="loadVms">Load VMs</button>
           </div>
         </section>
 
         <section class="panel stack">
           <h2>VM</h2>
           <div class="buttons">
-            <button id="selectAllVms">Tout cocher</button>
-            <button id="clearVms">Tout décocher</button>
+            <button id="selectAllVms">Select all</button>
+            <button id="clearVms">Clear all</button>
           </div>
-          <div id="vmList" class="muted">Clique sur Charger les VM.</div>
+          <div id="vmList" class="muted">Click Load VMs.</div>
         </section>
 
         <section class="panel stack">
-          <h2>Installation automatique</h2>
+          <h2>Automated installation</h2>
           <label class="field">
-            <span>Étendue de l'essai</span>
+            <span>Test scope</span>
             <select id="automationMode">
-              <option value="single">Un scénario personnalisé</option>
-              <option value="full">Campagne complète — 4 scénarios × 3 VM</option>
+              <option value="single">One custom scenario</option>
+              <option value="full">Complete campaign — 4 scenarios × 3 VMs</option>
             </select>
           </label>
-          <p id="campaignHint" class="muted" hidden>Mint puis Zorin, Windows-first puis Linux-first : trois VM en parallèle à chaque scénario. Snapshot habituel, espace pris sur Windows, deux partages activés, surveillance activée et aucune panne injectée. Chaque scénario se termine par la désinstallation de Linux via Libertix, puis un redémarrage Windows sans sélection d’OS et la vérification de la restauration. Si la migration est cochée, la campagne teste une image personnalisée. Les options de scénario individuel sont désactivées ci-dessous.</p>
+          <p id="campaignHint" class="muted" hidden>Mint then Zorin, Windows-first then Linux-first: three VMs in parallel for each scenario. Usual snapshot, space taken from Windows, both shares enabled, monitoring enabled and no injected fault. Each scenario ends by uninstalling Linux through Libertix, then a Windows reboot without OS selection and a verification of the restored state. If the migration is checked, the campaign tests a custom image. The single-scenario options below are disabled.</p>
           <label class="field">
-            <span>Utilisateur Linux</span>
+            <span>Linux user</span>
             <input
               id="linuxUsername"
               type="text"
@@ -283,11 +283,11 @@
               pattern="[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?"
               required
               autocomplete="off"
-              title="Minuscules, chiffres et tirets uniquement ; doit commencer par une lettre."
+              title="Lowercase letters, digits and hyphens only; must start with a letter."
             />
           </label>
           <label class="field">
-            <span>Mot de passe Linux</span>
+            <span>Linux password</span>
             <input
               id="linuxPassword"
               type="password"
@@ -298,20 +298,20 @@
             />
           </label>
           <label class="field">
-            <span>Taille finale Linux (Gio)</span>
+            <span>Final Linux size (GiB)</span>
             <input id="linuxSizeGib" type="number" value="20" min="20" max="16384" step="1" required />
           </label>
           <label class="check-field">
             <input id="migrateWindowsPreferences" type="checkbox" />
-            Tester la migration des préférences Windows (dont Wi-Fi personnel)
+            Test the Windows preference migration (including personal Wi-Fi)
           </label>
-          <p class="muted">Migration unique et consentie. Sans cette option, Linux conserve ses préférences d'origine.</p>
+          <p class="muted">One-time, consented migration. Without this option, Linux keeps its original preferences.</p>
           <label id="continueAfterFailureField" class="check-field" hidden>
             <input id="continueAfterFailure" type="checkbox" />
-            Continuer la campagne après un échec (la restauration suivante efface l'état de diagnostic des VM)
+            Continue the campaign after a failure (the next restore erases the diagnostic state of the VMs)
           </label>
           <fieldset id="singleScenarioOptions" class="stack">
-          <legend>Scénario individuel</legend>
+          <legend>Single scenario</legend>
           <label class="field">
             <span>Distribution</span>
             <select id="distribution">
@@ -320,113 +320,113 @@
             </select>
           </label>
           <label class="field">
-            <span>Premier système vérifié</span>
+            <span>First verified system</span>
             <select id="firstBoot">
-              <option value="windows">Windows en premier, puis Linux</option>
-              <option value="linux">Linux en premier, puis Windows</option>
+              <option value="windows">Windows first, then Linux</option>
+              <option value="linux">Linux first, then Windows</option>
             </select>
           </label>
           <label class="check-field">
             <input id="shareWindowsFilesInLinux" type="checkbox" checked />
-            Afficher les fichiers Windows dans Linux
+            Show Windows files in Linux
           </label>
           <label class="check-field">
             <input id="shareLinuxFilesInWindows" type="checkbox" checked />
-            Afficher les fichiers Linux dans Windows en lecture seule
+            Show Linux files in Windows (read-only)
           </label>
           <label class="check-field">
             <input id="monitorIso" type="checkbox" checked disabled />
-            Surveillance obligatoire — vision uniquement aux étapes qui en ont besoin
+            Monitoring required — vision only at the steps that need it
           </label>
           <label class="field">
-            <span>Fond d'écran de test pour la migration</span>
+            <span>Test wallpaper for the migration</span>
             <select id="preferenceWallpaper" disabled>
-              <option value="custom">Image personnalisée — doit être copiée dans Linux</option>
-              <option value="windows-default">Fond Windows intégré / Spotlight — conserver celui de Linux</option>
+              <option value="custom">Custom image — must be copied to Linux</option>
+              <option value="windows-default">Built-in Windows wallpaper / Spotlight — keep the Linux one</option>
             </select>
           </label>
           <details>
-            <summary>Stockage et partitions de laboratoire</summary>
+            <summary>Laboratory storage and partitions</summary>
             <div class="stack">
               <label class="field">
-                <span>Snapshot de départ</span>
+                <span>Starting snapshot</span>
                 <select id="snapshotMode">
-                  <option value="default">Snapshot habituel — mode par défaut</option>
-                  <option value="secondary-disk">Snapshot avec second disque</option>
+                  <option value="default">Usual snapshot — default mode</option>
+                  <option value="secondary-disk">Snapshot with a second disk</option>
                 </select>
               </label>
-              <p class="muted">Les noms des snapshots sont ceux configurés sur le serveur. Aucune fixture n'est ajoutée par défaut.</p>
+              <p class="muted">Snapshot names are the ones configured on the server. No fixture is added by default.</p>
               <label class="field">
-                <span>Prendre l'espace Linux sur</span>
+                <span>Take the Linux space from</span>
                 <select id="installationTarget">
-                  <option value="windows">Volume Windows (C: habituellement) — recommandé</option>
-                  <option value="secondary" disabled>Un autre disque physique — expérimental</option>
+                  <option value="windows">Windows volume (usually C:) — recommended</option>
+                  <option value="secondary" disabled>Another physical disk — experimental</option>
                 </select>
               </label>
-              <p id="secondaryTargetHint" class="bad" hidden>Moins bien pris en charge, potentiellement instable : le firmware doit pouvoir démarrer sur cet autre disque. Les partitions existantes ne sont pas déplacées.</p>
+              <p id="secondaryTargetHint" class="bad" hidden>Less supported and potentially unstable: the firmware must be able to boot from this other disk. Existing partitions are not moved.</p>
               <label class="field">
-                <span>Partition témoin supplémentaire sur le disque Windows</span>
+                <span>Extra witness partition on the Windows disk</span>
                 <select id="extraSystemPartition">
-                  <option value="none">Aucune</option>
+                  <option value="none">None</option>
                   <option value="fat32">FAT32</option>
                   <option value="ntfs">NTFS</option>
-                  <option value="recovery">Recovery (récupération OEM simulée)</option>
+                  <option value="recovery">Recovery (simulated OEM recovery)</option>
                 </select>
               </label>
               <label class="field">
-                <span>Taille de la partition témoin (Mio)</span>
+                <span>Witness partition size (MiB)</span>
                 <input id="extraPartitionSizeMib" type="number" value="1024" min="256" max="4096" step="1" disabled required />
               </label>
-              <label class="check-field"><input id="decryptSystemVolume" type="checkbox" disabled />Déchiffrer le volume Windows avant de créer la partition témoin</label>
+              <label class="check-field"><input id="decryptSystemVolume" type="checkbox" disabled />Decrypt the Windows volume before creating the witness partition</label>
               <fieldset id="secondaryDataOptions" class="stack" disabled>
-                <legend>Second disque (nécessite le snapshot correspondant)</legend>
-                <label class="check-field"><input id="secondaryData" type="checkbox" />Préparer et vérifier des données témoins sur le second disque</label>
-                <label class="check-field"><input id="decryptSecondaryVolume" type="checkbox" disabled />Déchiffrer le volume de données de test</label>
-                <label class="check-field"><input id="redirectDocuments" type="checkbox" disabled />Déplacer et lier Documents au second disque avant l'installation</label>
+                <legend>Second disk (requires the matching snapshot)</legend>
+                <label class="check-field"><input id="secondaryData" type="checkbox" />Prepare and verify witness data on the second disk</label>
+                <label class="check-field"><input id="decryptSecondaryVolume" type="checkbox" disabled />Decrypt the test data volume</label>
+                <label class="check-field"><input id="redirectDocuments" type="checkbox" disabled />Move and link Documents to the second disk before installation</label>
               </fieldset>
-              <p class="muted">Les déchiffrements concernent uniquement les volumes de laboratoire sélectionnés. Un rollback ne réactive pas automatiquement leur chiffrement initial.</p>
+              <p class="muted">Decryption only affects the selected laboratory volumes. A rollback does not automatically re-enable their original encryption.</p>
             </div>
           </details>
           <details>
-          <summary>Pannes simulées et chemins de récupération</summary>
+          <summary>Simulated faults and recovery paths</summary>
           <div class="stack">
           <label class="check-field">
             <input id="simulateStaleFirmwareEntries" type="checkbox" />
-            Simuler des entrées firmware Libertix obsolètes avant l'installation
+            Simulate stale Libertix firmware entries before installation
           </label>
           <label class="check-field">
             <input id="forceOfflineNtfsResize" type="checkbox" />
-            Forcer le redimensionnement NTFS hors ligne dans le mini-ISO
+            Force the offline NTFS resize in the mini-ISO
           </label>
           <label class="field">
-            <span>Scénario de panne ou de récupération</span>
+            <span>Fault or recovery scenario</span>
             <select id="bootGuardianFault">
-              <option value="none">Aucun test</option>
-              <option value="bios-rollback">Annuler après mutation BIOS et vérifier le rollback</option>
-              <option value="bios-controller-disconnect">BIOS : simuler la perte du contrôleur puis vérifier le rollback</option>
-              <option value="bios-postinstall-rollback">BIOS : rollback après installation complète</option>
-              <option value="uefi-postinstall-rollback">UEFI : rollback après installation complète</option>
-              <option value="boot-order">Altérer puis réparer BootOrder</option>
-              <option value="bootnext-fallback">Échec BootNext puis accepter BootOrder</option>
-              <option value="bootnext-rollback">Échec BootNext puis restaurer Windows</option>
-              <option value="preferred-path">Altérer puis réparer le chemin EFI de secours</option>
-              <option value="preferred-path-rollback">Refuser le chemin EFI et restaurer Windows</option>
+              <option value="none">No test</option>
+              <option value="bios-rollback">Cancel after a BIOS mutation and verify the rollback</option>
+              <option value="bios-controller-disconnect">BIOS: simulate a lost controller, then verify the rollback</option>
+              <option value="bios-postinstall-rollback">BIOS: rollback after a complete installation</option>
+              <option value="uefi-postinstall-rollback">UEFI: rollback after a complete installation</option>
+              <option value="boot-order">Break, then repair BootOrder</option>
+              <option value="bootnext-fallback">BootNext failure, then accept BootOrder</option>
+              <option value="bootnext-rollback">BootNext failure, then restore Windows</option>
+              <option value="preferred-path">Break, then repair the fallback EFI path</option>
+              <option value="preferred-path-rollback">Decline the EFI path and restore Windows</option>
             </select>
           </label>
-          <p class="muted">Essais réservés au laboratoire : une seule VM du firmware correspondant, avec Windows vérifié en premier. Pour une validation nominale, laissez ces options désactivées et le test sur « Aucun test ».</p>
+          <p class="muted">Laboratory-only tests: exactly one VM with the matching firmware, with Windows verified first. For a nominal validation, leave these options disabled and the test set to "No test".</p>
           </div>
           </details>
           </fieldset>
           <p class="muted">
-            Le mot de passe est envoyé uniquement à l'API locale au lancement. Cette page ne le
-            conserve pas et l'aperçu le masque.
+            The password is sent only to the local API when starting. This page does not
+            keep it and the preview masks it.
           </p>
         </section>
 
         <section class="panel stack">
           <h2>Filepool</h2>
           <div class="buttons">
-            <button id="checkFilepool">Vérifier les fichiers</button>
+            <button id="checkFilepool">Check files</button>
           </div>
           <div>
             <a href="/filepool/catalog.json" target="_blank" rel="noreferrer">catalog.json</a>
@@ -442,57 +442,57 @@
           </div>
           <div>
             <a href="/filepool/aria2-64.zip" target="_blank" rel="noreferrer">aria2-64.zip</a>
-            <span class="pill">Téléchargement</span>
+            <span class="pill">Download</span>
           </div>
         </section>
       </aside>
 
       <main>
         <section class="panel">
-          <h2>Actions API</h2>
+          <h2>API actions</h2>
           <div class="endpoint-grid">
             <div class="stack">
               <h3>Validation</h3>
-              <p class="muted">Compile, teste, déploie et ouvre Libertix, sans lancer d'installation.</p>
-              <button id="validationStream" class="primary">Valider avec suivi</button>
-              <button id="validationJson">Valider — réponse JSON finale</button>
+              <p class="muted">Builds, tests, deploys and opens Libertix without starting an installation.</p>
+              <button id="validationStream" class="primary">Validate with live log</button>
+              <button id="validationJson">Validate — final JSON response</button>
             </div>
             <div class="stack">
-              <h3>Installation / campagne</h3>
-              <p class="muted">Restaure les snapshots puis installe et vérifie Windows et Linux.</p>
-              <button id="automationStream" class="danger">Lancer avec suivi</button>
-              <button id="automationJson" class="danger">Lancer — réponse JSON finale</button>
+              <h3>Installation / campaign</h3>
+              <p class="muted">Restores the snapshots, then installs and verifies Windows and Linux.</p>
+              <button id="automationStream" class="danger">Start with live log</button>
+              <button id="automationJson" class="danger">Start — final JSON response</button>
             </div>
             <div class="stack">
-              <h3>Restauration seule</h3>
-              <p class="muted">Restaure le snapshot habituel configuré, sans installation. N'utilise pas les fixtures ni le choix de snapshot du scénario.</p>
-              <button id="resetStream" class="danger">Restaurer avec suivi</button>
-              <button id="resetJson" class="danger">Restaurer — réponse JSON finale</button>
+              <h3>Restore only</h3>
+              <p class="muted">Restores the usual configured snapshot without installing. Does not use the fixtures or the scenario's snapshot choice.</p>
+              <button id="resetStream" class="danger">Restore with live log</button>
+              <button id="resetJson" class="danger">Restore — final JSON response</button>
             </div>
           </div>
         </section>
 
         <section class="panel">
-          <h2>État</h2>
-          <div id="status" role="status" aria-live="polite">Prêt.</div>
+          <h2>Status</h2>
+          <div id="status" role="status" aria-live="polite">Ready.</div>
           <div id="summary" class="muted"></div>
-          <p><button id="stopOperation" class="danger">Arrêter l'opération active sur le serveur</button></p>
-          <p class="muted">Arrêt forcé de toute la campagne, pas d'une seule VM. Ne déclenche ni rollback ni nettoyage des opérations déjà lancées dans les VM.</p>
+          <p><button id="stopOperation" class="danger">Stop the active operation on the server</button></p>
+          <p class="muted">Forced stop of the whole campaign, not of a single VM. Triggers no rollback or cleanup of operations already started in the VMs.</p>
         </section>
 
         <section id="campaignResults" class="panel" hidden>
-          <h2>Bilan de la campagne</h2>
-          <p class="muted">« Non exécuté » ou « non vérifié » n'est jamais un succès. Les chemins de journaux ci-dessous sont locaux au serveur.</p>
+          <h2>Campaign summary</h2>
+          <p class="muted">"Not run" or "not verified" is never a success. The log paths below are local to the server.</p>
           <div id="campaignSummary"></div>
         </section>
 
         <section class="panel stack">
-          <h2>Aperçu de la requête unattended</h2>
+          <h2>Unattended request preview</h2>
           <pre id="requestPreview" class="request-preview"></pre>
         </section>
 
         <section class="panel">
-          <h2>Résultat brut</h2>
+          <h2>Raw result</h2>
           <pre id="rawResult">{}</pre>
         </section>
 
@@ -500,10 +500,10 @@
           <thead>
             <tr>
               <th>#</th>
-              <th>Étape</th>
-              <th>Statut</th>
+              <th>Step</th>
+              <th>Status</th>
               <th>Message</th>
-              <th>Contexte / logs</th>
+              <th>Context / logs</th>
             </tr>
           </thead>
           <tbody id="steps"></tbody>
@@ -552,7 +552,7 @@
         sessionStorage.setItem("libertix_source_mode", sourceModeInput.value);
         sessionStorage.setItem("libertix_distribution", distributionInput.value);
         sessionStorage.setItem("libertix_linux_username", linuxUsernameInput.value);
-        setStatus("Options enregistrées pour cet onglet. Le mot de passe Linux n'est pas stocké.", false);
+        setStatus("Options saved for this tab. The Linux password is not stored.", false);
       });
       document.getElementById("health").addEventListener("click", checkHealth);
       document.getElementById("loadVms").addEventListener("click", loadVms);
@@ -589,7 +589,7 @@
       function requestBody() {
         const vms = selectedVms();
         if (!vms.length) {
-          setStatus("Sélectionnez au moins une VM.", true);
+          setStatus("Select at least one VM.", true);
           return null;
         }
         return {
@@ -603,12 +603,12 @@
         if (!body) return null;
         if (!validateAutomationInputs()) return null;
         if (automationModeInput.value === "full" && body.vms.length !== 3) {
-          setStatus("La campagne complète exige exactement trois VM sélectionnées.", true);
+          setStatus("The complete campaign requires exactly three selected VMs.", true);
           return null;
         }
         if (automationModeInput.value === "single" && bootGuardianFaultInput.value !== "none") {
           if (body.vms.length !== 1 || firstBootInput.value !== "windows") {
-            setStatus("Une panne simulée exige une seule VM du firmware correspondant et Windows vérifié en premier.", true);
+            setStatus("A simulated fault requires exactly one VM with the matching firmware and Windows verified first.", true);
             return null;
           }
         }
@@ -621,7 +621,7 @@
           source: sourceModeInput.value || "local",
           apply: true,
           linux_username: linuxUsernameInput.value || "test",
-          linux_password: preview ? "<masqué>" : linuxPasswordInput.value,
+          linux_password: preview ? "<masked>" : linuxPasswordInput.value,
           linux_size_gib: Number(linuxSizeGibInput.value),
           migrate_windows_preferences: migrateWindowsPreferencesInput.checked,
         };
@@ -662,7 +662,7 @@
         const details = invalidInput.closest("details");
         if (details) details.open = true;
         invalidInput.reportValidity();
-        setStatus("Corrigez les paramètres unattended invalides avant de lancer l'installation.", true);
+        setStatus("Fix the invalid unattended settings before starting the installation.", true);
         return false;
       }
 
@@ -749,8 +749,8 @@
           result.steps.forEach(addStep);
         }
         if (result.operation && result.status) {
-          summaryBox.textContent = `${result.operation} terminé avec statut: ${result.status}`;
-          setStatus(result.message || "Opération terminée.", result.status !== "ok");
+          summaryBox.textContent = `${result.operation} finished with status: ${result.status}`;
+          setStatus(result.message || "Operation finished.", result.status !== "ok");
         }
         showCampaignSummary(result.campaign_summary || []);
       }
@@ -759,7 +759,7 @@
         const container = document.getElementById("campaignSummary");
         container.replaceChildren();
         document.getElementById("campaignResults").hidden = scenarios.length === 0;
-        const labels = { ok: "Réussi", error: "Échec", "not-run": "Non exécuté", "not-verified": "Non vérifié", interrupted: "Interrompu", running: "En cours" };
+        const labels = { ok: "Passed", error: "Failed", "not-run": "Not run", "not-verified": "Not verified", interrupted: "Interrupted", running: "Running" };
         for (const scenario of scenarios) {
           const section = document.createElement("section");
           section.className = "panel stack";
@@ -768,10 +768,10 @@
           title.className = scenario.status === "ok" ? "ok" : scenario.status === "error" ? "bad" : "muted";
           section.appendChild(title);
           const vms = document.createElement("p");
-          vms.textContent = Object.entries(scenario.vms || {}).map(([vm, status]) => `${vm} : ${labels[status] || status}`).join(" · ");
+          vms.textContent = Object.entries(scenario.vms || {}).map(([vm, status]) => `${vm}: ${labels[status] || status}`).join(" · ");
           section.appendChild(vms);
           const details = document.createElement("pre");
-          details.textContent = [scenario.message, scenario.log && `Journal : ${scenario.log}`, scenario.captures && `Captures : ${scenario.captures}`].filter(Boolean).join("\n");
+          details.textContent = [scenario.message, scenario.log && `Log: ${scenario.log}`, scenario.captures && `Captures: ${scenario.captures}`].filter(Boolean).join("\n");
           section.appendChild(details);
           for (const error of scenario.errors || []) {
             const diagnostic = document.createElement("pre");
@@ -788,15 +788,15 @@
       }
 
       async function stopOperation() {
-        if (!confirm("Arrêter de force l'opération actuellement active sur ce serveur, y compris si elle a été lancée depuis un autre onglet ? Aucun rollback automatique ne sera effectué dans les VM.")) return;
+        if (!confirm("Force-stop the operation currently active on this server, even if it was started from another tab? No automatic rollback will be performed in the VMs.")) return;
         const button = document.getElementById("stopOperation");
         button.disabled = true;
         try {
           const response = await fetch("/api/v1/operation/kill", { method: "POST" });
           if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
-          setStatus("Arrêt demandé au contrôleur. Les opérations déjà lancées dans les VM ne sont pas annulées automatiquement.", true);
+          setStatus("Stop requested from the controller. Operations already started in the VMs are not cancelled automatically.", true);
         } catch (error) {
-          setStatus(`Arrêt non confirmé : ${error.message}`, true);
+          setStatus(`Stop not confirmed: ${error.message}`, true);
         } finally {
           button.disabled = false;
         }
@@ -823,9 +823,9 @@
             vmList.appendChild(label);
           });
           updateRequestPreview();
-          setStatus("VM chargées.", false);
+          setStatus("VMs loaded.", false);
         } catch (error) {
-          setStatus(`Impossible de charger les VM: ${error.message}`, true);
+          setStatus(`Unable to load the VMs: ${error.message}`, true);
         } finally {
           setBusy(false);
         }
@@ -834,7 +834,7 @@
       async function checkFilepool() {
         clearResults();
         setBusy(true);
-        setStatus("Vérification du filepool...", false);
+        setStatus("Checking the filepool...", false);
         const files = [
           "catalog.json",
           "libertix-installer-bios.iso",
@@ -856,7 +856,7 @@
             addStep({
               step: `filepool.${file}`,
               status: response.ok ? "ok" : "error",
-              message: response.ok ? "Fichier accessible" : `HTTP ${response.status}`,
+              message: response.ok ? "File reachable" : `HTTP ${response.status}`,
               context: item,
             });
             if (!response.ok) {
@@ -864,9 +864,9 @@
             }
           }
           rawResult.textContent = JSON.stringify(result, null, 2);
-          setStatus(result.status === "ok" ? "Filepool accessible." : "Filepool incomplet.", result.status !== "ok");
+          setStatus(result.status === "ok" ? "Filepool reachable." : "Filepool incomplete.", result.status !== "ok");
         } catch (error) {
-          setStatus(`Erreur filepool: ${error.message}`, true);
+          setStatus(`Filepool error: ${error.message}`, true);
         } finally {
           setBusy(false);
         }
@@ -890,11 +890,11 @@
         const body = automationBody();
         if (!body) return;
         const full = automationModeInput.value === "full";
-        const scope = full ? "quatre installations successives par VM" : "une installation par VM";
-        if (!confirm(`Lancer ${scope} sur ${body.vms.join(", ")} ? Les snapshots seront restaurés et les données actuelles de ces VM remplacées. ${full && body.continue_after_failure ? "La campagne continuera après les échecs et effacera l'état de diagnostic avant le scénario suivant." : ""}`)) return;
+        const scope = full ? "four successive installations per VM" : "one installation per VM";
+        if (!confirm(`Start ${scope} on ${body.vms.join(", ")}? The snapshots will be restored and the current data of these VMs replaced. ${full && body.continue_after_failure ? "The campaign will continue after failures and will erase the diagnostic state before the next scenario." : ""}`)) return;
         const endpoint = automationEndpoint();
         if (stream) {
-          runStream(`${endpoint}/stream?format=ndjson`, body, full ? "campagne complète" : "installation automatique");
+          runStream(`${endpoint}/stream?format=ndjson`, body, full ? "complete campaign" : "automated installation");
           return;
         }
         runJson(
@@ -907,7 +907,7 @@
       function runReset(stream) {
         const vms = selectedVms();
         if (!vms.length) {
-          setStatus("Sélectionnez au moins une VM.", true);
+          setStatus("Select at least one VM.", true);
           return;
         }
         const params = new URLSearchParams();
@@ -924,7 +924,7 @@
       async function runJson(url, options, label) {
         clearResults();
         setBusy(true);
-        setStatus(`Opération ${label} en cours...`, false);
+        setStatus(`Operation ${label} running...`, false);
         try {
           const response = await fetch(url, options);
           const text = await response.text();
@@ -934,10 +934,10 @@
           const result = text ? JSON.parse(text) : {};
           showResult(result);
           if (!result.operation) {
-            setStatus(`Réponse ${label} reçue.`, false);
+            setStatus(`Response ${label} received.`, false);
           }
         } catch (error) {
-          setStatus(`Erreur interface: ${error.message}`, true);
+          setStatus(`Interface error: ${error.message}`, true);
         } finally {
           setBusy(false);
         }
@@ -946,7 +946,7 @@
       async function runStream(url, body, label) {
         clearResults();
         setBusy(true);
-        setStatus(`Opération ${label} en cours...`, false);
+        setStatus(`Operation ${label} running...`, false);
         try {
           const response = await fetch(url, {
             method: "POST",
@@ -976,9 +976,9 @@
           if (buffer.trim()) {
             terminalSeen = handleEventLine(buffer) || terminalSeen;
           }
-          if (!terminalSeen) throw new Error("Flux interrompu sans verdict final. L'opération peut continuer sur le serveur : ne la relancez pas à l'aveugle.");
+          if (!terminalSeen) throw new Error("Stream interrupted without a final verdict. The operation may continue on the server: do not restart it blindly.");
         } catch (error) {
-          setStatus(`Erreur interface: ${error.message}`, true);
+          setStatus(`Interface error: ${error.message}`, true);
         } finally {
           setBusy(false);
         }
@@ -989,7 +989,7 @@
         const event = JSON.parse(line);
         if (event.event === "step") {
           addStep(event.data);
-          setStatus(`Dernière étape: ${event.data.step}`, event.data.status !== "ok");
+          setStatus(`Last step: ${event.data.step}`, event.data.status !== "ok");
           return;
         }
         if (event.event === "result") {
@@ -999,7 +999,7 @@
       }
 
       function confirmReset(action) {
-        if (confirm("Confirmer le reset : restaurer le snapshot configuré sur les VM sélectionnées ? Le partage SMB sera conservé.")) {
+        if (confirm("Confirm the reset: restore the configured snapshot on the selected VMs? The SMB share is kept.")) {
           action();
         }
       }

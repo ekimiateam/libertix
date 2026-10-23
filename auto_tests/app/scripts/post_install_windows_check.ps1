@@ -122,14 +122,18 @@ function Get-LinuxDrive {
     param([Parameter(Mandatory = $true)][string]$LinuxUsername)
 
     for ($attempt = 0; $attempt -lt 90; $attempt++) {
-        foreach ($letter in @("L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
-            if (Test-Path -LiteralPath "${letter}:\home\$LinuxUsername" -PathType Container) {
-                return "${letter}:"
+        $statusPath = Join-Path $env:ProgramData 'Libertix\WindowsShare\mount-status.json'
+        if (Test-Path -LiteralPath $statusPath -PathType Leaf) {
+            $status = Read-JsonFileWithRetry -LiteralPath $statusPath
+            $drive = [string]$status.drive
+            Assert-Condition ($drive -match '^[L-Z]:$' -and [bool]$status.readOnly) 'Invalid read-only mount status.'
+            if (Test-Path -LiteralPath "$drive\home\$LinuxUsername" -PathType Container) {
+                return $drive
             }
         }
         Start-Sleep -Seconds 1
     }
-    throw "The read-only Linux volume is not mounted on any supported drive letter."
+    throw "The recorded read-only Linux mount is unavailable."
 }
 
 function Get-LibertixRecoveryTasks {
@@ -233,6 +237,7 @@ function Assert-LibertixPostInstallResult {
         "The post-install verification did not succeed: $($result.error)"
     Assert-Condition ([string]$result.planId -eq [string]$Session.Plan.planId) `
         "The post-install verification belongs to another plan."
+
     $expectedChecks = @(
         "execution-ledger",
         "installed-linux-boot",
@@ -260,6 +265,9 @@ function Assert-LibertixPostInstallResult {
         Assert-Condition ($actualChecks -contains $expectedCheck) `
             "The post-install verification omitted '$expectedCheck'."
     }
+
+    # A successful result is not enough if the evidence needed for later
+    # verification and rollback has disappeared.
     foreach ($relativePath in @(
         "installation-plan.json",
         "installation-state.json",
@@ -297,6 +305,7 @@ function Assert-LibertixPostInstallResult {
         [string]$evidence.localization.keyboardLayout -eq [string]$Session.Plan.locale.keyboardLayout -and
         [string]$evidence.localization.keyboardVariant -eq [string]$Session.Plan.locale.keyboardVariant
     ) "The first Linux boot did not prove the planned locale and keyboard configuration."
+
     if ($ExpectedFirmware -eq "uefi") {
         $bootChainType = [string]$evidence.grub.bootChain.type
         $bootCurrentVerified = $bootChainType -eq "uefi-boot-current"
@@ -364,6 +373,7 @@ function Assert-LibertixPostInstallResult {
         Assert-Condition (Test-Path -LiteralPath (Join-Path $root "bcd-backup") -PathType Leaf) `
             "The permanent BIOS BCD backup is missing."
     }
+
     return $result
 }
 
@@ -621,7 +631,7 @@ $installerIsoPattern = [regex]::Escape([string]$config.installer_iso_file_name)
 try {
     switch ($check) {
         "waiting_for_linux" {
-            $deadline = [DateTime]::UtcNow.AddMinutes(3)
+            $waitClock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $session = Get-LibertixRecoverySession `
                     -ExpectedFirmware ([string]$config.expected_firmware)
@@ -649,7 +659,7 @@ try {
                     $promptTasks.Count -eq 1
                 )
                 if ($waitingReady) { break }
-                if ([DateTime]::UtcNow -ge $deadline) {
+                if ($waitClock.Elapsed.TotalSeconds -ge 180) {
                     $waitingStatus = if ($null -eq $waitingResult) {
                         "missing"
                     } else {
@@ -724,7 +734,7 @@ try {
             Write-Output "WINDOWS_CURRENT_BOOT=$currentBootId"
         }
         "finalization" {
-            $deadline = [DateTime]::UtcNow.AddMinutes(5)
+            $clock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $session = Get-LibertixRecoverySession `
                     -ExpectedFirmware ([string]$config.expected_firmware)
@@ -742,10 +752,29 @@ try {
                         $_.TaskName -like "LibertixUefiRecovery_*"
                     ) -and $_.TaskName -notmatch "Prompt"
                 })
+
                 $interactiveCheckPassed = -not [bool]$config.share_linux_files_in_windows
                 if ($resultStatus -in @("failed", "rolled-back")) {
                     $failedChecks = @($savedResult.checks | Where-Object { -not [bool]$_.passed } |
-                        ForEach-Object { "{0}: {1}" -f [string]$_.name, [string]$_.message })
+                        ForEach-Object { "{0}: {1}" -f [string]$_.name, [string]$_.detail })
+                    foreach ($logPath in @(
+                        [string]$savedResult.logPath,
+                        (Join-Path $env:ProgramData 'Libertix\WindowsShare\windows-share.log')
+                    )) {
+                        if (-not [string]::IsNullOrWhiteSpace($logPath)) {
+                            try {
+                                if (-not (Test-Path -LiteralPath $logPath -PathType Leaf -ErrorAction Stop)) {
+                                    Write-Output "FINALIZATION_LOG_MISSING=$logPath"
+                                    continue
+                                }
+                                Write-Output "FINALIZATION_LOG=$logPath (last 20 lines)"
+                                Get-Content -LiteralPath $logPath -Tail 20 -ErrorAction Stop |
+                                    ForEach-Object { Write-Output ([string]$_) }
+                            } catch {
+                                Write-Output "FINALIZATION_LOG_UNREADABLE=$logPath ERROR=$($_.Exception.Message)"
+                            }
+                        }
+                    }
                     throw (
                         "Libertix Windows finalization reached terminal status '$resultStatus'. " +
                         "Error='$([string]$savedResult.error)'. " +
@@ -753,6 +782,7 @@ try {
                         "LogPath='$([string]$savedResult.logPath)'."
                     )
                 }
+
                 if ($resultStatus -eq "succeeded" -and [bool]$config.share_linux_files_in_windows) {
                     $interactiveCheckPassed = @($savedResult.checks | Where-Object {
                         [string]$_.name -eq "explorer-integration" -and [bool]$_.passed
@@ -770,7 +800,8 @@ try {
                     Write-Output "LIBERTIX_FINALIZATION=ready"
                     break
                 }
-                if ([DateTime]::UtcNow -ge $deadline) {
+
+                if ($clock.Elapsed.TotalSeconds -ge 300) {
                     throw (
                         "Libertix Windows finalization timed out: " +
                         "resultStatus=$resultStatus, uefiTransaction=$uefiTransaction, " +
@@ -821,6 +852,8 @@ try {
             Write-Output ("DEFAULT_ROUTES={0}" -f $defaultRoutes.Count)
             Write-Output ("SSHD={0}" -f $sshService.Status)
 
+            # The terminal result is valid only if both Windows itself and the
+            # durable Libertix evidence survived the final reboot.
             Assert-Condition ($os.ProductType -eq 1) "The final system is not a Windows workstation."
             if ([string]$config.expected_firmware -eq "uefi") {
                 Assert-Condition ($firmware -match "UEFI") "The final Windows boot is not UEFI."
@@ -945,12 +978,16 @@ try {
                 [int64]$_.Offset -eq [int64]$plan.disk.recovery.offsetBytes -and
                 [int64]$_.Size -eq [int64]$plan.disk.recovery.sizeBytes
             })
+
             Write-Output ("WINDOWS_OFFSET={0} WINDOWS_SIZE={1}" -f `
                 $systemPartition.Offset, $systemPartition.Size)
             Write-Output ("LINUX_OFFSET={0} LINUX_SIZE={1}" -f `
                 $installerOffset, $observedLinuxSize)
             Write-Output ("RECOVERY_OFFSET={0} RECOVERY_SIZE={1}" -f `
                 $plan.disk.recovery.offsetBytes, $plan.disk.recovery.sizeBytes)
+
+            # Check Windows, Linux and Recovery against the original geometry;
+            # a healthy volume alone would not reveal a moved partition.
             Assert-Condition ([int]$systemDisk.Number -eq [int]$plan.disk.number) `
                 "The installed system disk number differs from the installation plan."
             Assert-Condition (([string]$systemDisk.UniqueId).Trim() -eq `
@@ -1038,6 +1075,7 @@ try {
             $promptTasks = @($recoveryTasks | Where-Object {
                 $_.TaskName -match "Prompt"
             })
+
             Write-Output ("INSTALLER_VOLUMES={0}" -f $installerVolumes.Count)
             Write-Output ("UEFI_TRANSACTION={0}" -f $uefiTransaction)
             Write-Output ("BIOS_PENDING={0}" -f $biosPending)
@@ -1045,6 +1083,9 @@ try {
             Write-Output ("PREFERENCE_BUNDLE_PRESENT={0}" -f $preferenceBundlePresent)
             Write-Output ("STARTUP_RECOVERY_TASKS={0}" -f $startupRecoveryTasks.Count)
             Write-Output ("RESULT_PROMPT_TASKS={0}" -f $promptTasks.Count)
+
+            # Recovery metadata must remain available, while temporary media,
+            # secrets and startup tasks must be gone after installation.
             Assert-Condition ($installerVolumes.Count -eq 0) "The temporary installer volume still exists."
             Assert-Condition (-not $uefiTransaction) "The UEFI transaction file still exists."
             Assert-Condition (-not $accountSecretPresent) `
@@ -1107,19 +1148,48 @@ try {
                 { $_ -in @("en", "fr", "es", "ko") } { $_; break }
                 default { "en" }
             }
+
+            # Windows input-method IDs must map to the Linux layout recorded in
+            # the installation plan; a matching UI language alone is not proof.
             $exactKeyboardMappings = @{
-                "00000409" = "us|"; "00010409" = "us|dvorak"; "00020409" = "us|intl"
-                "00030409" = "us|dvorak-l"; "00040409" = "us|dvorak-r"; "00000809" = "gb|"
-                "0000040C" = "fr|"; "0000080C" = "be|"; "00000C0C" = "ca|fr-legacy"
-                "00001009" = "ca|"; "00011009" = "ca|multix"; "0000100C" = "ch|fr"
-                "0000040A" = "es|winkeys"; "0000080A" = "latam|"; "00000412" = "kr|"
+                "00000409" = "us|"
+                "00010409" = "us|dvorak"
+                "00020409" = "us|intl"
+                "00030409" = "us|dvorak-l"
+                "00040409" = "us|dvorak-r"
+                "00000809" = "gb|"
+                "0000040C" = "fr|"
+                "0000080C" = "be|"
+                "00000C0C" = "ca|fr-legacy"
+                "00001009" = "ca|"
+                "00011009" = "ca|multix"
+                "0000100C" = "ch|fr"
+                "0000040A" = "es|winkeys"
+                "0000080A" = "latam|"
+                "00000412" = "kr|"
             }
+
             $languageKeyboardMappings = @{
-                "0409" = "us|"; "0809" = "gb|"; "040C" = "fr|"; "080C" = "be|"
-                "0C0C" = "ca|fr-legacy"; "1009" = "ca|"; "1109" = "ca|multix"
-                "100C" = "ch|fr"; "040A" = "es|winkeys"; "080A" = "latam|"; "0412" = "kr|"
+                "0409" = "us|"
+                "0809" = "gb|"
+                "040C" = "fr|"
+                "080C" = "be|"
+                "0C0C" = "ca|fr-legacy"
+                "1009" = "ca|"
+                "1109" = "ca|multix"
+                "100C" = "ch|fr"
+                "040A" = "es|winkeys"
+                "080A" = "latam|"
+                "0412" = "kr|"
             }
-            $uiKeyboardFallbacks = @{ "en" = "us|"; "fr" = "fr|"; "es" = "es|"; "ko" = "kr|" }
+
+            $uiKeyboardFallbacks = @{
+                "en" = "us|"
+                "fr" = "fr|"
+                "es" = "es|"
+                "ko" = "kr|"
+            }
+
             $windowsKeyboardMappings = @(
                 foreach ($tip in $inputMethodTips) {
                     $identifier = (($tip -split ":")[-1]).ToUpperInvariant()
@@ -1133,13 +1203,16 @@ try {
                     }
                 }
             )
+
             $plannedKeyboard = "{0}|{1}" -f `
                 [string]$plannedLocale.keyboardLayout, [string]$plannedLocale.keyboardVariant
+
             Write-Output ("SYSTEM_LOCALE={0}" -f $systemLocale.Name)
             Write-Output ("UI_CULTURE={0}" -f $uiCulture.Name)
             Write-Output ("LANGUAGES={0}" -f (($languages.LanguageTag) -join ","))
             Write-Output ("INPUT_METHOD_TIPS={0}" -f ($inputMethodTips -join ","))
             Write-Output ("TIME_ZONE={0}" -f $timeZone.Id)
+
             Assert-Condition (-not [string]::IsNullOrWhiteSpace($systemLocale.Name)) "Windows has no system locale."
             Assert-Condition ($languages.Count -ge 1) "Windows has no user language."
             Assert-Condition ($inputMethodTips.Count -ge 1) "Windows has no configured input method."
@@ -1216,24 +1289,24 @@ try {
             }
         }
         "sharing_disabled" {
-            if (-not [bool]$config.share_linux_files_in_windows) {
-                $mountTasks = @(Get-ScheduledTask `
-                    -TaskName "LibertixLinuxReadOnly" `
-                    -ErrorAction SilentlyContinue)
-                $pinTasks = @(Get-ScheduledTask `
-                    -TaskName "LibertixLinuxReadOnlyPin_*" `
-                    -ErrorAction SilentlyContinue)
-                $mountProcesses = @(Get-CimInstance `
-                    Win32_Process `
-                    -Filter "Name='ext4.exe'" `
-                    -ErrorAction SilentlyContinue)
-                Assert-Condition ($mountTasks.Count -eq 0) `
-                    "The disabled Linux-to-Windows share still has a mount task."
-                Assert-Condition ($pinTasks.Count -eq 0) `
-                    "The disabled Linux-to-Windows share still has a shortcut task."
-                Assert-Condition ($mountProcesses.Count -eq 0) `
-                    "The disabled Linux-to-Windows share still has an ext4 mount process."
-            }
+            Assert-Condition (-not [bool]$config.share_linux_files_in_windows) `
+                "sharing_disabled only applies when the Linux-to-Windows share is disabled."
+            $mountTasks = @(Get-ScheduledTask `
+                -TaskName "LibertixLinuxReadOnly" `
+                -ErrorAction SilentlyContinue)
+            $pinTasks = @(Get-ScheduledTask `
+                -TaskName "LibertixLinuxReadOnlyPin_*" `
+                -ErrorAction SilentlyContinue)
+            $mountProcesses = @(Get-CimInstance `
+                Win32_Process `
+                -Filter "Name='ext4.exe'" `
+                -ErrorAction SilentlyContinue)
+            Assert-Condition ($mountTasks.Count -eq 0) `
+                "The disabled Linux-to-Windows share still has a mount task."
+            Assert-Condition ($pinTasks.Count -eq 0) `
+                "The disabled Linux-to-Windows share still has a shortcut task."
+            Assert-Condition ($mountProcesses.Count -eq 0) `
+                "The disabled Linux-to-Windows share still has an ext4 mount process."
         }
         "ext4_driver" {
             $ext4 = Join-Path $nativeProgramFiles "ext4-win-driver\ext4.exe"
@@ -1353,6 +1426,9 @@ try {
                     ExpectedPartition, `
                     Tokens |
                 Format-List
+
+            # A read-only flag is insufficient if the process mounted a
+            # different disk, partition or drive letter.
             $ownedProcesses = @($processIdentityResults | Where-Object {
                 $_.ExecutableMatches -and
                 $_.DiskMatches -and
@@ -1362,6 +1438,7 @@ try {
             })
             Assert-Condition ($ownedProcesses.Count -eq 1) `
                 "The active ext4 mount is not uniquely tied to the planned disk and partition."
+
             $mountStatusPath = Join-Path $env:ProgramData "Libertix\WindowsShare\mount-status.json"
             Assert-Condition (Test-Path -LiteralPath $mountStatusPath -PathType Leaf) `
                 "The durable ext4 mount status is missing."
@@ -1402,12 +1479,20 @@ try {
                 $accepted = $true
             } catch {
                 Write-Output ("WRITE_REFUSAL={0}" -f $_.Exception.Message)
+                $failure = $_.Exception
+                while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+                $nativeCode = $failure.HResult -band 0xffff
+                Write-Output "WRITE_REFUSAL_NATIVE_CODE=$nativeCode HRESULT=$($failure.HResult) TYPE=$($failure.GetType().FullName)"
+                Assert-Condition ($nativeCode -eq 19) 'The write failed for a reason other than media write protection.'
             } finally {
                 if ($accepted) {
                     Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
                 }
             }
             Assert-Condition (-not $accepted) "The Linux volume accepted a Windows write."
+            $marker = Join-Path $drive "home\$($config.linux_username)\$($config.linux_relative_path)"
+            $markerHash = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash.ToLowerInvariant()
+            Assert-Condition ($markerHash -eq [string]$config.linux_sha256) 'The Linux witness is no longer readable after the write probe.'
         }
         "explorer_shortcut" {
             $shortcuts = @(Get-RegisteredLinuxShortcuts -LinuxUsername ([string]$config.linux_username))
@@ -1426,33 +1511,51 @@ try {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $resultPath = Join-Path $session.Root "post-install-verification.json"
-            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            $clock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $savedResult = Read-JsonFileWithRetry -LiteralPath $resultPath
                 $checks = @($savedResult.checks | Where-Object {
                     [string]$_.name -eq "explorer-integration"
                 })
-                if ($checks.Count -eq 1 -or [DateTime]::UtcNow -ge $deadline) { break }
+                if ($checks.Count -eq 1 -or $clock.Elapsed.TotalSeconds -ge 120) { break }
                 Start-Sleep -Seconds 2
             } while ($true)
             Assert-Condition ($checks.Count -eq 1) `
                 "Explorer integration was not verified in the interactive user session."
             Assert-Condition ([bool]$checks[0].passed) `
                 "Explorer Home/Quick Access integration failed: $($checks[0].detail)"
+            $drive = Get-LinuxDrive -LinuxUsername ([string]$config.linux_username)
+            $expectedHome = Join-Path $drive "home\$($config.linux_username)"
+            $explorers = @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)
+            Assert-Condition ($explorers.Count -gt 0) 'No interactive Explorer session exists.'
+            foreach ($explorer in $explorers) {
+                $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwnerSid -ErrorAction Stop
+                $userProfile = Get-CimInstance Win32_UserProfile -Filter "SID='$($owner.Sid)'" -ErrorAction Stop
+                $junctionPath = Join-Path ([string]$userProfile.LocalPath) "Linux_$($config.linux_username)_read-only"
+                $junction = Get-Item -LiteralPath $junctionPath -Force -ErrorAction Stop
+                $targets = @($junction.Target)
+                Assert-Condition ([string]$junction.LinkType -eq 'Junction' -and $targets.Count -eq 1) 'The Explorer entry is not an unambiguous junction.'
+                Assert-Condition ([IO.Path]::GetFullPath([string]$targets[0]).TrimEnd('\') -ieq
+                    [IO.Path]::GetFullPath($expectedHome).TrimEnd('\')) 'The Explorer junction points to another directory.'
+                $witness = Join-Path $junctionPath ([string]$config.linux_relative_path)
+                $hash = (Get-FileHash -LiteralPath $witness -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                Assert-Condition ($hash -eq [string]$config.linux_sha256) 'The Linux witness differs when read through the Explorer junction.'
+                Write-Output "EXPLORER_JUNCTION=$junctionPath SHA256=$hash"
+            }
         }
         "post_install_result_ui" {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $expectedFirmware = [string]$config.expected_firmware
-            $deadline = [DateTime]::UtcNow.AddMinutes(2)
+            $waitClock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $uiProcesses = @(
                     Get-PostInstallResultUiProcesses `
                         -Session $session `
                         -ExpectedFirmware $expectedFirmware
                 )
-            if ($uiProcesses.Count -eq 1) { break }
-                if ([DateTime]::UtcNow -ge $deadline) {
+                if ($uiProcesses.Count -eq 1) { break }
+                if ($waitClock.Elapsed.TotalSeconds -ge 120) {
                     throw "The interactive Windows post-install result window is not running."
                 }
                 Start-Sleep -Seconds 2
@@ -1465,7 +1568,7 @@ try {
             $session = Get-LibertixRecoverySession `
                 -ExpectedFirmware ([string]$config.expected_firmware)
             $expectedFirmware = [string]$config.expected_firmware
-            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            $waitClock = [Diagnostics.Stopwatch]::StartNew()
             do {
                 $uiProcesses = @(
                     Get-PostInstallResultUiProcesses `
@@ -1478,7 +1581,7 @@ try {
                 if ($uiProcesses.Count -eq 0 -and $promptTasks.Count -eq 0) {
                     break
                 }
-                if ([DateTime]::UtcNow -ge $deadline) {
+                if ($waitClock.Elapsed.TotalSeconds -ge 30) {
                     throw "The Windows post-install result window or its prompt task is still active."
                 }
                 Start-Sleep -Seconds 1
@@ -1504,7 +1607,13 @@ try {
             Assert-Condition ($actual -eq [string]$config.windows_sha256) "The 100 MiB shared-file hash differs between Linux and Windows."
         }
         "dism_check_health" {
-            Invoke-NativeCheck -FilePath "dism.exe" -Arguments @("/Online", "/Cleanup-Image", "/CheckHealth")
+            $health = @(Repair-WindowsImage -Online -CheckHealth -NoRestart -ErrorAction Stop)
+            Assert-Condition ($health.Count -eq 1) "DISM did not return a unique image health result."
+            $state = if ($health[0].PSObject.Properties.Name -contains 'ImageHealthState') {
+                [string]$health[0].ImageHealthState
+            } else { '' }
+            Write-Output ("DISM_CHECK_HEALTH_STATE={0}" -f $state)
+            Assert-Condition ($state -eq "Healthy") "DISM CheckHealth did not report Healthy: '$state'."
         }
         "sfc_verify_only" {
             Invoke-NativeCheck -FilePath "sfc.exe" -Arguments @("/verifyonly")

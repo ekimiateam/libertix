@@ -100,39 +100,16 @@ function Invoke-DiskpartScript {
     }
 }
 
+# The installer keeps these names as seams that its Pester tests replace.
 function Get-HibernateEnabled {
-    # Read the state from the registry rather than parsing `powercfg /a`, whose
-    # output is localized. Returns $true, $false, or $null when unknown.
-    try {
-        $value = Get-ItemProperty `
-            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-            -Name "HibernateEnabled" `
-            -ErrorAction Stop
-        return ([int]$value.HibernateEnabled -ne 0)
-    } catch {
-        return $null
-    }
+    Get-LibertixHibernateEnabled
 }
 
 function Set-HibernateEnabled {
     param([Parameter(Mandatory = $true)][bool]$Enabled)
 
-    $argument = if ($Enabled) { "on" } else { "off" }
-    $powercfg = Get-NativeSystemExecutable -FileName "powercfg.exe"
-    $result = Invoke-LibertixNativeCommand `
-        -FilePath $powercfg `
-        -ArgumentList @("/hibernate", $argument) `
-        -TimeoutSeconds 60
-    $output = ($result.StandardOutput + [Environment]::NewLine + $result.StandardError).Trim()
-    if ($result.ExitCode -ne 0) {
-        throw "powercfg failed to turn hibernation $argument (rc=$($result.ExitCode)): $output"
-    }
-
-    $observed = Get-HibernateEnabled
-    if ($null -eq $observed -or $observed -ne $Enabled) {
-        throw "Windows did not apply the requested hibernation state: $argument"
-    }
-    Write-Log "Windows hibernation and Fast Startup set to: $argument" "Cyan"
+    Set-LibertixHibernateEnabled -Enabled $Enabled
+    Write-Log "Windows hibernation and Fast Startup set to: $(if ($Enabled) { 'on' } else { 'off' })" "Cyan"
 }
 
 function Get-GuidDLower {
@@ -209,6 +186,20 @@ function Remove-LibertixTemporaryEspFiles {
     }
 }
 
+function Assert-LibertixEspPreparationOwnership {
+    $esp = $null
+    try {
+        $esp = Mount-Esp -Letter $EspLetter
+        $temporary = Join-Path $esp $InstallerEspDirectory
+        if (Test-Path -LiteralPath $temporary) {
+            Assert-LibertixTemporaryEspOwnership -Directory $temporary
+        }
+        $null = Assert-LibertixInstalledEspOwnership -EspDrive $esp
+    } finally {
+        if ($esp) { Dismount-Letter -Letter $EspLetter }
+    }
+}
+
 function Assert-LibertixInstalledEspOwnership {
     param([Parameter(Mandatory = $true)][string]$EspDrive)
 
@@ -254,6 +245,7 @@ function Assert-LibertixTemporaryEspOwnership {
     }
     $owner = (Get-Content -LiteralPath $ownerPath -Raw -ErrorAction Stop).Trim()
     if ($owner -ne $RecoveryRunId) {
+        Write-Log "Temporary ESP ownership mismatch: directory=$Directory expected=$RecoveryRunId observed=$owner" "Red"
         throw "Temporary ESP directory belongs to another recovery run; refusing modification."
     }
 }
@@ -272,6 +264,16 @@ function Install-LibertixTemporaryBootloaderOnEsp {
     }
 
     $destination = Join-Path $EspDrive $InstallerEspDirectory
+    if (Test-Path -LiteralPath $destination) {
+        Assert-LibertixTemporaryEspOwnership -Directory $destination
+    }
+    $state = Get-TransactionPartitionState
+    if (-not $state -or [string]$state.RecoveryRunId -ne $RecoveryRunId) {
+        throw "Owned transaction state is required before temporary ESP writes."
+    }
+    # Persist intent before the first write, not after the loader copy succeeds.
+    Set-LibertixTransactionStateProperty -State $state -Name 'TemporaryBootPreparationStarted' -Value $true
+    Save-LibertixTransactionStateAtomic -State $state
     Remove-LibertixTemporaryEspFiles -EspDrive $EspDrive
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Set-Content `

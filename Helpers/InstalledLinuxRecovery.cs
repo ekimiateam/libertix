@@ -249,9 +249,10 @@ namespace Libertix.Helpers
                     Path.AltDirectorySeparatorChar);
                 if ((File.GetAttributes(canonicalRoot) & FileAttributes.ReparsePoint) != 0)
                     throw new InvalidOperationException("Recovery root is a reparse point.");
+                Security.ProtectedFiles.RequireRecoveryTree(canonicalRoot);
 
                 string planPath = Path.Combine(canonicalRoot, "installation-plan.json");
-                InstallationPlan plan = InstallationPlanSerializer.ReadValidated(planPath);
+                InstallationPlan plan = InstallationPlanSerializer.ReadForRecovery(planPath, out _);
                 if (!string.Equals(plan.PlanId, execution.PlanId, StringComparison.Ordinal) ||
                     !string.Equals(plan.Firmware, firmware, StringComparison.Ordinal) ||
                     !string.Equals(
@@ -272,6 +273,7 @@ namespace Libertix.Helpers
 
                 ValidateLinuxBootEvidence(canonicalRoot, plan);
                 ValidatePostInstallResult(canonicalRoot, plan);
+                ValidateRequiredFiles(canonicalRoot, new[] { "storage-before-installation.json" });
                 string statePath = null;
                 string scriptPath;
                 if (firmware == InstallationFirmware.Uefi)
@@ -293,6 +295,7 @@ namespace Libertix.Helpers
                         "Libertix.TemporaryArtifacts.psm1",
                         "Libertix.PostInstallVerification.psm1",
                         "Libertix.Rollback.psm1",
+                        "Libertix.StorageBaseline.psm1",
                         "Libertix.StorageTargets.psm1",
                         "Libertix.Process.psm1",
                         "Libertix.WindowsProfiles.psm1",
@@ -453,7 +456,8 @@ namespace Libertix.Helpers
                 Path.Combine("payload", "Scripts", "libertix-uefi-install.ps1"),
                 Path.Combine("payload", "Scripts", "modules", "Libertix.InstallationState.psm1"),
                 Path.Combine("payload", "Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
-                Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1")
+                Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1"),
+                Path.Combine("payload", "Scripts", "modules", "Libertix.StorageBaseline.psm1")
             });
             return Path.Combine(
                 state.PayloadRoot,

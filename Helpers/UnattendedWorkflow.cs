@@ -174,7 +174,23 @@ namespace Libertix.Helpers
                 ["stage"] = stage,
                 ["updatedAtUtc"] = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)
             };
-            AtomicJsonFile.Write(options.StatusPath, JsonSerializer.Serialize(status));
+            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+            while (true)
+            {
+                try
+                {
+                    await Task.Run(() => AtomicJsonFile.Write(
+                        options.StatusPath, JsonSerializer.Serialize(status))).ConfigureAwait(true);
+                    break;
+                }
+                catch (IOException ex) when (
+                    ((ex.HResult & 0xFFFF) == 32 || (ex.HResult & 0xFFFF) == 33) &&
+                    DateTime.UtcNow < deadline)
+                {
+                    // An SFTP reader can hold the old status open across several network round trips.
+                    await Task.Delay(250).ConfigureAwait(true);
+                }
+            }
             ApplicationLogger.Write(
                 string.Format(
                     CultureInfo.InvariantCulture,
@@ -182,7 +198,6 @@ namespace Libertix.Helpers
                     sequence,
                     stage));
 
-            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
             while (DateTime.UtcNow < deadline)
             {
                 try

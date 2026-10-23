@@ -11,6 +11,9 @@ param(
     [switch]$RecoverPreviousTransaction = $false,
     [string]$ExpectedRecoveryRunId = "",
     [string]$FilepoolBaseUrl = "",
+    [string]$LocalFilepoolDirectory = "",
+    [string]$LocalFilepoolServer = "",
+    [string]$Aria2ZipUrl = "",
     [string]$Aria2ExePath = "",
     [ValidateRange(0, 16)]
     [int]$Aria2Connections = 0,
@@ -43,6 +46,7 @@ $requiredModules = @(
     "Libertix.StorageTargets.psm1",
     "Libertix.Process.psm1",
     "Libertix.Firmware.psm1",
+    "Libertix.FirmwareVariables.psm1",
     "Libertix.Download.psm1",
     "Libertix.TemporaryArtifacts.psm1",
     "Libertix.Transaction.psm1",
@@ -91,6 +95,15 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
             $ExecutionStatePath = [string]$config.ExecutionStatePath
         }
         $FilepoolBaseUrl = [string]$config.FilepoolBaseUrl
+        if ($config.PSObject.Properties.Name -contains "LocalFilepoolDirectory") {
+            $LocalFilepoolDirectory = [string]$config.LocalFilepoolDirectory
+        }
+        if ($config.PSObject.Properties.Name -contains "LocalFilepoolServer") {
+            $LocalFilepoolServer = [string]$config.LocalFilepoolServer
+        }
+        if ($config.PSObject.Properties.Name -contains "Aria2ZipUrl") {
+            $Aria2ZipUrl = [string]$config.Aria2ZipUrl
+        }
         $Aria2ExePath = [string]$config.Aria2ExePath
         $Aria2Connections = [int]$config.Aria2Connections
         if (-not $bootStrategyWasSpecified -and $config.PSObject.Properties.Name -contains "BootStrategy") {
@@ -173,6 +186,12 @@ if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTra
         throw "FilepoolBaseUrl is required and must be an absolute HTTP(S) URL supplied by Libertix."
     }
     $FilepoolBaseUrl = $FilepoolBaseUrl.TrimEnd("/")
+    if (-not [string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+        $LocalFilepoolDirectory = [IO.Path]::GetFullPath($LocalFilepoolDirectory)
+        if (-not (Test-Path -LiteralPath $LocalFilepoolDirectory -PathType Container)) {
+            throw "The selected local filepool is no longer available."
+        }
+    }
 }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -184,19 +203,12 @@ $artifactCatalogPath = Join-Path $PSScriptRoot "config\Libertix.Artifacts.json"
 $artifactCatalog = Get-Content -LiteralPath $artifactCatalogPath -Raw -ErrorAction Stop |
     ConvertFrom-Json -ErrorAction Stop
 $Aria2ZipName = [string]$artifactCatalog.aria2.archiveFileName
-$downloadUrls = $null
-if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction) {
-    $downloadUrls = New-LibertixDownloadUrls `
-        -FilepoolBaseUrl $FilepoolBaseUrl `
-        -Aria2ZipName $Aria2ZipName
-}
 $InstallerIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoUrl } else { "" }
 $InstallerIsoName = "libertix-installer-uefi.iso"
 $InstallerIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoSha256 } else { "" }
 $DistributionIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoUrl } else { "" }
 $DistributionIsoPath = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoWindowsPath } else { "" }
 $DistributionIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoSha256 } else { "" }
-$Aria2ZipUrl = if ($downloadUrls) { $downloadUrls.Aria2Zip } else { "" }
 $Aria2ZipSha256 = [string]$artifactCatalog.aria2.archiveSha256
 $Aria2ExeSha256 = [string]$artifactCatalog.aria2.executableSha256
 $Aria2CacheDir = "$SystemDrive\LibertixTools\aria2"
@@ -441,9 +453,11 @@ try {
     Assert-LibertixPlanMatchesCurrentStorage
     Assert-LibertixAllocationMatchesCurrentStorage
     Test-LibertixSecureBootCompatibility -InstallationPlan $installationPlan
-    if ($installationPlan.PSObject.Properties.Name -contains 'allocation' -and $null -ne $installationPlan.allocation) {
+    Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
+    if (-not (Get-TransactionPartitionState)) {
         Save-TransactionPreparationState -SystemPartition (Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop)
     }
+    Assert-LibertixEspPreparationOwnership
     Set-WindowsVolumeReadableFromLinux -VerifyStorageIdentity {
         Assert-LibertixPlanMatchesCurrentStorage
         Assert-LibertixAllocationMatchesCurrentStorage

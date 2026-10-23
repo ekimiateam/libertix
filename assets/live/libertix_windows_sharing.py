@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pwd
 import re
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -19,7 +21,9 @@ from libertix_installation_policy import load_installation_policy
 
 SYS_CLASS_BLOCK = Path("/sys/class/block")
 FSTAB_PATH = Path("/etc/fstab")
+WINDOWS_MOUNT_PATH = Path("/mnt/windows")
 PARTITION_ALIGNMENT_BYTES = load_installation_policy().storage.partition_alignment_bytes
+PROFILE_FOLDERS = ("Desktop", "Documents", "Downloads", "Music", "Pictures", "Videos", "Favorites")
 
 
 def validate_sharing(value: Any) -> dict[str, Any]:
@@ -327,7 +331,7 @@ def preflight(plan: dict) -> None:
 
 def mount_paths(plan: dict, resolved: dict[str, Path], windows_device: Path) -> dict[str, Path]:
     return {
-        identifier: Path("/mnt/windows")
+        identifier: WINDOWS_MOUNT_PATH
         if device.resolve() == windows_device.resolve()
         else Path("/mnt/libertix-windows") / identifier
         for identifier, device in resolved.items()
@@ -338,11 +342,10 @@ def configure(plan: dict, windows_device: Path) -> None:
     resolved = resolve_volumes(plan)
     mounts = mount_paths(plan, resolved, windows_device)
     account = pwd.getpwnam(plan["account"]["username"])
-    home = Path(account.pw_dir)
     fstab = FSTAB_PATH
     content = fstab.read_text()
     for identifier, mount in mounts.items():
-        if mount == Path("/mnt/windows"):
+        if mount == WINDOWS_MOUNT_PATH:
             continue
         mount.mkdir(parents=True, exist_ok=True)
         entry = (
@@ -365,11 +368,67 @@ def configure(plan: dict, windows_device: Path) -> None:
         default_uid=current.st_uid,
         default_gid=current.st_gid,
     )
+    configure_shortcuts(plan["features"]["windowsSharing"]["folders"], account, mounts)
+
+
+def shortcut_paths(folders: list[dict], home: Path):
+    roots = {}
+    for folder in folders:
+        sid, name = folder["profileSid"], folder["shortcut"]
+        roots[sid] = min(roots.get(sid, name), name, key=len)
+    for folder in folders:
+        root = roots[folder["profileSid"]]
+        name = folder["shortcut"]
+        group = home / ("Win_" + root.removeprefix("User_"))
+        if name != root and not name.startswith(root + "_"):
+            raise ValueError("Windows sharing folder does not match its profile")
+        yield folder, group, None if name == root else group / name[len(root) + 1 :]
+
+
+def native_bookmarks(home: Path) -> list[str]:
+    configuration = home / ".config/user-dirs.dirs"
+    entries = []
+    if not configuration.exists():
+        return entries
+    for line in configuration.read_text().splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key not in {
+            "XDG_DESKTOP_DIR",
+            "XDG_DOCUMENTS_DIR",
+            "XDG_DOWNLOAD_DIR",
+            "XDG_MUSIC_DIR",
+            "XDG_PICTURES_DIR",
+            "XDG_VIDEOS_DIR",
+        }:
+            continue
+        values = shlex.split(value)
+        if len(values) != 1:
+            raise ValueError("Linux user directory configuration is invalid")
+        path = Path(values[0].replace("$HOME", str(home)))
+        if path.is_absolute() and path != home and path.is_dir():
+            entries.append(path.as_uri())
+    return entries
+
+
+def configure_shortcuts(folders: list[dict], account, mounts: dict[str, Path]) -> None:
+    home = Path(account.pw_dir)
     bookmarks = home / ".config/gtk-3.0/bookmarks"
     bookmarks.parent.mkdir(parents=True, exist_ok=True)
     existing = bookmarks.read_text().splitlines() if bookmarks.exists() else []
-    for folder in plan["features"]["windowsSharing"]["folders"]:
-        shortcut = home / folder["shortcut"]
+    # GTK's first-login initializer skips defaults when a bookmarks file already exists.
+    for entry in native_bookmarks(home):
+        if not any(line.split(" ", 1)[0] == entry for line in existing):
+            existing.append(entry)
+    for folder, group, shortcut in shortcut_paths(folders, home):
+        if group.is_symlink() or (group.exists() and not group.is_dir()):
+            raise RuntimeError("Windows profile folder would replace an existing user file")
+        group.mkdir(exist_ok=True)
+        os.chown(group, account.pw_uid, account.pw_gid)
+        entry = f"{group.as_uri()} {group.name}"
+        if entry not in existing:
+            existing.append(entry)
+        if shortcut is None:
+            continue
         target = mounts[folder["ntfsUuid"]] / folder["relativePath"]
         if shortcut.is_symlink():
             if os.readlink(shortcut) != str(target):
@@ -379,9 +438,6 @@ def configure(plan: dict, windows_device: Path) -> None:
         else:
             shortcut.symlink_to(target, target_is_directory=True)
         os.chown(shortcut, account.pw_uid, account.pw_gid, follow_symlinks=False)
-        entry = f"{shortcut.as_uri()} {folder['shortcut']}"
-        if entry not in existing:
-            existing.append(entry)
     atomic_write_text(
         bookmarks,
         "\n".join(existing) + "\n",
@@ -391,6 +447,38 @@ def configure(plan: dict, windows_device: Path) -> None:
     )
     for path in (home / ".config", bookmarks.parent, bookmarks):
         os.chown(path, account.pw_uid, account.pw_gid)
+
+
+def configure_legacy(plan: dict) -> None:
+    profiles = json.loads(
+        base64.b64decode(plan["features"]["windowsProfilesJsonBase64"], validate=True)
+    )
+    if not isinstance(profiles, list) or any(
+        not isinstance(profile, str)
+        or profile in {"", ".", ".."}
+        or re.search(r"[\x00-\x1f/\\]", profile)
+        for profile in profiles
+    ):
+        raise ValueError("Windows profile names are invalid")
+    mount = WINDOWS_MOUNT_PATH
+    folders = []
+    for profile in profiles:
+        relative = "Users/" + profile
+        require_directory(mount, relative)
+        for name in ("", *PROFILE_FOLDERS):
+            target = relative + ("/" + name if name else "")
+            if name and not (mount / target).is_dir():
+                continue
+            require_directory(mount, target)
+            folders.append(
+                {
+                    "profileSid": profile,
+                    "shortcut": "User_" + profile + ("_" + name if name else ""),
+                    "relativePath": target,
+                    "ntfsUuid": "legacy",
+                }
+            )
+    configure_shortcuts(folders, pwd.getpwnam(plan["account"]["username"]), {"legacy": mount})
 
 
 def verify(plan: dict, windows_device: Path) -> dict:
@@ -414,16 +502,25 @@ def verify(plan: dict, windows_device: Path) -> dict:
         ):
             raise RuntimeError("Shared volume mount has the wrong identity or is not writable")
     bookmarks = (home / ".config/gtk-3.0/bookmarks").read_text().splitlines()
-    for folder in plan["features"]["windowsSharing"]["folders"]:
-        shortcut = home / folder["shortcut"]
+    for folder, group, shortcut in shortcut_paths(
+        plan["features"]["windowsSharing"]["folders"], home
+    ):
         mount = mounts[folder["ntfsUuid"]]
         target = mount / folder["relativePath"]
         require_directory(mount, folder["relativePath"])
         if (
+            group.is_symlink()
+            or not group.is_dir()
+            or group.stat().st_uid != account.pw_uid
+            or f"{group.as_uri()} {group.name}" not in bookmarks
+        ):
+            raise RuntimeError("Windows profile folder or bookmark is invalid")
+        if shortcut is None:
+            continue
+        if (
             not shortcut.is_symlink()
             or os.readlink(shortcut) != str(target)
             or shortcut.lstat().st_uid != account.pw_uid
-            or f"{shortcut.as_uri()} {folder['shortcut']}" not in bookmarks
         ):
             raise RuntimeError("Shared folder shortcut or bookmark is invalid")
     return {
@@ -440,10 +537,14 @@ def main() -> None:
     parser.add_argument("windows_device", nargs="?", type=Path)
     args = parser.parse_args()
     plan = json.loads(args.plan.read_text())
-    if "windowsSharing" not in plan["features"]:
-        return
     if plan["features"].get("shareWindowsFilesInLinux") is not True:
-        raise ValueError("Disabled Windows sharing must not contain an inventory")
+        if "windowsSharing" in plan["features"]:
+            raise ValueError("Disabled Windows sharing must not contain an inventory")
+        return
+    if "windowsSharing" not in plan["features"]:
+        if args.action == "configure":
+            configure_legacy(plan)
+        return
     if args.action == "preflight":
         preflight(plan)
     else:

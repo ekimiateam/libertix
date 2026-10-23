@@ -27,26 +27,26 @@ Describe 'Windows recovery selection with OEM partitions' {
             $selected.PartitionNumber | Should -Be 4
             Should -Invoke Get-LibertixWindowsRecoveryLocation -Times 1 -Exactly -ParameterFilter { $AllowMissing }
         }
-        It 'selects active WinRE rather than the first OEM recovery candidate' {
+        It 'selects active WinRE rather than the first OEM recovery candidate on <_>' -ForEach @('GPT', 'MBR') {
             $parts = @($oem, $windows, $active)
             $selected = Resolve-LibertixWindowsRecoveryPartition -Partitions $parts `
-                -WindowsPartition $windows -PartitionStyle GPT
+                -WindowsPartition $windows -PartitionStyle $_
             $selected.PartitionNumber | Should -Be 4
             $parts.Count | Should -Be 3
             $oem.PartitionNumber | Should -Be 5
             Should -Invoke Get-LibertixWindowsRecoveryLocation -Times 1 -Exactly
         }
-        It 'refuses an unresolved active Recovery rather than guessing' {
+        It 'refuses an unresolved active Recovery rather than guessing on <_>' -ForEach @('GPT', 'MBR') {
             Mock Get-LibertixWindowsRecoveryLocation { throw 'Windows RE disabled or unavailable' }
             { Resolve-LibertixWindowsRecoveryPartition -Partitions @($windows, $oem, $active) `
-                -WindowsPartition $windows -PartitionStyle GPT } | Should -Throw '*disabled or unavailable*'
+                -WindowsPartition $windows -PartitionStyle $_ } | Should -Throw '*disabled or unavailable*'
         }
-        It 'does not identify Recovery on another physical disk' {
+        It 'does not identify Recovery on another physical disk on <_>' -ForEach @('GPT', 'MBR') {
             Mock Get-LibertixWindowsRecoveryLocation {
                 [pscustomobject]@{ DiskNumber = 0; PartitionNumber = 4 }
             }
             { Resolve-LibertixWindowsRecoveryPartition -Partitions @($windows, $oem, $active) `
-                -WindowsPartition $windows -PartitionStyle GPT } | Should -Throw '*does not match*'
+                -WindowsPartition $windows -PartitionStyle $_ } | Should -Throw '*does not match*'
         }
         It 'refuses a lone OEM candidate when active WinRE is on another disk' {
             Mock Get-LibertixWindowsRecoveryLocation {
@@ -70,9 +70,20 @@ Describe 'Windows recovery selection with OEM partitions' {
             { Resolve-LibertixWindowsRecoveryPartition -Partitions @($windows, $other) `
                 -WindowsPartition $windows -PartitionStyle GPT } | Should -Throw '*another physical disk*'
         }
-        It 'does not silently broaden MBR container support' {
-            { Resolve-LibertixWindowsRecoveryPartition -Partitions @($windows, $oem, $active) `
+        It 'identifies an MBR recovery candidate by its type without a GPT identifier' {
+            $active.GptType = ''
+            $active.Type = 'Unknown'
+            $oem.GptType = ''
+            $oem.Type = 'Unknown'
+            $selected = Resolve-LibertixWindowsRecoveryPartition -Partitions @($windows, $oem, $active) `
+                -WindowsPartition $windows -PartitionStyle MBR
+            $selected.PartitionNumber | Should -Be 4
+            Should -Invoke Get-LibertixWindowsRecoveryLocation -Times 1 -Exactly -ParameterFilter { -not $AllowMissing }
+        }
+        It 'refuses an MBR layout without a recovery candidate' {
+            { Resolve-LibertixWindowsRecoveryPartition -Partitions @($windows) `
                 -WindowsPartition $windows -PartitionStyle MBR } | Should -Throw '*no supported*'
+            Should -Invoke Get-LibertixWindowsRecoveryLocation -Times 0 -Exactly
         }
         It 'matches the native device path regardless of the translated heading' {
             $info = 'Emplacement Windows RE : \\?\GLOBALROOT\device\harddisk3\partition4\Recovery\WindowsRE'

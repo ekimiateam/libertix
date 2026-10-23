@@ -6,7 +6,11 @@ Set-StrictMode -Version Latest
 function Get-FirmwareFixtureScripts {
     param([Parameter(Mandatory = $true)][string]$ReleaseRoot)
 
-    $names = @("Scripts/modules/Libertix.Firmware.psm1", "Scripts/uefi/Libertix.Uefi.Firmware.ps1")
+    $names = @(
+        "Scripts/modules/Libertix.Firmware.psm1",
+        "Scripts/modules/Libertix.FirmwareVariables.psm1",
+        "Scripts/uefi/Libertix.Uefi.Firmware.ps1"
+    )
     $scripts = @{}
     if (@($names | Where-Object { -not (Test-Path -LiteralPath (Join-Path $ReleaseRoot $_)) }).Count -eq 0) {
         foreach ($name in $names) {
@@ -68,6 +72,9 @@ $releaseRoot = [IO.Path]::GetFullPath([string]$config.release_root)
 $scripts = Get-FirmwareFixtureScripts -ReleaseRoot $releaseRoot
 Import-Module (New-Module -Name LibertixFirmwareFixture -ScriptBlock (
     [scriptblock]::Create($scripts["Scripts/modules/Libertix.Firmware.psm1"])
+)) -Force -ErrorAction Stop
+Import-Module (New-Module -Name LibertixFirmwareVariablesFixture -ScriptBlock (
+    [scriptblock]::Create($scripts["Scripts/modules/Libertix.FirmwareVariables.psm1"])
 )) -Force -ErrorAction Stop
 . ([scriptblock]::Create($scripts["Scripts/uefi/Libertix.Uefi.Firmware.ps1"]))
 

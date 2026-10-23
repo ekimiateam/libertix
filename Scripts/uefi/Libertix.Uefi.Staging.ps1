@@ -356,7 +356,11 @@ function Install-LibertixIsoToPartition {
 
     try {
         Write-LibertixProgress -Stage "live-iso-download" -Percent 62
-        Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
+        if ([string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+            Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
+        } else {
+            Write-Log "Using Libertix UEFI ISO from the selected local filepool..." "Cyan"
+        }
         # Keep the configured canonical URL unchanged. Some filepool frontends
         # redirect only that exact resource and return 404 for arbitrary query
         # parameters; integrity is already enforced by the SHA-256 check below.
@@ -366,7 +370,8 @@ function Install-LibertixIsoToPartition {
             -Url $downloadUrl `
             -Destination $isoPath `
             -Label "Libertix UEFI ISO" `
-            -MaxBytes $script:MaximumLiveIsoBytes
+            -MaxBytes $script:MaximumLiveIsoBytes `
+            -LocalFileName $InstallerIsoName
 
         if (-not (Test-Path $isoPath)) {
             throw "ISO download failed."
@@ -487,17 +492,30 @@ function Install-LibertixIsoToPartition {
             }
         }
 
-        Dismount-DiskImage -ImagePath $isoPath | Out-Null
+        $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+        Write-Log "UEFI copy phase=dismount begin pid=$PID"
+        try {
+            Dismount-DiskImage -ImagePath $isoPath | Out-Null
+        } finally {
+            Write-Log "UEFI copy phase=dismount end elapsedMs=$($phaseClock.ElapsedMilliseconds)"
+        }
         Write-Log "Libertix UEFI installer copied." "Green"
     } finally {
+        $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+        Write-Log "UEFI copy phase=cleanup-dismount begin pid=$PID"
         try {
             Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue |
                 Out-Null
         } catch {
             Write-Verbose "Best-effort installer image dismount failed: $($_.Exception.Message)"
+        } finally {
+            Write-Log "UEFI copy phase=cleanup-dismount end elapsedMs=$($phaseClock.ElapsedMilliseconds)"
         }
 
+        $phaseClock.Restart()
+        Write-Log "UEFI copy phase=temporary-cleanup begin"
         Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "UEFI copy phase=temporary-cleanup end elapsedMs=$($phaseClock.ElapsedMilliseconds)"
     }
 }
 

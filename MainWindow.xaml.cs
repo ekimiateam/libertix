@@ -25,9 +25,15 @@ namespace Libertix
             _installationState = application.InstallationState;
             InitializeComponent();
             if (application.Filepool.IsDevelopmentMode ||
+                application.RuntimeOptions.DevelopmentMode ||
                 application.RuntimeOptions.Unattended != null)
             {
                 DevelopmentModeBanner.Visibility = Visibility.Visible;
+                if (application.RuntimeOptions.DevelopmentMode)
+                {
+                    DevelopmentModeBannerText.Text =
+                        "DEVELOPMENT MODE - online filepool comparison skipped.";
+                }
                 if (application.RuntimeOptions.Unattended != null)
                 {
                     DevelopmentModeBanner.Background =

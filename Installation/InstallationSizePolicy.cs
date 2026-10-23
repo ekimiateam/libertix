@@ -65,17 +65,21 @@ namespace Libertix.Installation
             if (shrinkAvailableGiB < StagingSizeGiB)
                 return 0;
 
-            double windowsBudget =
+            double downloadBudget =
                 initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB;
-            return Math.Max(0, windowsBudget);
+            if (downloadBudget < 0)
+                return 0;
+
+            // The final free-space budget credits the transaction ISO reclaimed
+            // by cleanup; the live installer still needs it during installation.
+            return Math.Max(0, initialWindowsFreeGiB - MinimumWindowsFreeSpaceGiB);
         }
 
         public static double RemainingWindowsFreeSpaceGiB(
             double initialWindowsFreeGiB,
-            double installerIsoGiB,
             double linuxSizeGiB)
         {
-            return initialWindowsFreeGiB - installerIsoGiB - linuxSizeGiB;
+            return initialWindowsFreeGiB - linuxSizeGiB;
         }
 
     }

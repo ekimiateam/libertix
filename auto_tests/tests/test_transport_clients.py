@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import gzip
+import io
 import re
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -237,6 +239,107 @@ def test_ssh_file_upload_sets_a_stall_timeout_and_forwards_progress(tmp_path: Pa
 
     assert sftp.channel.timeout == 45
     assert progress == [(3, 7), (7, 7)]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected", "error"),
+    [
+        (b'\xef\xbb\xbf{"sequence":1}', '{"sequence":1}', None),
+        (FileNotFoundError(2, "absent"), None, None),
+        (PermissionError(13, "denied"), None, "PermissionError"),
+        (TimeoutError("slow read"), None, "TimeoutError"),
+        (b"x" * 65, None, "ValueError"),
+        (b"\xff", None, "UnicodeDecodeError"),
+    ],
+)
+def test_ssh_text_read_is_bounded_and_does_not_spawn_commands(payload, expected, error) -> None:
+    channel = SimpleNamespace(settimeout=lambda seconds: None)
+
+    def open_file(path, mode):
+        assert path == "C:/Temp/status.json"
+        assert mode == "rb"
+        if isinstance(payload, Exception):
+            raise payload
+        return io.BytesIO(payload)
+
+    sftp = SimpleNamespace(get_channel=lambda: channel, open=open_file)
+    client = object.__new__(SSHClient)
+    client.host = "example.test"
+    client._client = SimpleNamespace(open_sftp=lambda: nullcontext(sftp))
+    if error:
+        with pytest.raises(WorkflowError) as caught:
+            client.read_text("C:/Temp/status.json", step="status", max_bytes=64)
+        assert caught.value.details["exception_type"] == error
+    else:
+        assert client.read_text("C:/Temp/status.json", step="status", max_bytes=64) == expected
+
+
+def test_ssh_text_read_timeout_also_bounds_subsystem_negotiation() -> None:
+    closed = threading.Event()
+
+    def blocked_open():
+        assert closed.wait(1)
+        raise EOFError("connection closed")
+
+    client = object.__new__(SSHClient)
+    client.host = "example.test"
+    client._client = SimpleNamespace(open_sftp=blocked_open, close=closed.set)
+    with pytest.raises(WorkflowError) as caught:
+        client.read_text("C:/Temp/status.json", step="status", timeout=0.05)
+    assert closed.is_set()
+    assert caught.value.details["exception_type"] == "EOFError"
+
+
+@pytest.mark.parametrize("blocked_stage", ["exec", "stdin"])
+def test_ssh_command_deadline_also_bounds_negotiation_and_stdin(monkeypatch, blocked_stage):
+    closed = threading.Event()
+    real_timer = threading.Timer
+    monkeypatch.setattr(
+        ssh_module.threading, "Timer", lambda _seconds, callback: real_timer(0.05, callback)
+    )
+
+    def block(*_args, **_kwargs):
+        assert closed.wait(2), "the transport deadline did not close the connection"
+        raise EOFError("connection closed")
+
+    fake = FakeParamikoClient()
+    fake.close = closed.set
+    if blocked_stage == "exec":
+        fake.exec_command = block
+    else:
+        stream = SimpleNamespace(channel=FakeChannel())
+        fake.exec_command = lambda *_args, **_kwargs: (SimpleNamespace(write=block), stream, stream)
+    client = SSHClient("vm.test", "test", "test", known_hosts_path="known_hosts")
+    client._client = fake
+    with pytest.raises(WorkflowError) as caught:
+        client.run("hostname", step="probe", timeout=5, stdin_data="input")
+    assert caught.value.details["exception_type"] == "TimeoutError"
+    assert caught.value.details["transport_error"] is True
+    assert closed.is_set()
+
+
+def test_replay_safe_ssh_failure_does_not_request_a_clean_scenario_restart(monkeypatch) -> None:
+    recovered = []
+    monkeypatch.setattr(
+        ssh_module.network_recovery,
+        "recover",
+        lambda failed_at, **kwargs: recovered.append((failed_at, kwargs)) or False,
+    )
+    client = SSHClient("vm.test", "test", "test", known_hosts_path="known_hosts")
+    client._client = SimpleNamespace(
+        exec_command=lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("lost")),
+        close=lambda: None,
+    )
+
+    with pytest.raises(WorkflowError):
+        client.run("hostname", step="boot.identity", timeout=5, replay_safe=True)
+
+    assert recovered[0][1]["replay_safe"] is True
+    assert recovered[0][1]["context"] == {
+        "failed_step": "boot.identity",
+        "target": "vm.test",
+        "transport_error": "TimeoutError",
+    }
 
 
 def test_ssh_client_connects_with_password_only_and_drains_both_streams(

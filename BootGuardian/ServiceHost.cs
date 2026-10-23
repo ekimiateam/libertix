@@ -45,6 +45,8 @@ namespace Libertix.BootGuardian
         {
             if (!Path.IsPathRooted(executablePath) || !File.Exists(executablePath))
                 throw new FileNotFoundException("Boot guardian service executable is missing.", executablePath);
+            Security.ProtectedFiles.RequireFile(executablePath);
+            Security.ProtectedFiles.RequireDirectory(Path.GetDirectoryName(executablePath));
             IntPtr manager = NativeMethods.OpenSCManager(
                 null,
                 null,

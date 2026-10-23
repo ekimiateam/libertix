@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from app.clients.proxmox import ProxmoxClient
 from app.config import VMConfig
 from app.errors import WorkflowError
+from app.models import AutomationRequest
 from app.services.automation import AutomationService
 from app.services.common import ResultBuilder
 
@@ -148,12 +149,15 @@ def test_boot_override_requires_explicit_secondary_allocation(
     monkeypatch.setattr(service.validation, "prepare_server", stop_before_build)
     result = service.run(
         ["vm1"],
-        linux_username="test",
-        linux_password="test-password",
-        linux_size_gib=20,
-        monitor_iso=True,
-        secondary_snapshot=snapshot,
-        installation_target=target,
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test-password",
+            linux_size_gib=20,
+            monitor_iso=True,
+            snapshot_mode="secondary-disk" if snapshot else "default",
+            installation_target=target,
+        ),
         run_workspace=tmp_path,
     )
     assert result.steps[-1].step == "test.stop"

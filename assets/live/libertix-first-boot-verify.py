@@ -36,6 +36,7 @@ HEX_ID = re.compile(r"^[0-9a-f]{32}$")
 EFI_GLOBAL_VARIABLE_GUID = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 BLOCK_CLASS_PATH = Path("/sys/class/block")
 BLOCK_DEVICE_PATH = Path("/dev")
+WINDOWS_PERMISSIONS_HELPER = Path(__file__).with_name("libertix-ntfs-permissions.py")
 
 
 class VerificationError(RuntimeError):
@@ -418,6 +419,7 @@ def write_json_atomic(
     value: dict[str, object],
     *,
     mode: int = 0o600,
+    windows_permissions: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
@@ -428,8 +430,11 @@ def write_json_atomic(
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
+        if windows_permissions:
+            run(sys.executable, str(WINDOWS_PERMISSIONS_HELPER), str(temporary))
         os.replace(temporary, path)
-        os.chmod(path, mode)
+        if not windows_permissions:
+            os.chmod(path, mode)
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
@@ -828,19 +833,35 @@ def verify_windows_sharing(plan: dict[str, object], windows_device: Path) -> dic
         account = pwd.getpwnam(username)
         home = Path(account.pw_dir)
         bookmarks = (home / ".config/gtk-3.0/bookmarks").read_text(encoding="utf-8").splitlines()
+        from libertix_windows_sharing import PROFILE_FOLDERS
+
         for profile in profiles:
-            shortcut = home / f"User_{profile}"
+            shortcut = home / f"Win_{profile}"
             target = mount / "Users" / profile
-            if not shortcut.is_symlink() or os.readlink(shortcut) != str(target):
-                raise VerificationError("A Linux Windows-profile shortcut has the wrong target")
-            if shortcut.lstat().st_uid != account.pw_uid or not target.is_dir():
+            if shortcut.is_symlink() or not shortcut.is_dir():
+                raise VerificationError("A Linux Windows-profile folder is missing or is a symlink")
+            if shortcut.stat().st_uid != account.pw_uid or not target.is_dir():
                 raise VerificationError(
                     "A Linux Windows-profile shortcut is inaccessible or has the wrong owner"
                 )
-            if f"{shortcut.as_uri()} User_{profile}" not in bookmarks:
+            if f"{shortcut.as_uri()} Win_{profile}" not in bookmarks:
                 raise VerificationError(
                     "A Linux Windows-profile bookmark is missing or incorrectly encoded"
                 )
+            for name in PROFILE_FOLDERS:
+                if not (target / name).is_dir():
+                    continue
+                link = shortcut / name
+                if (
+                    not link.is_symlink()
+                    or os.readlink(link) != str(target / name)
+                    or link.lstat().st_uid != account.pw_uid
+                ):
+                    raise VerificationError(
+                        "A Windows known-folder shortcut has the wrong target or owner"
+                    )
+                run("runuser", "-u", username, "--", "test", "-r", str(link))
+                run("runuser", "-u", username, "--", "test", "-x", str(link))
             run("runuser", "-u", username, "--", "test", "-r", str(shortcut))
             run("runuser", "-u", username, "--", "test", "-x", str(shortcut))
         return {"enabled": True, "device": str(source), "profileCount": len(profiles)}
@@ -983,7 +1004,7 @@ def publish_evidence(plan: dict[str, object], evidence: dict[str, object], devic
             boot_chain["backupMbrSha256"] = hashlib.sha256(backup_mbr).hexdigest()  # type: ignore[index]
             boot_chain["bootCodeChangedFromBackup"] = True  # type: ignore[index]
             boot_chain["verified"] = True  # type: ignore[index]
-        write_json_atomic(destination, evidence)
+        write_json_atomic(destination, evidence, windows_permissions=True)
         return destination
     finally:
         if mounted_here:
@@ -1030,6 +1051,9 @@ def archive_linux_diagnostics(plan: dict[str, object], device: Path | None = Non
         options = run("findmnt", "-rn", "-T", str(mount_path), "-o", "OPTIONS").split(",")
         if "rw" not in options:
             raise VerificationError("Windows partition is not mounted read-write")
+        log_root = mount_path / WINDOWS_LOG_ROOT
+        log_root.mkdir(parents=True, exist_ok=True)
+        run(sys.executable, str(WINDOWS_PERMISSIONS_HELPER), str(log_root))
         archive = mount_path / WINDOWS_LOG_ROOT / run_id
         archive.mkdir(parents=True, exist_ok=True)
         sources = (
@@ -1041,6 +1065,7 @@ def archive_linux_diagnostics(plan: dict[str, object], device: Path | None = Non
             if source.is_file():
                 shutil.copy2(source, archive / name)
         update_log_checksums(archive)
+        run(sys.executable, str(WINDOWS_PERMISSIONS_HELPER), "--recursive", str(archive))
 
         latest = mount_path / WINDOWS_LOG_ROOT / "latest"
         latest_plan = read_json(latest / "installation-plan.json") if latest.is_dir() else {}
@@ -1049,6 +1074,7 @@ def archive_linux_diagnostics(plan: dict[str, object], device: Path | None = Non
                 if source.is_file():
                     shutil.copy2(source, latest / name)
             update_log_checksums(latest)
+            run(sys.executable, str(WINDOWS_PERMISSIONS_HELPER), "--recursive", str(latest))
         run("sync")
         return archive
     finally:

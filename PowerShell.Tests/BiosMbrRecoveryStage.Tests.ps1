@@ -3,7 +3,7 @@ BeforeAll {
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
     if (@($errors).Count -ne 0) { throw $errors[0] }
-    foreach ($functionName in @('Restore-BiosMbrBootCode', 'Remove-OwnedBiosBcdEntry')) {
+    foreach ($functionName in @('Restore-BiosMbrBootCode', 'Remove-OwnedBiosBcdEntry', 'Invoke-MinimumRecoveryFallback')) {
         $function = $ast.Find({ param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
             $node.Name -eq $functionName
@@ -15,6 +15,18 @@ BeforeAll {
     function Get-LibertixNativeSystemExecutable { param([string]$FileName) }
     function Invoke-LibertixNativeCommand {
         param([string]$FilePath, [string[]]$ArgumentList, [int]$TimeoutSeconds)
+    }
+    function Invoke-RecoveryOperation { param([string]$Name, [scriptblock]$Operation) }
+}
+
+Describe 'Verified uninstall refuses fallback mutations before storage is proven' {
+    It 'does not restore BCD or clean payloads after a preflight refusal' {
+        $VerifiedUninstall = $true
+        $script:RecoveryCompensationSequenceStarted = $false
+        Mock Invoke-RecoveryOperation { throw 'Unexpected mutation' }
+        Invoke-MinimumRecoveryFallback
+        Should -Invoke Invoke-RecoveryOperation -Times 0 -Exactly
+        $script:RecoveryCompensationSequenceStarted | Should -BeFalse
     }
 }
 
@@ -79,11 +91,39 @@ description             Windows 11 maintenance entry
 
     It 'keeps whole-store import available for immediate installation rollback' {
         $guard = Get-Content "$PSScriptRoot/../Scripts/libertix-recovery-guard.ps1" -Raw
-        $restoreCall = $guard.Substring($guard.IndexOf('$bcdRestored = Invoke-RecoveryOperation'))
-        $restoreCall = $restoreCall.Substring(0, $restoreCall.IndexOf('$mbrRestored ='))
+        $start = $guard.IndexOf('if (-not $VerifiedUninstall)')
+        $restoreCall = $guard.Substring($start, $guard.IndexOf('$null = Invoke-RecoveryOperation -Name "windows-share.cleanup"', $start) - $start)
+        $restoreCall | Should -Match 'Restore-BcdState -Required:\$temporaryBootWasPrepared'
+        $restoreCall | Should -Not -Match '-PreserveUnrelatedChanges'
+        $guard | Should -Match 'Restore-BcdState -Required:\$temporaryBootWasPrepared -PreserveUnrelatedChanges'
+    }
+}
 
-        $restoreCall | Should -Match '-PreserveUnrelatedChanges:\$VerifiedUninstall'
-        $restoreCall | Should -Not -Match '-PreserveUnrelatedChanges:\$rollbackFromSucceeded'
+Describe 'Verified BIOS uninstall restores Windows boot before deleting Linux' {
+    BeforeAll {
+        $guard = Get-Content "$PSScriptRoot/../Scripts/libertix-recovery-guard.ps1" -Raw
+        $end = $guard.IndexOf('$diskLayoutRestored =')
+        $start = $guard.LastIndexOf('$script:RecoveryCompensationSequenceStarted = $true', $end)
+        $bootRestore = [scriptblock]::Create($guard.Substring($start, $end - $start))
+        function Invoke-RecoveryOperation { param([string]$Name, [scriptblock]$Operation) }
+    }
+    BeforeEach {
+        $VerifiedUninstall = $true
+        Mock Invoke-RecoveryOperation { $true }
+    }
+    It 'stops before disk restoration if the MBR could not be restored' {
+        Mock Invoke-RecoveryOperation { $false } -ParameterFilter { $Name -eq 'mbr.restore' }
+        { . $bootRestore } | Should -Throw '*Linux was not removed*'
+        Should -Invoke Invoke-RecoveryOperation -Times 0 -ParameterFilter { $Name -eq 'bcd.restore' }
+    }
+    It 'stops before disk restoration if the BCD could not be restored' {
+        Mock Invoke-RecoveryOperation { $false } -ParameterFilter { $Name -eq 'bcd.restore' }
+        { . $bootRestore } | Should -Throw '*Linux was not removed*'
+    }
+    It 'completes both boot restorations before reaching disk restoration' {
+        { . $bootRestore } | Should -Not -Throw
+        Should -Invoke Invoke-RecoveryOperation -Times 1 -Exactly -ParameterFilter { $Name -eq 'mbr.restore' }
+        Should -Invoke Invoke-RecoveryOperation -Times 1 -Exactly -ParameterFilter { $Name -eq 'bcd.restore' }
     }
 }
 

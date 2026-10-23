@@ -96,6 +96,8 @@ install_target_configuration_payload() {
         /mnt/target/usr/local/bin/first-boot-resize.sh
     install -m 0755 /usr/local/lib/libertix/libertix-first-boot-verify.py \
         /mnt/target/usr/local/lib/libertix/libertix-first-boot-verify.py
+    install -m 0755 /usr/local/lib/libertix/libertix-ntfs-permissions.py \
+        /mnt/target/usr/local/lib/libertix/libertix-ntfs-permissions.py
     install -m 0755 /usr/local/lib/libertix/libertix-first-boot-result.py \
         /mnt/target/usr/local/lib/libertix/libertix-first-boot-result.py
     install -d -m 0755 /mnt/target/etc/xdg/autostart

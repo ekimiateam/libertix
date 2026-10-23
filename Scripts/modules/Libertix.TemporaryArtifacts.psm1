@@ -124,6 +124,88 @@ function Remove-LibertixTransactionDownloads {
     }
 }
 
+function Test-LibertixDownloadPlanHasRecoveryState {
+    param(
+        [Parameter(Mandatory = $true)][string]$SystemDrive,
+        [Parameter(Mandatory = $true)][string]$PlanId
+    )
+
+    # A UEFI run keeps its recovery payload and scheduled tasks under its plan
+    # id until recovery completes; a BIOS run records its plan id in the single
+    # recovery root. Either one means that run may still need its downloads.
+    $uefiRoot = Join-Path $SystemDrive "ProgramData\Libertix\UefiRecovery\$PlanId"
+    if (Test-Path -LiteralPath $uefiRoot) { return $true }
+    foreach ($taskName in @("LibertixUefiRecovery_$PlanId", "LibertixUefiRecoveryPrompt_$PlanId")) {
+        if (Get-ScheduledTask -TaskPath '\' -TaskName $taskName -ErrorAction SilentlyContinue) {
+            return $true
+        }
+    }
+
+    $biosRoot = Join-Path $SystemDrive "LibertixInstallRecovery"
+    if (Test-Path -LiteralPath $biosRoot) {
+        $pendingPath = Join-Path $biosRoot "pending.env"
+        if (-not (Test-Path -LiteralPath $pendingPath -PathType Leaf)) { return $true }
+        $biosPlanId = @(Get-Content -LiteralPath $pendingPath -ErrorAction Stop |
+            Where-Object { $_.StartsWith("PLAN_ID=", [StringComparison]::Ordinal) } |
+            ForEach-Object { $_.Substring("PLAN_ID=".Length).Trim() }) | Select-Object -First 1
+        # An unreadable owner cannot prove that this plan is unrelated.
+        if ([string]$biosPlanId -cnotmatch '^[0-9a-f]{32}$' -or $biosPlanId -ceq $PlanId) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Move-LibertixReusableDistributionIso {
+    param(
+        [Parameter(Mandatory = $true)][string]$SystemDrive,
+        [Parameter(Mandatory = $true)][string]$PlanId,
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string]$Sha256,
+        [Parameter(Mandatory = $true)][int64]$MinimumBytes,
+        [Parameter(Mandatory = $true)][int64]$MaximumBytes
+    )
+
+    if ($FileName -ne [IO.Path]::GetFileName($FileName) -or [string]::IsNullOrWhiteSpace($FileName)) {
+        throw "The distribution ISO name must be a plain file name."
+    }
+    if ($Sha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "The distribution ISO hash must be a SHA256 hex digest."
+    }
+
+    $transactionRoot = Get-LibertixTransactionDownloadRoot -SystemDrive $SystemDrive -PlanId $PlanId
+    $destination = Join-Path $transactionRoot $FileName
+    if (Test-Path -LiteralPath $destination) { return $null }
+    $downloadsRoot = Split-Path -Parent $transactionRoot
+    if (-not (Test-Path -LiteralPath $downloadsRoot -PathType Container)) { return $null }
+
+    $siblings = @(Get-ChildItem -LiteralPath $downloadsRoot -Directory -Force -ErrorAction Stop |
+        Where-Object { $_.Name -cmatch '^[0-9a-f]{32}$' -and $_.Name -cne $PlanId })
+    foreach ($sibling in $siblings) {
+        if ($sibling.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+        $candidate = Join-Path $sibling.FullName $FileName
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        # aria2 keeps a control file next to an unfinished download.
+        if (Test-Path -LiteralPath "$candidate.aria2") { continue }
+        $item = Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $item.Length -le $MinimumBytes -or $item.Length -gt $MaximumBytes) {
+            continue
+        }
+        if (Test-LibertixDownloadPlanHasRecoveryState -SystemDrive $SystemDrive -PlanId $sibling.Name) {
+            continue
+        }
+        if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash -ine $Sha256) { continue }
+
+        New-Item -ItemType Directory -Path $transactionRoot -Force | Out-Null
+        # Both directories live under the same ProgramData root, so this is a
+        # rename: the reclaimable space now belongs to the current plan only.
+        Move-Item -LiteralPath $candidate -Destination $destination -ErrorAction Stop
+        return $candidate
+    }
+    return $null
+}
+
 function Remove-LibertixUefiToolArtifacts {
     param(
         [Parameter(Mandatory = $true)][string]$SystemDrive,
@@ -166,4 +248,6 @@ Export-ModuleMember -Function `
     Remove-LibertixBiosBootPayload, `
     Get-LibertixTransactionDownloadRoot, `
     Remove-LibertixTransactionDownloads, `
+    Test-LibertixDownloadPlanHasRecoveryState, `
+    Move-LibertixReusableDistributionIso, `
     Remove-LibertixUefiToolArtifacts

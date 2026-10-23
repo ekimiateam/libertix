@@ -266,20 +266,28 @@ def certificate_tbs_bytes(certificate: bytes) -> bytes:
     return certificate[start:tbs_end]
 
 
-def image_certificates(openssl: str, data: bytes) -> list[bytes]:
+def image_signatures(data: bytes) -> list[bytes]:
     layout = pe_layout(data)
     offset = int(layout["certificate_offset"])
     end = offset + int(layout["certificate_size"])
-    certificates: list[bytes] = []
+    signatures: list[bytes] = []
     while offset < end:
         if offset + 8 > end:
             raise VerificationError("PE signature header is truncated")
         length, revision, kind = struct.unpack_from("<IHH", data, offset)
         if length < 8 or offset + length > end or revision != 0x200 or kind != 2:
             raise VerificationError("PE signature is not a supported PKCS7 certificate")
+        signatures.append(data[offset + 8 : offset + length])
+        offset += (length + 7) & ~7
+    return signatures
+
+
+def image_certificates(openssl: str, data: bytes) -> list[bytes]:
+    certificates: list[bytes] = []
+    for signature in image_signatures(data):
         result = subprocess.run(
             [openssl, "pkcs7", "-inform", "DER", "-print_certs"],
-            input=data[offset + 8 : offset + length],
+            input=signature,
             capture_output=True,
             check=False,
             timeout=30,
@@ -293,7 +301,6 @@ def image_certificates(openssl: str, data: bytes) -> list[bytes]:
         if not matches:
             raise VerificationError("EFI signature contains no inspectable certificate")
         certificates.extend(ssl.PEM_cert_to_DER_cert(item) for item in matches)
-        offset += (length + 7) & ~7
     return certificates
 
 
@@ -317,7 +324,7 @@ def assert_certificate_hashes_allowed(
                     continue
                 certificate = temporary_root / "revoked-candidate.der"
                 certificate.write_bytes(certificate_bytes)
-                if not sbverify_accepts(args.sbverify, certificate, image):
+                if not sbverify_accepts(args.sbverify, certificate, image, openssl=args.openssl):
                     continue
                 if any(revoked_at):
                     # sbverify does not validate RFC3161 evidence against firmware dbt.
@@ -358,14 +365,58 @@ def certificate_subject(openssl: str, certificate: Path) -> str:
     ).strip()
 
 
-def sbverify_accepts(sbverify: str, certificate: Path, image: Path) -> bool:
-    result = subprocess.run(
-        [sbverify, "--cert", str(certificate), str(image)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0
+def sbverify_accepts(
+    sbverify: str, certificate: Path, image: Path, *, openssl: str = "openssl"
+) -> bool:
+    with tempfile.TemporaryDirectory(prefix="libertix-signature-") as directory:
+        trusted = Path(directory) / "trusted.pem"
+        trusted.write_text(ssl.DER_cert_to_PEM_cert(certificate.read_bytes()), encoding="ascii")
+        detached = Path(directory) / "signature.der"
+        for signature in image_signatures(image.read_bytes()):
+            # Older sbverify accepts unrelated intermediate CAs. Validate the signer
+            # chain independently, trusting only this firmware certificate.
+            chain = subprocess.run(
+                [
+                    openssl,
+                    "smime",
+                    "-verify",
+                    "-nosigs",
+                    "-inform",
+                    "DER",
+                    "-binary",
+                    "-CAfile",
+                    str(trusted),
+                    "-no-CApath",
+                    "-no-CAstore",
+                    "-partial_chain",
+                    "-purpose",
+                    "any",
+                    "-no_check_time",
+                ],
+                input=signature,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            if chain.returncode == 4:
+                continue
+            if chain.returncode:
+                raise VerificationError(
+                    "Cannot verify the EFI signer certificate chain: "
+                    + chain.stderr.decode("utf-8", errors="replace").strip()
+                )
+            # sbverify still checks the Authenticode signature and image digest.
+            # Bind both checks to the same signature, including on dual-signed images.
+            detached.write_bytes(signature)
+            result = subprocess.run(
+                [sbverify, "--cert", str(trusted), "--detached", str(detached), str(image)],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            if result.returncode == 0:
+                return True
+    return False
 
 
 def authority_matches(subject: str, authority: str) -> bool:
@@ -462,7 +513,7 @@ def verify(args: argparse.Namespace) -> dict[str, object]:
             certificate.write_bytes(certificate_bytes)
             subject = certificate_subject(args.openssl, certificate)
             if authority_matches(subject, args.authority) and sbverify_accepts(
-                args.sbverify, certificate, images["shim"]
+                args.sbverify, certificate, images["shim"], openssl=args.openssl
             ):
                 trusted_certificate_fingerprint = hashlib.sha256(certificate_bytes).hexdigest()
                 break
@@ -475,7 +526,7 @@ def verify(args: argparse.Namespace) -> dict[str, object]:
             certificate = temporary_root / f"dbx-{index}.der"
             certificate.write_bytes(certificate_bytes)
             for image_name, image in images.items():
-                if sbverify_accepts(args.sbverify, certificate, image):
+                if sbverify_accepts(args.sbverify, certificate, image, openssl=args.openssl):
                     raise VerificationError(
                         f"{image_name} is revoked by a firmware dbx certificate"
                     )
@@ -530,7 +581,7 @@ def verify_windows_loader(args: argparse.Namespace) -> dict[str, object]:
             certificate.write_bytes(certificate_bytes)
             subject = certificate_subject(args.openssl, certificate)
             if windows_authority_matches(subject) and sbverify_accepts(
-                args.sbverify, certificate, image
+                args.sbverify, certificate, image, openssl=args.openssl
             ):
                 trusted_certificate_fingerprint = hashlib.sha256(certificate_bytes).hexdigest()
                 break
@@ -543,7 +594,7 @@ def verify_windows_loader(args: argparse.Namespace) -> dict[str, object]:
         for index, certificate_bytes in enumerate(dbx_certificates):
             certificate = temporary_root / f"dbx-{index}.der"
             certificate.write_bytes(certificate_bytes)
-            if sbverify_accepts(args.sbverify, certificate, image):
+            if sbverify_accepts(args.sbverify, certificate, image, openssl=args.openssl):
                 raise VerificationError(
                     "Windows Boot Manager is revoked by a firmware dbx certificate"
                 )

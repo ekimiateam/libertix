@@ -1,3 +1,5 @@
+extern alias Guardian;
+
 using System;
 using System.IO;
 using System.Net;
@@ -25,7 +27,7 @@ namespace Libertix.Tests
         [TestMethod]
         public void Aria2UsesOneNonResumableConnectionWithoutByteRangeSupport()
         {
-            string[] arguments = ApplyChanges.CreateAria2DownloadArguments(
+            string[] arguments = InstallationEngine.CreateAria2DownloadArguments(
                 "https://example.test/live.iso",
                 @"C:\LibertixTools\downloads",
                 "live.iso",
@@ -58,13 +60,13 @@ namespace Libertix.Tests
         [TestMethod]
         public void RangeProbeRequiresAnExactOneBytePartialResponse()
         {
-            Assert.IsTrue(ApplyChanges.IsExactSingleByteRangeResponse(
+            Assert.IsTrue(InstallationEngine.IsExactSingleByteRangeResponse(
                 HttpStatusCode.PartialContent,
                 ContentRangeHeaderValue.Parse("bytes 0-0/524288000")));
-            Assert.IsFalse(ApplyChanges.IsExactSingleByteRangeResponse(
+            Assert.IsFalse(InstallationEngine.IsExactSingleByteRangeResponse(
                 HttpStatusCode.OK,
                 null));
-            Assert.IsFalse(ApplyChanges.IsExactSingleByteRangeResponse(
+            Assert.IsFalse(InstallationEngine.IsExactSingleByteRangeResponse(
                 HttpStatusCode.PartialContent,
                 ContentRangeHeaderValue.Parse("bytes 0-524287999/524288000")));
         }
@@ -263,7 +265,7 @@ namespace Libertix.Tests
                     "System.Text.Json.dll",
                     Path.Combine("Scripts", "libertix-uefi-install.ps1"),
                     Path.Combine("Scripts", "modules", "Libertix.Process.psm1"),
-                    Path.Combine("Scripts", "modules", "Libertix.FirmwareRead.psm1"),
+                    Path.Combine("Scripts", "modules", "Libertix.FirmwareVariables.psm1"),
                     Path.Combine("Scripts", "modules", "Libertix.PreferredBootPath.psm1"),
                     Path.Combine("Scripts", "modules", "Libertix.StorageGeometry.psm1"),
                     Path.Combine("Tools", "aria2", "aria2c.exe"),
@@ -289,7 +291,7 @@ namespace Libertix.Tests
                     File.WriteAllText(path, relativePath);
                 }
 
-                string[] selected = ApplyChanges
+                string[] selected = InstallationEngine
                     .EnumerateUefiRecoveryPayloadFiles(root)
                     .Select(path => path.Substring(root.Length).TrimStart(
                         Path.DirectorySeparatorChar,
@@ -1091,26 +1093,30 @@ namespace Libertix.Tests
         }
 
         [TestMethod]
-        public void LinuxAllocationReservesTheInstallerIsoAndWindowsMinimum()
+        public void LinuxAllocationRequiresTheInstallerDownloadAndCreditsItsCleanup()
         {
             Assert.AreEqual(
-                30d,
+                33d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(41d, 35d, 3d));
             Assert.AreEqual(
-                10d,
-                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 3d, 28d));
+                13d,
+                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 28d));
             Assert.AreEqual(
-                8d,
-                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 3d, 30d));
+                11d,
+                InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(41d, 30d));
             Assert.AreEqual(
                 0d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(10d, 35d, 3d));
             Assert.AreEqual(
-                49d,
+                52d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 12d, 3d));
             Assert.AreEqual(
                 0d,
                 InstallationSizePolicy.AvailableLinuxSizeGiB(60d, 7.99d, 3d));
+            Assert.AreEqual(
+                20.01d,
+                InstallationSizePolicy.AvailableLinuxSizeGiB(28.01d, 8d, 3.641d),
+                0.001d);
             Assert.AreEqual(10, InstallationSizePolicy.TargetWindowsFreeSpaceGiB);
             Assert.AreEqual(2, InstallationSizePolicy.WindowsFreeSpaceToleranceGiB);
             Assert.AreEqual(8, InstallationSizePolicy.MinimumWindowsFreeSpaceGiB);
@@ -1621,6 +1627,98 @@ namespace Libertix.Tests
             Assert.AreNotEqual(Path.GetDirectoryName(isoPath), liveMediaDirectory);
         }
 
+        private const string OrphanPlanId = "fedcba9876543210fedcba9876543210";
+
+        private static string ReuseIsoScenario(
+            Action<string> arrange,
+            Func<string, bool> recoveryTaskExists = null,
+            string expectedSha256 = null)
+        {
+            string root = Path.Combine(Path.GetTempPath(), "libertix-tests-" + Guid.NewGuid());
+            string downloads = Path.Combine(root, "Downloads");
+            string orphan = Path.Combine(downloads, OrphanPlanId, "linux.iso");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(orphan));
+                File.WriteAllText(orphan, "verified iso");
+                arrange(root);
+                string reused = InstallationTemporaryArtifacts.MoveReusableDistributionIso(
+                    downloads,
+                    Path.Combine(root, "UefiRecovery"),
+                    Path.Combine(root, "LibertixInstallRecovery"),
+                    PlanId,
+                    "linux.iso",
+                    expectedSha256 ?? Sha256Hex("verified iso"),
+                    1024,
+                    recoveryTaskExists ?? (_ => false));
+                string destination = Path.Combine(downloads, PlanId, "linux.iso");
+                Assert.AreEqual(reused != null, File.Exists(destination));
+                Assert.AreEqual(reused == null, File.Exists(orphan));
+                return reused;
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
+        private static string Sha256Hex(string text)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                return BitConverter.ToString(
+                    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text))).Replace("-", "");
+            }
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoIsMovedFromAnOrphanedPlan()
+        {
+            Assert.IsNotNull(ReuseIsoScenario(_ => { }));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoSkipsAnUnfinishedAria2Download()
+        {
+            Assert.IsNull(ReuseIsoScenario(root => File.WriteAllText(
+                Path.Combine(root, "Downloads", OrphanPlanId, "linux.iso.aria2"),
+                "control")));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoSkipsAHashMismatch()
+        {
+            Assert.IsNull(ReuseIsoScenario(_ => { }, expectedSha256: new string('0', 64)));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoSkipsAPlanWithUefiRecoveryState()
+        {
+            Assert.IsNull(ReuseIsoScenario(root =>
+                Directory.CreateDirectory(Path.Combine(root, "UefiRecovery", OrphanPlanId))));
+            Assert.IsNull(ReuseIsoScenario(
+                _ => { },
+                recoveryTaskExists: name => name == "LibertixUefiRecoveryPrompt_" + OrphanPlanId));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoRespectsTheBiosRecoveryOwner()
+        {
+            Func<string, Action<string>> biosOwner = pending => root =>
+            {
+                string biosRoot = Path.Combine(root, "LibertixInstallRecovery");
+                Directory.CreateDirectory(biosRoot);
+                if (pending != null)
+                    File.WriteAllText(Path.Combine(biosRoot, "pending.env"), pending);
+            };
+
+            Assert.IsNull(ReuseIsoScenario(biosOwner("PLAN_ID=" + OrphanPlanId + "\n")));
+            Assert.IsNull(ReuseIsoScenario(biosOwner(null)));
+            Assert.IsNull(ReuseIsoScenario(biosOwner("PLAN_ID=unknown\n")));
+            Assert.IsNotNull(ReuseIsoScenario(biosOwner("PLAN_ID=" + new string('a', 32) + "\n")));
+        }
+
         [TestMethod]
         public void InstallationPlanRejectsReservedMbrOffsetForUefi()
         {
@@ -1817,6 +1915,30 @@ namespace Libertix.Tests
             }, firmware, PlanId);
         }
 
+        [DataTestMethod]
+        [DataRow("bios")]
+        [DataRow("uefi")]
+        public void UninstallRejectsRecoveryRecordsWritableByStandardUsers(string firmware)
+        {
+            WithRecoveryRoots((systemRoot, programData, root) =>
+            {
+                CreateSuccessfulRecoveryArchive(root, firmware, PlanId);
+                string path = Path.Combine(root, "post-install-verification.json");
+                var security = File.GetAccessControl(path);
+                security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                    new System.Security.Principal.SecurityIdentifier(
+                        System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
+                    System.Security.AccessControl.FileSystemRights.Modify,
+                    System.Security.AccessControl.AccessControlType.Allow));
+                File.SetAccessControl(path, security);
+
+                var detection = InstalledLinuxRecoveryLocator.Find(systemRoot, programData);
+
+                Assert.AreEqual(InstalledLinuxRecoveryStatus.Blocked, detection.Status);
+                StringAssert.Contains(detection.Diagnostic, "untrusted account");
+            }, firmware, PlanId);
+        }
+
         [TestMethod]
         public void InstalledLinuxRecoveryOffersToResumeAnInterruptedRollback()
         {
@@ -1955,12 +2077,13 @@ namespace Libertix.Tests
             string firstPlanId = PlanId;
             string secondPlanId = new string('e', 32);
             string temporaryRoot = Path.Combine(
-                Path.GetTempPath(),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
                 "libertix-recovery-detection-" + Guid.NewGuid().ToString("N"));
             string systemRoot = Path.Combine(temporaryRoot, "system");
             string programData = Path.Combine(temporaryRoot, "program-data");
             try
             {
+                Guardian::Libertix.Security.ProtectedFiles.CreateDirectory(temporaryRoot);
                 Directory.CreateDirectory(systemRoot);
                 string uefiRoot = Path.Combine(programData, "Libertix", "UefiRecovery");
                 CreateSuccessfulRecoveryArchive(
@@ -2039,6 +2162,7 @@ namespace Libertix.Tests
             InstallationPlanSerializer.WriteAtomic(
                 Path.Combine(root, "installation-plan.json"),
                 plan);
+            File.WriteAllText(Path.Combine(root, "storage-before-installation.json"), "{}");
 
             InstallationStateMachine machine = CreateSuccessfulExecutionState(planId);
             InstallationStateStore.WriteAtomic(
@@ -2103,7 +2227,8 @@ namespace Libertix.Tests
                     Path.Combine("payload", "Scripts", "libertix-uefi-install.ps1"),
                     Path.Combine("payload", "Scripts", "modules", "Libertix.InstallationState.psm1"),
                     Path.Combine("payload", "Scripts", "modules", "Libertix.PostInstallVerification.psm1"),
-                    Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1")
+                    Path.Combine("payload", "Scripts", "modules", "Libertix.Rollback.psm1"),
+                    Path.Combine("payload", "Scripts", "modules", "Libertix.StorageBaseline.psm1")
                 });
             }
             else
@@ -2117,6 +2242,7 @@ namespace Libertix.Tests
                     "Libertix.AtomicFile.psm1", "Libertix.InstallationPolicy.json",
                     "Libertix.TemporaryArtifacts.psm1", "Libertix.PostInstallVerification.psm1",
                     "Libertix.Rollback.psm1", "Libertix.StorageTargets.psm1",
+                    "Libertix.StorageBaseline.psm1",
                     "Libertix.Process.psm1", "Libertix.WindowsProfiles.psm1",
                     "Libertix.BiosMbr.psm1", "bcd-backup",
                     Path.Combine("mbr-backup", "mbr-before-grub.bin"),

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
@@ -60,7 +61,28 @@ namespace Libertix
                 Shutdown(3);
                 return;
             }
+            var permissionChoices = new Dictionary<string, bool>(StringComparer.Ordinal);
+            Security.ProtectedFiles.ConfirmPermissions = warning => Dispatcher.Invoke(() =>
+            {
+                if (!permissionChoices.TryGetValue(warning, out bool accepted))
+                {
+                    accepted = MessageBox.Show(
+                        Localization.GetBootstrapString("UnsafePermissionsConfirmation",
+                            "The permissions on this path do not guarantee Libertix's security. " +
+                            "Another user could modify or replace code run as administrator. " +
+                            "Continue despite this risk?") + "\n\n" + warning,
+                        "Libertix", MessageBoxButton.YesNo, MessageBoxImage.Warning,
+                        MessageBoxResult.No) == MessageBoxResult.Yes;
+                    permissionChoices.Add(warning, accepted);
+                }
+                return accepted;
+            });
             ApplicationLogger.Initialize();
+            if (permissionChoices.ContainsValue(false))
+            {
+                Shutdown(1);
+                return;
+            }
             ApplicationLogger.Write("Libertix.exe startup.");
             RegisterApplicationErrorLogging();
 
@@ -110,6 +132,10 @@ namespace Libertix
                 ApplicationLogger.Write(
                     "Published version check skipped for the protected cached recovery UI.");
             }
+            if (string.IsNullOrWhiteSpace(recoveryStatePath) &&
+                Filepool.LocalDirectory == null && !Filepool.IsDevelopmentMode &&
+                RuntimeOptions.Unattended == null)
+                await ChooseLocalServerAsync();
             await RunValidatedStartupAsync(
                 () => string.IsNullOrWhiteSpace(recoveryStatePath)
                     ? ValidatePublishedVersionAsync()
@@ -127,6 +153,41 @@ namespace Libertix
             // StartupUri would open the window as soon as async OnStartup yields.
             if (await validate())
                 openWindow();
+        }
+
+        private async Task ChooseLocalServerAsync()
+        {
+            try
+            {
+                var servers = await LocalFilepoolDiscovery.FindAsync(Build.Channel);
+                for (int index = 0; index < servers.Count; index++)
+                {
+                    string prompt = string.Format(Localization.GetBootstrapString(
+                        "LocalServerChoice",
+                        "Local installation server {0} ({1}/{2}). Use this server? " +
+                        "Files will still be verified using the signed GitHub catalog. " +
+                        "Yes: use it. No: next server. Cancel: use official downloads."),
+                        servers[index], index + 1, servers.Count);
+                    var choice = MessageBox.Show(prompt, "Libertix", MessageBoxButton.YesNoCancel,
+                        MessageBoxImage.Question, MessageBoxResult.No);
+                    if (choice == MessageBoxResult.Cancel)
+                        return;
+                    if (choice == MessageBoxResult.Yes)
+                    {
+                        Filepool = Filepool.WithLocalServer(servers[index]);
+                        ApplicationLogger.Write("Accepted local filepool: " + Filepool.LocalServer);
+                        return;
+                    }
+                }
+            }
+            catch (System.Net.Sockets.SocketException error)
+            {
+                ApplicationLogger.Write("Local server discovery unavailable: " + error.Message);
+            }
+            catch (System.Net.NetworkInformation.NetworkInformationException error)
+            {
+                ApplicationLogger.Write("Local network enumeration unavailable: " + error.Message);
+            }
         }
 
         private static bool IsRecoveryUiInvocation(string[] args)
@@ -192,6 +253,36 @@ namespace Libertix
                 }
             }
 
+            string localDirectory = options.LocalFilepoolDirectory ?? ApplicationFiles.Resolve("filepool");
+            if (options.LocalFilepoolDirectory != null && !Directory.Exists(localDirectory))
+            {
+                RejectInvalidStartupOptions("The adjacent filepool directory is no longer available.");
+                return false;
+            }
+            if (Directory.Exists(localDirectory))
+            {
+                string prompt = Localization.GetBootstrapString(
+                    "LocalFilepoolChoice",
+                    "A filepool folder was found beside Libertix.exe. Use its files " +
+                    "for installation? They will be verified during the compatibility check. " +
+                    "Choose No to download from the online filepool.");
+                if (MessageBox.Show(
+                    prompt,
+                    "Libertix",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question) == MessageBoxResult.Yes)
+                {
+                    filepool = filepool.WithLocalDirectory(
+                        localDirectory,
+                        options.DevelopmentMode);
+                }
+            }
+            if (options.DevelopmentMode && filepool.LocalDirectory == null)
+            {
+                RejectInvalidStartupOptions("--dev requires choosing the adjacent filepool folder.");
+                return false;
+            }
+
             Filepool = filepool;
 
             bool usesPublishedDevelopmentChannel =
@@ -221,6 +312,8 @@ namespace Libertix
 
             RuntimeOptions = options;
             ApplicationLogger.Write($"Filepool base URL: {Filepool.BaseUrl}");
+            if (Filepool.LocalDirectory != null)
+                ApplicationLogger.Write("Local filepool selected: " + Filepool.LocalDirectory);
             ApplicationLogger.Write($"Build version: {Build.Version}; channel={Build.Channel}.");
             if (!string.IsNullOrEmpty(options.DevelopmentSshStaticIpv4Address))
             {
@@ -238,6 +331,12 @@ namespace Libertix
 
         private async Task<bool> ValidatePublishedVersionAsync()
         {
+            if (RuntimeOptions.DevelopmentMode && Filepool.LocalDirectory != null)
+            {
+                ApplicationLogger.Write("Published version check bypassed for the explicitly selected local filepool in development mode.");
+                return true;
+            }
+
             ReleaseCheckResult result = await ReleaseMetadataClient.CheckAsync(Build, Filepool);
             if (result.IsCurrent)
                 return true;

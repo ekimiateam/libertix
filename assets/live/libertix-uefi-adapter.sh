@@ -345,6 +345,26 @@ find_esp_partition() (
     echo "$esp"
 )
 
+remove_owned_temporary_efi_files() {
+    local esp_mount="$1" owner_file owner_run_id
+    if [ -e "$esp_mount/EFI/LibertixInstaller" ]; then
+        owner_file="$esp_mount/EFI/LibertixInstaller/.libertix-owner"
+        [ -f "$owner_file" ] || {
+            echo "Temporary EFI/LibertixInstaller ownership marker is missing" >&2
+            return 1
+        }
+        owner_run_id="$(tr -d '\r\n' < "$owner_file")"
+        if ! [[ "$RECOVERY_RUN_ID" =~ ^[0-9a-f]{32}$ ]] || [ "$owner_run_id" != "$RECOVERY_RUN_ID" ]; then
+            echo "Temporary EFI/LibertixInstaller belongs to another recovery run; preserving it" >&2
+            return 1
+        fi
+        echo "Removing temporary EFI/LibertixInstaller owned by $RECOVERY_RUN_ID"
+        rm -rf "$esp_mount/EFI/LibertixInstaller" || return 1
+        sync || return 1
+    fi
+    [ ! -e "$esp_mount/EFI/LibertixInstaller" ]
+}
+
 cleanup_final_uefi_bootloader_best_effort() (
     local bootnum entry_line esp_part esp_mount owner_file owner_run_id
 
@@ -387,6 +407,7 @@ cleanup_final_uefi_bootloader_best_effort() (
         sync || return 1
     fi
     [ ! -e "$esp_mount/EFI/Libertix" ] || return 1
+    remove_owned_temporary_efi_files "$esp_mount" || return 1
     umount "$esp_mount" || return 1
     rmdir "$esp_mount" 2>/dev/null || return 1
     trap - EXIT
@@ -582,17 +603,8 @@ EOF
 
     # Windows stages this directory only to enter the live installer. Leaving
     # it on the ESP after success creates a second, stale boot surface.
-    if [ -e "$esp_mount/EFI/LibertixInstaller" ]; then
-        [ -f "$esp_mount/EFI/LibertixInstaller/.libertix-owner" ] || \
-            die "temporary EFI/LibertixInstaller ownership marker is missing"
-        [ "$(tr -d '\r\n' < "$esp_mount/EFI/LibertixInstaller/.libertix-owner")" = "$RECOVERY_RUN_ID" ] || \
-            die "temporary EFI/LibertixInstaller belongs to another recovery run"
-        echo "Removing temporary EFI/LibertixInstaller directory"
-        run_logged rm -rf "$esp_mount/EFI/LibertixInstaller"
-        sync
-    fi
-    [ ! -e "$esp_mount/EFI/LibertixInstaller" ] || \
-        die "temporary EFI/LibertixInstaller directory still exists after cleanup"
+    remove_owned_temporary_efi_files "$esp_mount" || \
+        die "temporary EFI/LibertixInstaller cleanup could not be verified"
     umount "$esp_mount"
 }
 

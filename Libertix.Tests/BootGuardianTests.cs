@@ -1,15 +1,272 @@
+extern alias Guardian;
+
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using Libertix.BootGuardian;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
+using ProtectedFiles = Guardian::Libertix.Security.ProtectedFiles;
 
 namespace Libertix.Tests
 {
     [TestClass]
     public sealed class BootGuardianTests
     {
+        [DataTestMethod]
+        [DataRow("libertix-recovery-guard.ps1", "recover.ps1")]
+        [DataRow("libertix-configure-windows-share.ps1", "mount-linux-readonly.ps1")]
+        [DataRow("libertix-uefi-recovery-agent.ps1", "Scripts\\libertix-uefi-recovery-agent.ps1")]
+        public void HiddenHostAcceptsOriginalCodeAndRejectsAnAlteredModule(string source, string relative)
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                string script = WriteEmbeddedScript(root, relative, source);
+                string module = WriteEmbeddedScript(root, "Libertix.Process.psm1", "Libertix.Process.psm1");
+                TrustedScripts.VerifyPayload(root, script);
+
+                File.AppendAllText(module, "\r\n# modified module\r\n");
+                Assert.ThrowsException<InvalidDataException>(() => TrustedScripts.VerifyPayload(root, script));
+                WriteEmbeddedScript(root, "Libertix.Process.psm1", "Libertix.Process.psm1");
+                File.AppendAllText(script, "\r\n# modified entry point\r\n");
+                Assert.ThrowsException<InvalidDataException>(() => TrustedScripts.VerifyPayload(root, script));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void HiddenHostRejectsUnknownCodeAndOutsideScripts()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                string script = WriteEmbeddedScript(root, "recover.ps1", "libertix-recovery-guard.ps1");
+                Assert.ThrowsException<InvalidDataException>(() =>
+                    TrustedScripts.VerifyPayload(root, Path.Combine(root, "..", "recover.ps1")));
+                File.WriteAllText(Path.Combine(root, "unrecognized.psm1"), "# unexpected code");
+                Assert.ThrowsException<InvalidDataException>(() => TrustedScripts.VerifyPayload(root, script));
+                Assert.ThrowsException<InvalidDataException>(() =>
+                    TrustedScripts.Verify(new[] { "-NoProfile", "-Command", "exit 0" }));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void ProtectedPayloadRejectsUserWriteAccessWithoutChangingPermissions()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                string file = Path.Combine(root, "config.json");
+                File.WriteAllText(file, "{}");
+                ProtectedFiles.RequireTree(root);
+                FileSecurity security = File.GetAccessControl(file);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.Modify, AccessControlType.Allow));
+                File.SetAccessControl(file, security);
+                string before = File.GetAccessControl(file).GetSecurityDescriptorSddlForm(AccessControlSections.All);
+
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.CreateDirectory(root, true));
+                Assert.AreEqual(before, File.GetAccessControl(file).GetSecurityDescriptorSddlForm(AccessControlSections.All));
+                Assert.AreEqual("{}", File.ReadAllText(file));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        private static string NewProtectedDirectory()
+        {
+            // Windows Temp allows untrusted writes on CI runners and is not a protected parent.
+            string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                "libertix-security-test-" + Guid.NewGuid().ToString("N"));
+            ProtectedFiles.CreateDirectory(root, true);
+            Assert.AreEqual("S-1-5-32-544", Directory.GetAccessControl(root)
+                .GetOwner(typeof(SecurityIdentifier)).Value);
+            return root;
+        }
+
+        [DataTestMethod]
+        [DataRow("D:(D;;0x2;;;BU)(A;;GW;;;BU)", false)]
+        [DataRow("D:(A;;GW;;;BU)(D;;0x2;;;BU)", true)]
+        [DataRow("D:(D;;0x2;;;WD)(A;;GW;;;BU)", false)]
+        [DataRow("D:(D;;0x2;;;S-1-5-21-1-2-3-1001)(A;;GW;;;BU)", true)]
+        [DataRow("D:(A;OICIIO;GA;;;BU)", false)]
+        public void PermissionChecksRespectApplicableDenies(string sddl, bool writable)
+        {
+            var descriptor = new RawSecurityDescriptor(sddl);
+            var users = new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null);
+            Assert.AreEqual(writable ? FileSystemRights.WriteData : 0,
+                ProtectedFiles.GrantedRights(descriptor.DiscretionaryAcl, users, FileSystemRights.WriteData));
+        }
+
+        [TestMethod]
+        public void CapabilitiesDoNotAuthorizeOrdinaryUsers()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                DirectorySecurity security = Directory.GetAccessControl(root);
+                security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(
+                    "S-1-15-3-65536-1888954469-739942743-1668119174-2468466756-4239452838-1296943325-355587736-700089176"),
+                    FileSystemRights.FullControl, AccessControlType.Allow));
+                Directory.SetAccessControl(root, security);
+                ProtectedFiles.RequireTree(root);
+
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.DeleteSubdirectoriesAndFiles, AccessControlType.Allow));
+                Directory.SetAccessControl(root, security);
+                var error = Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
+                StringAssert.Contains(error.Message, "identity=S-1-5-32-545");
+                StringAssert.Contains(error.Message, "DeleteSubdirectoriesAndFiles");
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void PermissionConsentIsExplicitAndNotPersistent()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                DirectorySecurity security = Directory.GetAccessControl(root);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.WriteData, AccessControlType.Allow));
+                Directory.SetAccessControl(root, security);
+                Assert.ThrowsException<OperationCanceledException>(() =>
+                    ProtectedFiles.RequireTree(root, confirmUnsafePermissions: warning => false));
+                int confirmations = 0;
+                ProtectedFiles.RequireTree(root, confirmUnsafePermissions: warning =>
+                {
+                    StringAssert.Contains(warning, root);
+                    confirmations++;
+                    return true;
+                });
+                Assert.AreEqual(1, confirmations);
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void RepairsExistingPermissionsAfterConsent()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                string parent = Path.GetDirectoryName(root);
+                string before = Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access | AccessControlSections.Owner);
+                string child = Path.Combine(root, "existing");
+                Directory.CreateDirectory(child);
+                string file = Path.Combine(child, "config.json");
+                File.WriteAllText(file, "{}");
+                FileSecurity security = File.GetAccessControl(file);
+                security.SetAccessRuleProtection(true, true);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.Modify, AccessControlType.Allow));
+                File.SetAccessControl(file, security);
+                int confirmations = 0;
+
+                ProtectedFiles.CreateDirectory(root, true, warning =>
+                {
+                    confirmations++;
+                    return true;
+                });
+
+                Assert.IsTrue(confirmations > 0);
+                ProtectedFiles.RequireTree(root);
+                Assert.IsFalse(File.GetAccessControl(file).AreAccessRulesProtected);
+                Assert.AreEqual("S-1-5-32-544", File.GetAccessControl(file)
+                    .GetOwner(typeof(SecurityIdentifier)).Value);
+                Assert.AreEqual("{}", File.ReadAllText(file));
+                Assert.AreEqual(before, Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Access | AccessControlSections.Owner));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void ProtectedDirectoryRejectsJunctionsWithoutTouchingTheirTarget()
+        {
+            string root = NewProtectedDirectory();
+            string junction = Path.Combine(root, "junction");
+            try
+            {
+                string target = Path.Combine(root, "target");
+                Directory.CreateDirectory(target);
+                string witness = Path.Combine(target, "witness.txt");
+                File.WriteAllText(witness, "unchanged");
+                using (var command = Process.Start(new ProcessStartInfo
+                {
+                    FileName = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+                    Arguments = "/c mklink /J \"" + junction + "\" \"" + target + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }))
+                {
+                    Assert.IsTrue(command.WaitForExit(10000), "The test junction must be created promptly.");
+                    Assert.AreEqual(0, command.ExitCode);
+                }
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.CreateDirectory(junction));
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
+                Assert.AreEqual("unchanged", File.ReadAllText(witness));
+            }
+            finally
+            {
+                if (Directory.Exists(junction)) Directory.Delete(junction);
+                Directory.Delete(root, true);
+            }
+        }
+
+        [TestMethod]
+        public void MigratesLegacyAdminPermissions()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                string path = Path.Combine(root, "state.json");
+                File.WriteAllText(path, "original");
+                using (var identity = WindowsIdentity.GetCurrent())
+                {
+                    FileSecurity security = File.GetAccessControl(path);
+                    security.SetOwner(identity.User);
+                    security.AddAccessRule(new FileSystemAccessRule(identity.User,
+                        FileSystemRights.FullControl, AccessControlType.Allow));
+                    File.SetAccessControl(path, security);
+                    Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
+
+                    ProtectedFiles.CreateDirectory(root, true);
+
+                    ProtectedFiles.RequireTree(root);
+                    Assert.AreEqual("S-1-5-32-544", File.GetAccessControl(path)
+                        .GetOwner(typeof(SecurityIdentifier)).Value);
+                    Assert.AreEqual("original", File.ReadAllText(path));
+                }
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        private static string WriteEmbeddedScript(string root, string relative, string source)
+        {
+            string path = Path.Combine(root, relative);
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            using (Stream resource = typeof(BootGuardianEngine).Assembly
+                .GetManifestResourceStream("Libertix.TrustedScripts." + source))
+            using (Stream destination = File.Create(path))
+            {
+                Assert.IsNotNull(resource, "The real script must be embedded in the host.");
+                resource.CopyTo(destination);
+            }
+            return path;
+        }
+
         [TestMethod]
         public void PreferredWindowsUpdateResumesAtEveryCommitBoundary()
         {

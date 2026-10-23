@@ -309,9 +309,20 @@ def test_configuration_preserves_unrelated_bookmarks_and_is_repeatable(
     home.mkdir()
     mount = tmp_path / "data-volume"
     (mount / "Data/Alice/Documents").mkdir(parents=True)
+    (mount / "Users/Alice/Desktop").mkdir(parents=True)
+    document = home / "Documents"
+    document.mkdir()
+    (document / "personal.txt").write_text("Linux data")
     bookmark = home / ".config/gtk-3.0/bookmarks"
     bookmark.parent.mkdir(parents=True)
+    (home / ".config/user-dirs.dirs").write_text('XDG_DOCUMENTS_DIR="$HOME/Documents"\n')
     bookmark.write_text("file:///existing Existing\n")
+    inventory = plan["features"]["windowsSharing"]["folders"]
+    root = {**inventory[0], "shortcut": "User_Alice", "relativePath": "Users/Alice"}
+    inventory.insert(0, root)
+    inventory.append(
+        {**root, "shortcut": "User_Alice_Desktop", "relativePath": "Users/Alice/Desktop"}
+    )
     fstab = tmp_path / "fstab"
     fstab.write_text("# Existing mount table\n")
     monkeypatch.setattr(sharing, "FSTAB_PATH", fstab)
@@ -329,9 +340,33 @@ def test_configuration_preserves_unrelated_bookmarks_and_is_repeatable(
     sharing.configure(plan, Path("/dev/windows"))
     assert before == (fstab.read_text(), bookmark.read_text())
     assert before[1].startswith("file:///existing Existing\n")
-    shortcut = home / "User_Alice_Documents"
+    shortcut = home / "Win_Alice/Documents"
     assert shortcut.readlink() == mount / "Data/Alice/Documents"
     assert shortcut.lstat().st_uid == os.getuid()
+    assert not (home / "Win_Alice").is_symlink()
+    assert (home / "Win_Alice/Desktop").readlink() == mount / "Users/Alice/Desktop"
+    assert (document / "personal.txt").read_text() == "Linux data"
+    assert document.as_uri() in bookmark.read_text().splitlines()
+    assert bookmark.read_text().count(" Win_Alice\n") == 1
+    assert "User_Alice" not in bookmark.read_text()
+
+
+def test_profile_shortcuts_refuse_to_replace_a_user_folder(sharing, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "Win_Alice").symlink_to(tmp_path, target_is_directory=True)
+    account = SimpleNamespace(pw_dir=str(home), pw_uid=os.getuid(), pw_gid=os.getgid())
+    folders = [
+        {
+            "profileSid": "Alice",
+            "shortcut": "User_Alice",
+            "ntfsUuid": "data",
+            "relativePath": "Alice",
+        }
+    ]
+    with pytest.raises(RuntimeError, match="existing user file"):
+        sharing.configure_shortcuts(folders, account, {"data": tmp_path})
+    assert (home / "Win_Alice").readlink() == tmp_path
 
 
 def test_atomic_text_write_preserves_the_original_on_publish_failure(

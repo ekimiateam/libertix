@@ -49,12 +49,34 @@ namespace Libertix.Pages
             try
             {
                 await UnattendedWorkflow.PublishStageAndWaitAsync("compatibility-running");
+                var application = (App)Application.Current;
+                if (application.Filepool.LocalDirectory != null)
+                {
+                    try
+                    {
+                        await DistributionCatalogLoader.VerifyLocalFilepoolAsync(
+                            application.Filepool,
+                            AppendDetail);
+                        if (!application.Filepool.SkipWebCatalogComparison)
+                            ApplicationLogger.Write(
+                                "LOCAL_FILEPOOL_ONLINE_VERIFIED=" + application.Filepool.LocalDirectory);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new CompatibilityPreflightException(
+                            "COMPAT_E_LOCAL_FILEPOOL",
+                            ex.Message,
+                            application.Filepool.LocalDirectory);
+                    }
+                }
                 bool skipNvramWriteProbe =
-                    ((App)Application.Current).RuntimeOptions.SkipNvramWriteProbe;
+                    application.RuntimeOptions.SkipNvramWriteProbe;
                 CompatibilityInfo info = await CompatibilityPreflightRunner.RunAsync(
-                    ((App)Application.Current).Filepool.CatalogUrl,
+                    application.Filepool.CatalogUrl,
                     AppendDetail,
-                    skipNvramWriteProbe);
+                    skipNvramWriteProbe,
+                    application.Filepool.LocalDirectory != null &&
+                    application.Filepool.SkipWebCatalogComparison);
                 _installationState.Compatibility = info;
                 CheckProgress.IsIndeterminate = false;
                 CheckProgress.Value = 100;
@@ -69,7 +91,6 @@ namespace Libertix.Pages
                 if (UnattendedWorkflow.IsEnabled)
                 {
                     await UnattendedWorkflow.PublishStageAndWaitAsync("compatibility-passed");
-                    var application = (App)Application.Current;
                     await UnattendedInstallationConfigurator.ConfigureAsync(
                         _installationState,
                         application.Filepool);

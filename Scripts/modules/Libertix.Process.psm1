@@ -260,8 +260,42 @@ function Invoke-LibertixNativeProcess {
     }
 }
 
+function Get-LibertixHibernateEnabled {
+    # Read the registry rather than parsing `powercfg /a`, whose output is localized.
+    # Returns $true, $false, or $null when the state is unknown.
+    try {
+        $value = Get-ItemProperty `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
+            -Name "HibernateEnabled" `
+            -ErrorAction Stop
+        return ([int]$value.HibernateEnabled -ne 0)
+    } catch {
+        return $null
+    }
+}
+
+function Set-LibertixHibernateEnabled {
+    param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+    $argument = if ($Enabled) { "on" } else { "off" }
+    $result = Invoke-LibertixNativeCommand `
+        -FilePath (Get-LibertixNativeSystemExecutable -FileName "powercfg.exe") `
+        -ArgumentList @("/hibernate", $argument) `
+        -TimeoutSeconds 60
+    $output = ($result.StandardOutput + [Environment]::NewLine + $result.StandardError).Trim()
+    if ($result.ExitCode -ne 0) {
+        throw "powercfg failed to turn hibernation $argument (rc=$($result.ExitCode)): $output"
+    }
+    $observed = Get-LibertixHibernateEnabled
+    if ($null -eq $observed -or $observed -ne $Enabled) {
+        throw "Windows did not apply the requested hibernation state: $argument"
+    }
+}
+
 Export-ModuleMember -Function `
     Get-LibertixNativeSystemExecutable, `
     Invoke-LibertixNativeProcess, `
     Invoke-LibertixNativeCommand, `
-    ConvertTo-LibertixNativeArgument
+    ConvertTo-LibertixNativeArgument, `
+    Get-LibertixHibernateEnabled, `
+    Set-LibertixHibernateEnabled

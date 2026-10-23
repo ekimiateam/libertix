@@ -70,7 +70,7 @@ namespace Libertix.Tests
             foreach (bool rollbackPending in new[] { false, true })
             {
                 Assert.AreEqual(requested && !processUnknown && !rollbackPending,
-                    Pages.ApplyChanges.CanRetryAfterFailure(requested, processUnknown, rollbackPending));
+                    Installation.InstallationEngine.CanRetryAfterFailure(requested, processUnknown, rollbackPending));
             }
         }
 

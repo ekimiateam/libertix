@@ -10,6 +10,12 @@ BeforeAll {
         }, $true)
         . ([scriptblock]::Create($definition.Extent.Text))
     }
+    $recoveryTypeRestore = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.IfStatementAst] -and
+        $node.Clauses[0].Item1.Extent.Text -eq "`$action.format -eq 'recovery' -and [string]`$disk.PartitionStyle -eq 'MBR'"
+    }, $true)
+    $restoreRecoveryType = [scriptblock]::Create($recoveryTypeRestore.Extent.Text)
 }
 
 Describe 'Storage fixture primary partition creation before formatting' {
@@ -67,7 +73,7 @@ Describe 'Storage fixture primary partition creation before formatting' {
         }
     }
 
-    It 'creates MBR Recovery as primary type 27 without a later type conversion' {
+    It 'creates MBR Recovery as primary type 27 before formatting' {
         $created.MbrType = 39
         (New-FixtureSystemPartition -Disk $disk -Offset 41GB -Size 1GB -Recovery).PartitionNumber | Should -Be 4
         Should -Invoke Invoke-FixtureDiskPart -Times 1 -Exactly -ParameterFilter {
@@ -113,6 +119,53 @@ Describe 'Storage fixture primary partition creation before formatting' {
     It 'refuses to create a fifth primary' {
         $before += [pscustomobject]@{ PartitionNumber = 4; Offset = 42GB; Size = 1GB; GptType = ''; MbrType = 7 }
         { New-FixtureSystemPartition -Disk $disk -Offset 41GB -Size 1GB } | Should -Throw '*no free primary*'
+        Should -Invoke Invoke-FixtureDiskPart -Times 0
+    }
+}
+
+Describe 'Storage fixture Recovery type after formatting' {
+    BeforeEach {
+        $disk = [pscustomobject]@{ Number = 3; Path = 'fixture-disk'; Signature = 123; Size = 64GB; PartitionStyle = 'MBR' }
+        $part = [pscustomobject]@{ PartitionNumber = 4; Offset = 41GB; Size = 1GB; MbrType = 7 }
+        $offset = 41GB
+        $size = 1GB
+        $action = @{ format = 'recovery' }
+        Mock Resolve-FixtureDisk { $disk.PSObject.Copy() }
+        Mock Get-Partition { $part }
+        Mock Invoke-FixtureDiskPart { $part.MbrType = 39 }
+    }
+
+    It 'restores the exact MBR fixture to type 27 after NTFS formatting reset it to 07' {
+        . $restoreRecoveryType
+        $part.MbrType | Should -Be 39
+        Should -Invoke Invoke-FixtureDiskPart -Times 1 -Exactly -ParameterFilter {
+            $Commands -ceq "select disk 3`r`nselect partition 4`r`nset id=27 override`r`nexit"
+        }
+    }
+
+    It 'refuses a changed disk before changing the type' {
+        Mock Resolve-FixtureDisk { $copy = $disk.PSObject.Copy(); $copy.Signature = 456; $copy }
+        { . $restoreRecoveryType } | Should -Throw '*changed before restoring*'
+        Should -Invoke Invoke-FixtureDiskPart -Times 0
+    }
+
+    It 'refuses a changed partition before changing the type' {
+        $part.Offset += 1MB
+        { . $restoreRecoveryType } | Should -Throw '*changed before restoring*'
+        Should -Invoke Invoke-FixtureDiskPart -Times 0
+    }
+
+    It 'rejects a command that did not restore the type' {
+        Mock Invoke-FixtureDiskPart {}
+        { . $restoreRecoveryType } | Should -Throw '*not preserved after formatting*'
+    }
+
+    It 'does not apply an MBR type to GPT or ordinary NTFS fixtures' {
+        $disk.PartitionStyle = 'GPT'
+        . $restoreRecoveryType
+        $disk.PartitionStyle = 'MBR'
+        $action.format = 'ntfs'
+        . $restoreRecoveryType
         Should -Invoke Invoke-FixtureDiskPart -Times 0
     }
 }

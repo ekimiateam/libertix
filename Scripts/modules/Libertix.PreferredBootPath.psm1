@@ -100,7 +100,7 @@ function Get-LibertixPreferredPathByteHash {
 }
 
 function Import-LibertixPreferredPathFirmwareModules {
-    foreach ($name in @("Libertix.Firmware.psm1", "Libertix.FirmwareRead.psm1")) {
+    foreach ($name in @("Libertix.Firmware.psm1", "Libertix.FirmwareVariables.psm1")) {
         $path = Join-Path $PSScriptRoot $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Preferred boot firmware dependency is missing: $path"

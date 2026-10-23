@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Libertix.Helpers;
 
 namespace Libertix.Installation
 {
@@ -28,8 +29,7 @@ namespace Libertix.Installation
 
         public static LiveBootArguments LoadFromApplicationDirectory()
         {
-            return Load(Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            return Load(ApplicationFiles.Resolve(
                 "Scripts",
                 "config",
                 "Libertix.BootArguments.json"));

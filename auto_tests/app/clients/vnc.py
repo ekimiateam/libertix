@@ -10,6 +10,7 @@ from PIL import Image
 from vncdotool import api, rfb
 from vncdotool.client import VNCDoToolClient, VNCDoToolFactory
 
+from app.clients import network_recovery
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class VNCClient:
         self.connect_timeout = connect_timeout
 
     def connect(self, address: str):
+        network_recovery.checkpoint()
         # vncdotool lazily starts one process-wide Twisted reactor. Concurrent
         # first connections can both observe it as stopped and race to start it.
         # Serialize only connection establishment; VM workflows remain parallel.
@@ -75,7 +77,11 @@ class VNCClient:
         destination.parent.mkdir(parents=True, exist_ok=True)
         logger.info("VNC capture started", extra={"step": "vnc.capture", "target": address})
         last_error: Exception | None = None
-        for attempt in range(1, CAPTURE_MAX_ATTEMPTS + 1):
+        max_attempts = 2 if network_recovery.active is not None else CAPTURE_MAX_ATTEMPTS
+        failed_at: float | None = None
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
             client = None
             destination.unlink(missing_ok=True)
             try:
@@ -100,12 +106,17 @@ class VNCClient:
                     last_error = None
                     break
                 last_error = exc
-                if attempt < CAPTURE_MAX_ATTEMPTS:
+                if failed_at is None:
+                    failed_at = time.monotonic()
+                if attempt < max_attempts:
                     logger.warning(
                         "Transient VNC capture failure; retrying",
                         extra={"step": "vnc.capture_retry", "target": address},
                     )
                     time.sleep(CAPTURE_RETRY_SECONDS)
+                elif network_recovery.recover(failed_at):
+                    attempt = 0
+                    failed_at = None
             finally:
                 try:
                     # Coordination deadlines must not include slow VNC disconnects.
@@ -130,7 +141,7 @@ class VNCClient:
                 "VNC capture failed",
                 details={
                     "address": address,
-                    "attempts": CAPTURE_MAX_ATTEMPTS,
+                    "attempts": max_attempts,
                     "error": str(last_error),
                 },
             ) from last_error

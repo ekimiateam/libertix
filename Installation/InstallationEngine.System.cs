@@ -8,16 +8,15 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Libertix.Helpers;
-using Libertix.Installation;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
     /// <summary>
     /// Windows privilege, firmware, storage-preflight, and process helpers.
     /// Firmware-specific orchestrators call these shared helpers without
     /// duplicating the platform checks or native process contracts.
     /// </summary>
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private static bool IsRunningAsAdministrator()
         {
@@ -48,8 +47,7 @@ namespace Libertix.Pages
             bool decryptBitLocker = true,
             bool observeCancellation = true)
         {
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-storage-preflight.ps1");
             if (!File.Exists(scriptPath))
@@ -68,7 +66,7 @@ namespace Libertix.Pages
                     Encoding.UTF8.GetBytes(JsonSerializer.Serialize(_installationState.SelectedInstallationTarget))));
             StreamingProcessResult processResult = await RunStreamingProcessAsync(
                 powershell,
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} " +
                 $"-ExpectedFirmware {expected} " +
                 (firmware == FirmwareType.Bios && decryptBitLocker ? "-DecryptBitLocker" : "") +
                 expectedPlanArgument + targetArgument,
@@ -180,14 +178,13 @@ namespace Libertix.Pages
         private (int exitCode, string output, string error) RunProcess(
             string fileName,
             string arguments,
-            int waitMs,
+            TimeSpan timeout,
             Encoding encoding = null)
         {
             WindowsProcessResult result;
             try
             {
-                result = WindowsProcessRunner.Run(
-                    fileName, arguments, TimeSpan.FromMilliseconds(waitMs), encoding);
+                result = WindowsProcessRunner.Run(fileName, arguments, timeout, encoding);
             }
             catch (UnterminatedProcessException)
             {
@@ -195,7 +192,7 @@ namespace Libertix.Pages
                 throw;
             }
             string error = result.TimedOut
-                ? $"Process timed out after {waitMs} ms. {result.StandardError}".Trim()
+                ? $"Process timed out after {timeout.TotalMilliseconds:F0} ms. {result.StandardError}".Trim()
                 : result.StandardError;
             return (result.ExitCode, result.StandardOutput, error);
         }

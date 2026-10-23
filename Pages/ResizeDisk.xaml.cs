@@ -38,12 +38,36 @@ namespace Libertix.Pages
         public bool HasMultipleTargets => InstallationTargets.Length > 1;
         public bool IsWindowsTarget => _selectedTarget == null || _selectedTarget.IsWindows;
         public bool IsSecondaryTarget => !IsWindowsTarget;
+        public bool HasSelectedTarget => _selectedTarget != null || InstallationTargets.Length == 0;
+        public bool IsWindowsTargetUnavailable
+        {
+            get
+            {
+                if (_installationState.Compatibility?.WindowsPartitionSlotAvailable == false)
+                    return true;
+                var windows = InstallationTargets.FirstOrDefault(target => target.IsWindows);
+                return windows != null && InstallationSizePolicy.AvailableLinuxSizeGiB(
+                    windows.FreeBytes / (double)InstallationSizePolicy.BytesPerGiB,
+                    (_installationState.Compatibility?.ShrinkAvailableBytes ?? 0) /
+                        (double)InstallationSizePolicy.BytesPerGiB, IsoSize) < MinimumSize;
+            }
+        }
+        public string WindowsTargetUnavailableMessage => string.Format(CultureInfo.CurrentCulture,
+            Localization.GetString(_installationState.Compatibility?.WindowsPartitionSlotAvailable == false
+                ? "ResizeDiskWindowsMbrUnavailable" : "ResizeDiskWindowsSpaceUnavailable"),
+            InstallationTargets.FirstOrDefault(target => target.IsWindows)?.Drive ?? Path.GetPathRoot(Environment.SystemDirectory));
+        public string AllocationErrorTitle => !HasSelectedTarget
+            ? Localization.GetString("ResizeDiskTargetTitle") : Localization.GetString("NotEnoughSpace");
+        public string AllocationErrorMessage => !HasSelectedTarget
+            ? Localization.GetString("ResizeDiskChooseAvailableTarget") : Localization.GetString("FreeUpSpace");
         public string SecondaryDiskWarning => IsSecondaryTarget
-            ? string.Format(CultureInfo.CurrentCulture, Localization.GetString("ResizeDiskSecondaryWarning"),
+            ? string.Format(CultureInfo.CurrentCulture, Localization.GetString(IsWindowsTargetUnavailable
+                ? "ResizeDiskSecondaryWarningNoWindows" : "ResizeDiskSecondaryWarning"),
                 _selectedTarget.Drive, InstallationTargets.FirstOrDefault(target => target.IsWindows)?.Drive ?? Path.GetPathRoot(Environment.SystemDirectory))
             : string.Empty;
         public string RetainedVolumeName => IsWindowsTarget ? Localization.GetString("Windows") : _selectedTarget.Drive;
-        public string TargetRecommendation => string.Format(CultureInfo.CurrentCulture,
+        public string TargetRecommendation => IsWindowsTargetUnavailable
+            ? Localization.GetString("ResizeDiskChooseAvailableTarget") : string.Format(CultureInfo.CurrentCulture,
             Localization.GetString("ResizeDiskTargetRecommendation"),
             InstallationTargets.FirstOrDefault(target => target.IsWindows)?.Drive ?? Path.GetPathRoot(Environment.SystemDirectory));
         private double AllocationIsoSize => IsWindowsTarget ? IsoSize : 0;
@@ -60,6 +84,8 @@ namespace Libertix.Pages
                     return;
                 if (!InstallationTargets.Contains(value))
                     throw new InvalidOperationException("The selected installation target is not in the verified inventory.");
+                if (value.IsWindows && IsWindowsTargetUnavailable)
+                    throw new InvalidOperationException(WindowsTargetUnavailableMessage);
                 _selectedTarget = value;
                 _installationState.SelectedInstallationTarget = value.IsWindows ? null : value;
                 _totalSpace = value.SizeBytes / (double)InstallationSizePolicy.BytesPerGiB;
@@ -85,7 +111,9 @@ namespace Libertix.Pages
         // WPF rejects a slider whose maximum is lower than its minimum. The
         // separate CanAllocateLinux flag still prevents an invalid install.
         public double MaximumSize => Math.Max(MinimumSize, Math.Floor(AvailableLinuxSize));
-        public bool CanAllocateLinux => AvailableLinuxSize >= MinimumSize && HasWindowsDownloadSpace;
+        public bool CanAllocateLinux => HasSelectedTarget &&
+            (!IsWindowsTarget || !IsWindowsTargetUnavailable) &&
+            AvailableLinuxSize >= MinimumSize && HasWindowsDownloadSpace;
 
         public double WindowsTotalSpace => _windowsUsedSpace + _windowsFreeSpace;
         public GridLength WindowsPartitionPercentage => new GridLength(
@@ -221,7 +249,6 @@ namespace Libertix.Pages
             LinuxSize = linuxSize;
             WindowsFreeSpace = InstallationSizePolicy.RemainingWindowsFreeSpaceGiB(
                 _initialFreeSpace,
-                AllocationIsoSize,
                 linuxSize);
 
             // These bindings depend on calculated properties rather than stored
@@ -257,7 +284,7 @@ namespace Libertix.Pages
             string.Format(CultureInfo.CurrentCulture,
                 Localization.GetString("ResizeDiskLinuxMinimum"), MinimumSize));
 
-        public string AdditionalSpaceNeeded => !HasWindowsDownloadSpace
+        public string AdditionalSpaceNeeded => !HasSelectedTarget ? null : !HasWindowsDownloadSpace
             ? Localization.GetString("ResizeDiskWindowsDownloadSpace")
             : HasError ? string.Format(
                 CultureInfo.CurrentCulture,
@@ -329,8 +356,11 @@ namespace Libertix.Pages
             {
                 InstallationTargets = InstallationTargetSelection.ForFirmware(
                     _installationState.Compatibility.InstallationTargets, _installationState.Compatibility.Firmware);
-                SelectedTarget = InstallationTargetSelection.Select(InstallationTargets,
-                    _installationState.SelectedInstallationTarget?.Drive);
+                if (!IsWindowsTargetUnavailable || _installationState.SelectedInstallationTarget != null)
+                    SelectedTarget = InstallationTargetSelection.Select(InstallationTargets,
+                        _installationState.SelectedInstallationTarget?.Drive);
+                CheckSpaceRequirements();
+                NotifyPropertyChanged(string.Empty);
             }
 
         }

@@ -12,14 +12,12 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using System.Windows;
 using Libertix.Helpers;
-using Libertix.Installation;
 using Libertix.Models;
 
-namespace Libertix.Pages
+namespace Libertix.Installation
 {
-    public partial class ApplyChanges
+    internal partial class InstallationEngine
     {
         private async Task ExecutePartitioningAsync()
         {
@@ -50,9 +48,7 @@ namespace Libertix.Pages
             Log("- Next reboot will automatically boot the Linux installer");
             Log("- Layout: [Windows] [FAT32 live/future Linux] [Recovery]");
 
-            RebootButton.Visibility = Visibility.Visible;
-            RebootButton.IsDefault = true;
-            RebootButton.Focus();
+            _view.ShowRebootAction();
             await PublishUnattendedRebootReadyAsync();
         }
 
@@ -77,7 +73,7 @@ namespace Libertix.Pages
                     InstallationPhase.Windows);
                 Log("ERROR: Failed to install Windows recovery guard");
                 UpdateProgress(0, Localized("ApplyChangesError", "Error occurred"));
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
                 return false;
             }
             CompleteExecutionStep(InstallationStep.WindowsRecoveryArmed);
@@ -107,12 +103,11 @@ namespace Libertix.Pages
             // Query SizeMin after disabling Fast Startup because hiberfil.sys is
             // unmovable and can otherwise make Windows report an artificially
             // small shrink range.
-            bool forceOfflineResize = ((App)Application.Current)
-                .RuntimeOptions.ForceOfflineNtfsResize;
+            bool forceOfflineResize = RuntimeOptions.ForceOfflineNtfsResize;
             bool hibernationAlreadyDisabled =
                 _installationState.Sharing.ShareWindowsFilesInLinux || forceOfflineResize;
             if (hibernationAlreadyDisabled &&
-                !SetHibernateEnabled(false))
+                !await Task.Run(() => SetHibernateEnabled(false)))
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Windows hibernation could not be disabled safely");
@@ -126,7 +121,7 @@ namespace Libertix.Pages
             if (!forceOfflineResize && maxShrinkMB < requestedLinuxMB &&
                 !hibernationAlreadyDisabled)
             {
-                if (!SetHibernateEnabled(false))
+                if (!await Task.Run(() => SetHibernateEnabled(false)))
                 {
                     await FailBiosPreparationAndRollbackAsync(
                         "Windows hibernation could not be disabled for the final online shrink attempt");
@@ -142,7 +137,7 @@ namespace Libertix.Pages
             bool useOfflineResize = forceOfflineResize || maxShrinkMB < requestedLinuxMB;
             double windowsShrinkMB = useOfflineResize ? stagingMB : requestedLinuxMB;
             if (useOfflineResize && !hibernationAlreadyDisabled &&
-                !SetHibernateEnabled(false))
+                !await Task.Run(() => SetHibernateEnabled(false)))
             {
                 await FailBiosPreparationAndRollbackAsync(
                     "Windows hibernation could not be disabled for offline NTFS resize");
@@ -259,9 +254,9 @@ namespace Libertix.Pages
             try
             {
                 string localIsoName = Path.GetFileName(new Uri(isoUrl).LocalPath);
-                string localIsoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, localIsoName);
+                string localIsoPath = LocalArtifactPath(localIsoName);
                 bool downloadSuccess;
-                if (File.Exists(localIsoPath))
+                if (Filepool.LocalDirectory != null || File.Exists(localIsoPath))
                 {
                     Log($"Found local ISO: {localIsoName}, copying...");
                     await Task.Run(() => File.Copy(localIsoPath, tempIsoPath, true));
@@ -292,7 +287,9 @@ namespace Libertix.Pages
                 ThrowIfCancellationRequested();
                 UpdateProgress(BiosProgress.LiveMediaCopy, Localized("ApplyChangesCopyingIsoContents", "Copying ISO contents..."));
                 Log($"Step 6: Mounting ISO and copying contents to {BiosInstallerRoot}...");
-                bool copySucceeded = await MountAndCopyIsoAsync(tempIsoPath);
+                // The process waits are asynchronous, but the surrounding filesystem
+                // operations can also stall on slow media. Keep the whole copy off the UI thread.
+                bool copySucceeded = await Task.Run(() => MountAndCopyIsoAsync(tempIsoPath));
                 ThrowIfCancellationRequested();
                 if (!copySucceeded)
                 {
@@ -303,7 +300,7 @@ namespace Libertix.Pages
                 bool lowMemoryMode =
                     _installationState.Compatibility is CompatibilityInfo compatibility &&
                     compatibility.LowMemoryMode;
-                if (lowMemoryMode && !ConfigureBiosLowMemoryBoot())
+                if (lowMemoryMode && !await Task.Run(() => ConfigureBiosLowMemoryBoot()))
                 {
                     await FailBiosPreparationAndRollbackAsync(
                         "Failed to configure low-memory live boot");
@@ -313,21 +310,51 @@ namespace Libertix.Pages
                 // The live must consume the same validated plan that authorized the
                 // Windows-side disk changes; no second shell contract is generated.
                 UpdateProgress(BiosProgress.InstallationContextReady, Localized("ApplyChangesWritingConfiguration", "Writing configuration..."));
-                PublishInstallationContextToLive(BiosInstallerRoot);
+                await Task.Run(() => PublishInstallationContextToLive(BiosInstallerRoot));
                 Log($"Installation plan published to {BiosInstallerRoot}installation-plan.json.");
-                CompleteExecutionStep(InstallationStep.WindowsLiveMediaPrepared);
+                await Task.Run(() => CompleteExecutionStep(InstallationStep.WindowsLiveMediaPrepared));
                 return true;
             }
             finally
             {
-                DeleteDownloadArtifactBestEffort(tempIsoPath, "Libertix BIOS ISO");
-                DeleteDownloadDirectoryBestEffort(
-                    tempIsoDirectory,
-                    "Libertix BIOS ISO transaction");
-                if (File.Exists(tempIsoPath) || Directory.Exists(tempIsoDirectory))
-                    Log("WARNING: Libertix BIOS ISO transaction cleanup could not be verified.");
-                else
-                    Log("Libertix BIOS ISO transaction cleanup verified.");
+                await Task.Run(() =>
+                {
+                    DeleteDownloadArtifactBestEffort(tempIsoPath, "Libertix BIOS ISO");
+                    DeleteDownloadDirectoryBestEffort(
+                        tempIsoDirectory,
+                        "Libertix BIOS ISO transaction");
+                    if (File.Exists(tempIsoPath) || Directory.Exists(tempIsoDirectory))
+                        Log("WARNING: Libertix BIOS ISO transaction cleanup could not be verified.");
+                    else
+                        Log("Libertix BIOS ISO transaction cleanup verified.");
+                });
+            }
+        }
+
+        private string TryReusePreviousDistributionIso(InstallationDistribution distribution)
+        {
+            // A failed run that never reached cleanup leaves its verified ISO in
+            // its own plan directory. The hash check after this step still
+            // verifies the adopted file at the plan-owned path before use.
+            try
+            {
+                string schtasks = ResolveSystemExecutable("schtasks.exe", "schtasks.exe");
+                return InstallationTemporaryArtifacts.MoveReusableDistributionIso(
+                    Path.GetPathRoot(distribution.InstallerIsoWindowsPath),
+                    _installationPlan.PlanId,
+                    distribution.InstallerIsoFileName,
+                    distribution.InstallerIsoSha256,
+                    MaximumInstallerIsoBytes,
+                    taskName => RunProcess(
+                        schtasks,
+                        $"/Query /TN {QuoteArgument(@"\" + taskName)}",
+                        WindowsProcessTimeouts.QuickCommand,
+                        GetWindowsConsoleEncoding()).exitCode == 0);
+            }
+            catch (Exception ex)
+            {
+                Log($"Previous Linux installer ISO could not be reused: {ex.Message}");
+                return null;
             }
         }
 
@@ -350,11 +377,19 @@ namespace Libertix.Pages
 
             string installerPath = distribution.InstallerIsoWindowsPath;
             Directory.CreateDirectory(Path.GetDirectoryName(installerPath));
-            string localInstallerPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
-                distribution.InstallerIsoFileName);
+            string localInstallerPath = LocalArtifactPath(distribution.InstallerIsoFileName);
             bool downloadSuccess;
-            if (File.Exists(localInstallerPath))
+            string reusedInstallerPath = await Task.Run(() =>
+                TryReusePreviousDistributionIso(distribution));
+            ThrowIfCancellationRequested();
+            if (reusedInstallerPath != null)
+            {
+                Log($"Reusing verified Linux installer ISO from a previous run: {reusedInstallerPath}");
+                downloadSuccess = true;
+                UpdateProgress(BiosProgress.DistributionReady, Localized("ApplyChangesLinuxIsoReused", "Linux installer reused from a previous run"));
+            }
+            // The adjacent filepool may omit distribution ISOs; download the missing one.
+            else if (File.Exists(localInstallerPath))
             {
                 Log($"Found local installer ISO: {distribution.InstallerIsoFileName}, copying...");
                 await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));
@@ -396,7 +431,7 @@ namespace Libertix.Pages
             PublishUnattendedFailure(
                 "bios-artifact-preparation-failed",
                 reason);
-            FinishInstallation(enableBackButton: true);
+            FinishInstallation(allowRetry: true);
             return false;
         }
 
@@ -428,7 +463,7 @@ namespace Libertix.Pages
                 string destinationPath = Path.Combine(
                     preparedBootRoot,
                     file);
-                string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, file);
+                string localPath = LocalArtifactPath(file);
                 bool ready = false;
                 if (File.Exists(localPath))
                 {
@@ -443,10 +478,10 @@ namespace Libertix.Pages
                         Log($"ERROR: Failed to copy local {file}: {ex.Message}");
                     }
                 }
-                if (!ready)
+                if (!ready && Filepool.LocalDirectory == null)
                 {
                     ready = await DownloadFileAsync(
-                        $"{Filepool.BaseUrl}/{file}",
+                        Filepool.ResolveArtifactUrl(file, file, grubHashes[file]),
                         destinationPath);
                 }
                 ThrowIfCancellationRequested();
@@ -529,7 +564,7 @@ namespace Libertix.Pages
             var result = await Task.Run(() => RunProcess(
                 powershell,
                 $"-NoProfile -Command {QuoteArgument(command)}",
-                (int)WindowsProcessTimeouts.DiskOperation.TotalMilliseconds));
+                WindowsProcessTimeouts.DiskOperation));
             if (result.exitCode != 0)
             {
                 Log(
@@ -561,7 +596,7 @@ namespace Libertix.Pages
                     string powershell = WindowsProcessRunner.ResolvePowerShell();
                     StreamingProcessResult processResult = await RunStreamingProcessAsync(
                         powershell,
-                        $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(recoveryScript)}",
+                        $"{WindowsProcessRunner.PowerShellFileArguments(recoveryScript)}",
                         WindowsProcessTimeouts.RecoveryOperation,
                         line => Log($"ROLLBACK: {line}"),
                         observeCancellation: false);
@@ -595,7 +630,7 @@ namespace Libertix.Pages
                     "bios-preparation-failed",
                     $"{reason} Automatic rollback was verified.");
                 _rollbackVerificationPending = false;
-                FinishInstallation(enableBackButton: true);
+                FinishInstallation(allowRetry: true);
             }
             else
             {
@@ -608,18 +643,17 @@ namespace Libertix.Pages
                 PublishUnattendedFailure(
                     "bios-rollback-incomplete",
                     $"{reason} Automatic rollback could not be verified.");
-                FinishInstallation(enableBackButton: false);
-                MessageBox.Show(
+                FinishInstallation(allowRetry: false);
+                _view.ShowBlockingMessage(
+                    Localized(
+                        "ApplyChangesRollbackIncompleteTitle",
+                        "Libertix - Incomplete rollback"),
                     LocalizedFormat(
                         "ApplyChangesPreparationRollbackIncompleteDetails",
                         "Preparation failed and automatic rollback could not be verified. Do not " +
                         "restart the installation; review {0}.",
                         Path.Combine(RecoveryRoot, "recovery.log")),
-                    Localized(
-                        "ApplyChangesRollbackIncompleteTitle",
-                        "Libertix - Incomplete rollback"),
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                    isError: true);
             }
         }
 
@@ -652,7 +686,7 @@ namespace Libertix.Pages
                     RunProcess(
                         bcdeditPath,
                         $"/create /d {QuoteArgument(bootDescription)} /application bootsector",
-                        (int)WindowsProcessTimeouts.QuickCommand.TotalMilliseconds,
+                        WindowsProcessTimeouts.QuickCommand,
                         GetWindowsConsoleEncoding()));
                 string output = createResult.output;
                 string error = createResult.error;
@@ -763,8 +797,7 @@ namespace Libertix.Pages
             string mountedDrive = "";
             bool imageMounted = false;
             string powershell = WindowsProcessRunner.ResolvePowerShell();
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-disk-image.ps1");
 
@@ -774,7 +807,7 @@ namespace Libertix.Pages
                 object mountOutputLock = new object();
                 StreamingProcessResult mountResult = await RunStreamingProcessAsync(
                     powershell,
-                    $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                    $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} " +
                     $"-Action Mount -ImagePath {QuoteArgument(isoPath)}",
                     WindowsProcessTimeouts.DiskImageOperation,
                     line => Log($"ISO mount: {line}"),
@@ -899,7 +932,7 @@ namespace Libertix.Pages
             Log("Dismounting ISO...");
             StreamingProcessResult unmountResult = await RunStreamingProcessAsync(
                 powershell,
-                $"-NoProfile -ExecutionPolicy Bypass -File {QuoteArgument(scriptPath)} " +
+                $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} " +
                 $"-Action Dismount -ImagePath {QuoteArgument(isoPath)}",
                 WindowsProcessTimeouts.DiskImageOperation,
                 line => Log($"ISO dismount: {line}"),
