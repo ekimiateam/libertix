@@ -408,6 +408,8 @@
         "success": "Linux started through the installed Libertix boot chain. The ext4 root, account, packages, services, GRUB, running kernel and Windows handoff evidence were verified successfully.",
         "failure_title": "Libertix verification failed",
         "failure": "The installed system could not be fully verified.",
+        "archive_warning_title": "Installation verified; logs could not be saved to Windows",
+        "archive_warning": "The installation checks passed, but Libertix could not save their logs to Windows. The logs remain available in Linux. Libertix will retry saving them at the next startup.",
         "log": "Detailed log",
         "close": "Close"
       },
@@ -817,6 +819,8 @@
         "success": "Linux a démarré via la chaîne de démarrage Libertix installée. La racine ext4, le compte, les paquets, les services, GRUB, le noyau actif et la preuve transmise à Windows ont été vérifiés avec succès.",
         "failure_title": "Échec de la vérification Libertix",
         "failure": "Le système installé n’a pas pu être entièrement vérifié.",
+        "archive_warning_title": "Installation vérifiée ; journaux non sauvegardés sur Windows",
+        "archive_warning": "Les vérifications de l’installation ont réussi, mais Libertix n’a pas pu sauvegarder leurs journaux sur Windows. Les journaux restent disponibles dans Linux. Libertix réessaiera de les sauvegarder au prochain démarrage.",
         "log": "Journal détaillé",
         "close": "Fermer"
       },
@@ -1226,6 +1230,8 @@
         "success": "Linux se inició mediante la cadena de arranque Libertix instalada. Se verificaron correctamente la raíz ext4, la cuenta, los paquetes, los servicios, GRUB, el núcleo activo y la prueba enviada a Windows.",
         "failure_title": "Falló la verificación de Libertix",
         "failure": "No se pudo verificar completamente el sistema instalado.",
+        "archive_warning_title": "Instalación verificada; no se pudieron guardar los registros en Windows",
+        "archive_warning": "Las comprobaciones de la instalación se completaron correctamente, pero Libertix no pudo guardar sus registros en Windows. Los registros siguen disponibles en Linux. Libertix intentará guardarlos de nuevo en el próximo inicio.",
         "log": "Registro detallado",
         "close": "Cerrar"
       },
@@ -1635,6 +1641,8 @@
         "success": "설치된 Libertix 부팅 체인을 통해 Linux가 시작되었습니다. ext4 루트, 계정, 패키지, 서비스, GRUB, 실행 중인 커널, Windows 전달 증거가 모두 성공적으로 검증되었습니다.",
         "failure_title": "Libertix 검증에 실패했습니다",
         "failure": "설치된 시스템을 완전히 검증할 수 없었습니다.",
+        "archive_warning_title": "설치 검증 완료, Windows에 로그를 저장하지 못했습니다",
+        "archive_warning": "설치 검증은 통과했지만 Libertix가 Windows에 로그를 저장하지 못했습니다. 로그는 Linux에서 계속 확인할 수 있습니다. 다음 부팅 때 로그 저장을 다시 시도합니다.",
         "log": "상세 로그",
         "close": "닫기"
       },

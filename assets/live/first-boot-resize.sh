@@ -84,17 +84,19 @@ recover_interrupted_package_state() {
 
 }
 
-CURRENT_STAGE="package-manager-recovery"
-recover_interrupted_package_state
+if ! "$VERIFIER" --verification-completed; then
+    CURRENT_STAGE="package-manager-recovery"
+    recover_interrupted_package_state
 
-CURRENT_STAGE="root-device-validation"
-ROOT_DEV="$(findmnt -n -o SOURCE /)"
-[ -b "$ROOT_DEV" ] || fail_stage "Root source is not a block device: $ROOT_DEV"
-[ "$(findmnt -n -o FSTYPE /)" = "ext4" ] || fail_stage "Root filesystem is not ext4"
-CURRENT_STAGE="root-filesystem-resize"
-resize2fs "$ROOT_DEV" >> "$LOG" 2>&1
-resize2fs -P "$ROOT_DEV" >> "$LOG" 2>&1
-df -hT / >> "$LOG" 2>&1
+    CURRENT_STAGE="root-device-validation"
+    ROOT_DEV="$(findmnt -n -o SOURCE /)"
+    [ -b "$ROOT_DEV" ] || fail_stage "Root source is not a block device: $ROOT_DEV"
+    [ "$(findmnt -n -o FSTYPE /)" = "ext4" ] || fail_stage "Root filesystem is not ext4"
+    CURRENT_STAGE="root-filesystem-resize"
+    resize2fs "$ROOT_DEV" >> "$LOG" 2>&1
+    resize2fs -P "$ROOT_DEV" >> "$LOG" 2>&1
+    df -hT / >> "$LOG" 2>&1
+fi
 CURRENT_STAGE="installed-system-verification"
 if VERIFICATION_OUTPUT="$("$VERIFIER" 2>&1)"; then
     VERIFICATION_RC=0
@@ -111,12 +113,18 @@ if [ "$VERIFICATION_RC" -ne 0 ]; then
     return_failure "$VERIFICATION_RC"
 fi
 
-CURRENT_STAGE="one-shot-service-retirement"
+CURRENT_STAGE="diagnostics-archive"
+ARCHIVE_COMPLETE=false
+if "$VERIFIER" --archive-service-diagnostics >> "$LOG" 2>&1; then
+    ARCHIVE_COMPLETE=true
+fi
 "$VERIFIER" --update-service-attempt \
     "$ATTEMPT_ID" "$CURRENT_STAGE" "succeeded" \
     >> "$LOG" 2>&1
 sync -f "$LOG" 2>/dev/null || sync
-"$VERIFIER" --archive-service-diagnostics >> "$LOG" 2>&1
+# Keep the one-shot service enabled until the remaining archive can be saved.
+[ "$ARCHIVE_COMPLETE" = true ] || exit 0
+CURRENT_STAGE="one-shot-service-retirement"
 systemctl disable first-boot-resize.service >> "$LOG" 2>&1
 trap - ERR TERM INT HUP
 rm -f /etc/systemd/system/first-boot-resize.service \

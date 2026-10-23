@@ -40,6 +40,8 @@ def result_fingerprint(state: dict) -> str:
     fields = {
         key: state.get(key) for key in ("planId", "status", "updatedAtUtc", "error", "attemptId")
     }
+    if "archiveError" in state:
+        fields["archiveError"] = state["archiveError"]
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
 
 
@@ -97,6 +99,7 @@ def check_first_boot_evidence(args: argparse.Namespace) -> int:
     require_equal(state["status"], "succeeded", "status")
     require_equal(state["planId"], plan["planId"], "planId")
     require(not state.get("error"), f"error: {state.get('error')!r}")
+    require(not state.get("archiveError"), f"archiveError: {state.get('archiveError')!r}")
     require_equal(state["distribution"]["id"], args.distribution, "distribution.id")
     require_equal(state["distribution"]["osReleaseId"], args.os_release_id, "osReleaseId")
     require_equal(state["root"]["filesystem"], "ext4", "root.filesystem")

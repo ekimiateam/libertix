@@ -1096,6 +1096,7 @@ def write_local_status(
         "schemaVersion": 1,
         "status": status,
         "planId": plan_id if isinstance(plan_id, str) else "",
+        "planSha256": hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest(),
         "updatedAtUtc": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "logPath": str(VERIFICATION_LOG_PATH),
         "error": error,
@@ -1209,7 +1210,32 @@ def update_service_attempt(attempt_id: str, stage: str, outcome: str) -> None:
 
 def archive_service_diagnostics() -> Path:
     plan = read_json(PLAN_PATH)
-    return archive_linux_diagnostics(plan)
+    status = read_verified_status(plan)
+    if status is None:
+        raise VerificationError("successful installation verification is missing")
+    try:
+        windows_device = resolve_windows_device(plan)
+        archive = archive_linux_diagnostics(plan, windows_device)
+    except (VerificationError, OSError) as error:
+        status["archiveError"] = str(error)
+        write_json_atomic(LOCAL_STATUS_PATH, status, mode=0o644)
+        raise
+    status["archiveError"] = None
+    write_json_atomic(LOCAL_STATUS_PATH, status, mode=0o644)
+    return archive
+
+
+def read_verified_status(plan: dict[str, object]) -> dict[str, object] | None:
+    status = read_optional_json(LOCAL_STATUS_PATH)
+    plan_digest = hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
+    if (
+        status is None
+        or status.get("status") != "succeeded"
+        or status.get("planId") != plan.get("planId")
+        or status.get("planSha256") != plan_digest
+    ):
+        return None
+    return status
 
 
 def record_service_failure(
@@ -1240,22 +1266,24 @@ def record_service_failure(
 
 def main() -> int:
     plan = read_json(PLAN_PATH)
-    root_source = Path(run("findmnt", "-n", "-o", "SOURCE", "/"))
-    if not root_source.exists():
-        raise VerificationError(f"root source is not a block device: {root_source}")
-    if run("findmnt", "-n", "-o", "FSTYPE", "/") != "ext4":
-        raise VerificationError("root filesystem is not ext4")
-    evidence, windows_device = build_evidence(plan, root_source)
-    destination = publish_evidence(plan, evidence, windows_device)
+    evidence = read_verified_status(plan)
+    if evidence is None:
+        root_source = Path(run("findmnt", "-n", "-o", "SOURCE", "/"))
+        if not root_source.exists():
+            raise VerificationError(f"root source is not a block device: {root_source}")
+        if run("findmnt", "-n", "-o", "FSTYPE", "/") != "ext4":
+            raise VerificationError("root filesystem is not ext4")
+        evidence, windows_device = build_evidence(plan, root_source)
+        destination = publish_evidence(plan, evidence, windows_device)
+    else:
+        destination = Path(require_text(evidence, "windowsEvidencePath"))
     write_local_status(
         "succeeded",
         plan=plan,
         evidence=evidence,
         windows_evidence_path=destination,
     )
-    archive = archive_linux_diagnostics(plan, windows_device)
     print(f"FIRST_BOOT_EVIDENCE={destination}")
-    print(f"FIRST_BOOT_LOG_ARCHIVE={archive}")
     return 0
 
 
@@ -1279,8 +1307,14 @@ if __name__ == "__main__":
         update_service_attempt(sys.argv[2], sys.argv[3], sys.argv[4])
         raise SystemExit(0)
     if len(sys.argv) == 2 and sys.argv[1] == "--archive-service-diagnostics":
-        print(f"FIRST_BOOT_LOG_ARCHIVE={archive_service_diagnostics()}")
+        try:
+            print(f"FIRST_BOOT_LOG_ARCHIVE={archive_service_diagnostics()}")
+        except (VerificationError, OSError) as error:
+            print(f"FIRST_BOOT_LOG_ARCHIVE_ERROR={error}", file=sys.stderr)
+            raise SystemExit(1) from error
         raise SystemExit(0)
+    if len(sys.argv) == 2 and sys.argv[1] == "--verification-completed":
+        raise SystemExit(0 if read_verified_status(read_json(PLAN_PATH)) is not None else 1)
     if len(sys.argv) in (3, 4, 5) and sys.argv[1] == "--record-service-failure":
         attempt_id = sys.argv[2] if len(sys.argv) >= 4 else None
         stage = sys.argv[3] if len(sys.argv) == 5 else "first-boot-resize"
