@@ -331,6 +331,33 @@ namespace Libertix.Installation
             }
         }
 
+        private string TryReusePreviousDistributionIso(InstallationDistribution distribution)
+        {
+            // A failed run that never reached cleanup leaves its verified ISO in
+            // its own plan directory. The hash check after this step still
+            // verifies the adopted file at the plan-owned path before use.
+            try
+            {
+                string schtasks = ResolveSystemExecutable("schtasks.exe", "schtasks.exe");
+                return InstallationTemporaryArtifacts.MoveReusableDistributionIso(
+                    Path.GetPathRoot(distribution.InstallerIsoWindowsPath),
+                    _installationPlan.PlanId,
+                    distribution.InstallerIsoFileName,
+                    distribution.InstallerIsoSha256,
+                    MaximumInstallerIsoBytes,
+                    taskName => RunProcess(
+                        schtasks,
+                        $"/Query /TN {QuoteArgument(@"\" + taskName)}",
+                        WindowsProcessTimeouts.QuickCommand,
+                        GetWindowsConsoleEncoding()).exitCode == 0);
+            }
+            catch (Exception ex)
+            {
+                Log($"Previous Linux installer ISO could not be reused: {ex.Message}");
+                return null;
+            }
+        }
+
         private async Task<bool> PrepareBiosDistributionIsoAsync(
             InstallationDistribution distribution)
         {
@@ -352,8 +379,17 @@ namespace Libertix.Installation
             Directory.CreateDirectory(Path.GetDirectoryName(installerPath));
             string localInstallerPath = LocalArtifactPath(distribution.InstallerIsoFileName);
             bool downloadSuccess;
+            string reusedInstallerPath = await Task.Run(() =>
+                TryReusePreviousDistributionIso(distribution));
+            ThrowIfCancellationRequested();
+            if (reusedInstallerPath != null)
+            {
+                Log($"Reusing verified Linux installer ISO from a previous run: {reusedInstallerPath}");
+                downloadSuccess = true;
+                UpdateProgress(BiosProgress.DistributionReady, Localized("ApplyChangesLinuxIsoReused", "Linux installer reused from a previous run"));
+            }
             // The adjacent filepool may omit distribution ISOs; download the missing one.
-            if (File.Exists(localInstallerPath))
+            else if (File.Exists(localInstallerPath))
             {
                 Log($"Found local installer ISO: {distribution.InstallerIsoFileName}, copying...");
                 await Task.Run(() => File.Copy(localInstallerPath, installerPath, true));

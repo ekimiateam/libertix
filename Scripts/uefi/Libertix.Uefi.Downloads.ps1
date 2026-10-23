@@ -530,6 +530,24 @@ function Start-RobustDownload {
 }
 
 function Set-DistributionIsoOnWindows {
+    # A failed run that never reached cleanup leaves its verified ISO in its own
+    # plan directory. Adopt it instead of downloading the same file again; the
+    # hash check below still verifies it at the plan-owned path before use.
+    try {
+        $reusedFrom = Move-LibertixReusableDistributionIso `
+            -SystemDrive $SystemDrive `
+            -PlanId ([string]$installationPlan.planId) `
+            -FileName ([IO.Path]::GetFileName($DistributionIsoPath)) `
+            -Sha256 $DistributionIsoSha256 `
+            -MinimumBytes $script:MinimumDistributionIsoBytes `
+            -MaximumBytes $script:MaximumDistributionIsoBytes
+        if ($reusedFrom) {
+            Write-Log "Reusing verified distribution ISO from a previous run: $reusedFrom" "Green"
+        }
+    } catch {
+        Write-Log "Previous distribution ISO could not be reused: $($_.Exception.Message)" "Yellow"
+    }
+
     $existing = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction SilentlyContinue
     if ($existing -and $existing.Length -gt $script:MaximumDistributionIsoBytes) {
         Write-Log "Existing distribution ISO exceeds the supported size limit; replacing it." "Yellow"

@@ -1627,6 +1627,98 @@ namespace Libertix.Tests
             Assert.AreNotEqual(Path.GetDirectoryName(isoPath), liveMediaDirectory);
         }
 
+        private const string OrphanPlanId = "fedcba9876543210fedcba9876543210";
+
+        private static string ReuseIsoScenario(
+            Action<string> arrange,
+            Func<string, bool> recoveryTaskExists = null,
+            string expectedSha256 = null)
+        {
+            string root = Path.Combine(Path.GetTempPath(), "libertix-tests-" + Guid.NewGuid());
+            string downloads = Path.Combine(root, "Downloads");
+            string orphan = Path.Combine(downloads, OrphanPlanId, "linux.iso");
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(orphan));
+                File.WriteAllText(orphan, "verified iso");
+                arrange(root);
+                string reused = InstallationTemporaryArtifacts.MoveReusableDistributionIso(
+                    downloads,
+                    Path.Combine(root, "UefiRecovery"),
+                    Path.Combine(root, "LibertixInstallRecovery"),
+                    PlanId,
+                    "linux.iso",
+                    expectedSha256 ?? Sha256Hex("verified iso"),
+                    1024,
+                    recoveryTaskExists ?? (_ => false));
+                string destination = Path.Combine(downloads, PlanId, "linux.iso");
+                Assert.AreEqual(reused != null, File.Exists(destination));
+                Assert.AreEqual(reused == null, File.Exists(orphan));
+                return reused;
+            }
+            finally
+            {
+                if (Directory.Exists(root))
+                    Directory.Delete(root, true);
+            }
+        }
+
+        private static string Sha256Hex(string text)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                return BitConverter.ToString(
+                    sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(text))).Replace("-", "");
+            }
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoIsMovedFromAnOrphanedPlan()
+        {
+            Assert.IsNotNull(ReuseIsoScenario(_ => { }));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoSkipsAnUnfinishedAria2Download()
+        {
+            Assert.IsNull(ReuseIsoScenario(root => File.WriteAllText(
+                Path.Combine(root, "Downloads", OrphanPlanId, "linux.iso.aria2"),
+                "control")));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoSkipsAHashMismatch()
+        {
+            Assert.IsNull(ReuseIsoScenario(_ => { }, expectedSha256: new string('0', 64)));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoSkipsAPlanWithUefiRecoveryState()
+        {
+            Assert.IsNull(ReuseIsoScenario(root =>
+                Directory.CreateDirectory(Path.Combine(root, "UefiRecovery", OrphanPlanId))));
+            Assert.IsNull(ReuseIsoScenario(
+                _ => { },
+                recoveryTaskExists: name => name == "LibertixUefiRecoveryPrompt_" + OrphanPlanId));
+        }
+
+        [TestMethod]
+        public void ReusableDistributionIsoRespectsTheBiosRecoveryOwner()
+        {
+            Func<string, Action<string>> biosOwner = pending => root =>
+            {
+                string biosRoot = Path.Combine(root, "LibertixInstallRecovery");
+                Directory.CreateDirectory(biosRoot);
+                if (pending != null)
+                    File.WriteAllText(Path.Combine(biosRoot, "pending.env"), pending);
+            };
+
+            Assert.IsNull(ReuseIsoScenario(biosOwner("PLAN_ID=" + OrphanPlanId + "\n")));
+            Assert.IsNull(ReuseIsoScenario(biosOwner(null)));
+            Assert.IsNull(ReuseIsoScenario(biosOwner("PLAN_ID=unknown\n")));
+            Assert.IsNotNull(ReuseIsoScenario(biosOwner("PLAN_ID=" + new string('a', 32) + "\n")));
+        }
+
         [TestMethod]
         public void InstallationPlanRejectsReservedMbrOffsetForUefi()
         {

@@ -68,3 +68,93 @@ Describe "Libertix temporary artifact ownership" {
             Should -BeTrue
     }
 }
+
+Describe "Libertix distribution ISO reuse" {
+    BeforeEach {
+        # TestDrive persists across the It blocks of one Describe, so clear the
+        # previous test's downloads and recovery owners before arranging this one.
+        foreach ($leftover in @("ProgramData", "LibertixInstallRecovery")) {
+            Remove-Item -LiteralPath (Join-Path $TestDrive $leftover) -Recurse -Force `
+                -ErrorAction SilentlyContinue
+        }
+        & subst.exe T: $TestDrive
+        if ($LASTEXITCODE -ne 0) {
+            throw "Could not map the Pester test directory to T:."
+        }
+        Mock -ModuleName Libertix.TemporaryArtifacts Get-ScheduledTask { $null }
+        $script:planId = "a" * 32
+        $script:orphanId = "b" * 32
+        $script:orphan = "T:\ProgramData\Libertix\Downloads\$orphanId\linux.iso"
+        $script:destination = "T:\ProgramData\Libertix\Downloads\$planId\linux.iso"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $orphan) -Force | Out-Null
+        Set-Content -LiteralPath $orphan -Value "verified iso" -NoNewline
+        $script:hash = (Get-FileHash -LiteralPath $orphan -Algorithm SHA256).Hash
+        $script:invokeReuse = {
+            param([string]$Sha256 = $script:hash)
+            Move-LibertixReusableDistributionIso `
+                -SystemDrive "T:" `
+                -PlanId $script:planId `
+                -FileName "linux.iso" `
+                -Sha256 $Sha256 `
+                -MinimumBytes 0 `
+                -MaximumBytes 1KB
+        }
+    }
+
+    AfterEach {
+        & subst.exe T: /D
+    }
+
+    It "moves a verified ISO out of an orphaned plan directory" {
+        & $invokeReuse | Should -Be $orphan
+
+        Test-Path -LiteralPath $destination | Should -BeTrue
+        Test-Path -LiteralPath $orphan | Should -BeFalse
+    }
+
+    It "skips an unfinished aria2 download" {
+        Set-Content -LiteralPath "$orphan.aria2" -Value "control"
+
+        & $invokeReuse | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $orphan | Should -BeTrue
+        Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+    It "leaves an ISO whose hash does not match in place" {
+        & $invokeReuse -Sha256 ("0" * 64) | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $orphan | Should -BeTrue
+        Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+    It "skips a plan that still has UEFI recovery state" {
+        New-Item -ItemType Directory -Path "T:\ProgramData\Libertix\UefiRecovery\$orphanId" -Force |
+            Out-Null
+
+        & $invokeReuse | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $orphan | Should -BeTrue
+        Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+    It "skips a plan that still has a UEFI recovery task" {
+        Mock -ModuleName Libertix.TemporaryArtifacts Get-ScheduledTask {
+            if ($TaskName -eq "LibertixUefiRecoveryPrompt_$orphanId") { [pscustomobject]@{} }
+        }
+
+        & $invokeReuse | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $orphan | Should -BeTrue
+        Test-Path -LiteralPath $destination | Should -BeFalse
+    }
+
+    It "respects the BIOS recovery owner and refuses an unreadable one" {
+        New-Item -ItemType Directory -Path "T:\LibertixInstallRecovery" -Force | Out-Null
+        & $invokeReuse | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $destination | Should -BeFalse
+
+        Set-Content -LiteralPath "T:\LibertixInstallRecovery\pending.env" -Value "PLAN_ID=$orphanId"
+        & $invokeReuse | Should -BeNullOrEmpty
+        Test-Path -LiteralPath $destination | Should -BeFalse
+
+        Set-Content -LiteralPath "T:\LibertixInstallRecovery\pending.env" -Value ("PLAN_ID=" + "c" * 32)
+        & $invokeReuse | Should -Be $orphan
+    }
+}
