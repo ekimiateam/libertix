@@ -75,6 +75,8 @@ def status_fingerprint(status: dict[str, object]) -> str:
         "error": status.get("error"),
         "attemptId": status.get("attemptId"),
     }
+    if "archiveError" in status:
+        fields["archiveError"] = status["archiveError"]
     return hashlib.sha256(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()
 
 
@@ -408,6 +410,9 @@ def main() -> int:
         failed = session_localization_error is not None
     title = text["failure_title"] if failed else text["success_title"]
     message = text["failure"] if failed else text["success"]
+    if not failed and status.get("archiveError"):
+        title = text["archive_warning_title"]
+        message = text["archive_warning"] + f"\n\n{status['archiveError']}"
     if failed and status.get("error"):
         message += f"\n\n{status['error']}"
     if session_localization_error:
