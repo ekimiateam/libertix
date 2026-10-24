@@ -82,9 +82,9 @@ namespace Libertix.Standalone
                 "Runtime");
             var acceptedWarnings = new HashSet<string>(StringComparer.Ordinal);
             Func<string, bool> confirm = warning => ConfirmUnsafePermissions(warning, acceptedWarnings);
-            ProtectDirectory(parent, confirm);
+            bool refreshRuntime = Security.ProtectedFiles.RepairDirectory(parent, confirmUnsafePermissions: confirm);
             using (FileStream runtimeLock = AcquireRuntimeLock(parent))
-                return EnsureRuntimeLocked(assembly, manifest, identity, parent, confirm);
+                return EnsureRuntimeLocked(assembly, manifest, identity, parent, confirm, refreshRuntime);
         }
 
         private static bool ConfirmUnsafePermissions(string warning, HashSet<string> acceptedWarnings)
@@ -133,10 +133,11 @@ namespace Libertix.Standalone
             PayloadManifest manifest,
             string identity,
             string parent,
-            Func<string, bool> confirm)
+            Func<string, bool> confirm,
+            bool refreshRuntime)
         {
             string destination = Path.Combine(parent, identity);
-            if (ValidateRuntime(destination, manifest))
+            if (!refreshRuntime && ValidateRuntime(destination, manifest))
                 return destination;
 
             string staging = Path.Combine(parent, ".staging-" + Guid.NewGuid().ToString("N"));

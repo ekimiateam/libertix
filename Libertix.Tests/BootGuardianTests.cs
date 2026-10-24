@@ -182,7 +182,7 @@ namespace Libertix.Tests
 
                 Assert.IsTrue(confirmations > 0);
                 ProtectedFiles.RequireTree(root);
-                Assert.IsFalse(File.GetAccessControl(file).AreAccessRulesProtected);
+                Assert.IsTrue(File.GetAccessControl(file).AreAccessRulesProtected);
                 Assert.AreEqual("S-1-5-32-544", File.GetAccessControl(file)
                     .GetOwner(typeof(SecurityIdentifier)).Value);
                 Assert.AreEqual("{}", File.ReadAllText(file));
@@ -215,6 +215,8 @@ namespace Libertix.Tests
                     Assert.AreEqual(0, command.ExitCode);
                 }
                 Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.CreateDirectory(junction));
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RepairDirectory(junction));
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RepairDirectory(root));
                 Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
                 Assert.AreEqual("unchanged", File.ReadAllText(witness));
             }
@@ -223,6 +225,126 @@ namespace Libertix.Tests
                 if (Directory.Exists(junction)) Directory.Delete(junction);
                 Directory.Delete(root, true);
             }
+        }
+
+        [TestMethod]
+        public void RepairsOwnedDirectoryBeforeWarning()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                string parent = Path.GetDirectoryName(root);
+                string parentPermissions = Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Owner | AccessControlSections.Access);
+                DirectorySecurity directoryPermissions = Directory.GetAccessControl(root);
+                directoryPermissions.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+                    FileSystemRights.Modify, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None, AccessControlType.Allow));
+                Directory.SetAccessControl(root, directoryPermissions);
+                string file = Path.Combine(root, "existing.log");
+                File.WriteAllText(file, "preserved");
+                FileSecurity permissions = File.GetAccessControl(file);
+                permissions.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+                    FileSystemRights.Modify, AccessControlType.Allow));
+                File.SetAccessControl(file, permissions);
+
+                bool repaired = ProtectedFiles.RepairDirectory(root, confirmUnsafePermissions: warning =>
+                {
+                    Assert.Fail("Repairable permissions must not require consent: " + warning);
+                    return false;
+                });
+
+                Assert.IsTrue(repaired);
+                ProtectedFiles.RequireTree(root);
+                Assert.AreEqual("preserved", File.ReadAllText(file));
+                Assert.AreEqual(parentPermissions, Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Owner | AccessControlSections.Access));
+                var descriptor = new RawSecurityDescriptor(File.GetAccessControl(file)
+                    .GetSecurityDescriptorBinaryForm(), 0);
+                Assert.AreEqual((FileSystemRights)0, ProtectedFiles.GrantedRights(
+                    descriptor.DiscretionaryAcl,
+                    new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null),
+                    FileSystemRights.FullControl));
+                Assert.IsFalse(ProtectedFiles.RepairDirectory(root));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void GroupsPermissionWarnings()
+        {
+            string root = NewProtectedDirectory();
+            try
+            {
+                foreach (string name in new[] { "first.log", "second.log" })
+                {
+                    string file = Path.Combine(root, name);
+                    File.WriteAllText(file, "preserved");
+                    FileSecurity permissions = File.GetAccessControl(file);
+                    permissions.AddAccessRule(new FileSystemAccessRule(
+                        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                        FileSystemRights.Modify, AccessControlType.Allow));
+                    File.SetAccessControl(file, permissions);
+                }
+                int confirmations = 0;
+                ProtectedFiles.RequireTree(root, confirmUnsafePermissions: warning =>
+                {
+                    confirmations++;
+                    StringAssert.Contains(warning, "first.log");
+                    StringAssert.Contains(warning, "second.log");
+                    return true;
+                });
+                Assert.AreEqual(1, confirmations);
+                Assert.ThrowsException<OperationCanceledException>(() => ProtectedFiles.RequireTree(root,
+                    confirmUnsafePermissions: warning => false));
+                Assert.ThrowsException<UnauthorizedAccessException>(() => ProtectedFiles.RequireTree(root));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [TestMethod]
+        public void VolumeRootDeleteIsNotDeleteChild()
+        {
+            string volume = Path.GetPathRoot(Environment.SystemDirectory);
+            var rights = FileSystemRights.DeleteSubdirectoriesAndFiles |
+                FileSystemRights.ChangePermissions | FileSystemRights.TakeOwnership;
+            Assert.AreEqual(rights, ProtectedFiles.AncestorRights(volume));
+            Assert.AreEqual(rights | FileSystemRights.Delete,
+                ProtectedFiles.AncestorRights(Path.Combine(volume, "Libertix")));
+        }
+
+        [TestMethod]
+        public void RepairKeepsUnsafeParentWarning()
+        {
+            string parent = NewProtectedDirectory();
+            try
+            {
+                string root = Path.Combine(parent, "logs");
+                ProtectedFiles.CreateDirectory(root);
+                DirectorySecurity permissions = Directory.GetAccessControl(parent);
+                permissions.AddAccessRule(new FileSystemAccessRule(
+                    new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                    FileSystemRights.DeleteSubdirectoriesAndFiles, AccessControlType.Allow));
+                Directory.SetAccessControl(parent, permissions);
+                string before = Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Owner | AccessControlSections.Access);
+                int confirmations = 0;
+
+                ProtectedFiles.RepairDirectory(root, confirmUnsafePermissions: warning =>
+                {
+                    confirmations++;
+                    StringAssert.Contains(warning, parent);
+                    StringAssert.Contains(warning, "DeleteSubdirectoriesAndFiles");
+                    return true;
+                });
+
+                Assert.AreEqual(1, confirmations);
+                Assert.AreEqual(before, Directory.GetAccessControl(parent)
+                    .GetSecurityDescriptorSddlForm(AccessControlSections.Owner | AccessControlSections.Access));
+            }
+            finally { Directory.Delete(parent, true); }
         }
 
         [TestMethod]

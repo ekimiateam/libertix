@@ -4483,7 +4483,8 @@ def test_standalone_release_contains_and_verifies_the_complete_runtime() -> None
     assert "Libertix.Standalone.Payload.zip" in project
     assert "Libertix.Standalone.PayloadManifest.json" in project
     assert 'requestedExecutionLevel level="requireAdministrator"' in read("Standalone/app.manifest")
-    assert "ProtectDirectory(parent, confirm)" in launcher
+    assert "RepairDirectory(parent, confirmUnsafePermissions: confirm)" in launcher
+    assert "!refreshRuntime && ValidateRuntime(destination, manifest)" in launcher
     assert "MessageBoxDefaultButton.Button2" in launcher
     assert 'Path.Combine(parent, ".extraction.lock")' in launcher
     assert "FileShare.None" in launcher
