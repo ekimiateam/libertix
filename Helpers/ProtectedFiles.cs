@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.AccessControl;
 using System.Security.Principal;
 
@@ -36,6 +37,37 @@ namespace Libertix.Security
                 ProtectTree(child, readableByUsers);
         }
 
+        internal static bool RepairDirectory(string path, bool readableByUsers = false,
+            Func<string, bool> confirmUnsafePermissions = null)
+        {
+            path = Path.GetFullPath(path);
+            var warnings = new List<string>();
+            Func<string, bool> collect = warning => { warnings.Add(warning); return true; };
+            if (!Directory.Exists(path))
+                CreateDirectory(path, readableByUsers, collect);
+            RequireAncestors(Path.GetDirectoryName(path), confirmUnsafePermissions: collect);
+            var contentWarnings = new List<string>();
+            InspectTree(path, null, warning => { contentWarnings.Add(warning); return true; });
+
+            // A repaired executable cache still needs fresh, verified files: old handles survive ACL changes.
+            bool untrustedContents = contentWarnings.Count != 0;
+            try
+            {
+                ProtectTree(path, readableByUsers);
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                warnings.Add("Could not protect a Libertix directory: " + path + " | error=" + error.Message);
+            }
+            catch (IOException error)
+            {
+                warnings.Add("Could not protect a Libertix directory: " + path + " | error=" + error.Message);
+            }
+            InspectTree(path, null, collect);
+            ConfirmWarnings(warnings, confirmUnsafePermissions);
+            return untrustedContents;
+        }
+
         internal static void RequireRecoveryTree(string path)
         {
             RequireTree(path, CurrentAdministrator());
@@ -44,14 +76,20 @@ namespace Libertix.Security
         internal static void RequireTree(string path, string administrator = null,
             Func<string, bool> confirmUnsafePermissions = null)
         {
-            RequireAncestors(Path.GetDirectoryName(Path.GetFullPath(path)), administrator, confirmUnsafePermissions);
-            RequireItem(path, WriteRights, administrator, confirmUnsafePermissions);
+            var warnings = new List<string>();
+            Func<string, bool> collect = warning => { warnings.Add(warning); return true; };
+            RequireAncestors(Path.GetDirectoryName(Path.GetFullPath(path)), administrator, collect);
+            InspectTree(path, administrator, collect);
+            ConfirmWarnings(warnings, confirmUnsafePermissions);
+        }
+
+        private static void InspectTree(string path, string administrator, Func<string, bool> collect)
+        {
+            RequireItem(path, WriteRights, administrator, collect);
+            if (!Directory.Exists(path))
+                return;
             foreach (string child in Directory.GetFileSystemEntries(path))
-            {
-                RequireItem(child, WriteRights, administrator, confirmUnsafePermissions);
-                if (Directory.Exists(child))
-                    RequireTree(child, administrator, confirmUnsafePermissions);
-            }
+                InspectTree(child, administrator, collect);
         }
 
         internal static void RequireDirectory(string path)
@@ -86,7 +124,21 @@ namespace Libertix.Security
             Func<string, bool> confirmUnsafePermissions = null)
         {
             for (string current = path; current != null; current = Path.GetDirectoryName(current))
-                RequireItem(current, ReplacementRights, administrator, confirmUnsafePermissions);
+                RequireItem(current, AncestorRights(current), administrator, confirmUnsafePermissions);
+        }
+
+        internal static FileSystemRights AncestorRights(string path)
+        {
+            // DELETE on the volume root is not permission to delete its children.
+            return Path.GetDirectoryName(Path.GetFullPath(path)) == null
+                ? ReplacementRights & ~FileSystemRights.Delete : ReplacementRights;
+        }
+
+        private static void ConfirmWarnings(IEnumerable<string> warnings, Func<string, bool> confirm)
+        {
+            string combined = string.Join(Environment.NewLine + Environment.NewLine, warnings.Distinct());
+            if (combined.Length != 0)
+                RequireConsent(combined, confirm);
         }
 
         private static void RequireItem(string path, FileSystemRights forbidden, string administrator = null,
@@ -199,18 +251,49 @@ namespace Libertix.Security
         private static void ProtectTree(string path, bool readableByUsers)
         {
             bool directory = Directory.Exists(path);
+            FileSystemSecurity expected;
             if (directory)
-                Directory.SetAccessControl(path, DirectorySecurity(readableByUsers));
+                expected = DirectorySecurity(readableByUsers);
             else
             {
                 var security = new FileSecurity();
                 security.SetOwner(new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null));
-                security.SetAccessRuleProtection(false, false);
-                File.SetAccessControl(path, security);
+                security.SetAccessRuleProtection(true, false);
+                foreach (var sid in new[] { WellKnownSidType.LocalSystemSid, WellKnownSidType.BuiltinAdministratorsSid })
+                    security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid, null),
+                        FileSystemRights.FullControl, AccessControlType.Allow));
+                if (readableByUsers)
+                    security.AddAccessRule(new FileSystemAccessRule(
+                        new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                        FileSystemRights.ReadAndExecute, AccessControlType.Allow));
+                expected = security;
+            }
+            FileSystemSecurity current = directory
+                ? (FileSystemSecurity)Directory.GetAccessControl(path) : File.GetAccessControl(path);
+            if (!SamePermissions(current, expected))
+            {
+                if (directory)
+                    Directory.SetAccessControl(path, (DirectorySecurity)expected);
+                else
+                    File.SetAccessControl(path, (FileSecurity)expected);
             }
             if (directory)
                 foreach (string child in Directory.GetFileSystemEntries(path))
                     ProtectTree(child, readableByUsers);
+        }
+
+        private static bool SamePermissions(FileSystemSecurity current, FileSystemSecurity expected)
+        {
+            var actual = new RawSecurityDescriptor(current.GetSecurityDescriptorBinaryForm(), 0);
+            var required = new RawSecurityDescriptor(expected.GetSecurityDescriptorBinaryForm(), 0);
+            if (actual.DiscretionaryAcl == null)
+                return false;
+            var actualAcl = new byte[actual.DiscretionaryAcl.BinaryLength];
+            var requiredAcl = new byte[required.DiscretionaryAcl.BinaryLength];
+            actual.DiscretionaryAcl.GetBinaryForm(actualAcl, 0);
+            required.DiscretionaryAcl.GetBinaryForm(requiredAcl, 0);
+            return actual.Owner == required.Owner && current.AreAccessRulesProtected == expected.AreAccessRulesProtected &&
+                actualAcl.SequenceEqual(requiredAcl);
         }
     }
 }
