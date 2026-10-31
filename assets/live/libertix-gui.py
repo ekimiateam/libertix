@@ -7,7 +7,6 @@ import os
 import subprocess
 import time
 import tkinter as tk
-import webbrowser
 from pathlib import Path
 
 LOG_DIR = Path("/run/libertix")
@@ -22,13 +21,6 @@ BUILD_ID_FILE = Path("/etc/libertix-build-id")
 I18N_MODULE_PATH = Path("/usr/local/lib/libertix/libertix-i18n.py")
 PROGRESS_MODULE_PATH = Path("/usr/local/lib/libertix/libertix_progress.py")
 STAGE_CATALOG_PATH = Path("/usr/local/lib/libertix/libertix-stages.tsv")
-SUPPORT_SPEC = importlib.util.spec_from_file_location(
-    "libertix_support", I18N_MODULE_PATH.with_name("libertix_support.py")
-)
-if SUPPORT_SPEC is None or SUPPORT_SPEC.loader is None:
-    raise RuntimeError("cannot load the support report helper")
-SUPPORT = importlib.util.module_from_spec(SUPPORT_SPEC)
-SUPPORT_SPEC.loader.exec_module(SUPPORT)
 
 
 def load_i18n_module():
@@ -255,36 +247,6 @@ class LibertixGui:
         )
         self.details_button.pack(side=tk.LEFT)
 
-        self.support_text = SUPPORT.labels(os.environ.get("LANGUAGE_CODE", "en"))
-        self.copy_report_button = tk.Button(
-            self.button_bar,
-            text=self.support_text["copy"],
-            command=self.copy_report,
-            font=("DejaVu Sans", 12),
-            padx=12,
-            pady=8,
-        )
-        self.copy_report_button.pack(side=tk.LEFT, padx=(12, 0))
-        self.issue_button = tk.Button(
-            self.button_bar,
-            text=self.support_text["issue"],
-            command=self.open_issue,
-            font=("DejaVu Sans", 12),
-            padx=12,
-            pady=8,
-        )
-        self.issue_button.pack(side=tk.LEFT, padx=(12, 0))
-        self.support_status = tk.Label(
-            self.container,
-            text=self.support_text["review"],
-            fg="#9fb3c8",
-            bg="#0b1020",
-            font=("DejaVu Sans", 11),
-            wraplength=1100,
-            justify=tk.LEFT,
-        )
-        self.support_status.pack(anchor="w", fill=tk.X)
-
         self.reboot_button = tk.Button(
             self.button_bar,
             text=tr("reboot"),
@@ -368,7 +330,6 @@ class LibertixGui:
         self.message_label.configure(
             font=("DejaVu Sans", body_font), wraplength=max(360, width - pad_x * 2)
         )
-        self.support_status.configure(wraplength=max(360, width - pad_x * 2))
         self.details_button.configure(
             font=("DejaVu Sans", button_font),
             padx=max(8, button_font - 1),
@@ -565,29 +526,6 @@ class LibertixGui:
                 self.log_text.yview_moveto(first)
 
         self.root.after(700, self.refresh)
-
-    def copy_report(self) -> None:
-        report = SUPPORT.create(
-            self.stage_label.cget("text"),
-            self.message_label.cget("text") + "\n" + read_text(FAIL_FILE),
-            (LOG_DIR,),
-        )
-        try:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(report)
-            self.support_status.configure(text=self.support_text["copied"])
-        except tk.TclError as error:
-            self.support_status.configure(text=f"{self.support_text['failed']} {error}")
-
-    def open_issue(self) -> None:
-        try:
-            opened = webbrowser.open(SUPPORT.ISSUE_URL)
-        except (OSError, webbrowser.Error):
-            opened = False
-        if not opened:
-            self.support_status.configure(
-                text=self.support_text["failed"] + " " + SUPPORT.ISSUE_URL
-            )
 
     def run(self) -> None:
         self.root.mainloop()

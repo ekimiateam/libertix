@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import importlib.util
 import json
 import os
 import pwd
 import shutil
 import subprocess
 import time
-import webbrowser
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,13 +20,6 @@ SERVICE_STATE_PATH = Path("/var/lib/libertix/first-boot-service-state.json")
 WAIT_SECONDS = 600
 SESSION_SETTLE_SECONDS = 10
 SESSION_LOCALIZATION_WAIT_SECONDS = 60
-SUPPORT_SPEC = importlib.util.spec_from_file_location(
-    "libertix_support", Path(__file__).with_name("libertix_support.py")
-)
-if SUPPORT_SPEC is None or SUPPORT_SPEC.loader is None:
-    raise RuntimeError("cannot load the support report helper")
-SUPPORT = importlib.util.module_from_spec(SUPPORT_SPEC)
-SUPPORT_SPEC.loader.exec_module(SUPPORT)
 
 
 def resolve_translation_catalogue_path() -> Path:
@@ -139,11 +130,6 @@ def show_gtk_dialog(
     try:
         dialog = gtk.Dialog(title=f"Libertix - {title}", flags=gtk.DialogFlags.MODAL)
         dialog.add_button(close_label, gtk.ResponseType.OK)
-        plan = read_json(PLAN_PATH) or {}
-        locale = plan.get("locale") or {}
-        support_text = SUPPORT.labels(str(locale.get("languageCode", "en")))
-        copy_button = dialog.add_button(support_text["copy"], gtk.ResponseType.NONE)
-        issue_button = dialog.add_button(support_text["issue"], gtk.ResponseType.NONE)
         dialog.set_default_size(720, 430)
         dialog.set_keep_above(True)
         dialog.set_urgency_hint(True)
@@ -200,32 +186,6 @@ def show_gtk_dialog(
         message_label.set_line_wrap_mode(pango.WrapMode.WORD_CHAR)
         message_label.set_selectable(True)
         content.pack_start(message_label, True, True, 0)
-        review_label = gtk.Label(label=support_text["review"], xalign=0)
-        review_label.set_line_wrap(True)
-        review_label.set_margin_start(26)
-        review_label.set_margin_end(26)
-        review_label.set_margin_bottom(12)
-        content.pack_start(review_label, False, False, 0)
-
-        def copy_report(_button: object) -> None:
-            report = SUPPORT.create(title, message, (Path("/var/log/libertix"),))
-            clipboard = gtk.Clipboard.get(gdk.SELECTION_CLIPBOARD)
-            clipboard.set_text(report, -1)
-            clipboard.store()
-            message_label.set_text(message + "\n\n" + support_text["copied"])
-
-        def open_issue(_button: object) -> None:
-            try:
-                opened = webbrowser.open(SUPPORT.ISSUE_URL)
-            except (OSError, webbrowser.Error):
-                opened = False
-            if not opened:
-                message_label.set_text(
-                    message + "\n\n" + support_text["failed"] + " " + SUPPORT.ISSUE_URL
-                )
-
-        copy_button.connect("clicked", copy_report)
-        issue_button.connect("clicked", open_issue)
 
         close_button = dialog.get_widget_for_response(gtk.ResponseType.OK)
         if close_button is not None:
@@ -285,8 +245,7 @@ def show_gtk_dialog(
         # and otherwise cover the verification result. Re-present once after the
         # desktop has settled without repeatedly stealing focus from the user.
         glib.timeout_add_seconds(5, present_after_desktop_startup)
-        while dialog.run() == gtk.ResponseType.NONE:
-            pass
+        dialog.run()
         if ui_state_path is not None:
             write_json_atomic(
                 ui_state_path,
@@ -331,8 +290,6 @@ def show_dialog(
         )
     if gtk_shown:
         return True
-
-    message += "\n\n" + SUPPORT.ISSUE_URL
 
     commands: list[list[str]] = []
     if shutil.which("zenity"):

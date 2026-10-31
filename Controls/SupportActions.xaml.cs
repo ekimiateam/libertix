@@ -31,7 +31,7 @@ namespace Libertix.Controls
         {
             var labels = SupportReport.Labels(Localization.CurrentLanguage);
             CopyButton.Content = labels["copy"];
-            IssueButton.Content = labels["issue"];
+            IssueLinkText.Text = labels["issue"];
             StatusText.Text = labels["review"];
         }
 

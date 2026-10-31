@@ -6,9 +6,11 @@
             <Button x:Name="CopyButton" Style="{StaticResource ModernButton}"
                     AutomationProperties.AutomationId="CopySupportReportButton"
                     Padding="14,8" Margin="0,0,10,6" Click="Copy_Click"/>
-            <Button x:Name="IssueButton" Style="{StaticResource ModernButton}"
-                    AutomationProperties.AutomationId="CreateGitHubIssueButton"
-                    Padding="14,8" Margin="0,0,0,6" Click="Issue_Click"/>
+            <TextBlock VerticalAlignment="Center" Margin="0,0,0,6">
+                <Hyperlink Click="Issue_Click" Foreground="{DynamicResource AccentColor}">
+                    <Run x:Name="IssueLinkText"/>
+                </Hyperlink>
+            </TextBlock>
         </WrapPanel>
         <TextBlock x:Name="StatusText" Foreground="{DynamicResource TextSecondary}"
                    TextWrapping="Wrap" FontSize="12"/>

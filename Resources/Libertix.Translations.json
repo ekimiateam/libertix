@@ -11,7 +11,7 @@
       "displayName": "English",
       "support": {
         "copy": "Copy support report",
-        "issue": "Create a GitHub issue",
+        "issue": "Report an issue on GitHub",
         "copied": "Report copied. Review it before sharing it publicly.",
         "review": "Known secrets are masked. Review the report before posting it. Nothing is sent automatically.",
         "failed": "The action failed:",
@@ -430,7 +430,7 @@
       "displayName": "Français",
       "support": {
         "copy": "Copier le rapport",
-        "issue": "Créer une issue GitHub",
+        "issue": "Signaler un problème sur GitHub",
         "copied": "Rapport copié. Relisez-le avant de le partager publiquement.",
         "review": "Les secrets connus sont masqués. Relisez le rapport avant publication. Rien n'est envoyé automatiquement.",
         "failed": "L'action a échoué :",
@@ -849,7 +849,7 @@
       "displayName": "Español",
       "support": {
         "copy": "Copiar informe",
-        "issue": "Crear una incidencia en GitHub",
+        "issue": "Informar de un problema en GitHub",
         "copied": "Informe copiado. Revíselo antes de compartirlo públicamente.",
         "review": "Los secretos conocidos se ocultan. Revise el informe antes de publicarlo. No se envía nada automáticamente.",
         "failed": "La acción ha fallado:",
@@ -1268,7 +1268,7 @@
       "displayName": "한국어",
       "support": {
         "copy": "지원 보고서 복사",
-        "issue": "GitHub 이슈 만들기",
+        "issue": "GitHub에 문제 보고하기",
         "copied": "보고서를 복사했습니다. 공개하기 전에 내용을 확인하세요.",
         "review": "알려진 비밀 정보는 가려집니다. 게시 전에 보고서를 확인하세요. 자동으로 전송되지 않습니다.",
         "failed": "작업 실패:",

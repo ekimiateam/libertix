@@ -30,33 +30,6 @@ def test_all_supported_languages_have_success_and_failure_messages(result_ui: Mo
         assert all(translation[key].strip() for key in translation)
 
 
-@pytest.mark.parametrize(
-    "secret",
-    [
-        "password=do-not-publish",
-        "Authorization: Bearer do-not-publish",
-        '--password "do-not-publish"',
-        "<keyMaterial>do-not-publish</keyMaterial>",
-        "https://person:do-not-publish@example.org/file.iso",
-    ],
-)
-def test_support_report_masks_secrets(result_ui: ModuleType, secret: str) -> None:
-    assert "do-not-publish" not in result_ui.SUPPORT.redact(secret)
-    assert "HTTP 503" in result_ui.SUPPORT.redact("download failed: HTTP 503")
-
-
-def test_support_report_preserves_errors_without_copying_plans(result_ui, tmp_path) -> None:
-    (tmp_path / "first-boot.log").write_text("ERROR: test evidence\npassword=do-not-publish")
-    (tmp_path / "installation-plan.json").write_text("must-not-be-copied")
-    report = result_ui.SUPPORT.create("first boot", "verification failed", (tmp_path,))
-    assert "ERROR: test evidence" in report
-    assert "verification failed" in report
-    assert "do-not-publish" not in report
-    assert "must-not-be-copied" not in report
-    for language in ("en", "fr", "es", "ko"):
-        assert all(result_ui.SUPPORT.labels(language).values())
-
-
 def test_acknowledgement_fingerprint_changes_with_terminal_result(result_ui: ModuleType) -> None:
     success = {
         "planId": "a" * 32,

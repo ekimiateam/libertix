@@ -383,11 +383,13 @@ $copyReportButton.Add_Click({
         $message.Text = "$originalMessage`n$($supportText.failed) $($_.Exception.Message)"
     }
 })
-$issueButton = New-Object Windows.Controls.Button
-$issueButton.Content = [string]$supportText.issue
-$issueButton.Padding = New-Object Windows.Thickness(12, 8, 12, 8)
-$issueButton.Margin = New-Object Windows.Thickness(0, 0, 10, 0)
-$issueButton.Add_Click({
+$issueText = New-Object Windows.Controls.TextBlock
+$issueText.VerticalAlignment = "Center"
+$issueText.Margin = New-Object Windows.Thickness(0, 0, 10, 0)
+$issueLink = New-Object Windows.Documents.Hyperlink
+$issueLink.Inlines.Add([string]$supportText.issue)
+$issueLink.Foreground = $accentBrush
+$issueLink.Add_Click({
     try {
         Start-Process "https://github.com/ekimiateam/libertix/issues/new?template=bug_report.md"
     } catch {
@@ -395,7 +397,8 @@ $issueButton.Add_Click({
     }
 })
 $buttons.Children.Add($copyReportButton) | Out-Null
-$buttons.Children.Add($issueButton) | Out-Null
+$issueText.Inlines.Add($issueLink)
+$buttons.Children.Add($issueText) | Out-Null
 $originalMessage = $message.Text
 
 $closeButton = New-Object Windows.Controls.Button
