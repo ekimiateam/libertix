@@ -1,0 +1,16 @@
+<UserControl x:Class="Libertix.Controls.SupportActions"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Margin="0,10,0,0">
+        <WrapPanel>
+            <Button x:Name="CopyButton" Style="{StaticResource ModernButton}"
+                    AutomationProperties.AutomationId="CopySupportReportButton"
+                    Padding="14,8" Margin="0,0,10,6" Click="Copy_Click"/>
+            <Button x:Name="IssueButton" Style="{StaticResource ModernButton}"
+                    AutomationProperties.AutomationId="CreateGitHubIssueButton"
+                    Padding="14,8" Margin="0,0,0,6" Click="Issue_Click"/>
+        </WrapPanel>
+        <TextBlock x:Name="StatusText" Foreground="{DynamicResource TextSecondary}"
+                   TextWrapping="Wrap" FontSize="12"/>
+    </StackPanel>
+</UserControl>

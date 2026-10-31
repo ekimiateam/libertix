@@ -45,6 +45,8 @@
     <Compile Include="Hashing.cs" />
     <Compile Include="NativeMethods.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="..\Helpers\SupportReport.cs"><Link>SupportReport.cs</Link></Compile>
+    <EmbeddedResource Include="..\Resources\Libertix.Translations.json"><LogicalName>Libertix.SupportTranslations.json</LogicalName></EmbeddedResource>
     <Compile Include="TrustedScripts.cs" />
     <Compile Include="..\Helpers\ProtectedFiles.cs"><Link>ProtectedFiles.cs</Link></Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />

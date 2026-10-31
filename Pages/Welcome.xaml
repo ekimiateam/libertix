@@ -1,6 +1,7 @@
 <Page x:Class="Libertix.Pages.Welcome"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:controls="clr-namespace:Libertix.Controls"
       Background="{DynamicResource PrimaryBackground}"
       KeyboardNavigation.TabNavigation="Cycle"
       Loaded="Welcome_Loaded">
@@ -48,6 +49,7 @@
                                TextAlignment="Center"
                                TextWrapping="Wrap"
                                Margin="0,0,0,18"/>
+                    <controls:SupportActions Context="{Binding Text, ElementName=InstalledLinuxText}"/>
                     <Button x:Name="UninstallButton"
                             Content="{DynamicResource UninstallLinuxButton}"
                             AutomationProperties.AutomationId="UninstallLinuxButton"

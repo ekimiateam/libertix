@@ -100,6 +100,8 @@ install_target_configuration_payload() {
         /mnt/target/usr/local/lib/libertix/libertix-ntfs-permissions.py
     install -m 0755 /usr/local/lib/libertix/libertix-first-boot-result.py \
         /mnt/target/usr/local/lib/libertix/libertix-first-boot-result.py
+    install -m 0644 /usr/local/lib/libertix/libertix_support.py \
+        /mnt/target/usr/local/lib/libertix/libertix_support.py
     install -d -m 0755 /mnt/target/etc/xdg/autostart
     install -m 0644 /usr/local/lib/libertix/libertix-first-boot-result.desktop \
         /mnt/target/etc/xdg/autostart/libertix-first-boot-result.desktop

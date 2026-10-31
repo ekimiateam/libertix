@@ -4,6 +4,7 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:converters="clr-namespace:Libertix.Converters"
+             xmlns:controls="clr-namespace:Libertix.Controls"
              mc:Ignorable="d">
 
     <UserControl.Resources>
@@ -137,6 +138,14 @@
                 </Border>
             </Expander>
 
+            <controls:SupportActions Context="{Binding Message, RelativeSource={RelativeSource AncestorType=controls:ErrorPanel}}">
+                <controls:SupportActions.Details>
+                    <MultiBinding StringFormat="{}{0}&#10;{1}">
+                        <Binding Path="Details" RelativeSource="{RelativeSource AncestorType=controls:ErrorPanel}"/>
+                        <Binding Path="AdditionalDetails" RelativeSource="{RelativeSource AncestorType=controls:ErrorPanel}"/>
+                    </MultiBinding>
+                </controls:SupportActions.Details>
+            </controls:SupportActions>
             </StackPanel>
         </ScrollViewer>
     </Border>

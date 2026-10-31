@@ -205,6 +205,7 @@ install_live_installer_assets() {
         "0755|$ROOT_DIR/assets/live/libertix-install-main.sh|/usr/local/lib/libertix/libertix-install-main.sh"
         "0755|$ROOT_DIR/assets/live/libertix-i18n.py|/usr/local/lib/libertix/libertix-i18n.py"
         "0755|$ROOT_DIR/assets/live/libertix_progress.py|/usr/local/lib/libertix/libertix_progress.py"
+        "0644|$ROOT_DIR/assets/live/libertix_support.py|/usr/local/lib/libertix/libertix_support.py"
         "0755|$ROOT_DIR/assets/live/libertix-i18n.sh|/usr/local/lib/libertix/libertix-i18n.sh"
         "0644|$ROOT_DIR/Resources/Libertix.Translations.json|/usr/local/lib/libertix/Libertix.Translations.json"
         "0644|$ROOT_DIR/Resources/Images/icon.ico|/usr/local/lib/libertix/Libertix.ico"
