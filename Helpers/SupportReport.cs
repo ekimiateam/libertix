@@ -29,8 +29,8 @@ namespace Libertix.Support
             var report = new StringBuilder();
             report.AppendLine("Libertix support report");
             report.AppendLine("UTC: " + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
-            Assembly entry = Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly();
-            report.AppendLine("Version: " + FileVersionInfo.GetVersionInfo(entry.Location).ProductVersion);
+            report.AppendLine("Version: " + FileVersionInfo.GetVersionInfo(
+                Assembly.GetExecutingAssembly().Location).ProductVersion);
             report.AppendLine("Windows: " + Environment.OSVersion);
             report.AppendLine("Architecture: " + (Environment.Is64BitOperatingSystem ? "x64" : "x86") +
                 "; process=" + (Environment.Is64BitProcess ? "x64" : "x86"));
