@@ -59,11 +59,7 @@ namespace Libertix.Standalone
                     : language == "es"
                         ? "Libertix no pudo preparar su entorno interno verificado."
                         : "Libertix could not prepare its verified runtime.";
-                MessageBox.Show(
-                    message + "\r\n\r\n" + error,
-                    "Libertix",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                Support.SupportReportDialog.Show("Libertix", message + "\r\n\r\n" + error);
                 return 1;
             }
         }

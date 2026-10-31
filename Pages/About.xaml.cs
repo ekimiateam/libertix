@@ -33,11 +33,8 @@ namespace Libertix.Pages
             }
             catch (Exception error)
             {
-                MessageBox.Show(
-                    string.Format(Localization.GetString("AboutLinkError"), error.Message),
-                    Localization.GetString("AboutTitle"),
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                Support.SupportReportDialog.Show(Localization.GetString("AboutTitle"),
+                    string.Format(Localization.GetString("AboutLinkError"), error.Message));
             }
         }
     }

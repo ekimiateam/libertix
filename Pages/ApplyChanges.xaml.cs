@@ -201,11 +201,7 @@ namespace Libertix.Pages
 
         void IInstallationView.ShowBlockingMessage(string title, string message, bool isError)
         {
-            Dispatcher.Invoke(() => MessageBox.Show(
-                message,
-                title,
-                MessageBoxButton.OK,
-                isError ? MessageBoxImage.Error : MessageBoxImage.Warning));
+            Dispatcher.Invoke(() => Support.SupportReportDialog.Show(title, message));
         }
 
         private void AppendLogLine(TextBox output, string line)

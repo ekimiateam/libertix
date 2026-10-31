@@ -47,6 +47,7 @@
     <Reference Include="System.Xml" />
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Runtime.Serialization" />
     <Reference Include="System.ServiceProcess" />
     <Reference Include="System.Xml.Linq" />
     <Reference Include="System.Data.DataSetExtensions" />
@@ -95,6 +96,11 @@
     <Compile Include="Helpers\WindowsPreferenceCollector.cs" />
     <Compile Include="Helpers\WindowsWifiProfileReader.cs" />
     <Compile Include="Helpers\ApplicationLogger.cs" />
+    <Compile Include="Helpers\SupportReport.cs" />
+    <Compile Include="Helpers\SupportReportDialog.cs" />
+    <Compile Include="Controls\SupportActions.xaml.cs"><DependentUpon>SupportActions.xaml</DependentUpon></Compile>
+    <Page Include="Controls\SupportActions.xaml" />
+    <EmbeddedResource Include="Resources\Libertix.Translations.json"><LogicalName>Libertix.SupportTranslations.json</LogicalName></EmbeddedResource>
     <Compile Include="Helpers\WindowsProcessRunner.cs" />
     <Compile Include="Helpers\LinuxPasswordHasher.cs" />
     <Compile Include="Helpers\BoundedHttpContent.cs" />

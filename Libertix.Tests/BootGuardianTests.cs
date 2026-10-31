@@ -10,12 +10,57 @@ using System.Threading;
 using Libertix.BootGuardian;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using ProtectedFiles = Guardian::Libertix.Security.ProtectedFiles;
+using Report = Guardian::Libertix.Support.SupportReport;
 
 namespace Libertix.Tests
 {
     [TestClass]
     public sealed class BootGuardianTests
     {
+        [DataTestMethod]
+        [DataRow("password=do-not-publish", "do-not-publish")]
+        [DataRow("Authorization: Bearer private-token", "private-token")]
+        [DataRow("--password \"secret phrase\"", "secret phrase")]
+        [DataRow("<keyMaterial>wifi-secret</keyMaterial>", "wifi-secret")]
+        [DataRow("https://person:private-value@example.org/file.iso", "private-value")]
+        [DataRow("ghp_1234567890abcdef", "1234567890abcdef")]
+        public void SupportReportHidesSecrets(string input, string secret)
+        {
+            Assert.IsFalse(Report.Redact(input).Contains(secret));
+            StringAssert.Contains(Report.Redact("download failed: HTTP 503"), "HTTP 503");
+        }
+
+        [TestMethod]
+        public void SupportReportIncludesLogsButNotPlans()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "libertix-report-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                File.WriteAllText(Path.Combine(root, "boot-guardian.log"), "repair failed: test evidence\npassword=hidden-value");
+                File.WriteAllText(Path.Combine(root, "installation-plan.json"), "must-not-be-copied");
+                string report = Report.Create("installation", "ERROR test failure", new[] { root });
+                StringAssert.Contains(report, "ERROR test failure");
+                StringAssert.Contains(report, "repair failed: test evidence");
+                Assert.IsFalse(report.Contains("hidden-value"));
+                Assert.IsFalse(report.Contains("must-not-be-copied"));
+            }
+            finally { Directory.Delete(root, true); }
+        }
+
+        [DataTestMethod]
+        [DataRow("en")]
+        [DataRow("fr")]
+        [DataRow("es")]
+        [DataRow("ko")]
+        public void SupportButtonsAreTranslated(string language)
+        {
+            var labels = Report.Labels(language);
+            foreach (string key in new[] { "copy", "issue", "copied", "review", "failed", "close" })
+                Assert.IsFalse(string.IsNullOrWhiteSpace(labels[key]), language + ":" + key);
+            StringAssert.EndsWith(Report.IssueUrl, "template=bug_report.md");
+        }
+
         [DataTestMethod]
         [DataRow("libertix-recovery-guard.ps1", "recover.ps1")]
         [DataRow("libertix-configure-windows-share.ps1", "mount-linux-readonly.ps1")]

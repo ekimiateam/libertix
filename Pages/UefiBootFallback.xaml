@@ -1,6 +1,7 @@
 <Page x:Class="Libertix.Pages.UefiBootFallback"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:controls="clr-namespace:Libertix.Controls"
       Title="UefiBootFallback">
     <Grid Background="{DynamicResource PrimaryBackground}">
         <Grid.RowDefinitions>
@@ -60,6 +61,8 @@
                              IsReadOnly="True"
                              VerticalScrollBarVisibility="Auto"
                              TextWrapping="Wrap"/>
+                    <controls:SupportActions Context="{Binding Text, ElementName=CurrentStepText}"
+                                             Details="{Binding Text, ElementName=LogOutput}"/>
                 </StackPanel>
             </Border>
         </StackPanel>

@@ -546,11 +546,8 @@ namespace Libertix.Pages
             ValidateAndUpdateSize(ManualSize);
             if (HasError || HasSizeError)
             {
-                MessageBox.Show(
-                    SizeErrorMessage ?? Localization.GetString("ResizeDiskNoSpace"),
-                    Localization.GetString("ResizeDiskErrorTitle"),
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Warning);
+                Support.SupportReportDialog.Show(Localization.GetString("ResizeDiskErrorTitle"),
+                    SizeErrorMessage ?? Localization.GetString("ResizeDiskNoSpace"));
                 return;
             }
 

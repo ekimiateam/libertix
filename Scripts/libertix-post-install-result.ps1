@@ -354,11 +354,52 @@ $details.Text = $detailLines -join [Environment]::NewLine
 [Windows.Controls.Grid]::SetRow($details, 2)
 $root.Children.Add($details) | Out-Null
 
-$buttons = New-Object Windows.Controls.StackPanel
+$buttons = New-Object Windows.Controls.WrapPanel
 $buttons.Orientation = "Horizontal"
 $buttons.HorizontalAlignment = "Right"
 $buttons.Margin = New-Object Windows.Thickness(0, 18, 0, 0)
 [Windows.Controls.Grid]::SetRow($buttons, 3)
+
+$supportText = $translations.languages.$language.support
+$copyReportButton = New-Object Windows.Controls.Button
+$copyReportButton.Content = [string]$supportText.copy
+$copyReportButton.Padding = New-Object Windows.Thickness(12, 8, 12, 8)
+$copyReportButton.Margin = New-Object Windows.Thickness(0, 0, 10, 0)
+$copyReportButton.Add_Click({
+    try {
+        # The same protected host that launched this script supplies the report formatter.
+        $hostPath = if ($Firmware -eq "uefi") {
+            Join-Path (Split-Path -Parent $PSScriptRoot) "Libertix.BootGuardian.exe"
+        } else {
+            Join-Path $PSScriptRoot "Libertix.BootGuardian.exe"
+        }
+        [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($hostPath))
+        $logRoot = Join-Path ([IO.Path]::GetPathRoot($env:SystemRoot)) "LibertixInstallLogs"
+        $report = [Libertix.Support.SupportReport]::Create(
+            $resultTitle, $details.Text, [string[]]@($logRoot, $recoveryRoot))
+        [Windows.Clipboard]::SetText($report)
+        $message.Text = "$originalMessage`n$($supportText.copied)"
+    } catch {
+        $message.Text = "$originalMessage`n$($supportText.failed) $($_.Exception.Message)"
+    }
+})
+$issueText = New-Object Windows.Controls.TextBlock
+$issueText.VerticalAlignment = "Center"
+$issueText.Margin = New-Object Windows.Thickness(0, 0, 10, 0)
+$issueLink = New-Object Windows.Documents.Hyperlink
+$issueLink.Inlines.Add([string]$supportText.issue)
+$issueLink.Foreground = $accentBrush
+$issueLink.Add_Click({
+    try {
+        Start-Process "https://github.com/ekimiateam/libertix/issues/new?template=bug_report.md"
+    } catch {
+        $message.Text = "$originalMessage`n$($supportText.failed) $($_.Exception.Message)"
+    }
+})
+$buttons.Children.Add($copyReportButton) | Out-Null
+$issueText.Inlines.Add($issueLink)
+$buttons.Children.Add($issueText) | Out-Null
+$originalMessage = $message.Text
 
 $closeButton = New-Object Windows.Controls.Button
 $closeButton.Content = [string]$text.close

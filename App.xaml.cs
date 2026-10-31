@@ -94,11 +94,7 @@ namespace Libertix
                 ApplicationLogger.Write("Startup refused: administrator privileges are missing.");
                 // This runs before the language dictionary is merged, so the
                 // message is resolved from the Windows UI language directly.
-                MessageBox.Show(
-                    AdministratorRequiredMessage(),
-                    "Libertix",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                Support.SupportReportDialog.Show("Libertix", AdministratorRequiredMessage());
 
                 Shutdown(1);
                 return;
@@ -112,14 +108,12 @@ namespace Libertix
             if (!_keepAwakeRequested)
             {
                 ApplicationLogger.Write("Startup refused: Windows rejected the sleep prevention request.");
-                MessageBox.Show(
+                Support.SupportReportDialog.Show(
+                    "Libertix",
                     Localization.GetBootstrapString(
                         "SleepPreventionFailed",
                         "Windows could not keep the computer and display awake. " +
-                        "Libertix will close without starting the installation. Try again."),
-                    "Libertix",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                        "Libertix will close without starting the installation. Try again."));
                 Shutdown(6);
                 return;
             }
@@ -344,17 +338,15 @@ namespace Libertix
             if (!string.IsNullOrWhiteSpace(result.Error))
             {
                 ApplicationLogger.Write("Published version check failed: " + result.Error);
-                MessageBox.Show(
+                Support.SupportReportDialog.Show(
+                    Localization.GetBootstrapString(
+                        "ReleaseCheckFailedTitle",
+                        "Libertix - version verification failed"),
                     string.Format(
                         Localization.GetBootstrapString(
                             "ReleaseCheckFailedMessage",
                             "Libertix could not verify the current published version: {0}"),
-                        result.Error),
-                    Localization.GetBootstrapString(
-                        "ReleaseCheckFailedTitle",
-                        "Libertix - version verification failed"),
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                        result.Error));
                 Shutdown(4);
                 return false;
             }
@@ -396,17 +388,15 @@ namespace Libertix
         private static void RejectInvalidStartupOptions(string error)
         {
             ApplicationLogger.Write("Startup refused: " + error);
-            MessageBox.Show(
+            Support.SupportReportDialog.Show(
+                Localization.GetBootstrapString(
+                    "InvalidStartupOptionsTitle",
+                    "Libertix - invalid startup option"),
                 string.Format(
                     Localization.GetBootstrapString(
                         "InvalidStartupOptionsMessage",
                         "Invalid startup option: {0}"),
-                    error),
-                Localization.GetBootstrapString(
-                    "InvalidStartupOptionsTitle",
-                    "Libertix - invalid startup option"),
-                MessageBoxButton.OK,
-                MessageBoxImage.Error);
+                    error));
             Current.Shutdown(2);
         }
 
