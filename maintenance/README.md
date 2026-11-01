@@ -26,8 +26,8 @@ cleaning. Save any diagnostics needed for a bug report outside the cleanup paths
 ## What is checked
 
 - Every BIOS/UEFI recovery session, including archived BIOS sessions, must have
-  a valid plan and execution ledger, all required compensations completed, and
-  a successful `uninstall-verification.json` matching the ledger revision.
+  a valid plan and execution ledger, with status `rolled-back` and all required
+  compensations completed. No post-install or post-uninstall report is required.
 - Current affected disks, original NTFS volume identity, every recorded
   partition's position, size, identity and attributes must match the saved
   pre-installation inventory. Unexpected partitions cause refusal. Unrelated
@@ -38,22 +38,26 @@ cleaning. Save any diagnostics needed for a bug report outside the cleanup paths
   Manager must exist, and Libertix EFI directories must be absent. If the
   preferred Windows boot path was used, its original files and firmware entry
   are checked against their archived hashes.
-- No Libertix tasks, services or visible running processes may reference the
-  cleanup paths. BCD must be readable and contain no Libertix/GRUB4DOS references.
+- No Libertix tasks or visible running processes may reference the cleanup paths.
+  BCD must be readable and contain no Libertix/GRUB4DOS references. A residual
+  BootGuardian service is accepted only if its executable path, LocalSystem
+  account and protected configuration identify one of the verified sessions.
+  It is stopped and unregistered only after confirmation, before rechecking boot
+  and storage and deleting files. Other residual services cause refusal.
 - Symbolic links, junctions and directory mount points in cleanup paths or their
   ancestors cause refusal. Unknown top-level product directories are refused.
-- The existing Libertix permission validator must accept the cleanup trees and
-  their parents, without an override. A standard user must not be able to replace
-  a directory while the elevated script deletes its contents. Other users' writable
-  logs can therefore block global cleanup; have those users remove their own logs
-  or ask a developer to investigate. This tool never repairs permissions.
+- The existing Libertix permission rules check ownership and replacement rights
+  for every deletion path and its parents. Being allowed to create a sibling file
+  is not treated as permission to replace an existing protected item. Recovery
+  evidence additionally requires protection against content modification. Unsafe
+  replacement rights cause refusal; this tool never repairs permissions.
 - Machine checks are repeated after confirmation; a changed inventory causes
   refusal before deletion starts.
 
-These checks deliberately reject incomplete or old evidence. In particular, a
-failed installation that says only `rolled-back`, without the final uninstall
-verification, **is not eligible**. A missing post-install result (such as the
-case discussed in issue #32) is not evidence of a completed rollback. Do not
+These checks deliberately reject incomplete or old evidence. A failed installation
+whose rollback completed can be cleaned even if the post-install verifier never
+created its result. A missing post-install result (such as the case discussed in
+issue #32) alone is not evidence of a completed rollback. Do not
 create a success JSON file by hand, remove a guard, or delete the archive to
 make this tool accept it. Diagnose or complete the supported recovery first.
 
@@ -78,8 +82,9 @@ Downloaded executables, adjacent `filepool` folders, source checkouts, manually
 saved logs, logs in redirected/custom profile locations, Windows event logs and
 OS history are not erased. It is a reset of managed installation/recovery data,
 not a forensic eraser of every trace. It does not remove other operating systems,
-drivers, user documents, partitions, firmware entries, services or scheduled
-tasks; those must already have been handled by the normal rollback.
+drivers, user documents, partitions, firmware entries or scheduled tasks; those
+must already have been handled by the normal rollback. BootGuardian is the only
+residual service it can remove, after checking ownership as described above.
 
 ## Failure and limitations
 

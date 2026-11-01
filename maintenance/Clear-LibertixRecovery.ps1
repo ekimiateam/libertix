@@ -142,26 +142,15 @@ function Assert-RestoredBoot {
 function Assert-CompletedRecovery {
     param([Parameter(Mandatory = $true)][string]$Root)
 
+    [Libertix.Security.RecoveryCleanupAccess]::VerifyEvidence($Root)
     $plan = Read-LibertixInstallationPlan -Path (Join-Path $Root 'installation-plan.json')
     $state = Read-LibertixExecutionState -Path (Join-Path $Root 'installation-state.json')
     if ([string]$plan.disk.systemDrive -ine $env:SystemDrive -or
         [string]$state.planId -cne [string]$plan.planId -or [string]$state.status -cne 'rolled-back') {
         throw "A matching completed rollback is required: $Root"
     }
-    $report = Read-RecoveryJson -Path (Join-Path $Root 'uninstall-verification.json')
-    $names = @('execution-ledger', 'restored-storage', 'boot-restored', 'maintenance-removed')
-    if ([int]$report.schemaVersion -ne 1 -or [string]$report.planId -cne [string]$plan.planId -or
-        [string]$report.firmware -cne [string]$plan.firmware -or [string]$report.status -cne 'succeeded' -or
-        [int]$report.rollbackExecutionRevision -ne [int]$state.revision -or @($report.checks).Count -ne $names.Count) {
-        throw "Final rollback verification is missing, stale or unsuccessful: $Root"
-    }
-    foreach ($name in $names) {
-        $checks = @($report.checks | Where-Object name -CEQ $name)
-        if ($checks.Count -ne 1 -or $checks[0].passed -isnot [bool] -or -not $checks[0].passed) {
-            throw "Rollback verification did not pass '$name': $Root"
-        }
-    }
-    # A saved success report cannot establish the current disk or boot state.
+    # Failed installations do not produce the post-uninstall report. Observe the
+    # machine directly instead of requiring evidence from a different workflow.
     Assert-LibertixUninstallStorageBaseline -RecoveryRoot $Root -Restored
     Assert-RestoredBoot -Root $Root -Plan $plan
     Write-Host "Verified rollback: $($plan.planId) ($Root)"
@@ -171,7 +160,9 @@ function Assert-NoLibertixActivity {
     param([string[]]$Roots)
 
     foreach ($task in @(Get-ScheduledTask -ErrorAction Stop)) {
-        $actions = @($task.Actions | ForEach-Object { [string]$_.Execute + ' ' + [string]$_.Arguments }) -join '\n'
+        $actions = @($task.Actions | Where-Object {
+            $_.PSObject.Properties.Name -contains 'Execute'
+        } | ForEach-Object { [string]$_.Execute + ' ' + [string]$_.Arguments }) -join '\n'
         if ([string]$task.TaskName -like 'Libertix*' -or @($Roots | Where-Object {
             $actions.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
         }).Count -gt 0) {
@@ -179,6 +170,7 @@ function Assert-NoLibertixActivity {
         }
     }
     foreach ($service in @(Get-CimInstance Win32_Service -ErrorAction Stop)) {
+        if ($null -ne $script:residualGuardian -and $service.Name -eq 'LibertixBootGuardian') { continue }
         if ([string]$service.Name -like 'Libertix*' -or @($Roots | Where-Object {
             ([string]$service.PathName).IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0
         }).Count -gt 0) {
@@ -187,6 +179,8 @@ function Assert-NoLibertixActivity {
     }
     foreach ($process in @(Get-CimInstance Win32_Process -ErrorAction Stop)) {
         if ([int]$process.ProcessId -eq $PID) { continue }
+        if ($null -ne $script:residualGuardian -and
+            [int]$process.ProcessId -eq [int]$script:residualGuardian.ProcessId) { continue }
         if ([string]$process.Name -like 'Libertix*.exe') { throw 'Close Libertix before cleanup.' }
         foreach ($root in $Roots) {
             if (([string]$process.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
@@ -200,6 +194,45 @@ function Assert-NoLibertixActivity {
         $bcd.StandardOutput -match '(?i)libertix|grldr') {
         throw 'BCD is unreadable or still references Libertix/GRUB4DOS; cleanup is refused.'
     }
+}
+
+function Get-ResidualBootGuardian {
+    param([string[]]$RecoveryRoots)
+    $service = Get-CimInstance Win32_Service -Filter "Name='LibertixBootGuardian'" -ErrorAction Stop
+    if ($null -eq $service) { return $null }
+    $root = Join-Path $env:ProgramData 'Libertix\BootGuardian'
+    $expected = Join-Path $root 'Libertix.BootGuardian.exe'
+    if ([string]$service.StartName -ne 'LocalSystem' -or
+        ([string]$service.PathName).Trim('"') -ine $expected) {
+        throw 'BootGuardian service ownership cannot be established; refusing to remove it.'
+    }
+    [Libertix.Security.RecoveryCleanupAccess]::VerifyEvidence($root)
+    $config = Read-RecoveryJson -Path (Join-Path $root 'config.json')
+    $planIds = @($RecoveryRoots | ForEach-Object {
+        (Read-RecoveryJson -Path (Join-Path $_ 'installation-plan.json')).planId
+    })
+    if ([int]$config.version -ne 1 -or [string]$config.runId -cnotin $planIds) {
+        throw 'BootGuardian does not belong to a verified recovery session.'
+    }
+    return $service
+}
+
+function Remove-ResidualBootGuardian {
+    if ($null -eq $script:residualGuardian) { return }
+    $sc = Join-Path $env:SystemRoot 'System32\sc.exe'
+    $result = Invoke-LibertixNativeCommand -FilePath $sc `
+        -ArgumentList @('stop', 'LibertixBootGuardian') -TimeoutSeconds 30
+    if ($result.ExitCode -notin @(0, 1062)) { throw 'BootGuardian could not be stopped.' }
+    $service = Get-Service -Name LibertixBootGuardian -ErrorAction Stop
+    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+    $result = Invoke-LibertixNativeCommand -FilePath $sc `
+        -ArgumentList @('delete', 'LibertixBootGuardian') -TimeoutSeconds 30
+    if ($result.ExitCode -ne 0) { throw 'BootGuardian service registration could not be removed.' }
+    $service.Dispose()
+    if (Get-Service -Name LibertixBootGuardian -ErrorAction SilentlyContinue) {
+        throw 'BootGuardian is still registered; close other service-management tools and retry.'
+    }
+    $script:residualGuardian = $null
 }
 
 if ($PSVersionTable.PSEdition -ne 'Desktop' -or -not [Environment]::Is64BitProcess) {
@@ -217,6 +250,10 @@ namespace Libertix.Security
     public static class RecoveryCleanupAccess
     {
         public static void Verify(string path)
+        {
+            ProtectedFiles.RequireRemovalPath(path);
+        }
+        public static void VerifyEvidence(string path)
         {
             ProtectedFiles.RequireRecoveryTree(path);
         }
@@ -251,7 +288,7 @@ foreach ($root in $roots) {
     }
 }
 $inventory = @(Get-CleanupInventory -Roots $roots)
-foreach ($root in $roots) { [Libertix.Security.RecoveryCleanupAccess]::Verify($root) }
+foreach ($item in $inventory) { [Libertix.Security.RecoveryCleanupAccess]::Verify($item.FullName) }
 if (Test-Path -LiteralPath $productRoot) {
     $knownDirectories = @('Runtime', 'Downloads', 'UefiRecovery', 'RecoveryHistory', 'WindowsShare', 'BootGuardian', 'Automation')
     foreach ($child in @(Get-ChildItem -LiteralPath $productRoot -Force)) {
@@ -280,10 +317,12 @@ if (Test-Path -LiteralPath $history) {
     }
 }
 if ($recoveryRoots.Count -eq 0) { throw 'No recovery evidence remains. Refusing to guess whether cleanup is safe.' }
-Assert-NoLibertixActivity -Roots $roots
 foreach ($root in $recoveryRoots) { Assert-CompletedRecovery -Root $root }
+$script:residualGuardian = Get-ResidualBootGuardian -RecoveryRoots $recoveryRoots
+Assert-NoLibertixActivity -Roots $roots
 
 Write-Warning 'This permanently deletes managed installation logs, runtime files and rollback archives. Save diagnostics elsewhere first.'
+if ($null -ne $script:residualGuardian) { Write-Warning 'The verified residual LibertixBootGuardian service will also be stopped and removed.' }
 foreach ($item in $inventory) { Write-Host $item.FullName }
 if (-not $Apply) { Write-Host 'Preview only. Nothing deleted. Use -Apply only after reviewing the complete list.'; return }
 if (-not $PSCmdlet.ShouldProcess(($roots -join ', '), 'Permanently remove verified Libertix recovery data')) { return }
@@ -291,8 +330,12 @@ if (-not $PSCmdlet.ShouldProcess(($roots -join ', '), 'Permanently remove verifi
 # Revalidate after the confirmation prompt, before losing any recovery evidence.
 Assert-NoLibertixActivity -Roots $roots
 foreach ($root in $recoveryRoots) { Assert-CompletedRecovery -Root $root }
+$script:residualGuardian = Get-ResidualBootGuardian -RecoveryRoots $recoveryRoots
+Remove-ResidualBootGuardian
+Assert-NoLibertixActivity -Roots $roots
+foreach ($root in $recoveryRoots) { Assert-CompletedRecovery -Root $root }
 $current = @(Get-CleanupInventory -Roots $roots)
-foreach ($root in $roots) { [Libertix.Security.RecoveryCleanupAccess]::Verify($root) }
+foreach ($item in $current) { [Libertix.Security.RecoveryCleanupAccess]::Verify($item.FullName) }
 if (Compare-Object @($inventory.FullName | Sort-Object) @($current.FullName | Sort-Object)) {
     throw 'The cleanup inventory changed during confirmation; run the preview again.'
 }
@@ -309,6 +352,7 @@ $deletionOrder = @($current | Sort-Object @{
 }, @{ Expression = { $_.FullName.Length }; Descending = $true })
 foreach ($item in $deletionOrder) {
     Assert-PlainPath -Path $item.FullName
+    [Libertix.Security.RecoveryCleanupAccess]::Verify($item.FullName)
     # Delete only enumerated leaves; never recursively traverse a newly added directory.
     if ($item.PSIsContainer) {
         [IO.Directory]::Delete($item.FullName, $false)
@@ -316,4 +360,4 @@ foreach ($item in $deletionOrder) {
         Remove-Item -LiteralPath $item.FullName -Force -Confirm:$false -ErrorAction Stop
     }
 }
-Write-Host 'Managed installation data removed. No partitions, boot entries or Windows settings were modified.'
+Write-Host 'Managed installation data removed. No partitions or boot entries were modified.'
