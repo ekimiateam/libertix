@@ -73,6 +73,15 @@ namespace Libertix.Security
             RequireTree(path, CurrentAdministrator());
         }
 
+        public static void RequireRemovalPath(string path)
+        {
+            path = Path.GetFullPath(path);
+            string administrator = CurrentAdministrator();
+            RequireAncestors(Path.GetDirectoryName(path), administrator);
+            // Creating a sibling cannot redirect a non-recursive deletion of this item.
+            RequireItem(path, AncestorRights(path), administrator);
+        }
+
         internal static void RequireTree(string path, string administrator = null,
             Func<string, bool> confirmUnsafePermissions = null)
         {
