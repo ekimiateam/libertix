@@ -297,6 +297,12 @@ tools before accepting either image.
 Version, origin, license and SHA-256 information for binaries and fonts stored in the repository is
 recorded in [THIRD_PARTY.md](THIRD_PARTY.md).
 
+## Developer recovery cleanup
+
+Developer-only cleanup after a verified rollback is documented in
+[`maintenance/README.md`](maintenance/README.md). It is not an alternative to
+rollback and refuses incomplete recovery evidence. Preview before any deletion.
+
 ## Tests
 
 The automated test service is located in `auto_tests`. Its runtime configuration is loaded from a
