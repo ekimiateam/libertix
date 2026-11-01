@@ -120,6 +120,31 @@ namespace Libertix.Pages
             CanAllocateLinux ? WindowsTotalSpace * 100 / _totalSpace : 100, GridUnitType.Star);
         public GridLength LinuxPartitionPercentage => new GridLength(
             CanAllocateLinux ? _linuxSize * 100 / _totalSpace : 0, GridUnitType.Star);
+        // The boundary slider spans only MinimumSize..MaximumSize. These three columns
+        // put it on the bar's scale, so its thumb sits on the Windows/Linux boundary.
+        public GridLength FixedVolumePercentage => new GridLength(Math.Max(0, _totalSpace - MaximumSize), GridUnitType.Star);
+        public GridLength AdjustableRangePercentage => new GridLength(Math.Max(0, MaximumSize - MinimumSize), GridUnitType.Star);
+        public GridLength MinimumLinuxPercentage => new GridLength(MinimumSize, GridUnitType.Star);
+        public string AllocationSummary => string.Format(CultureInfo.CurrentCulture,
+            Localization.GetString("ResizeDiskSummary"),
+            _installationState.SelectedDistro?.Name ?? Localization.GetString("Linux"),
+            TargetName,
+            LinuxSize);
+        private string TargetName
+        {
+            get
+            {
+                string drive = (_selectedTarget?.Drive ?? Path.GetPathRoot(Environment.SystemDirectory)).TrimEnd('\\');
+                return IsWindowsTarget
+                    ? $"{drive} ({Localization.GetString("Windows")})"
+                    : $"{drive} ({_selectedTarget.FriendlyName})";
+            }
+        }
+        // The installer partition is created inside the final Linux allocation and then
+        // becomes part of it, so it is described rather than drawn at one position.
+        public string StagingDetail => string.Format(CultureInfo.CurrentCulture,
+            Localization.GetString("ResizeDiskStagingDetail"),
+            InstallationSizePolicy.FromRequestedGigabytes(LinuxSize).StagingSizeGiB);
         public GridLength WindowsUsedPercentage => new GridLength(_windowsUsedSpace, GridUnitType.Star);
         public GridLength WindowsFreeInPartitionPercentage => new GridLength(_windowsFreeSpace > 0 ? _windowsFreeSpace : 0.001, GridUnitType.Star);
         public string WindowsFreeInsideLabel => FormatSize("ResizeDiskWindowsFreeInside", WindowsFreeSpace);
@@ -184,6 +209,8 @@ namespace Libertix.Pages
                 _linuxSize = value;
                 NotifyPropertyChanged(nameof(LinuxSize));
                 NotifyPropertyChanged(nameof(LinuxSizeLabel));
+                NotifyPropertyChanged(nameof(AllocationSummary));
+                NotifyPropertyChanged(nameof(StagingDetail));
                 NotifyPropertyChanged(nameof(LinuxLegend));
             }
         }
@@ -258,6 +285,8 @@ namespace Libertix.Pages
             NotifyPropertyChanged(nameof(LinuxPartitionPercentage));
             NotifyPropertyChanged(nameof(WindowsUsedPercentage));
             NotifyPropertyChanged(nameof(WindowsFreeInPartitionPercentage));
+            NotifyPropertyChanged(nameof(FixedVolumePercentage));
+            NotifyPropertyChanged(nameof(AdjustableRangePercentage));
 
             CheckSpaceRequirements();
         }

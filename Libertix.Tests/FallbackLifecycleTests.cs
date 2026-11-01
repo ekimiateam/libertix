@@ -119,6 +119,8 @@ namespace Libertix.Tests
             Assert.AreEqual("37", page.ManualSize);
             Assert.AreNotEqual(page.RecommendedSize, page.SelectedSize);
             Assert.IsFalse(page.HasSizeError);
+            AssertBoundaryHandleIsOnTheBar(page);
+            page.SelectedSize = 37;
 
             page.ManualSize = "42";
             typeof(ResizeDisk).GetMethod("SaveState", BindingFlags.NonPublic | BindingFlags.Instance)
@@ -137,6 +139,25 @@ namespace Libertix.Tests
             var fresh = new ResizeDisk(state, 500 * gib, reducedFree);
             Assert.AreEqual(fresh.RecommendedSize, fresh.SelectedSize);
             Assert.IsFalse(fresh.HasSizeError, "Recommendation must not round above the available budget.");
+        }
+
+        // The slider covers only Minimum..Maximum, laid over the bar with three star
+        // columns. Its thumb must land on the drawn Windows/Linux boundary at every value.
+        private static void AssertBoundaryHandleIsOnTheBar(ResizeDisk page)
+        {
+            Assert.IsTrue(page.MaximumSize > page.MinimumSize);
+            foreach (double size in new[] { page.MinimumSize, Math.Floor((page.MinimumSize + page.MaximumSize) / 2), page.MaximumSize })
+            {
+                page.SelectedSize = size;
+                double fixedPart = page.FixedVolumePercentage.Value;
+                double range = page.AdjustableRangePercentage.Value;
+                double handle = (fixedPart + range * (page.MaximumSize - size) / (page.MaximumSize - page.MinimumSize)) /
+                    (fixedPart + range + page.MinimumLinuxPercentage.Value);
+                double boundary = page.WindowsPartitionPercentage.Value /
+                    (page.WindowsPartitionPercentage.Value + page.LinuxPartitionPercentage.Value);
+                Assert.AreEqual(boundary, handle, 1e-9, $"Handle is off the boundary at {size} GiB.");
+                Assert.IsFalse(page.HasSizeError);
+            }
         }
 
         private static void VerifySeparateDiskSelection()
@@ -182,8 +203,11 @@ namespace Libertix.Tests
                 "The ISO stays on Windows and must not consume the donor volume budget.");
             Assert.IsTrue(page.CanAllocateLinux);
             Assert.IsFalse(page.HasSizeError);
+            AssertBoundaryHandleIsOnTheBar(page);
+            StringAssert.Contains(page.AllocationSummary, "D:");
+            StringAssert.Contains(page.AllocationSummary, page.SelectedSize.ToString("N0"));
             string language = Localization.CurrentLanguage;
-            foreach (string candidate in new[] { "en", "fr", "es" })
+            foreach (string candidate in new[] { "en", "fr", "es", "ko" })
             {
                 Localization.SetLanguage(candidate);
                 page.Measure(new Size(1070, 530));
