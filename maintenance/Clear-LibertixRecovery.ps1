@@ -224,11 +224,12 @@ function Remove-ResidualBootGuardian {
         -ArgumentList @('stop', 'LibertixBootGuardian') -TimeoutSeconds 30
     if ($result.ExitCode -notin @(0, 1062)) { throw 'BootGuardian could not be stopped.' }
     $service = Get-Service -Name LibertixBootGuardian -ErrorAction Stop
-    $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
-    $result = Invoke-LibertixNativeCommand -FilePath $sc `
-        -ArgumentList @('delete', 'LibertixBootGuardian') -TimeoutSeconds 30
-    if ($result.ExitCode -ne 0) { throw 'BootGuardian service registration could not be removed.' }
-    $service.Dispose()
+    try {
+        $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(30))
+        $result = Invoke-LibertixNativeCommand -FilePath $sc `
+            -ArgumentList @('delete', 'LibertixBootGuardian') -TimeoutSeconds 30
+        if ($result.ExitCode -ne 0) { throw 'BootGuardian service registration could not be removed.' }
+    } finally { $service.Dispose() }
     if (Get-Service -Name LibertixBootGuardian -ErrorAction SilentlyContinue) {
         throw 'BootGuardian is still registered; close other service-management tools and retry.'
     }
