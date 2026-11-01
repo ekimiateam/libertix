@@ -1,3 +1,5 @@
+https://github.com/user-attachments/assets/d0b94e3b-0c9c-406e-9ee4-da1cb0888cdc
+
 <p align="center">
   <img src="docs/images/banner.png" alt="Libertix: install Linux alongside Windows, straight from Windows" width="100%">
 </p>
@@ -11,7 +13,6 @@
 
 <p align="center">
   <a href="https://github.com/ekimiateam/libertix/releases/latest"><b>Download</b></a> ·
-  <a href="#demo"><b>Demo</b></a> ·
   <a href="#getting-started"><b>Getting started</b></a> ·
   <a href="#technical-documentation"><b>Technical documentation</b></a> ·
   <a href="https://ekimia.fr/donations/campagne-libertix/"><b>Donate</b></a>
@@ -70,10 +71,6 @@ Libertix 0.4 adds the following changes since 0.3.
 - Automatic sleep and display timeout are prevented while Libertix is open, installation logs are
   exported more reliably after the first Linux boot, and developers get a verified cleanup tool for
   leftovers after a completed rollback.
-
-## Demo
-
-https://github.com/user-attachments/assets/d0b94e3b-0c9c-406e-9ee4-da1cb0888cdc
 
 ## How it works
 
@@ -483,3 +480,7 @@ Libertix is distributed under the GNU General Public License v3.0. See [`LICENSE
 
 - [Rose Pine](https://rosepinetheme.com/) for the application color palette
 - [WPF](https://github.com/dotnet/wpf) for the Windows desktop framework
+
+## Stars
+
+[![Star History Chart](https://api.star-history.com/chart?repos=ekimiateam/libertix&type=date&legend=top-left)](https://www.star-history.com/?repos=ekimiateam%2Flibertix&type=date&legend=top-left)
