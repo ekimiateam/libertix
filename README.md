@@ -1,5 +1,3 @@
-https://github.com/user-attachments/assets/d0b94e3b-0c9c-406e-9ee4-da1cb0888cdc
-
 <p align="center">
   <img src="docs/images/banner.png" alt="Libertix: install Linux alongside Windows, straight from Windows" width="100%">
 </p>
@@ -27,6 +25,8 @@ prepare and no separate Linux installer to go through.
 > [!WARNING]
 > Libertix modifies disk partitions and boot configuration. Back up important data before using it.
 > The compatibility checks deliberately reject layouts that cannot be handled safely.
+
+https://github.com/user-attachments/assets/d0b94e3b-0c9c-406e-9ee4-da1cb0888cdc
 
 ## What Libertix does
 
