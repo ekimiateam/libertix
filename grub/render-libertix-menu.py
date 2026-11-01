@@ -47,15 +47,47 @@ def indent(lines: list[str]) -> list[str]:
     return [f"\t{line}" if line else "" for line in lines]
 
 
-def add_invisible_icon_class(lines: list[str]) -> list[str]:
-    """Give submenu entries a valid transparent icon for GRUB gfxmenu.
+# A title may be several quoted pieces, e.g. grub_quote's 'l'\''OS'.
+MENU_ENTRY = re.compile(
+    r"^(\s*(?:menuentry|submenu)\s+(?:'[^']*'|\"[^\"]*\"|\\.)+)(.*?)(\s*\{)?\s*$"
+)
+MENU_ENTRY_ID = re.compile(r"(?:\$menuentry_id_option|--id)\s+(?:'([^']*)'|\"([^\"]*)\")")
 
-    The theme reserves icon space. Entries without any loadable class icon can
-    make GRUB attempt to scale a null bitmap when a submenu is first painted.
-    ``find.none.png`` is the theme's transparent 48x48 icon.
+
+def add_icon_classes(lines: list[str], distribution_icon: str) -> list[str]:
+    """Give generated advanced entries an icon for what they do.
+
+    GRUB shows the icon of the first class that has one, so a known function
+    goes first. Menu ids are matched instead of titles because titles are
+    translated. Ids follow the Ubuntu 24.04 10_linux, 20_memtest86+ and
+    30_uefi-firmware generators.
+
+    Every entry also ends with ``find.none``, a transparent icon. The theme
+    reserves icon space, and an entry with no loadable class icon can make GRUB
+    try to scale a null bitmap when a submenu is first painted. Putting it last
+    keeps that guard without hiding the generator's own classes.
     """
-    entry = re.compile(r"^(\s*(?:menuentry|submenu)\s+(?:'[^']*'|\"[^\"]*\"))(.*)$")
-    return [entry.sub(r"\1 --class find.none\2", line) for line in lines]
+    functions = (
+        ("gnulinux-advanced-", "submenu"),
+        ("gnulinux-.+-recovery-", "recovery"),
+        ("gnulinux-.+-advanced-", distribution_icon),
+        ("memtest86", "memtest"),
+        ("uefi-firmware$", "efi"),
+    )
+    result = []
+    for line in lines:
+        entry = MENU_ENTRY.match(line)
+        if entry is None:
+            result.append(line)
+            continue
+        head, options, brace = entry.groups()
+        entry_id = MENU_ENTRY_ID.search(options)
+        menu_id = (entry_id[1] or entry_id[2] or "") if entry_id else ""
+        icon = next((icon for prefix, icon in functions if re.match(prefix, menu_id)), None)
+        if icon:
+            head += f" --class {icon}"
+        result.append(f"{head}{options} --class find.none{brace or ''}")
+    return result
 
 
 def read_distribution_presentation(path: Path) -> tuple[str, str, dict[str, str]]:
@@ -109,10 +141,10 @@ def main() -> int:
         raise ValueError("Linux GRUB entry title could not be replaced")
     simple[0] = simple[0].replace("--class ", f"--class {icon} --class ", 1)
 
-    advanced = add_invisible_icon_class(linux[advanced_start:advanced_end])
+    advanced = add_icon_classes(linux[advanced_start:advanced_end], icon)
     windows = read_lines(args.windows)
     firmware = (
-        add_invisible_icon_class(read_lines(args.firmware))
+        add_icon_classes(read_lines(args.firmware), icon)
         if args.firmware and args.firmware.exists()
         else []
     )
@@ -120,7 +152,7 @@ def main() -> int:
         line
         for path in args.extra
         if path.exists()
-        for line in add_invisible_icon_class(read_lines(path))
+        for line in add_icon_classes(read_lines(path), icon)
     ]
 
     output: list[str] = []

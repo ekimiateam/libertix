@@ -4919,11 +4919,125 @@ def test_product_logs_are_grouped_by_operating_system_without_retention() -> Non
     assert "archive_linux_diagnostics(plan, windows_device)" in first_boot
 
 
-def test_grub_submenu_entries_always_have_a_transparent_icon_class() -> None:
-    renderer = read("grub/render-libertix-menu.py")
-    assert "add_invisible_icon_class" in renderer
-    assert "--class find.none" in renderer
-    assert (ROOT / "assets/grub-theme/icons/find.none.png").is_file()
+GRUB_ICONS = ROOT / "assets/grub-theme/icons"
+
+
+def render_noble_grub_menu(tmp_path: Path, distributor_class: str, icon: str) -> str:
+    """Render generator output shaped like Ubuntu 24.04 grub-common and memtest86+."""
+    linux = tmp_path / "linux.cfg"
+    windows = tmp_path / "windows.cfg"
+    firmware = tmp_path / "firmware.cfg"
+    memtest = tmp_path / "memtest.cfg"
+    custom = tmp_path / "custom.cfg"
+    plan = tmp_path / "installation-plan.json"
+    classes = f"--class {distributor_class} --class gnu-linux --class gnu --class os"
+    linux.write_text(
+        f"menuentry 'Vendor Linux' {classes} $menuentry_id_option 'gnulinux-simple-u1' {{\n"
+        "}\n"
+        "submenu 'Options avanc'\\''ees' $menuentry_id_option 'gnulinux-advanced-u1' {\n"
+        f"\tmenuentry 'Vendor, Linux 6.8.0-90' {classes} "
+        "$menuentry_id_option 'gnulinux-6.8.0-90-generic-advanced-u1' {\n"
+        "\t}\n"
+        f"\tmenuentry 'Vendor, Linux 6.8.0-90 (recovery)' {classes} "
+        "$menuentry_id_option 'gnulinux-6.8.0-90-generic-recovery-u1' {\n"
+        "\t}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    windows.write_text(
+        "menuentry 'Windows' --class windows --class os --id libertix-windows {\n}\n",
+        encoding="utf-8",
+    )
+    firmware.write_text(
+        'if [ "$grub_platform" = "efi" ]; then\n'
+        "\tmenuentry 'UEFI Firmware Settings' $menuentry_id_option 'uefi-firmware' {\n"
+        "\t\tfwsetup\n\t}\nfi\n",
+        encoding="utf-8",
+    )
+    memtest.write_text(
+        'menuentry "Memory test (memtest86+x64.efi)" --class memtest '
+        "$menuentry_id_option 'memtest86+' {\n}\n",
+        encoding="utf-8",
+    )
+    custom.write_text("menuentry 'Custom tool' $menuentry_id_option 'custom' {\n}\n")
+    plan.write_text(
+        json.dumps(
+            {
+                "distribution": {"grubDisplayName": "Vendor Linux", "grubIcon": icon},
+                "locale": {"languageCode": "en"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    arguments = ["--linux", linux, "--windows", windows, "--firmware", firmware]
+    arguments += ["--extra", memtest, "--extra", custom, "--plan", plan]
+    return subprocess.run(
+        ["python3", str(ROOT / "grub/render-libertix-menu.py"), *map(str, arguments)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+def grub_entry_icons(config: str) -> dict[str, str]:
+    """Return, by menu id, the icon GRUB gfxmenu shows for each entry.
+
+    GRUB tries an entry's classes in order and uses the first one with a
+    ``<class>.png`` in the theme (grub-core/gfxmenu/icon_manager.c).
+    """
+    icons = {}
+    for line in config.splitlines():
+        if not re.match(r"\s*(?:menuentry|submenu) ", line):
+            continue
+        menu_id = re.search(r"(?:\$menuentry_id_option|--id) '?([^' ]+)", line)[1]
+        classes = re.findall(r"--class (\S+)", line)
+        icons[menu_id] = next((c for c in classes if (GRUB_ICONS / f"{c}.png").is_file()), "")
+    return icons
+
+
+@pytest.mark.parametrize(
+    ("distributor_class", "icon"),
+    [
+        # configure-target-main.sh sets GRUB_DISTRIBUTOR to the display name and
+        # 10_linux keeps its first word, so Mint entries carry "linux".
+        ("linux", "linuxmint"),
+        ("zorin", "zorin"),
+    ],
+)
+def test_grub_advanced_entries_show_their_function_or_nothing(
+    tmp_path: Path, distributor_class: str, icon: str
+) -> None:
+    rendered = render_noble_grub_menu(tmp_path, distributor_class, icon)
+
+    assert grub_entry_icons(rendered) == {
+        "gnulinux-simple-u1": icon,
+        "libertix-windows": "windows",
+        "libertix-shutdown": "shutdown",
+        "libertix-advanced": "efi",
+        "gnulinux-advanced-u1": "submenu",
+        "gnulinux-6.8.0-90-generic-advanced-u1": icon,
+        "gnulinux-6.8.0-90-generic-recovery-u1": "recovery",
+        "uefi-firmware": "efi",
+        "memtest86+": "memtest",
+        "custom": "find.none",
+    }
+
+
+def test_grub_fallback_icon_is_transparent_and_last_on_every_advanced_entry(
+    tmp_path: Path,
+) -> None:
+    from PIL import Image
+
+    rendered = render_noble_grub_menu(tmp_path, "linux", "linuxmint")
+    advanced = rendered.split("--id libertix-advanced {", 1)[1].splitlines()
+    entries = [line for line in advanced if re.match(r"\s*(?:menuentry|submenu) ", line)]
+
+    assert len(entries) == 6
+    assert all(line.endswith(" --class find.none {") for line in entries)
+    assert "\tsubmenu 'Options avanc'\\''ees' --class submenu $menuentry_id_option" in rendered
+    with Image.open(GRUB_ICONS / "find.none.png") as fallback:
+        assert fallback.mode == "RGBA"
+        assert fallback.getchannel("A").getextrema() == (0, 0)
 
 
 @pytest.mark.parametrize(
