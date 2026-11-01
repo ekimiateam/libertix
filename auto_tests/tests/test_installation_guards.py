@@ -5016,11 +5016,32 @@ def test_grub_advanced_entries_show_their_function_or_nothing(
         "libertix-advanced": "efi",
         "gnulinux-advanced-u1": "submenu",
         "gnulinux-6.8.0-90-generic-advanced-u1": icon,
-        "gnulinux-6.8.0-90-generic-recovery-u1": "recovery",
-        "uefi-firmware": "efi",
+        "gnulinux-6.8.0-90-generic-recovery-u1": "recovery-mode",
+        "uefi-firmware": "firmware",
         "memtest86+": "memtest",
         "custom": "find.none",
     }
+
+
+def test_functional_grub_icons_match_their_recorded_mingcute_sources() -> None:
+    from PIL import Image
+
+    source = GRUB_ICONS / "source"
+    script = (source / "render-functional-icons.sh").read_text(encoding="utf-8")
+    mapping = re.findall(r"^([a-z-]+) ([a-z_0-9]+)$", script.split("<<'EOF'", 1)[1], re.M)
+    third_party = read("THIRD_PARTY.md")
+
+    assert len(mapping) == 6
+    assert (
+        (source / "LICENSE.MingCute.txt")
+        .read_text(encoding="utf-8")
+        .startswith("\n                                 Apache License")
+    )
+    for grub_class, icon in mapping:
+        digest = hashlib.sha256((source / "mingcute" / f"{icon}.svg").read_bytes()).hexdigest()
+        assert f"`{icon}.svg`: `{digest}`" in third_party
+        with Image.open(GRUB_ICONS / f"{grub_class}.png") as png:
+            assert (png.size, png.mode) == ((48, 48), "RGBA")
 
 
 def test_grub_fallback_icon_is_transparent_and_last_on_every_advanced_entry(

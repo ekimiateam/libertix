@@ -69,10 +69,11 @@ def add_icon_classes(lines: list[str], distribution_icon: str) -> list[str]:
     """
     functions = (
         ("gnulinux-advanced-", "submenu"),
-        ("gnulinux-.+-recovery-", "recovery"),
+        # "recovery" is also used by the live installer menu, for diagnostics.
+        ("gnulinux-.+-recovery-", "recovery-mode"),
         ("gnulinux-.+-advanced-", distribution_icon),
         ("memtest86", "memtest"),
-        ("uefi-firmware$", "efi"),
+        ("uefi-firmware$", "firmware"),
     )
     result = []
     for line in lines:

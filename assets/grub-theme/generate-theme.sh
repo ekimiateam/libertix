@@ -58,6 +58,8 @@ while IFS= read -r -d '' icon; do
   magick "$icon" -channel A -threshold 1% +channel \
     -resize "${icon_size}x${icon_size}" "PNG32:$generated_theme/icons/$icon_name"
 done < <(find "$source_dir/icons" -type f -name '*.png' -print0)
+# The functional icons are derived from MingCute (Apache-2.0); see icons/source/README.md.
+cp -- "$source_dir/icons/source/LICENSE.MingCute.txt" "$generated_theme/icons/"
 
 selector_height=$(scale 56)
 for selector in select_c.png select_e.png select_w.png; do
