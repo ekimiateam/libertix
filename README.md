@@ -49,9 +49,9 @@ prepare and no separate Linux installer to go through.
 
 Supported distributions: **Linux Mint 22.3 Cinnamon** and **Zorin OS 18.1 Core**.
 
-### New since 0.3 (development branch)
+### New in Libertix 0.4
 
-These changes are available in the `dev` branch and its prereleases, not yet in a stable release.
+Libertix 0.4 adds the following changes since 0.3.
 
 - **Korean** translation, in addition to English, French and Spanish.
 - **Optional migration of Windows preferences** (wallpaper, theme, power and input settings) and
