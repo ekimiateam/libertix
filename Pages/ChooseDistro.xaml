@@ -14,9 +14,9 @@
         <Style x:Key="DistroCard" TargetType="Border">
             <Setter Property="Background" Value="{DynamicResource SecondaryBackground}"/>
             <Setter Property="CornerRadius" Value="8"/>
-            <Setter Property="Height" Value="285"/>
-            <Setter Property="Margin" Value="10"/>
-            <Setter Property="Padding" Value="15"/>
+            <Setter Property="MinHeight" Value="124"/>
+            <Setter Property="Margin" Value="40,6"/>
+            <Setter Property="Padding" Value="12"/>
             <Setter Property="BorderThickness" Value="2"/>
             <Setter Property="BorderBrush" Value="Transparent"/>
             <Style.Triggers>
@@ -26,6 +26,10 @@
                 <DataTrigger Binding="{Binding IsSelected}" Value="True">
                     <Setter Property="BorderBrush" Value="{DynamicResource AccentColor}"/>
                     <Setter Property="Background" Value="{DynamicResource PanelBorder}"/>
+                </DataTrigger>
+                <!-- Keyboard focus is visible even when it is on an unselected card. -->
+                <DataTrigger Binding="{Binding IsKeyboardFocused, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+                    <Setter Property="BorderBrush" Value="{DynamicResource HighlightColor}"/>
                 </DataTrigger>
             </Style.Triggers>
         </Style>
@@ -93,7 +97,7 @@
                  SelectionChanged="DistrosListBox_SelectionChanged">
                 <ListBox.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <WrapPanel/>
+                        <StackPanel/>
                     </ItemsPanelTemplate>
                 </ListBox.ItemsPanel>
                 <ListBox.ItemContainerStyle>
@@ -103,6 +107,7 @@
                         <Setter Property="Padding" Value="0"/>
                         <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
                         <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                        <Setter Property="AutomationProperties.Name" Value="{Binding Name}"/>
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="{x:Type ListBoxItem}">
@@ -114,51 +119,49 @@
                 </ListBox.ItemContainerStyle>
                 <ListBox.ItemTemplate>
                     <DataTemplate>
-                        <Border Style="{StaticResource DistroCard}"
-                                Width="300">
+                        <Border Style="{StaticResource DistroCard}">
                             <Grid>
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
-                                    <RowDefinition Height="Auto"/>
-                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
 
-                                <Image Source="{Binding ImageUrl}"
-                                       Height="150"
-                                       Stretch="Uniform"
-                                       Margin="0,0,0,10"/>
+                                <!-- A desktop preview, kept small: it supports the choice, the name leads it. -->
+                                <Border Width="160" Height="96" CornerRadius="4" ClipToBounds="True"
+                                        Background="{DynamicResource DeepBackground}" VerticalAlignment="Center">
+                                    <Image Source="{Binding ImageUrl}" Stretch="UniformToFill"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
 
-                                <StackPanel Grid.Row="1">
+                                <StackPanel Grid.Column="1" Margin="16,0" VerticalAlignment="Center">
                                     <TextBlock Text="{Binding Name}"
                                                FontSize="20"
                                                FontWeight="SemiBold"
                                                Foreground="{DynamicResource TextPrimary}"
-                                               Margin="0,0,0,5"
-                                               TextWrapping="Wrap"
-                                               LineHeight="24"
-                                               TextAlignment="Center"/>
+                                               Margin="0,0,0,4"
+                                               TextWrapping="Wrap"/>
                                     <TextBlock Text="{Binding Description}"
-                                               Foreground="{DynamicResource TextPrimary}"
+                                               FontSize="13"
+                                               LineHeight="18"
+                                               Foreground="{DynamicResource TextSecondary}"
                                                TextWrapping="Wrap"/>
                                 </StackPanel>
 
-                                <Border Grid.Row="2"
-                                        Height="4"
-                                        Margin="0,10,0,0"
-                                        Background="{DynamicResource AccentColor}"
-                                        Opacity="0">
-                                    <Border.Style>
-                                        <Style TargetType="Border">
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                                    <Setter Property="Opacity" Value="1"/>
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Border.Style>
-                                </Border>
+                                <!-- Single choice, so a radio-style mark rather than a check. -->
+                                <Grid Grid.Column="2" Width="22" Height="22" VerticalAlignment="Center">
+                                    <Ellipse x:Name="SelectionRing" StrokeThickness="2" Stroke="{DynamicResource TextSecondary}"/>
+                                    <Ellipse x:Name="SelectionDot" Width="10" Height="10"
+                                             Fill="{DynamicResource AccentColor}" Visibility="Collapsed"/>
+                                </Grid>
                             </Grid>
                         </Border>
+                        <DataTemplate.Triggers>
+                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                <Setter TargetName="SelectionRing" Property="Stroke" Value="{DynamicResource AccentColor}"/>
+                                <Setter TargetName="SelectionDot" Property="Visibility" Value="Visible"/>
+                            </DataTrigger>
+                        </DataTemplate.Triggers>
                     </DataTemplate>
                 </ListBox.ItemTemplate>
         </ListBox>

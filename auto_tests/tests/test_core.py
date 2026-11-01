@@ -137,12 +137,16 @@ def test_distribution_cards_have_uniform_rounded_selection_chrome() -> None:
         "</Style>", maxsplit=1
     )[0]
 
-    assert '<Setter Property="Height" Value="285"/>' in card_style
+    assert '<Setter Property="MinHeight" Value="124"/>' in card_style
     assert '<Setter Property="CornerRadius" Value="8"/>' in card_style
     assert '<DataTrigger Binding="{Binding IsSelected}" Value="True">' in card_style
+    assert "AncestorType=ListBoxItem}}" in card_style, "keyboard focus must be visible"
     assert '<ControlTemplate TargetType="{x:Type ListBoxItem}">' in container_style
     assert "<ContentPresenter " in container_style
     assert "<Border " not in container_style
+    assert (
+        '<Setter Property="AutomationProperties.Name" Value="{Binding Name}"/>' in container_style
+    )
 
 
 def test_vnc_text_typing_uses_vncdotool_literal_minus(monkeypatch: pytest.MonkeyPatch) -> None:
