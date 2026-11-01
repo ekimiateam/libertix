@@ -56,10 +56,8 @@ function Get-LibertixStagingGrubConfig {
 
     return @"
 set default=0
-set timeout=0
-set timeout_style=hidden
-set hidden_timeout=0
-set hidden_timeout_quiet=true
+set timeout=5
+set timeout_style=menu
 
 search --no-floppy --label $InstallerLabel --set=root
 
@@ -102,8 +100,7 @@ function Write-LibertixProgress {
 }
 
 function Test-LibertixTrackedExecution {
-    # Revert can run from transaction state alone after the plan volume is no
-    # longer available. Normal preparation always supplies both documents.
+    # A completed rollback retains its disk proof but must not repeat ledger transitions.
     return (
         $null -ne $installationPlan -and
         -not [string]::IsNullOrWhiteSpace($ExecutionStatePath)
@@ -204,7 +201,8 @@ function Update-LibertixInstallationPlanPartition {
     if ($null -eq $installationPlan) {
         return
     }
-    if ([int]$Partition.DiskNumber -ne [int]$installationPlan.disk.number) {
+    $binding = Get-LibertixTransactionStorageBinding
+    if ([int]$Partition.DiskNumber -ne [int]$binding.Disk.number) {
         throw "Installer partition is not on the disk selected by the installation plan."
     }
     if ([int64]$Partition.Size -ne [int64]$installationPlan.disk.installer.stagingSizeBytes) {
@@ -271,6 +269,49 @@ function Publish-LibertixInstallationContext {
             Destination = Join-Path $PartitionDrive "installation-state.json"
         }
     )
+
+    # The optional secret bundle must be verified separately from the public
+    # plan and state before it crosses into the live environment.
+    $preferenceMigration = $installationPlan.features.windowsPreferenceMigration
+    $preferenceBundleSource = $null
+    if ([bool]$preferenceMigration.enabled) {
+        $preferenceBundleSource = Join-Path `
+            ([string]$installationPlan.runtime.recoveryRootWindows) `
+            ([string]$preferenceMigration.bundleFileName)
+        $preferenceBundleDestination = Join-Path `
+            $PartitionDrive `
+            ([string]$preferenceMigration.bundleFileName)
+        if ([IO.File]::Exists($preferenceBundleSource)) {
+            $sourceInfo = [IO.FileInfo]::new($preferenceBundleSource)
+            if ($sourceInfo.Length -ne [int64]$preferenceMigration.bundleSizeBytes) {
+                throw "Windows preference migration bundle size verification failed."
+            }
+            $sourceHash = (Get-FileHash -LiteralPath $preferenceBundleSource -Algorithm SHA256).Hash
+            if ($sourceHash -cne ([string]$preferenceMigration.bundleSha256).ToUpperInvariant()) {
+                throw "Windows preference migration bundle hash verification failed."
+            }
+            $contextFiles += [pscustomobject]@{
+                Source = $preferenceBundleSource
+                Destination = $preferenceBundleDestination
+            }
+        } elseif ([IO.File]::Exists($preferenceBundleDestination)) {
+            $publishedInfo = [IO.FileInfo]::new($preferenceBundleDestination)
+            $publishedHash = (
+                Get-FileHash -LiteralPath $preferenceBundleDestination -Algorithm SHA256
+            ).Hash
+            if (
+                $publishedInfo.Length -ne [int64]$preferenceMigration.bundleSizeBytes -or
+                $publishedHash -cne ([string]$preferenceMigration.bundleSha256).ToUpperInvariant()
+            ) {
+                throw "Published Windows preference migration bundle verification failed."
+            }
+            $preferenceBundleSource = $null
+            Write-Log "Published Windows preference migration bundle re-verified."
+        } else {
+            throw "The protected Windows preference migration bundle is missing."
+        }
+    }
+
     foreach ($contextFile in $contextFiles) {
         $source = [IO.Path]::GetFullPath([string]$contextFile.Source)
         $destination = [IO.Path]::GetFullPath([string]$contextFile.Destination)
@@ -312,6 +353,7 @@ function Publish-LibertixInstallationContext {
             if ($sourceHash -ne $temporaryHash) {
                 throw "Installation context staging hash mismatch for $([IO.Path]::GetFileName($destination))."
             }
+
             Publish-LibertixFileAtomic `
                 -TemporaryPath $temporary `
                 -DestinationPath $destination `
@@ -324,6 +366,19 @@ function Publish-LibertixInstallationContext {
             if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
             if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
         }
+    }
+
+    # Retire the protected Windows copy only after every destination has been
+    # published and checked; an interrupted handoff can still be retried.
+    if ($null -ne $preferenceBundleSource) {
+        [IO.File]::Delete($preferenceBundleSource)
+        if ([IO.File]::Exists($preferenceBundleSource)) {
+            throw "The Windows preference migration source bundle could not be retired."
+        }
+        Write-Log (
+            "Windows preference migration bundle published and source retired; Wi-Fi profiles={0}." -f
+            [int]$preferenceMigration.wifiProfileCount
+        )
     }
 }
 

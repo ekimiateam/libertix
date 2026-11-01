@@ -17,6 +17,7 @@ cleanup_live_mounts_best_effort() {
     umount /mnt/target/dev/pts 2>/dev/null || true
     umount /mnt/target/dev 2>/dev/null || true
     umount /mnt/target/proc 2>/dev/null || true
+    umount /mnt/target/sys/firmware/efi/efivars 2>/dev/null || true
     umount /mnt/target/sys 2>/dev/null || true
     umount /mnt/target/boot/efi 2>/dev/null || true
     for mount_directory in /mnt/target/mnt/win_*; do
@@ -27,17 +28,53 @@ cleanup_live_mounts_best_effort() {
     umount /mnt/libertix-final-verify 2>/dev/null || true
     umount /mnt/libertix-windows-final-verify 2>/dev/null || true
     umount /mnt/libertix-esp-final-verify 2>/dev/null || true
+    rm -f -- "${LOG_DIR:-/run/libertix}-private/windows-preferences.secret.json" \
+        2>/dev/null || true
+    if [ -n "${WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH:-}" ]; then
+        rm -f -- "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" 2>/dev/null || true
+        WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH=""
+    fi
 }
 
 resolve_rollback_storage_best_effort() {
-    if [ -z "$DISK" ] || [ ! -b "$DISK" ]; then
-        DISK=$(resolve_target_disk_from_manifest || true)
-        # The target setup module consumes DISKNAME after rollback refreshes it.
-        # shellcheck disable=SC2034
-        [ -n "$DISK" ] && DISKNAME="$(basename "$DISK")"
+    if [ -z "${TARGET_DISK_SIZE_BYTES:-}" ]; then
+        # install-main clears the manifest-derived disk identity to
+        # rollback-safe empty defaults at bootstrap and only repopulates them
+        # at stage 010-read-config. If rollback fires from an earlier stage
+        # (e.g. an unhandled exit during 005-wait-prereqs),
+        # disk_matches_manifest would otherwise reject every disk against
+        # permanently blank expected values, no matter how many times
+        # resolution is retried. The runner already validated and cached the
+        # plan at this path before launching this process, so reloading it
+        # here is safe.
+        echo "ROLLBACK: installation plan not yet loaded in this process; reloading $LOG_DIR/installation-plan.json"
+        load_libertix_installation_plan "$LOG_DIR/installation-plan.json" || \
+            echo "ROLLBACK: could not reload installation plan"
     fi
-    if [ -z "$WINDOWS_PART" ] && [ -n "$DISK" ] && [ -b "$DISK" ]; then
-        WINDOWS_PART="$(partition_at_offset "$DISK" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)"
+
+    # Re-resolve table identities even when installation cached device names;
+    # those names must never be sufficient authority for compensating writes.
+    # Early rollback must also allow udev to expose both recorded disks.
+    for _ in $(seq 1 10); do
+        udevadm settle --timeout=5 2>/dev/null || true
+        WINDOWS_DISK=$(resolve_target_disk_from_manifest || true)
+        DISK="$WINDOWS_DISK"
+        if [ "${SEPARATE_ALLOCATION_DISK:-false}" = true ]; then
+            DISK=$(resolve_allocation_disk_from_manifest || true)
+        fi
+        [ -n "$WINDOWS_DISK" ] && [ -b "$WINDOWS_DISK" ] \
+            && [ -n "$DISK" ] && [ -b "$DISK" ] && break
+        sleep 1
+    done
+    if [ "${SEPARATE_ALLOCATION_DISK:-false}" = true ]; then
+        [ "$DISK" != "$WINDOWS_DISK" ] || return 1
+    fi
+    # shellcheck disable=SC2034
+    [ -n "$DISK" ] && DISKNAME="$(basename "$DISK")"
+    WINDOWS_PART=""
+    ALLOCATION_SOURCE_PART=""
+    if [ -n "$WINDOWS_DISK" ] && [ -b "$WINDOWS_DISK" ]; then
+        WINDOWS_PART="$(partition_at_offset "$WINDOWS_DISK" "$WINDOWS_PARTITION_OFFSET_BYTES" || true)"
         [ -n "$WINDOWS_PART" ] && echo "ROLLBACK: resolved Windows partition as $WINDOWS_PART"
     fi
 
@@ -47,6 +84,12 @@ resolve_rollback_storage_best_effort() {
     }
     [ -n "$WINDOWS_PART" ] && [ -b "$WINDOWS_PART" ] || {
         echo "ROLLBACK: skipped because Windows partition is unknown"
+        return 1
+    }
+    ALLOCATION_SOURCE_PART="$(partition_at_offset "$DISK" \
+        "${ALLOCATION_SOURCE_OFFSET_BYTES:-$WINDOWS_PARTITION_OFFSET_BYTES}" || true)"
+    [ -n "$ALLOCATION_SOURCE_PART" ] && [ -b "$ALLOCATION_SOURCE_PART" ] || {
+        echo "ROLLBACK: skipped because allocation source is unknown"
         return 1
     }
 }
@@ -60,8 +103,8 @@ restore_pre_grub_mbr_best_effort() {
     fi
 
     echo "ROLLBACK: restoring pre-GRUB MBR boot code from $MBR_BACKUP"
-    dd if="$MBR_BACKUP" of="$DISK" bs=446 count=1 conv=notrunc status=none
-    sync || true
+    dd if="$MBR_BACKUP" of="${WINDOWS_DISK:-$DISK}" bs=446 count=1 conv=notrunc status=none || return 1
+    sync
 }
 
 delete_transaction_partition_best_effort() {
@@ -115,26 +158,56 @@ delete_transaction_partition_best_effort() {
     fi
 }
 
+assert_source_restore_extent_is_free() {
+    local disk="$1" source_number="$2" source_offset="$3" original_size="$4"
+    local layout number start end rest found=0 original_end
+    original_end=$((source_offset + original_size))
+    layout="$(parted -sm "$disk" unit B print 2>/dev/null)" || return 1
+    while IFS=: read -r number start end rest; do
+        [[ "$number" =~ ^[0-9]+$ ]] || continue
+        start="${start%B}"
+        end="${end%B}"
+        [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || return 1
+        [ "$end" -ge "$start" ] || return 1
+        if [ "$number" -eq "$source_number" ]; then
+            [ "$start" -eq "$source_offset" ] && [ "$end" -lt "$original_end" ] || return 1
+            found=$((found + 1))
+        elif [ "$start" -lt "$original_end" ] && [ "$end" -ge "$source_offset" ]; then
+            echo "ROLLBACK: original source extent overlaps partition $number" >&2
+            return 1
+        fi
+    done <<< "$layout"
+    [ "$found" -eq 1 ]
+}
+
 restore_windows_partition_best_effort() {
+    local source_part="${ALLOCATION_SOURCE_PART:-$WINDOWS_PART}"
+    local source_offset="${ALLOCATION_SOURCE_OFFSET_BYTES:-$WINDOWS_PARTITION_OFFSET_BYTES}"
+    local source_size="${ALLOCATION_SOURCE_SIZE_BYTES:-$WINDOWS_PARTITION_SIZE_BYTES}"
     local logical_sector original_end_bytes original_end_sector
     local recovery_start_sector windows_number
 
-    windows_number="$(partition_number "$WINDOWS_PART")"
+    allocation_source_filesystem_matches_manifest "$source_part" || {
+        echo "ROLLBACK: source NTFS identity cannot be verified before restoring its extent"
+        return 1
+    }
+
+    windows_number="$(partition_number "$source_part")"
     logical_sector="$(blockdev --getss "$DISK" 2>/dev/null || echo 0)"
     [ "$logical_sector" -eq 512 ] || [ "$logical_sector" -eq 4096 ] || {
         echo "ROLLBACK: unsupported logical sector size: $logical_sector"
         return 1
     }
-    [ "${WINDOWS_PARTITION_OFFSET_BYTES:-0}" -gt 0 ] 2>/dev/null || {
+    [ "${source_offset:-0}" -gt 0 ] 2>/dev/null || {
         echo "ROLLBACK: original Windows partition offset is unavailable"
         return 1
     }
-    [ "${WINDOWS_PARTITION_SIZE_BYTES:-0}" -gt 0 ] 2>/dev/null || {
+    [ "${source_size:-0}" -gt 0 ] 2>/dev/null || {
         echo "ROLLBACK: original Windows partition size is unavailable"
         return 1
     }
 
-    original_end_bytes=$((WINDOWS_PARTITION_OFFSET_BYTES + WINDOWS_PARTITION_SIZE_BYTES))
+    original_end_bytes=$((source_offset + source_size))
     original_end_sector="$(bytes_to_logical_sectors \
         "$original_end_bytes" "$logical_sector")" || {
         echo "ROLLBACK: original Windows partition end is not sector-aligned"
@@ -149,36 +222,45 @@ restore_windows_partition_best_effort() {
         echo "ROLLBACK: recovery partition offset is not sector-aligned"
         return 1
     }
-    [ "$original_end_sector" -le "$recovery_start_sector" ] || {
+    if [ "${SEPARATE_ALLOCATION_DISK:-false}" != true ] && \
+        [ "$original_end_sector" -gt "$recovery_start_sector" ] && \
+        { [ "$LIBERTIX_FIRMWARE_MODE" = "bios" ] || \
+          [ $((RECOVERY_PARTITION_OFFSET_BYTES + RECOVERY_PARTITION_SIZE_BYTES)) -gt \
+              "$source_offset" ]; }; then
         echo "ROLLBACK: original Windows partition would overlap Recovery"
         return 1
-    }
+    fi
 
     # Recovery must reproduce the captured geometry, not consume every sector
     # before Recovery. Cloned layouts may intentionally contain a pre-existing
     # gap, and growing C: into that gap would make rollback non-reversible.
-    echo "ROLLBACK: restoring Windows partition $WINDOWS_PART to its original end"
+    assert_source_restore_extent_is_free "$DISK" "$windows_number" \
+        "$source_offset" "$source_size" || {
+        echo "ROLLBACK: source identity or free extent cannot be verified before resize"
+        return 1
+    }
+    echo "ROLLBACK: restoring source partition $source_part to its original end"
     resize_partition_size_sectors \
         "$DISK" "$windows_number" \
-        "$((WINDOWS_PARTITION_SIZE_BYTES / logical_sector))" || {
+        "$((source_size / logical_sector))" || {
         echo "ROLLBACK: partition resize failed"
         return 1
     }
 
     partprobe "$DISK" 2>/dev/null || true
     udevadm settle 2>/dev/null || true
-    [ "$(partition_start_bytes "$DISK" "$WINDOWS_PART" || true)" = \
-        "$WINDOWS_PARTITION_OFFSET_BYTES" ] || {
+    [ "$(partition_start_bytes "$DISK" "$source_part" || true)" = \
+        "$source_offset" ] || {
         echo "ROLLBACK: Windows partition start changed unexpectedly"
         return 1
     }
-    [ "$(blockdev --getsize64 "$WINDOWS_PART" 2>/dev/null || echo 0)" = \
-        "$WINDOWS_PARTITION_SIZE_BYTES" ] || {
+    [ "$(blockdev --getsize64 "$source_part" 2>/dev/null || echo 0)" = \
+        "$source_size" ] || {
         echo "ROLLBACK: Windows partition size was not restored"
         return 1
     }
     echo "ROLLBACK: growing NTFS filesystem"
-    ntfsresize -f "$WINDOWS_PART" <<< "y" && ntfsfix -d "$WINDOWS_PART" || {
+    ntfsresize -f "$source_part" <<< "y" && ntfsfix -d "$source_part" || {
         echo "ROLLBACK: NTFS growth or verification failed"
         return 1
     }
@@ -190,10 +272,11 @@ rollback_windows_layout_best_effort() {
     [ "$INSTALL_SUCCESS" = false ] || return 0
     [ "$ROLLBACK_ATTEMPTED" = false ] || return 0
     ROLLBACK_ATTEMPTED=true
-    begin_installation_state_rollback || state_rollback_ok=false
 
     echo "=== ROLLBACK: best-effort Windows layout restore ==="
     resolve_rollback_storage_best_effort || return 1
+    # Beginning rollback mirrors the state to the resolved Windows partition.
+    begin_installation_state_rollback || state_rollback_ok=false
     cleanup_live_mounts_best_effort
     swapoff -a 2>/dev/null || true
 
@@ -208,7 +291,7 @@ rollback_windows_layout_best_effort() {
 
     if [ -n "$RECOVERY_GEOMETRY_BEFORE" ]; then
         echo "ROLLBACK: recovery before=$RECOVERY_GEOMETRY_BEFORE"
-        echo "ROLLBACK: recovery after=$(recovery_geometry "$DISK")"
+        echo "ROLLBACK: recovery after=$(recovery_geometry "${WINDOWS_DISK:-$DISK}")"
     fi
     debug_disk_state || true
 

@@ -7,8 +7,16 @@ import os
 import struct
 import subprocess
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import pkcs7
+from cryptography.x509.oid import NameOID
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "assets/live/libertix-secure-boot-chain.py"
@@ -91,10 +99,208 @@ def test_efi_signature_list_parser_separates_certificates_and_hashes() -> None:
         uuid.UUID("c1c41626-504c-4092-aca9-41f936934328"), [digest]
     )
 
-    certificates, hashes = module.parse_efi_signature_lists(data)
+    certificates, hashes, certificate_hashes = module.parse_efi_signature_lists(data)
 
     assert certificates == [certificate]
     assert hashes["sha256"] == {digest}
+    assert certificate_hashes == []
+
+
+def signed_test_pe(subject: str, sbat: str) -> tuple[bytes, bytes, bytes]:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, subject)])
+    now = datetime.now(UTC)
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(1)
+        .not_valid_before(now - timedelta(days=1))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(key, hashes.SHA256())
+    )
+    signed_data = (
+        pkcs7.PKCS7SignatureBuilder()
+        .set_data(b"unit-test payload; Authenticode validation is stubbed")
+        .add_signer(certificate, key, hashes.SHA256())
+        .sign(serialization.Encoding.DER, [pkcs7.PKCS7Options.Binary])
+    )
+    entry = struct.pack("<IHH", len(signed_data) + 8, 0x200, 2) + signed_data
+    entry += b"\0" * (-len(entry) % 8)
+    data = bytearray(synthetic_pe(sbat)[:0x300])
+    struct.pack_into("<II", data, 0x98 + 112 + 32, 0x300, len(entry))
+    data.extend(entry)
+    return (
+        certificate.public_bytes(serialization.Encoding.DER),
+        certificate.tbs_certificate_bytes,
+        bytes(data),
+    )
+
+
+@pytest.fixture
+def certificate_and_pe() -> tuple[bytes, bytes, bytes]:
+    return signed_test_pe("Microsoft UEFI CA 2023", "shim,4,Vendor,shim,1,url\n")
+
+
+def test_certificate_extraction_uses_real_openssl_and_exact_tbs(certificate_and_pe) -> None:
+    certificate, tbs, image = certificate_and_pe
+    module = load_module()
+    assert module.image_certificates("openssl", image) == [certificate]
+    assert module.certificate_tbs_bytes(certificate) == tbs
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_signer_chain_is_checked_even_when_sbverify_accepts_every_certificate(
+    tmp_path: Path, certificate_and_pe, matching: bool
+) -> None:
+    certificate, _, image_bytes = certificate_and_pe
+    if not matching:
+        certificate, _, _ = signed_test_pe("Unrelated CA", "")
+    trust = tmp_path / "trust.der"
+    trust.write_bytes(certificate)
+    image = tmp_path / "image.efi"
+    image.write_bytes(image_bytes)
+    marker = tmp_path / "sbverify-called"
+    verifier = tmp_path / "sbverify"
+    write_executable(verifier, f"#!/bin/sh\ntouch '{marker}'\nexit 0\n")
+
+    assert load_module().sbverify_accepts(str(verifier), trust, image) is matching
+    assert marker.exists() is matching
+
+
+def test_signer_chain_and_authenticode_must_accept_the_same_signature(
+    tmp_path: Path, certificate_and_pe, monkeypatch
+) -> None:
+    module = load_module()
+    certificate, _, trusted_image = certificate_and_pe
+    _, _, unrelated_image = signed_test_pe("Unrelated CA", "")
+    trusted_signature = module.image_signatures(trusted_image)[0]
+    unrelated_signature = module.image_signatures(unrelated_image)[0]
+    entries = b""
+    for signature in (trusted_signature, unrelated_signature):
+        entry = struct.pack("<IHH", len(signature) + 8, 0x200, 2) + signature
+        entries += entry + b"\0" * (-len(entry) % 8)
+    image_bytes = bytearray(trusted_image[:0x300])
+    struct.pack_into("<II", image_bytes, 0x98 + 112 + 32, 0x300, len(entries))
+    image = tmp_path / "dual.efi"
+    image.write_bytes(image_bytes + entries)
+    trust = tmp_path / "trust.der"
+    trust.write_bytes(certificate)
+    run = subprocess.run
+    verified_signatures = []
+
+    def verify(command, **kwargs):
+        if command[0] != "test-sbverify":
+            return run(command, **kwargs)
+        trusted = Path(command[command.index("--cert") + 1]).read_bytes()
+        assert trusted.startswith(b"-----BEGIN CERTIFICATE-----")
+        assert (
+            x509.load_pem_x509_certificate(trusted).public_bytes(serialization.Encoding.DER)
+            == certificate
+        )
+        assert "--detached" in command
+        signature = Path(command[command.index("--detached") + 1]).read_bytes()
+        verified_signatures.append(signature)
+        # Only the unrelated signature passes the simulated Authenticode check.
+        return subprocess.CompletedProcess(command, int(signature != unrelated_signature))
+
+    monkeypatch.setattr(module.subprocess, "run", verify)
+    assert not module.sbverify_accepts("test-sbverify", trust, image)
+    assert verified_signatures == [trusted_signature]
+
+
+@pytest.mark.parametrize("matching", [False, True])
+def test_dbx_certificate_revokes_only_its_actual_signer(tmp_path: Path, matching: bool) -> None:
+    command = secure_boot_fixture(tmp_path, revoked_shim=False)
+    module = load_module()
+    db = (tmp_path / "efivars" / f"db-{SECURITY_DATABASE_GUID.upper()}").read_bytes()[4:]
+    certificate = module.parse_efi_signature_lists(db)[0][0]
+    if not matching:
+        certificate, _, _ = signed_test_pe("Unrelated revoked CA", "")
+    (tmp_path / "efivars" / f"dbx-{SECURITY_DATABASE_GUID}").write_bytes(
+        struct.pack("<I", 7) + efi_signature_list(module.EFI_CERT_X509_GUID, [certificate])
+    )
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode == (1 if matching else 0), result.stderr
+    assert (tmp_path / "evidence.json").exists() is not matching
+    if matching:
+        assert "shim is revoked by a firmware dbx certificate" in result.stderr
+
+
+@pytest.mark.parametrize("algorithm", ["sha256", "sha384", "sha512"])
+@pytest.mark.parametrize("timed", [False, True])
+@pytest.mark.parametrize("windows_loader", [False, True])
+def test_secure_boot_rejects_matching_certificate_hash_revocation(
+    tmp_path: Path,
+    certificate_and_pe,
+    algorithm: str,
+    timed: bool,
+    windows_loader: bool,
+) -> None:
+    module = load_module()
+    certificate, tbs, image = certificate_and_pe
+    command = secure_boot_fixture(tmp_path, revoked_shim=False)
+    (tmp_path / "shim.efi").write_bytes(image)
+    (tmp_path / "efivars" / f"db-{SECURITY_DATABASE_GUID.upper()}").write_bytes(
+        struct.pack("<I", 7) + efi_signature_list(module.EFI_CERT_X509_GUID, [certificate])
+    )
+    signature_type = next(k for k, v in module.EFI_X509_HASH_ALGORITHMS.items() if v == algorithm)
+    timestamp = (
+        struct.pack("<HBBBBBBIhBB", 2025, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0) if timed else bytes(16)
+    )
+    database = efi_signature_list(
+        signature_type, [hashlib.new(algorithm, tbs).digest() + timestamp]
+    )
+    (tmp_path / "efivars" / f"dbx-{SECURITY_DATABASE_GUID}").write_bytes(
+        struct.pack("<I", 7) + database
+    )
+    command[command.index("--openssl") + 1] = "openssl"
+    if windows_loader:
+        command = (
+            command[:2]
+            + ["--windows-loader", str(tmp_path / "shim.efi")]
+            + command[command.index("--efivarfs") :]
+        )
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert result.returncode == 1
+    assert (
+        "pre-revocation timestamp cannot be verified" if timed else "certificate TBS hash"
+    ) in result.stderr
+    assert not (tmp_path / "evidence.json").exists()
+
+
+def test_unrelated_certificate_hash_does_not_block_the_chain(
+    tmp_path: Path, certificate_and_pe
+) -> None:
+    from argparse import Namespace
+
+    module = load_module()
+    certificate, _, data = certificate_and_pe
+    image = tmp_path / "image.efi"
+    image.write_bytes(data)
+    module.assert_certificate_hashes_allowed(
+        Namespace(openssl="openssl", sbverify="must-not-run"),
+        {"shim": image},
+        [certificate],
+        [("sha256", bytes(32), bytes(16))],
+        tmp_path,
+    )
+
+
+@pytest.mark.parametrize("payload", [b"", bytes(32), bytes(47), bytes(49)])
+def test_malformed_x509_hash_entry_is_rejected(payload: bytes) -> None:
+    module = load_module()
+    with pytest.raises(module.VerificationError, match="invalid X509 hash entry"):
+        module.parse_efi_signature_lists(
+            efi_signature_list(next(iter(module.EFI_X509_HASH_ALGORITHMS)), [payload])
+        )
+
+
+def test_unknown_revocation_type_is_not_silently_ignored() -> None:
+    module = load_module()
+    with pytest.raises(module.VerificationError, match="Unsupported EFI signature database type"):
+        module.parse_efi_signature_lists(efi_signature_list(uuid.UUID(int=42), [bytes(32)]))
 
 
 def test_sbat_rejects_only_generations_below_the_firmware_minimum() -> None:
@@ -117,10 +323,12 @@ def secure_boot_fixture(tmp_path: Path, *, revoked_shim: bool) -> list[str]:
     shim = tmp_path / "shim.efi"
     grub = tmp_path / "grub.efi"
     mok = tmp_path / "mm.efi"
-    shim.write_bytes(synthetic_pe("shim,4,Vendor,shim,1,url\n"))
-    grub.write_bytes(synthetic_pe("grub,5,Vendor,grub,1,url\n"))
-    mok.write_bytes(synthetic_pe("sbat,1,SBAT,sbat,1,url\n"))
-    certificate = b"fake-microsoft-2023-certificate"
+    certificate, _, signed_image = signed_test_pe(
+        "Microsoft UEFI CA 2023", "shim,4,Vendor,shim,1,url\ngrub,5,Vendor,grub,1,url\n"
+    )
+    shim.write_bytes(signed_image)
+    grub.write_bytes(signed_image)
+    mok.write_bytes(signed_image)
     db = efi_signature_list(load_module().EFI_CERT_X509_GUID, [certificate])
     dbx = b""
     if revoked_shim:
@@ -130,10 +338,6 @@ def secure_boot_fixture(tmp_path: Path, *, revoked_shim: bool) -> list[str]:
     if dbx:
         (efivars / f"dbx-{SECURITY_DATABASE_GUID}").write_bytes(struct.pack("<I", 7) + dbx)
     write_executable(commands / "sbverify", "#!/bin/sh\nexit 0\n")
-    write_executable(
-        commands / "openssl",
-        "#!/bin/sh\nprintf 'subject=CN=Microsoft UEFI CA 2023\\n'\n",
-    )
     write_executable(
         commands / "mokutil",
         "#!/bin/sh\nprintf 'shim,4\\ngrub,5\\n'\n",
@@ -155,7 +359,7 @@ def secure_boot_fixture(tmp_path: Path, *, revoked_shim: bool) -> list[str]:
         "--sbverify",
         str(commands / "sbverify"),
         "--openssl",
-        str(commands / "openssl"),
+        "openssl",
         "--mokutil",
         str(commands / "mokutil"),
         "--output",
@@ -193,15 +397,11 @@ def test_windows_loader_verification_requires_a_windows_firmware_authority(
     efivars.mkdir()
     commands.mkdir()
     loader = tmp_path / "bootmgfw.efi"
-    loader.write_bytes(synthetic_pe(""))
-    certificate = b"fake-windows-2023-certificate"
+    certificate, _, signed_image = signed_test_pe("Windows UEFI CA 2023", "")
+    loader.write_bytes(signed_image)
     db = efi_signature_list(load_module().EFI_CERT_X509_GUID, [certificate])
     (efivars / f"db-{SECURITY_DATABASE_GUID}").write_bytes(struct.pack("<I", 7) + db)
     write_executable(commands / "sbverify", "#!/bin/sh\nexit 0\n")
-    write_executable(
-        commands / "openssl",
-        "#!/bin/sh\nprintf 'subject=CN=Windows UEFI CA 2023\\n'\n",
-    )
     evidence_path = tmp_path / "windows-loader.json"
 
     subprocess.run(
@@ -215,7 +415,7 @@ def test_windows_loader_verification_requires_a_windows_firmware_authority(
             "--sbverify",
             str(commands / "sbverify"),
             "--openssl",
-            str(commands / "openssl"),
+            "openssl",
             "--output",
             str(evidence_path),
         ],

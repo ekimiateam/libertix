@@ -17,7 +17,7 @@ packages=(
     squashfs-tools dosfstools ntfs-3g python3-hivex python3-jsonschema nano util-linux coreutils
     psmisc lsof xserver-xorg-core xserver-xorg-input-libinput xserver-xorg-video-vesa
     xserver-xorg-video-fbdev x11-xserver-utils python3-tk kbd
-    fonts-dejavu-core fonts-noto-cjk imagemagick grub-common plymouth
+    fonts-dejavu-core fonts-noto-cjk imagemagick grub-common plymouth firmware-intel-graphics
 )
 if [ "$firmware_mode" = "uefi" ]; then
     packages+=(efibootmgr shim-signed grub-efi-amd64-bin grub-efi-amd64-signed)

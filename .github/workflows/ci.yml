@@ -29,6 +29,7 @@ jobs:
       channel: ${{ steps.identity.outputs.channel }}
       tag: ${{ steps.identity.outputs.tag }}
       build_version: ${{ steps.identity.outputs.build_version }}
+      file_version: ${{ steps.identity.outputs.file_version }}
       publish_release: ${{ steps.identity.outputs.publish_release }}
 
     steps:
@@ -46,6 +47,21 @@ jobs:
           TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
         run: |
           set -Eeuo pipefail
+          release_version="$(python3 -c 'import json; print(json.load(open("release-config.json", encoding="utf-8"))["mainRelease"]["version"])')"
+          file_version="$(python3 - "$release_version" <<'PY'
+          import re
+          import sys
+
+          version = sys.argv[1]
+          match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\.(0|[1-9][0-9]*))?(?:-[0-9A-Za-z.-]+)?", version)
+          if match is None:
+              raise SystemExit(f"mainRelease.version cannot be converted to a Windows file version: {version}")
+          parts = [int(part) if part is not None else 0 for part in match.groups()]
+          if any(part > 65534 for part in parts):
+              raise SystemExit("Windows file version components must not exceed 65534")
+          print(".".join(str(part) for part in (*parts, 0)))
+          PY
+          )"
           publish_release=true
           case "$TARGET_BRANCH" in
             dev)
@@ -55,7 +71,7 @@ jobs:
               ;;
             main)
               channel=main
-              tag="$(python3 -c 'import json; print(json.load(open("release-config.json", encoding="utf-8"))["mainRelease"]["version"])')"
+              tag="$release_version"
               build_version="$tag"
               if gh api "repos/$GH_REPO/git/ref/tags/$tag" >/dev/null 2>&1; then
                 comparison_status="$(
@@ -81,6 +97,7 @@ jobs:
             printf 'channel=%s\n' "$channel"
             printf 'tag=%s\n' "$tag"
             printf 'build_version=%s\n' "$build_version"
+            printf 'file_version=%s\n' "$file_version"
             printf 'publish_release=%s\n' "$publish_release"
           } >> "$GITHUB_OUTPUT"
           printf 'Channel: %s; tag: %s; WPF version: %s; publish release: %s\n' \
@@ -132,6 +149,9 @@ jobs:
             printf 'This is a recommendation, not a gate: see AI_POLICY.md.\n'
           fi
 
+      - name: Audit deployed scripts and their protection
+        run: python3 auto_tests/tools/deployment_audit.py
+
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
@@ -139,6 +159,18 @@ jobs:
           version: "0.9.8"
           enable-cache: true
           cache-dependency-glob: auto_tests/uv.lock
+
+      - name: Install native Python test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            gir1.2-gdkpixbuf-2.0 \
+            gir1.2-nm-1.0 \
+            libcairo2-dev \
+            libgirepository-2.0-dev \
+            pkg-config \
+            python3-dev \
+            python3-gi
 
       - name: Synchronize locked test environment
         working-directory: auto_tests
@@ -155,6 +187,29 @@ jobs:
         run: >-
           uv run --frozen python -m ruff format --check
           app tests tools ../assets/live/*.py ../iso-tools/*.py ../grub/*.py
+
+      - name: Reject skipped or expected-failure tests
+        working-directory: auto_tests
+        run: |
+          uv run --frozen python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          forbidden = {"importorskip", "skip", "skipif", "xfail"}
+          violations = []
+          for path in sorted(Path("tests").rglob("*.py")):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              for node in ast.walk(tree):
+                  if not isinstance(node, ast.Call):
+                      continue
+                  function = node.func
+                  if isinstance(function, ast.Attribute) and function.attr in forbidden:
+                      violations.append(f"{path}:{node.lineno}: {function.attr}")
+          if violations:
+              raise SystemExit(
+                  "Skipped and expected-failure tests are forbidden:\n" + "\n".join(violations)
+              )
+          PY
 
       - name: Run Python test suite with coverage
         working-directory: auto_tests
@@ -212,8 +267,12 @@ jobs:
           msbuild -version
 
       - name: Validate PowerShell syntax
-        shell: pwsh
+        shell: powershell
         run: |
+          if ($PSVersionTable.PSEdition -ne 'Desktop' -or
+              $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw 'Windows PowerShell 5.1 is required for product compatibility validation.'
+          }
           $failures = [System.Collections.Generic.List[string]]::new()
           Get-ChildItem -Path Scripts, auto_tests/app/scripts, PowerShell.Tests -Recurse -File |
             Where-Object { $_.Extension -in '.ps1', '.psm1' } |
@@ -234,7 +293,7 @@ jobs:
           }
 
       - name: Analyze PowerShell
-        shell: pwsh
+        shell: powershell
         run: |
           Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 `
             -Scope CurrentUser -Force -Repository PSGallery
@@ -261,21 +320,54 @@ jobs:
           }
 
       - name: Run PowerShell contract tests
-        shell: pwsh
+        shell: powershell
         run: |
+          if ($PSVersionTable.PSEdition -ne 'Desktop' -or
+              $PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1) {
+            throw 'Windows PowerShell 5.1 is required for product compatibility validation.'
+          }
           Install-Module -Name Pester -RequiredVersion 6.0.1 `
             -Scope CurrentUser -Force -Repository PSGallery
           $configuration = New-PesterConfiguration
           $configuration.Run.Path = 'PowerShell.Tests'
-          $configuration.Run.Exit = $true
+          $configuration.Run.Exit = $false
+          $configuration.Run.PassThru = $true
           $configuration.Output.Verbosity = 'Normal'
-          Invoke-Pester -Configuration $configuration
+          $result = Invoke-Pester -Configuration $configuration
+          if ($result.Result -ne 'Passed' -or $result.TotalCount -le 0 -or
+              $result.PassedCount -ne $result.TotalCount -or
+              $result.SkippedCount -ne 0 -or $result.NotRunCount -ne 0 -or
+              $result.InconclusiveCount -ne 0) {
+            throw "Incomplete or failed Pester tests: passed=$($result.PassedCount), total=$($result.TotalCount), skipped=$($result.SkippedCount), notRun=$($result.NotRunCount), inconclusive=$($result.InconclusiveCount)."
+          }
 
       - name: Stamp source revision in the executable
         shell: pwsh
         env:
           LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
+          LIBERTIX_FILE_VERSION: ${{ needs.identity.outputs.file_version }}
         run: |
+          foreach ($path in @(
+            'Properties\AssemblyInfo.cs',
+            'Standalone\AssemblyInfo.cs',
+            'BootGuardian\Properties\AssemblyInfo.cs'
+          )) {
+            $content = [IO.File]::ReadAllText($path)
+            $pattern = 'AssemblyFileVersion\("[0-9.]+"\)'
+            if ([regex]::Matches($content, $pattern).Count -ne 1) {
+              throw "Expected exactly one assembly file version: $path"
+            }
+            $stamped = [regex]::Replace(
+              $content,
+              $pattern,
+              "AssemblyFileVersion(`"$env:LIBERTIX_FILE_VERSION`")"
+            )
+            [IO.File]::WriteAllText(
+              $path,
+              $stamped,
+              [Text.UTF8Encoding]::new($false)
+            )
+          }
           foreach ($path in @('Properties\AssemblyInfo.cs', 'Standalone\AssemblyInfo.cs')) {
             $content = [IO.File]::ReadAllText($path)
             $stamped = $content.Replace(
@@ -305,17 +397,19 @@ jobs:
 
       - name: Run C# contract tests
         shell: pwsh
-        run: >-
-          dotnet test Libertix.Tests\Libertix.Tests.csproj
-          --configuration Release
-          --no-build
-          --no-restore
-          --verbosity minimal
+        run: |
+          dotnet test Libertix.Tests\Libertix.Tests.csproj `
+            --configuration Release --no-build --no-restore --verbosity minimal `
+            --logger 'trx;LogFileName=contracts.trx' --results-directory "$env:RUNNER_TEMP/contract-tests"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./auto_tests/app/scripts/assert_vstest_results.ps1 `
+            -TestResultPath "$env:RUNNER_TEMP/contract-tests/contracts.trx"
 
       - name: Verify WPF output
         shell: pwsh
         env:
           LIBERTIX_BUILD_VERSION: ${{ needs.identity.outputs.build_version }}
+          LIBERTIX_FILE_VERSION: ${{ needs.identity.outputs.file_version }}
         run: |
           $outputDirectory = 'Standalone\bin\Release'
           $executable = Join-Path $outputDirectory 'Libertix.exe'
@@ -326,6 +420,16 @@ jobs:
             Where-Object { $_.Extension -ne '.pdb' })
           if ($exposedFiles.Count -ne 1 -or $exposedFiles[0].Name -ne 'Libertix.exe') {
             throw 'Standalone output must expose exactly one Libertix.exe.'
+          }
+          foreach ($path in @(
+            $executable,
+            'bin\Release\Libertix.exe',
+            'bin\Release\Libertix.BootGuardian.exe'
+          )) {
+            $actualFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($path).FileVersion
+            if ($actualFileVersion -ne $env:LIBERTIX_FILE_VERSION) {
+              throw "Unexpected file version for ${path}: $actualFileVersion"
+            }
           }
           $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $executable
           "Libertix.exe SHA-256: $($hash.Hash.ToLowerInvariant())" |
@@ -340,11 +444,42 @@ jobs:
           retention-days: 14
           compression-level: 9
 
+  install-party:
+    name: Install-party tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Run install-party tests
+        shell: pwsh
+        run: |
+          dotnet test install-party-kit/Tests/Libertix.InstallParty.Tests.csproj `
+            --configuration Release --verbosity minimal `
+            --logger 'trx;LogFileName=install-party.trx' --results-directory "$env:RUNNER_TEMP/install-party-tests"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./auto_tests/app/scripts/assert_vstest_results.ps1 `
+            -TestResultPath "$env:RUNNER_TEMP/install-party-tests/install-party.trx"
+
   iso:
     name: Build and verify BIOS and UEFI mini-ISO
     needs:
       - quality
       - wpf
+      - install-party
     # The ISO builder requires a privileged Docker container. Do not execute
     # untrusted pull-request code with that privilege.
     if: >-
@@ -376,6 +511,15 @@ jobs:
       - name: Build and verify both mini-ISO images
         shell: bash
         run: ./iso-tools/build-isos-docker.sh all
+
+      - name: Preserve failed ISO build logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Libertix-iso-build-logs-${{ github.sha }}-${{ github.run_attempt }}
+          path: build-logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Record ISO checksums
         shell: bash
@@ -430,6 +574,15 @@ jobs:
           version: "0.9.8"
           enable-cache: true
           cache-dependency-glob: auto_tests/uv.lock
+
+      - name: Install native dependencies for the locked metadata environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            libcairo2-dev \
+            libgirepository-2.0-dev \
+            pkg-config \
+            python3-dev
 
       - name: Synchronize locked metadata environment
         working-directory: auto_tests

@@ -6,7 +6,7 @@ BeforeAll {
     function New-ValidInstallationPlan {
         return @'
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "planId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "createdAtUtc": "2026-07-15T12:00:00Z",
   "firmware": "uefi",
@@ -34,7 +34,7 @@ BeforeAll {
   },
   "account": {
     "username": "oem",
-    "passwordHashWindowsPath": "C:\\ProgramData\\Libertix\\account-secret.env",
+    "passwordHashWindowsPath": "C:\\ProgramData\\Libertix\\Recovery\\account-secret.env",
     "computerName": "libertix-test"
   },
   "disk": {
@@ -60,7 +60,14 @@ BeforeAll {
   "features": {
     "shareWindowsFilesInLinux": true,
     "shareLinuxFilesInWindows": true,
-    "windowsProfilesJsonBase64": "W10="
+    "windowsProfilesJsonBase64": "W10=",
+    "windowsPreferenceMigration": {
+      "enabled": false,
+      "bundleFileName": null,
+      "bundleSha256": null,
+      "bundleSizeBytes": 0,
+      "wifiProfileCount": 0
+    }
   },
   "runtime": {
     "windowsBitLockerState": "FullyDecrypted",
@@ -74,6 +81,84 @@ BeforeAll {
 }
 
 '@ | ConvertFrom-Json
+    }
+}
+
+Describe 'Separate physical allocation plan' {
+    BeforeEach {
+        $plan = New-ValidInstallationPlan
+        $plan.schemaVersion = 5
+        $plan | Add-Member -NotePropertyName allocation -NotePropertyValue ([pscustomobject]@{
+            number = 3; uniqueId = $plan.disk.uniqueId; sizeBytes = 64GB
+            partitionTableId = 'gpt:87654321-1234-1234-1234-123456789abc'
+            partitionStyle = 'GPT'; logicalSectorSizeBytes = 512
+            sourceDrive = 'D:'; sourceVolumeId = 'volume-data'; sourceBitLockerState = 'FullyDecrypted'
+            sourceNtfsUuid = '1234567890ABCDEF'
+            sourcePartition = [pscustomobject]@{ number = 2; offsetBytes = 1GB; sizeBytes = 60GB }
+        })
+        $plan.disk.installer.finalOffsetBytes = 21GB
+        $plan.disk.installer.offsetBytes = 21GB
+    }
+
+    It 'validates <Firmware> Windows with <Style> secondary allocation' -ForEach @(
+        @{ Firmware = 'bios'; Style = 'MBR' }, @{ Firmware = 'bios'; Style = 'GPT' },
+        @{ Firmware = 'uefi'; Style = 'MBR' }, @{ Firmware = 'uefi'; Style = 'GPT' }
+    ) {
+        if ($Firmware -eq 'bios') {
+            $plan.firmware = 'bios'
+            $plan.disk.partitionStyle = 'MBR'
+            $plan.disk.partitionTableId = 'mbr:12345678'
+            $plan.runtime.bootStrategy = 'bios-grub4dos'
+            $plan.runtime.secureBootEnabled = $false
+            $plan.runtime.trustedMicrosoftUefiAuthorities = @()
+        }
+        if ($Style -eq 'MBR') {
+            $plan.allocation.partitionStyle = 'MBR'
+            $plan.allocation.partitionTableId = 'mbr:87654321'
+        }
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+        $plan.disk.windows.sizeBytes | Should -Be 200GB
+        $plan.disk.number | Should -Be 0
+    }
+
+    It 'rejects invalid allocation field <Field>' -ForEach @(
+        @{ Field = 'number'; Value = 0 },
+        @{ Field = 'partitionTableId'; Value = 'gpt:12345678-1234-1234-1234-123456789abc' },
+        @{ Field = 'partitionTableId'; Value = 'gpt:00000000-0000-0000-0000-000000000000' },
+        @{ Field = 'sourceDrive'; Value = 'C:' },
+        @{ Field = 'sourceDrive'; Value = 'd:' },
+        @{ Field = 'sourceVolumeId'; Value = '' },
+        @{ Field = 'sourceNtfsUuid'; Value = $null },
+        @{ Field = 'sourceNtfsUuid'; Value = '0000000000000000' },
+        @{ Field = 'sourceNtfsUuid'; Value = '12345678' },
+        @{ Field = 'sourceNtfsUuid'; Value = '1234567890abcdef' },
+        @{ Field = 'sourceBitLockerState'; Value = 'suspended' },
+        @{ Field = 'logicalSectorSizeBytes'; Value = 0 },
+        @{ Field = 'sourcePartition'; Value = @{ number = 2; offsetBytes = 63GB; sizeBytes = 60GB } }
+    ) {
+        $plan.allocation.$Field = $Value
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Throw
+    }
+
+    It 'rejects an extent calculated from C instead of the selected data volume' {
+        $plan.disk.installer.finalOffsetBytes = 161GB
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Throw '*finalOffsetBytes*'
+    }
+
+    It 'retains the online and offline shrink distinction on the selected data volume' {
+        $plan.disk.installer.resizeMode = 'live-offline'
+        $plan.disk.installer.offsetBytes = 53GB
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It 'does not allow a secondary allocation to be read as schema four' {
+        $plan.schemaVersion = 4
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Throw '*schemaVersion*'
+    }
+
+    It 'does not accept schema five without its separate allocation' {
+        $plan.PSObject.Properties.Remove('allocation')
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Throw '*schemaVersion*'
     }
 }
 
@@ -139,9 +224,86 @@ Describe "Atomic file publication" {
 }
 
 Describe "Installation plan contract" {
+    It 'accepts an empty firmware authority array on UEFI without enrolled third-party certificates' {
+        $plan = New-ValidInstallationPlan
+        $plan.runtime.secureBootEnabled = $false
+        $plan.runtime.trustedMicrosoftUefiAuthorities = @()
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It 'rejects a null or scalar authority value instead of treating it as an array' -ForEach @(
+        @{ Owner = 'runtime'; Name = 'trustedMicrosoftUefiAuthorities'; Value = $null },
+        @{ Owner = 'runtime'; Name = 'trustedMicrosoftUefiAuthorities'; Value = '2011' },
+        @{ Owner = 'distribution'; Name = 'secureBootMicrosoftAuthorities'; Value = '2011' }
+    ) {
+        $plan = New-ValidInstallationPlan
+        $plan.$Owner.$Name = $Value
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Throw '*must be an array*'
+    }
+
+    It 'accepts a BIOS Windows partition that also owns the boot files' {
+        $plan = New-ValidInstallationPlan
+        $plan.firmware = 'bios'
+        $plan.disk.partitionStyle = 'MBR'
+        $plan.disk.partitionTableId = 'mbr:12345678'
+        $plan.runtime.bootStrategy = 'bios-grub4dos'
+        $plan.runtime.secureBootEnabled = $false
+        $plan.runtime.trustedMicrosoftUefiAuthorities = @()
+        $plan.disk.boot = $plan.disk.windows.PSObject.Copy()
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It 'still refuses a distinct BIOS boot partition that overlaps Windows' {
+        $plan = New-ValidInstallationPlan
+        $plan.firmware = 'bios'
+        $plan.disk.partitionStyle = 'MBR'
+        $plan.disk.partitionTableId = 'mbr:12345678'
+        $plan.runtime.bootStrategy = 'bios-grub4dos'
+        $plan.runtime.secureBootEnabled = $false
+        $plan.runtime.trustedMicrosoftUefiAuthorities = @()
+        $plan.disk.boot.offsetBytes = $plan.disk.windows.offsetBytes
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Throw '*overlap*'
+    }
+
+    It 'accepts non-overlapping UEFI Recovery before Windows' {
+        $plan = New-ValidInstallationPlan
+        $plan.disk.recovery.offsetBytes = 256MB
+        $plan.disk.recovery.sizeBytes = 512MB
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It 'refuses allocating the whole Windows partition to Linux' {
+        $plan = New-ValidInstallationPlan
+        $plan.disk.installer.finalSizeBytes = $plan.disk.windows.sizeBytes
+        $plan.disk.installer.finalOffsetBytes = $plan.disk.windows.offsetBytes
+        $plan.disk.installer.offsetBytes = $plan.disk.windows.offsetBytes
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Throw '*original Windows extent*'
+    }
+
     It "accepts a complete valid plan" {
         $plan = New-ValidInstallationPlan
         { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It "accepts a validated Windows preference migration manifest without secrets" {
+        $plan = New-ValidInstallationPlan
+        $plan.features.windowsPreferenceMigration.enabled = $true
+        $plan.features.windowsPreferenceMigration.bundleFileName = `
+            "windows-preferences.secret.json"
+        $plan.features.windowsPreferenceMigration.bundleSha256 = ("e" * 64)
+        $plan.features.windowsPreferenceMigration.bundleSizeBytes = 4096
+        $plan.features.windowsPreferenceMigration.wifiProfileCount = 3
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+    }
+
+    It "rejects an enabled Windows preference migration with a variable bundle name" {
+        $plan = New-ValidInstallationPlan
+        $plan.features.windowsPreferenceMigration.enabled = $true
+        $plan.features.windowsPreferenceMigration.bundleFileName = "other.json"
+        $plan.features.windowsPreferenceMigration.bundleSha256 = ("e" * 64)
+        $plan.features.windowsPreferenceMigration.bundleSizeBytes = 4096
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*fixed transaction bundle name*"
     }
 
     It "accepts the staging geometry selected for live offline resize" {
@@ -230,12 +392,42 @@ Describe "Installation plan contract" {
             Should -Throw "*must be located on disk.systemDrive*"
     }
 
+    It "rejects mixed-separator traversal in recovery paths" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution.installerIsoWindowsPath = `
+            "C:\ProgramData\Libertix\Downloads\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\safe/../mint.iso"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*absolute safe Windows path*"
+
+        $plan = New-ValidInstallationPlan
+        $plan.account.passwordHashWindowsPath = `
+            "C:\ProgramData\Libertix\Recovery\safe/../../account-secret.env"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*absolute safe Windows path*"
+
+        $plan = New-ValidInstallationPlan
+        $plan.runtime.recoveryRootWindows = `
+            "C:\ProgramData\Libertix\Recovery\safe/../escaped"
+        $plan.account.passwordHashWindowsPath = `
+            "C:\ProgramData\Libertix\Recovery\safe/../escaped\account-secret.env"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*absolute safe Windows path*"
+    }
+
+    It "requires the account secret under the recovery root" {
+        $plan = New-ValidInstallationPlan
+        $plan.account.passwordHashWindowsPath = `
+            "C:\ProgramData\Libertix\Other\account-secret.env"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*under runtime.recoveryRootWindows*"
+    }
+
     It "accepts consistent Windows paths on a non-C system drive" {
         $plan = New-ValidInstallationPlan
         $plan.disk.systemDrive = "D:"
         $plan.distribution.installerIsoWindowsPath = `
             "D:\ProgramData\Libertix\Downloads\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\mint.iso"
-        $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\account-secret.env"
+        $plan.account.passwordHashWindowsPath = "D:\ProgramData\Libertix\Recovery\account-secret.env"
         $plan.runtime.recoveryRootWindows = "D:\ProgramData\Libertix\Recovery"
         { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
     }

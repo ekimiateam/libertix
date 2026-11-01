@@ -41,7 +41,7 @@ function Get-LibertixFirmwareBootVariableSummary {
 function New-OrReuseInstallerPartition {
     param([Parameter(Mandatory = $true)][int]$SizeGB)
 
-    $existingPartition = Get-VerifiedTransactionPartition
+    $existingPartition = Resolve-LibertixTransactionPartition
     if ($existingPartition) {
         if (-not $existingPartition.DriveLetter) {
             $existingDriveLetter = Get-LibertixFreeDriveLetter
@@ -85,19 +85,28 @@ function New-OrReuseInstallerPartition {
         throw "InstallerPartitionSizeGB does not match the installation plan."
     }
     $stagingSizeGB = [int]($stagingBytes / 1GB)
-    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    $systemDisk = Get-Disk -Number $systemPartition.DiskNumber -ErrorAction Stop
-    $recoveryOffsetBytes = [int64]$installationPlan.disk.recovery.offsetBytes
+    $binding = Get-LibertixTransactionStorageBinding
+    if ([string]$binding.Disk.partitionStyle -ne 'GPT') {
+        throw 'This UEFI preparation path requires a GPT allocation disk.'
+    }
+    $sourceDriveLetter = $binding.SourceDrive.TrimEnd(':')
+    $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition `
+        -ExpectedSize ([long]$binding.SourcePartition.sizeBytes)
+    $sourceDisk = Get-Disk -Number $sourcePartition.DiskNumber -ErrorAction Stop
+    $originalSourceOffset = [int64]$binding.SourcePartition.offsetBytes
+    $originalSourceSize = [int64]$binding.SourcePartition.sizeBytes
+    $originalSourceEnd = $originalSourceOffset + $originalSourceSize
     if (
-        $requestedBytes -gt $recoveryOffsetBytes -or
+        $requestedBytes -ge $originalSourceSize -or
+        [int64]$installationPlan.disk.installer.finalOffsetBytes -le $originalSourceOffset -or
         [int64]$installationPlan.disk.installer.finalOffsetBytes -gt `
-            $recoveryOffsetBytes - $requestedBytes
+            $originalSourceEnd - $requestedBytes
     ) {
-        throw "The requested Linux partition would overlap Windows Recovery."
+        throw 'The requested Linux partition must stay inside the original source extent.'
     }
 
     Start-LibertixTrackedStep -Step "windows.recovery-armed"
-    Save-TransactionPreparationState -SystemPartition $systemPartition
+    Save-TransactionPreparationState -SystemPartition (Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop)
     Complete-LibertixTrackedStep -Step "windows.recovery-armed"
 
     $forcedOfflineResize = (
@@ -113,25 +122,27 @@ function New-OrReuseInstallerPartition {
     }
 
     $fullGeometry = Get-LibertixAlignedShrinkGeometry `
-        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
-        -PartitionSizeBytes ([int64]$systemPartition.Size) `
+        -PartitionOffsetBytes ([int64]$sourcePartition.Offset) `
+        -PartitionSizeBytes ([int64]$sourcePartition.Size) `
         -RequestedAllocationBytes $requestedBytes `
-        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
+        -LogicalSectorSizeBytes ([int64]$sourceDisk.LogicalSectorSize)
     $stagingGeometry = Get-LibertixAlignedShrinkGeometry `
-        -PartitionOffsetBytes ([int64]$systemPartition.Offset) `
-        -PartitionSizeBytes ([int64]$systemPartition.Size) `
+        -PartitionOffsetBytes ([int64]$sourcePartition.Offset) `
+        -PartitionSizeBytes ([int64]$sourcePartition.Size) `
         -RequestedAllocationBytes $stagingBytes `
-        -LogicalSectorSizeBytes ([int64]$systemDisk.LogicalSectorSize)
+        -LogicalSectorSizeBytes ([int64]$sourceDisk.LogicalSectorSize)
 
-    $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
-    $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
+    $supported = Get-PartitionSupportedSize -DiskNumber $sourcePartition.DiskNumber `
+        -PartitionNumber $sourcePartition.PartitionNumber -ErrorAction Stop
+    $maxShrink = [int64]$sourcePartition.Size - [int64]$supported.SizeMin
     if (-not $forcedOfflineResize -and [int64]$fullGeometry.ShrinkBytes -gt $maxShrink) {
         if (-not $hibernationDisabled) {
             Set-HibernateEnabled -Enabled $false
             $hibernationDisabled = $true
-            $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-            $supported = $systemPartition | Get-PartitionSupportedSize -ErrorAction Stop
-            $maxShrink = [int64]$systemPartition.Size - [int64]$supported.SizeMin
+            $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition -ExpectedSize $originalSourceSize
+            $supported = Get-PartitionSupportedSize -DiskNumber $sourcePartition.DiskNumber `
+                -PartitionNumber $sourcePartition.PartitionNumber -ErrorAction Stop
+            $maxShrink = [int64]$sourcePartition.Size - [int64]$supported.SizeMin
         }
         if ([int64]$fullGeometry.ShrinkBytes -gt $maxShrink) {
             Set-LibertixInstallationPlanResizeMode -ResizeMode "live-offline"
@@ -146,7 +157,7 @@ function New-OrReuseInstallerPartition {
     [int64]$installerOffsetBytes = [int64]$shrinkGeometry.InstallerOffsetBytes
     if ($shrinkBytes -gt $maxShrink) {
         throw (
-            "Cannot reserve even the Libertix staging partition on $SystemDrive " +
+            "Cannot reserve even the Libertix staging partition on $($binding.SourceDrive) " +
             "(required=$shrinkBytes bytes, maximum=$maxShrink bytes)."
         )
     }
@@ -163,18 +174,38 @@ function New-OrReuseInstallerPartition {
 
     # The shared budget applies the same bounded Windows free-space policy to
     # BIOS and UEFI for the allocation Windows is actually asked to reserve.
+    $verifiedDistributionIso = Get-Item `
+        -LiteralPath $DistributionIsoPath `
+        -ErrorAction Stop
+    $unsafeReclaimableAttributes =
+        [IO.FileAttributes]::Compressed -bor
+        [IO.FileAttributes]::SparseFile -bor
+        [IO.FileAttributes]::ReparsePoint
+    if (($verifiedDistributionIso.Attributes -band $unsafeReclaimableAttributes) -ne 0) {
+        throw "The verified installer ISO cannot be credited as reclaimable disk space."
+    }
+    # The ISO remains on Windows, so its later deletion cannot free space on a separate donor.
+    [int64]$reclaimableArtifactBytes = if ($binding.Separate) { 0 } else { [int64]$verifiedDistributionIso.Length }
     $freeSpaceBudget = Wait-LibertixWindowsFreeSpaceBudget `
-        -DriveLetter $SystemDriveLetter `
-        -AllocationBytes $shrinkBytes
+        -DriveLetter $sourceDriveLetter `
+        -AllocationBytes $shrinkBytes `
+        -ReclaimableArtifactBytes $reclaimableArtifactBytes
     [int64]$remainingBytes = [int64]$freeSpaceBudget.AvailableBytes
     if (-not $freeSpaceBudget.Accepted) {
         throw (
-            "Not enough free space on $SystemDrive " +
+            "Not enough free space on $($binding.SourceDrive) " +
             "(available=$remainingBytes bytes, " +
+            "reclaimable=$($freeSpaceBudget.ReclaimableArtifactBytes) bytes, " +
+            "effective=$($freeSpaceBudget.EffectiveAvailableBytes) bytes, " +
             "required=$($freeSpaceBudget.RequiredBytes) bytes, " +
             "acceptedFloor=$($freeSpaceBudget.AcceptedFloorBytes) bytes)."
         )
     }
+    Write-Log (
+        "Windows free-space budget verified with transaction-owned ISO cleanup: " +
+        "available=$remainingBytes reclaimable=$reclaimableArtifactBytes " +
+        "effective=$($freeSpaceBudget.EffectiveAvailableBytes)."
+    ) "Gray"
     if ($freeSpaceBudget.WithinTolerance) {
         Write-Log (
             "Windows free space is within the bounded tolerance: " +
@@ -183,26 +214,26 @@ function New-OrReuseInstallerPartition {
     }
 
     Start-LibertixTrackedStep -Step "windows.system-volume-shrunk"
+    $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition -ExpectedSize $originalSourceSize
     # A cloned Windows partition can end between 1 MiB boundaries. Move its
     # new end back to the preceding boundary so CreatePartition does not lose
     # part of the requested extent while aligning the staging partition.
     Resize-Partition `
-        -DriveLetter $SystemDriveLetter `
-        -Size ($systemPartition.Size - $shrinkBytes) `
+        -DriveLetter $sourceDriveLetter `
+        -Size ($sourcePartition.Size - $shrinkBytes) `
         -ErrorAction Stop
     Start-Sleep -Seconds 2
-    $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-    if (
-        [int64]$systemPartition.Offset -ne [int64]$installationPlan.disk.windows.offsetBytes -or
-        [int64]$systemPartition.Size -ne [int64]$shrinkGeometry.TargetSizeBytes
-    ) {
-        throw "Windows partition geometry does not match the aligned shrink target."
-    }
+    $sourcePartition = Get-LibertixVerifiedTransactionSourcePartition `
+        -ExpectedSize ([int64]$shrinkGeometry.TargetSizeBytes)
     Complete-LibertixTrackedStep -Step "windows.system-volume-shrunk"
 
     Start-LibertixTrackedStep -Step "windows.installer-partition-created"
+    # New-Partition may commit before PowerShell returns its object. Save the
+    # verified empty extent first so rollback can resolve that interruption.
+    Save-TransactionPartitionCreationIntent -DiskNumber $sourcePartition.DiskNumber `
+        -Offset $installerOffsetBytes -Size $stagingBytes
     $newPartition = New-Partition `
-        -DiskNumber $systemPartition.DiskNumber `
+        -DiskNumber $sourcePartition.DiskNumber `
         -Size $stagingBytes `
         -Offset $installerOffsetBytes `
         -Alignment ([int64]$shrinkGeometry.AlignmentBytes) `
@@ -231,12 +262,12 @@ function New-OrReuseInstallerPartition {
     # Exposing a RAW partition through a drive letter makes Explorer display a
     # modal format prompt. Assign the access path only after FAT32 exists, while
     # still letting Mount Manager avoid persistent or disconnected mappings.
-    $formattedPartition = Get-VerifiedTransactionPartition
+    $formattedPartition = Resolve-LibertixTransactionPartition
     Add-PartitionAccessPath `
         -InputObject $formattedPartition `
         -AssignDriveLetter `
         -ErrorAction Stop | Out-Null
-    $verifiedPartition = Get-VerifiedTransactionPartition
+    $verifiedPartition = Resolve-LibertixTransactionPartition
     $createdDriveLetter = [string]$verifiedPartition.DriveLetter
     if ([string]::IsNullOrWhiteSpace($createdDriveLetter)) {
         throw "Windows formatted the installer partition but did not assign a drive letter."
@@ -271,7 +302,7 @@ function New-OrReuseInstallerPartition {
 }
 
 function Get-ReusablePreparedInstallerPartition {
-    $partition = Get-VerifiedTransactionPartition
+    $partition = Resolve-LibertixTransactionPartition
     if (-not $partition) {
         throw "Owned prepared installer partition is missing; refusing firmware fallback."
     }
@@ -325,7 +356,11 @@ function Install-LibertixIsoToPartition {
 
     try {
         Write-LibertixProgress -Stage "live-iso-download" -Percent 62
-        Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
+        if ([string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+            Write-Log "Downloading Libertix UEFI ISO..." "Cyan"
+        } else {
+            Write-Log "Using Libertix UEFI ISO from the selected local filepool..." "Cyan"
+        }
         # Keep the configured canonical URL unchanged. Some filepool frontends
         # redirect only that exact resource and return 404 for arbitrary query
         # parameters; integrity is already enforced by the SHA-256 check below.
@@ -335,7 +370,8 @@ function Install-LibertixIsoToPartition {
             -Url $downloadUrl `
             -Destination $isoPath `
             -Label "Libertix UEFI ISO" `
-            -MaxBytes $script:MaximumLiveIsoBytes
+            -MaxBytes $script:MaximumLiveIsoBytes `
+            -LocalFileName $InstallerIsoName
 
         if (-not (Test-Path $isoPath)) {
             throw "ISO download failed."
@@ -456,17 +492,30 @@ function Install-LibertixIsoToPartition {
             }
         }
 
-        Dismount-DiskImage -ImagePath $isoPath | Out-Null
+        $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+        Write-Log "UEFI copy phase=dismount begin pid=$PID"
+        try {
+            Dismount-DiskImage -ImagePath $isoPath | Out-Null
+        } finally {
+            Write-Log "UEFI copy phase=dismount end elapsedMs=$($phaseClock.ElapsedMilliseconds)"
+        }
         Write-Log "Libertix UEFI installer copied." "Green"
     } finally {
+        $phaseClock = [Diagnostics.Stopwatch]::StartNew()
+        Write-Log "UEFI copy phase=cleanup-dismount begin pid=$PID"
         try {
             Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue |
                 Out-Null
         } catch {
             Write-Verbose "Best-effort installer image dismount failed: $($_.Exception.Message)"
+        } finally {
+            Write-Log "UEFI copy phase=cleanup-dismount end elapsedMs=$($phaseClock.ElapsedMilliseconds)"
         }
 
+        $phaseClock.Restart()
+        Write-Log "UEFI copy phase=temporary-cleanup begin"
         Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "UEFI copy phase=temporary-cleanup end elapsedMs=$($phaseClock.ElapsedMilliseconds)"
     }
 }
 

@@ -39,8 +39,15 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="InstallationContractsTests.cs" />
+    <Compile Include="InstallationTargetTests.cs" />
+    <Compile Include="WindowsSharingPlanTests.cs" />
     <Compile Include="RuntimeContractTests.cs" />
     <Compile Include="BootGuardianTests.cs" />
+    <Compile Include="BiosBootPayloadTests.cs" />
+    <Compile Include="LiveBootArgumentsTests.cs" />
+    <Compile Include="FallbackLifecycleTests.cs" />
+    <Compile Include="HttpCatalogTests.cs" />
+    <Compile Include="StartupValidationTests.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
@@ -56,6 +63,7 @@
     <ProjectReference Include="..\BootGuardian\Libertix.BootGuardian.csproj">
       <Project>{A147B320-A380-4E00-B8FC-8DB44410C6F5}</Project>
       <Name>Libertix.BootGuardian</Name>
+      <Aliases>global,Guardian</Aliases>
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>

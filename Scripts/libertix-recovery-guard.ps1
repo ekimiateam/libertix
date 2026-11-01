@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet("Check", "Revert")]
-    [string]$Action = "Check"
+    [string]$Action = "Check",
+    [switch]$VerifiedUninstall
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,12 +36,6 @@ $TemporaryArtifactsModulePath = Join-Path $Root "Libertix.TemporaryArtifacts.psm
 $PostInstallVerificationModulePath = Join-Path $Root "Libertix.PostInstallVerification.psm1"
 $ProcessModulePath = Join-Path $Root "Libertix.Process.psm1"
 $RecoveryOperationsPath = Join-Path $Root "recovery-operations.json"
-$TemporaryBootFiles = @(
-    (Join-Path $SystemDrive "grldr"),
-    (Join-Path $SystemDrive "grldr.mbr"),
-    (Join-Path $SystemDrive "menu.lst"),
-    (Join-Path $SystemDrive "libertix-live.iso")
-)
 $WindowsShareRoot = Join-Path $ProgramDataRoot "Libertix\WindowsShare"
 
 if (-not (Test-Path -LiteralPath $InstallationPolicyPath -PathType Leaf)) {
@@ -100,6 +95,8 @@ function Import-RecoveryVerificationModules {
     # forced nested import removes the previous script-scope Process commands
     # in Windows PowerShell 5.1, so restore the script-scope import last.
     Import-Module -Name $PostInstallVerificationModulePath -Force -ErrorAction Stop
+    Import-Module (Join-Path $Root 'Libertix.Rollback.psm1') -Force -ErrorAction Stop
+    Import-Module (Join-Path $Root 'Libertix.StorageTargets.psm1') -ErrorAction Stop
     Import-Module -Name $ProcessModulePath -Force -ErrorAction Stop
 }
 
@@ -297,6 +294,31 @@ function Invoke-RecoveryOperation {
     return ($operationSucceeded -and $beginStatePersisted -and $endStatePersisted)
 }
 
+function Assert-OriginalSourceEncryption {
+    $plan = Get-Content -LiteralPath (Join-Path $Root 'installation-plan.json') -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([int]$plan.schemaVersion -eq 4) { return }
+    if ([int]$plan.schemaVersion -ne 5 -or $null -eq $plan.allocation) {
+        throw 'The source encryption check has no valid allocation plan.'
+    }
+    $original = Get-Content -LiteralPath (Join-Path $Root 'source-encryption-original.json') -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([string]$original.recoveryRunId -cne [string]$plan.runtime.recoveryRunId -or
+        [string]$original.sourceDrive -cne [string]$plan.allocation.sourceDrive -or
+        [string]$original.sourceNtfsUuid -cne [string]$plan.allocation.sourceNtfsUuid -or
+        (Get-LibertixNtfsVolumeSerial -Drive $original.sourceDrive) -cne [string]$original.sourceNtfsUuid) {
+        throw 'The original source encryption evidence does not match this recovery transaction.'
+    }
+    $current = Get-LibertixTargetVolumeEncryptionSnapshot -Drive $original.sourceDrive
+    foreach ($field in @('state', 'conversionStatus', 'encryptionPercentage', 'protectionStatus')) {
+        if ($original.snapshot.PSObject.Properties.Name -notcontains $field -or
+            $null -eq $original.snapshot.$field -or
+            [string]$original.snapshot.$field -cne [string]$current.$field) {
+            throw 'Disk and boot rollback completed, but the source volume BitLocker state differs from its initial state.'
+        }
+    }
+}
+
 function Assert-RecoveryOperationsSucceeded {
     if ($script:RecoveryErrors.Count -eq 0) {
         return
@@ -309,7 +331,7 @@ function Assert-RecoveryOperationsSucceeded {
 }
 
 function Invoke-MinimumRecoveryFallback {
-    if ($script:RecoveryCompensationSequenceStarted) {
+    if ($VerifiedUninstall -or $script:RecoveryCompensationSequenceStarted) {
         return
     }
     $script:RecoveryCompensationSequenceStarted = $true
@@ -336,14 +358,13 @@ function Invoke-MinimumRecoveryFallback {
 
 function Read-EnvValue {
     param(
-        [string]$Path,
-        [string]$Name
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
     )
 
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
-
     $line = @(
         Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop |
             Where-Object { $_ -match "^$([regex]::Escape($Name))=" }
@@ -351,7 +372,6 @@ function Read-EnvValue {
     if (-not $line) {
         return $null
     }
-
     return ($line -replace "^$([regex]::Escape($Name))=", "").Trim()
 }
 
@@ -447,6 +467,28 @@ function Start-RecoveryPromptTask {
     }
 }
 
+function Test-RecoveryRawPartitionGeometry {
+    param(
+        [Parameter(Mandatory = $true)]$Partition,
+        [Parameter(Mandatory = $true)][int64]$FinalOffset,
+        [Parameter(Mandatory = $true)][int64]$FinalSize,
+        [Parameter(Mandatory = $true)][int64]$StagingSize,
+        [Parameter(Mandatory = $true)][int64]$Alignment
+    )
+
+    if ($Alignment -le 0 -or $FinalSize -le $Alignment -or $StagingSize -le $Alignment) {
+        throw "Recovery partition geometry limits are invalid."
+    }
+    $size = [int64]$Partition.Size
+    # Windows normally exposes ext4 without a Volume object. Its final extent,
+    # reconstructed from the saved Windows boundary, still proves ownership.
+    return (
+        ($size -ge ($StagingSize - $Alignment) -and $size -le ($StagingSize + $Alignment)) -or
+        ([int64]$Partition.Offset -eq $FinalOffset -and
+            $size -ge ($FinalSize - $Alignment) -and $size -le $FinalSize)
+    )
+}
+
 function Read-RecoveryExecutionState {
     if (-not (Test-Path -LiteralPath $ExecutionStatePath -PathType Leaf)) {
         throw "Recovery execution state is missing."
@@ -526,47 +568,17 @@ function Remove-TransactionArtifacts {
 
 function Restore-OriginalHibernationSetting {
     $originalHibernate = Read-EnvValue -Path $Pending -Name "ORIGINAL_HIBERNATE_ENABLED"
-    if ($originalHibernate -eq "true") {
-        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
-        $hibernate = Invoke-LibertixNativeCommand `
-            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-            -ArgumentList @("/hibernate", "on") `
-            -TimeoutSeconds 60
-        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
-        if ($hibernate.ExitCode -ne 0) {
-            throw "Hibernation restore failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
-        }
-        $hibernateEnabled = (
-            Get-ItemProperty `
-                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-                -Name "HibernateEnabled" `
-                -ErrorAction Stop
-        ).HibernateEnabled
-        if ($hibernateEnabled -ne 1) {
-            throw "Hibernation restore did not enable HibernateEnabled."
-        }
-    } elseif ($originalHibernate -eq "false") {
-        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
-        $hibernate = Invoke-LibertixNativeCommand `
-            -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-            -ArgumentList @("/hibernate", "off") `
-            -TimeoutSeconds 60
-        $hibernateOutput = ($hibernate.StandardOutput + [Environment]::NewLine + $hibernate.StandardError).Trim()
-        if ($hibernate.ExitCode -ne 0) {
-            throw "Hibernation disable failed with rc=$($hibernate.ExitCode) output=$hibernateOutput"
-        }
-        $hibernateEnabled = (
-            Get-ItemProperty `
-                -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-                -Name "HibernateEnabled" `
-                -ErrorAction Stop
-        ).HibernateEnabled
-        if ($hibernateEnabled -ne 0) {
-            throw "Hibernation restore did not disable HibernateEnabled."
-        }
-    } else {
+    if ($originalHibernate -notin @("true", "false")) {
         Write-RecoveryLog "Original hibernation state unknown; left unchanged."
+        return
     }
+    $enabled = $originalHibernate -eq "true"
+    if ($enabled) {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup."
+    } else {
+        Write-RecoveryLog "Restoring Windows hibernation and Fast Startup to disabled."
+    }
+    Set-LibertixHibernateEnabled -Enabled $enabled
 }
 
 function Restore-HibernationAfterInstallation {
@@ -594,8 +606,81 @@ function Restore-HibernationAfterInstallation {
     Write-RecoveryLog "Original hibernation state restored after verified installation."
 }
 
+function Remove-OwnedBiosBcdEntry {
+    $recoveryRunId = Read-EnvValue -Path $Pending -Name 'RECOVERY_RUN_ID'
+    if ($recoveryRunId -notmatch '^[0-9a-f]{32}$') {
+        throw 'The BIOS recovery identity is invalid; refusing selective BCD cleanup.'
+    }
+    $bcdedit = Get-LibertixNativeSystemExecutable -FileName 'bcdedit.exe'
+    Write-RecoveryLog "Resolved native BCD editor: $bcdedit"
+    $enumeration = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @('/enum', 'all', '/v') `
+        -TimeoutSeconds 60
+    $enumerationOutput = (
+        $enumeration.StandardOutput +
+        [Environment]::NewLine +
+        $enumeration.StandardError
+    ).Trim()
+    if ($enumeration.ExitCode -ne 0) {
+        throw "BCD enumeration failed with rc=$($enumeration.ExitCode) output=$enumerationOutput"
+    }
+    $description = "Libertix BIOS Installer $recoveryRunId"
+    $blocks = @($enumerationOutput -split '(?:\r?\n){2,}')
+    $ownedBlocks = @(
+        $blocks | Where-Object {
+            $_ -match '(?im)^\s*\S.*\s+(\{[0-9a-f-]{36}\})\s*$' -and
+            $_ -match ('(?im)^\s*\S.*\s+' + [regex]::Escape($description) + '\s*$') -and
+            $_ -match '(?im)^\s*\S.*\s+\\grldr\.mbr\s*$' -and
+            $_ -match ('(?im)^\s*\S.*\s+partition=' + [regex]::Escape($SystemDrive) + '\s*$')
+        }
+    )
+    if ($ownedBlocks.Count -gt 1) {
+        throw 'Multiple transaction-owned BIOS BCD entries were found; refusing cleanup.'
+    }
+    if ($ownedBlocks.Count -eq 0) {
+        Write-RecoveryLog 'The transaction-owned BIOS BCD entry is already absent.'
+        return
+    }
+    $identifier = [regex]::Match(
+        $ownedBlocks[0],
+        '(?im)^\s*\S.*\s+(\{[0-9a-f-]{36}\})\s*$'
+    ).Groups[1].Value
+    $removal = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @('/delete', $identifier, '/f') `
+        -TimeoutSeconds 60
+    $removalOutput = (
+        $removal.StandardOutput + [Environment]::NewLine + $removal.StandardError
+    ).Trim()
+    if ($removal.ExitCode -ne 0) {
+        throw "Owned BCD entry removal failed with rc=$($removal.ExitCode) output=$removalOutput"
+    }
+    $verification = Invoke-LibertixNativeCommand `
+        -FilePath $bcdedit `
+        -ArgumentList @('/enum', 'all', '/v') `
+        -TimeoutSeconds 60
+    $verificationOutput = (
+        $verification.StandardOutput +
+        [Environment]::NewLine +
+        $verification.StandardError
+    ).Trim()
+    if ($verification.ExitCode -ne 0 -or $verificationOutput -match [regex]::Escape($identifier)) {
+        throw 'The transaction-owned BIOS BCD entry could not be verified as removed.'
+    }
+    Write-RecoveryLog "Transaction-owned BIOS BCD entry removed: $identifier"
+}
+
 function Restore-BcdState {
-    param([switch]$Required)
+    param(
+        [switch]$Required,
+        [switch]$PreserveUnrelatedChanges
+    )
+
+    if ($PreserveUnrelatedChanges) {
+        Remove-OwnedBiosBcdEntry
+        return
+    }
 
     if (-not (Test-Path -LiteralPath $BcdBackup -PathType Leaf)) {
         if ($Required) {
@@ -636,14 +721,22 @@ function Restore-BcdState {
 function Restore-BiosMbrBootCode {
     param(
         [Parameter(Mandatory = $true)][int]$DiskNumber,
-        [switch]$Required
+        [Parameter(Mandatory = $true)][object]$ExecutionState
     )
 
+    # Windows prepares BCD/GRUB4DOS without writing MBR boot code. The live
+    # writes GRUB only after target.system-configured; that completed step
+    # survives failures and rollback retries which clear activeStep.
+    $backupRequired = "target.system-configured" -in @($ExecutionState.completedSteps)
+    $backupExists = Test-Path -LiteralPath $MbrBackup -PathType Leaf
+    $hashExists = Test-Path -LiteralPath $MbrBackupHash -PathType Leaf
     if (
-        -not (Test-Path -LiteralPath $MbrBackup -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $MbrBackupHash -PathType Leaf)
+        -not $backupExists -or
+        -not $hashExists
     ) {
-        if ($Required) { throw "Required pre-GRUB MBR backup is missing." }
+        if ($backupRequired -or $backupExists -or $hashExists) {
+            throw "Required pre-GRUB MBR backup is missing or incomplete."
+        }
         Write-RecoveryLog "No pre-GRUB MBR backup exists; boot-code restore skipped."
         return
     }
@@ -657,53 +750,23 @@ function Restore-BiosMbrBootCode {
         throw "Pre-GRUB MBR backup checksum verification failed."
     }
 
-    $devicePath = "\\.\PhysicalDrive$DiskNumber"
-    $stream = New-Object IO.FileStream(
-        $devicePath,
-        [IO.FileMode]::Open,
-        [IO.FileAccess]::ReadWrite,
-        [IO.FileShare]::ReadWrite
-    )
-    try {
-        [byte[]]$current = New-Object byte[] 512
-        if ($stream.Read($current, 0, $current.Length) -ne 512) {
-            throw "Cannot read the current BIOS MBR."
-        }
-        $currentBootCode = [Convert]::ToBase64String($current, 0, 440)
-        $backupBootCode = [Convert]::ToBase64String($backup, 0, 440)
-        if ($currentBootCode -ne $backupBootCode) {
-            $stream.Position = 0
-            $stream.Write($backup, 0, 440)
-            $stream.Flush($true)
-        }
-        $stream.Position = 0
-        [byte[]]$verified = New-Object byte[] 512
-        if ($stream.Read($verified, 0, $verified.Length) -ne 512) {
-            throw "Cannot verify the restored BIOS MBR."
-        }
-        if ([Convert]::ToBase64String($verified, 0, 440) -ne $backupBootCode) {
-            throw "BIOS MBR boot-code restoration could not be verified."
-        }
-    } finally {
-        $stream.Dispose()
+    $disk = Get-Disk -Number $DiskNumber -ErrorAction Stop
+    if ([string]$disk.PartitionStyle -ne "MBR" -or
+        [int]$disk.LogicalSectorSize -notin @(512, 4096) -or
+        [int]$disk.PhysicalSectorSize -notin @(512, 4096)) {
+        throw "Cannot prove the BIOS disk sector geometry."
     }
+    $sectorSize = [Math]::Max([int]$disk.LogicalSectorSize, [int]$disk.PhysicalSectorSize)
+    Import-Module (Join-Path $Root "Libertix.BiosMbr.psm1") -Force -ErrorAction Stop
+    Initialize-LibertixBiosMbrIo
+    [Libertix.BiosMbrIo]::Restore("\\.\PhysicalDrive$DiskNumber", $sectorSize, $backup)
     Write-RecoveryLog "BIOS MBR boot code restored from the durable pre-GRUB backup."
 }
 
 function Remove-TemporaryBootPayload {
-    foreach ($temporaryBootFile in $TemporaryBootFiles) {
-        if (Test-Path -LiteralPath $temporaryBootFile -PathType Leaf) {
-            Remove-Item -LiteralPath $temporaryBootFile -Force -ErrorAction Stop
-            Write-RecoveryLog "Removed temporary boot file: $temporaryBootFile"
-        }
-    }
-    $remainingFiles = @(
-        $TemporaryBootFiles |
-            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
-    )
-    if ($remainingFiles.Count -ne 0) {
-        throw "Temporary boot payload remains: $($remainingFiles -join ', ')"
-    }
+    $planId = Read-EnvValue -Path $Pending -Name "PLAN_ID"
+    Remove-LibertixBiosBootPayload -SystemRoot $SystemDrive -RecoveryRoot $Root -PlanId $planId
+    Write-RecoveryLog "Verified transaction-owned BIOS boot payload cleanup completed."
 }
 
 function Invoke-WindowsShareFinalize {
@@ -815,80 +878,15 @@ function Remove-WindowsShareAfterRollback {
         }
     }
 
-    $shareTask = Get-ScheduledTask `
-        -TaskName "LibertixLinuxReadOnly" `
-        -ErrorAction SilentlyContinue
-    if ($null -ne $shareTask) {
-        Unregister-ScheduledTask `
-            -TaskName "LibertixLinuxReadOnly" `
-            -Confirm:$false `
-            -ErrorAction Stop
-    }
+    Import-Module $TemporaryArtifactsModulePath -Force -ErrorAction Stop
+    Remove-LibertixWindowsShareTasks -ShareRoot $WindowsShareRoot
     if (Test-Path -LiteralPath $WindowsShareRoot) {
         Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
     }
-    if (
-        (Test-Path -LiteralPath $WindowsShareRoot) -or
-        $null -ne (Get-ScheduledTask `
-            -TaskName "LibertixLinuxReadOnly" `
-            -ErrorAction SilentlyContinue)
-    ) {
+    if (Test-Path -LiteralPath $WindowsShareRoot) {
         throw "Windows read-only Linux sharing cleanup could not be verified."
     }
     Write-RecoveryLog "Removed Windows read-only Linux sharing after rollback."
-}
-
-function Wait-SystemDriveResizeCapacity {
-    param(
-        [Parameter(Mandatory = $true)][int]$DiskNumber,
-        [Parameter(Mandatory = $true)][int64]$RequiredSize,
-        [int]$TimeoutSeconds = 60
-    )
-
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $capacityReadFailures = 0
-    do {
-        # Removing a partition updates the disk before every Storage CIM object
-        # sees the new free extent. Refresh both caches before trusting SizeMax.
-        Update-HostStorageCache -ErrorAction SilentlyContinue
-        Update-Disk -Number $DiskNumber -ErrorAction SilentlyContinue | Out-Null
-
-        try {
-            $partition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-            $supported = Get-PartitionSupportedSize `
-                -DriveLetter $SystemDriveLetter `
-                -ErrorAction Stop
-        } catch {
-            $capacityReadFailures++
-            if ($capacityReadFailures -eq 1) {
-                Write-RecoveryLog (
-                    "Windows storage capacity is still refreshing after partition " +
-                    "removal; retrying: $($_.Exception.Message)"
-                )
-            }
-            if ([DateTime]::UtcNow -ge $deadline) {
-                throw (
-                    "Windows storage capacity did not become readable within " +
-                    "$TimeoutSeconds seconds: $($_.Exception.Message)"
-                )
-            }
-            Start-Sleep -Seconds 2
-            continue
-        }
-        if ($partition.Size -ge $RequiredSize -or $supported.SizeMax -ge $RequiredSize) {
-            if ($capacityReadFailures -gt 0) {
-                Write-RecoveryLog (
-                    "Windows storage capacity became readable after " +
-                    "$capacityReadFailures transient failure(s)."
-                )
-            }
-            return $supported
-        }
-        if ([DateTime]::UtcNow -ge $deadline) {
-            return $supported
-        }
-        Start-Sleep -Seconds 2
-    } while ($true)
 }
 
 function Remove-EmptyTransactionExtendedContainer {
@@ -1011,7 +1009,8 @@ try {
     Set-LibertixShutdownVerificationPriority
     $script:TrackRecoveryExecutionState = $false
     $recoveryExecutionState = Read-RecoveryExecutionState
-    $rollbackFromSucceeded = [string]$recoveryExecutionState.status -eq "succeeded"
+    $rollbackFromSucceeded = [string]$recoveryExecutionState.status -eq "succeeded" -or
+        "target.bootloader-installed" -in @($recoveryExecutionState.completedSteps)
     $temporaryBootWasPrepared = (
         "windows.temporary-boot-prepared" -in
         @($recoveryExecutionState.completedSteps)
@@ -1126,7 +1125,8 @@ try {
             Restore-BcdState -Required
         }
         $null = Invoke-RecoveryOperation -Name "windows-share.pending-cleanup" -Operation {
-            Remove-PendingWindowsSharePayload
+            if ($rollbackFromSucceeded) { Remove-WindowsShareAfterRollback }
+            else { Remove-PendingWindowsSharePayload }
         }
         $null = Invoke-RecoveryOperation -Name "hibernation.restore" -Operation {
             Restore-OriginalHibernationSetting
@@ -1137,12 +1137,16 @@ try {
         $null = Invoke-RecoveryOperation -Name "downloads.cleanup" -Operation {
             Remove-TransactionArtifacts
         }
+        $null = Invoke-RecoveryOperation -Name 'source-encryption.verify' -Operation {
+            Assert-OriginalSourceEncryption
+        }
+        Assert-RecoveryOperationsSucceeded
+        $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
+            Remove-RecoveryPromptTask -Required
+        }
         Assert-RecoveryOperationsSucceeded
         $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
             Remove-RecoveryTask -Required
-        }
-        $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
-            Remove-RecoveryPromptTask -Required
         }
         Assert-RecoveryOperationsSucceeded
         Complete-RecoveryAttemptState
@@ -1158,6 +1162,23 @@ try {
         exit 2
     }
 
+    if ($VerifiedUninstall) {
+        Import-Module (Join-Path $Root 'Libertix.StorageBaseline.psm1') -ErrorAction Stop
+        Assert-LibertixUninstallStorageBaseline -RecoveryRoot $Root
+        $uninstallPlan = Get-Content -LiteralPath (Join-Path $Root 'installation-plan.json') -Raw |
+            ConvertFrom-Json -ErrorAction Stop
+        $linuxDisk = if ([int]$uninstallPlan.schemaVersion -eq 5) { $uninstallPlan.allocation } else { $uninstallPlan.disk }
+        $linuxOffset = Get-LibertixPlannedLinuxOffset -Plan $uninstallPlan
+        $linuxPartitions = @(Get-Partition -DiskNumber $linuxDisk.number -ErrorAction Stop | Where-Object {
+            [long]$_.Offset -eq $linuxOffset
+        })
+        if ($linuxPartitions.Count -eq 1) {
+            Assert-LibertixInstalledFilesystemIdentity -Partition $linuxPartitions[0] -RecoveryRoot $Root
+        } elseif ($linuxPartitions.Count -gt 1 -or
+            [string]$recoveryExecutionState.status -notin @('rollback-running', 'rolled-back')) {
+            throw 'The installed Linux filesystem is missing before uninstall.'
+        }
+    }
     $script:RecoveryRollbackRequested = $true
     $script:TrackRecoveryExecutionState = Initialize-RecoveryExecutionState `
         -State $recoveryExecutionState
@@ -1210,22 +1231,49 @@ try {
         $stagingMinBytes = 1
     }
     $stagingMaxBytes = $stagingBytes + $partitionSizeTolerance
-    $alignmentPadding =
-        ($initialSystemOffset + $initialSystemSize) % $PartitionAlignmentBytes
-    $expectedTransactionOffset = `
-        $initialSystemOffset + $initialSystemSize - $alignmentPadding - $expectedBytes
-    [int64]$initialSystemEnd = $initialSystemOffset + $initialSystemSize
+    $rollbackPlan = Get-Content -LiteralPath (Join-Path $Root 'installation-plan.json') `
+        -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($expectedDiskId) -or
+        $expectedRecoveryRunId -notmatch '^[0-9a-f]{32}$' -or
+        [int]$rollbackPlan.schemaVersion -notin @(4, 5) -or [string]$rollbackPlan.firmware -ne 'bios' -or
+        [string]$rollbackPlan.planId -ne $expectedRecoveryRunId -or
+        [string]$rollbackPlan.runtime.recoveryRunId -ne $expectedRecoveryRunId -or
+        [string]$rollbackPlan.disk.systemDrive -ne $SystemDrive -or
+        [int]$rollbackPlan.disk.number -ne $diskNumber -or
+        ([string]$rollbackPlan.disk.uniqueId).Trim() -ne $expectedDiskId.Trim() -or
+        [int]$rollbackPlan.disk.windows.number -ne $systemPartitionNumber -or
+        [long]$rollbackPlan.disk.windows.offsetBytes -ne $initialSystemOffset -or
+        [long]$rollbackPlan.disk.windows.sizeBytes -ne $initialSystemSize -or
+        [long]$rollbackPlan.disk.recovery.offsetBytes -ne $recoveryPartitionOffset -or
+        [long]$rollbackPlan.disk.installer.finalSizeBytes -ne $expectedBytes -or
+        [long]$rollbackPlan.disk.installer.stagingSizeBytes -ne $stagingBytes) {
+        throw 'The BIOS rollback plan does not match its pending recovery metadata.'
+    }
 
     $script:RecoveryCompensationSequenceStarted = $true
+    if ($VerifiedUninstall) {
+        # Restore a bootable Windows path before deleting the filesystem used by GRUB.
+        $mbrRestored = Invoke-RecoveryOperation -Name 'mbr.restore' -Operation {
+            Restore-BiosMbrBootCode -DiskNumber $diskNumber -ExecutionState $recoveryExecutionState
+        }
+        if (-not $mbrRestored) { throw 'Windows boot-code restoration failed; Linux was not removed.' }
+        $bcdRestored = Invoke-RecoveryOperation -Name 'bcd.restore' -Operation {
+            Restore-BcdState -Required:$temporaryBootWasPrepared -PreserveUnrelatedChanges
+        }
+        if (-not $bcdRestored) { throw 'Windows boot-menu restoration failed; Linux was not removed.' }
+    }
     $diskLayoutRestored = Invoke-RecoveryOperation -Name "disk-layout.restore" -Operation {
         $systemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
         if (
             $systemPartition.DiskNumber -ne $diskNumber -or
-            $systemPartition.PartitionNumber -ne $systemPartitionNumber
+            $systemPartition.PartitionNumber -ne $systemPartitionNumber -or
+            [long]$systemPartition.Offset -ne $initialSystemOffset -or
+            [long]$systemPartition.Size -gt $initialSystemSize
         ) {
             throw "Windows system partition identity changed; refusing rollback."
         }
         $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
+        Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $rollbackPlan.disk
         if (
             $expectedDiskId -and
             ([string]$disk.UniqueId).Trim() -ne $expectedDiskId.Trim()
@@ -1233,29 +1281,73 @@ try {
             throw "Windows system disk identity changed; refusing rollback."
         }
 
+        $sourcePlanDisk = $rollbackPlan.disk
+        $sourceDefinition = $rollbackPlan.disk.windows
+        $sourceDrive = $SystemDrive
+        $sourcePartition = $systemPartition
+        $sourceRecoveryBoundary = $recoveryPartitionOffset
+        $separateSource = $rollbackPlan.PSObject.Properties.Name -contains 'allocation' -and
+            $null -ne $rollbackPlan.allocation
+        if (([int]$rollbackPlan.schemaVersion -eq 5) -ne $separateSource) {
+            throw 'The BIOS rollback allocation does not match its schema version.'
+        }
+        if ($separateSource) {
+            $sourcePlanDisk = $rollbackPlan.allocation
+            $sourceDefinition = $sourcePlanDisk.sourcePartition
+            $sourceDrive = [string]$sourcePlanDisk.sourceDrive
+            if ([string]$sourcePlanDisk.partitionStyle -ne 'MBR' -or
+                [int]$sourcePlanDisk.number -eq $diskNumber -or
+                [string]$sourcePlanDisk.partitionTableId -eq [string]$rollbackPlan.disk.partitionTableId -or
+                $sourceDrive -cnotmatch '^[A-Z]:$' -or $sourceDrive -eq $SystemDrive -or
+                [string]::IsNullOrWhiteSpace([string]$sourcePlanDisk.sourceVolumeId) -or
+                [long]$systemPartition.Size -ne $initialSystemSize) {
+                throw 'The BIOS rollback cannot prove a separate source without changing Windows.'
+            }
+            $sourcePartition = Get-Partition -DriveLetter $sourceDrive.TrimEnd(':') -ErrorAction Stop
+            Assert-LibertixSourceVolumeIdentity -Partition $sourcePartition -PlanDisk $sourcePlanDisk `
+                -SourcePartition $sourceDefinition -DriveLetter $sourceDrive.TrimEnd(':') `
+                -ExpectedVolumeId ([string]$sourcePlanDisk.sourceVolumeId)
+            $sourceRecoveryBoundary = 0
+        }
+        [long]$sourceOriginalOffset = $sourceDefinition.offsetBytes
+        [long]$sourceOriginalSize = $sourceDefinition.sizeBytes
+        if ($sourceOriginalOffset -le 0 -or $sourceOriginalSize -le 0 -or
+            $sourceOriginalSize -gt [long]$sourcePlanDisk.sizeBytes -or
+            $sourceOriginalOffset -gt ([long]$sourcePlanDisk.sizeBytes - $sourceOriginalSize) -or
+            [long]$sourcePartition.Size -le 0 -or [long]$sourcePartition.Size -gt $sourceOriginalSize -or
+            [int]$sourcePartition.PartitionNumber -ne [int]$sourceDefinition.number) {
+            throw 'The BIOS rollback source extent is invalid.'
+        }
+        [int]$sourceDiskNumber = $sourcePlanDisk.number
+        [long]$sourceOriginalEnd = $sourceOriginalOffset + $sourceOriginalSize
+        [long]$sourceExpectedTransactionOffset = if ($VerifiedUninstall) {
+            Get-LibertixPlannedLinuxOffset -Plan $rollbackPlan
+        } else {
+            $sourceOriginalEnd - ($sourceOriginalEnd % $PartitionAlignmentBytes) - $expectedBytes
+        }
+
         # Imaging and partitioning tools can use different alignment padding. A
         # transaction candidate must still be wholly owned by the exact extent
-        # released from the recorded Windows partition. This accepts variable
-        # padding without allowing recovery to cross the original Windows end.
-        $partitions = Get-Partition -DiskNumber $diskNumber | Sort-Object Offset
+        # released from the recorded source partition, never another disk's free space.
+        $partitions = Get-Partition -DiskNumber $sourceDiskNumber | Sort-Object Offset
         $candidates = @()
-        [int64]$systemPartitionEnd = (
-            [int64]$systemPartition.Offset + [int64]$systemPartition.Size
+        [int64]$sourcePartitionEnd = (
+            [int64]$sourcePartition.Offset + [int64]$sourcePartition.Size
         )
 
         foreach ($partition in $partitions) {
-            if ($partition.PartitionNumber -eq $systemPartition.PartitionNumber) {
+            if ($partition.PartitionNumber -eq $sourcePartition.PartitionNumber) {
                 continue
             }
             [int64]$partitionStart = [int64]$partition.Offset
             [int64]$partitionEnd = $partitionStart + [int64]$partition.Size
             if (
                 [int]$partition.MbrType -in @(5, 15, 133) -or
-                $partitionStart -lt $systemPartitionEnd -or
-                $partitionEnd -gt $initialSystemEnd -or
+                $partitionStart -lt $sourcePartitionEnd -or
+                $partitionEnd -gt $sourceOriginalEnd -or
                 (
-                    $recoveryPartitionOffset -gt 0 -and
-                    $partitionEnd -gt $recoveryPartitionOffset
+                    $sourceRecoveryBoundary -gt 0 -and
+                    $partitionEnd -gt $sourceRecoveryBoundary
                 )
             ) {
                 continue
@@ -1295,7 +1387,12 @@ try {
             if (
                 ($isTemporaryFat -and -not $matchesStagingSize -and -not $matchesFinalSize) -or
                 ($isLinuxFileSystem -and -not $matchesFinalSize) -or
-                ($isRawTransaction -and -not $matchesStagingSize)
+                ($isRawTransaction -and -not (Test-RecoveryRawPartitionGeometry `
+                    -Partition $partition `
+                    -FinalOffset $sourceExpectedTransactionOffset `
+                    -FinalSize $expectedBytes `
+                    -StagingSize $stagingBytes `
+                    -Alignment $partitionSizeTolerance))
             ) {
                 continue
             }
@@ -1317,6 +1414,9 @@ try {
 
         if (@($candidates).Count -eq 1) {
             $candidate = $candidates[0]
+            if ($VerifiedUninstall) {
+                Assert-LibertixInstalledFilesystemIdentity -Partition $candidate.Partition -RecoveryRoot $Root
+            }
             $number = $candidate.Partition.PartitionNumber
             $candidateOffset = [int64]$candidate.Partition.Offset
             $candidateSize = [int64]$candidate.Partition.Size
@@ -1327,76 +1427,52 @@ try {
                 "fs=$($candidate.FileSystem)."
             )
             Remove-Partition `
-                -DiskNumber $diskNumber `
+                -DiskNumber $sourceDiskNumber `
                 -PartitionNumber $number `
                 -Confirm:$false `
                 -ErrorAction Stop
             Start-Sleep -Seconds 2
             Remove-EmptyTransactionExtendedContainer `
-                -DiskNumber $diskNumber `
+                -DiskNumber $sourceDiskNumber `
                 -TransactionOffset $candidateOffset `
                 -TransactionSize $candidateSize `
-                -SystemPartitionEnd $systemPartitionEnd `
-                -OriginalSystemPartitionEnd $initialSystemEnd `
-                -RecoveryPartitionOffset $recoveryPartitionOffset
+                -SystemPartitionEnd $sourcePartitionEnd `
+                -OriginalSystemPartitionEnd $sourceOriginalEnd `
+                -RecoveryPartitionOffset $sourceRecoveryBoundary
         } else {
             Write-RecoveryLog (
                 "No transaction partition exists; checking whether only the " +
                 "system partition needs extension."
             )
             Remove-EmptyTransactionExtendedContainer `
-                -DiskNumber $diskNumber `
-                -TransactionOffset $expectedTransactionOffset `
+                -DiskNumber $sourceDiskNumber `
+                -TransactionOffset $sourceExpectedTransactionOffset `
                 -TransactionSize $stagingBytes `
-                -SystemPartitionEnd $systemPartitionEnd `
-                -OriginalSystemPartitionEnd $initialSystemEnd `
-                -RecoveryPartitionOffset $recoveryPartitionOffset
+                -SystemPartitionEnd $sourcePartitionEnd `
+                -OriginalSystemPartitionEnd $sourceOriginalEnd `
+                -RecoveryPartitionOffset $sourceRecoveryBoundary
         }
 
-        $currentSystemPartition = Get-Partition `
-            -DriveLetter $SystemDriveLetter `
-            -ErrorAction Stop
-        if ($currentSystemPartition.Size -ne $initialSystemSize) {
-            $supported = Wait-SystemDriveResizeCapacity `
-                -DiskNumber $diskNumber `
-                -RequiredSize $initialSystemSize
-            if (
-                $supported.SizeMin -gt $initialSystemSize -or
-                $supported.SizeMax -lt $initialSystemSize
-            ) {
-                throw (
-                    "$SystemDrive cannot be restored to its initial size " +
-                    "($initialSystemSize); SizeMin=$($supported.SizeMin), " +
-                    "SizeMax=$($supported.SizeMax)."
-                )
-            }
-            Write-RecoveryLog (
-                "Restoring $SystemDrive to its exact initial size: " +
-                "$initialSystemSize bytes."
-            )
-            Resize-Partition `
-                -DriveLetter $SystemDriveLetter `
-                -Size $initialSystemSize `
-                -ErrorAction Stop
-        } else {
-            Write-RecoveryLog (
-                "$SystemDrive is already at its initial size; resize skipped."
-            )
+        if ($separateSource) {
+            Restore-LibertixSourceVolumeInitialSize -SourceDrive $sourceDrive -PlanDisk $sourcePlanDisk `
+                -SourcePartition $sourceDefinition -ExpectedVolumeId ([string]$sourcePlanDisk.sourceVolumeId)
+            return
         }
-
-        $finalSystemPartition = Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop
-        if ($finalSystemPartition.Size -ne $initialSystemSize) {
-            throw "$SystemDrive rollback verification failed: size=$($finalSystemPartition.Size), expected=$initialSystemSize."
-        }
+        Restore-LibertixSystemDriveInitialSize -PlanDisk $rollbackPlan.disk -State ([pscustomobject]@{
+            SystemDrive = $SystemDrive
+            DiskNumber = $diskNumber
+            DiskUniqueId = $expectedDiskId
+            OriginalCSize = $initialSystemSize
+        })
     }
 
-    $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
-        Restore-BcdState -Required:$temporaryBootWasPrepared
-    }
-    $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
-        Restore-BiosMbrBootCode `
-            -DiskNumber $diskNumber `
-            -Required:$temporaryBootWasPrepared
+    if (-not $VerifiedUninstall) {
+        $bcdRestored = Invoke-RecoveryOperation -Name "bcd.restore" -Operation {
+            Restore-BcdState -Required:$temporaryBootWasPrepared
+        }
+        $mbrRestored = Invoke-RecoveryOperation -Name "mbr.restore" -Operation {
+            Restore-BiosMbrBootCode -DiskNumber $diskNumber -ExecutionState $recoveryExecutionState
+        }
     }
     $null = Invoke-RecoveryOperation -Name "windows-share.cleanup" -Operation {
         if ($rollbackFromSucceeded) {
@@ -1463,6 +1539,10 @@ try {
     }
     Assert-RecoveryOperationsSucceeded
 
+    $null = Invoke-RecoveryOperation -Name 'source-encryption.verify' -Operation {
+        Assert-OriginalSourceEncryption
+    }
+    Assert-RecoveryOperationsSucceeded
     if ($script:TrackRecoveryExecutionState) {
         $null = Invoke-RecoveryOperation `
             -Name "ledger.recovery-armed.compensate" `
@@ -1481,14 +1561,40 @@ try {
     }
     Assert-RecoveryOperationsSucceeded
 
-    $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
-        Remove-RecoveryTask -Required
-    }
     $null = Invoke-RecoveryOperation -Name "prompt-task.remove" -Operation {
         Remove-RecoveryPromptTask -Required
     }
     Assert-RecoveryOperationsSucceeded
+    $null = Invoke-RecoveryOperation -Name "startup-task.remove" -Operation {
+        Remove-RecoveryTask -Required
+    }
+    Assert-RecoveryOperationsSucceeded
     Complete-RecoveryAttemptState
+    if ($VerifiedUninstall) {
+        $null = Invoke-RecoveryOperation -Name 'uninstall.final-verification' -Operation {
+            Assert-LibertixUninstallComplete -RecoveryRoot $Root `
+                -RecoveryTaskNames @($TaskName, $PromptTaskName) `
+                -WriteLog { param($Message) Write-RecoveryLog $Message } -VerifyBoot {
+                    $disk = Get-Disk -Number $diskNumber -ErrorAction Stop
+                    $sectorSize = [Math]::Max([int]$disk.LogicalSectorSize, [int]$disk.PhysicalSectorSize)
+                    [Libertix.BiosMbrIo]::VerifyBootCode("\\.\PhysicalDrive$diskNumber", $sectorSize,
+                        [IO.File]::ReadAllBytes($MbrBackup))
+                    $bcd = Invoke-LibertixNativeCommand `
+                        -FilePath (Get-LibertixNativeSystemExecutable -FileName 'bcdedit.exe') `
+                        -ArgumentList @('/enum', 'all', '/v') -TimeoutSeconds 60
+                    if ($bcd.ExitCode -ne 0 -or $bcd.StandardOutput -match
+                        [regex]::Escape("Libertix BIOS Installer $script:RecoveryCorrelationId")) {
+                        throw 'The final BIOS BCD verification failed.'
+                    }
+                    'Original BIOS boot code verified; transaction BCD entry absent.'
+                }
+        }
+        Assert-RecoveryOperationsSucceeded
+        $null = Invoke-RecoveryOperation -Name "post-install-result.rollback-complete" -Operation {
+            $null = Set-LibertixPostInstallRolledBack -RecoveryRoot $Root
+        }
+        Assert-RecoveryOperationsSucceeded
+    }
     $successfulOperationCount = @(
         $script:RecoveryOperationRecords |
             Where-Object { $_.status -eq "success" }

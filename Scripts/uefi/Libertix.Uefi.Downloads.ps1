@@ -21,6 +21,17 @@ function Invoke-BoundedHttpDownload {
 
     if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
 
+    if (Get-Variable -Name LocalFilepoolServer -ValueOnly -ErrorAction SilentlyContinue) {
+        if (-not ("Libertix.Helpers.LocalFilepoolDownload" -as [type])) {
+            Add-Type -Path (Join-Path $PSScriptRoot "..\native\LocalFilepoolDownload.cs") -ErrorAction Stop
+        }
+        $download = [Libertix.Helpers.LocalFilepoolDownload]::DownloadAsync(
+            $LocalFilepoolServer, $Url, $Destination, $MaxBytes, $null,
+            [Threading.CancellationToken]::None)
+        $download.GetAwaiter().GetResult()
+        return
+    }
+
     $request = [Net.HttpWebRequest]::Create($Url)
     $request.AllowAutoRedirect = $true
     $request.Timeout = $TimeoutSeconds * 1000
@@ -429,10 +440,41 @@ function Start-RobustDownload {
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$Destination,
         [Parameter(Mandatory = $true)][string]$Label,
-        [Parameter(Mandatory = $true)][int64]$MaxBytes
+        [Parameter(Mandatory = $true)][int64]$MaxBytes,
+        [string]$LocalFileName = "",
+        # Distribution ISOs may be absent from the selected folder; download them instead.
+        [switch]$LocalFileOptional
     )
 
     if ($MaxBytes -le 0) { throw "MaxBytes must be positive." }
+    $source = $null
+    if (-not [string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+        if ($LocalFileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+            throw "The selected local filepool artifact name is invalid: $LocalFileName"
+        }
+        $source = Join-Path $LocalFilepoolDirectory $LocalFileName
+        if ($LocalFileOptional -and -not (Test-Path -LiteralPath $source)) {
+            Write-Log "$Label is not in the selected local filepool; downloading it." "Cyan"
+            $source = $null
+        }
+    }
+    if ($source) {
+        $item = Get-Item -LiteralPath $source -ErrorAction Stop
+        if ($item.Length -gt $MaxBytes -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "The selected local filepool artifact is unsafe: $LocalFileName"
+        }
+        Write-Log "Copying $Label from the selected local filepool..." "Cyan"
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName(
+            [IO.Path]::GetFullPath($Destination))) | Out-Null
+        Copy-Item -LiteralPath $source -Destination $Destination -Force -ErrorAction Stop
+        return
+    }
+
+    if (Get-Variable -Name LocalFilepoolServer -ValueOnly -ErrorAction SilentlyContinue) {
+        # No aria2/BITS fallback: every request must stay on the accepted server.
+        Invoke-BoundedHttpDownload -Url $Url -Destination $Destination -MaxBytes $MaxBytes
+        return
+    }
 
     $maximumAria2Attempts = [int]$script:DownloadPolicy.maximumAttempts
     $retryBaseDelaySeconds = [int]$script:DownloadPolicy.retryBaseDelaySeconds
@@ -488,6 +530,24 @@ function Start-RobustDownload {
 }
 
 function Set-DistributionIsoOnWindows {
+    # A failed run that never reached cleanup leaves its verified ISO in its own
+    # plan directory. Adopt it instead of downloading the same file again; the
+    # hash check below still verifies it at the plan-owned path before use.
+    try {
+        $reusedFrom = Move-LibertixReusableDistributionIso `
+            -SystemDrive $SystemDrive `
+            -PlanId ([string]$installationPlan.planId) `
+            -FileName ([IO.Path]::GetFileName($DistributionIsoPath)) `
+            -Sha256 $DistributionIsoSha256 `
+            -MinimumBytes $script:MinimumDistributionIsoBytes `
+            -MaximumBytes $script:MaximumDistributionIsoBytes
+        if ($reusedFrom) {
+            Write-Log "Reusing verified distribution ISO from a previous run: $reusedFrom" "Green"
+        }
+    } catch {
+        Write-Log "Previous distribution ISO could not be reused: $($_.Exception.Message)" "Yellow"
+    }
+
     $existing = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction SilentlyContinue
     if ($existing -and $existing.Length -gt $script:MaximumDistributionIsoBytes) {
         Write-Log "Existing distribution ISO exceeds the supported size limit; replacing it." "Yellow"
@@ -504,12 +564,16 @@ function Set-DistributionIsoOnWindows {
         Remove-Item -LiteralPath $DistributionIsoPath -Force
     }
 
-    Write-Log "Downloading distribution ISO to $DistributionIsoPath..." "Cyan"
+    if ([string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+        Write-Log "Downloading distribution ISO to $DistributionIsoPath..." "Cyan"
+    }
     Start-RobustDownload `
         -Url $DistributionIsoUrl `
         -Destination $DistributionIsoPath `
         -Label "distribution ISO" `
-        -MaxBytes $script:MaximumDistributionIsoBytes
+        -MaxBytes $script:MaximumDistributionIsoBytes `
+        -LocalFileName ([string]$installationPlan.distribution.installerIsoFileName) `
+        -LocalFileOptional
 
     $downloadedIso = Get-Item -LiteralPath $DistributionIsoPath -ErrorAction Stop
     if ($downloadedIso.Length -le $script:MinimumDistributionIsoBytes) {

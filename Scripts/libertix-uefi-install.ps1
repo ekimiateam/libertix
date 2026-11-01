@@ -11,6 +11,9 @@ param(
     [switch]$RecoverPreviousTransaction = $false,
     [string]$ExpectedRecoveryRunId = "",
     [string]$FilepoolBaseUrl = "",
+    [string]$LocalFilepoolDirectory = "",
+    [string]$LocalFilepoolServer = "",
+    [string]$Aria2ZipUrl = "",
     [string]$Aria2ExePath = "",
     [ValidateRange(0, 16)]
     [int]$Aria2Connections = 0,
@@ -40,8 +43,10 @@ $requiredModules = @(
     "Libertix.InstallationPlan.psm1",
     "Libertix.InstallationState.psm1",
     "Libertix.StorageGeometry.psm1",
+    "Libertix.StorageTargets.psm1",
     "Libertix.Process.psm1",
     "Libertix.Firmware.psm1",
+    "Libertix.FirmwareVariables.psm1",
     "Libertix.Download.psm1",
     "Libertix.TemporaryArtifacts.psm1",
     "Libertix.Transaction.psm1",
@@ -90,6 +95,15 @@ if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) {
             $ExecutionStatePath = [string]$config.ExecutionStatePath
         }
         $FilepoolBaseUrl = [string]$config.FilepoolBaseUrl
+        if ($config.PSObject.Properties.Name -contains "LocalFilepoolDirectory") {
+            $LocalFilepoolDirectory = [string]$config.LocalFilepoolDirectory
+        }
+        if ($config.PSObject.Properties.Name -contains "LocalFilepoolServer") {
+            $LocalFilepoolServer = [string]$config.LocalFilepoolServer
+        }
+        if ($config.PSObject.Properties.Name -contains "Aria2ZipUrl") {
+            $Aria2ZipUrl = [string]$config.Aria2ZipUrl
+        }
         $Aria2ExePath = [string]$config.Aria2ExePath
         $Aria2Connections = [int]$config.Aria2Connections
         if (-not $bootStrategyWasSpecified -and $config.PSObject.Properties.Name -contains "BootStrategy") {
@@ -172,6 +186,12 @@ if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTra
         throw "FilepoolBaseUrl is required and must be an absolute HTTP(S) URL supplied by Libertix."
     }
     $FilepoolBaseUrl = $FilepoolBaseUrl.TrimEnd("/")
+    if (-not [string]::IsNullOrWhiteSpace($LocalFilepoolDirectory)) {
+        $LocalFilepoolDirectory = [IO.Path]::GetFullPath($LocalFilepoolDirectory)
+        if (-not (Test-Path -LiteralPath $LocalFilepoolDirectory -PathType Container)) {
+            throw "The selected local filepool is no longer available."
+        }
+    }
 }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -183,19 +203,12 @@ $artifactCatalogPath = Join-Path $PSScriptRoot "config\Libertix.Artifacts.json"
 $artifactCatalog = Get-Content -LiteralPath $artifactCatalogPath -Raw -ErrorAction Stop |
     ConvertFrom-Json -ErrorAction Stop
 $Aria2ZipName = [string]$artifactCatalog.aria2.archiveFileName
-$downloadUrls = $null
-if (-not $Revert -and -not $RestoreWindowsSettings -and -not $RecoverPreviousTransaction) {
-    $downloadUrls = New-LibertixDownloadUrls `
-        -FilepoolBaseUrl $FilepoolBaseUrl `
-        -Aria2ZipName $Aria2ZipName
-}
 $InstallerIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoUrl } else { "" }
 $InstallerIsoName = "libertix-installer-uefi.iso"
 $InstallerIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.liveIsoSha256 } else { "" }
 $DistributionIsoUrl = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoUrl } else { "" }
 $DistributionIsoPath = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoWindowsPath } else { "" }
 $DistributionIsoSha256 = if ($installationPlan) { [string]$installationPlan.distribution.installerIsoSha256 } else { "" }
-$Aria2ZipUrl = if ($downloadUrls) { $downloadUrls.Aria2Zip } else { "" }
 $Aria2ZipSha256 = [string]$artifactCatalog.aria2.archiveSha256
 $Aria2ExeSha256 = [string]$artifactCatalog.aria2.executableSha256
 $Aria2CacheDir = "$SystemDrive\LibertixTools\aria2"
@@ -325,7 +338,7 @@ if ($RecoverPreviousTransaction) {
             # The durable ledger already proves every compensation. Run the
             # idempotent physical checks without attempting a second state
             # transition, then remove only the leftover active transaction.
-            $installationPlan = $null
+            # Keep the validated disk proof even when ledger transitions are disabled.
             $InstallationPlanPath = ""
             $ExecutionStatePath = ""
         } else {
@@ -352,6 +365,7 @@ if ($RecoverPreviousTransaction) {
             -Kind "Primary" `
             -CorrelationId $previousRecoveryCorrelationId `
             -Stage "previous-transaction-recovery"
+        if ($previousRecoveryError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
         exit 1
     }
 }
@@ -363,14 +377,14 @@ if ($Revert) {
         if ([string]$rollbackContext.ExecutionState.status -eq "pending") {
             throw "UEFI recovery execution state is pending; no rollback is active."
         }
+        $installationPlan = $rollbackContext.Plan
         if ([string]$rollbackContext.ExecutionState.status -eq "rolled-back") {
             # The ledger is already terminal. Keep the physical cleanup idempotent
             # without trying to record a second rollback transition.
-            $installationPlan = $null
+            # Storage verification still needs the original disk and Windows extent.
             $InstallationPlanPath = ""
             $ExecutionStatePath = ""
         } else {
-            $installationPlan = $rollbackContext.Plan
             $InstallationPlanPath = $rollbackContext.PlanPath
             $ExecutionStatePath = $rollbackContext.StatePath
         }
@@ -384,6 +398,7 @@ if ($Revert) {
             -Kind "Rollback" `
             -CorrelationId $ExpectedRecoveryRunId `
             -Stage "rollback"
+        if ($rollbackError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
         exit 1
     }
 }
@@ -436,9 +451,19 @@ try {
     }
 
     Assert-LibertixPlanMatchesCurrentStorage
+    Assert-LibertixAllocationMatchesCurrentStorage
     Test-LibertixSecureBootCompatibility -InstallationPlan $installationPlan
-    Set-WindowsVolumeReadableFromLinux
+    Assert-LibertixTransactionRecoveryRunId -ExpectedRecoveryRunId $RecoveryRunId
+    if (-not (Get-TransactionPartitionState)) {
+        Save-TransactionPreparationState -SystemPartition (Get-Partition -DriveLetter $SystemDriveLetter -ErrorAction Stop)
+    }
+    Assert-LibertixEspPreparationOwnership
+    Set-WindowsVolumeReadableFromLinux -VerifyStorageIdentity {
+        Assert-LibertixPlanMatchesCurrentStorage
+        Assert-LibertixAllocationMatchesCurrentStorage
+    }
     Set-LibertixInstallationPlanWindowsBitLockerState -State "FullyDecrypted"
+    Set-LibertixAllocationVolumeReadableFromLinux
     Start-LibertixTrackedStep -Step "windows.artifacts-verified"
     Write-LibertixProgress -Stage "installer-iso-download" -Percent 30
     Set-DistributionIsoOnWindows
@@ -493,6 +518,16 @@ try {
         -Kind "Primary" `
         -CorrelationId $diagnosticCorrelationId `
         -Stage $diagnosticStage
+    if ($preparationError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") {
+        try {
+            Set-LibertixTrackedFailure `
+                -Code "WINDOWS_PROCESS_TERMINATION_UNVERIFIED" `
+                -Message $preparationError.Exception.Message
+            Write-Log "Automatic revert is blocked until all previous writers are proven stopped." "Red"
+        } finally {
+            exit 173
+        }
+    }
     Write-Log "Error during preparation; running automatic revert..." "Yellow"
     try {
         Set-LibertixTrackedFailure `
@@ -513,6 +548,7 @@ try {
             -CorrelationId $diagnosticCorrelationId `
             -Stage "rollback"
         Write-Log "Tip: you can run with -Revert to restore Windows boot." "Yellow"
+        if ($revertError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
     }
     exit 1
 }

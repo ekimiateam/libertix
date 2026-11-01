@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.storage_fixtures import StorageFixtureRequest
 
 _INSTALLATION_POLICY = json.loads(
     (
@@ -30,12 +32,34 @@ FirstBoot = Literal["windows", "linux"]
 BootGuardianFault = Literal[
     "none",
     "bios-rollback",
+    "bios-controller-disconnect",
+    "bios-postinstall-rollback",
+    "uefi-postinstall-rollback",
     "boot-order",
     "bootnext-fallback",
     "bootnext-rollback",
     "preferred-path",
     "preferred-path-rollback",
 ]
+BIOS_BOOT_GUARDIAN_FAULTS = frozenset(
+    {"bios-rollback", "bios-controller-disconnect", "bios-postinstall-rollback"}
+)
+# The live installer is cancelled before Linux boots; the monitor must observe a rollback.
+CANCELLED_INSTALLATION_FAULTS = frozenset({"bios-rollback", "bios-controller-disconnect"})
+BOOTNEXT_FAULTS = frozenset({"bootnext-fallback", "bootnext-rollback"})
+PREFERRED_PATH_FAULTS = frozenset({"preferred-path", "preferred-path-rollback"})
+BOOT_GUARDIAN_REPAIR_FAULTS = frozenset({"boot-order", "preferred-path"})
+# Scenarios that must end with Windows restored exactly as captured before installation.
+ROLLBACK_FAULTS = frozenset(
+    {
+        "bios-rollback",
+        "bios-controller-disconnect",
+        "bios-postinstall-rollback",
+        "uefi-postinstall-rollback",
+        "bootnext-rollback",
+        "preferred-path-rollback",
+    }
+)
 
 
 class StepResult(BaseModel):
@@ -50,6 +74,7 @@ class OperationResult(BaseModel):
     operation: Literal["validation", "reset", "automation"]
     message: str
     steps: list[StepResult] = Field(default_factory=list)
+    campaign_summary: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ValidationRequest(BaseModel):
@@ -78,6 +103,44 @@ class ValidationRequest(BaseModel):
         return values or None
 
 
+class AutomationCampaignRequest(ValidationRequest):
+    """Nominal campaign with optional storage and UEFI recovery scenarios."""
+
+    model_config = ConfigDict(extra="forbid")
+    apply: Literal[True]
+    linux_username: str = "test"
+    linux_password: str = Field(min_length=4, max_length=128)
+    linux_size_gib: int = Field(default=20, ge=_MINIMUM_LINUX_SIZE_GIB, le=16384)
+    migrate_windows_preferences: bool = False
+    continue_after_failure: bool = False
+    include_nominal_scenarios: bool = True
+    include_storage_scenarios: bool = False
+    include_boot_guardian_scenarios: bool = False
+    include_local_filepool_scenarios: bool = False
+    start_scenario: str | None = Field(default=None, min_length=1, max_length=80)
+    retry_failed_scenarios: bool = False
+    start_scenario_attempt: Literal[1, 2] = 1
+
+    @model_validator(mode="after")
+    def validate_installation_options(self) -> AutomationCampaignRequest:
+        if not any(
+            (
+                self.include_nominal_scenarios,
+                self.include_storage_scenarios,
+                self.include_boot_guardian_scenarios,
+                self.include_local_filepool_scenarios,
+            )
+        ):
+            raise ValueError("At least one campaign scenario group must be enabled")
+        AutomationRequest(
+            apply=True,
+            linux_username=self.linux_username,
+            linux_password=self.linux_password,
+            linux_size_gib=self.linux_size_gib,
+        )
+        return self
+
+
 class AutomationRequest(ValidationRequest):
     """Destructive unattended Libertix installation request.
 
@@ -86,6 +149,28 @@ class AutomationRequest(ValidationRequest):
     """
 
     apply: Literal[True] = Field(description="Explicitly authorize the complete installation")
+    snapshot_mode: Literal["default", "secondary-disk"] = Field(
+        default="default",
+        description=(
+            "Restore RESET_SNAPSHOT by default, or SECONDARY_DISK_RESET_SNAPSHOT "
+            "for the explicitly requested secondary-disk test baseline"
+        ),
+    )
+    storage_fixture: StorageFixtureRequest = Field(default_factory=StorageFixtureRequest)
+    installation_target: Literal["windows", "secondary"] = "windows"
+    expected_compatibility_refusal: Literal["COMPAT_E_MBR_PRIMARY_LIMIT"] | None = None
+    local_filepool: bool = False
+
+    @model_validator(mode="after")
+    def validate_storage_fixture_snapshot(self) -> AutomationRequest:
+        if self.storage_fixture.secondary_data and self.snapshot_mode != "secondary-disk":
+            raise ValueError("secondary_data requires snapshot_mode=secondary-disk")
+        if self.storage_fixture.decrypt_secondary_volume and self.snapshot_mode != "secondary-disk":
+            raise ValueError("decrypt_secondary_volume requires snapshot_mode=secondary-disk")
+        if self.installation_target == "secondary" and self.snapshot_mode != "secondary-disk":
+            raise ValueError("secondary installation requires snapshot_mode=secondary-disk")
+        return self
+
     distribution: DistributionId = Field(
         default="mint", description="Distribution catalog id selected in the Libertix wizard"
     )
@@ -111,6 +196,8 @@ class AutomationRequest(ValidationRequest):
     monitor_iso: bool = Field(default=True)
     share_windows_files_in_linux: bool = Field(default=True)
     share_linux_files_in_windows: bool = Field(default=True)
+    migrate_windows_preferences: bool = Field(default=False)
+    preference_wallpaper: Literal["custom", "windows-default"] = "custom"
     simulate_stale_firmware_entries: bool = Field(
         default=False,
         description=(
@@ -126,6 +213,13 @@ class AutomationRequest(ValidationRequest):
     boot_guardian_fault: BootGuardianFault = Field(
         default="none",
         description=("Development-only recovery scenario used to prove rollback or boot repair"),
+    )
+    verify_uninstall: bool = Field(
+        default=False,
+        description=(
+            "Relaunch Libertix after successful post-install verification and prove the "
+            "interactive installed-Linux uninstall path"
+        ),
     )
 
     @field_validator("linux_username")

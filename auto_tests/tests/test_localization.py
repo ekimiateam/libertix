@@ -12,7 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CATALOGUE_PATH = ROOT / "Resources/Libertix.Translations.json"
-LANGUAGES = ("en", "fr", "es")
+LANGUAGES = ("en", "fr", "es", "ko")
 
 
 def translation_catalogue() -> dict[str, object]:
@@ -21,6 +21,22 @@ def translation_catalogue() -> dict[str, object]:
 
 def language_section(language: str, section: str) -> dict[str, str]:
     return translation_catalogue()["languages"][language][section]
+
+
+@pytest.mark.parametrize(
+    "language,limitation",
+    [
+        ("en", "will not automatically restore encryption"),
+        ("fr", "ne rétablira pas automatiquement le chiffrement"),
+        ("es", "no restaurará automáticamente el cifrado"),
+    ],
+)
+def test_final_warning_discloses_bitlocker_rollback_limit(language, limitation):
+    warning = language_section(language, "wpf")["WarningMessage"]
+    assert "BitLocker" in warning
+    assert limitation in warning
+    page = (ROOT / "Pages/WarningConfirmation.xaml").read_text(encoding="utf-8-sig")
+    assert 'Text="{DynamicResource WarningMessage}"' in page
 
 
 def load_i18n_module() -> ModuleType:
@@ -70,6 +86,7 @@ def test_supported_language_metadata_is_complete_and_exact() -> None:
         "en": ("English", "en_US.UTF-8", "us"),
         "fr": ("Français", "fr_FR.UTF-8", "fr"),
         "es": ("Español", "es_ES.UTF-8", "es"),
+        "ko": ("한국어", "ko_KR.UTF-8", "kr"),
     }
     for language, values in expected.items():
         entry = catalogue["languages"][language]
@@ -199,6 +216,7 @@ def test_linux_extraction_labels_are_concise_in_every_language() -> None:
         "en": ("Extracting the Linux system", "Extracting the Linux system:"),
         "fr": ("Extraction du système Linux", "Extraction du système Linux :"),
         "es": ("Extrayendo el sistema Linux", "Extrayendo el sistema Linux:"),
+        "ko": ("Linux 시스템 추출 중", "Linux 시스템 추출 중:"),
     }
 
     for language, (label, progress_prefix) in expected.items():
@@ -257,6 +275,7 @@ def test_live_translation_helper_loads_every_supported_language(language: str) -
         ("en", "Automatic installation"),
         ("fr", "Installation automatique"),
         ("es", "Instalación automática"),
+        ("ko", "자동 설치"),
     ),
 )
 def test_live_context_retry_preserves_language_exports(
@@ -300,7 +319,7 @@ printf '%s\n' "$LIBERTIX_I18N_AUTOMATIC_INSTALLATION"
 
 
 def test_bios_and_uefi_project_the_language_code_to_the_live() -> None:
-    bios = (ROOT / "Pages/ApplyChanges.Plan.cs").read_text(encoding="utf-8-sig")
+    bios = (ROOT / "Installation/InstallationEngine.Plan.cs").read_text(encoding="utf-8-sig")
     plan_exporter = (ROOT / "assets/live/libertix-installation-plan.py").read_text(
         encoding="utf-8-sig"
     )
@@ -347,7 +366,7 @@ def test_compatibility_preflight_uses_the_selected_language() -> None:
     assert "string languageCode = Localization.CurrentLanguage" in runner
     assert '" -LanguageCode " +' in runner
     assert "WindowsProcessRunner.QuoteArgument(languageCode)" in runner
-    assert '[ValidateSet("en", "fr", "es")]' in script
+    assert '[ValidateSet("en", "fr", "es", "ko")]' in script
     assert messages["checkMessages"]["COMPAT_010_PRIVILEGES"] == (
         "Checking administrator privileges"
     )
@@ -435,25 +454,25 @@ def test_confirmations_use_libertix_language_instead_of_windows_button_captions(
         for relative in (
             "MainWindow.xaml.cs",
             "Pages/ApplyChanges.xaml.cs",
-            "Pages/ApplyChanges.Cancellation.cs",
+            "Installation/InstallationEngine.Cancellation.cs",
         )
     )
 
     assert '<Page Include="Dialogs\\LocalizedConfirmationDialog.xaml" />' in project
     assert 'x:Name="YesButton"' in dialog
     assert 'x:Name="NoButton"' in dialog
-    assert sources.count("LocalizedConfirmationDialog.Show(") == 3
+    assert sources.count("LocalizedConfirmationDialog.Show(") == 4
     assert "MessageBoxButton.YesNo" not in sources
 
 
 def test_bcdedit_output_is_decoded_with_the_windows_oem_code_page() -> None:
-    system = (ROOT / "Pages/ApplyChanges.System.cs").read_text(encoding="utf-8-sig")
+    system = (ROOT / "Installation/InstallationEngine.System.cs").read_text(encoding="utf-8-sig")
     bcd_sources = "\n".join(
         (ROOT / relative).read_text(encoding="utf-8-sig")
         for relative in (
-            "Pages/ApplyChanges.Bios.cs",
-            "Pages/ApplyChanges.Processes.cs",
-            "Pages/ApplyChanges.Windows.cs",
+            "Installation/InstallationEngine.Bios.cs",
+            "Installation/InstallationEngine.Processes.cs",
+            "Installation/InstallationEngine.Windows.cs",
         )
     )
 
@@ -463,7 +482,11 @@ def test_bcdedit_output_is_decoded_with_the_windows_oem_code_page() -> None:
 
 def test_apply_changes_progress_does_not_embed_french_fallbacks() -> None:
     sources = "\n".join(
-        path.read_text(encoding="utf-8-sig") for path in (ROOT / "Pages").glob("ApplyChanges*.cs")
+        path.read_text(encoding="utf-8-sig")
+        for path in [
+            *(ROOT / "Pages").glob("ApplyChanges*.cs"),
+            *(ROOT / "Installation").glob("InstallationEngine*.cs"),
+        ]
     )
     forbidden = (
         'UpdateProgress(5, "Préparation',
@@ -550,7 +573,7 @@ def test_unattended_warning_has_dedicated_localized_copy() -> None:
 
     assert "UnattendedWarningTitle" in dialog
     assert "UnattendedWarningMessage" in dialog
-    for language in ("en", "fr", "es"):
+    for language in LANGUAGES:
         strings = catalog["languages"][language]["wpf"]
         assert strings["UnattendedWarningTitle"].strip()
         assert strings["UnattendedWarningMessage"].strip()

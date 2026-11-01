@@ -192,12 +192,23 @@ namespace Libertix.BootGuardian
     }
 
     [DataContract]
-    internal sealed class PreferredManifest
+    internal sealed class PreferredManifest : IExtensibleDataObject
     {
+        public ExtensionDataObject ExtensionData { get; set; }
         [DataMember(Name = "version", IsRequired = true)] public int Version { get; set; }
         [DataMember(Name = "runId", IsRequired = true)] public string RunId { get; set; }
         [DataMember(Name = "status", IsRequired = true)] public string Status { get; set; }
         [DataMember(Name = "preferred", IsRequired = true)] public PreferredHashes Preferred { get; set; }
+        [DataMember(Name = "windowsLoader", IsRequired = true)] public PreferredWindowsLoader WindowsLoader { get; set; }
+
+        internal string ToJson()
+        {
+            using (var stream = new MemoryStream())
+            {
+                new DataContractJsonSerializer(typeof(PreferredManifest)).WriteObject(stream, this);
+                return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+            }
+        }
 
         public static PreferredManifest Read(string path)
         {
@@ -210,11 +221,21 @@ namespace Libertix.BootGuardian
     }
 
     [DataContract]
-    internal sealed class PreferredHashes
+    internal sealed class PreferredHashes : IExtensibleDataObject
     {
+        public ExtensionDataObject ExtensionData { get; set; }
         [DataMember(Name = "shimSha256", IsRequired = true)] public string ShimSha256 { get; set; }
         [DataMember(Name = "grubSha256", IsRequired = true)] public string GrubSha256 { get; set; }
         [DataMember(Name = "mokManagerSha256", IsRequired = true)] public string MokManagerSha256 { get; set; }
         [DataMember(Name = "grubConfigSha256", IsRequired = true)] public string GrubConfigSha256 { get; set; }
+    }
+
+    [DataContract]
+    internal sealed class PreferredWindowsLoader : IExtensibleDataObject
+    {
+        public ExtensionDataObject ExtensionData { get; set; }
+        [DataMember(Name = "activePath", IsRequired = true)] public string ActivePath { get; set; }
+        [DataMember(Name = "backupPath", IsRequired = true)] public string BackupPath { get; set; }
+        [DataMember(Name = "sha256", IsRequired = true)] public string Sha256 { get; set; }
     }
 }

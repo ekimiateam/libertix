@@ -180,12 +180,7 @@ firmware_rollback_partition_is_owned() {
 
     [ "$partition" != "$WINDOWS_PART" ] \
         && [ "$(parent_disk_from_part "$partition")" = "$DISK" ] \
-        && {
-            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
-                "$INSTALLER_PARTITION_OFFSET_BYTES" ] ||
-            [ "$(partition_start_bytes "$DISK" "$partition" || true)" = \
-                "$INSTALLER_FINAL_OFFSET_BYTES" ]
-        }
+        && transaction_partition_extent_matches_manifest "$partition"
 }
 
 firmware_relocate_installer_partition_or_die() {
@@ -243,14 +238,14 @@ firmware_cleanup_partition_container_best_effort() {
 firmware_restore_boot_state_best_effort() {
     # On GPT, parted's "boot" flag is the ESP flag. Resolve the real ESP instead
     # of assuming partition 1, otherwise a rollback marks the wrong partition.
-    local esp_part esp_num
+    local esp_part esp_num windows_disk="${WINDOWS_DISK:-$DISK}"
     esp_part="$(find_esp_partition || true)"
     [ -n "$esp_part" ] && [ -b "$esp_part" ] || return 1
-    [ "$(parent_disk_from_part "$esp_part")" = "$DISK" ] || return 1
+    [ "$(parent_disk_from_part "$esp_part")" = "$windows_disk" ] || return 1
     esp_num="$(partition_number "$esp_part")"
     [ -n "$esp_num" ] || return 1
-    parted -s "$DISK" set "$esp_num" esp on 2>/dev/null || return 1
-    parted -sm "$DISK" print 2>/dev/null | awk -F: -v number="$esp_num" '
+    parted -s "$windows_disk" set "$esp_num" esp on 2>/dev/null || return 1
+    parted -sm "$windows_disk" print 2>/dev/null | awk -F: -v number="$esp_num" '
         $1 == number {
             count++
             if ($7 ~ /(^|,)(boot|esp)(,|;$)/) found=1
@@ -269,6 +264,7 @@ firmware_write_failure_marker_best_effort() {
 
 wait_for_prereqs() {
     mark "005-wait-prereqs"
+    load_libertix_staging_volume_label || die "Invalid or unavailable staging volume label"
     local i label_device
     for i in $(seq 1 60); do
         local disk_ready=0
@@ -292,7 +288,7 @@ wait_for_prereqs() {
             [ -n "$found_config" ] && config_ready=1
         fi
 
-        if [ "$config_ready" -eq 0 ]; then
+        if [ "$config_ready" -eq 0 ] && [ -n "${LIBERTIX_STAGING_VOLUME_LABEL:-}" ]; then
             while read -r label_device; do
                 [ -n "$label_device" ] || continue
                 [ "$(blkid -s LABEL -o value "$label_device" 2>/dev/null || true)" = \
@@ -314,7 +310,7 @@ wait_for_prereqs() {
 }
 
 find_esp_partition() (
-    local esp filesystem mountpoint="" mounted=false
+    local esp filesystem mountpoint="" mounted=false windows_disk="${WINDOWS_DISK:-$DISK}"
 
     cleanup_esp_probe_mount() {
         if [ "$mounted" = true ] && mountpoint -q "$mountpoint"; then
@@ -324,9 +320,9 @@ find_esp_partition() (
     }
     trap cleanup_esp_probe_mount EXIT HUP INT TERM
 
-    esp="$(partition_at_offset "$DISK" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)"
+    esp="$(partition_at_offset "$windows_disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true)"
     [ -n "$esp" ] && [ -b "$esp" ] || return 1
-    [ "$(parent_disk_from_part "$esp")" = "$DISK" ] || return 1
+    [ "$(parent_disk_from_part "$esp")" = "$windows_disk" ] || return 1
     filesystem="$(blkid -s TYPE -o value "$esp" 2>/dev/null || echo "")"
     case "$filesystem" in
         vfat|fat|msdos) ;;
@@ -348,6 +344,26 @@ find_esp_partition() (
     trap - EXIT HUP INT TERM
     echo "$esp"
 )
+
+remove_owned_temporary_efi_files() {
+    local esp_mount="$1" owner_file owner_run_id
+    if [ -e "$esp_mount/EFI/LibertixInstaller" ]; then
+        owner_file="$esp_mount/EFI/LibertixInstaller/.libertix-owner"
+        [ -f "$owner_file" ] || {
+            echo "Temporary EFI/LibertixInstaller ownership marker is missing" >&2
+            return 1
+        }
+        owner_run_id="$(tr -d '\r\n' < "$owner_file")"
+        if ! [[ "$RECOVERY_RUN_ID" =~ ^[0-9a-f]{32}$ ]] || [ "$owner_run_id" != "$RECOVERY_RUN_ID" ]; then
+            echo "Temporary EFI/LibertixInstaller belongs to another recovery run; preserving it" >&2
+            return 1
+        fi
+        echo "Removing temporary EFI/LibertixInstaller owned by $RECOVERY_RUN_ID"
+        rm -rf "$esp_mount/EFI/LibertixInstaller" || return 1
+        sync || return 1
+    fi
+    [ ! -e "$esp_mount/EFI/LibertixInstaller" ]
+}
 
 cleanup_final_uefi_bootloader_best_effort() (
     local bootnum entry_line esp_part esp_mount owner_file owner_run_id
@@ -391,6 +407,7 @@ cleanup_final_uefi_bootloader_best_effort() (
         sync || return 1
     fi
     [ ! -e "$esp_mount/EFI/Libertix" ] || return 1
+    remove_owned_temporary_efi_files "$esp_mount" || return 1
     umount "$esp_mount" || return 1
     rmdir "$esp_mount" 2>/dev/null || return 1
     trap - EXIT
@@ -488,7 +505,7 @@ ensure_windows_bootentry_for_current_esp_or_die() {
     fi
 
     echo "Windows Boot Manager entry is absent for the current ESP; creating it"
-    run_logged efibootmgr -c -d "$DISK" -p "$esp_num" \
+    run_logged efibootmgr -c -d "${WINDOWS_DISK:-$DISK}" -p "$esp_num" \
         -L "$WINDOWS_BOOT_DESCRIPTION" -l "$WINDOWS_BOOT_LOADER"
     if ! bootnumbers="$(find_exact_uefi_bootnumbers \
         "$WINDOWS_BOOT_DESCRIPTION" "$WINDOWS_BOOT_LOADER" "$esp_num" "$esp_guid")"; then
@@ -566,18 +583,12 @@ set prefix=(\$root)/boot/grub
 configfile /boot/grub/grub.cfg
 EOF
 
-    # Debian/Ubuntu signed GRUB normally reads the config beside the loaded EFI
-    # binary, but mirroring it under EFI/debian helps if the compiled prefix is
-    # distribution-specific.
-    mkdir -p "$esp_mount/EFI/debian"
-    cp -f "$efi_dir/grub.cfg" "$esp_mount/EFI/debian/grub.cfg"
-
     sync
 
     ensure_windows_bootentry_for_current_esp_or_die "$esp_num" "$esp_guid"
     LIBERTIX_FINAL_BOOTNUM=""
     if ! set_libertix_bootentry_first_or_die "$esp_num" "$esp_guid"; then
-        run_logged efibootmgr -c -d "$DISK" -p "$esp_num" \
+        run_logged efibootmgr -c -d "${WINDOWS_DISK:-$DISK}" -p "$esp_num" \
             -L "$LIBERTIX_BOOT_DESCRIPTION" -l "$LIBERTIX_BOOT_LOADER"
         set_libertix_bootentry_first_or_die "$esp_num" "$esp_guid" || \
             die "failed to put the current ESP Libertix entry first in UEFI BootOrder"
@@ -592,17 +603,8 @@ EOF
 
     # Windows stages this directory only to enter the live installer. Leaving
     # it on the ESP after success creates a second, stale boot surface.
-    if [ -e "$esp_mount/EFI/LibertixInstaller" ]; then
-        [ -f "$esp_mount/EFI/LibertixInstaller/.libertix-owner" ] || \
-            die "temporary EFI/LibertixInstaller ownership marker is missing"
-        [ "$(tr -d '\r\n' < "$esp_mount/EFI/LibertixInstaller/.libertix-owner")" = "$RECOVERY_RUN_ID" ] || \
-            die "temporary EFI/LibertixInstaller belongs to another recovery run"
-        echo "Removing temporary EFI/LibertixInstaller directory"
-        run_logged rm -rf "$esp_mount/EFI/LibertixInstaller"
-        sync
-    fi
-    [ ! -e "$esp_mount/EFI/LibertixInstaller" ] || \
-        die "temporary EFI/LibertixInstaller directory still exists after cleanup"
+    remove_owned_temporary_efi_files "$esp_mount" || \
+        die "temporary EFI/LibertixInstaller cleanup could not be verified"
     umount "$esp_mount"
 }
 

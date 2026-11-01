@@ -39,6 +39,23 @@ partition_number() {
     echo "$1" | grep -oE '[0-9]+$'
 }
 
+transaction_partition_extent_matches_manifest() {
+    local partition="$1" offset size tolerance="${INSTALLER_ALIGNMENT_BYTES:-0}"
+    offset="$(partition_start_bytes "$DISK" "$partition" 2>/dev/null)" || return 1
+    size="$(blockdev --getsize64 "$partition" 2>/dev/null)" || return 1
+    [ "$size" -gt 0 ] 2>/dev/null || return 1
+    if [ "$offset" = "$INSTALLER_PARTITION_OFFSET_BYTES" ] \
+        && [ "$size" = "$INSTALLER_STAGING_SIZE_BYTES" ]; then
+        return 0
+    fi
+    # Accept the same final alignment tolerance as the Windows rollback resolver.
+    [ "$tolerance" -gt 0 ] 2>/dev/null \
+        && [ "${INSTALLER_FINAL_SIZE_BYTES:-0}" -gt "$tolerance" ] \
+        && [ "$offset" = "$INSTALLER_FINAL_OFFSET_BYTES" ] \
+        && [ "$size" -le "$INSTALLER_FINAL_SIZE_BYTES" ] \
+        && [ "$size" -ge "$((INSTALLER_FINAL_SIZE_BYTES - tolerance))" ]
+}
+
 disk_partition_table_identity() {
     local disk="$1" style pt_uuid
 
@@ -58,21 +75,29 @@ disk_partition_table_identity() {
     esac
 }
 
-disk_matches_manifest() {
-    local disk="$1"
-    local actual_size actual_style actual_identity expected_style
-    local windows_candidate boot_candidate
+disk_matches_recorded_identity() {
+    local disk="$1" expected_size="$2" expected_sector="$3" expected_table="$4" expected_style="$5"
+    local actual_size actual_style actual_identity
 
     actual_size="$(blockdev --getsize64 "$disk" 2>/dev/null || echo 0)"
-    [ "$actual_size" = "$TARGET_DISK_SIZE_BYTES" ] || return 1
+    [ "$actual_size" = "$expected_size" ] || return 1
+    [ "$(blockdev --getss "$disk" 2>/dev/null || echo 0)" = "$expected_sector" ] || return 1
     actual_style="$(
         parted -sm "$disk" print 2>/dev/null | awk -F: 'NR==2{print tolower($6)}'
     )"
-    expected_style="$(echo "$EXPECTED_PARTITION_STYLE" | tr '[:upper:]' '[:lower:]')"
+    expected_style="$(echo "$expected_style" | tr '[:upper:]' '[:lower:]')"
     [ "$expected_style" != "mbr" ] || expected_style="msdos"
     [ "$actual_style" = "$expected_style" ] || return 1
     actual_identity="$(disk_partition_table_identity "$disk" || true)"
-    [ "$actual_identity" = "$TARGET_DISK_PARTITION_TABLE_ID" ] || return 1
+    [ "$actual_identity" = "$expected_table" ] || return 1
+}
+
+disk_matches_manifest() {
+    local disk="$1" windows_candidate boot_candidate
+
+    disk_matches_recorded_identity "$disk" "$TARGET_DISK_SIZE_BYTES" \
+        "$TARGET_LOGICAL_SECTOR_SIZE_BYTES" "$TARGET_DISK_PARTITION_TABLE_ID" \
+        "$EXPECTED_PARTITION_STYLE" || return 1
     windows_candidate="$(
         partition_at_offset "$disk" "$WINDOWS_PARTITION_OFFSET_BYTES" || true
     )"
@@ -83,6 +108,55 @@ disk_matches_manifest() {
         partition_at_offset "$disk" "$WINDOWS_BOOT_PARTITION_OFFSET_BYTES" || true
     )"
     [ -n "$boot_candidate" ] || return 1
+}
+
+allocation_disk_matches_manifest() {
+    local disk="$1" source_candidate
+
+    disk_matches_recorded_identity "$disk" "$ALLOCATION_DISK_SIZE_BYTES" \
+        "$ALLOCATION_DISK_SECTOR_SIZE_BYTES" "$ALLOCATION_DISK_PARTITION_TABLE_ID" \
+        "$ALLOCATION_PARTITION_STYLE" || return 1
+    source_candidate="$(partition_at_offset "$disk" "$ALLOCATION_SOURCE_OFFSET_BYTES" || true)"
+    [ -n "$source_candidate" ] || return 1
+    allocation_source_filesystem_matches_manifest "$source_candidate"
+}
+
+allocation_source_filesystem_matches_manifest() {
+    local source_part="$1" expected_uuid="${ALLOCATION_SOURCE_NTFS_UUID:-}"
+    [ "$(blkid -s TYPE -o value "$source_part" 2>/dev/null || true)" = ntfs ] || return 1
+    [ "${SEPARATE_ALLOCATION_DISK:-false}" = true ] || return 0
+    [[ "$expected_uuid" =~ ^[0-9A-F]{16}$ ]] && [ "$expected_uuid" != 0000000000000000 ] || return 1
+    [ "$(blkid -s UUID -o value "$source_part" 2>/dev/null || true)" = "$expected_uuid" ]
+}
+
+resolve_allocation_disk_from_manifest() {
+    local candidate
+    candidate="$(resolve_disk_with_unique_table_identity \
+        "$ALLOCATION_DISK_PARTITION_TABLE_ID" allocation)" || return 1
+    allocation_disk_matches_manifest "$candidate" || return 1
+    echo "$candidate"
+}
+
+resolve_disk_with_unique_table_identity() {
+    local expected_identity="$1" purpose="$2" candidate identity
+    local matches=()
+
+    [ -n "$expected_identity" ] || return 1
+    while read -r candidate; do
+        [ -b "$candidate" ] || continue
+        identity="$(disk_partition_table_identity "$candidate" || true)"
+        if [ "$identity" = "$expected_identity" ]; then
+            matches+=("$candidate")
+        fi
+    done < <(candidate_disks)
+
+    # A clone can retain the same table identifier after resizing. Do not use
+    # geometry or filesystem contents to break a duplicate-identity tie.
+    if [ "${#matches[@]}" -ne 1 ]; then
+        echo "Manifest matched ${#matches[@]} $purpose disks; exactly one is required" >&2
+        return 1
+    fi
+    echo "${matches[0]}"
 }
 
 parent_disk_from_part() {
@@ -319,18 +393,8 @@ manifest_partition_geometry() {
 
 resolve_target_disk_from_manifest() {
     local candidate
-    local matches=()
-
-    while read -r candidate; do
-        [ -b "$candidate" ] || continue
-        if disk_matches_manifest "$candidate"; then
-            matches+=("$candidate")
-        fi
-    done < <(candidate_disks)
-
-    if [ "${#matches[@]}" -ne 1 ]; then
-        echo "Manifest matched ${#matches[@]} target disks; exactly one is required" >&2
-        return 1
-    fi
-    echo "${matches[0]}"
+    candidate="$(resolve_disk_with_unique_table_identity \
+        "$TARGET_DISK_PARTITION_TABLE_ID" target)" || return 1
+    disk_matches_manifest "$candidate" || return 1
+    echo "$candidate"
 }

@@ -9,5 +9,5 @@ using System.Runtime.InteropServices;
 [assembly: ComVisible(false)]
 [assembly: Guid("E7262D5A-36F3-4AAB-8868-0D75F6F21B6B")]
 [assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
 [assembly: InternalsVisibleTo("Libertix.Tests")]

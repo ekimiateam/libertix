@@ -30,6 +30,7 @@ def test_legacy_project_compiles_every_application_source_file() -> None:
         "BootGuardian",
         "Libertix.Tests",
         "Standalone",
+        "install-party-kit",
         "bin",
         "obj",
         ".work",
@@ -214,7 +215,7 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
     staging_size_gib = min(final_size_gib, 8)
     is_bios = firmware == "bios"
     return {
-        "schemaVersion": 3,
+        "schemaVersion": 4,
         "planId": "a" * 32,
         "createdAtUtc": "2026-07-15T12:00:00Z",
         "firmware": firmware,
@@ -277,6 +278,13 @@ def make_plan(firmware: str, final_size_gib: int) -> dict[str, object]:
             "shareWindowsFilesInLinux": True,
             "shareLinuxFilesInWindows": True,
             "windowsProfilesJsonBase64": "W10=",
+            "windowsPreferenceMigration": {
+                "enabled": False,
+                "bundleFileName": None,
+                "bundleSha256": None,
+                "bundleSizeBytes": 0,
+                "wifiProfileCount": 0,
+            },
         },
         "runtime": {
             "windowsBitLockerState": "FullyDecrypted",
@@ -371,12 +379,33 @@ def test_offline_resize_rejects_unexpected_staging_offset(plan_module: ModuleTyp
         plan_module.validate_plan(plan, require_installer=True)
 
 
-def test_plan_rejects_non_decrypted_bitlocker_state(plan_module: ModuleType) -> None:
-    plan = make_plan("uefi", 40)
-    plan["runtime"]["windowsBitLockerState"] = "FullyEncrypted"  # type: ignore[index]
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+@pytest.mark.parametrize("state", ["FullyEncrypted", "EncryptedOrProtected"])
+def test_plan_rejects_non_decrypted_bitlocker_state(
+    plan_module: ModuleType, firmware: str, state: str
+) -> None:
+    plan = make_plan(firmware, 40)
+    plan["runtime"]["windowsBitLockerState"] = state  # type: ignore[index]
 
     with pytest.raises(plan_module.PlanValidationError, match="windowsBitLockerState"):
         plan_module.validate_plan(plan, require_installer=True)
+
+
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+@pytest.mark.parametrize("difference", [None, "number", "offsetBytes", "sizeBytes"])
+def test_shared_windows_boot_partition_requires_exact_bios_identity(
+    plan_module: ModuleType, firmware: str, difference: str | None
+) -> None:
+    plan = make_plan(firmware, 40)
+    disk = plan["disk"]
+    disk["boot"] = dict(disk["windows"])
+    if difference is not None:
+        disk["boot"][difference] += 1 if difference == "number" else 1048576
+    if firmware == "bios" and difference is None:
+        plan_module.validate_plan(plan, require_installer=True)
+    else:
+        with pytest.raises(plan_module.PlanValidationError, match="overlap"):
+            plan_module.validate_plan(plan, require_installer=True)
 
 
 @pytest.mark.parametrize("state", ["FullyDecrypted", "NotEncryptable"])
@@ -433,10 +462,22 @@ def test_live_plan_export_excludes_noninteractive_windows_profiles(
     [
         (("distribution", "installerIsoFileName"), "folder/mint.iso"),
         (("distribution", "installerIsoWindowsPath"), "C:mint.iso"),
+        (
+            ("distribution", "installerIsoWindowsPath"),
+            "C:\\ProgramData\\Libertix\\Downloads\\" + "a" * 32 + "\\safe/../mint.iso",
+        ),
         (("account", "passwordHashWindowsPath"), "..\\account-secret.env"),
+        (
+            ("account", "passwordHashWindowsPath"),
+            "C:\\ProgramData\\Libertix\\Recovery\\safe/../../account-secret.env",
+        ),
         (("account", "passwordHashWindowsPath"), "D:\\account-secret.env"),
         (("disk", "systemDrive"), "c:"),
         (("runtime", "recoveryRootWindows"), "relative\\Recovery"),
+        (
+            ("runtime", "recoveryRootWindows"),
+            "C:\\ProgramData\\Libertix\\Recovery\\safe/../escaped",
+        ),
         (("runtime", "recoveryRootWindows"), "D:\\Recovery"),
         (("features", "windowsProfilesJsonBase64"), ""),
         (("runtime", "recoveryRunId"), ""),
@@ -477,6 +518,18 @@ def test_shared_plan_accepts_all_windows_paths_on_a_non_c_system_drive(
     )
 
     plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_shared_plan_requires_the_account_secret_under_the_recovery_root(
+    plan_module: ModuleType,
+) -> None:
+    plan = make_plan("uefi", 40)
+    plan["account"]["passwordHashWindowsPath"] = (  # type: ignore[index]
+        "C:\\ProgramData\\Libertix\\Other\\account-secret.env"
+    )
+
+    with pytest.raises(plan_module.PlanValidationError, match="under runtime.recoveryRootWindows"):
+        plan_module.validate_plan(plan, require_installer=True)
 
 
 def test_legacy_plan_without_keyboard_variant_uses_empty_variant(
@@ -673,6 +726,32 @@ def test_plan_rejects_recovery_before_original_windows_end(
     plan = make_plan("uefi", 24)
     plan["disk"]["recovery"]["offsetBytes"] = 190 * GIB  # type: ignore[index]
 
+    with pytest.raises(plan_module.PlanValidationError):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+@pytest.mark.parametrize("firmware", ["uefi", "bios"])
+def test_recovery_before_windows_is_supported_only_on_uefi(plan_module: ModuleType, firmware: str):
+    plan = make_plan(firmware, 24)
+    plan["disk"]["recovery"].update(offsetBytes=256 * 1024**2, sizeBytes=512 * 1024**2)
+    if firmware == "uefi":
+        plan_module.validate_plan(plan, require_installer=True)
+    else:
+        with pytest.raises(plan_module.PlanValidationError, match="recovery must start"):
+            plan_module.validate_plan(plan, require_installer=True)
+
+
+@pytest.mark.parametrize("firmware", ["uefi", "bios"])
+def test_installer_cannot_consume_the_entire_windows_partition(
+    plan_module: ModuleType, firmware: str
+):
+    plan = make_plan(firmware, 24)
+    disk = plan["disk"]
+    disk["installer"].update(
+        finalSizeBytes=disk["windows"]["sizeBytes"],
+        finalOffsetBytes=disk["windows"]["offsetBytes"],
+        offsetBytes=disk["windows"]["offsetBytes"],
+    )
     with pytest.raises(plan_module.PlanValidationError):
         plan_module.validate_plan(plan, require_installer=True)
 
@@ -987,9 +1066,25 @@ def test_windows_plan_models_and_powershell_property_sets_match_schema() -> None
         "locale": set(schema["$defs"]["locale"]["properties"]),
         "account": set(schema["$defs"]["account"]["properties"]),
         "disk": set(schema["$defs"]["disk"]["properties"]),
+        "allocation": set(schema["$defs"]["allocation"]["properties"]),
         "partition": set(schema["$defs"]["partitionIdentity"]["properties"]),
         "installer": set(schema["$defs"]["installerPartition"]["properties"]),
         "features": set(schema["$defs"]["features"]["properties"]),
+        "windowsSharing": set(schema["$defs"]["windowsSharing"]["properties"]),
+        "sharingVolume": set(
+            schema["$defs"]["windowsSharing"]["properties"]["volumes"]["items"]["properties"]
+        ),
+        "sharingDisk": set(
+            schema["$defs"]["windowsSharing"]["properties"]["volumes"]["items"]["properties"][
+                "disk"
+            ]["properties"]
+        ),
+        "sharingFolder": set(
+            schema["$defs"]["windowsSharing"]["properties"]["folders"]["items"]["properties"]
+        ),
+        "windowsPreferenceMigration": set(
+            schema["$defs"]["windowsPreferenceMigration"]["properties"]
+        ),
         "runtime": set(schema["$defs"]["runtime"]["properties"]),
         "development": set(schema["$defs"]["development"]["properties"]),
     }
@@ -1013,6 +1108,7 @@ def test_windows_plan_models_and_powershell_property_sets_match_schema() -> None
         "InstallationLocale": "locale",
         "InstallationAccount": "account",
         "InstallationDisk": "disk",
+        "InstallationAllocation": "allocation",
         "PartitionIdentity": "partition",
         "InstallerPartitionPlan": "installer",
         "InstallationFeatures": "features",

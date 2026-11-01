@@ -7,11 +7,14 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Literal, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import ValidationError
 
+from app.clients import network_recovery
 from app.clients.vision_contracts import (
+    FORMAT_CORRECTION_PROMPT,
     INSTALL_PROGRESS_SCHEMA,
     INSTALL_PROGRESS_SYSTEM_PROMPT,
 )
@@ -41,6 +44,7 @@ class VisionLLMClient:
         timeout: float,
         *,
         reasoning_effort: Literal["minimal", "low", "medium", "high"] | None = None,
+        provider_only: str | None = None,
         max_attempts: int = 3,
         retry_base_seconds: float = 3,
     ) -> None:
@@ -49,14 +53,18 @@ class VisionLLMClient:
         self.model = model
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort
+        self.provider_only = provider_only
         self.max_attempts = max_attempts
         self.retry_base_seconds = retry_base_seconds
 
     def _with_reasoning(self, payload: dict[str, object]) -> dict[str, object]:
-        """Add provider-neutral reasoning controls only when explicitly configured."""
+        """Use the reasoning format accepted by the configured API."""
 
         if self.reasoning_effort is not None:
-            payload["reasoning"] = {"effort": self.reasoning_effort}
+            if urlsplit(self.url).hostname == "openrouter.ai":
+                payload["reasoning"] = {"effort": self.reasoning_effort}
+            else:
+                payload["reasoning_effort"] = self.reasoning_effort
         return payload
 
     def _request_verdict(
@@ -67,8 +75,18 @@ class VisionLLMClient:
         failure_message: str,
         decode: Callable[[dict[str, object]], VerdictT],
     ) -> VerdictT:
+        if urlsplit(self.url).hostname == "openrouter.ai":
+            # Otherwise a provider can silently ignore the required JSON schema.
+            payload["provider"] = {"require_parameters": True}
+            if self.provider_only is not None:
+                payload["provider"].update(only=[self.provider_only], allow_fallbacks=False)
         response: httpx.Response | None = None
-        for attempt in range(1, self.max_attempts + 1):
+        failed_at: float | None = None
+        attempt = 0
+        while attempt < self.max_attempts:
+            attempt += 1
+            network_recovery.checkpoint()
+            message: object = None
             try:
                 response = httpx.post(
                     self.url,
@@ -98,6 +116,19 @@ class VisionLLMClient:
                 ValueError,
                 ValidationError,
             ) as exc:
+                if isinstance(message, dict) and attempt < self.max_attempts:
+                    self._ask_for_format_correction(payload, message, vm_name)
+                if network_recovery.active is not None and isinstance(exc, httpx.TransportError):
+                    if failed_at is None:
+                        failed_at = time.monotonic()
+                    if attempt >= min(2, self.max_attempts):
+                        if network_recovery.recover(failed_at):
+                            attempt = 0
+                            failed_at = None
+                            continue
+                        raise self._request_error(
+                            step, failure_message, exc, vm_name, response, attempt
+                        ) from exc
                 if attempt < self.max_attempts:
                     self._wait_before_retry(response, attempt, vm_name)
                     continue
@@ -195,6 +226,25 @@ class VisionLLMClient:
             "llm.install_progress",
             "LLM progress response is missing, invalid, or non-conforming",
             decode,
+        )
+
+    @staticmethod
+    def _ask_for_format_correction(
+        payload: dict[str, object], message: dict[str, object], vm_name: str
+    ) -> None:
+        """Continue the conversation so the model corrects its own non-conforming answer."""
+
+        messages = payload["messages"]
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            messages.append({"role": "assistant", "content": content})
+        required = payload["response_format"]["json_schema"]["schema"]["required"]
+        messages.append(
+            {"role": "user", "content": FORMAT_CORRECTION_PROMPT.format(fields=", ".join(required))}
+        )
+        logger.warning(
+            "LLM answer did not match the required format; asking for a corrected answer",
+            extra={"step": "llm.format_correction", "target": vm_name},
         )
 
     def _wait_before_retry(

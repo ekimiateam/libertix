@@ -1,6 +1,7 @@
-import base64
 import hashlib
+import json
 import re
+import runpy
 import shlex
 import subprocess
 import threading
@@ -21,7 +22,7 @@ from app.clients.vnc import VNCClient
 from app.config import Settings
 from app.distributions import load_distribution_profile
 from app.errors import WorkflowError
-from app.models import ValidationRequest
+from app.models import AutomationRequest, ValidationRequest
 from app.services.automation import AutomationService
 from app.services.automation_postinstall import (
     BootGuardianFaultEvidence,
@@ -87,8 +88,8 @@ def test_wizard_pages_expose_deterministic_keyboard_navigation() -> None:
 
 def test_apply_changes_reboot_is_a_focused_keyboard_default() -> None:
     xaml = read_repo("Pages/ApplyChanges.xaml")
-    bios = read_repo("Pages/ApplyChanges.Bios.cs")
-    uefi = read_repo("Pages/ApplyChanges.Uefi.cs")
+    bios = read_repo("Installation/InstallationEngine.Bios.cs")
+    uefi = read_repo("Installation/InstallationEngine.Uefi.cs")
 
     reboot_button = xaml.split('<Button x:Name="RebootButton"', maxsplit=1)[1].split(
         "/>\n",
@@ -96,13 +97,35 @@ def test_apply_changes_reboot_is_a_focused_keyboard_default() -> None:
     )[0]
     assert 'KeyboardNavigation.TabNavigation="Cycle"' in xaml
     assert 'AutomationProperties.AutomationId="ApplyChangesRebootButton"' in reboot_button
-    visible_and_focused = (
+    page = read_repo("Pages/ApplyChanges.xaml.cs")
+    show_reboot = page.split("void IInstallationView.ShowRebootAction()", 1)[1].split(
+        "void IInstallationView.HideRebootAction()", 1
+    )[0]
+    assert (
         "RebootButton.Visibility = Visibility.Visible;\n"
-        "            RebootButton.IsDefault = true;\n"
-        "            RebootButton.Focus();"
+        "                RebootButton.IsDefault = true;\n"
+        "                RebootButton.Focus();"
+    ) in show_reboot
+    assert (
+        "_view.ShowRebootAction();\n            await PublishUnattendedRebootReadyAsync();" in bios
     )
-    assert visible_and_focused in bios
-    assert visible_and_focused in uefi
+    assert (
+        "_view.ShowRebootAction();\n                await PublishUnattendedRebootReadyAsync();"
+        in uefi
+    )
+
+
+def test_installed_linux_disables_the_hidden_default_install_action() -> None:
+    source = read_repo("Pages/Welcome.xaml.cs")
+    detected_branch = source.split(
+        "InstalledLinuxPanel.Visibility = Visibility.Visible;", maxsplit=1
+    )[1].split(
+        "if (_recoveryDetection.Status == InstalledLinuxRecoveryStatus.Available)",
+        maxsplit=1,
+    )[0]
+
+    assert "StartButton.Visibility = Visibility.Collapsed;" in detected_branch
+    assert "StartButton.IsEnabled = false;" in detected_branch
 
 
 def test_distribution_cards_have_uniform_rounded_selection_chrome() -> None:
@@ -236,11 +259,14 @@ def settings(**overrides: object) -> Settings:
 
 
 def apply_changes_source() -> str:
-    """Return all files that form the ApplyChanges partial class."""
+    """Return the installation screen and the engine it drives."""
 
     return "\n".join(
         path.read_text(encoding="utf-8-sig")
-        for path in sorted((REPO_ROOT / "Pages").glob("ApplyChanges*.cs"))
+        for path in [
+            *sorted((REPO_ROOT / "Pages").glob("ApplyChanges*.cs")),
+            *sorted((REPO_ROOT / "Installation").glob("InstallationEngine*.cs")),
+        ]
     )
 
 
@@ -319,8 +345,18 @@ def test_local_filepool_sync_uploads_changed_artifacts_atomically(
             self.commands.append((step, command))
             return CommandResult(stdout="", stderr="", exit_code=0)
 
-        def upload_file(self, local: Path, remote: str, *, step: str) -> None:
+        def upload_file(
+            self,
+            local: Path,
+            remote: str,
+            *,
+            step: str,
+            on_progress=None,
+            **_kwargs: object,
+        ) -> None:
             self.uploads.append((local, remote, step))
+            if on_progress is not None:
+                on_progress(local.stat().st_size, local.stat().st_size)
 
     service = ValidationService(
         settings(runtime_dir=runtime_dir, capture_dir=runtime_dir / "captures")
@@ -338,6 +374,15 @@ def test_local_filepool_sync_uploads_changed_artifacts_atomically(
     ]
     assert ssh.uploads[0][0] == runtime_catalog
     assert all(item[2] == "server.filepool_upload" for item in ssh.uploads)
+    progress_steps = [
+        step for step in result.steps if step.step == "server.filepool_upload_progress"
+    ]
+    assert [step.context["file"] for step in progress_steps] == [
+        "catalog.json",
+        "libertix-installer-bios.iso",
+        "libertix-installer-uefi.iso",
+    ]
+    assert all(step.context["percent"] == 100.0 for step in progress_steps)
     publish_commands = [
         command for step, command in ssh.commands if step == "server.filepool_publish"
     ]
@@ -378,7 +423,7 @@ def test_local_filepool_sync_reuses_matching_remote_artifacts(
             stdout = next(expected_hashes) if step == "server.filepool_hash" else ""
             return CommandResult(stdout=stdout, stderr="", exit_code=0)
 
-        def upload_file(self, local: Path, remote: str, *, step: str) -> None:
+        def upload_file(self, local: Path, remote: str, *, step: str, **_kwargs: object) -> None:
             self.uploads.append((local, remote, step))
 
     runtime_dir = tmp_path / "runtime"
@@ -519,13 +564,26 @@ def test_live_state_transition_is_published_to_the_windows_recovery_root(
     state.write_text('{"revision":7}\n', encoding="utf-8")
     windows.mkdir()
     context = REPO_ROOT / "assets/live/libertix-live-context.sh"
-    command = (
-        'windows_path_to_relative() { printf "%s\\n" "Recovery/Current"; }; '
-        'source "$1"; INSTALLATION_STATE_PATH="$2"; '
-        'RECOVERY_ROOT_WINDOWS="C:\\\\Recovery\\\\Current"; '
-        'publish_installation_state_mirror "$3"; '
-        'cmp "$2" "$3/Recovery/Current/installation-state.json"'
-    )
+    command = r"""
+windows_path_to_relative() { printf '%s\n' 'Recovery/Current'; }
+source "$1"
+INSTALLATION_STATE_PATH="$2"
+RECOVERY_ROOT_WINDOWS='C:\Recovery\Current'
+TEST_WINDOWS_ROOT="$3"
+# The host temporary directory has no Windows ACL metadata.
+python3() {
+    if [ "$1" != /usr/local/lib/libertix/libertix-ntfs-permissions.py ]; then
+        command python3 "$@"
+        return $?
+    fi
+    [ "$#" -eq 2 ] && [ -f "$2" ] || return 1
+    [[ "$2" == "$TEST_WINDOWS_ROOT/Recovery/Current/.installation-state."*.tmp ]] || return 1
+    cmp "$INSTALLATION_STATE_PATH" "$2" || return 1
+    printf '%s\n' "$2" > "$TEST_WINDOWS_ROOT/permissions-checked"
+}
+publish_installation_state_mirror "$TEST_WINDOWS_ROOT" || exit 1
+cmp "$INSTALLATION_STATE_PATH" "$TEST_WINDOWS_ROOT/Recovery/Current/installation-state.json"
+"""
 
     completed = subprocess.run(
         ["bash", "-c", command, "bash", str(context), str(state), str(windows)],
@@ -535,6 +593,7 @@ def test_live_state_transition_is_published_to_the_windows_recovery_root(
     )
 
     assert completed.returncode == 0, completed.stderr
+    assert (windows / "permissions-checked").is_file()
 
 
 @pytest.mark.parametrize(
@@ -1052,11 +1111,13 @@ def test_full_automation_launch_passes_unattended_values_without_a_password_argu
         "schemaVersion": 1,
         "distribution": "zorin",
         "linuxSizeGiB": 120,
+        "installationTarget": "windows",
         "linuxUsername": "test-linux",
         "linuxPassword": "pass",
         "computerName": "vm2-linux",
         "shareWindowsFilesInLinux": False,
         "shareLinuxFilesInWindows": True,
+        "migrateWindowsPreferences": False,
     }
     assert observed["force_offline_ntfs_resize"] is True
     assert "pass" not in " ".join(str(value) for value in launch.values())
@@ -1103,12 +1164,10 @@ def test_unattended_coordination_reconnects_only_after_transport_failure() -> No
             self.reconnections += 1
 
     ssh = ReconnectingSsh()
-    response = service._run_unattended_control_command(  # noqa: SLF001
+    response = service._retry_unattended_control(  # noqa: SLF001
         ssh,
-        "read-status",
+        lambda: ssh.run("read-status"),
         step="automation.unattended_status",
-        timeout=20,
-        check=False,
     )
 
     assert response.stdout == "STAGE=ready\n"
@@ -1134,11 +1193,10 @@ def test_unattended_coordination_does_not_retry_remote_command_failure() -> None
 
     ssh = FailedCommandSsh()
     with pytest.raises(WorkflowError):
-        service._run_unattended_control_command(  # noqa: SLF001
+        service._retry_unattended_control(  # noqa: SLF001
             ssh,
-            "read-status",
+            lambda: ssh.run("read-status"),
             step="automation.unattended_status",
-            timeout=20,
         )
 
     assert ssh.reconnections == 0
@@ -1172,12 +1230,10 @@ def test_unattended_coordination_retries_a_failed_reconnection() -> None:
                 )
 
     ssh = RecoveringSsh()
-    response = service._run_unattended_control_command(  # noqa: SLF001
+    response = service._retry_unattended_control(  # noqa: SLF001
         ssh,
-        "read-status",
+        lambda: ssh.run("read-status"),
         step="automation.unattended_status",
-        timeout=20,
-        check=False,
     )
 
     assert response.stdout == "STAGE=ready\n"
@@ -1252,6 +1308,84 @@ def test_linux_remote_check_does_not_retry_a_remote_failure() -> None:
     assert result.steps[-1].status == "error"
 
 
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_power_transition_retries_only_an_unopened_ssh_channel(
+    monkeypatch: pytest.MonkeyPatch, ambiguous: bool
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    calls = []
+    reconnects = []
+    delays = []
+
+    def run(*args: object, **kwargs: object) -> CommandResult:
+        calls.append(args)
+        if len(calls) == 1:
+            raise WorkflowError(
+                "power",
+                "transport failed",
+                details={
+                    "exception_type": "SSHException",
+                    "error": "Channel closed." if ambiguous else "Timeout opening channel.",
+                },
+            )
+        return CommandResult(stdout="", stderr="", exit_code=0)
+
+    ssh = SimpleNamespace(run=run, reconnect=lambda: reconnects.append(True))
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", delays.append)
+    if ambiguous:
+        with pytest.raises(WorkflowError):
+            service._request_windows_power_transition(ssh, vm, "shutdown", "power")
+        assert len(calls) == 1
+        assert reconnects == delays == []
+    else:
+        assert service._request_windows_power_transition(ssh, vm, "shutdown", "power")
+        assert len(calls) == 2
+        assert reconnects == [True]
+        assert delays == [5]
+
+
+@pytest.mark.parametrize("transport_error", [True, False])
+def test_power_transition_timeout_is_unacknowledged_not_retried(
+    monkeypatch: pytest.MonkeyPatch, transport_error: bool
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    calls = []
+
+    def run(*args: object, **kwargs: object) -> CommandResult:
+        calls.append(args)
+        raise WorkflowError(
+            "power",
+            "timed out",
+            details={"exception_type": "TimeoutError", "transport_error": transport_error},
+        )
+
+    ssh = SimpleNamespace(run=run, reconnect=lambda: pytest.fail("Must not resend shutdown"))
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _: pytest.fail())
+    if transport_error:
+        assert service._request_windows_power_transition(ssh, vm, "shutdown", "power") is False
+    else:
+        with pytest.raises(WorkflowError):
+            service._request_windows_power_transition(ssh, vm, "shutdown", "power")
+    assert len(calls) == 1
+
+
+def test_vnc_rejects_a_png_with_a_corrupt_chunk_checksum(tmp_path: Path) -> None:
+    from app.clients.vnc import _is_valid_capture
+
+    path = tmp_path / "corrupt.png"
+    Image.new("RGB", (16, 16)).save(path)
+    data = bytearray(path.read_bytes())
+    chunk = data.index(b"IDAT")
+    length = int.from_bytes(data[chunk - 4 : chunk], "big")
+    data[chunk + 4 + length] ^= 1
+    path.write_bytes(data)
+    with Image.open(path) as image, pytest.raises(SyntaxError):
+        image.verify()
+    assert not _is_valid_capture(path)
+
+
 def test_windows_script_reconnects_after_transport_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1296,7 +1430,7 @@ def test_windows_script_reconnects_after_transport_failure(
 
     assert response == CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
     assert (calls, ssh.reconnections) == (2, 1)
-    assert delays == [2]
+    assert delays == [5]
 
 
 def test_linux_script_reconnects_after_transport_failure(
@@ -1339,12 +1473,22 @@ def test_linux_script_reconnects_after_transport_failure(
 
     assert response == CommandResult(stdout="RESULT=OK", stderr="", exit_code=0)
     assert (calls, ssh.reconnections) == (2, 1)
-    assert retry_delays == [3]
+    assert retry_delays == [5]
 
 
+@pytest.mark.parametrize(
+    ("disconnect_controller", "expired_before_reboot"),
+    [(False, False), (True, False), (False, True)],
+)
 def test_unattended_wizard_captures_and_acknowledges_every_stage(
     monkeypatch: pytest.MonkeyPatch,
+    disconnect_controller: bool,
+    expired_before_reboot: bool,
 ) -> None:
+    from contextlib import nullcontext
+
+    assert automation_wizard_module.UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS == 40
+    assert automation_wizard_module.UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS < 180
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
     reported_stages = (
@@ -1369,17 +1513,27 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def run(self, command: str, **_kwargs: object) -> CommandResult:
-            if "ConvertFrom-Json" in command:
-                index = stage_index["value"]
-                stage_index["value"] += 1
-                return CommandResult(
-                    stdout=f"SEQUENCE={index + 1}\nSTAGE={reported_stages[index]}\n",
-                    stderr="",
-                    exit_code=0,
+        def read_text(self, path: str, **_kwargs: object) -> str:
+            assert path == "C:/ProgramData/Libertix/Automation/run.status.json"
+            index = stage_index["value"]
+            stage_index["value"] += 1
+            if index == len(reported_stages):
+                return json.dumps(
+                    {
+                        "sequence": index + 1,
+                        "stage": "failed",
+                        "errorCode": "windows-preparation-failed",
+                        "errorMessage": "Acknowledgement expired",
+                    }
+                    if expired_before_reboot
+                    else {"sequence": index, "stage": "reboot-ready"}
                 )
-            acknowledgements.append(command)
-            return CommandResult(stdout="", stderr="", exit_code=0)
+            return json.dumps({"sequence": index + 1, "stage": reported_stages[index]})
+
+        def upload_text(self, path: str, content: str, **_kwargs: object) -> None:
+            assert path == "C:/ProgramData/Libertix/Automation/run.ack"
+            assert int(content) == stage_index["value"]
+            acknowledgements.append(content)
 
     captures: list[str] = []
     keyboard_events: list[tuple[str, str] | tuple[str, None]] = []
@@ -1407,10 +1561,18 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
         ),
     )
     monkeypatch.setattr(service.vnc, "connect", lambda _address: FakeVnc())
+
+    def capture_stage(_vm, label, *, on_captured=None):
+        captures.append(label)
+        path = Path(f"/tmp/{label}.png")
+        if on_captured is not None:
+            on_captured(path)
+        return path
+
     monkeypatch.setattr(
         service,
         "_capture_with_name",
-        lambda _vm, label: captures.append(label) or Path(f"/tmp/{label}.png"),
+        capture_stage,
     )
     monkeypatch.setattr(
         service,
@@ -1420,28 +1582,63 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
     monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
     result = ResultBuilder("automation")
 
-    service._observe_unattended_wizard(  # noqa: SLF001
-        vm,
-        AutomationOptions("test", "test-passphrase", True),
-        result,
-        4321,
-        r"C:\ProgramData\Libertix\Automation\run.status.json",
-        r"C:\ProgramData\Libertix\Automation\run.ack",
-    )
+    with (
+        pytest.raises(WorkflowError, match="Acknowledgement expired")
+        if expired_before_reboot
+        else nullcontext()
+    ):
+        service._observe_unattended_wizard(  # noqa: SLF001
+            vm,
+            AutomationOptions(
+                "test",
+                "test-passphrase",
+                True,
+                boot_guardian_fault=(
+                    "bios-controller-disconnect" if disconnect_controller else "none"
+                ),
+            ),
+            result,
+            4321,
+            r"C:\ProgramData\Libertix\Automation\run.status.json",
+            r"C:\ProgramData\Libertix\Automation\run.ack",
+        )
 
-    assert captures == [
+    expected_stage_captures = [
         f"wizard-{index:02d}-{stage}"
         if stage != "warning-ready"
         else f"wizard-{index:02d}-warning-ready-keyboard-{index - 6}"
         for index, stage in enumerate(reported_stages, 1)
-    ] + ["reboot-ready", "reboot-confirm", "reboot-accepted"]
-    assert len(acknowledgements) == len(reported_stages)
+    ]
+    if disconnect_controller:
+        assert captures == expected_stage_captures[:-1] + [
+            "bios-controller-disconnect-reboot-ready"
+        ]
+        assert len(acknowledgements) == len(reported_stages) - 1
+    elif expired_before_reboot:
+        assert captures == expected_stage_captures
+        assert keyboard_events == [("press", "tab"), ("press", "enter")] * 2 + [
+            ("disconnect", None)
+        ]
+        return
+    else:
+        assert captures == expected_stage_captures + [
+            "reboot-ready",
+            "reboot-confirm",
+            "reboot-accepted",
+        ]
+        assert len(acknowledgements) == len(reported_stages)
     assert len(focus_calls) == 2
     assert all(call["script_name"] == "focus_unattended_warning.ps1" for call in focus_calls)
     assert all(call["config"] == {"process_id": 4321} for call in focus_calls)
     assert [
         step.context["stage"] for step in result.steps if step.step == "automation.unattended_stage"
-    ] == list(reported_stages)
+    ] == list(reported_stages[:-1] if disconnect_controller else reported_stages)
+    if disconnect_controller:
+        assert keyboard_events == [("press", "tab"), ("press", "enter")] * 2 + [
+            ("disconnect", None)
+        ]
+        assert result.steps[-1].step == "automation.bios_controller_disconnect"
+        return
     assert keyboard_events == (
         [
             ("press", "tab"),
@@ -1455,6 +1652,255 @@ def test_unattended_wizard_captures_and_acknowledges_every_stage(
             ("disconnect", None),
         ]
     )
+
+
+@pytest.mark.parametrize("firmware,selector", [("bios", "vm1"), ("uefi", "vm2")])
+def test_postinstall_rollback_requests_guard_then_checks_the_original_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    firmware: str,
+    selector: str,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms([selector])[0]
+    calls = []
+    baseline = {"SYSTEM_DISK_NUMBER": "0"}
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        boot_guardian_fault=f"{firmware}-postinstall-rollback",
+        rollback_baseline=baseline,
+    )
+    monkeypatch.setattr(
+        service,
+        "_run_windows_script_resiliently",
+        lambda *_args, **kwargs: calls.append(("request", kwargs)),
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_exact_windows_rollback",
+        lambda _ssh, _vm, original, _result, **_kwargs: calls.append(("verify", original)),
+    )
+    getattr(service, f"_rollback_completed_{firmware}_installation")(
+        object(), vm, options, ResultBuilder("automation")
+    )
+    assert calls[0][0] == "request"
+    assert calls[0][1]["script_name"] == f"request_{firmware}_postinstall_rollback.ps1"
+    assert calls[0][1]["timeout"] == 960
+    assert calls[1] == ("verify", baseline)
+
+
+@pytest.mark.parametrize("reason", ["uefi", "no-baseline", "failed-check"])
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+def test_postinstall_rollback_refuses_unproved_prerequisites(reason: str, firmware: str) -> None:
+    service = AutomationService(settings())
+    matching = "vm1" if firmware == "bios" else "vm2"
+    other = "vm2" if firmware == "bios" else "vm1"
+    vm = service.validation.select_vms([other if reason == "uefi" else matching])[0]
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        boot_guardian_fault=f"{firmware}-postinstall-rollback",
+        rollback_baseline=None if reason == "no-baseline" else {"SYSTEM_DISK_NUMBER": "0"},
+    )
+    result = ResultBuilder("automation")
+    if reason == "failed-check":
+        result.error("automation.test.windows", "failed")
+    with pytest.raises(WorkflowError, match="requires successful checks"):
+        getattr(service, f"_rollback_completed_{firmware}_installation")(
+            object(), vm, options, result
+        )
+
+
+def test_verified_install_uninstall_drives_product_ui_then_proves_exact_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    baseline = {"SYSTEM_DISK_NUMBER": "0"}
+    options = AutomationOptions(
+        "test",
+        "test-passphrase",
+        True,
+        verify_uninstall=True,
+        rollback_baseline=baseline,
+        deployed_executable=PureWindowsPath(r"C:\Users\test\Documents\Libertix.exe"),
+    )
+    events: list[object] = []
+    monkeypatch.setattr(
+        service.validation,
+        "launch_elevated_process",
+        lambda _vm, _exe, **kwargs: (
+            events.append(("launch", kwargs))
+            or {
+                "PID": "1234",
+                "WINDOW_HANDLE": "5678",
+                "SESSION_ID": "1",
+                "WINDOW_TITLE": "Libertix",
+                "WINDOW_VISIBLE": "True",
+            }
+        ),
+    )
+
+    def drive(_ssh, _vm, process_id, action, *, timeout):
+        events.append(("ui", action, process_id, timeout))
+        return {
+            "ACTION": action,
+            "WINDOW_HANDLE": "5678",
+            "LANGUAGE": "English",
+            "UNINSTALL_CAPTION": "Uninstall Linux",
+            "CONFIRMATION_CAPTION": "Uninstall Linux",
+            "PROGRESS": "100",
+            "RESULT": "OK",
+        }
+
+    monkeypatch.setattr(service, "_drive_installed_linux_uninstall_ui", drive)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: events.append(("capture", label)) or tmp_path / f"{label}.png",
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_exact_windows_rollback",
+        lambda _ssh, _vm, original, _result, **kwargs: events.append(("verify", original, kwargs)),
+    )
+    monkeypatch.setattr(service, "_read_windows_boot_id", lambda *_: "old-boot")
+    monkeypatch.setattr(
+        service,
+        "_request_windows_power_transition",
+        lambda *_: events.append(("reboot",)) or True,
+    )
+    monkeypatch.setattr(
+        service,
+        "_wait_for_ssh",
+        lambda *_args, **kwargs: (
+            events.append(("boot", kwargs)) or SimpleNamespace(close=lambda: None)
+        ),
+    )
+
+    service._exercise_installed_linux_uninstall(  # noqa: SLF001
+        object(), vm, options, ResultBuilder("automation")
+    )
+
+    assert [item[1] for item in events if item[0] == "ui"] == [
+        "inspect",
+        "request",
+        "confirm",
+        "complete",
+    ]
+    launch = next(item for item in events if item[0] == "launch")
+    assert "unattended_config" not in launch[1]
+    verify = next(item for item in events if item[0] == "verify")
+    assert verify[1] is baseline
+    assert verify[2]["require_closed_post_install_result"] is True
+    assert len([item for item in events if item[0] == "verify"]) == 2
+    boot = next(item for item in events if item[0] == "boot")
+    assert boot[1]["previous_windows_boot_id"] == "old-boot"
+    assert boot[1].get("grub_entry") is None
+
+
+def test_uninstall_ssh_wait_requires_new_windows_boot_without_keyboard_input(monkeypatch):
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    boot_ids = iter(("old-boot", "new-boot"))
+    clients = []
+
+    def client_factory(*_args, **kwargs):
+        assert kwargs["remote_os"] == "windows"
+        client = SimpleNamespace(
+            __enter__=lambda: None,
+            close=lambda: None,
+            run=lambda *_args, **_kwargs: CommandResult("LIBERTIX_WINDOWS_READY", "", 0),
+        )
+        clients.append(client)
+        return client
+
+    def forbidden_input(*_args, **_kwargs):
+        pytest.fail("Uninstall reboot verification must not select an operating system")
+
+    monkeypatch.setattr(automation_postinstall_module, "SSHClient", client_factory)
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _: None)
+    monkeypatch.setattr(service, "_read_windows_boot_id", lambda *_: next(boot_ids))
+    monkeypatch.setattr(service, "_select_grub_entry_when_theme_ready", forbidden_input)
+    monkeypatch.setattr(service, "_select_grub_entry_if_visible", forbidden_input)
+    monkeypatch.setattr(service.vnc, "connect", forbidden_input)
+    result = ResultBuilder("automation")
+    client = service._wait_for_ssh(
+        vm,
+        result=result,
+        username=vm.username,
+        password="test-password",
+        trust_on_first_use=False,
+        probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
+        expected="LIBERTIX_WINDOWS_READY",
+        phase="uninstall_windows_return",
+        previous_windows_boot_id="old-boot",
+    )
+    assert len(clients) == 2
+    assert client is clients[1]
+    assert result.steps[-1].context["boot_id"] == "new-boot"
+
+
+def test_windows_boot_identity_retries_once_after_a_transport_failure(monkeypatch) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+
+    class BootIdentitySsh:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.reconnects = 0
+
+        def reconnect(self) -> None:
+            self.reconnects += 1
+
+        def run(self, _command, **kwargs):
+            self.calls += 1
+            assert kwargs["replay_safe"] is True
+            if self.calls == 1:
+                raise WorkflowError(
+                    "automation.windows_boot_identity",
+                    "transport lost",
+                    details={"transport_error": True},
+                )
+            return CommandResult("638620200000000000\n", "", 0)
+
+    ssh = BootIdentitySsh()
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
+
+    assert service._read_windows_boot_id(ssh, vm) == "638620200000000000"  # type: ignore[arg-type]
+    assert ssh.calls == 2
+    assert ssh.reconnects == 1
+
+
+@pytest.mark.parametrize("action", ["request", "confirm", "complete"])
+def test_uninstall_does_not_replay_a_click_after_an_ambiguous_ssh_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    service = AutomationService(settings())
+    calls = []
+
+    def disconnected(*_args, **kwargs):
+        calls.append(kwargs)
+        raise WorkflowError(
+            "automation.uninstall",
+            "Reply lost",
+            details={"exception_type": "MissingExitStatus", "transport_error": True},
+        )
+
+    monkeypatch.setattr(service.validation, "run_windows_script", disconnected)
+    with pytest.raises(WorkflowError, match="Reply lost"):
+        service._drive_installed_linux_uninstall_ui(  # noqa: SLF001
+            object(),
+            service.validation.select_vms(["vm1"])[0],
+            1234,
+            action,
+            timeout=90,
+        )
+    assert len(calls) == 1
 
 
 def test_bootnext_rollback_injection_is_proven_before_reboot(
@@ -1598,23 +2044,138 @@ def test_unattended_warning_is_captured_before_keyboard_acceptance(
     assert events == ["focus", "capture", "key:tab", "key:enter"]
 
 
+@pytest.mark.parametrize(
+    ("failed_captures", "changed_warning", "failure_step"),
+    [
+        (1, False, "automation.capture"),
+        (2, False, "automation.capture"),
+        (3, False, "automation.capture"),
+        (1, True, "automation.capture"),
+        (1, False, "automation.focus"),
+    ],
+)
+def test_unattended_warning_reconnects_without_accepting_an_unproven_dialog(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_captures: int,
+    changed_warning: bool,
+    failure_step: str,
+) -> None:
+    from contextlib import nullcontext
+
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    stages = [
+        "compatibility-running",
+        "compatibility-passed",
+        "configuration-distribution-applied",
+        "configuration-disk-size-applied",
+        "configuration-sharing-applied",
+        "configuration-account-applied",
+        "warning-ready",
+    ]
+    observations = [{"sequence": i, "stage": stage} for i, stage in enumerate(stages, 1)]
+    observations.extend(
+        {"sequence": 8 if changed_warning else 7, "stage": "warning-ready"}
+        for _ in range(min(failed_captures, 2))
+    )
+    observations.extend(
+        [
+            {"sequence": 8, "stage": "installation-started"},
+            {"sequence": 9, "stage": "reboot-ready"},
+            {"sequence": 9, "stage": "reboot-ready"},
+        ]
+    )
+    observed = iter(observations)
+    events: list[tuple[str, object]] = []
+    clients: list[object] = []
+    captures = 0
+
+    def connect(_address: str) -> object:
+        identity = len(clients)
+        client = SimpleNamespace(
+            keyPress=lambda key: events.append((f"key:{key}", identity)),
+            disconnect=lambda: events.append(("disconnect", identity)),
+        )
+        clients.append(client)
+        return client
+
+    def capture(client: object, *_args: object) -> Path:
+        nonlocal captures
+        captures += 1
+        assert client is clients[-1]
+        events.append(("capture", captures))
+        if captures <= failed_captures:
+            raise WorkflowError(failure_step, "Controlled capture failure")
+        return Path("warning.png")
+
+    def acknowledge(_ssh, _vm, _result, _path, stage, **_kwargs):
+        events.append(("ack", stage["sequence"]))
+        return stage["sequence"]
+
+    monkeypatch.setattr(service.validation, "ssh", lambda *_a, **_kw: nullcontext(object()))
+    monkeypatch.setattr(service, "_wait_for_unattended_stage", lambda *_a, **_kw: next(observed))
+    monkeypatch.setattr(service, "_capture_and_acknowledge_unattended_stage", acknowledge)
+    monkeypatch.setattr(service, "_capture_from_client", capture)
+    monkeypatch.setattr(service.vnc, "connect", connect)
+    monkeypatch.setattr(
+        service.validation,
+        "run_windows_script",
+        lambda *_a, **_kw: CommandResult(stdout="RESULT=OK", stderr="", exit_code=0),
+    )
+    monkeypatch.setattr(
+        service, "_request_reboot_after_preparation", lambda *_a: events.append(("reboot", None))
+    )
+    monkeypatch.setattr(automation_wizard_module.time, "sleep", lambda _seconds: None)
+    result = ResultBuilder("automation")
+
+    def run() -> None:
+        service._observe_unattended_wizard(  # noqa: SLF001
+            vm,
+            AutomationOptions("test", "test-passphrase", True),
+            result,
+            4321,
+            r"C:\ProgramData\Libertix\Automation\run.status.json",
+            r"C:\ProgramData\Libertix\Automation\run.ack",
+        )
+
+    succeeds = failed_captures < 3 and not changed_warning and failure_step == "automation.capture"
+    if succeeds:
+        run()
+        assert captures == failed_captures + 1
+        assert len(clients) == failed_captures + 1
+        assert [event for event in events if event[0].startswith("key:")] == [
+            ("key:tab", failed_captures),
+            ("key:enter", failed_captures),
+        ]
+        assert events.index(("capture", captures)) < events.index(("key:tab", failed_captures))
+        assert events.index(("key:enter", failed_captures)) < events.index(("ack", 7))
+        assert events[-1] == ("reboot", None)
+    else:
+        with pytest.raises(WorkflowError) as raised:
+            run()
+        assert raised.value.step == (
+            "automation.unattended_warning" if changed_warning else failure_step
+        )
+        assert not any(event[0].startswith("key:") for event in events)
+        assert not any(event == ("ack", 7) or event[0] == "reboot" for event in events)
+        assert captures == (3 if failed_captures == 3 else 1)
+    assert [event[1] for event in events if event[0] == "disconnect"] == list(range(len(clients)))
+
+
 def test_unattended_terminal_failure_is_reported_without_waiting_for_timeout() -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
     message = "Distribution catalog is invalid"
-    encoded = base64.b64encode(message.encode("utf-8")).decode("ascii")
 
     class FakeSsh:
-        def run(self, _command: str, **_kwargs: object) -> CommandResult:
-            return CommandResult(
-                stdout=(
-                    "SEQUENCE=4\n"
-                    "STAGE=failed\n"
-                    "ERROR_CODE=distribution-catalog-load\n"
-                    f"ERROR_MESSAGE_BASE64={encoded}\n"
-                ),
-                stderr="",
-                exit_code=0,
+        def read_text(self, _path: str, **_kwargs: object) -> str:
+            return json.dumps(
+                {
+                    "sequence": 4,
+                    "stage": "failed",
+                    "errorCode": "distribution-catalog-load",
+                    "errorMessage": message,
+                }
             )
 
     with pytest.raises(WorkflowError) as raised:
@@ -1631,6 +2192,69 @@ def test_unattended_terminal_failure_is_reported_without_waiting_for_timeout() -
     assert raised.value.details["error_code"] == "distribution-catalog-load"
 
 
+def test_unattended_stage_polling_does_not_wait_for_a_slow_vision_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    release_vision = threading.Event()
+    vision_started = threading.Event()
+    responses = iter(
+        (
+            json.dumps({"sequence": 10, "stage": "installation-started"}),
+            json.dumps({"sequence": 11, "stage": "reboot-ready"}),
+        )
+    )
+
+    class FakeSsh:
+        def read_text(self, _path: str, **_kwargs: object) -> str:
+            return next(responses)
+
+    def slow_vision(*_args: object) -> InstallProgressVerdict:
+        vision_started.set()
+        assert release_vision.wait(5)
+        return InstallProgressVerdict(
+            iso_download_finished=False,
+            installation_finished=False,
+            reboot_prompt_visible=False,
+            still_in_progress=True,
+            error_visible=False,
+            summary="Preparation still running",
+            visible_text="Preparing",
+        )
+
+    capture = tmp_path / "progress.png"
+    Image.new("RGB", (10, 10)).save(capture)
+    monkeypatch.setattr(service, "_capture_with_name", lambda *_args: capture)
+    monkeypatch.setattr(service.vision_llm, "analyze_install_progress", slow_vision)
+
+    try:
+        observed = service._wait_for_unattended_stage(  # noqa: SLF001
+            FakeSsh(),
+            vm,
+            r"C:\ProgramData\Libertix\Automation\run.status.json",
+            10,
+            ("reboot-ready",),
+            timeout_seconds=3,
+            observe_installation_progress=True,
+            result=ResultBuilder("automation"),
+        )
+        assert vision_started.wait(1)
+        assert observed == {"sequence": 11, "stage": "reboot-ready"}
+    finally:
+        release_vision.set()
+
+
+@pytest.mark.parametrize("content", ["", "[]", "{", '{"sequence":true,"stage":"ready"}'])
+def test_unattended_malformed_sftp_status_fails_closed(content: str) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    ssh = SimpleNamespace(read_text=lambda *_a, **_k: content)
+    with pytest.raises(WorkflowError, match="Invalid unattended status file"):
+        service._wait_for_unattended_stage(ssh, vm, "C:/Temp/status.json", 0, ("ready",))
+
+
 def test_unattended_windows_preparation_stops_on_a_visible_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1638,12 +2262,8 @@ def test_unattended_windows_preparation_stops_on_a_visible_error(
     vm = service.validation.select_vms(["vm1"])[0]
 
     class FakeSsh:
-        def run(self, _command: str, **_kwargs: object) -> CommandResult:
-            return CommandResult(
-                stdout="SEQUENCE=10\nSTAGE=installation-started\n",
-                stderr="",
-                exit_code=0,
-            )
+        def read_text(self, _path: str, **_kwargs: object) -> str:
+            return json.dumps({"sequence": 10, "stage": "installation-started"})
 
     monkeypatch.setattr(
         service,
@@ -1681,9 +2301,11 @@ def test_unattended_windows_preparation_stops_on_a_visible_error(
     assert raised.value.details["error_visible"] is True
 
 
+@pytest.mark.parametrize("animated", [False, True])
 def test_unattended_windows_preparation_reports_a_visual_stall(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    animated: bool,
 ) -> None:
     service = AutomationService(
         settings(
@@ -1697,18 +2319,18 @@ def test_unattended_windows_preparation_reports_a_visual_stall(
     clock = {"now": 0.0}
 
     class FakeSsh:
-        def run(self, _command: str, **_kwargs: object) -> CommandResult:
-            return CommandResult(
-                stdout="SEQUENCE=10\nSTAGE=installation-started\n",
-                stderr="",
-                exit_code=0,
-            )
+        def read_text(self, _path: str, **_kwargs: object) -> str:
+            return json.dumps({"sequence": 10, "stage": "installation-started"})
 
-    monkeypatch.setattr(
-        service,
-        "_capture_with_name",
-        lambda *_args: capture,
-    )
+    frames = [0]
+
+    def capture_preparation(*_args: object) -> Path:
+        frames[0] += 1
+        if animated:
+            Image.new("RGB", (320, 200), (255 * (frames[0] % 2), 20, 30)).save(capture)
+        return capture
+
+    monkeypatch.setattr(service, "_capture_with_name", capture_preparation)
     monkeypatch.setattr(
         service.vision_llm,
         "analyze_install_progress",
@@ -1758,21 +2380,13 @@ def test_unattended_windows_preparation_reports_vision_payment_failure(
     vm = service.validation.select_vms(["vm2"])[0]
     responses = iter(
         (
-            CommandResult(
-                stdout="SEQUENCE=10\nSTAGE=installation-started\n",
-                stderr="",
-                exit_code=0,
-            ),
-            CommandResult(
-                stdout="SEQUENCE=11\nSTAGE=reboot-ready\n",
-                stderr="",
-                exit_code=0,
-            ),
+            json.dumps({"sequence": 10, "stage": "installation-started"}),
+            json.dumps({"sequence": 11, "stage": "reboot-ready"}),
         )
     )
 
     class FakeSsh:
-        def run(self, _command: str, **_kwargs: object) -> CommandResult:
+        def read_text(self, _path: str, **_kwargs: object) -> str:
             return next(responses)
 
     def unavailable_vision(*_args: object) -> InstallProgressVerdict:
@@ -1809,8 +2423,12 @@ def test_unattended_windows_preparation_reports_vision_payment_failure(
     assert result.steps == []
 
 
+@pytest.mark.parametrize("update_proof", ["True", "False", ""])
+@pytest.mark.parametrize("sac_state", ["Off", "NotAvailable", "On", "Evaluation", ""])
 def test_automation_prepares_snapshot_clock_before_deployment(
     monkeypatch: pytest.MonkeyPatch,
+    update_proof: str,
+    sac_state: str,
 ) -> None:
     class FakeSshContext:
         def __enter__(self) -> object:
@@ -1843,6 +2461,9 @@ def test_automation_prepares_snapshot_clock_before_deployment(
                 "WINDOWS_BACKUP_NOTIFICATIONS_DISABLED=True\n"
                 "WINDOWS_NOTIFICATION_SERVICES_DISABLED=True\n"
                 "WINDOWS_SETUP_REMINDER_DISABLED=True\n"
+                f"WINDOWS_UPDATES_DISABLED={update_proof}\n"
+                f"SMART_APP_CONTROL_STATE={sac_state}\n"
+                "TEMPORARY_FILES_RECLAIMED_BYTES=268435456\n"
             ),
             stderr="",
             exit_code=0,
@@ -1851,6 +2472,13 @@ def test_automation_prepares_snapshot_clock_before_deployment(
     monkeypatch.setattr(service.validation, "ssh", fake_ssh)
     monkeypatch.setattr(service.validation, "run_windows_script", fake_run_windows_script)
     result = ResultBuilder("automation")
+
+    if update_proof != "True" or sac_state not in {"Off", "NotAvailable"}:
+        monkeypatch.setattr(automation_module.time, "sleep", lambda *_args: None)
+        with pytest.raises(WorkflowError, match="update policy"):
+            service._prepare_windows_test_vm(vm, result)  # noqa: SLF001
+        assert result.steps == []
+        return
 
     service._prepare_windows_test_vm(vm, result)  # noqa: SLF001
 
@@ -1863,6 +2491,9 @@ def test_automation_prepares_snapshot_clock_before_deployment(
     assert result.steps[-1].context["windows_backup_notifications_disabled"] is True
     assert result.steps[-1].context["windows_notification_services_disabled"] is True
     assert result.steps[-1].context["windows_setup_reminder_disabled"] is True
+    assert result.steps[-1].context["windows_updates_disabled"] is True
+    assert result.steps[-1].context["smart_app_control_state"] == sac_state
+    assert result.steps[-1].context["temporary_files_reclaimed_bytes"] == 268435456
 
 
 def test_automation_scope_accepts_vm500() -> None:
@@ -1962,10 +2593,13 @@ def test_automation_reports_configured_storage_headroom() -> None:
 def test_automation_requires_visual_monitoring() -> None:
     result = AutomationService(settings()).run(
         ["vm1"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=False,
-        source="local",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=False,
+            source="local",
+        ),
     )
 
     assert result.status == "error"
@@ -1975,23 +2609,29 @@ def test_automation_requires_visual_monitoring() -> None:
 def test_boot_guardian_fault_scope_is_rejected_before_vm_mutation() -> None:
     bios_result = AutomationService(settings()).run(
         ["vm1"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=True,
-        source="local",
-        boot_guardian_fault="boot-order",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+            boot_guardian_fault="boot-order",
+        ),
     )
     assert bios_result.status == "error"
     assert bios_result.steps[-1].step == "automation.boot_guardian_fault_scope"
 
     linux_first_result = AutomationService(settings()).run(
         ["vm2"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=True,
-        source="local",
-        first_boot="linux",
-        boot_guardian_fault="boot-order",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+            first_boot="linux",
+            boot_guardian_fault="boot-order",
+        ),
     )
     assert linux_first_result.status == "error"
     assert linux_first_result.steps[-1].step == "automation.boot_guardian_fault_order"
@@ -2074,6 +2714,9 @@ def test_boot_guardian_fault_is_repaired_during_a_real_shutdown_cycle(
 
         def __exit__(self, *_args: object) -> None:
             calls.append("ssh-close")
+
+        def close(self) -> None:
+            self.__exit__()
 
     class FakeProxmox:
         def __enter__(self) -> "FakeProxmox":
@@ -2492,10 +3135,19 @@ def test_automation_run_retains_completed_capture_workspace(
 
     monkeypatch.setattr(service.validation, "select_vms", lambda _selectors: (vm,))
     monkeypatch.setattr(service, "_restore_clean_snapshots", lambda _result, _profiles: None)
+    preparation_order: list[str] = []
+    monkeypatch.setattr(
+        service, "_prepare_windows_test_vm", lambda vm, _result: preparation_order.append(vm.name)
+    )
+
+    def prepare_server(_result, source):
+        assert preparation_order == ["vm1"]
+        return PurePosixPath("/srv/libertix-smb/Libertix-release/Libertix.exe")
+
     monkeypatch.setattr(
         service.validation,
         "prepare_server",
-        lambda _result, source: PurePosixPath("/srv/libertix-smb/Libertix-release/Libertix.exe"),
+        prepare_server,
     )
 
     def fake_run_vm(*_args, **_kwargs):
@@ -2506,10 +3158,13 @@ def test_automation_run_retains_completed_capture_workspace(
 
     result = service.run(
         ["vm1"],
-        linux_username="test",
-        linux_password="test",
-        monitor_iso=True,
-        source="local",
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+        ),
     )
 
     assert result.status == "ok"
@@ -2523,13 +3178,17 @@ def test_automation_isolates_unexpected_errors_to_the_originating_vm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = AutomationService(settings())
+    collected = []
+    monkeypatch.setattr(
+        service, "_collect_vm_failure_diagnostics", lambda *args: collected.append(args)
+    )
     vm = service.validation.select_vms(["vm2"])[0]
     profile = service._automation_profile_for_vm(vm)  # noqa: SLF001
     assert profile is not None
     monkeypatch.setattr(
-        service,
-        "_prepare_windows_test_vm",
-        lambda *_args: (_ for _ in ()).throw(TypeError("broken helper contract")),
+        service.validation,
+        "deploy_to_documents",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TypeError("broken helper contract")),
     )
 
     result = service._run_vm_isolated(  # noqa: SLF001
@@ -2541,18 +3200,139 @@ def test_automation_isolates_unexpected_errors_to_the_originating_vm(
 
     assert result.status == "error"
     assert result.steps[-1].step == "automation.internal"
+    assert len(collected) == 1 and collected[0][0] == vm
+    frames = result.steps[-1].context["traceback"]
     assert result.steps[-1].context == {
         "vm": vm.name,
         "target": vm.host,
         "type": "TypeError",
         "exception_type": "WorkflowError",
+        "traceback": frames,
     }
+    assert len(frames) >= 3
+    assert frames[0]["function"] == "_run_vm_isolated"
+    assert Path(frames[0]["file"]).as_posix().endswith("app/services/automation.py")
+    assert frames[-1]["function"] == "<genexpr>"
+    assert frames[-1]["file"] == __file__
+    assert all(set(frame) == {"file", "line", "function"} for frame in frames)
+    assert all(isinstance(frame["line"], int) and frame["line"] > 0 for frame in frames)
+
+
+def test_preparation_failure_collects_diagnostics_and_preserves_other_vm_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service = AutomationService(settings(capture_dir=tmp_path))
+    collected = []
+    launched = []
+    monkeypatch.setattr(service, "_restore_clean_snapshots", lambda *_args: None)
+
+    def prepare(vm, _result):
+        if vm.name == "vm2":
+            raise WorkflowError("automation.prepare_vm", "original preparation failure")
+
+    monkeypatch.setattr(service, "_prepare_windows_test_vm", prepare)
+    monkeypatch.setattr(
+        service, "_collect_vm_failure_diagnostics", lambda vm, *_args: collected.append(vm.name)
+    )
+    monkeypatch.setattr(
+        service.validation,
+        "prepare_server",
+        lambda *_args, **_kwargs: PurePosixPath("/srv/libertix-smb/Libertix-release/Libertix.exe"),
+    )
+
+    def run_vm(vm, *_args):
+        assert collected == ["vm2"]
+        launched.append(vm.name)
+        return ResultBuilder("automation").success("ok")
+
+    monkeypatch.setattr(service, "_run_vm_isolated", run_vm)
+    result = service.run(
+        ["vm1", "vm2", "vm3"],
+        AutomationRequest(
+            apply=True,
+            linux_username="test",
+            linux_password="test",
+            monitor_iso=True,
+            source="local",
+        ),
+    )
+    assert sorted(launched) == ["vm1", "vm3"]
+    assert result.status == "error"
+    assert any(step.message == "original preparation failure" for step in result.steps)
+    assert {
+        step.context["vm"]: step.context["vm_status"]
+        for step in result.steps
+        if step.step == "automation.vm_finished"
+    } == {"vm1": "ok", "vm2": "error", "vm3": "ok"}
+
+
+def test_diagnostic_collection_failure_never_replaces_original_vm_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    monkeypatch.setattr(
+        service.validation,
+        "deploy_to_documents",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            WorkflowError("original.step", "original failure")
+        ),
+    )
+    monkeypatch.setattr(
+        automation_module,
+        "collect_failure_diagnostics",
+        lambda *_args: (_ for _ in ()).throw(OSError("local archive disk unavailable")),
+    )
+    result = service._run_vm_isolated(
+        vm,
+        PureWindowsPath("C:/Libertix.exe"),
+        AutomationOptions("test", "test", True),
+        None,
+    )
+    assert result.status == "error"
+    assert result.message == "error: original failure"
+    assert [step.step for step in result.steps] == [
+        "original.step",
+        "automation.diagnostics.wait",
+        "automation.diagnostics.failed",
+    ]
+
+
+def test_failed_check_is_archived_before_the_next_check_runs(monkeypatch):
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm2"])[0]
+    order = []
+    monkeypatch.setattr(
+        service.validation, "deploy_to_documents", lambda _vm, path, **_kwargs: path
+    )
+    monkeypatch.setattr(service, "_start_serial_capture", lambda *_args: None)
+    monkeypatch.setattr(service, "_launch_elevated", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(service, "_run_unattended_wizard", lambda *_args: "boot-menu")
+
+    def collect(_vm, _options, result):
+        order.append("diagnostics")
+        result.error("automation.diagnostics.failed", "test archive unavailable", vm=vm.name)
+
+    def validate(_vm, _options, result, _outcome):
+        result.error("automation.test.linux", "timeout", vm=vm.name, test="failed-check")
+        order.append("next-check")
+        result.ok("automation.test.linux", "OK", vm=vm.name, test="next-check")
+
+    monkeypatch.setattr(service, "_collect_vm_failure_diagnostics", collect)
+    monkeypatch.setattr(service, "_run_post_install_validation", validate)
+    result = service._run_vm_isolated(
+        vm, PureWindowsPath("C:/Libertix.exe"), AutomationOptions("test", "test", True), None
+    )
+    assert order == ["diagnostics", "next-check"]
+    assert result.status == "error"
+    assert result.steps[-1].context["test"] == "next-check"
 
 
 def test_automation_preserves_primary_failure_when_serial_capture_also_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = AutomationService(settings())
+    monkeypatch.setattr(service, "_collect_vm_failure_diagnostics", lambda *_args: None)
     vm = service.validation.select_vms(["vm2"])[0]
     serial_session = SimpleNamespace()
 
@@ -2560,7 +3340,7 @@ def test_automation_preserves_primary_failure_when_serial_capture_also_fails(
     monkeypatch.setattr(
         service.validation,
         "deploy_to_documents",
-        lambda _vm, executable: executable,
+        lambda _vm, executable, **_kwargs: executable,
     )
     monkeypatch.setattr(service, "_start_serial_capture", lambda *_args: serial_session)
     monkeypatch.setattr(
@@ -2603,6 +3383,36 @@ def test_automation_preserves_primary_failure_when_serial_capture_also_fails(
         "target": vm.host,
         "path": "serial.log",
     }
+
+
+def test_serial_capture_skips_unconfigured_hardware_before_opening_a_proxy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    service = AutomationService(settings(capture_dir=tmp_path))
+    vm = service.validation.select_vms(["vm1"])[0]
+
+    class FakeProxmox:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def locate_vm(self, vmid):
+            assert vmid == vm.vmid
+            return "node-a"
+
+        def has_serial_console(self, node, vmid):
+            assert (node, vmid) == ("node-a", vm.vmid)
+            return False
+
+    monkeypatch.setattr(service, "_proxmox", FakeProxmox)
+    result = ResultBuilder("automation")
+    session = service._start_serial_capture(vm, result)  # noqa: SLF001
+    service._stop_serial_capture(vm, session, result)  # noqa: SLF001
+    assert session.error is None
+    assert session.report.connections == 0
+    assert all(step.step == "automation.serial_capture_unavailable" for step in result.steps)
 
 
 def test_serial_capture_unavailable_is_reported_without_false_success(
@@ -3042,9 +3852,11 @@ def test_installation_monitor_skips_three_identical_ai_analyses_then_rechecks(
     assert len([step for step in result.steps if step.step == "automation.monitor_unchanged"]) == 3
 
 
+@pytest.mark.parametrize("animated", [False, True])
 def test_installation_monitor_reports_a_visual_stall_with_its_capture(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    animated: bool,
 ) -> None:
     service = AutomationService(
         settings(
@@ -3061,6 +3873,8 @@ def test_installation_monitor_reports_a_visual_stall_with_its_capture(
 
     def capture_screen(_vm: object, label: str) -> Path:
         labels.append(label)
+        if animated:
+            Image.new("RGB", (320, 200), (255 * (len(labels) % 2), 20, 30)).save(capture)
         return capture
 
     monkeypatch.setattr(service, "_capture_with_name", capture_screen)
@@ -3165,6 +3979,32 @@ def test_reboot_request_tolerates_vnc_loss_only_after_confirmation(
         "automation.reboot_transition",
         "automation.reboot_requested",
     ]
+
+
+def test_reboot_capture_failure_preserves_the_transport_diagnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    keys: list[str] = []
+    client = SimpleNamespace(keyPress=keys.append, disconnect=lambda: None)
+
+    def capture(*_args: object) -> None:
+        raise WorkflowError(
+            "automation.capture",
+            "VNC capture is missing or empty",
+            details={"path": "reboot.png", "capture_error": "VNC response timed out"},
+        )
+
+    monkeypatch.setattr(service.vnc, "connect", lambda _address: client)
+    monkeypatch.setattr(service, "_capture_from_client", capture)
+
+    with pytest.raises(WorkflowError) as raised:
+        service._request_reboot_after_preparation(vm, ResultBuilder("automation"))  # noqa: SLF001
+
+    assert keys == []
+    assert raised.value.details["capture_error"] == "VNC response timed out"
+    assert raised.value.details["path"] == "reboot.png"
 
 
 def test_client_capture_accepts_a_complete_image_written_before_vnc_timeout(
@@ -3435,8 +4275,18 @@ def test_automation_monitor_waits_for_the_final_rollback_verdict(
     )
 
 
+@pytest.mark.parametrize(
+    "visible_text",
+    [
+        "Rollback incomplete. Manual intervention is required.",
+        "ROLLBACK NOT VERIFIED: do not reboot.",
+        "ROLLBACK NON VÉRIFIÉ : ne redémarrez pas.",
+        "RESTAURACIÓN NO VERIFICADA: no reinicie.",
+    ],
+)
 def test_automation_monitor_reports_an_incomplete_rollback_immediately(
     monkeypatch: pytest.MonkeyPatch,
+    visible_text: str,
 ) -> None:
     service = AutomationService(settings())
     vm = service.validation.select_vms(["vm1"])[0]
@@ -3447,7 +4297,7 @@ def test_automation_monitor_reports_an_incomplete_rollback_immediately(
         still_in_progress=False,
         error_visible=True,
         summary="Manual intervention is required.",
-        visible_text="Rollback incomplete. Manual intervention is required.",
+        visible_text=visible_text,
     )
     monkeypatch.setattr(automation_monitoring_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -3462,8 +4312,14 @@ def test_automation_monitor_reports_an_incomplete_rollback_immediately(
     )
     result = ResultBuilder("automation")
 
+    def reject_reboot_probe(*_args: object) -> None:
+        pytest.fail("An unverified rollback must not request a reboot probe")
+
+    monkeypatch.setattr(service, "_request_live_failure_reboot_probe", reject_reboot_probe)
     with pytest.raises(WorkflowError) as raised:
-        service._monitor_until_live_boot(vm, result, "bios")  # noqa: SLF001
+        service._monitor_until_live_boot(  # noqa: SLF001
+            vm, result, "bios", reboot_requested=True
+        )
 
     assert raised.value.details["rollback_outcome"] == "incomplete"
     assert "incomplete rollback" in raised.value.message
@@ -3484,7 +4340,8 @@ def test_bios_installer_keeps_windows_boot_partition_active() -> None:
 
     assert "WINDOWS_BOOT_PARTITION_OFFSET_BYTES" in installer
     assert "set_bios_boot_flags_or_die" in installer
-    assert 'sfdisk --lock --activate "$DISK" "$partition_number"' in bios_adapter
+    assert 'sfdisk --lock --activate "$windows_disk" "$partition_number"' in bios_adapter
+    assert 'windows_disk="${WINDOWS_DISK:-$DISK}"' in bios_adapter
     assert "only_mbr_partition_has_boot_flag" in bios_adapter
     assert "final verify: Windows boot partition is not active" in bios_adapter
     assert "bootPartitionOffset = [long]$boot.Offset" in preflight
@@ -3516,7 +4373,8 @@ def test_uefi_recovery_guard_uses_exact_windows_manifest() -> None:
     runtime = read_repo("assets/live/libertix-install-runtime-common.sh")
 
     assert "assert_recovery_unchanged_or_die" in installer
-    assert 'partition_at_offset "$DISK" "$RECOVERY_PARTITION_OFFSET_BYTES"' in runtime
+    assert 'windows_disk="${WINDOWS_DISK:-$DISK}"' in runtime
+    assert 'partition_at_offset "$windows_disk" "$RECOVERY_PARTITION_OFFSET_BYTES"' in runtime
     assert 'recovery_size=$(blockdev --getsize64 "$recovery_partition"' in runtime
     assert '"$recovery_size" = "$RECOVERY_PARTITION_SIZE_BYTES"' in runtime
     assert "Windows recovery partition size changed" in runtime
@@ -3578,9 +4436,9 @@ def test_uefi_recovery_tasks_are_not_clock_boundary_dependent() -> None:
 
 
 def test_recovery_is_armed_before_any_bitlocker_mutation() -> None:
-    workflow = read_repo("Pages/ApplyChanges.xaml.cs")
-    bios = read_repo("Pages/ApplyChanges.Bios.cs")
-    uefi = read_repo("Pages/ApplyChanges.Uefi.cs")
+    workflow = read_repo("Installation/InstallationEngine.cs")
+    bios = read_repo("Installation/InstallationEngine.Bios.cs")
+    uefi = read_repo("Installation/InstallationEngine.Uefi.cs")
     installer = read_repo("Scripts/libertix-uefi-install.ps1")
     transaction = read_repo("Scripts/uefi/Libertix.Uefi.Transaction.ps1")
 
@@ -3600,17 +4458,21 @@ def test_recovery_is_armed_before_any_bitlocker_mutation() -> None:
 
 
 def test_bios_recovery_payload_includes_atomic_state_dependency() -> None:
-    source = read_repo("Pages/ApplyChanges.Windows.cs")
+    source = read_repo("Installation/InstallationEngine.Windows.cs")
     method_start = source.index("private async Task<bool> InstallWindowsRecoveryGuardAsync")
     method_end = source.index("private async Task<double> QueryShrinkSpaceAsync", method_start)
     method = source[method_start:method_end]
 
-    assert '"Libertix.InstallationState.psm1"' in method
-    assert method.count('"Libertix.AtomicFile.psm1"') == 2
+    modules = source.split("BiosRecoveryModules =", 1)[1].split("};", 1)[0]
+    assert "foreach (string module in BiosRecoveryModules)" in method
+    for module in ("InstallationState", "AtomicFile", "BiosMbr", "Rollback"):
+        assert f'"Libertix.{module}.psm1"' in modules
+    project = read_repo("Libertix.csproj")
+    assert 'Include="Scripts\\modules\\Libertix.BiosMbr.psm1"' in project
 
 
 def test_bios_live_ledger_is_detached_before_drive_letter_removal() -> None:
-    bios = read_repo("Pages/ApplyChanges.Bios.cs")
+    bios = read_repo("Installation/InstallationEngine.Bios.cs")
     method = bios.split("private async Task<bool> PrepareBiosTemporaryBootAsync()", 1)[1].split(
         "private async Task<bool> RemoveBiosInstallerAccessPathAsync()", 1
     )[0]
@@ -3653,7 +4515,143 @@ def test_wpf_storage_preflight_fails_closed() -> None:
     assert "Installation was stopped before any disk change" in source
     assert "systemDiskNumber = [int]$partition.DiskNumber" in preflight
     assert "bitLockerSafe = [bool]$bitLocker.Safe" in preflight
-    assert "Exactly one Windows recovery partition is required" in preflight
+    assert "modules\\Libertix.StorageGeometry.psm1" in preflight
+    assert "$recovery = Resolve-LibertixWindowsRecoveryPartition" in preflight
+    assert preflight.index(
+        "$recovery = Resolve-LibertixWindowsRecoveryPartition"
+    ) < preflight.index("if ($DecryptBitLocker)")
+
+
+@pytest.mark.parametrize(
+    "outcome", ["update-finishes", "update-stays-busy", "stop-fails", "restore-loses-connection"]
+)
+def test_linux_checks_restore_update_timers(monkeypatch, outcome) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    result = ResultBuilder("automation")
+    clock = [0.0]
+    calls = []
+    apt_attempts = 0
+    restore_attempts = 0
+    reconnects = []
+    monkeypatch.setattr(automation_postinstall_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda seconds: None)
+
+    class FakeSSH:
+        def reconnect(self):
+            reconnects.append(True)
+
+        def run(self, command, **kwargs):
+            nonlocal apt_attempts, restore_attempts
+            calls.append(command)
+            if "systemctl list-units" in command:
+                return CommandResult("apt-daily-upgrade.timer loaded active waiting\n", "", 0)
+            if "systemctl stop" in command and outcome == "stop-fails":
+                raise WorkflowError(kwargs["step"], "Timer stop failed")
+            if "systemctl start" in command:
+                restore_attempts += 1
+                if outcome == "restore-loses-connection" and restore_attempts == 1:
+                    raise WorkflowError(
+                        kwargs["step"], "SSH connection lost", details={"transport_error": True}
+                    )
+            if "apt-get" in command:
+                apt_attempts += 1
+                if apt_attempts == 1:
+                    if outcome == "update-stays-busy":
+                        clock[0] += service.settings.post_install_package_timeout_seconds
+                    return CommandResult("", "Could not get lock /var/lib/dpkg/lock-frontend", 100)
+            return CommandResult("", "", 0)
+
+    if outcome in {"stop-fails", "update-stays-busy"}:
+        message = "Timer stop failed" if outcome == "stop-fails" else "package manager is not ready"
+        with pytest.raises(WorkflowError, match=message):
+            service._run_linux_checks(
+                FakeSSH(), vm, AutomationOptions("test", "password", True), result
+            )
+    else:
+        service._run_linux_checks(
+            FakeSSH(), vm, AutomationOptions("test", "password", True), result
+        )
+    assert "systemctl stop apt-daily-upgrade.timer" in calls[1]
+    assert "systemctl start apt-daily-upgrade.timer" in calls[-1]
+    assert not any("systemctl stop apt-daily.timer" in command for command in calls)
+    assert not any("kill" in command or "rm " in command for command in calls)
+    checks = [step for step in result.steps if step.step == "automation.test.linux"]
+    if outcome in {"update-finishes", "restore-loses-connection"}:
+        assert apt_attempts == 2
+        assert [step.context["test"] for step in checks[:2]] == [
+            "linux.package_dependencies",
+            "linux.package_database",
+        ]
+        assert all(step.status == "ok" for step in checks)
+        assert len(reconnects) == (1 if outcome == "restore-loses-connection" else 0)
+        assert restore_attempts == (2 if outcome == "restore-loses-connection" else 1)
+    elif outcome == "update-stays-busy":
+        assert len(checks) == 1
+        assert checks[0].status == "error"
+        assert checks[0].context["failure_kind"] == "package_manager_busy"
+
+
+def test_package_checks_wait_for_an_activating_update(tmp_path, monkeypatch) -> None:
+    systemctl = tmp_path / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\nif [ -e "$APT_WAIT_STATE" ]; then '
+        "printf 'inactive\\ninactive\\n'; else "
+        ": > \"$APT_WAIT_STATE\"; printf 'activating\\ninactive\\n'; fi\n"
+    )
+    sleep = tmp_path / "sleep"
+    sleep.write_text('#!/bin/sh\nprintf "DELAY=%s\\n" "$1"\n')
+    apt = tmp_path / "apt-get"
+    apt.write_text("#!/bin/sh\nset -eu\ntest \"$LC_ALL\" = C\nprintf 'DEPENDENCIES_CHECKED\\n'\n")
+    for executable in (systemctl, sleep, apt):
+        executable.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("APT_WAIT_STATE", str(tmp_path / "update-finished"))
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    check = next(
+        check
+        for check in service._linux_checks(vm, AutomationOptions("test", "password", True))
+        if check.name == "linux.package_dependencies"
+    )
+
+    class LocalSSH:
+        def run(self, command, **kwargs):
+            arguments = shlex.split(command)
+            assert arguments[:4] == ["sudo", "-S", "-p", ""]
+            # Exercise the complete shell command without elevating the local test process.
+            response = subprocess.run(arguments[4:], capture_output=True, text=True, timeout=5)
+            return CommandResult(response.stdout, response.stderr, response.returncode)
+
+    response = service._run_remote_check(
+        LocalSSH(), vm, ResultBuilder("automation"), "linux", check, sudo_password="password"
+    )
+    assert response is not None
+    assert response.exit_code == 0, response.stderr
+    assert response.stdout == (
+        "Waiting for automatic APT services to finish.\n"
+        f"DELAY={automation_postinstall_module.PACKAGE_MANAGER_RETRY_DELAY_SECONDS}\n"
+        "DEPENDENCIES_CHECKED\n"
+    )
+
+
+def test_package_database_prints_its_failure_before_exiting(tmp_path, monkeypatch) -> None:
+    dpkg = tmp_path / "dpkg"
+    dpkg.write_text("#!/bin/sh\nprintf '%s\\n' 'package-example awaits configuration'\n")
+    dpkg.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    check = next(
+        check
+        for check in service._linux_checks(vm, AutomationOptions("test", "password", True))
+        if check.name == "linux.package_database"
+    )
+    response = subprocess.run(
+        ["/bin/sh", "-eu", "-c", check.command], capture_output=True, text=True
+    )
+    assert response.returncode == 1
+    assert response.stdout == "package-example awaits configuration\n"
 
 
 def test_linux_post_install_checks_continue_after_one_failure() -> None:
@@ -3676,7 +4674,7 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
 
     service._run_linux_checks(ssh, vm, options, result)  # type: ignore[arg-type]  # noqa: SLF001
 
-    tests = [step.context["test"] for step in result.steps]
+    tests = [step.context["test"] for step in result.steps if step.step == "automation.test.linux"]
     assert {
         "linux.hostname",
         "linux.locale",
@@ -3698,15 +4696,25 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     assert "linux.time_sync" in tests
     assert "linux.package_database" in tests
     assert "linux.package_dependencies" in tests
+    apt_command, apt_options = next(call for call in ssh.calls if "apt-get" in call[0])
+    assert "apt-get -o DPkg::Lock::Timeout=300 check" in apt_command
+    assert apt_options["timeout"] == 360
     assert "linux.name_resolution" in tests
     assert tests[-1] == "linux.name_resolution"
     assert (
-        next(step for step in result.steps if step.context["test"] == "linux.time_sync").status
+        next(
+            step
+            for step in result.steps
+            if step.step == "automation.test.linux" and step.context["test"] == "linux.time_sync"
+        ).status
         == "error"
     )
-    assert len(ssh.calls) == len(tests)
+    assert len(ssh.calls) == len(tests) + 1
+    assert "systemctl list-units --type=timer --state=active" in ssh.calls[0][0]
+    assert tests[:2] == ["linux.package_dependencies", "linux.package_database"]
     sudo_calls = [(command, kwargs) for command, kwargs in ssh.calls if command.startswith("sudo ")]
-    assert len(sudo_calls) == 11
+    assert len(sudo_calls) == 12
+    assert any("--verify-windows-sharing" in command for command, _ in sudo_calls)
     assert all(
         command.startswith("sh -eu -c ") or command.startswith("sudo -S -p '' sh -eu -c ")
         for command, _kwargs in ssh.calls
@@ -3739,6 +4747,29 @@ def test_linux_post_install_checks_continue_after_one_failure() -> None:
     assert "default via 192.0.2.1" in commands
     assert "8.8.8.8" in commands
     assert "1.1.1.1" in commands
+
+
+@pytest.mark.parametrize("attempt_id", [None, "first-attempt", "second-attempt"])
+def test_linux_post_install_ack_matches_real_result_producer(attempt_id: str | None) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    checks = service._linux_checks(vm, AutomationOptions("test", "test-passphrase", True))  # noqa: SLF001
+    check = next(check for check in checks if check.name == "linux.first_boot_verification")
+    assert " first-boot-evidence " in check.command
+    helper = runpy.run_path(str(REPO_ROOT / "auto_tests/app/scripts/linux_check_helper.py"))
+    producer = runpy.run_path(str(REPO_ROOT / "assets/live/libertix-first-boot-result.py"))
+    status = {
+        "planId": "a" * 32,
+        "status": "succeeded",
+        "updatedAtUtc": "2026-09-05T12:00:00Z",
+        "error": None,
+        "attemptId": attempt_id,
+    }
+    acknowledgement = producer["status_fingerprint"](status)
+    assert helper["result_fingerprint"](status) == acknowledgement
+    assert helper["result_fingerprint"](dict(status, attemptId="different-attempt")) != (
+        acknowledgement
+    )
 
 
 def test_linux_post_install_check_requires_selected_distribution_identity() -> None:
@@ -3920,6 +4951,9 @@ def test_wait_for_ssh_retries_a_still_visible_grub_menu(
         def __exit__(self, *_args) -> None:
             pass
 
+        def close(self) -> None:
+            self.__exit__()
+
     monkeypatch.setattr(automation_postinstall_module, "SSHClient", FakeSSH)
     monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
@@ -4046,11 +5080,21 @@ def test_windows_post_install_checks_continue_after_one_failure(
     assert "bitlocker" in called
     assert called[-1] == "chkdsk_scan"
     assert (
-        next(step for step in result.steps if step.context["test"] == "windows.bitlocker").status
+        next(
+            step
+            for step in result.steps
+            if step.step == "automation.test.windows"
+            and step.context["test"] == "windows.bitlocker"
+        ).status
         == "error"
     )
     assert (
-        next(step for step in result.steps if step.context["test"] == "windows.chkdsk_scan").status
+        next(
+            step
+            for step in result.steps
+            if step.step == "automation.test.windows"
+            and step.context["test"] == "windows.chkdsk_scan"
+        ).status
         == "ok"
     )
     assert timeouts["identity"] == 300
@@ -4120,6 +5164,12 @@ def test_post_install_flow_proves_windows_before_first_linux_boot(
 
         def __exit__(self, *_args) -> None:
             events.append("ssh-close")
+
+        def close(self) -> None:
+            self.__exit__()
+
+        def upload_text(self, *_args, **_kwargs) -> None:
+            pass
 
     def fake_wait_for_ssh(_vm, *, phase, grub_entry, **_kwargs):
         events.append(f"wait:{phase}:{grub_entry}")
@@ -4244,6 +5294,12 @@ def test_post_install_flow_can_verify_linux_first_but_still_tests_both_systems(
         def __exit__(self, *_args: object) -> None:
             return None
 
+        def close(self) -> None:
+            self.__exit__()
+
+        def upload_text(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
     def wait_for_ssh(_vm: object, *, phase: str, grub_entry: str, **_kwargs: object):
         events.append(f"wait:{phase}:{grub_entry}")
         return FakeSSH()
@@ -4313,6 +5369,9 @@ def test_windows_filesystem_repair_waits_for_reboot_then_resumes(
 
         def __exit__(self, *_args: object) -> None:
             closed.append(self.name)
+
+        def close(self) -> None:
+            self.__exit__()
 
     responses = iter(
         (
@@ -4440,6 +5499,7 @@ def test_linux_graphical_session_uses_loginctl_before_submitting_credentials(
 
     def connect(_address: str) -> SimpleNamespace:
         return SimpleNamespace(
+            mouseMove=lambda _x, _y: None,
             keyPress=keys.append,
             keyDown=lambda key: held_keys.append(("down", key)),
             keyUp=lambda key: held_keys.append(("up", key)),
@@ -4480,7 +5540,7 @@ def test_linux_graphical_session_uses_loginctl_before_submitting_credentials(
     assert held_keys == [("down", "ctrl"), ("up", "ctrl")]
     assert captures == [
         "post-install-linux-login-01-ready",
-        "post-install-linux-login-01-password-entered",
+        "post-install-linux-login-01-submitted",
     ]
     assert len(disconnects) == 1
     assert [step.step for step in result.steps] == [
@@ -4511,6 +5571,7 @@ def test_linux_graphical_session_retries_until_loginctl_proves_an_active_desktop
     responses = iter(
         (
             CommandResult(stdout="", stderr="", exit_code=1),
+            *[CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0)] * 60,
             CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
             CommandResult(stdout="LIBERTIX_DESKTOP_READY", stderr="", exit_code=0),
         )
@@ -4529,6 +5590,7 @@ def test_linux_graphical_session_retries_until_loginctl_proves_an_active_desktop
         service.vnc,
         "connect",
         lambda _address: SimpleNamespace(
+            mouseMove=lambda _x, _y: None,
             keyPress=keys.append,
             keyDown=lambda key: held_keys.append(("down", key)),
             keyUp=lambda key: held_keys.append(("up", key)),
@@ -4568,6 +5630,67 @@ def test_linux_graphical_session_retries_until_loginctl_proves_an_active_desktop
     assert [step.context.get("attempt") for step in result.steps[:2]] == [1, 2]
 
 
+def test_linux_graphical_login_waits_for_slow_desktop_without_retyping_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm3"])[0]
+    responses = iter(
+        (
+            CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
+            CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
+            CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
+            CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
+            CommandResult(stdout="LIBERTIX_DESKTOP_READY", stderr="", exit_code=0),
+        )
+    )
+    typed: list[str] = []
+
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service,
+        "_capture_with_name",
+        lambda _vm, label: Path(f"{label}.png"),
+    )
+    monkeypatch.setattr(
+        service.vnc,
+        "connect",
+        lambda _address: SimpleNamespace(
+            mouseMove=lambda _x, _y: None,
+            keyPress=lambda _key: None,
+            keyDown=lambda _key: None,
+            keyUp=lambda _key: None,
+            disconnect=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_capture_from_client",
+        lambda _client, _vm, label, _result: Path(f"{label}.png"),
+    )
+    monkeypatch.setattr(
+        service,
+        "_type_text",
+        lambda _client, text, _layout: typed.append(text),
+    )
+    linux_ssh = SimpleNamespace(run=lambda *_args, **_kwargs: next(responses))
+    result = ResultBuilder("automation")
+
+    service._prepare_linux_graphical_session(  # noqa: SLF001
+        linux_ssh,
+        vm,
+        result,
+        "test",
+        "test-passphrase",
+    )
+
+    assert typed == ["test-passphrase"]
+    assert [step.step for step in result.steps] == [
+        "automation.linux_graphical_login",
+        "automation.linux_graphical_session",
+    ]
+
+
 def test_linux_graphical_session_reconnects_after_a_blank_vnc_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4576,6 +5699,7 @@ def test_linux_graphical_session_reconnects_after_a_blank_vnc_capture(
     responses = iter(
         (
             CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
+            *[CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0)] * 60,
             CommandResult(stdout="LIBERTIX_GREETER_READY", stderr="", exit_code=0),
             CommandResult(stdout="LIBERTIX_DESKTOP_READY", stderr="", exit_code=0),
         )
@@ -4586,6 +5710,7 @@ def test_linux_graphical_session_reconnects_after_a_blank_vnc_capture(
 
     def connect(_address: str) -> SimpleNamespace:
         connection = SimpleNamespace(
+            mouseMove=lambda _x, _y: None,
             keyPress=lambda _key: None,
             keyDown=lambda _key: None,
             keyUp=lambda _key: None,
@@ -4644,6 +5769,61 @@ def test_linux_graphical_session_reconnects_after_a_blank_vnc_capture(
     assert result.steps[0].context["attempt"] == 1
 
 
+@pytest.mark.parametrize("gdm_password_worker_blocked", [False, True])
+def test_linux_graphical_retries_wait_five_minutes_and_wake_without_clicking(
+    monkeypatch: pytest.MonkeyPatch, gdm_password_worker_blocked: bool
+) -> None:
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    elapsed = 0.0
+    connected_at: list[float] = []
+    moves: list[tuple[int, int]] = []
+    submissions: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal elapsed
+        elapsed += seconds
+
+    def connect(_address: str) -> SimpleNamespace:
+        connected_at.append(elapsed)
+        return SimpleNamespace(
+            mouseMove=lambda x, y: moves.append((x, y)),
+            keyPress=lambda _key: None,
+            keyDown=lambda _key: None,
+            keyUp=lambda _key: None,
+            disconnect=lambda: None,
+        )
+
+    def capture(_client: object, _vm: object, label: str, _result: object) -> Path:
+        assert moves[-2:] == [(1, 1), (2, 1)]
+        return Path(f"{label}.png")
+
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", sleep)
+    monkeypatch.setattr(service.vnc, "connect", connect)
+    monkeypatch.setattr(service, "_capture_from_client", capture)
+    monkeypatch.setattr(service, "_assert_single_gdm_account", lambda *_args: None)
+    monkeypatch.setattr(service, "_wait_for_gdm_password_worker", lambda *_args, **_kw: False)
+    monkeypatch.setattr(
+        service, "_type_text", lambda _client, text, _layout: submissions.append(text)
+    )
+    state = (
+        "LIBERTIX_GDM_GREETER_READY" if gdm_password_worker_blocked else "LIBERTIX_GREETER_READY"
+    )
+    linux_ssh = SimpleNamespace(
+        run=lambda *_args, **_kw: CommandResult(stdout=state, stderr="", exit_code=0)
+    )
+
+    with pytest.raises(WorkflowError, match="five attempts"):
+        service._prepare_linux_graphical_session(  # noqa: SLF001
+            linux_ssh, vm, ResultBuilder("automation"), "test", "test-passphrase"
+        )
+
+    assert connected_at == [0, 301, 602, 903, 1204]
+    assert elapsed == 1505
+    assert moves == [(1, 1), (2, 1)] * 5
+    assert len(submissions) == (0 if gdm_password_worker_blocked else 5)
+
+
 def test_windows_post_install_checks_unlock_the_interactive_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4688,8 +5868,10 @@ def test_windows_post_install_checks_unlock_the_interactive_session(
     keys: list[str] = []
     typed: list[tuple[str, str]] = []
     disconnects: list[bool] = []
+    moves = []
+    sleeps = []
 
-    monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", sleeps.append)
     monkeypatch.setattr(
         service,
         "_capture_with_name",
@@ -4700,6 +5882,7 @@ def test_windows_post_install_checks_unlock_the_interactive_session(
         "connect",
         lambda _address: SimpleNamespace(
             keyPress=keys.append,
+            mouseMove=lambda x, y: moves.append((x, y)),
             disconnect=lambda: disconnects.append(True),
         ),
     )
@@ -4721,13 +5904,60 @@ def test_windows_post_install_checks_unlock_the_interactive_session(
     assert typed == [
         (service.settings.windows_ssh_password.get_secret_value(), vm.vnc_keyboard_layout)
     ]
-    assert disconnects == [True]
+    assert disconnects == [True] * 4
+    assert moves == [(1, 1)] * 3
+    assert sleeps.count(300) == 2
     assert [step.step for step in result.steps] == [
         "automation.windows_graphical_session_wait",
         "automation.windows_graphical_session_wait",
         "automation.windows_graphical_login",
         "automation.windows_graphical_session",
     ]
+
+
+@pytest.mark.parametrize("ready_after_submit", [False, True])
+def test_windows_login_proves_success_or_captures_bounded_failure(monkeypatch, ready_after_submit):
+    service = AutomationService(settings())
+    vm = service.validation.select_vms(["vm1"])[0]
+    sleeps, moves, submissions, captures = [], [], [], []
+    monkeypatch.setattr(automation_postinstall_module.time, "sleep", sleeps.append)
+    monkeypatch.setattr(
+        service.vnc,
+        "connect",
+        lambda _address: SimpleNamespace(
+            mouseMove=lambda *xy: moves.append(xy),
+            keyPress=lambda _key: None,
+            disconnect=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(service, "_type_text", lambda *_args: submissions.append(True))
+
+    def capture(_vm, label):
+        captures.append(label)
+        return Path(label + ".png")
+
+    monkeypatch.setattr(service, "_capture_with_name", capture)
+
+    def inspect(*_args, **_kwargs):
+        ready = ready_after_submit and bool(submissions)
+        return CommandResult(
+            f"EXPLORER_SESSION_READY={ready}\nLOGIN_SCREEN_PRESENT=True\nSESSION_ID=1", "", 0
+        )
+
+    monkeypatch.setattr(service.validation, "run_windows_script", inspect)
+    if ready_after_submit:
+        service._prepare_windows_graphical_session(object(), vm, ResultBuilder("automation"))
+        assert len(submissions) == 1
+        assert 300 not in sleeps
+        assert len(captures) == 2
+        return
+    with pytest.raises(WorkflowError) as caught:
+        service._prepare_windows_graphical_session(object(), vm, ResultBuilder("automation"))
+    assert len(submissions) == 3
+    assert sleeps.count(300) == 2
+    assert moves == [(1, 1)] * 3
+    assert len(captures) == 6
+    assert caught.value.details["capture"] == captures[-1] + ".png"
 
 
 def test_windows_post_install_dismisses_identified_setup_experience(
@@ -4739,6 +5969,11 @@ def test_windows_post_install_dismisses_identified_setup_experience(
     inspection_count = {"value": 0}
 
     monkeypatch.setattr(automation_postinstall_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        service.vnc,
+        "connect",
+        lambda _address: SimpleNamespace(mouseMove=lambda *_args: None, disconnect=lambda: None),
+    )
     monkeypatch.setattr(
         service,
         "_capture_with_name",
@@ -4850,13 +6085,14 @@ def test_linux_result_dialog_dismissal_requires_process_exit_and_acknowledgement
     assert "pgrep -fo" in commands[0]
     assert "first-boot-result.py" in commands[0]
     assert "first-boot-result.py" in commands[1]
-    assert "first-boot-result-ack.json" in commands[1]
+    assert "linux-check-helper.py result-acknowledged" in commands[1]
     assert linux_scripts == [
         {
             "script_name": "focus_linux_post_install_result.py",
-            "arguments": ("--pid", "4321", "--timeout", "15"),
+            "arguments": ("--pid", "4321", "--ready-timeout", "90", "--timeout", "15"),
             "step": "automation.linux_post_install_result_focused",
-            "timeout": 30,
+            "timeout": 120,
+            "replay_safe": True,
         }
     ]
     assert result.steps[-1].context["proof_source"] == ("guest-state-process-and-dismissal")
@@ -4882,7 +6118,12 @@ def test_windows_result_dialog_dismissal_requires_process_and_task_cleanup(
     def fake_run_windows_script(_ssh: object, **kwargs: object) -> CommandResult:
         observed.append(dict(kwargs))
         if kwargs["script_name"] == "focus_post_install_result.ps1":
-            return CommandResult(stdout="RESULT=OK\n", stderr="", exit_code=0)
+            return CommandResult(
+                stdout="ACTIVE_KEYBOARD_IDENTIFIER=0000040C\nINTERACTIVE_UI_CULTURE=fr-FR\n"
+                "INTERACTIVE_SESSION_ID=1\nRESULT=OK\n",
+                stderr="",
+                exit_code=0,
+            )
         if kwargs["config"]["check"] == "post_install_result_ui":
             return CommandResult(
                 stdout="POST_INSTALL_RESULT_UI_PROCESS_ID=4567\nRESULT=OK\n",
@@ -4908,6 +6149,7 @@ def test_windows_result_dialog_dismissal_requires_process_and_task_cleanup(
         "post_install_windows_check.ps1",
         "focus_post_install_result.ps1",
         "post_install_windows_check.ps1",
+        "post_install_windows_check.ps1",
     ]
     assert observed[0]["config"] == {
         "check": "post_install_result_ui",
@@ -4917,10 +6159,18 @@ def test_windows_result_dialog_dismissal_requires_process_and_task_cleanup(
     assert observed[1]["config"] == {"process_id": 4567}
     assert observed[1]["step"] == "automation.windows_post_install_result_focused"
     assert observed[2]["config"] == {
+        "check": "locale",
+        "expected_firmware": "uefi",
+        "interactive_keyboard_identifier": "0000040C",
+        "interactive_ui_culture": "fr-FR",
+        "interactive_session_id": "1",
+    }
+    assert observed[2]["step"] == "automation.windows_interactive_locale"
+    assert observed[3]["config"] == {
         "check": "post_install_result_ui_dismissed",
         "expected_firmware": "uefi",
     }
-    assert observed[2]["step"] == "automation.windows_post_install_result_dismissed"
+    assert observed[3]["step"] == "automation.windows_post_install_result_dismissed"
 
 
 def test_windows_validation_plan_keeps_conditional_sharing_checks_declarative() -> None:
@@ -5115,6 +6365,7 @@ def test_windows_post_install_script_exposes_every_requested_check() -> None:
         "network",
         "locale",
         "ssh_service",
+        "update_policy",
         "core_services",
         "hibernation",
         "ext4_driver",
@@ -5130,6 +6381,36 @@ def test_windows_post_install_script_exposes_every_requested_check() -> None:
         "sfc_verify_only",
         "chkdsk_scan",
     } <= implemented
+
+
+def test_windows_update_check_uses_persistent_policy_not_service_state() -> None:
+    script = read_repo("auto_tests/app/scripts/post_install_windows_check.ps1")
+    start = script.index('        "update_policy" {')
+    end = script.index('        "core_services" {', start)
+    update_policy = script[start:end]
+
+    assert "NoAutoUpdate" in update_policy
+    assert "SetDisableUXWUAccess" in update_policy
+    assert "Assert-Condition ($automaticUpdates -eq 1 -and $updateUi -eq 1)" in update_policy
+    assert "WINDOWS_UPDATES_DISABLED=True" in update_policy
+    assert 'Write-Output ("WINDOWS_UPDATE_SERVICE_STATE={0}"' in update_policy
+    assert '$updateService.State -eq "Stopped"' not in update_policy
+    assert '$updateService.StartMode -eq "Disabled"' not in update_policy
+
+
+def test_windows_test_preparation_reclaims_only_known_temporary_contents() -> None:
+    script = read_repo("auto_tests/app/scripts/prepare_windows_test_vm.ps1")
+
+    assert '"C:\\Windows\\Temp"' in script
+    assert '"C:\\Windows\\SoftwareDistribution\\Download"' in script
+    assert "$env:TEMP" in script
+    assert "Get-CimInstance Win32_UserProfile" in script
+    assert '(Join-Path ([string]$interactiveProfile.LocalPath) "AppData\\Local\\Temp")' in script
+    assert "Get-ChildItem -LiteralPath $path -Force -ErrorAction SilentlyContinue" in script
+    assert '$_.Name -notlike "auto-tests-*"' in script
+    assert '$_.Name -notlike "libertix-ssh-*"' in script
+    assert "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue" in script
+    assert "TEMPORARY_FILES_RECLAIMED_BYTES=$temporaryBytesReclaimed" in script
 
 
 def test_final_windows_state_check_excludes_slow_health_scans() -> None:

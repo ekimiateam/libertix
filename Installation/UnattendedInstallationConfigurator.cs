@@ -36,6 +36,7 @@ namespace Libertix.Installation
             await UnattendedWorkflow.PublishStageAndWaitAsync(
                 "configuration-distribution-applied");
 
+            SelectInstallationTarget(state, options.InstallationTarget);
             ValidateLinuxSize(state, distribution, options.LinuxSizeGiB);
             state.SelectedLinuxSizeGiB = options.LinuxSizeGiB;
             await UnattendedWorkflow.PublishStageAndWaitAsync(
@@ -44,7 +45,8 @@ namespace Libertix.Installation
             state.Sharing = new SharingOptions
             {
                 ShareWindowsFilesInLinux = options.ShareWindowsFilesInLinux,
-                ShareLinuxFilesInWindows = options.ShareLinuxFilesInWindows
+                ShareLinuxFilesInWindows = options.ShareLinuxFilesInWindows,
+                MigrateWindowsPreferences = options.MigrateWindowsPreferences
             };
             await UnattendedWorkflow.PublishStageAndWaitAsync(
                 "configuration-sharing-applied");
@@ -58,6 +60,31 @@ namespace Libertix.Installation
             options.ClearPassword();
             await UnattendedWorkflow.PublishStageAndWaitAsync(
                 "configuration-account-applied");
+        }
+
+        internal static void SelectInstallationTarget(InstallationState state, string mode)
+        {
+            if (mode == "windows")
+            {
+                if (!state.Compatibility.WindowsPartitionSlotAvailable)
+                    throw new CompatibilityPreflightException(
+                        "COMPAT_E_MBR_PRIMARY_LIMIT",
+                        string.Format(System.Globalization.CultureInfo.CurrentCulture,
+                            Localization.GetString("ResizeDiskWindowsMbrUnavailable"),
+                            state.Compatibility.InstallationTargets.Single(target => target.IsWindows).Drive),
+                        "The requested Windows target has no free primary partition slot.");
+                state.SelectedInstallationTarget = null;
+                return;
+            }
+            if (mode != "secondary")
+                throw new InvalidOperationException("The unattended installation target is invalid.");
+            var candidates = InstallationTargetSelection.ForFirmware(
+                state.Compatibility.InstallationTargets, state.Compatibility.Firmware)
+                .Where(target => !target.IsWindows).ToArray();
+            if (candidates.Length != 1)
+                throw new InvalidOperationException(
+                    "Unattended secondary-disk installation requires exactly one verified secondary volume.");
+            state.SelectedInstallationTarget = candidates[0];
         }
 
         private static void ValidateLinuxSize(
@@ -80,10 +107,38 @@ namespace Libertix.Installation
                 (double)InstallationSizePolicy.BytesPerGiB;
             double installerIsoGiB = distribution.IsoInstallerSizeBytes /
                 (double)InstallationSizePolicy.BytesPerGiB;
+            if (state.SelectedInstallationTarget is InstallationTargetInfo target)
+            {
+                if (initialFreeGiB < installerIsoGiB + InstallationSizePolicy.MinimumWindowsFreeSpaceGiB)
+                    throw new InvalidOperationException(
+                        "The Windows volume has insufficient space for the installer download.");
+                initialFreeGiB = target.FreeBytes / (double)InstallationSizePolicy.BytesPerGiB;
+                shrinkAvailableGiB = Math.Max(0,
+                    target.SizeBytes - target.MinimumSizeBytes - InstallationSizePolicy.PartitionAlignmentBytes) /
+                    (double)InstallationSizePolicy.BytesPerGiB;
+                installerIsoGiB = 0;
+            }
             double availableGiB = InstallationSizePolicy.AvailableLinuxSizeGiB(
                 initialFreeGiB,
                 shrinkAvailableGiB,
                 installerIsoGiB);
+
+            ValidateAvailableLinuxSize(requestedSizeGiB, availableGiB);
+        }
+
+        internal static void ValidateAvailableLinuxSize(int requestedSizeGiB, double availableGiB)
+        {
+            if (availableGiB < InstallationSizePolicy.MinimumFinalSizeGiB)
+            {
+                throw new InvalidOperationException(
+                    string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        "Insufficient space on the selected installation volume: " +
+                        "{0:F2} GiB is available for Linux after safety reserves; " +
+                        "at least {1} GiB is required. No installation changes were started.",
+                        availableGiB,
+                        InstallationSizePolicy.MinimumFinalSizeGiB));
+            }
 
             if (requestedSizeGiB < InstallationSizePolicy.MinimumFinalSizeGiB ||
                 requestedSizeGiB > availableGiB)

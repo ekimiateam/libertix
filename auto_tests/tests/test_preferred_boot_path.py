@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import subprocess
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 HELPER = ROOT / "assets/live/libertix-preferred-boot-path.py"
@@ -157,3 +161,112 @@ def test_sync_preserves_a_verified_windows_update_before_reinstalling_shim(
         (esp / "EFI" / "Libertix" / "preferred-boot-path.json").read_text(encoding="utf-8")
     )
     assert manifest["windowsLoader"]["sha256"] == digest(b"updated-windows-loader")
+
+
+@pytest.mark.parametrize("interruption", range(10))
+@pytest.mark.parametrize("after_write", [False, True])
+def test_sync_resumes_every_persistent_file_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: int, after_write: bool
+) -> None:
+    esp, verifier = fixture(tmp_path)
+    microsoft = esp / "EFI/Microsoft/Boot"
+    libertix = esp / "EFI/Libertix"
+    reference = libertix / "BootGuardianReference"
+    write(reference / ".libertix-owner", b"a" * 32 + b"\n")
+    for name in ("shimx64.efi", "grubx64.efi", "mmx64.efi", "grub.cfg"):
+        write(reference / name, b"old-reference")
+    write(microsoft / "bootmgfw.efi", b"updated-windows-loader")
+    spec = importlib.util.spec_from_file_location("preferred_sync_under_test", HELPER)
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    original_replace = helper.replace_atomic
+    journal = libertix / "preferred-boot-path.sync.json"
+    count = 0
+
+    def interrupted_replace(source: Path, destination: Path, expected_hash: str) -> None:
+        nonlocal count
+        publishing = journal.exists() and destination.parent in (microsoft, libertix, reference)
+        interrupt_now = publishing and count == interruption
+        if publishing:
+            count += 1
+        if interrupt_now and not after_write:
+            raise OSError("simulated interruption before replacement")
+        original_replace(source, destination, expected_hash)
+        if interrupt_now and after_write:
+            raise OSError("simulated interruption after replacement")
+
+    monkeypatch.setattr(helper, "replace_atomic", interrupted_replace)
+    args = SimpleNamespace(esp=str(esp), secure_boot_verifier=str(verifier))
+    with pytest.raises(OSError, match="simulated interruption"):
+        helper.synchronize(args)
+    assert journal.is_file()
+    monkeypatch.setattr(helper, "replace_atomic", original_replace)
+    helper.synchronize(args)
+    assert not journal.exists()
+    manifest = json.loads((libertix / "preferred-boot-path.json").read_text())
+    for path, expected in (
+        (microsoft / "bootmgfw.efi", manifest["preferred"]["shimSha256"]),
+        (microsoft / "grubx64.efi", manifest["preferred"]["grubSha256"]),
+        (microsoft / "mmx64.efi", manifest["preferred"]["mokManagerSha256"]),
+        (microsoft / "grub.cfg", manifest["preferred"]["grubConfigSha256"]),
+        (microsoft / "bootmgfw.libertix-windows.efi", manifest["windowsLoader"]["sha256"]),
+        (reference / "shimx64.efi", manifest["preferred"]["shimSha256"]),
+        (reference / "grubx64.efi", manifest["preferred"]["grubSha256"]),
+        (reference / "mmx64.efi", manifest["preferred"]["mokManagerSha256"]),
+        (reference / "grub.cfg", manifest["preferred"]["grubConfigSha256"]),
+    ):
+        assert digest(path.read_bytes()) == expected
+    assert (microsoft / "bootmgfw.libertix-windows.efi").read_bytes() == b"updated-windows-loader"
+
+
+@pytest.mark.parametrize("tamper", ["source", "destination", "path", "manifest"])
+def test_pending_sync_rejects_external_changes_before_any_more_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    esp, verifier = fixture(tmp_path)
+    spec = importlib.util.spec_from_file_location("preferred_sync_tamper_test", HELPER)
+    assert spec is not None and spec.loader is not None
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    real_replay = helper.replay_synchronization
+    journal_path = esp / "EFI/Libertix/preferred-boot-path.sync.json"
+
+    def stop_after_preparation(*args: object) -> None:
+        if journal_path.exists():
+            raise OSError("prepared")
+
+    monkeypatch.setattr(helper, "replay_synchronization", stop_after_preparation)
+    with pytest.raises(OSError, match="prepared"):
+        helper.synchronize(SimpleNamespace(esp=str(esp), secure_boot_verifier=str(verifier)))
+    journal = json.loads(journal_path.read_text())
+    stage = journal_path.parent / journal["stage"]
+    if tamper == "source":
+        (stage / "0").write_bytes(b"corrupted")
+    elif tamper == "destination":
+        (esp / "EFI/Microsoft/Boot/grubx64.efi").write_bytes(b"external-file")
+    elif tamper == "path":
+        journal["entries"][0]["target"] = "../outside"
+        journal_path.write_text(json.dumps(journal))
+    else:
+        (stage / "manifest.json").write_text("{}")
+    before = {path: path.read_bytes() for path in esp.rglob("*") if path.is_file()}
+    with pytest.raises((helper.PreferredBootPathError, ValueError)):
+        real_replay(esp, journal_path.with_name("preferred-boot-path.json"))
+    assert before == {path: path.read_bytes() for path in esp.rglob("*") if path.is_file()}
+
+
+def test_pending_sync_is_retried_on_linux_boot_and_blocks_windows_writers() -> None:
+    watch = (ROOT / "assets/live/libertix-efi-sync.path").read_text()
+    assert "RequiresMountsFor=/boot/efi" in watch
+    assert "PathExists=/boot/efi/EFI/Libertix/preferred-boot-path.sync.json" in watch
+    guardian = (ROOT / "BootGuardian/BootGuardianEngine.cs").read_text()
+    assert guardian.index("PreferredSynchronization.Replay(") < guardian.index(
+        "PreferredManifest.Read(manifestPath)"
+    )
+    restore = (
+        (ROOT / "Scripts/modules/Libertix.PreferredBootPath.psm1")
+        .read_text()
+        .split("function Restore-LibertixPreferredBootPath", 1)[1]
+    )
+    assert restore.index("preferred-boot-path.sync.json") < restore.index("$archiveRoot =")

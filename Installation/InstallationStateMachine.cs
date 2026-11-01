@@ -241,6 +241,21 @@ namespace Libertix.Installation
             Touch();
         }
 
+        public static int GetRollbackProgressPercent(InstallationExecutionState state)
+        {
+            ValidateState(state);
+            if (state.Status == InstallationStatus.RolledBack)
+                return 100;
+            if (state.Status != InstallationStatus.RollbackRunning)
+                return 0;
+
+            int required = state.CompletedSteps.Count(CompensatableSteps.Contains);
+            if (required == 0)
+                return 100;
+            int completed = state.CompensatedSteps.Count(CompensatableSteps.Contains);
+            return Math.Min(100, completed * 100 / required);
+        }
+
         public static void ValidateState(InstallationExecutionState state)
         {
             if (state == null)

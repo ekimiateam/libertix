@@ -8,12 +8,14 @@ namespace Libertix.Models
         public bool LowMemoryMode { get; set; }
         public int SystemDiskNumber { get; set; }
         public string SystemDiskUniqueId { get; set; }
+        public string SystemDiskPartitionTableId { get; set; }
         public long SystemDiskSize { get; set; }
         public string PartitionStyle { get; set; }
         public string StorageBusType { get; set; }
         public int LogicalSectorSize { get; set; }
         public int PhysicalSectorSize { get; set; }
         public long ShrinkAvailableBytes { get; set; }
+        public bool WindowsPartitionSlotAvailable { get; set; } = true;
         public bool BitLockerSafe { get; set; }
         public string BitLockerState { get; set; }
         public bool SecureBootEnabled { get; set; }
@@ -21,5 +23,6 @@ namespace Libertix.Models
         public bool NvramProbePassed { get; set; }
         public bool NvramProbeSkipped { get; set; }
         public string[] Warnings { get; set; } = new string[0];
+        public InstallationTargetInfo[] InstallationTargets { get; set; } = new InstallationTargetInfo[0];
     }
 }

@@ -62,8 +62,9 @@ def test_stream_worker_finishes_when_its_parent_event_pipe_is_gone(
             calls.append("close")
 
     def run_operation(
-        _settings, _operation, _selectors, _request, on_step, _run_workspace
+        _settings, _operation, _selectors, _request, on_step, _run_workspace, prepared_release
     ) -> OperationResult:
+        assert prepared_release is None
         on_step(
             main_module.StepResult(
                 step="automation.deploy",
@@ -141,7 +142,8 @@ def test_web_ui_is_served() -> None:
     assert "/api/v1/validation" in response.text
     assert "/api/v1/validation/stream" in response.text
     assert "/api/v1/automation" in response.text
-    assert "/api/v1/automation/stream" in response.text
+    assert "/api/v1/automation/full" in response.text
+    assert "`${endpoint}/stream?format=ndjson`" in response.text
     assert "/api/v1/reset" in response.text
     assert "/api/v1/reset/stream" in response.text
     assert "/filepool/catalog.json" in response.text
@@ -166,12 +168,28 @@ def test_web_ui_is_served() -> None:
     assert "distribution" in response.text
     assert "Zorin OS 18.1 Core" in response.text
     assert "source" in response.text
-    assert "Working tree local" in response.text
-    assert "Le partage SMB sera conservé" in response.text
-    assert "Automation unattended" in response.text
+    assert "Local working tree" in response.text
+    assert "The SMB share is kept" in response.text
+    assert "Automated installation" in response.text
     assert "apply: true" in response.text
     assert 'id="requestPreview"' in response.text
-    assert 'linux_password: "<masqué>"' in response.text
+    assert 'linux_password: preview ? "<masked>" : linuxPasswordInput.value' in response.text
+    for field in (
+        "automationMode",
+        "snapshotMode",
+        "installationTarget",
+        "extraSystemPartition",
+        "extraPartitionSizeMib",
+        "secondaryData",
+        "decryptSystemVolume",
+        "decryptSecondaryVolume",
+        "redirectDocuments",
+        "migrateWindowsPreferences",
+        "preferenceWallpaper",
+        "continueAfterFailure",
+        "campaignSummary",
+    ):
+        assert f'id="{field}"' in response.text
     assert 'sessionStorage.setItem("libertix_linux_password"' not in response.text
     assert 'localStorage.setItem("libertix_linux_password"' not in response.text
     assert "automationDry" not in response.text

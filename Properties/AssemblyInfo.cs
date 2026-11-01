@@ -21,5 +21,5 @@ using System.Windows;
 )]
 
 [assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
 [assembly: AssemblyInformationalVersion("dev_0000000")]

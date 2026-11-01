@@ -1,9 +1,28 @@
 #requires -Version 5.1
 
+function Set-LibertixAllocationVolumeReadableFromLinux {
+    if ($null -eq $installationPlan -or
+        $installationPlan.PSObject.Properties.Name -notcontains 'allocation' -or
+        $null -eq $installationPlan.allocation) { return }
+
+    # Decrypting Windows may take hours, during which removable storage can change.
+    Assert-LibertixPlanMatchesCurrentStorage
+    Assert-LibertixAllocationMatchesCurrentStorage
+    Set-WindowsVolumeReadableFromLinux -MountPoint ([string]$installationPlan.allocation.sourceDrive) `
+        -VerifyStorageIdentity {
+            Assert-LibertixPlanMatchesCurrentStorage
+            Assert-LibertixAllocationMatchesCurrentStorage
+        }
+    Assert-LibertixPlanMatchesCurrentStorage
+    Assert-LibertixAllocationMatchesCurrentStorage
+    $installationPlan.allocation.sourceBitLockerState = 'FullyDecrypted'
+    Write-LibertixInstallationPlanAtomic -Path $InstallationPlanPath -Plan $installationPlan
+}
+
 # Windows storage, ESP mounting, volume letters, and installer cleanup.
 
 function Remove-LibertixInstallerPartitionIfPresent {
-    $partition = Get-VerifiedTransactionPartition -AllowMissing
+    $partition = Resolve-LibertixTransactionPartition -AllowMissing
     if (-not $partition) {
         if (Test-LibertixInstallerPartitionPresent) {
             throw "$InstallerLabel exists without a matching transaction state; refusing removal."
@@ -23,35 +42,38 @@ function Remove-LibertixInstallerPartitionIfPresent {
             -Confirm:$false `
             -ErrorAction Stop
     } catch {
-        Write-Log "PowerShell could not remove $InstallerLabel partition; trying diskpart fallback..." "Yellow"
-        Invoke-DiskpartScript -ScriptText @"
-select disk $($partition.DiskNumber)
-select partition $($partition.PartitionNumber)
+        # The storage operation may have completed before its response failed.
+        # Resolve ownership again; a cached number can now name another partition.
+        $remainingPartition = Resolve-LibertixTransactionPartition -AllowMissing
+        if ($remainingPartition) {
+            Write-Log "PowerShell could not remove $InstallerLabel partition; trying diskpart fallback..." "Yellow"
+            Invoke-DiskpartScript -ScriptText @"
+select disk $($remainingPartition.DiskNumber)
+select partition $($remainingPartition.PartitionNumber)
 delete partition override
 exit
 "@
+        }
     }
 
     Assert-LibertixInstallerPartitionRemoved
 }
 
 function Test-LibertixInstallerPartitionPresent {
-    $volume = Get-Volume -ErrorAction SilentlyContinue |
+    $binding = Get-LibertixTransactionStorageBinding
+    $disk = Get-Disk -Number $binding.Disk.number -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $binding.Disk
+    $volumes = @(Get-Partition -DiskNumber $disk.Number -ErrorAction Stop |
+        Get-Volume -ErrorAction Stop |
         Where-Object { $_.FileSystemLabel -eq $InstallerLabel } |
-        Select-Object -First 1
-    if ($volume) {
-        return $true
-    }
-
-    $cim = Get-CimInstance Win32_Volume -Filter "Label='$InstallerLabel'" `
-        -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    return ($null -ne $cim)
+        Select-Object -First 1)
+    return $volumes.Count -ne 0
 }
 
 function Assert-LibertixInstallerPartitionRemoved {
     Start-Sleep -Seconds 1
-    if (Test-LibertixInstallerPartitionPresent) {
+    # The live installer changes FAT32 into ext4, which Get-Volume may not expose.
+    if (Resolve-LibertixTransactionPartition -AllowMissing) {
         throw "$InstallerLabel partition is still present after revert attempt."
     }
 }
@@ -78,39 +100,16 @@ function Invoke-DiskpartScript {
     }
 }
 
+# The installer keeps these names as seams that its Pester tests replace.
 function Get-HibernateEnabled {
-    # Read the state from the registry rather than parsing `powercfg /a`, whose
-    # output is localized. Returns $true, $false, or $null when unknown.
-    try {
-        $value = Get-ItemProperty `
-            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-            -Name "HibernateEnabled" `
-            -ErrorAction Stop
-        return ([int]$value.HibernateEnabled -ne 0)
-    } catch {
-        return $null
-    }
+    Get-LibertixHibernateEnabled
 }
 
 function Set-HibernateEnabled {
     param([Parameter(Mandatory = $true)][bool]$Enabled)
 
-    $argument = if ($Enabled) { "on" } else { "off" }
-    $powercfg = Get-NativeSystemExecutable -FileName "powercfg.exe"
-    $result = Invoke-LibertixNativeCommand `
-        -FilePath $powercfg `
-        -ArgumentList @("/hibernate", $argument) `
-        -TimeoutSeconds 60
-    $output = ($result.StandardOutput + [Environment]::NewLine + $result.StandardError).Trim()
-    if ($result.ExitCode -ne 0) {
-        throw "powercfg failed to turn hibernation $argument (rc=$($result.ExitCode)): $output"
-    }
-
-    $observed = Get-HibernateEnabled
-    if ($null -eq $observed -or $observed -ne $Enabled) {
-        throw "Windows did not apply the requested hibernation state: $argument"
-    }
-    Write-Log "Windows hibernation and Fast Startup set to: $argument" "Cyan"
+    Set-LibertixHibernateEnabled -Enabled $Enabled
+    Write-Log "Windows hibernation and Fast Startup set to: $(if ($Enabled) { 'on' } else { 'off' })" "Cyan"
 }
 
 function Get-GuidDLower {
@@ -187,6 +186,20 @@ function Remove-LibertixTemporaryEspFiles {
     }
 }
 
+function Assert-LibertixEspPreparationOwnership {
+    $esp = $null
+    try {
+        $esp = Mount-Esp -Letter $EspLetter
+        $temporary = Join-Path $esp $InstallerEspDirectory
+        if (Test-Path -LiteralPath $temporary) {
+            Assert-LibertixTemporaryEspOwnership -Directory $temporary
+        }
+        $null = Assert-LibertixInstalledEspOwnership -EspDrive $esp
+    } finally {
+        if ($esp) { Dismount-Letter -Letter $EspLetter }
+    }
+}
+
 function Assert-LibertixInstalledEspOwnership {
     param([Parameter(Mandatory = $true)][string]$EspDrive)
 
@@ -232,6 +245,7 @@ function Assert-LibertixTemporaryEspOwnership {
     }
     $owner = (Get-Content -LiteralPath $ownerPath -Raw -ErrorAction Stop).Trim()
     if ($owner -ne $RecoveryRunId) {
+        Write-Log "Temporary ESP ownership mismatch: directory=$Directory expected=$RecoveryRunId observed=$owner" "Red"
         throw "Temporary ESP directory belongs to another recovery run; refusing modification."
     }
 }
@@ -250,6 +264,16 @@ function Install-LibertixTemporaryBootloaderOnEsp {
     }
 
     $destination = Join-Path $EspDrive $InstallerEspDirectory
+    if (Test-Path -LiteralPath $destination) {
+        Assert-LibertixTemporaryEspOwnership -Directory $destination
+    }
+    $state = Get-TransactionPartitionState
+    if (-not $state -or [string]$state.RecoveryRunId -ne $RecoveryRunId) {
+        throw "Owned transaction state is required before temporary ESP writes."
+    }
+    # Persist intent before the first write, not after the loader copy succeeds.
+    Set-LibertixTransactionStateProperty -State $state -Name 'TemporaryBootPreparationStarted' -Value $true
+    Save-LibertixTransactionStateAtomic -State $state
     Remove-LibertixTemporaryEspFiles -EspDrive $EspDrive
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     Set-Content `
@@ -593,26 +617,33 @@ function Request-BitLockerDecryption {
 }
 
 function Set-WindowsVolumeReadableFromLinux {
+    param(
+        [ValidatePattern('^[A-Za-z]:$')][string]$MountPoint = $SystemDrive,
+        [scriptblock]$VerifyStorageIdentity
+    )
+
     $manageBde = Get-NativeSystemExecutable -FileName "manage-bde.exe"
 
+    if ($null -ne $VerifyStorageIdentity) { & $VerifyStorageIdentity }
     try {
-        $bitlockerVolume = Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop
+        $bitlockerVolume = Get-BitLockerVolume -MountPoint $MountPoint -ErrorAction Stop
     } catch {
-        throw "Cannot establish the BitLocker state of $SystemDrive. Refusing disk changes: $($_.Exception.Message)"
+        throw "Cannot establish the BitLocker state of $MountPoint. Refusing disk changes: $($_.Exception.Message)"
     }
 
     if (-not $bitlockerVolume) {
-        throw "Get-BitLockerVolume returned no $SystemDrive volume. Refusing disk changes."
+        throw "Get-BitLockerVolume returned no $MountPoint volume. Refusing disk changes."
     }
 
     if (Test-BitLockerVolumeReadable -Volume $bitlockerVolume) {
-        Write-Log "Windows $SystemDrive is already readable from Linux." "Green"
+        Write-Log "Windows $MountPoint is already readable from Linux." "Green"
         return
     }
 
     Write-LibertixProgress -Stage "windows-decryption-start" -Percent 18
-    Write-Log "Disabling BitLocker/device encryption on $SystemDrive before Linux live boot..." "Cyan"
-    Request-BitLockerDecryption -MountPoint $SystemDrive -ManageBdePath $manageBde
+    Write-Log "Disabling BitLocker/device encryption on $MountPoint before Linux live boot..." "Cyan"
+    if ($null -ne $VerifyStorageIdentity) { & $VerifyStorageIdentity }
+    Request-BitLockerDecryption -MountPoint $MountPoint -ManageBdePath $manageBde
 
     $maxDecryptionWait = [TimeSpan]::FromHours(6)
     $decryptionTimer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -622,10 +653,11 @@ function Set-WindowsVolumeReadableFromLinux {
     while ($decryptionTimer.Elapsed -lt $maxDecryptionWait) {
         Start-Sleep -Seconds 10
         $attempt++
-        $bitlockerVolume = Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction Stop
+        if ($null -ne $VerifyStorageIdentity) { & $VerifyStorageIdentity }
+        $bitlockerVolume = Get-BitLockerVolume -MountPoint $MountPoint -ErrorAction Stop
         if (Test-BitLockerVolumeReadable -Volume $bitlockerVolume) {
             Write-LibertixProgress -Stage "windows-decryption-complete" -Percent 28
-            Write-Log "Windows $SystemDrive decrypted." "Green"
+            Write-Log "Windows $MountPoint decrypted." "Green"
             return
         }
 
@@ -643,14 +675,15 @@ function Set-WindowsVolumeReadableFromLinux {
                 -Stage "windows-decryption" `
                 -Percent $overallPercent `
                 -DetailPercent $encryptedPercent
-            Write-Log "Waiting for $SystemDrive decryption... $encryptedPercent% encrypted, protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
+            Write-Log "Waiting for $MountPoint decryption... $encryptedPercent% encrypted, protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
         } else {
-            Write-Log "Waiting for $SystemDrive decryption... status=$($bitlockerVolume.VolumeStatus), protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
+            Write-Log "Waiting for $MountPoint decryption... status=$($bitlockerVolume.VolumeStatus), protection=$($bitlockerVolume.ProtectionStatus)" "Yellow"
         }
 
         if (($attempt % 12) -eq 0 -or $samePercentCount -ge 12) {
-            Write-Log "Reasserting BitLocker decryption request for $SystemDrive..." "Yellow"
-            Request-BitLockerDecryption -MountPoint $SystemDrive -ManageBdePath $manageBde
+            Write-Log "Reasserting BitLocker decryption request for $MountPoint..." "Yellow"
+            if ($null -ne $VerifyStorageIdentity) { & $VerifyStorageIdentity }
+            Request-BitLockerDecryption -MountPoint $MountPoint -ManageBdePath $manageBde
             $samePercentCount = 0
         }
 
@@ -658,12 +691,12 @@ function Set-WindowsVolumeReadableFromLinux {
     $decryptionTimer.Stop()
     $finalStatusResult = Invoke-LibertixNativeCommand `
         -FilePath $manageBde `
-        -ArgumentList @("-status", $SystemDrive) `
+        -ArgumentList @("-status", $MountPoint) `
         -TimeoutSeconds 60
     $finalStatus = (
         $finalStatusResult.StandardOutput +
         [Environment]::NewLine +
         $finalStatusResult.StandardError
     ).Trim()
-    throw "Timed out waiting for $SystemDrive BitLocker decryption. Final status: $finalStatus"
+    throw "Timed out waiting for $MountPoint BitLocker decryption. Final status: $finalStatus"
 }

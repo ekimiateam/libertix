@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v3.json",
+  "$id": "https://ekimia.fr/libertix/schemas/installation-plan-v5.json",
   "title": "Libertix Installation Plan",
   "description": "Versioned contract shared by the Windows application, the live installer, the installed target and rollback tooling.",
   "type": "object",
@@ -19,7 +19,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 3
+      "enum": [4, 5]
     },
     "planId": {
       "type": "string",
@@ -47,6 +47,9 @@
     "disk": {
       "$ref": "#/$defs/disk"
     },
+    "allocation": {
+      "$ref": "#/$defs/allocation"
+    },
     "features": {
       "$ref": "#/$defs/features"
     },
@@ -58,6 +61,29 @@
     }
   },
   "$defs": {
+    "allocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "number", "uniqueId", "partitionTableId", "sizeBytes", "logicalSectorSizeBytes",
+        "partitionStyle", "sourceDrive", "sourcePartition", "sourceVolumeId", "sourceNtfsUuid", "sourceBitLockerState"
+      ],
+      "properties": {
+        "number": { "$ref": "#/$defs/disk/properties/number" },
+        "uniqueId": { "$ref": "#/$defs/disk/properties/uniqueId" },
+        "partitionTableId": { "$ref": "#/$defs/disk/properties/partitionTableId" },
+        "sizeBytes": { "$ref": "#/$defs/disk/properties/sizeBytes" },
+        "logicalSectorSizeBytes": { "$ref": "#/$defs/disk/properties/logicalSectorSizeBytes" },
+        "partitionStyle": { "$ref": "#/$defs/disk/properties/partitionStyle" },
+        "sourceDrive": { "$ref": "#/$defs/disk/properties/systemDrive" },
+        "sourcePartition": { "$ref": "#/$defs/partitionIdentity" },
+        "sourceVolumeId": { "type": "string", "minLength": 1 },
+        "sourceNtfsUuid": { "type": "string", "pattern": "^[0-9A-F]{16}$", "not": { "const": "0000000000000000" } },
+        "sourceBitLockerState": {
+          "enum": ["FullyDecrypted", "NotEncryptable", "EncryptedOrProtected"]
+        }
+      }
+    },
     "distribution": {
       "type": "object",
       "additionalProperties": false,
@@ -110,7 +136,7 @@
         },
         "installerIsoWindowsPath": {
           "type": "string",
-          "pattern": "^[A-Za-z]:[\\\\/]"
+          "pattern": "^[A-Za-z]:\\\\[^/]+$"
         },
         "installerIsoSha256": {
           "$ref": "#/$defs/sha256"
@@ -137,7 +163,7 @@
       "properties": {
         "languageCode": {
           "type": "string",
-          "enum": ["en", "fr", "es"]
+          "enum": ["en", "fr", "es", "ko"]
         },
         "systemLanguage": {
           "type": "string",
@@ -177,7 +203,7 @@
         },
         "passwordHashWindowsPath": {
           "type": "string",
-          "pattern": "^[A-Za-z]:\\\\"
+          "pattern": "^[A-Za-z]:\\\\[^/]+$"
         },
         "computerName": {
           "type": "string",
@@ -328,7 +354,8 @@
       "required": [
         "shareWindowsFilesInLinux",
         "shareLinuxFilesInWindows",
-        "windowsProfilesJsonBase64"
+        "windowsProfilesJsonBase64",
+        "windowsPreferenceMigration"
       ],
       "properties": {
         "shareWindowsFilesInLinux": {
@@ -340,6 +367,86 @@
         "windowsProfilesJsonBase64": {
           "type": "string",
           "minLength": 1
+        },
+        "windowsSharing": {
+          "$ref": "#/$defs/windowsSharing"
+        },
+        "windowsPreferenceMigration": {
+          "$ref": "#/$defs/windowsPreferenceMigration"
+        }
+      }
+    },
+    "windowsSharing": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "volumes", "folders"],
+      "properties": {
+        "version": {"const": 1},
+        "volumes": {"type": "array", "maxItems": 64, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ntfsUuid", "disk", "offsetBytes", "sizeBytes", "windowsVolumeId", "windowsDrive"],
+          "properties": {
+            "ntfsUuid": {"type": "string", "pattern": "^[A-F0-9]{16}$"},
+            "offsetBytes": {"type": "integer", "minimum": 1},
+            "sizeBytes": {"type": "integer", "minimum": 1},
+            "windowsDrive": {"type": "string", "pattern": "^[A-Z]:$"},
+            "windowsVolumeId": {"type": "string", "pattern": "^\\\\\\\\\\?\\\\Volume\\{[0-9a-fA-F-]{36}\\}\\\\$"},
+            "disk": {
+              "type": "object", "additionalProperties": false,
+              "required": ["partitionTableId", "partitionStyle", "sizeBytes", "logicalSectorSizeBytes"],
+              "properties": {
+                "partitionTableId": {"type": "string"},
+                "partitionStyle": {"enum": ["GPT", "MBR"]},
+                "sizeBytes": {"type": "integer", "minimum": 1},
+                "logicalSectorSizeBytes": {"enum": [512, 4096]}
+              }
+            }
+          }
+        }},
+        "folders": {"type": "array", "maxItems": 256, "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["shortcut", "profileSid", "ntfsUuid", "relativePath"],
+          "properties": {
+            "shortcut": {"type": "string", "minLength": 6, "maxLength": 180},
+            "profileSid": {"type": "string", "pattern": "^S-1-5-21-(?:[0-9]+-){3}[0-9]+$"},
+            "ntfsUuid": {"type": "string", "pattern": "^[A-F0-9]{16}$"},
+            "relativePath": {"type": "string", "minLength": 1, "maxLength": 32767}
+          }
+        }}
+      }
+    },
+    "windowsPreferenceMigration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "bundleFileName",
+        "bundleSha256",
+        "bundleSizeBytes",
+        "wifiProfileCount"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "bundleFileName": {
+          "type": ["string", "null"],
+          "pattern": "^windows-preferences\\.secret\\.json$"
+        },
+        "bundleSha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "bundleSizeBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 134217728
+        },
+        "wifiProfileCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
         }
       }
     },
@@ -387,7 +494,7 @@
             "string",
             "null"
           ],
-          "pattern": "^[A-Za-z]:\\\\"
+          "pattern": "^[A-Za-z]:\\\\[^/]+$"
         },
         "recoveryRunId": {
           "type": [
@@ -455,6 +562,11 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "schemaVersion": { "const": 5 } }, "required": ["schemaVersion"] },
+      "then": { "required": ["allocation"] },
+      "else": { "not": { "required": ["allocation"] } }
+    },
     {
       "if": {
         "properties": {

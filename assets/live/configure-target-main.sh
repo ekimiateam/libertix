@@ -79,38 +79,30 @@ configure_windows_mount() {
 
 configure_windows_profile_shortcuts() {
     [ "$SHARE_WINDOWS_FILES_IN_LINUX" = "true" ] || return 0
-    local home_dir bookmarks profile shortcut profiles_output
-    home_dir="/home/$USERNAME"
-    bookmarks="$home_dir/.config/gtk-3.0/bookmarks"
-    mkdir -p "$(dirname "$bookmarks")"
-    : > "$bookmarks"
-
-    profiles_output=$(python3 - "$WINDOWS_PROFILES_JSON_BASE64" <<'PY'
-import base64
-import json
-import sys
-
-profiles = json.loads(base64.b64decode(sys.argv[1], validate=True).decode("utf-8"))
-if not isinstance(profiles, list) or not all(isinstance(item, str) for item in profiles):
-    raise SystemExit("invalid Windows profile manifest")
-for profile in profiles:
-    print(profile)
-PY
-    ) || { echo "Cannot decode Windows profile manifest" >&2; exit 1; }
-    while IFS= read -r profile; do
-        [ -n "$profile" ] || continue
-        case "$profile" in .|..|*/*) echo "Invalid Windows profile name: $profile" >&2; exit 1 ;; esac
-        shortcut="User_$profile"
-        ln -sfn "/mnt/windows/Users/$profile" "$home_dir/$shortcut"
-        printf 'file://%s/%s %s\n' "$home_dir" "$shortcut" "$shortcut" >> "$bookmarks"
-    done <<< "$profiles_output"
-    chown -h "$USERNAME:$USERNAME" "$home_dir"/User_* 2>/dev/null || true
-    chown -R "$USERNAME:$USERNAME" "$home_dir/.config"
+    runuser -u "$USERNAME" -- env "LANG=$SYSTEM_LANG" "LC_ALL=$SYSTEM_LANG" xdg-user-dirs-update
+    python3 /usr/local/lib/libertix/libertix_windows_sharing.py configure \
+        /etc/libertix/installation-plan.json "$WINDOWS_PART"
 }
 
 configure_windows_readonly_request() {
     mkdir -p /etc/libertix
     printf '%s\n' "$SHARE_LINUX_FILES_IN_WINDOWS" > /etc/libertix/share-linux-in-windows
+}
+
+configure_windows_preferences() {
+    [ "$WINDOWS_PREFERENCE_MIGRATION_ENABLED" = "true" ] || {
+        echo "Windows preference migration disabled by the user."
+        return 0
+    }
+    [ -f /tmp/windows-preferences.secret.json ] || {
+        echo "Windows preference migration bundle is missing" >&2
+        return 1
+    }
+    /tmp/libertix-apply-windows-preferences.py apply \
+        /tmp/windows-preferences.secret.json \
+        "$INSTALLATION_PLAN_ID" \
+        "$USERNAME" \
+        "$WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT"
 }
 
 configure_locale() {
@@ -489,9 +481,10 @@ main() {
     assert_target_distribution_identity
     configure_user
     configure_windows_mount
-    configure_windows_profile_shortcuts
     configure_windows_readonly_request
+    configure_windows_preferences
     configure_locale
+    configure_windows_profile_shortcuts
     configure_keyboard
     configure_timezone
     configure_development_access

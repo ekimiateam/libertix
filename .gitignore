@@ -78,3 +78,6 @@ auto_tests/tools/__pycache__/
 
 # Local Markdown reports preserved outside the versioned documentation
 /local-markdown/
+
+# Install-party runtime settings, certificates and managed downloads
+/install-party-kit/Server/state/

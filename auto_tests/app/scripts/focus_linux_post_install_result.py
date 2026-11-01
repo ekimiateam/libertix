@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focus the Linux first-boot result using only X11 session contracts."""
+"""Prove result-window focus, using the product state on Wayland and X11 otherwise."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import re
 import subprocess
 import time
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 CLIENT_MESSAGE = 33
@@ -55,7 +56,7 @@ def read_process_environment(process_id: int) -> dict[str, str]:
         name, separator, value = entry.partition(b"=")
         if separator:
             values[name.decode("utf-8")] = value.decode("utf-8")
-    required = ("DISPLAY", "XAUTHORITY")
+    required = () if values.get("XDG_SESSION_TYPE") == "wayland" else ("DISPLAY", "XAUTHORITY")
     missing = [name for name in required if not values.get(name)]
     if missing:
         raise RuntimeError("The graphical process environment lacks: " + ", ".join(missing))
@@ -84,6 +85,8 @@ def request_product_activation(
     process_id: int,
     environment: dict[str, str],
     timeout: float,
+    *,
+    check_only: bool = False,
 ) -> tuple[bool, str]:
     home = environment.get("HOME")
     if not home:
@@ -100,9 +103,11 @@ def request_product_activation(
             ui_state
             and ui_state.get("processId") == process_id
             and ui_state.get("visible") is True
-            and isinstance(ui_state.get("fingerprint"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", str(ui_state.get("fingerprint", "")))
         ):
             fingerprint = str(ui_state["fingerprint"])
+            if check_only:
+                return product_state_is_active(ui_state, process_id, fingerprint), fingerprint
             write_json_atomic(
                 activation_request_path,
                 {
@@ -118,19 +123,57 @@ def request_product_activation(
 
     while time.monotonic() < deadline:
         ui_state = read_json(ui_state_path)
-        if (
-            ui_state
-            and ui_state.get("processId") == process_id
-            and ui_state.get("fingerprint") == fingerprint
-            and ui_state.get("visible") is True
-            and ui_state.get("active") is True
-        ):
+        if product_state_is_active(ui_state, process_id, fingerprint):
             return True, fingerprint
         time.sleep(0.1)
     return False, fingerprint
 
 
-def xprop(environment: dict[str, str], *arguments: str) -> str:
+def product_state_is_active(
+    state: dict[str, object] | None, process_id: int, fingerprint: str
+) -> bool:
+    return product_state_is_visible(state, process_id, fingerprint) and state.get("active") is True
+
+
+def product_state_is_visible(
+    state: dict[str, object] | None, process_id: int, fingerprint: str
+) -> bool:
+    if not state:
+        return False
+    try:
+        updated = datetime.fromisoformat(str(state.get("updatedAtUtc", "")))
+        age = (datetime.now(UTC) - updated).total_seconds()
+    except (ValueError, TypeError):
+        return False
+    return (
+        0 <= age <= 5
+        and state.get("processId") == process_id
+        and state.get("fingerprint") == fingerprint
+        and state.get("visible") is True
+    )
+
+
+def wait_product_window(process_id: int, environment: dict[str, str], timeout: float) -> bool:
+    home = environment.get("HOME")
+    if not home:
+        return False
+    path = Path(home) / ".local/state/libertix/first-boot-result-ui.json"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = read_json(path)
+        fingerprint = str(state.get("fingerprint", "")) if state else ""
+        if re.fullmatch(r"[0-9a-f]{64}", fingerprint) and product_state_is_visible(
+            state, process_id, fingerprint
+        ):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def xprop(environment: dict[str, str], *arguments: str, deadline: float) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("The X11 focus deadline expired")
     process_environment = os.environ.copy()
     process_environment.update(environment)
     result = subprocess.run(
@@ -139,26 +182,28 @@ def xprop(environment: dict[str, str], *arguments: str) -> str:
         capture_output=True,
         text=True,
         env=process_environment,
-        timeout=5,
+        timeout=min(5, remaining),
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "xprop failed")
     return result.stdout.strip()
 
 
-def find_window(environment: dict[str, str], process_id: int) -> int | None:
-    client_list = xprop(environment, "-root", "_NET_CLIENT_LIST")
+def find_window(environment: dict[str, str], process_id: int, deadline: float) -> int | None:
+    client_list = xprop(environment, "-root", "_NET_CLIENT_LIST", deadline=deadline)
     for hexadecimal in re.findall(r"0x[0-9a-fA-F]+", client_list):
         window = int(hexadecimal, 16)
-        properties = xprop(environment, "-id", hexadecimal, "_NET_WM_PID", "WM_STATE")
+        properties = xprop(
+            environment, "-id", hexadecimal, "_NET_WM_PID", "WM_STATE", deadline=deadline
+        )
         pid_match = re.search(r"_NET_WM_PID\([^)]*\) = (\d+)", properties)
         if pid_match and int(pid_match.group(1)) == process_id and "WM_STATE" in properties:
             return window
     return None
 
 
-def active_window(environment: dict[str, str]) -> int | None:
-    properties = xprop(environment, "-root", "_NET_ACTIVE_WINDOW")
+def active_window(environment: dict[str, str], deadline: float) -> int | None:
+    properties = xprop(environment, "-root", "_NET_ACTIVE_WINDOW", deadline=deadline)
     match = re.search(r"0x[0-9a-fA-F]+", properties)
     return int(match.group(0), 16) if match else None
 
@@ -235,15 +280,29 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pid", type=int, required=True)
     parser.add_argument("--timeout", type=float, default=15)
+    parser.add_argument("--ready-timeout", type=float, default=0)
+    parser.add_argument("--check-only", action="store_true")
     arguments = parser.parse_args()
-    if arguments.pid <= 0 or arguments.timeout <= 0:
-        parser.error("--pid and --timeout must be positive")
+    if arguments.pid <= 0 or arguments.timeout <= 0 or arguments.ready_timeout < 0:
+        parser.error("--pid and --timeout must be positive; --ready-timeout must be nonnegative")
 
     environment = read_process_environment(arguments.pid)
+    wayland = environment.get("XDG_SESSION_TYPE") == "wayland"
+    if arguments.ready_timeout and not arguments.check_only:
+        # The product may wait for session localization before creating its dialog.
+        # A running autostart process alone is not evidence that a window exists.
+        ready = wait_product_window(arguments.pid, environment, arguments.ready_timeout)
+        if wayland and not ready:
+            raise RuntimeError(
+                "The Linux result window did not publish fresh visibility evidence "
+                f"within {arguments.ready_timeout} seconds; process_id={arguments.pid}."
+            )
+    deadline = time.monotonic() + arguments.timeout
     product_active, fingerprint = request_product_activation(
         arguments.pid,
         environment,
-        arguments.timeout,
+        arguments.timeout if wayland else arguments.timeout / 2,
+        check_only=arguments.check_only,
     )
     if product_active:
         print(f"PROCESS_ID={arguments.pid}")
@@ -253,14 +312,22 @@ def main() -> int:
         print("RESULT=OK")
         return 0
 
-    deadline = time.monotonic() + arguments.timeout
+    if wayland and fingerprint:
+        # Wayland may reject background activation without a user-input token.
+        # The controller must switch windows, then prove focus before sending Enter.
+        print(f"PROCESS_ID={arguments.pid}")
+        print(f"FINGERPRINT={fingerprint}")
+        print("ACTIVE_WINDOW_PROVEN=False")
+        print("RESULT=NEEDS_USER_ACTIVATION")
+        return 0
+
     last_window: int | None = None
     while time.monotonic() < deadline:
-        last_window = find_window(environment, arguments.pid)
+        last_window = find_window(environment, arguments.pid, deadline)
         if last_window is not None:
             request_activation(environment, last_window)
             time.sleep(0.2)
-            if active_window(environment) == last_window:
+            if active_window(environment, deadline) == last_window:
                 print(f"PROCESS_ID={arguments.pid}")
                 print(f"WINDOW_ID=0x{last_window:x}")
                 print("ACTIVE_WINDOW_PROVEN=True")

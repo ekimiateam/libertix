@@ -46,6 +46,12 @@ unmount_target_windows_partitions() {
 install_target_configuration_payload() {
     install -d -m 0755 /mnt/target/etc/libertix
     install -d -m 0755 /mnt/target/usr/local/lib/libertix
+    install -m 0755 /usr/local/lib/libertix/libertix_windows_sharing.py \
+        /mnt/target/usr/local/lib/libertix/libertix_windows_sharing.py
+    install -m 0755 /usr/local/lib/libertix/libertix_installation_policy.py \
+        /mnt/target/usr/local/lib/libertix/libertix_installation_policy.py
+    install -m 0644 /usr/local/lib/libertix/Libertix.InstallationPolicy.json \
+        /mnt/target/usr/local/lib/libertix/Libertix.InstallationPolicy.json
     install -m 0644 "$INSTALLATION_PLAN_PATH" \
         /mnt/target/etc/libertix/installation-plan.json
     install -m 0644 /usr/local/lib/libertix/Libertix.InstallationPolicy.json \
@@ -54,6 +60,8 @@ install_target_configuration_payload() {
         /mnt/target/tmp/libertix-configure-target.sh
     install -m 0755 /usr/local/lib/libertix/configure-target-main.sh \
         /mnt/target/tmp/configure-target-main.sh
+    install -m 0755 /usr/local/lib/libertix/libertix-apply-windows-preferences.py \
+        /mnt/target/tmp/libertix-apply-windows-preferences.py
     install -m 0755 /usr/local/lib/libertix/libertix-storage-common.sh \
         /mnt/target/tmp/libertix-storage-common.sh
     install -m 0755 /usr/local/lib/libertix/10_libertix \
@@ -88,6 +96,8 @@ install_target_configuration_payload() {
         /mnt/target/usr/local/bin/first-boot-resize.sh
     install -m 0755 /usr/local/lib/libertix/libertix-first-boot-verify.py \
         /mnt/target/usr/local/lib/libertix/libertix-first-boot-verify.py
+    install -m 0755 /usr/local/lib/libertix/libertix-ntfs-permissions.py \
+        /mnt/target/usr/local/lib/libertix/libertix-ntfs-permissions.py
     install -m 0755 /usr/local/lib/libertix/libertix-first-boot-result.py \
         /mnt/target/usr/local/lib/libertix/libertix-first-boot-result.py
     install -d -m 0755 /mnt/target/etc/xdg/autostart
@@ -103,10 +113,21 @@ install_target_configuration_payload() {
         /mnt/target/tmp/libertix-development-ssh-first-boot.sh
     install -m 0644 /usr/local/lib/libertix/libertix-development-ssh.service \
         /mnt/target/tmp/libertix-development-ssh.service
+    if [ "$WINDOWS_PREFERENCE_MIGRATION_ENABLED" = true ]; then
+        [ -f "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" ] || {
+            echo "Windows preference migration runtime bundle is missing" >&2
+            return 1
+        }
+        install -m 0600 "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH" \
+            /mnt/target/tmp/windows-preferences.secret.json
+    fi
 }
 
 run_target_configuration() {
+    local result=0
+
     chroot /mnt/target /usr/bin/env \
+        INSTALLATION_PLAN_ID="$INSTALLATION_PLAN_ID" \
         LANGUAGE_CODE="$LANGUAGE_CODE" \
         DISTRIBUTION_ID="$DISTRIBUTION_ID" \
         DISTRIBUTION_NAME="$DISTRIBUTION_NAME" \
@@ -128,6 +149,8 @@ run_target_configuration() {
         SHARE_WINDOWS_FILES_IN_LINUX="$SHARE_WINDOWS_FILES_IN_LINUX" \
         SHARE_LINUX_FILES_IN_WINDOWS="$SHARE_LINUX_FILES_IN_WINDOWS" \
         WINDOWS_PROFILES_JSON_BASE64="$WINDOWS_PROFILES_JSON_BASE64" \
+        WINDOWS_PREFERENCE_MIGRATION_ENABLED="$WINDOWS_PREFERENCE_MIGRATION_ENABLED" \
+        WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT="$WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT" \
         DEVELOPMENT_SSH_ENABLED="$DEVELOPMENT_SSH_ENABLED" \
         DEVELOPMENT_STATIC_IPV4_ADDRESS="$DEVELOPMENT_STATIC_IPV4_ADDRESS" \
         DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH="$DEVELOPMENT_STATIC_IPV4_PREFIX_LENGTH" \
@@ -135,16 +158,24 @@ run_target_configuration() {
         DEVELOPMENT_DNS_SERVERS="$DEVELOPMENT_DNS_SERVERS" \
         GRUB_RESOLUTION="$GRUB_RESOLUTION" \
         LIBERTIX_FIRMWARE_MODE="$LIBERTIX_FIRMWARE_MODE" \
-        /tmp/libertix-configure-target.sh
+        /tmp/libertix-configure-target.sh || result=$?
 
     rm -f /mnt/target/tmp/libertix-configure-target.sh \
         /mnt/target/tmp/configure-target-main.sh \
+        /mnt/target/tmp/libertix-apply-windows-preferences.py \
+        /mnt/target/tmp/windows-preferences.secret.json \
         /mnt/target/tmp/libertix-storage-common.sh \
         /mnt/target/tmp/10_libertix \
         /mnt/target/tmp/render-libertix-menu.py \
         /mnt/target/tmp/libertix-configure-development-access.sh \
         /mnt/target/tmp/libertix-development-ssh-first-boot.sh \
         /mnt/target/tmp/libertix-development-ssh.service
+    if [ -n "${WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH:-}" ]; then
+        rm -f -- "$WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH"
+        WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH=""
+        unset WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH
+    fi
+    return "$result"
 }
 
 configure_target_system() {

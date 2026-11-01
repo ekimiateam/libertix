@@ -4,6 +4,7 @@ using System.IO;
 using System.Text;
 using System.Threading.Tasks;
 using Libertix.Models;
+using Libertix.Installation;
 
 namespace Libertix.Helpers
 {
@@ -25,7 +26,8 @@ namespace Libertix.Helpers
         public static async Task<CompatibilityInfo> RunAsync(
             string connectivityUrl,
             Action<string> onOutput,
-            bool skipNvramWriteProbe = false)
+            bool skipNvramWriteProbe = false,
+            bool skipConnectivityProbe = false)
         {
             if (!Uri.TryCreate(connectivityUrl, UriKind.Absolute, out Uri connectivityUri) ||
                 (connectivityUri.Scheme != Uri.UriSchemeHttp &&
@@ -36,8 +38,7 @@ namespace Libertix.Helpers
                     nameof(connectivityUrl));
             }
 
-            string scriptPath = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string scriptPath = ApplicationFiles.Resolve(
                 "Scripts",
                 "libertix-compatibility-preflight.ps1");
             if (!File.Exists(scriptPath))
@@ -57,6 +58,7 @@ namespace Libertix.Helpers
                     languageCode,
                     connectivityUri.AbsoluteUri,
                     skipNvramWriteProbe,
+                    skipConnectivityProbe,
                     onOutput));
                 ApplicationLogger.Write("COMPATIBILITY: preflight completed successfully.");
                 return result;
@@ -103,18 +105,21 @@ namespace Libertix.Helpers
             string languageCode,
             string connectivityUrl,
             bool skipNvramWriteProbe,
+            bool skipConnectivityProbe,
             Action<string> onOutput)
         {
             string powershell = WindowsProcessRunner.ResolvePowerShell();
             var output = new StringBuilder();
             var error = new StringBuilder();
 
-            string arguments = "-NoProfile -ExecutionPolicy Bypass -File " +
-                WindowsProcessRunner.QuoteArgument(scriptPath) + " -LanguageCode " +
+            string arguments = WindowsProcessRunner.PowerShellFileArguments(scriptPath) +
+                " -LanguageCode " +
                 WindowsProcessRunner.QuoteArgument(languageCode) + " -ConnectivityUrl " +
                 WindowsProcessRunner.QuoteArgument(connectivityUrl);
             if (skipNvramWriteProbe)
                 arguments += " -SkipNvramWriteProbe";
+            if (skipConnectivityProbe)
+                arguments += " -SkipConnectivityProbe";
 
             var startInfo = new ProcessStartInfo
             {
@@ -211,7 +216,7 @@ namespace Libertix.Helpers
                         "This machine's compatibility could not be confirmed.");
                     throw new CompatibilityPreflightException(code, message, diagnostics);
                 }
-                return new CompatibilityInfo
+                var info = new CompatibilityInfo
                 {
                     Firmware = values.GetString("firmware"),
                     Architecture = values.GetString("architecture"),
@@ -219,12 +224,14 @@ namespace Libertix.Helpers
                     LowMemoryMode = values.GetBoolean("lowMemoryMode"),
                     SystemDiskNumber = values.GetInt32("systemDiskNumber"),
                     SystemDiskUniqueId = values.GetString("systemDiskUniqueId"),
+                    SystemDiskPartitionTableId = values.GetString("systemDiskPartitionTableId"),
                     SystemDiskSize = values.GetInt64("systemDiskSize"),
                     PartitionStyle = values.GetString("partitionStyle"),
                     StorageBusType = values.GetString("storageBusType"),
                     LogicalSectorSize = values.GetInt32("logicalSectorSize"),
                     PhysicalSectorSize = values.GetInt32("physicalSectorSize"),
                     ShrinkAvailableBytes = values.GetInt64("shrinkAvailableBytes"),
+                    WindowsPartitionSlotAvailable = values.GetBoolean("windowsPartitionSlotAvailable"),
                     BitLockerSafe = values.GetBoolean("bitLockerSafe"),
                     BitLockerState = values.GetString("bitLockerState"),
                     SecureBootEnabled = values.GetBoolean("secureBootEnabled"),
@@ -232,8 +239,15 @@ namespace Libertix.Helpers
                         values.GetStringArray("trustedMicrosoftUefiAuthorities"),
                     NvramProbePassed = values.GetBoolean("nvramProbePassed"),
                     NvramProbeSkipped = values.GetBoolean("nvramProbeSkipped"),
-                    Warnings = values.GetStringArray("warnings")
+                    Warnings = values.GetStringArray("warnings"),
+                    InstallationTargets = values.GetObjectArray<InstallationTargetInfo>("installationTargets")
                 };
+                info.InstallationTargets = InstallationTargetSelection.ValidateInventory(
+                    info.InstallationTargets,
+                    values.GetString("systemDrive"),
+                    info.SystemDiskNumber,
+                    info.SystemDiskPartitionTableId);
+                return info;
             }
         }
 

@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$StatePath,
     [ValidateSet("Check", "Prompt", "Cancel", "InstallPreferredPath")]
-    [string]$Action = "Check"
+    [string]$Action = "Check",
+    [switch]$VerifiedUninstall
 )
 
 Set-StrictMode -Version Latest
@@ -18,9 +19,21 @@ function Write-AgentLog {
 
     $root = Split-Path -Parent $StatePath
     New-Item -ItemType Directory -Path $root -Force | Out-Null
-    Add-Content -LiteralPath (Join-Path $root "recovery-agent.log") -Value (
-        "[{0}] {1}" -f (Get-Date -Format o), $Message
-    )
+    $logPath = Join-Path $root "recovery-agent.log"
+    $line = "[{0}] {1}" -f (Get-Date -Format o), $Message
+    $deadline = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        try {
+            # Add-Content can retain an unreadable stream when concurrent writers race.
+            [IO.File]::AppendAllText($logPath, $line + [Environment]::NewLine, [Text.Encoding]::Default)
+            return
+        } catch [IO.IOException] {
+            # Check and Prompt may append concurrently; only sharing/lock conflicts are transient.
+            $nativeError = $_.Exception.HResult -band 0xffff
+            if ($nativeError -notin @(32, 33) -or $deadline.Elapsed.TotalSeconds -ge 5) { throw }
+            Start-Sleep -Milliseconds 100
+        }
+    }
 }
 
 function Write-AgentErrorRecord {
@@ -48,6 +61,26 @@ function Write-AgentErrorRecord {
         $innerException = $innerException.InnerException
     }
     Write-AgentLog "ERROR DotNetException: $($exception.ToString())"
+}
+
+function Get-AgentLogLockReport {
+    $logPath = Join-Path (Split-Path -Parent $StatePath) "recovery-agent.log"
+    # The module path is only known once the recovery payload has been validated.
+    if (
+        [string]::IsNullOrWhiteSpace($script:AtomicFileModulePath) -or
+        -not (Test-Path -LiteralPath $script:AtomicFileModulePath -PathType Leaf)
+    ) {
+        return "unavailable before the recovery payload was validated"
+    }
+    $atomicFileModule = Import-Module `
+        -Name $script:AtomicFileModulePath `
+        -Force `
+        -PassThru `
+        -ErrorAction Stop
+    return & $atomicFileModule {
+        param([string]$Path)
+        Get-LibertixFileLockReport -Path $Path
+    } $logPath
 }
 
 function Publish-RecoveryFileAtomic {
@@ -90,9 +123,10 @@ function Read-EnvValue {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $null
     }
-    $line = Get-Content -LiteralPath $Path | Where-Object {
-        $_ -match "^$([regex]::Escape($Name))="
-    } | Select-Object -First 1
+    $line = @(
+        Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop |
+            Where-Object { $_ -match "^$([regex]::Escape($Name))=" }
+    ) | Select-Object -First 1
     if (-not $line) {
         return $null
     }
@@ -136,11 +170,10 @@ function Save-State {
             $stream.Dispose()
         }
 
-        if ([IO.File]::Exists($fullPath)) {
-            [IO.File]::Replace($temporaryPath, $fullPath, $backupPath)
-        } else {
-            [IO.File]::Move($temporaryPath, $fullPath)
-        }
+        Publish-RecoveryFileAtomic `
+            -TemporaryPath $temporaryPath `
+            -DestinationPath $fullPath `
+            -BackupPath $backupPath
     } finally {
         if ([IO.File]::Exists($temporaryPath)) { [IO.File]::Delete($temporaryPath) }
         if ([IO.File]::Exists($backupPath)) { [IO.File]::Delete($backupPath) }
@@ -197,6 +230,70 @@ function Read-ValidatedExecutionState {
     return $executionState
 }
 
+function Get-CurrentRunBcdFirmwareEntries {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [switch]$LogUnattributed
+    )
+
+    $transactionPath = Join-Path $State.RecoveryRoot 'uefi-transaction.json'
+    $transaction = Get-Content -LiteralPath $transactionPath -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
+        throw 'The archived UEFI transaction does not belong to this recovery run.'
+    }
+
+    $trackedIdentifier = if ($transaction.PSObject.Properties.Name -contains 'FirmwareEntryId') {
+        [string]$transaction.FirmwareEntryId
+    } else {
+        ''
+    }
+    if ($trackedIdentifier -and $trackedIdentifier -notmatch `
+        '^\{[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}$') {
+        throw 'The archived BCD firmware entry identifier is invalid.'
+    }
+
+    $result = Invoke-LibertixNativeProcess -FilePath "$env:SystemRoot\System32\bcdedit.exe" `
+        -Arguments '/enum firmware /v' -TimeoutSeconds 60
+    if ($result.ExitCode -ne 0) {
+        throw "Firmware enumeration failed with rc=$($result.ExitCode): $($result.StandardError) $($result.StandardOutput)"
+    }
+
+    # A matching description or archived ID only attributes an entry to this
+    # run when its loader path also matches the temporary Libertix path.
+    $description = "Libertix UEFI Installer $([string]$State.RunId)"
+    $descriptionPattern = "(?m)^[^`r`n]+\s+$([regex]::Escape($description))\s*$"
+    $loaderPathPattern = '(?im)^[^\r\n]+\s+\\EFI\\\S+\s*$'
+    $pathPattern = '(?im)^[^\r\n]+\s+\\EFI\\LibertixInstaller\\BOOTX64\.EFI\s*$'
+    $entries = New-Object System.Collections.Generic.List[string]
+    foreach ($block in ([string]$result.StandardOutput -split "(?:`r?`n){2,}")) {
+        $identifiers = [regex]::Matches(
+            $block,
+            '\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}'
+        )
+        $descriptionMatches = $block -match $descriptionPattern
+        $tracked = $trackedIdentifier -and $block -match $loaderPathPattern -and
+            $identifiers.Count -eq 1 -and
+            $identifiers[0].Value.Equals($trackedIdentifier, [StringComparison]::OrdinalIgnoreCase)
+        if (-not $descriptionMatches -and -not $tracked) {
+            if ($LogUnattributed -and $block -match '(?i)\\EFI\\Libertix(?:Installer)?\\') {
+                $identifier = if ($identifiers.Count -eq 1) { $identifiers[0].Value } else { 'unknown' }
+                Write-AgentLog "Preserving firmware entry $identifier with a Libertix path: no ownership proof for run $($State.RunId)."
+            }
+            continue
+        }
+        if ($block -notmatch $pathPattern) {
+            throw "A firmware entry attributed to recovery run $($State.RunId) has an unexpected loader path; refusing deletion."
+        }
+        if ($identifiers.Count -ne 1) {
+            throw "A firmware entry attributed to recovery run $($State.RunId) has no unique BCD identifier."
+        }
+        $entries.Add($identifiers[0].Value)
+    }
+
+    return $entries.ToArray()
+}
+
 function Test-RecoveryPayload {
     param([Parameter(Mandatory = $true)]$State)
 
@@ -221,44 +318,116 @@ function Test-RecoveryPayload {
     }
 }
 
-function Test-LinuxPartitionPresent {
+function Read-ValidatedRecoveryPlan {
     param([Parameter(Mandatory = $true)]$State)
 
+    Import-Module (Join-Path $State.PayloadRoot 'Scripts\modules\Libertix.InstallationPlan.psm1') -ErrorAction Stop
+    $plan = Read-LibertixInstallationPlan -Path (Join-Path $State.RecoveryRoot 'installation-plan.json')
     if (
-        $null -eq $State.SystemDiskNumber -or
-        [string]::IsNullOrWhiteSpace([string]$State.SystemDiskUniqueId) -or
-        [string]::IsNullOrWhiteSpace([string]$State.SystemDiskPartitionTableId) -or
-        $null -eq $State.SystemDiskSize -or
-        $null -eq $State.ExpectedLinuxPartitionOffset -or
-        $null -eq $State.ExpectedLinuxPartitionSize
+        [string]$plan.planId -cne [string]$State.PlanId -or
+        [string]$plan.runtime.recoveryRunId -cne [string]$State.RunId -or
+        [string]$plan.firmware -cne 'uefi' -or
+        [int]$plan.disk.number -ne [int]$State.SystemDiskNumber -or
+        ([string]$plan.disk.uniqueId).Trim() -ne ([string]$State.SystemDiskUniqueId).Trim() -or
+        [string]$plan.disk.partitionTableId -cne [string]$State.SystemDiskPartitionTableId -or
+        [int64]$plan.disk.sizeBytes -ne [int64]$State.SystemDiskSize -or
+        [int64]$plan.disk.installer.finalOffsetBytes -ne [int64]$State.ExpectedLinuxPartitionOffset -or
+        [int64]$plan.disk.installer.finalSizeBytes -ne [int64]$State.ExpectedLinuxPartitionSize
     ) {
-        return $false
+        throw 'The installation plan does not match the UEFI recovery state.'
     }
-    $disk = Get-Disk -Number ([int]$State.SystemDiskNumber) -ErrorAction Stop
-    if (
-        ([string]$disk.UniqueId).Trim() -ne ([string]$State.SystemDiskUniqueId).Trim() -or
-        [int64]$disk.Size -ne [int64]$State.SystemDiskSize -or
-        [string]$disk.PartitionStyle -ne "GPT" -or
-        -not $disk.Guid
-    ) {
-        return $false
+    return $plan
+}
+
+function Test-LinuxPartitionPresent {
+    param(
+        [Parameter(Mandatory = $true)]$State,
+        [switch]$VerifiedUninstall,
+        [switch]$AllowMissing
+    )
+
+    $plan = Read-ValidatedRecoveryPlan -State $State
+    $transactionPath = Join-Path $State.RecoveryRoot 'uefi-transaction.json'
+    if (-not (Test-Path -LiteralPath $transactionPath -PathType Leaf)) {
+        $transactionPath = Join-Path $SystemDrive 'LibertixTools\uefi-transaction.json'
     }
-    $partitionTableId = "gpt:$(([Guid]$disk.Guid).ToString('D').ToLowerInvariant())"
-    if ($partitionTableId -ne [string]$State.SystemDiskPartitionTableId) {
-        return $false
+    if (-not (Test-Path -LiteralPath $transactionPath -PathType Leaf)) {
+        throw 'The active and permanent UEFI transaction states are both missing.'
     }
-    $expectedSize = [int64]$State.ExpectedLinuxPartitionSize
-    $expectedOffset = [int64]$State.ExpectedLinuxPartitionOffset
-    $linuxGptType = "{0fc63daf-8483-4772-8e79-3d69d8477de4}"
+    $transaction = Get-Content `
+        -LiteralPath $transactionPath `
+        -Raw `
+        -Encoding UTF8 `
+        -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([string]$transaction.RecoveryRunId -ne [string]$State.RunId) {
+        throw 'The UEFI transaction partition identity is invalid.'
+    }
+    foreach ($module in @('Libertix.Rollback.psm1', 'Libertix.InstallationPolicy.psm1')) {
+        Import-Module (Join-Path $State.PayloadRoot "Scripts\modules\$module") -ErrorAction Stop
+    }
+
+    # The ESP remains on Windows even when Linux uses another physical disk.
+    $plannedDisk = if ([int]$plan.schemaVersion -eq 5) { $plan.allocation } else { $plan.disk }
+    $disk = Get-Disk -Number ([int]$plannedDisk.number) -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $plannedDisk
+    $expectedPartitionGuid = ''
+    if ([string]$disk.PartitionStyle -eq 'GPT') {
+        if ($transaction.PSObject.Properties.Name -contains 'PartitionGuid' -and
+            -not [string]::IsNullOrWhiteSpace([string]$transaction.PartitionGuid)) {
+            if ([string]$transaction.PartitionGuid -notmatch (
+                '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-' +
+                '[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+            )) { throw 'The UEFI GPT partition identity is invalid.' }
+            $expectedPartitionGuid = ([Guid]$transaction.PartitionGuid).ToString('D').ToLowerInvariant()
+        }
+    }
+    $expectedSize = [int64]$plan.disk.installer.finalSizeBytes
+    $expectedOffset = [int64]$plan.disk.installer.finalOffsetBytes
+    $alignment = [int64](Get-LibertixInstallationPolicy).storage.partitionAlignmentBytes
+    $partitions = @(Get-Partition -DiskNumber ([int]$plannedDisk.number) -ErrorAction Stop)
     $installerPartitions = @(
-        Get-Partition -DiskNumber ([int]$State.SystemDiskNumber) -ErrorAction Stop |
+        $partitions |
             Where-Object {
                 [int64]$_.Offset -eq $expectedOffset -and
-                [int64]$_.Size -eq $expectedSize -and
-                ($_.GptType -eq $linuxGptType -or $_.Type -match "Linux")
+                [int64]$_.Size -le $expectedSize -and
+                [int64]$_.Size -ge ($expectedSize - $alignment) -and
+                (([string]$disk.PartitionStyle -eq 'GPT' -and
+                    $_.Guid -and
+                    ($expectedPartitionGuid -eq '' -or
+                        ([Guid]$_.Guid).ToString('D').ToLowerInvariant() -eq $expectedPartitionGuid) -and
+                    [string]$_.GptType -eq '{0fc63daf-8483-4772-8e79-3d69d8477de4}') -or
+                 ([string]$disk.PartitionStyle -eq 'MBR' -and [int]$_.MbrType -eq 0x83))
             }
     )
-    return $installerPartitions.Count -eq 1
+    if ($installerPartitions.Count -ne 1) {
+        if ($VerifiedUninstall -and $AllowMissing -and
+            @($partitions | Where-Object { [long]$_.Offset -eq $expectedOffset }).Count -gt 0) {
+            throw 'The installed Linux partition was replaced before uninstall resumed.'
+        }
+        return $false
+    }
+
+    if ($VerifiedUninstall) {
+        Assert-LibertixInstalledFilesystemIdentity -Partition $installerPartitions[0] -RecoveryRoot $State.RecoveryRoot
+        if ([string]$disk.PartitionStyle -eq 'GPT' -and $expectedPartitionGuid -eq '') {
+            # Older archives did not record the GPT GUID. Adopt it only after matching the ext UUID.
+            $transaction | Add-Member -NotePropertyName PartitionGuid `
+                -NotePropertyValue ([Guid]$installerPartitions[0].Guid).ToString('D') -Force
+            $backup = "$transactionPath.before-uninstall-guid"
+            if (-not (Test-Path -LiteralPath $backup)) {
+                Copy-Item -LiteralPath $transactionPath -Destination $backup -ErrorAction Stop
+            }
+            $temporary = "$transactionPath.guid-$PID.tmp"
+            [IO.File]::WriteAllText($temporary, ($transaction | ConvertTo-Json -Depth 20),
+                [Text.UTF8Encoding]::new($false))
+            Publish-RecoveryFileAtomic -TemporaryPath $temporary -DestinationPath $transactionPath `
+                -BackupPath "$transactionPath.guid-replace.bak"
+        }
+    } elseif ([string]$disk.PartitionStyle -eq 'GPT' -and $expectedPartitionGuid -eq '') {
+        throw 'The UEFI GPT partition identity is missing.'
+    }
+
+    return $true
 }
 
 function Get-VerifiedEspPartition {
@@ -413,7 +582,7 @@ function Get-FirmwareBootBypassEvidence {
     $firmwareModule = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.Firmware.psm1"
     $firmwareReadModule = Join-Path `
         $State.PayloadRoot `
-        "Scripts\modules\Libertix.FirmwareRead.psm1"
+        "Scripts\modules\Libertix.FirmwareVariables.psm1"
     foreach ($modulePath in @($firmwareModule, $firmwareReadModule)) {
         if (-not (Test-Path -LiteralPath $modulePath -PathType Leaf)) {
             throw "Firmware evidence module is missing: $modulePath"
@@ -444,6 +613,8 @@ function Get-FirmwareBootBypassEvidence {
             throw "Installed Libertix ESP ownership marker does not match the recorded transaction."
         }
 
+        # A Windows boot here is not evidence of firmware bypass when the user
+        # selected Windows manually or Libertix still heads BootOrder.
         [uint16]$ownedBootNumber = [Convert]::ToUInt16($ownedBootText, 16)
         $bootCurrent = @(
             ConvertFrom-BootOrderBytes `
@@ -472,6 +643,8 @@ function Get-FirmwareBootBypassEvidence {
             return $null
         }
 
+        # Both entries must target the recorded ESP and their exact loaders
+        # before offering a change to the preferred Windows boot path.
         $disk = Get-Disk -Number ([int]$State.SystemDiskNumber) -ErrorAction Stop
         $windowsBytes = Get-LibertixFirmwareVariableBytes -Name (
             "Boot{0:X4}" -f $currentBootNumber
@@ -642,11 +815,13 @@ function Restore-PreferredBootPathIfPresent {
 function Remove-RecoveryTasks {
     param([Parameter(Mandatory = $true)]$State)
 
-    $taskNames = @([string]$State.TaskName, [string]$State.PromptTaskName) |
+    $taskNames = @([string]$State.PromptTaskName, [string]$State.TaskName) |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     foreach ($taskName in $taskNames) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        $present = @(Get-ScheduledTask -TaskPath "\" -ErrorAction Stop | Where-Object TaskName -eq $taskName)
+        if ($present.Count -eq 0) { continue }
+        Unregister-ScheduledTask -TaskName $taskName -TaskPath "\" -Confirm:$false -ErrorAction Stop
+        if (@(Get-ScheduledTask -TaskPath "\" -ErrorAction Stop | Where-Object TaskName -eq $taskName).Count -ne 0) {
             throw "Recovery task still exists after removal: $taskName"
         }
     }
@@ -805,6 +980,41 @@ function Restore-UefiTransactionArchive {
     }
 }
 
+function Restore-FailedLiveInstallation {
+    param([Parameter(Mandatory = $true)]$State)
+
+    $execution = Read-ValidatedExecutionState -RecoveryState $State
+    if ([string]$execution.status -notin @("failed", "rollback-running", "rolled-back")) {
+        throw "Live failure cannot restore an execution in state '$($execution.status)'."
+    }
+    Restore-UefiTransactionArchive -State $State
+    $processModule = Join-Path $State.PayloadRoot "Scripts\modules\Libertix.Process.psm1"
+    Import-Module -Name $processModule -Force -ErrorAction Stop
+    $installerScript = Join-Path $State.PayloadRoot "Scripts\libertix-uefi-install.ps1"
+    $powershell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $operations = @()
+    if ([string]$execution.status -ne "rolled-back") {
+        $operations += "-Revert"
+    } else {
+        $operations += "-RestoreWindowsSettings"
+    }
+    foreach ($operation in $operations) {
+        $result = Invoke-LibertixNativeCommand -FilePath $powershell `
+            -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", $installerScript, $operation, "-ExpectedRecoveryRunId", [string]$State.RunId) `
+            -TimeoutSeconds 900 `
+            -OnStandardOutputLine { param($Line) Write-AgentLog "Live recovery: $Line" } `
+            -OnStandardErrorLine { param($Line) Write-AgentLog "Live recovery error: $Line" }
+        if ($result.ExitCode -ne 0) {
+            throw "Live recovery $operation failed with rc=$($result.ExitCode)."
+        }
+        $execution = Read-ValidatedExecutionState -RecoveryState $State
+        if ([string]$execution.status -ne "rolled-back") {
+            throw "Live recovery did not prove a completed rollback; recovery remains armed."
+        }
+    }
+}
+
 function Save-RecoveryLogs {
     param([Parameter(Mandatory = $true)]$State)
 
@@ -879,33 +1089,20 @@ function Restore-HibernationAfterInstallation {
         return
     }
 
-    $expected = [bool]$transaction.OriginalHibernateEnabled
-    $argument = if ($expected) { "on" } else { "off" }
     $processModule = Resolve-VerifiedPayloadPath -State $State -RelativePath (
         "Scripts\modules\Libertix.Process.psm1"
     )
     Import-Module -Name $processModule -Force -ErrorAction Stop
-    $powercfg = Invoke-LibertixNativeCommand `
-        -FilePath "$env:SystemRoot\System32\powercfg.exe" `
-        -ArgumentList @("/hibernate", $argument) `
-        -TimeoutSeconds 60
-    $output = ($powercfg.StandardOutput + [Environment]::NewLine + $powercfg.StandardError).Trim()
-    if ($powercfg.ExitCode -ne 0) {
-        throw "Hibernation finalization failed with rc=$($powercfg.ExitCode) output=$output"
-    }
-    $observed = [int](Get-ItemProperty `
-        -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power" `
-        -Name "HibernateEnabled" `
-        -ErrorAction Stop).HibernateEnabled
-    if (($observed -ne 0) -ne $expected) {
-        throw "Hibernation finalization did not apply the recorded original state."
-    }
+    Set-LibertixHibernateEnabled -Enabled ([bool]$transaction.OriginalHibernateEnabled)
     Write-AgentLog "Original hibernation state restored after verified installation."
 }
 
 function Remove-PendingWindowsSharePayload {
     if (Test-Path -LiteralPath (Join-Path $WindowsShareRoot "pending.marker") -PathType Leaf) {
-        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $WindowsShareRoot) {
+            throw "Pending Windows sharing payload still exists after removal."
+        }
         Write-AgentLog "Removed pending Windows sharing payload."
     }
 }
@@ -913,7 +1110,6 @@ function Remove-PendingWindowsSharePayload {
 function Remove-WindowsShareAfterRollback {
     param([Parameter(Mandatory = $true)]$State)
 
-    if (-not (Test-Path -LiteralPath $WindowsShareRoot -PathType Container)) { return }
     $shareLog = Join-Path $WindowsShareRoot "windows-share.log"
     if (Test-Path -LiteralPath $shareLog -PathType Leaf) {
         Copy-Item `
@@ -922,11 +1118,14 @@ function Remove-WindowsShareAfterRollback {
             -Force `
             -ErrorAction Stop
     }
-    Unregister-ScheduledTask `
-        -TaskName "LibertixLinuxReadOnly" `
-        -Confirm:$false `
-        -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    Import-Module (Join-Path $State.PayloadRoot "Scripts\modules\Libertix.TemporaryArtifacts.psm1") -Force -ErrorAction Stop
+    Remove-LibertixWindowsShareTasks -ShareRoot $WindowsShareRoot
+    if (Test-Path -LiteralPath $WindowsShareRoot) {
+        Remove-Item -LiteralPath $WindowsShareRoot -Recurse -Force -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $WindowsShareRoot) {
+        throw "Windows sharing payload still exists after rollback cleanup."
+    }
     Write-AgentLog "Removed Windows read-only Linux sharing after rollback."
 }
 
@@ -1064,6 +1263,7 @@ function Invoke-VerifiedInstallationSuccess {
     }
     Import-Module -Name $modulePath -Force -ErrorAction Stop
     $writeLog = { param($Message) Write-AgentLog -Message $Message }
+    $verificationCompleted = $false
     try {
         $filesystemRepair = Invoke-LibertixWindowsFilesystemRepairIfRequired `
             -RecoveryRoot ([string]$State.RecoveryRoot) `
@@ -1082,41 +1282,52 @@ function Invoke-VerifiedInstallationSuccess {
             }
             return
         }
+
+        # Persist each checkpoint after its effect so startup recovery can
+        # resume without repeating completed finalization work.
         if ((Get-FinalizationStepRank -State $State) -lt 1) {
             Set-FinalizationStep -State $State -Step "Started"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 2) {
             Save-UefiTransactionArchive -State $State
             Set-FinalizationStep -State $State -Step "TransactionArchived"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 3) {
             $null = Install-BootGuardianForCurrentBootPath -State $State
             Set-FinalizationStep -State $State -Step "BootGuardianInstalled"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 4) {
             Invoke-WindowsShareFinalize
             Set-FinalizationStep -State $State -Step "WindowsShareFinalized"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 5) {
             Restore-HibernationAfterInstallation -State $State
             Set-FinalizationStep -State $State -Step "HibernationRestored"
         }
+
         if ((Get-FinalizationStepRank -State $State) -lt 6) {
             Remove-TemporaryRecoveryArtifacts -State $State
             Set-FinalizationStep -State $State -Step "TemporaryArtifactsRemoved"
         }
+
+        $null = Invoke-LibertixPostInstallVerification `
+            -RecoveryRoot ([string]$State.RecoveryRoot) `
+            -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
+            -WriteLog $writeLog
+        $verificationCompleted = $true
         if ((Get-FinalizationStepRank -State $State) -lt 7) {
-            $null = Invoke-LibertixPostInstallVerification `
-                -RecoveryRoot ([string]$State.RecoveryRoot) `
-                -LogPath (Join-Path $State.RecoveryRoot "recovery-agent.log") `
-                -WriteLog $writeLog
             Set-FinalizationStep -State $State -Step "PostInstallVerified"
         }
+
         $State.Phase = "Verified"
         Save-State -State $State
     } catch {
         $verificationFailure = $_
-        if ((Get-FinalizationStepRank -State $State) -ge 7) {
+        if ($verificationCompleted) {
             $State.Phase = "FinalizationPending"
             try {
                 Save-State -State $State
@@ -1183,6 +1394,9 @@ function Invoke-VerifiedInstallationSuccess {
 try {
     $state = Get-Content -LiteralPath $StatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     Assert-RecoveryState -State $state
+    if ([string]$state.Phase -eq "FallbackProcessStateUnknown") {
+        throw "Recovery is blocked because the previous process tree was not proven stopped."
+    }
     Test-RecoveryPayload -State $state
     $script:AtomicFileModulePath = Join-Path `
         $state.PayloadRoot `
@@ -1211,6 +1425,7 @@ try {
         $successRunIdForPrompt = Read-EnvValue `
             -Path $installSuccess `
             -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
+
         if ($successRunIdForPrompt -eq [string]$state.RunId) {
             $linuxBootEvidencePresent = Test-Path `
                 -LiteralPath $linuxBootEvidence `
@@ -1232,11 +1447,13 @@ try {
                     )
                     exit 0
                 }
+
                 $preferredPathRequired = [string]$state.Phase -in @(
                     "InstalledBootBypassed",
                     "PreferredPathPrompted",
                     "PreferredPathPreparationFailed"
                 )
+
                 if (-not $preferredPathRequired) {
                     try {
                         $firmwareBypassEvidence = Get-FirmwareBootBypassEvidence -State $state
@@ -1264,11 +1481,13 @@ try {
                         throw
                     }
                 }
+
                 if ($preferredPathRequired) {
                     Start-FallbackUi -State $state -Mode PreferredPath
                     exit 0
                 }
             }
+
             if (
                 $linuxBootEvidencePresent -or
                 (Test-Path -LiteralPath $postInstallResult -PathType Leaf)
@@ -1282,10 +1501,12 @@ try {
             )
             exit 0
         }
+
         if (Test-Path -LiteralPath $postInstallResult -PathType Leaf) {
             Start-PostInstallResultUi -State $state
             exit 0
         }
+
         $startedRunIdForPrompt = Read-EnvValue `
             -Path $liveStarted `
             -Name "LIBERTIX_UEFI_RECOVERY_RUN_ID"
@@ -1298,7 +1519,22 @@ try {
     }
 
     if ($Action -eq "Cancel") {
-        $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded"
+        if ($VerifiedUninstall) {
+            Import-Module (Join-Path $state.PayloadRoot 'Scripts\modules\Libertix.StorageBaseline.psm1') -ErrorAction Stop
+            Assert-LibertixUninstallStorageBaseline -RecoveryRoot $state.RecoveryRoot
+        }
+        $rollbackFromSucceeded = [string]$executionState.status -eq "succeeded" -or
+            "target.bootloader-installed" -in @($executionState.completedSteps)
+        if ($VerifiedUninstall -and [string]$executionState.status -ne 'rolled-back') {
+            $resumingUninstall = [string]$executionState.status -eq 'rollback-running'
+            $linuxPresent = Test-LinuxPartitionPresent -State $state -VerifiedUninstall -AllowMissing:$resumingUninstall
+            if (-not $linuxPresent -and -not $resumingUninstall) {
+                throw 'The installed Linux partition identity could not be verified before uninstall.'
+            }
+        }
+
+        # Remove the maintenance service and preferred boot path before the
+        # transaction rollback restores the original Windows boot state.
         $null = Remove-BootGuardianIfPresent -State $state
         if ([string]$executionState.status -ne "rolled-back") {
             $null = Restore-PreferredBootPathIfPresent -State $state
@@ -1344,14 +1580,55 @@ try {
         } else {
             Write-AgentLog "UEFI transaction was already rolled back; cleanup is continuing."
         }
+
         if ($rollbackFromSucceeded) {
             Remove-WindowsShareAfterRollback -State $state
         } else {
             Remove-PendingWindowsSharePayload
         }
+
         Save-RecoveryLogs -State $state
         Remove-TemporaryRecoveryArtifacts -State $state
         Remove-RecoveryTasks -State $state
+        if ($VerifiedUninstall) {
+            # Do not report uninstall success until the ESP, firmware entries
+            # and permanent rollback evidence agree on the final boot state.
+            Assert-LibertixUninstallComplete -RecoveryRoot ([string]$state.RecoveryRoot) `
+                -RecoveryTaskNames @([string]$state.TaskName, [string]$state.PromptTaskName) `
+                -WriteLog { param($Message) Write-AgentLog $Message } -VerifyBoot {
+                    $null = Invoke-WithVerifiedEsp -State $state -Action {
+                        param($espPartition, $espRoot)
+                        foreach ($name in @('EFI\Libertix', 'EFI\LibertixInstaller')) {
+                            if (Test-Path -LiteralPath (Join-Path $espRoot $name)) {
+                                throw "An owned EFI boot directory remains after uninstall: $name"
+                            }
+                        }
+                        if (-not (Test-Path -LiteralPath (Join-Path $espRoot 'EFI\Microsoft\Boot\bootmgfw.efi') -PathType Leaf)) {
+                            throw 'Windows Boot Manager is missing from the verified ESP.'
+                        }
+                    }
+                    Import-Module (Join-Path $state.PayloadRoot 'Scripts\modules\Libertix.Process.psm1') -ErrorAction Stop
+                    $ownedEntries = @(
+                        Get-CurrentRunBcdFirmwareEntries -State $state -LogUnattributed
+                    )
+                    foreach ($identifier in $ownedEntries) {
+                        Write-AgentLog "Removing residual BCD firmware entry $identifier owned by run $($state.RunId)."
+                        $result = Invoke-LibertixNativeProcess `
+                            -FilePath "$env:SystemRoot\System32\bcdedit.exe" `
+                            -Arguments "/delete $identifier /f" `
+                            -TimeoutSeconds 60
+                        if ($result.ExitCode -ne 0) {
+                            throw "Failed to remove owned BCD firmware entry ${identifier}: rc=$($result.ExitCode); $($result.StandardError) $($result.StandardOutput)"
+                        }
+                    }
+                    if (@(Get-CurrentRunBcdFirmwareEntries -State $state).Count -ne 0) {
+                        throw 'A firmware entry owned by this recovery run remains after cleanup.'
+                    }
+                    'Windows EFI loader present; Libertix EFI directories and current-run boot references absent.'
+                }
+            $null = Set-LibertixPostInstallRolledBack `
+                -RecoveryRoot ([string]$state.RecoveryRoot)
+        }
         exit 0
     }
 
@@ -1375,6 +1652,7 @@ try {
         if (-not $firmwareBypassEvidence) {
             throw "Firmware boot bypass could not be reproven immediately before mutation."
         }
+
         Save-FirmwareBootBypassEvidence `
             -State $state `
             -Evidence $firmwareBypassEvidence
@@ -1472,13 +1750,7 @@ try {
         $failedRunId -eq [string]$state.RunId -and
         [string]$executionState.status -in @("failed", "rollback-running", "rolled-back")
     ) {
-        $installerScript = Join-Path $state.PayloadRoot "Scripts\libertix-uefi-install.ps1"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerScript `
-            -RestoreWindowsSettings `
-            -ExpectedRecoveryRunId ([string]$state.RunId)
-        if ($LASTEXITCODE -ne 0) {
-            throw "Windows setting restoration failed after live rollback with rc=$LASTEXITCODE."
-        }
+        Restore-FailedLiveInstallation -State $state
         Remove-PendingWindowsSharePayload
         $state.Phase = "LiveFailed"
         Save-State -State $state
@@ -1511,7 +1783,29 @@ try {
     try {
         Write-AgentErrorRecord -ErrorRecord $fatalError
     } catch {
-        Write-Verbose "Unable to persist the recovery failure: $($_.Exception.Message)"
+        # Scheduled tasks discard this process's error stream, so a shared log that
+        # stays unwritable would otherwise hide both failures.
+        $logError = $_.Exception
+        $failurePath = Join-Path (Split-Path -Parent $StatePath) (
+            "recovery-agent-failure-{0}-{1}.log" -f $PID, [Guid]::NewGuid().ToString("N")
+        )
+        try {
+            $logHolders = Get-AgentLogLockReport
+        } catch {
+            $logHolders = "holder lookup failed: $($_.Exception.Message)"
+        }
+        try {
+            Set-Content -LiteralPath $failurePath -Encoding UTF8 -ErrorAction Stop -Value @(
+                "[$(Get-Date -Format o)] action=$Action",
+                "ERROR: $($fatalError | Out-String)",
+                "ERROR PowerShellStack: $($fatalError.ScriptStackTrace)",
+                ("LOG WRITE ERROR: {0} HResult=0x{1:X8}: {2}" -f
+                    $logError.GetType().FullName, $logError.HResult, $logError.Message),
+                "LOG HOLDERS: $logHolders"
+            )
+        } catch {
+            Write-Verbose "Unable to persist the recovery failure: $($_.Exception.Message)"
+        }
     }
     try {
         if ($null -ne (Get-Variable -Name state -ValueOnly -ErrorAction SilentlyContinue)) {
@@ -1520,6 +1814,7 @@ try {
     } catch {
         Write-Verbose "Unable to archive the recovery failure log: $($_.Exception.Message)"
     }
-    Write-Error $fatalError.Exception.Message
+    Write-Error $fatalError.Exception.Message -ErrorAction Continue
+    if ($fatalError.Exception.Message -like "*PROCESS_TREE_NOT_STOPPED*") { exit 173 }
     exit 1
 }

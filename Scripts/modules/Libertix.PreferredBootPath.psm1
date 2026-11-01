@@ -100,7 +100,7 @@ function Get-LibertixPreferredPathByteHash {
 }
 
 function Import-LibertixPreferredPathFirmwareModules {
-    foreach ($name in @("Libertix.Firmware.psm1", "Libertix.FirmwareRead.psm1")) {
+    foreach ($name in @("Libertix.Firmware.psm1", "Libertix.FirmwareVariables.psm1")) {
         $path = Join-Path $PSScriptRoot $name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Preferred boot firmware dependency is missing: $path"
@@ -929,6 +929,10 @@ function Restore-LibertixPreferredBootPath {
         [Parameter(Mandatory = $true)][scriptblock]$WriteLog
     )
 
+    $pendingSync = Join-Path $EspRoot "EFI\Libertix\preferred-boot-path.sync.json"
+    if (Test-Path -LiteralPath $pendingSync) {
+        throw "An interrupted Linux EFI synchronization is pending. Resume Linux before restoring this boot path."
+    }
     $archiveRoot = Join-Path $State.RecoveryRoot "preferred-boot-path"
     $archiveManifest = Join-Path $archiveRoot "manifest.json"
     if (-not (Test-Path -LiteralPath $archiveManifest -PathType Leaf)) {

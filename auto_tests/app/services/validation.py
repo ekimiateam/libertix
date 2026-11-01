@@ -177,6 +177,7 @@ class ValidationService:
         config: dict[str, Any],
         step: str,
         timeout: float,
+        replay_safe: bool = False,
     ) -> CommandResult:
         """Upload, execute, then remove one repository-owned PowerShell script.
 
@@ -211,18 +212,38 @@ class ValidationService:
             '-Force -ErrorAction SilentlyContinue"'
         )
 
+        script_content = script_path.read_text(encoding="utf-8")
+        logger.info(
+            "PowerShell helper source selected",
+            extra={
+                "step": step,
+                "target": ssh.host,
+                "script": script_name,
+                "script_sha256": hashlib.sha256(
+                    script_content.removeprefix("\ufeff").encode("utf-8-sig")
+                ).hexdigest(),
+            },
+        )
         try:
             ssh.upload_text(
                 remote_script_sftp,
-                script_path.read_text(encoding="utf-8"),
+                script_content,
                 step=f"{step}.upload_script",
+                replay_safe=True,
             )
             ssh.upload_text(
                 remote_config_sftp,
                 json.dumps(config, ensure_ascii=False),
                 step=f"{step}.upload_config",
+                replay_safe=True,
             )
-            return ssh.run(command, step=step, timeout=timeout, sensitive=True)
+            return ssh.run(
+                command,
+                step=step,
+                timeout=timeout,
+                sensitive=True,
+                replay_safe=replay_safe,
+            )
         finally:
             try:
                 ssh.run(
@@ -231,6 +252,7 @@ class ValidationService:
                     timeout=30,
                     check=False,
                     sensitive=True,
+                    replay_safe=True,
                 )
             except WorkflowError as exc:
                 # A timed-out remote check can close its SSH transport. Cleanup
@@ -250,6 +272,7 @@ class ValidationService:
         arguments: Sequence[str],
         step: str,
         timeout: float,
+        replay_safe: bool = False,
     ) -> CommandResult:
         """Upload, execute, then remove one repository-owned Linux helper."""
 
@@ -268,19 +291,15 @@ class ValidationService:
         command = " ".join(
             ["python3", shlex.quote(remote_script), *(shlex.quote(value) for value in arguments)]
         )
-        cleanup_command = (
-            "python3 -c "
-            + shlex.quote("import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=True)")
-            + " "
-            + shlex.quote(remote_script)
-        )
+        cleanup_command = f"rm -f -- {shlex.quote(remote_script)}"
         try:
             ssh.upload_text(
                 remote_script,
                 script_path.read_text(encoding="utf-8"),
                 step=f"{step}.upload_script",
+                replay_safe=True,
             )
-            return ssh.run(command, step=step, timeout=timeout)
+            return ssh.run(command, step=step, timeout=timeout, replay_safe=replay_safe)
         finally:
             try:
                 ssh.run(
@@ -288,6 +307,7 @@ class ValidationService:
                     step=f"{step}.cleanup_script",
                     timeout=30,
                     check=False,
+                    replay_safe=True,
                 )
             except WorkflowError as exc:
                 logger.warning(
@@ -485,11 +505,8 @@ class ValidationService:
                 for path in self._local_source_files(root):
                     tar.add(path, arcname=path.relative_to(root), recursive=False)
 
-            digest = hashlib.sha256()
             with archive.open("rb") as archive_stream:
-                for chunk in iter(lambda: archive_stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            archive_sha256 = digest.hexdigest()
+                archive_sha256 = hashlib.file_digest(archive_stream, "sha256").hexdigest()
 
             remote_archive = str(PurePosixPath(s.smb_root) / f".{archive.name}")
             ssh.upload_file(archive, remote_archive, step="server.copy_local_source.upload")
@@ -594,12 +611,34 @@ class ValidationService:
         copied = 0
         reused = 0
         manifest: dict[str, dict[str, object]] = {}
+
+        def make_upload_progress_reporter(
+            file_name: str, progress_interval: int
+        ) -> Callable[[int, int], None]:
+            last_reported = 0
+
+            def report(transferred: int, total: int) -> None:
+                nonlocal last_reported
+                if transferred < total and transferred - last_reported < progress_interval:
+                    return
+                last_reported = transferred
+                result.ok(
+                    "server.filepool_upload_progress",
+                    "Development filepool upload progressed",
+                    target=s.main_ssh_host,
+                    file=file_name,
+                    phase=file_name,
+                    sequence=transferred,
+                    bytes_transferred=transferred,
+                    total_bytes=total,
+                    percent=round(transferred * 100 / total, 1) if total > 0 else 100.0,
+                )
+
+            return report
+
         for name, local_path in sorted(artifacts.items()):
-            digest = hashlib.sha256()
             with local_path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            sha256 = digest.hexdigest()
+                sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
             size = local_path.stat().st_size
             remote_path = remote_root / name
             remote_digest = ssh.run(
@@ -614,11 +653,14 @@ class ValidationService:
                 reused += 1
             else:
                 temporary_path = remote_root / f".{name}.{uuid.uuid4().hex}.tmp"
+                progress_interval = max(8 * 1024 * 1024, (size + 9) // 10)
                 try:
                     ssh.upload_file(
                         local_path,
                         str(temporary_path),
                         step="server.filepool_upload",
+                        on_progress=make_upload_progress_reporter(name, progress_interval),
+                        stall_timeout_seconds=120,
                     )
                     publish = (
                         "set -eu; "
@@ -702,6 +744,7 @@ class ValidationService:
             prefixes=(
                 "MSBUILD",
                 "VSTEST",
+                "VSTEST_TESTS",
                 "PSSCRIPTANALYZER",
                 "PESTER",
                 "TEMP_BUILD_DIR",
@@ -722,6 +765,7 @@ class ValidationService:
             target=s.build_vm_host,
             msbuild=values.get("MSBUILD"),
             vstest=values.get("VSTEST"),
+            vstest_tests=values.get("VSTEST_TESTS"),
             psscriptanalyzer=values.get("PSSCRIPTANALYZER"),
             pester=values.get("PESTER"),
             executable_sha256=values.get("FINAL_EXE_SHA256"),
@@ -832,7 +876,14 @@ class ValidationService:
                 )
             )
 
-    def deploy_to_documents(self, vm: VMConfig, executable: PureWindowsPath) -> PureWindowsPath:
+    def deploy_to_documents(
+        self,
+        vm: VMConfig,
+        executable: PureWindowsPath,
+        *,
+        expected_sha256: str | None = None,
+        on_step: Callable[[StepResult], None] | None = None,
+    ) -> PureWindowsPath:
         share_release = PureWindowsPath("Z:/") / self.settings.release_dir_name
         try:
             relative_executable = executable.relative_to(share_release)
@@ -852,6 +903,7 @@ class ValidationService:
             ),
             "release_dir_name": self.settings.release_dir_name,
             "relative_executable": str(relative_executable),
+            "expected_sha256": expected_sha256,
         }
         with self.ssh(
             vm.host,
@@ -876,6 +928,19 @@ class ValidationService:
                 "vm.deploy",
                 "The local Libertix path was not confirmed",
                 details={"vm": vm.name, "host": vm.host},
+            )
+        if expected_sha256 and values["LOCAL_EXE_SHA256"] != expected_sha256:
+            raise WorkflowError(
+                "vm.deploy", "Deployed executable differs from the campaign release"
+            )
+        if on_step:
+            on_step(
+                StepResult(
+                    step="automation.deployed_provenance",
+                    status="ok",
+                    message="Deployed standalone executable content verified",
+                    context={"vm": vm.name, **values},
+                )
             )
         return PureWindowsPath(values["LOCAL_EXE"])
 
@@ -916,6 +981,7 @@ class ValidationService:
         step: str,
         use_default_filepool: bool = False,
         force_offline_ntfs_resize: bool = False,
+        local_filepool: bool = False,
         unattended_config: dict[str, object] | None = None,
     ) -> dict[str, str]:
         def has_interactive_window_proof(parsed: dict[str, str]) -> bool:
@@ -953,10 +1019,11 @@ class ValidationService:
                     ),
                     "development_dns_servers": list(self.settings.development_dns_servers),
                     "force_offline_ntfs_resize": force_offline_ntfs_resize,
+                    "local_filepool": local_filepool,
                     "unattended": unattended_config,
                 },
                 step=step,
-                timeout=90,
+                timeout=720,
             )
             values = self.parse_powershell_results(
                 response.stdout,
@@ -972,8 +1039,11 @@ class ValidationService:
                     "WINDOW_VISIBLE",
                     "UNATTENDED_STATUS_PATH",
                     "UNATTENDED_ACKNOWLEDGEMENT_PATH",
+                    "LOCAL_FILEPOOL_SELECTED",
                 ),
             )
+            if local_filepool and values.get("LOCAL_FILEPOOL_SELECTED") != "True":
+                raise WorkflowError(step, "The local filepool choice was not accepted")
             if not has_interactive_window_proof(values):
                 confirmation = self.run_windows_script(
                     ssh,

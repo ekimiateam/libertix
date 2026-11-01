@@ -18,16 +18,67 @@ if (-not (Test-Path -LiteralPath $processModulePath -PathType Leaf)) {
     throw "Native-process module is missing from the Windows sharing payload."
 }
 Import-Module -Name $processModulePath -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot 'Libertix.WindowsProfiles.psm1') -ErrorAction Stop
 
 function Write-ShareLog {
     param([string]$Message)
-    $root = Split-Path -Parent $ConfigPath
-    New-Item -ItemType Directory -Path $root -Force | Out-Null
-    $line = "[{0}] {1}" -f (Get-Date -Format o), $Message
-    Add-Content -LiteralPath (Join-Path $root "windows-share.log") -Value $line
-    $archiveRoot = Join-Path $env:SystemDrive "LibertixInstallLogs\Windows"
-    New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
-    Add-Content -LiteralPath (Join-Path $archiveRoot "windows-share.log") -Value $line
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try {
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        $elevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } finally {
+        $identity.Dispose()
+    }
+    if ($elevated) {
+        $logRoots = @(
+            (Split-Path -Parent $ConfigPath),
+            (Join-Path $env:SystemDrive "LibertixInstallLogs\Windows")
+        )
+    } else {
+        # Per-user pinning must not need write access to the privileged script payload.
+        $logRoots = @((Join-Path $env:LOCALAPPDATA "Libertix\Logs"))
+    }
+    $line = "[{0}] pid={1} session={2} {3}" -f (Get-Date -Format o), $PID, ([Diagnostics.Process]::GetCurrentProcess().SessionId), $Message
+    foreach ($logRoot in $logRoots) {
+        New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
+        $logPath = Join-Path $logRoot "windows-share.log"
+        # Add-Content races with other writers while detecting the existing encoding.
+        for ($attempt = 1; $attempt -le 50; $attempt++) {
+            try {
+                [IO.File]::AppendAllText($logPath, $line + [Environment]::NewLine, [Text.Encoding]::Default)
+                break
+            } catch [IO.IOException] {
+                if (($_.Exception.HResult -band 0xffff) -notin @(32, 33) -or $attempt -eq 50) {
+                    throw
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+    }
+}
+
+function Test-LibertixFileHasReadableContent {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite,
+            4096,
+            $true)
+        $buffer = New-Object byte[] 1
+        $readTask = $stream.ReadAsync($buffer, 0, $buffer.Length)
+        return $readTask.GetAwaiter().GetResult() -gt 0
+    } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        throw "Cannot read '$Path': nativeCode=$($failure.HResult -band 0xffff) hresult=$($failure.HResult) error=$($failure.Message)"
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Remove-VerifiedExt4InstallerResume {
@@ -112,6 +163,7 @@ function Get-Config {
     if (
         [int]$config.SystemDiskNumber -lt 0 -or
         [string]::IsNullOrWhiteSpace([string]$config.SystemDiskUniqueId) -or
+        [string]::IsNullOrWhiteSpace([string]$config.SystemDiskPartitionTableId) -or
         [int64]$config.ExpectedLinuxPartitionOffset -le 0 -or
         [int64]$config.ExpectedLinuxPartitionSize -le 0 -or
         [int64]$config.PartitionSizeToleranceBytes -le 0 -or
@@ -322,6 +374,14 @@ function Get-LinuxPartition {
     if (([string]$disk.UniqueId).Trim() -ne ([string]$Config.SystemDiskUniqueId).Trim()) {
         throw "Windows share configuration disk identity no longer matches the system disk."
     }
+    $tableId = switch ([string]$disk.PartitionStyle) {
+        'GPT' { 'gpt:' + ([guid]$disk.Guid).ToString('D').ToLowerInvariant() }
+        'MBR' { 'mbr:' + ([uint32]$disk.Signature).ToString('x8') }
+        default { throw 'Windows sharing requires a basic GPT or MBR disk.' }
+    }
+    if ($tableId -cne [string]$Config.SystemDiskPartitionTableId) {
+        throw 'Windows sharing partition-table identity no longer matches the recorded disk.'
+    }
     $expectedOffset = [int64]$Config.ExpectedLinuxPartitionOffset
     $expected = [int64]$Config.ExpectedLinuxPartitionSize
     $minimum = $expected - [int64]$Config.PartitionSizeToleranceBytes
@@ -342,23 +402,7 @@ function Get-LinuxPartition {
 }
 
 function Get-RealWindowsProfiles {
-    $excludedNames = @(
-        "DefaultAccount",
-        "defaultuser0",
-        "WDAGUtilityAccount",
-        "WsiAccount"
-    )
-    return @(
-        Get-CimInstance Win32_UserProfile -ErrorAction Stop |
-            Where-Object {
-                $profileName = Split-Path -Leaf ([string]$_.LocalPath)
-                -not $_.Special -and
-                [string]$_.SID -match '^S-1-5-21-(?:\d+-){3}\d+$' -and
-                $_.LocalPath -like "$env:SystemDrive\Users\*" -and
-                $profileName -notin $excludedNames -and
-                (Test-Path -LiteralPath $_.LocalPath -PathType Container)
-            }
-    )
+    return @(Get-LibertixWindowsUserProfiles)
 }
 
 function Write-MountStatus {
@@ -611,16 +655,18 @@ function Install-ExplorerPinTasks {
 function Install-ExplorerShortcuts {
     param(
         [Parameter(Mandatory = $true)]$Config,
-        [Parameter(Mandatory = $true)][string]$LinuxHome
+        [Parameter(Mandatory = $true)][string]$LinuxHome,
+        [switch]$CurrentUserOnly
     )
 
-    $profileRoots = @(
-        Get-RealWindowsProfiles | ForEach-Object { [string]$_.LocalPath }
-    )
-    if ($env:USERPROFILE -like "$env:SystemDrive\Users\*" -and
-        (Test-Path -LiteralPath $env:USERPROFILE -PathType Container)) {
-        $profileRoots += $env:USERPROFILE
+    $profiles = @(Get-RealWindowsProfiles)
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $currentProfiles = @($profiles | Where-Object { [string]$_.SID -eq $currentSid })
+    if ($currentProfiles.Count -gt 1 -or ($CurrentUserOnly -and $currentProfiles.Count -ne 1)) {
+        throw "The current Windows user profile identity is missing or ambiguous."
     }
+    $selectedProfiles = if ($CurrentUserOnly) { $currentProfiles } else { $profiles }
+    $profileRoots = @($selectedProfiles | ForEach-Object { [string]$_.LocalPath })
     $profileRoots = @($profileRoots | Sort-Object -Unique)
     if ($profileRoots.Count -eq 0) {
         throw "No real Windows user profile is available for the Linux shortcut."
@@ -642,55 +688,86 @@ function Install-ExplorerShortcuts {
         Write-ShareLog "Explorer shortcut created: $shortcutPath"
     }
 
-    if ($env:USERPROFILE -like "$env:SystemDrive\Users\*") {
-        $shellApplication = New-Object -ComObject Shell.Application
-        $junctionPath = Join-Path $env:USERPROFILE "Linux_$($Config.LinuxUsername)_read-only"
-        if (Test-Path -LiteralPath $junctionPath) {
-            $junction = Get-Item -LiteralPath $junctionPath -Force
-            if (-not ($junction.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                throw "Refusing to replace a non-junction path: $junctionPath"
+    if ($currentProfiles.Count -eq 1) {
+        # The logon task and result verifier can pin the same folder concurrently.
+        $pinMutex = [Threading.Mutex]::new($false, "Local\Libertix.ExplorerPin.$currentSid")
+        $ownsPinMutex = $false
+        try {
+            Write-ShareLog "Explorer phase=wait-pin-lock"
+            try {
+                $ownsPinMutex = $pinMutex.WaitOne(60000)
+            } catch [Threading.AbandonedMutexException] {
+                # Ownership is granted; recheck the junction and actual Explorer state below.
+                $ownsPinMutex = $true
+                Write-ShareLog "Explorer phase=pin-lock-abandoned"
             }
-        } else {
-            $cmdPath = Join-Path $env:SystemRoot "System32\cmd.exe"
-            $junctionResult = Invoke-LibertixNativeCommand `
-                -FilePath $cmdPath `
-                -ArgumentList @("/d", "/c", "mklink", "/J", $junctionPath, $LinuxHome) `
-                -TimeoutSeconds 30
-            $junctionOutput = (
-                $junctionResult.StandardOutput +
-                [Environment]::NewLine +
-                $junctionResult.StandardError
-            ).Trim()
-            if ($junctionResult.ExitCode -ne 0) {
-                throw "Explorer junction creation failed with rc=$($junctionResult.ExitCode)`: $junctionOutput"
+            if (-not $ownsPinMutex) {
+                throw "Another Libertix Explorer integration did not finish within 60 seconds."
             }
-        }
+            Write-ShareLog "Explorer phase=resolve-shell"
+            $shellApplication = New-Object -ComObject Shell.Application
+            $junctionPath = Join-Path ([string]$currentProfiles[0].LocalPath) "Linux_$($Config.LinuxUsername)_read-only"
+            if (Test-Path -LiteralPath $junctionPath) {
+                $junction = Get-Item -LiteralPath $junctionPath -Force
+                if (-not ($junction.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                    throw "Refusing to replace a non-junction path: $junctionPath"
+                }
+            } else {
+                $cmdPath = Join-Path $env:SystemRoot "System32\cmd.exe"
+                $junctionResult = Invoke-LibertixNativeCommand `
+                    -FilePath $cmdPath `
+                    -ArgumentList @("/d", "/c", "mklink", "/J", $junctionPath, $LinuxHome) `
+                    -TimeoutSeconds 30
+                $junctionOutput = (
+                    $junctionResult.StandardOutput +
+                    [Environment]::NewLine +
+                    $junctionResult.StandardError
+                ).Trim()
+                if ($junctionResult.ExitCode -ne 0) {
+                    throw "Explorer junction creation failed with rc=$($junctionResult.ExitCode)`: $junctionOutput"
+                }
+            }
 
-        $pinFound = $false
-        for ($attempt = 1; $attempt -le 5 -and -not $pinFound; $attempt++) {
-            $quickAccess = $shellApplication.Namespace($script:QuickAccessNamespace)
-            if ($null -eq $quickAccess) {
-                throw "Explorer Home/Quick Access namespace is unavailable."
+            $junction = Get-Item -LiteralPath $junctionPath -Force -ErrorAction Stop
+            if ([string]$junction.LinkType -ne 'Junction' -or @($junction.Target).Count -ne 1 -or
+                [IO.Path]::GetFullPath([string]$junction.Target[0]).TrimEnd('\') -ine
+                [IO.Path]::GetFullPath($LinuxHome).TrimEnd('\')) {
+                throw "Explorer junction targets another location; the existing path was not replaced: $junctionPath"
             }
-            $pinFound = @(
-                $quickAccess.Items() | Where-Object {
-                    [string]$_.Path -ieq $junctionPath -or
-                    [string]$_.Path -ieq $LinuxHome
+
+            $pinFound = $false
+            for ($attempt = 1; $attempt -le 5 -and -not $pinFound; $attempt++) {
+                Write-ShareLog "Explorer phase=inspect-quick-access attempt=$attempt"
+                $quickAccess = $shellApplication.Namespace($script:QuickAccessNamespace)
+                if ($null -eq $quickAccess) {
+                    throw "Explorer Home/Quick Access namespace is unavailable."
                 }
-            ).Count -ge 1
+                $pinFound = @(
+                    $quickAccess.Items() | Where-Object {
+                        [string]$_.Path -ieq $junctionPath -or
+                        [string]$_.Path -ieq $LinuxHome
+                    }
+                ).Count -ge 1
+                if (-not $pinFound) {
+                    Write-ShareLog "Explorer phase=resolve-junction attempt=$attempt"
+                    $junctionShellItem = $shellApplication.Namespace($junctionPath)
+                    if ($null -eq $junctionShellItem -or $null -eq $junctionShellItem.Self) {
+                        throw "Explorer cannot resolve the Linux shortcut junction."
+                    }
+                    Write-ShareLog "Explorer phase=invoke-pin attempt=$attempt"
+                    $junctionShellItem.Self.InvokeVerb("pintohome")
+                    Write-ShareLog "Explorer phase=pin-returned attempt=$attempt"
+                    Start-Sleep -Seconds 2
+                }
+            }
             if (-not $pinFound) {
-                $junctionShellItem = $shellApplication.Namespace($junctionPath)
-                if ($null -eq $junctionShellItem -or $null -eq $junctionShellItem.Self) {
-                    throw "Explorer cannot resolve the Linux shortcut junction."
-                }
-                $junctionShellItem.Self.InvokeVerb("pintohome")
-                Start-Sleep -Seconds 2
+                throw "Linux shortcut was not visible in Explorer Home/Quick Access after pinning."
             }
+            Write-ShareLog "Explorer Home/Quick Access pin verified: $junctionPath"
+        } finally {
+            if ($ownsPinMutex) { $pinMutex.ReleaseMutex() }
+            $pinMutex.Dispose()
         }
-        if (-not $pinFound) {
-            throw "Linux shortcut was not visible in Explorer Home/Quick Access after pinning."
-        }
-        Write-ShareLog "Explorer Home/Quick Access pin verified: $junctionPath"
     }
 }
 
@@ -800,12 +877,22 @@ function Start-ReadOnlyMount {
             Set-Content -LiteralPath $writeProbe -Value "readonly verification" -ErrorAction Stop
             $writeSucceeded = $true
         } catch {
-            Write-ShareLog "Read-only write probe was refused as expected."
+            $failure = $_.Exception
+            while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+            $nativeCode = $failure.HResult -band 0xffff
+            if ($nativeCode -ne 19) {
+                throw "Read-only probe is inconclusive: nativeCode=$nativeCode hresult=$($failure.HResult) error=$($failure.Message)"
+            }
+            Write-ShareLog "Read-only write probe returned ERROR_WRITE_PROTECT (19)."
         } finally {
             if ($writeSucceeded) { Remove-Item -LiteralPath $writeProbe -Force -ErrorAction SilentlyContinue }
         }
         if ($writeSucceeded) {
             throw "SECURITY ERROR: the Linux volume accepted a write despite --ro."
+        }
+        # The pinned ext4 driver cannot read the /etc/os-release symlink; read its regular target.
+        if (-not (Test-LibertixFileHasReadableContent -Path "$drive\usr\lib\os-release")) {
+            throw 'The Linux volume is not readable after the write probe.'
         }
 
         Install-ExplorerShortcuts -Config $Config -LinuxHome $linuxHome
@@ -864,12 +951,25 @@ try {
     }
     if ($Pin) {
         $linuxHome = $null
+        $mountStatusPath = Join-Path (Split-Path -Parent $ConfigPath) 'mount-status.json'
         for ($attempt = 0; $attempt -lt 90 -and -not $linuxHome; $attempt++) {
-            foreach ($letter in @("L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
-                $candidate = "${letter}:\home\$($config.LinuxUsername)"
+            if (Test-Path -LiteralPath $mountStatusPath -PathType Leaf) {
+                $status = Get-Content -LiteralPath $mountStatusPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ([int]$status.schemaVersion -ne 1 -or -not [bool]$status.readOnly -or
+                    [int]$status.diskNumber -ne [int]$config.SystemDiskNumber -or
+                    ([string]$status.diskUniqueId).Trim() -cne ([string]$config.SystemDiskUniqueId).Trim() -or
+                    [int64]$status.partitionOffset -ne [int64]$config.ExpectedLinuxPartitionOffset -or
+                    [int64]$status.partitionSize -gt [int64]$config.ExpectedLinuxPartitionSize -or
+                    [int64]$status.partitionSize -lt ([int64]$config.ExpectedLinuxPartitionSize - [int64]$config.PartitionSizeToleranceBytes) -or
+                    [string]$status.drive -notmatch '^[L-Z]:$') {
+                    throw 'Explorer pinning mount status does not match the configured Linux partition.'
+                }
+                $candidate = "$($status.drive)\home\$($config.LinuxUsername)"
+                if ([string]$status.linuxHome -ine $candidate) {
+                    throw 'Explorer pinning home differs from the recorded mount.'
+                }
                 if (Test-Path -LiteralPath $candidate -PathType Container) {
                     $linuxHome = $candidate
-                    break
                 }
             }
             if (-not $linuxHome) { Start-Sleep -Seconds 1 }
@@ -877,7 +977,7 @@ try {
         if (-not $linuxHome) {
             throw "The Linux read-only home did not become available for Explorer pinning."
         }
-        Install-ExplorerShortcuts -Config $config -LinuxHome $linuxHome
+        Install-ExplorerShortcuts -Config $config -LinuxHome $linuxHome -CurrentUserOnly
         Write-ShareLog "Explorer pinning completed for $env:USERNAME."
         exit 0
     }

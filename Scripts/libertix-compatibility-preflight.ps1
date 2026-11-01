@@ -2,12 +2,13 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet("en", "fr", "es")]
+    [ValidateSet("en", "fr", "es", "ko")]
     [string]$LanguageCode = "en",
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$ConnectivityUrl,
-    [switch]$SkipNvramWriteProbe
+    [switch]$SkipNvramWriteProbe,
+    [switch]$SkipConnectivityProbe
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +28,74 @@ function Stop-Compatibility {
         throw "[$Code] $Code"
     }
     throw "[$Code] $($template -f $FormatArguments)"
+}
+
+function Resolve-CompatibilitySystemStorage {
+    param([string]$SystemDrive, [object[]]$VisibleDisks)
+
+    if ($SystemDrive -notmatch '^[A-Za-z]:$') {
+        Stop-Compatibility 'COMPAT_E_SYSTEM_DRIVE'
+    }
+    $partitions = @(Get-Partition -DriveLetter $SystemDrive.Substring(0, 1) -ErrorAction Stop)
+    if ($partitions.Count -ne 1) {
+        Stop-Compatibility 'COMPAT_E_SYSTEM_DISK_UNRESOLVED'
+    }
+    # Other disks are not candidates for Windows merely because they are enumerated first.
+    $systemDiskMatches = @($VisibleDisks | Where-Object { $_.Number -eq $partitions[0].DiskNumber })
+    if ($systemDiskMatches.Count -ne 1 -or [long]$systemDiskMatches[0].Size -le 0) {
+        Stop-Compatibility 'COMPAT_E_SYSTEM_DISK_UNRESOLVED'
+    }
+    $disk = $systemDiskMatches[0]
+    if ($disk.IsOffline -or $disk.IsReadOnly) {
+        Stop-Compatibility 'COMPAT_E_DISK_NOT_WRITABLE'
+    }
+    $busType = [string]$disk.BusType
+    if ($busType -match 'RAID|iSCSI|USB|File Backed Virtual|Spaces') {
+        Stop-Compatibility 'COMPAT_E_STORAGE_BUS_UNSUPPORTED' @($busType)
+    }
+    if ($busType -notmatch '^(SATA|ATA|NVMe|SAS|SCSI|MMC)$') {
+        Stop-Compatibility 'COMPAT_E_STORAGE_BUS_UNKNOWN' @($busType)
+    }
+    try {
+        Assert-LibertixUniqueTargetDiskIdentity -Disk $disk -Disks $VisibleDisks
+    } catch {
+        Stop-Compatibility 'COMPAT_E_DISK_IDENTITY_AMBIGUOUS'
+    }
+    [pscustomobject]@{ Partition = $partitions[0]; Disk = $disk }
+}
+
+function Get-CompatibilityAllocationCapacity {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Targets,
+        [Parameter(Mandatory = $true)][ValidateSet('GPT', 'MBR')][string]$PartitionStyle,
+        [Parameter(Mandatory = $true)][long]$WindowsShrinkBytes,
+        [Parameter(Mandatory = $true)][long]$RequiredShrinkBytes,
+        [Parameter(Mandatory = $true)][bool]$WindowsPartitionSlotAvailable
+    )
+
+    $matchingTargets = @($Targets | Where-Object { $_.partitionStyle -eq $PartitionStyle })
+    if (@($matchingTargets | Where-Object isWindows).Count -ne 1) {
+        Stop-Compatibility 'COMPAT_E_DISK_INVENTORY' @('The Windows volume identity is missing or ambiguous.')
+    }
+    $secondaryAvailable = @($matchingTargets | Where-Object {
+        if ($_.isWindows) { return $false }
+        $padding = Get-LibertixPartitionEndAlignmentPadding -PartitionOffsetBytes $_.offsetBytes `
+            -PartitionSizeBytes $_.sizeBytes -LogicalSectorSizeBytes $_.logicalSectorSizeBytes
+        if ($PartitionStyle -eq 'MBR') { $padding += Get-LibertixPartitionAlignmentBytes }
+        [long]$_.sizeBytes - [long]$_.minimumSizeBytes - $padding -ge $RequiredShrinkBytes
+    }).Count -gt 0
+    if (-not $WindowsPartitionSlotAvailable -and -not $secondaryAvailable) {
+        Stop-Compatibility 'COMPAT_E_MBR_PRIMARY_LIMIT'
+    }
+    if ($WindowsShrinkBytes -lt $RequiredShrinkBytes -and -not $secondaryAvailable) {
+        Stop-Compatibility 'COMPAT_E_SHRINK_SPACE' @(
+            [math]::Round($WindowsShrinkBytes / 1GB, 1), [math]::Round($RequiredShrinkBytes / 1GB, 1))
+    }
+    # Keep Windows in the inventory for download budgeting, without enabling unsafe allocation there.
+    $usableWindowsShrink = if ($WindowsPartitionSlotAvailable -and $WindowsShrinkBytes -ge $RequiredShrinkBytes) {
+        $WindowsShrinkBytes
+    } else { [long]0 }
+    [pscustomobject]@{ Targets = $matchingTargets; WindowsShrinkBytes = $usableWindowsShrink }
 }
 
 $messageCatalog = $null
@@ -160,25 +229,22 @@ function Get-BitLockerState {
     }
 }
 
+function Format-DiskDescriptions {
+    param([object[]]$Disks)
+    ($Disks | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.FriendlyName)) { "#$($_.Number)" } else { [string]$_.FriendlyName }
+    }) -join ", "
+}
+
 function Get-StorageControllerNames {
-    $operationTimeoutSeconds = 15
-    $names = @()
-    foreach ($className in @("Win32_IDEController", "Win32_SCSIController")) {
-        try {
-            $names += @(
-                Get-CimInstance `
-                    -ClassName $className `
-                    -OperationTimeoutSec $operationTimeoutSeconds `
-                    -ErrorAction Stop |
-                    ForEach-Object { $_.Name }
-            )
-        } catch {
-            Stop-Compatibility `
-                "COMPAT_E_STORAGE_CONTROLLER_QUERY" `
-                @($className, $operationTimeoutSeconds, $_.Exception.Message)
-        }
+    param([Parameter(Mandatory = $true)][uint32]$DiskNumber)
+
+    try {
+        return @(Get-LibertixStorageControllerNames -DiskNumber $DiskNumber)
+    } catch {
+        Stop-Compatibility "COMPAT_E_STORAGE_CONTROLLER_QUERY" `
+            @("disk $DiskNumber", 15, $_.Exception.Message)
     }
-    return @($names | Where-Object { $_ })
 }
 
 function Get-SecureBootDbCertificates {
@@ -217,45 +283,20 @@ function Get-SecureBootDbCertificates {
 }
 
 function Initialize-NvramApi {
-    if (([System.Management.Automation.PSTypeName]"LibertixCompatibilityNvram").Type) { return }
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class LibertixCompatibilityNvram {
-    private const UInt32 TOKEN_ADJUST_PRIVILEGES = 0x20;
-    private const UInt32 TOKEN_QUERY = 0x8;
-    private const UInt32 SE_PRIVILEGE_ENABLED = 0x2;
-    [StructLayout(LayoutKind.Sequential)] private struct LUID { public UInt32 LowPart; public Int32 HighPart; }
-    [StructLayout(LayoutKind.Sequential)] private struct TOKEN_PRIVILEGES { public UInt32 Count; public LUID Luid; public UInt32 Attributes; }
-    [DllImport("advapi32.dll", SetLastError=true)] private static extern bool OpenProcessToken(IntPtr p, UInt32 a, out IntPtr t);
-    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] private static extern bool LookupPrivilegeValue(string s, string n, out LUID l);
-    [DllImport("advapi32.dll", SetLastError=true)] private static extern bool AdjustTokenPrivileges(IntPtr t, bool d, ref TOKEN_PRIVILEGES n, UInt32 b, IntPtr p, IntPtr r);
-    [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
-    [DllImport("kernel32.dll", SetLastError=true)] private static extern bool CloseHandle(IntPtr h);
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern UInt32 GetFirmwareEnvironmentVariable(string n, string g, byte[] b, UInt32 s);
-    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)] public static extern bool SetFirmwareEnvironmentVariableEx(string n, string g, byte[] b, UInt32 s, UInt32 a);
-    public static int LastError() { return Marshal.GetLastWin32Error(); }
-    public static void EnablePrivilege() {
-        IntPtr token;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out token)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        try {
-            LUID luid;
-            if (!LookupPrivilegeValue(null, "SeSystemEnvironmentPrivilege", out luid)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES(); tp.Count = 1; tp.Luid = luid; tp.Attributes = SE_PRIVILEGE_ENABLED;
-            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            int error = Marshal.GetLastWin32Error(); if (error != 0) throw new System.ComponentModel.Win32Exception(error);
-        } finally { CloseHandle(token); }
-    }
-}
-"@
+    Import-Module (Join-Path $PSScriptRoot 'modules\Libertix.FirmwareVariables.psm1') -ErrorAction Stop
+    Initialize-LibertixFirmwareVariableApi
 }
 
 function Get-NvramVariable {
     param([string]$Name, [string]$Guid)
     $buffer = New-Object byte[] 65536
-    $size = [LibertixCompatibilityNvram]::GetFirmwareEnvironmentVariable($Name, $Guid, $buffer, [uint32]$buffer.Length)
+    $size = [LibertixFirmwareVariableApi]::GetFirmwareEnvironmentVariable($Name, $Guid, $buffer, [uint32]$buffer.Length)
     if ($size -eq 0) {
-        return [pscustomobject]@{ Exists = $false; Bytes = $null; Error = [LibertixCompatibilityNvram]::LastError() }
+        $errorCode = [LibertixFirmwareVariableApi]::LastError()
+        if ($errorCode -ne 203) {
+            throw "GetFirmwareEnvironmentVariable($Name) failed with Win32 error $errorCode."
+        }
+        return [pscustomobject]@{ Exists = $false; Bytes = $null; Error = $errorCode }
     }
     $result = New-Object byte[] $size
     [Array]::Copy($buffer, $result, $size)
@@ -265,15 +306,15 @@ function Get-NvramVariable {
 function Set-NvramVariable {
     param([string]$Name, [string]$Guid, [AllowNull()][byte[]]$Bytes)
     $size = if ($null -eq $Bytes) { 0 } else { $Bytes.Length }
-    if (-not [LibertixCompatibilityNvram]::SetFirmwareEnvironmentVariableEx(
+    if (-not [LibertixFirmwareVariableApi]::SetFirmwareEnvironmentVariableEx(
         $Name, $Guid, $Bytes, [uint32]$size, [uint32]7)) {
-        throw "SetFirmwareEnvironmentVariableEx($Name) failed with Win32 error $([LibertixCompatibilityNvram]::LastError())."
+        throw "SetFirmwareEnvironmentVariableEx($Name) failed with Win32 error $([LibertixFirmwareVariableApi]::LastError())."
     }
 }
 
 function Test-NvramAndBootNext {
     Initialize-NvramApi
-    [LibertixCompatibilityNvram]::EnablePrivilege()
+    [LibertixFirmwareVariableApi]::EnableSystemEnvironmentPrivilege()
     $global = "{8BE4DF61-93CA-11D2-AA0D-00E098032B8C}"
     $originalBootNext = Get-NvramVariable -Name "BootNext" -Guid $global
     try {
@@ -314,12 +355,13 @@ try {
         throw "Libertix storage geometry module is missing: $geometryModule"
     }
     Import-Module -Name $geometryModule -Force -ErrorAction Stop
+    Import-Module (Join-Path $PSScriptRoot 'modules\Libertix.StorageTargets.psm1') -Force -ErrorAction Stop
     Import-Module -Name $policyModulePath -Force -ErrorAction Stop
     $installationPolicy = Get-LibertixInstallationPolicy
-    [int]$minimumLinuxSizeGB = [int]$installationPolicy.storage.minimumFinalSizeGiB
     [int]$minimumMemoryMB = [int]$installationPolicy.memory.windowsMinimumMiB
     [int]$lowMemoryThresholdMB = [int]$installationPolicy.memory.lowMemoryThresholdMiB
     [int]$preflightShrinkSafetyGB = [int]$installationPolicy.storage.preflightShrinkSafetyGiB
+    [int]$stagingSizeGB = [int]$installationPolicy.storage.stagingSizeGiB
 
     Write-Check "COMPAT_010_PRIVILEGES"
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -329,7 +371,9 @@ try {
     }
 
     Write-Check "COMPAT_015_NETWORK"
-    Test-DownloadServiceAccess -Url $ConnectivityUrl
+    if (-not $SkipConnectivityProbe) {
+        Test-DownloadServiceAccess -Url $ConnectivityUrl
+    }
 
     Write-Check "COMPAT_020_PLATFORM"
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
@@ -342,10 +386,10 @@ try {
     }
     [long]$memoryBytes = [long]$os.TotalVisibleMemorySize * 1024L
     [long]$memoryMB = [math]::Floor($memoryBytes / 1MB)
-    if ($memoryMB -lt $MinimumMemoryMB) {
-        Stop-Compatibility "COMPAT_E_RAM_TOO_LOW" @($MinimumMemoryMB, $memoryMB)
+    if ($memoryMB -lt $minimumMemoryMB) {
+        Stop-Compatibility "COMPAT_E_RAM_TOO_LOW" @($minimumMemoryMB, $memoryMB)
     }
-    $lowMemory = $memoryMB -lt $LowMemoryThresholdMB
+    $lowMemory = $memoryMB -lt $lowMemoryThresholdMB
     if ($lowMemory) {
         Write-LocalizedWarning "LOW_MEMORY" @($memoryMB)
     }
@@ -401,36 +445,13 @@ try {
     } catch {
         Stop-Compatibility "COMPAT_E_DISK_INVENTORY" @($_.Exception.Message)
     }
-    $usbDisks = @($visibleDisks | Where-Object { [string]$_.BusType -eq "USB" })
-    if ($usbDisks.Count -ne 0) {
-        Stop-Compatibility "COMPAT_E_USB_STORAGE" @($usbDisks.Count)
-    }
-    if ($visibleDisks.Count -ne 1) {
-        Stop-Compatibility "COMPAT_E_DISK_COUNT" @($visibleDisks.Count)
-    }
-
     $systemDrive = [Environment]::GetEnvironmentVariable("SystemDrive").TrimEnd("\")
-    if ($systemDrive -notmatch "^[A-Za-z]:$") {
-        Stop-Compatibility "COMPAT_E_SYSTEM_DRIVE"
-    }
-    $systemPartition = @(Get-Partition -DriveLetter $systemDrive.Substring(0, 1) -ErrorAction Stop)
-    if ($systemPartition.Count -ne 1) {
-        Stop-Compatibility "COMPAT_E_SYSTEM_DISK_UNRESOLVED"
-    }
-    $partition = $systemPartition[0]
-    $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
-    if ($disk.IsOffline -or $disk.IsReadOnly) {
-        Stop-Compatibility "COMPAT_E_DISK_NOT_WRITABLE"
-    }
+    $systemStorage = Resolve-CompatibilitySystemStorage -SystemDrive $systemDrive -VisibleDisks $visibleDisks
+    $partition = $systemStorage.Partition
+    $disk = $systemStorage.Disk
     $busType = [string]$disk.BusType
-    if ($busType -match "RAID|iSCSI|USB|File Backed Virtual|Spaces") {
-        Stop-Compatibility "COMPAT_E_STORAGE_BUS_UNSUPPORTED" @($busType)
-    }
-    if ($busType -notmatch "^(SATA|ATA|NVMe|SAS|SCSI|MMC)$") {
-        Stop-Compatibility "COMPAT_E_STORAGE_BUS_UNKNOWN" @($busType)
-    }
 
-    $controllerNames = @(Get-StorageControllerNames)
+    $controllerNames = @(Get-StorageControllerNames -DiskNumber ([uint32]$disk.Number))
     $controllerText = $controllerNames -join " | "
     if ($controllerText -match "(?i)Intel.*(RST|Rapid Storage|VMD|Volume Management|Optane|VROC|RAID)") {
         Stop-Compatibility "COMPAT_E_INTEL_RST_RAID"
@@ -461,19 +482,21 @@ try {
     ) {
         Stop-Compatibility "COMPAT_E_MBR_EXTENDED_LAYOUT"
     }
-    if ($firmware -eq "BIOS" -and $allPartitions.Count -ge 4) {
-        Stop-Compatibility "COMPAT_E_MBR_PRIMARY_LIMIT"
-    }
+    $windowsPartitionSlotAvailable = $firmware -ne 'BIOS' -or $allPartitions.Count -lt 4
     $recovery = @($allPartitions | Where-Object {
         $_.GptType -eq "{de94bba4-06d1-4d40-a16a-bfd50179d6ac}" -or
         [int]$_.MbrType -eq 39 -or $_.Type -match "Recovery"
     })
-    if ($recovery.Count -ne 1) {
+    try {
+        $recovery = @(Resolve-LibertixWindowsRecoveryPartition -Partitions $allPartitions `
+            -WindowsPartition $partition -PartitionStyle ([string]$disk.PartitionStyle))
+    } catch {
         Stop-Compatibility "COMPAT_E_RECOVERY_LAYOUT" @($recovery.Count)
     }
     if (
-        [int64]$recovery[0].Offset -le [int64]$partition.Offset -or
-        [int64]$partition.Size -gt [int64]$recovery[0].Offset - [int64]$partition.Offset
+        ($firmware -eq 'BIOS' -and [int64]$recovery[0].Offset -le [int64]$partition.Offset) -or
+        ([int64]$recovery[0].Offset -lt ([int64]$partition.Offset + [int64]$partition.Size) -and
+            [int64]$partition.Offset -lt ([int64]$recovery[0].Offset + [int64]$recovery[0].Size))
     ) {
         Stop-Compatibility "COMPAT_E_RECOVERY_POSITION"
     }
@@ -515,10 +538,12 @@ try {
         $shrinkAvailable -= Get-LibertixPartitionAlignmentBytes
     }
     [long]$requiredShrink =
-        ([long]$MinimumLinuxSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
-    if ($shrinkAvailable -lt $requiredShrink) {
-        Stop-Compatibility "COMPAT_E_SHRINK_SPACE" @([math]::Round($shrinkAvailable / 1GB, 1), [math]::Round($requiredShrink / 1GB, 1))
-    }
+        ([long]$stagingSizeGB + [long]$preflightShrinkSafetyGB) * 1GB
+    $targets = @(Get-LibertixInstallationTargetInventory -SystemPartition $partition -Disks $visibleDisks)
+    $capacity = Get-CompatibilityAllocationCapacity -Targets $targets -PartitionStyle $expectedStyle `
+        -WindowsShrinkBytes $shrinkAvailable -RequiredShrinkBytes $requiredShrink `
+        -WindowsPartitionSlotAvailable $windowsPartitionSlotAvailable
+    $shrinkAvailable = $capacity.WindowsShrinkBytes
     $bitLocker = Get-BitLockerState -DriveLetter $systemDrive
     if (-not $bitLocker.Safe) {
         Write-LocalizedWarning "BITLOCKER"
@@ -530,13 +555,16 @@ try {
         memoryBytes = [long]$memoryBytes
         lowMemoryMode = [bool]$lowMemory
         systemDiskNumber = [int]$disk.Number
+        systemDrive = $systemDrive
         systemDiskUniqueId = [string]$disk.UniqueId
+        systemDiskPartitionTableId = Get-LibertixTargetDiskIdentity -Disk $disk
         systemDiskSize = [long]$disk.Size
         partitionStyle = [string]$disk.PartitionStyle
         storageBusType = [string]$busType
         logicalSectorSize = [int]$disk.LogicalSectorSize
         physicalSectorSize = [int]$disk.PhysicalSectorSize
         shrinkAvailableBytes = [long]$shrinkAvailable
+        windowsPartitionSlotAvailable = [bool]$windowsPartitionSlotAvailable
         bitLockerSafe = [bool]$bitLocker.Safe
         bitLockerState = [string]$bitLocker.State
         secureBootEnabled = [bool]$secureBootEnabled
@@ -544,7 +572,8 @@ try {
         nvramProbePassed = [bool]$nvramPassed
         nvramProbeSkipped = [bool]$nvramSkipped
         warnings = @($warnings)
-    } | ConvertTo-Json -Compress
+        installationTargets = @($capacity.Targets)
+    } | ConvertTo-Json -Depth 6 -Compress
     exit 0
 } catch {
     $code = "COMPAT_E_UNEXPECTED"

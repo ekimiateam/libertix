@@ -2,17 +2,6 @@ Set-StrictMode -Version Latest
 $script:MountedIsoDriveMaximumAttempts = 30
 $script:MountedIsoDriveRetryDelayMilliseconds = 500
 
-function New-LibertixDownloadUrls {
-    param(
-        [Parameter(Mandatory = $true)][string]$FilepoolBaseUrl,
-        [Parameter(Mandatory = $true)][string]$Aria2ZipName
-    )
-    $baseUrl = $FilepoolBaseUrl.TrimEnd("/")
-    return [pscustomobject]@{
-        Aria2Zip = "$baseUrl/$Aria2ZipName"
-    }
-}
-
 function Get-MountedIsoDrive {
     param([Parameter(Mandatory = $true)][string]$ImagePath)
     $resolvedImagePath = [IO.Path]::GetFullPath($ImagePath)
@@ -51,4 +40,4 @@ function Get-MountedIsoDrive {
     throw "ISO mounted, but no usable drive letter was found for $resolvedImagePath. DiskImage=$diagnostic"
 }
 
-Export-ModuleMember -Function New-LibertixDownloadUrls, Get-MountedIsoDrive
+Export-ModuleMember -Function Get-MountedIsoDrive

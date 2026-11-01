@@ -10,6 +10,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# The UEFI payload keeps modules under Scripts\modules; the BIOS recovery root is flat.
+# Each layout has exactly one module location, selected by the firmware the task passes.
+$atomicFileModulePath = if ($Firmware -eq "uefi") {
+    Join-Path $PSScriptRoot "modules\Libertix.AtomicFile.psm1"
+} else {
+    Join-Path $PSScriptRoot "Libertix.AtomicFile.psm1"
+}
+Import-Module -Name $atomicFileModulePath -Force -ErrorAction Stop
+
 function Read-JsonFile {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -33,11 +42,7 @@ function Write-JsonFileAtomic {
             (($Value | ConvertTo-Json -Depth 8) + "`n"),
             $encoding
         )
-        if ([IO.File]::Exists($Path)) {
-            [IO.File]::Replace($temporary, $Path, $backup)
-        } else {
-            [IO.File]::Move($temporary, $Path)
-        }
+        Publish-LibertixFileAtomic -TemporaryPath $temporary -DestinationPath $Path -BackupPath $backup
     } finally {
         if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
         if ([IO.File]::Exists($backup)) { [IO.File]::Delete($backup) }
@@ -84,6 +89,7 @@ function Complete-InteractiveWindowsShareVerification {
     $shareRoot = Join-Path $env:ProgramData "Libertix\WindowsShare"
     $configPath = Join-Path $shareRoot "config.json"
     $shareScript = Join-Path $shareRoot "mount-linux-readonly.ps1"
+    $checkName = "explorer-integration"
     try {
         if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
             throw "Windows read-only Linux sharing configuration is missing."
@@ -94,31 +100,60 @@ function Complete-InteractiveWindowsShareVerification {
         $shareArguments = (
             '-NoProfile -ExecutionPolicy Bypass -File "{0}" -ConfigPath "{1}" -Pin'
         ) -f $shareScript, $configPath
+        $logPrefix = Join-Path (Split-Path -Parent $StatePath) ("explorer-integration-{0}" -f [Guid]::NewGuid().ToString("N"))
+        $clock = [Diagnostics.Stopwatch]::StartNew()
         $process = Start-Process `
             -FilePath "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
             -ArgumentList $shareArguments `
-            -Wait `
             -PassThru `
+            -RedirectStandardOutput ($logPrefix + ".stdout.log") `
+            -RedirectStandardError ($logPrefix + ".stderr.log") `
             -WindowStyle Hidden
-        if ($process.ExitCode -ne 0) {
-            throw "Explorer integration verification failed with rc=$($process.ExitCode)."
+        try {
+            # Wait only for our helper, not Explorer or another long-lived descendant.
+            $null = $process.Handle
+            Add-Content -LiteralPath ($logPrefix + ".lifecycle.log") -Value (
+                "plan={0} parentPid={1} helperPid={2} session={3} phase=started" -f `
+                    $Plan.planId, $PID, $process.Id, $process.SessionId
+            )
+            if (-not $process.WaitForExit(120000)) {
+                $process.Kill()
+                $stopped = $process.WaitForExit(5000)
+                throw "Explorer integration helper timed out after 120 seconds; helperStopped=$stopped. Logs: $logPrefix.*.log"
+            }
+            Add-Content -LiteralPath ($logPrefix + ".lifecycle.log") -Value (
+                "phase=exited elapsedSeconds={0:F1} exitCode={1}" -f `
+                    $clock.Elapsed.TotalSeconds, $process.ExitCode
+            )
+            if ($process.ExitCode -ne 0) {
+                throw "Explorer integration verification failed with rc=$($process.ExitCode). Logs: $logPrefix.*.log"
+            }
+        } finally {
+            $process.Dispose()
         }
         Add-InteractiveShareCheck `
             -Result $Result `
             -Name "explorer-integration" `
             -Passed $true `
             -Detail "Linux read-only shortcut is accessible in Explorer Home/Quick Access."
+        $checkName = "result-persistence"
         Write-JsonFileAtomic -Path $StatePath -Value $Result
     } catch {
         Add-InteractiveShareCheck `
             -Result $Result `
-            -Name "explorer-integration" `
+            -Name $checkName `
             -Passed $false `
             -Detail $_.Exception.Message
         $Result.status = "failed"
         $Result.error = $_.Exception.Message
         $Result.rollbackAvailable = $true
-        Write-JsonFileAtomic -Path $StatePath -Value $Result
+        try {
+            Write-JsonFileAtomic -Path $StatePath -Value $Result
+        } catch {
+            # Still display a failure when the persisted result cannot be updated.
+            $Result.error += " Result persistence failed: $($_.Exception.Message)"
+            [Console]::Error.WriteLine($Result.error)
+        }
     }
 }
 
@@ -178,7 +213,7 @@ if ([string]::IsNullOrWhiteSpace($translationsPath)) {
     throw "Libertix translation catalogue is missing."
 }
 $translations = Read-JsonFile -Path $translationsPath
-if ($language -notin @("en", "fr", "es")) {
+if ($language -notin @("en", "fr", "es", "ko")) {
     $language = "en"
 }
 $text = $translations.languages.$language.postInstall
@@ -319,11 +354,52 @@ $details.Text = $detailLines -join [Environment]::NewLine
 [Windows.Controls.Grid]::SetRow($details, 2)
 $root.Children.Add($details) | Out-Null
 
-$buttons = New-Object Windows.Controls.StackPanel
+$buttons = New-Object Windows.Controls.WrapPanel
 $buttons.Orientation = "Horizontal"
 $buttons.HorizontalAlignment = "Right"
 $buttons.Margin = New-Object Windows.Thickness(0, 18, 0, 0)
 [Windows.Controls.Grid]::SetRow($buttons, 3)
+
+$supportText = $translations.languages.$language.support
+$copyReportButton = New-Object Windows.Controls.Button
+$copyReportButton.Content = [string]$supportText.copy
+$copyReportButton.Padding = New-Object Windows.Thickness(12, 8, 12, 8)
+$copyReportButton.Margin = New-Object Windows.Thickness(0, 0, 10, 0)
+$copyReportButton.Add_Click({
+    try {
+        # The same protected host that launched this script supplies the report formatter.
+        $hostPath = if ($Firmware -eq "uefi") {
+            Join-Path (Split-Path -Parent $PSScriptRoot) "Libertix.BootGuardian.exe"
+        } else {
+            Join-Path $PSScriptRoot "Libertix.BootGuardian.exe"
+        }
+        [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($hostPath))
+        $logRoot = Join-Path ([IO.Path]::GetPathRoot($env:SystemRoot)) "LibertixInstallLogs"
+        $report = [Libertix.Support.SupportReport]::Create(
+            $resultTitle, $details.Text, [string[]]@($logRoot, $recoveryRoot))
+        [Windows.Clipboard]::SetText($report)
+        $message.Text = "$originalMessage`n$($supportText.copied)"
+    } catch {
+        $message.Text = "$originalMessage`n$($supportText.failed) $($_.Exception.Message)"
+    }
+})
+$issueText = New-Object Windows.Controls.TextBlock
+$issueText.VerticalAlignment = "Center"
+$issueText.Margin = New-Object Windows.Thickness(0, 0, 10, 0)
+$issueLink = New-Object Windows.Documents.Hyperlink
+$issueLink.Inlines.Add([string]$supportText.issue)
+$issueLink.Foreground = $accentBrush
+$issueLink.Add_Click({
+    try {
+        Start-Process "https://github.com/ekimiateam/libertix/issues/new?template=bug_report.md"
+    } catch {
+        $message.Text = "$originalMessage`n$($supportText.failed) $($_.Exception.Message)"
+    }
+})
+$buttons.Children.Add($copyReportButton) | Out-Null
+$issueText.Inlines.Add($issueLink)
+$buttons.Children.Add($issueText) | Out-Null
+$originalMessage = $message.Text
 
 $closeButton = New-Object Windows.Controls.Button
 $closeButton.Content = [string]$text.close

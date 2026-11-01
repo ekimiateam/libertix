@@ -49,8 +49,7 @@ namespace Libertix.Dialogs
                     Keyboard.Focus(dialog.NoButton);
                     Task acknowledgement =
                         UnattendedWorkflow.PublishStageAndWaitAsync(
-                            "warning-ready",
-                            timeoutSeconds: 45);
+                            "warning-ready");
                     Task completed = await Task.WhenAny(
                         acknowledgement,
                         dialog._decision.Task);

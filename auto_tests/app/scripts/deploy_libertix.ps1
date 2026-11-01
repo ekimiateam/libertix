@@ -136,6 +136,11 @@ try {
     if ($sourceHash -ne $localHash) {
         throw "The local Libertix.exe hash does not match the Samba release"
     }
+    if ($config.PSObject.Properties.Name -contains 'expected_sha256' -and
+        -not [string]::IsNullOrWhiteSpace([string]$config.expected_sha256) -and
+        $localHash -cne [string]$config.expected_sha256) {
+        throw 'The deployed executable differs from the frozen campaign build.'
+    }
 
     Write-Result -Name "LOCAL_EXE" -Value $localExe
     Write-Result -Name "LOCAL_EXE_SHA256" -Value $localHash

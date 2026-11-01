@@ -1,7 +1,9 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace Libertix.BootGuardian
 {
@@ -46,6 +48,7 @@ namespace Libertix.BootGuardian
 
         private static int RunHiddenPowerShell(string[] arguments)
         {
+            TrustedScripts.Verify(arguments);
             string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
             string powerShell = Path.Combine(
                 windows,
@@ -68,8 +71,48 @@ namespace Libertix.BootGuardian
                 if (process == null)
                     throw new InvalidOperationException("The hidden PowerShell process could not start.");
                 process.WaitForExit();
+                if (process.ExitCode != 0)
+                    RecordNonZeroExit(process.ExitCode, process.ExitTime - process.StartTime, startInfo.Arguments);
                 return process.ExitCode;
             }
+        }
+
+        // Task Scheduler keeps only the last result code and this host discards the
+        // script's error stream. One file per non-zero exit dates every failed or
+        // interrupted script, including one stopped before it could write its own log.
+        private static void RecordNonZeroExit(int exitCode, TimeSpan duration, string arguments)
+        {
+            try
+            {
+                string directory = Path.Combine(
+                    Path.GetPathRoot(Environment.SystemDirectory),
+                    "LibertixInstallLogs",
+                    "Windows",
+                    "HiddenPowerShell");
+                Security.ProtectedFiles.CreateDirectory(directory);
+                DateTime now = DateTime.UtcNow;
+                string path = Path.Combine(
+                    directory,
+                    now.ToString("yyyyMMddTHHmmss.fffffffZ", CultureInfo.InvariantCulture) +
+                    "-exit-" + exitCode.ToString(CultureInfo.InvariantCulture) +
+                    "-" + Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture) + ".log");
+                File.WriteAllText(
+                    path,
+                    string.Format(
+                        CultureInfo.InvariantCulture,
+                        "[{0:o}] exitCode={1} durationMs={2:F0} user={3} arguments={4}{5}",
+                        now,
+                        exitCode,
+                        duration.TotalMilliseconds,
+                        Environment.UserName,
+                        arguments,
+                        Environment.NewLine),
+                    new UTF8Encoding(false));
+            }
+            // The record is diagnostic only; the task must still receive the script's own
+            // exit code when a standard user cannot write to the log folder.
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
 
         private static string QuoteArgument(string value)

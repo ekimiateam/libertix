@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
-import base64
+import json
 import logging
 import time
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 from PIL import Image
 
-from app.clients.ssh import CommandResult, SSHClient, is_reconnectable_transport_error
+from app.clients import network_recovery
+from app.clients.ssh import SSHClient, is_reconnectable_transport_error
+from app.clients.vision_models import InstallProgressVerdict
 from app.config import VMConfig
 from app.errors import WorkflowError
+from app.models import BOOTNEXT_FAULTS, CANCELLED_INSTALLATION_FAULTS
+from app.services.automation_progress import InstallationProgress, assert_installation_progress
 from app.services.automation_types import (
     AutomationOptions,
 )
@@ -23,11 +29,103 @@ from tools.azerty_qwerty import azerty_to_qwerty
 logger = logging.getLogger(__name__)
 
 UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS = 3
+UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS = 40
 UNATTENDED_CONTROL_SSH_MAX_ATTEMPTS = 12
+_T = TypeVar("_T")
 
 
 class WizardAutomationMixin:
     """Observe unattended stages and perform the single visible warning acknowledgement."""
+
+    def _verify_compatibility_refusal(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+        launch: dict[str, object],
+    ) -> None:
+        baseline = options.rollback_baseline
+        if vm.firmware != "bios" or options.installation_target != "windows" or not baseline:
+            raise WorkflowError("automation.compatibility_refusal", "Invalid negative-test scope")
+        disks = json.loads(baseline["STORAGE_LAYOUT_JSON"])
+        system = [disk for disk in disks if disk["Number"] == int(baseline["SYSTEM_DISK_NUMBER"])]
+        if (
+            len(system) != 1
+            or system[0]["PartitionStyle"] != "MBR"
+            or len(system[0]["Partitions"]) != 4
+        ):
+            raise WorkflowError(
+                "automation.compatibility_refusal",
+                "The Windows disk is not a four-primary MBR fixture",
+            )
+        sequence = 0
+        with self.validation.ssh(
+            vm.host,
+            vm.username,
+            self.settings.windows_ssh_password.get_secret_value(),
+            remote_os="windows",
+        ) as ssh:
+            status_path = str(launch["unattended_status_path"]).replace("\\", "/")
+            ack_path = str(launch["unattended_acknowledgement_path"]).replace("\\", "/")
+            try:
+                for stage in (
+                    "compatibility-running",
+                    "compatibility-passed",
+                    "configuration-distribution-applied",
+                ):
+                    observed = self._wait_for_unattended_stage(
+                        ssh, vm, status_path, sequence, (stage,)
+                    )
+                    sequence = self._capture_and_acknowledge_unattended_stage(
+                        ssh, vm, result, ack_path, observed
+                    )
+                # Never acknowledge a disk-size stage or the destructive warning in a negative test.
+                self._wait_for_unattended_stage(ssh, vm, status_path, sequence, ("failed",))
+            except WorkflowError as exc:
+                if (
+                    exc.step != "automation.unattended_failure"
+                    or exc.details.get("error_code") != options.expected_compatibility_refusal
+                    or exc.details.get("stage") != "failed"
+                ):
+                    raise
+                capture = self._capture_with_name(vm, "compatibility-refusal")
+                result.ok(
+                    "automation.compatibility_refusal",
+                    "Windows target refused before installation",
+                    vm=vm.name,
+                    error_code=options.expected_compatibility_refusal,
+                    capture=str(capture),
+                    **{
+                        key: value
+                        for key, value in exc.details.items()
+                        if key not in {"vm", "error_code"}
+                    },
+                )
+            else:
+                raise WorkflowError(
+                    "automation.compatibility_refusal",
+                    "The expected product refusal was not observed",
+                )
+            observed_baseline = self._capture_rollback_baseline(
+                vm, result, installation_not_started=False, include_full_boot_configuration=True
+            )
+            changed = [
+                key
+                for key, value in baseline.items()
+                if key != "LIBERTIX_PROCESS_COUNT" and observed_baseline.get(key) != value
+            ]
+            if changed:
+                raise WorkflowError(
+                    "automation.compatibility_unchanged",
+                    "State changed during the compatibility refusal",
+                    details={"vm": vm.name, "changed": changed},
+                )
+            self._verify_windows_storage_fixture(ssh, vm, result, options.storage_fixture_receipt)
+            result.ok(
+                "automation.compatibility_unchanged",
+                "Storage, boot entries, installation ledger and data witnesses are unchanged",
+                vm=vm.name,
+            )
 
     def _run_unattended_wizard(
         self,
@@ -52,9 +150,9 @@ class WizardAutomationMixin:
             str(unattended_status_path),
             str(unattended_acknowledgement_path),
         )
-        if options.boot_guardian_fault == "bios-rollback":
+        if options.boot_guardian_fault in CANCELLED_INSTALLATION_FAULTS:
             return "installation-rollback"
-        if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
+        if options.boot_guardian_fault in BOOTNEXT_FAULTS:
             return "bootnext-fallback"
         return self._monitor_until_live_boot(
             vm,
@@ -81,8 +179,8 @@ class WizardAutomationMixin:
             "configuration-sharing-applied",
             "configuration-account-applied",
         )
-        quoted_status = status_path.replace("'", "''")
-        quoted_acknowledgement = acknowledgement_path.replace("'", "''")
+        sftp_status = status_path.replace("\\", "/")
+        sftp_acknowledgement = acknowledgement_path.replace("\\", "/")
         after_sequence = 0
         with self.validation.ssh(
             vm.host,
@@ -94,38 +192,107 @@ class WizardAutomationMixin:
                 observed = self._wait_for_unattended_stage(
                     ssh,
                     vm,
-                    quoted_status,
+                    sftp_status,
                     after_sequence,
                     (expected_stage,),
+                    timeout_seconds=(
+                        self.settings.automation_monitor_timeout_seconds
+                        if options.local_filepool and expected_stage == "compatibility-passed"
+                        else 180
+                    ),
                 )
                 after_sequence = self._capture_and_acknowledge_unattended_stage(
                     ssh,
                     vm,
                     result,
-                    quoted_acknowledgement,
+                    sftp_acknowledgement,
                     observed,
                 )
 
-            warning_attempt = 0
+            after_sequence = self._accept_unattended_warning(
+                ssh, vm, result, process_id, sftp_status, sftp_acknowledgement, after_sequence
+            )
+            if options.boot_guardian_fault == "bios-rollback":
+                self._request_bios_rollback_cancellation(ssh, vm, result, process_id)
+                return
+
             observed = self._wait_for_unattended_stage(
                 ssh,
                 vm,
-                quoted_status,
+                sftp_status,
                 after_sequence,
-                ("warning-ready",),
+                ("reboot-ready",),
+                timeout_seconds=self.settings.automation_monitor_timeout_seconds,
+                observe_installation_progress=True,
+                result=result,
             )
-            warning_client = None
-            try:
-                warning_client = self.vnc.connect(vm.vnc)
-                while True:
-                    warning_attempt += 1
-                    if warning_attempt > UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS:
-                        raise WorkflowError(
-                            "automation.unattended_warning",
-                            "The unattended warning dialog was not accepted after "
-                            "three keyboard attempts",
-                            details={"vm": vm.name, "target": vm.host, **observed},
-                        )
+            if options.boot_guardian_fault == "bios-controller-disconnect":
+                capture = self._capture_with_name(vm, "bios-controller-disconnect-reboot-ready")
+                result.ok(
+                    "automation.bios_controller_disconnect",
+                    "Withholding reboot-ready acknowledgement to reproduce controller loss; "
+                    "the product must time out and restore Windows",
+                    vm=vm.name,
+                    target=vm.host,
+                    sequence=int(observed["sequence"]),
+                    capture=str(capture),
+                )
+                return
+            if options.local_filepool:
+                self._verify_local_filepool_used(ssh, vm, result, options, process_id)
+            self._capture_and_acknowledge_unattended_stage(
+                ssh,
+                vm,
+                result,
+                sftp_acknowledgement,
+                observed,
+            )
+            # A slow capture can outlive the product's acknowledgement deadline.
+            self._wait_for_unattended_stage(
+                ssh,
+                vm,
+                sftp_status,
+                int(observed["sequence"]) - 1,
+                ("reboot-ready",),
+            )
+            if options.boot_guardian_fault in BOOTNEXT_FAULTS:
+                self._force_bootnext_failure(ssh, vm, result)
+
+        self._request_reboot_after_preparation(vm, result)
+
+    def _accept_unattended_warning(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        process_id: int,
+        sftp_status: str,
+        sftp_acknowledgement: str,
+        after_sequence: int,
+    ) -> int:
+        """Accept the destructive warning by keyboard and return the next stage sequence."""
+
+        warning_attempt = 0
+        observed = self._wait_for_unattended_stage(
+            ssh,
+            vm,
+            sftp_status,
+            after_sequence,
+            ("warning-ready",),
+        )
+        warning_client = None
+        try:
+            warning_client = self.vnc.connect(vm.vnc)
+            while True:
+                warning_attempt += 1
+                if warning_attempt > UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS:
+                    raise WorkflowError(
+                        "automation.unattended_warning",
+                        "The unattended warning dialog was not accepted after "
+                        "three keyboard attempts",
+                        details={"vm": vm.name, "target": vm.host, **observed},
+                    )
+                try:
                     capture = self._accept_unattended_warning_dialog(
                         ssh,
                         warning_client,
@@ -135,113 +302,159 @@ class WizardAutomationMixin:
                         int(observed["sequence"]),
                         warning_attempt,
                     )
-                    # Keep this VNC connection alive until the coordination files
-                    # prove acceptance. Some VNC transports take long enough to
-                    # disconnect that Libertix can otherwise expire first.
+                except WorkflowError as exc:
+                    if (
+                        exc.step != "automation.capture"
+                        or warning_attempt >= UNATTENDED_WARNING_DIALOG_MAX_ATTEMPTS
+                    ):
+                        raise
+                    # Capture failure occurs before any acceptance key is sent.
+                    # A timed-out VNC proxy must not be reused for keyboard input.
+                    try:
+                        warning_client.disconnect()
+                    except Exception:
+                        logger.warning("Failed to close the timed-out warning VNC connection")
+                    warning_client = self.vnc.connect(vm.vnc)
+                    current = self._wait_for_unattended_stage(
+                        ssh,
+                        vm,
+                        sftp_status,
+                        after_sequence,
+                        ("warning-ready",),
+                        timeout_seconds=10,
+                    )
+                    if current["sequence"] != observed["sequence"]:
+                        raise WorkflowError(
+                            "automation.unattended_warning",
+                            "The warning changed during capture reconnection",
+                            details={"vm": vm.name},
+                        ) from exc
+                    result.ok(
+                        "automation.unattended_warning_capture_retry",
+                        "VNC reconnected before any warning acceptance key was sent",
+                        vm=vm.name,
+                        attempt=warning_attempt,
+                    )
+                    continue
+                # Keep this VNC connection alive until the coordination files
+                # prove acceptance. Some VNC transports take long enough to
+                # disconnect that Libertix can otherwise expire first.
+                after_sequence = self._capture_and_acknowledge_unattended_stage(
+                    ssh,
+                    vm,
+                    result,
+                    sftp_acknowledgement,
+                    observed,
+                    capture=capture,
+                )
+
+                observed = self._wait_for_unattended_stage(
+                    ssh,
+                    vm,
+                    sftp_status,
+                    after_sequence,
+                    ("warning-ready", "installation-started"),
+                    timeout_seconds=UNATTENDED_WARNING_STAGE_TIMEOUT_SECONDS,
+                )
+                if observed["stage"] == "installation-started":
                     after_sequence = self._capture_and_acknowledge_unattended_stage(
                         ssh,
                         vm,
                         result,
-                        quoted_acknowledgement,
+                        sftp_acknowledgement,
                         observed,
-                        capture=capture,
                     )
-
-                    observed = self._wait_for_unattended_stage(
-                        ssh,
-                        vm,
-                        quoted_status,
-                        after_sequence,
-                        ("warning-ready", "installation-started"),
-                        timeout_seconds=15,
+                    break
+        finally:
+            if warning_client is not None:
+                try:
+                    warning_client.disconnect()
+                except Exception:
+                    logger.warning(
+                        "VNC connection did not close cleanly",
+                        extra={"step": "automation.vnc_close", "target": vm.vnc},
                     )
-                    if observed["stage"] == "installation-started":
-                        after_sequence = self._capture_and_acknowledge_unattended_stage(
-                            ssh,
-                            vm,
-                            result,
-                            quoted_acknowledgement,
-                            observed,
-                        )
-                        break
-            finally:
-                if warning_client is not None:
-                    try:
-                        warning_client.disconnect()
-                    except Exception:
-                        logger.warning(
-                            "VNC connection did not close cleanly",
-                            extra={"step": "automation.vnc_close", "target": vm.vnc},
-                        )
+        return after_sequence
 
-            if options.boot_guardian_fault == "bios-rollback":
-                cancellation = self.validation.run_windows_script(
-                    ssh,
-                    script_name="request_installation_cancellation.ps1",
-                    config={
-                        "process_id": process_id,
-                        "wait_for_state_path": (
-                            r"C:\LibertixInstallRecovery\installation-state.json"
-                        ),
-                        "wait_for_completed_step": "windows.installer-partition-created",
-                        "wait_timeout_seconds": 900,
-                    },
-                    step="automation.bios_rollback.request",
-                    timeout=960,
-                )
-                values = self.validation.parse_powershell_results(
-                    cancellation.stdout,
-                    prefixes=(
-                        "MAIN_WINDOW_HANDLE",
-                        "CONFIRMATION_WINDOW_HANDLE",
-                        "CANCELLATION_CONTROL",
-                        "CONFIRMATION_CONTROL",
-                        "WAITED_COMPLETED_STEP",
-                        "RESULT",
-                    ),
-                )
-                if (
-                    values.get("CANCELLATION_CONTROL") != "ApplyChangesCancelButton"
-                    or values.get("CONFIRMATION_CONTROL") != "LocalizedConfirmationYesButton"
-                    or values.get("WAITED_COMPLETED_STEP") != "windows.installer-partition-created"
-                    or values.get("RESULT") != "OK"
-                ):
-                    raise WorkflowError(
-                        "automation.bios_rollback.request",
-                        "The BIOS cancellation was not requested after proven disk mutation",
-                        details={"vm": vm.name, "target": vm.host, **values},
-                    )
-                result.ok(
-                    "automation.bios_rollback.request",
-                    "The translated cancellation was confirmed after the installer "
-                    "partition existed",
-                    vm=vm.name,
-                    target=vm.host,
-                    **values,
-                )
-                return
+    def _request_bios_rollback_cancellation(
+        self, ssh: SSHClient, vm: VMConfig, result: ResultBuilder, process_id: int
+    ) -> None:
+        """Cancel through the product UI only after the installer partition exists."""
 
-            observed = self._wait_for_unattended_stage(
-                ssh,
-                vm,
-                quoted_status,
-                after_sequence,
-                ("reboot-ready",),
-                timeout_seconds=self.settings.automation_monitor_timeout_seconds,
-                observe_installation_progress=True,
-                result=result,
+        cancellation = self.validation.run_windows_script(
+            ssh,
+            script_name="request_installation_cancellation.ps1",
+            config={
+                "process_id": process_id,
+                "wait_for_state_path": (r"C:\LibertixInstallRecovery\installation-state.json"),
+                "wait_for_completed_step": "windows.installer-partition-created",
+                "wait_timeout_seconds": 900,
+            },
+            step="automation.bios_rollback.request",
+            timeout=960,
+        )
+        values = self.validation.parse_powershell_results(
+            cancellation.stdout,
+            prefixes=(
+                "MAIN_WINDOW_HANDLE",
+                "CONFIRMATION_WINDOW_HANDLE",
+                "CANCELLATION_CONTROL",
+                "CONFIRMATION_CONTROL",
+                "WAITED_COMPLETED_STEP",
+                "RESULT",
+            ),
+        )
+        if (
+            values.get("CANCELLATION_CONTROL") != "ApplyChangesCancelButton"
+            or values.get("CONFIRMATION_CONTROL") != "LocalizedConfirmationYesButton"
+            or values.get("WAITED_COMPLETED_STEP") != "windows.installer-partition-created"
+            or values.get("RESULT") != "OK"
+        ):
+            raise WorkflowError(
+                "automation.bios_rollback.request",
+                "The BIOS cancellation was not requested after proven disk mutation",
+                details={"vm": vm.name, "target": vm.host, **values},
             )
-            self._capture_and_acknowledge_unattended_stage(
-                ssh,
-                vm,
-                result,
-                quoted_acknowledgement,
-                observed,
-            )
-            if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
-                self._force_bootnext_failure(ssh, vm, result)
+        result.ok(
+            "automation.bios_rollback.request",
+            "The translated cancellation was confirmed after the installer partition existed",
+            vm=vm.name,
+            target=vm.host,
+            **values,
+        )
 
-        self._request_reboot_after_preparation(vm, result)
+    def _verify_local_filepool_used(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        options: AutomationOptions,
+        process_id: int,
+    ) -> None:
+        response = self.validation.run_windows_script(
+            ssh,
+            script_name="local_filepool.ps1",
+            config={
+                "mode": "verify",
+                "process_id": process_id,
+                "directory": str(options.deployed_executable.parent / "filepool"),
+            },
+            step="automation.local_filepool.used",
+            timeout=30,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout, prefixes=("LOCAL_FILEPOOL_USED", "SOURCE_LOG")
+        )
+        if values.get("LOCAL_FILEPOOL_USED") != "True":
+            raise WorkflowError(
+                "automation.local_filepool.used", "Local filepool evidence is missing"
+            )
+        result.ok(
+            "automation.local_filepool.used",
+            "Online catalog, local hashes and local ISO copies verified in the product log",
+            vm=vm.name,
+            **values,
+        )
 
     def _force_bootnext_failure(
         self,
@@ -290,7 +503,7 @@ class WizardAutomationMixin:
         self,
         ssh: SSHClient,
         vm: VMConfig,
-        quoted_status_path: str,
+        status_path: str,
         after_sequence: int,
         accepted_stages: tuple[str, ...],
         *,
@@ -302,95 +515,117 @@ class WizardAutomationMixin:
             raise ValueError("A result builder is required while observing installation progress")
 
         deadline = time.monotonic() + timeout_seconds
+        vision_executor = (
+            ThreadPoolExecutor(max_workers=1) if observe_installation_progress else None
+        )
+        try:
+            return self._poll_unattended_stage(
+                ssh,
+                vm,
+                status_path,
+                after_sequence,
+                accepted_stages,
+                deadline=deadline,
+                observe_installation_progress=observe_installation_progress,
+                result=result,
+                vision_executor=vision_executor,
+            )
+        finally:
+            if vision_executor is not None:
+                # A slow provider must not hold up the next wizard acknowledgement.
+                vision_executor.shutdown(wait=False, cancel_futures=True)
+
+    def _poll_unattended_stage(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        status_path: str,
+        after_sequence: int,
+        accepted_stages: tuple[str, ...],
+        *,
+        deadline: float,
+        observe_installation_progress: bool,
+        result: ResultBuilder | None,
+        vision_executor: ThreadPoolExecutor | None,
+    ) -> dict[str, object]:
         observed: dict[str, object] | None = None
         next_progress_observation = time.monotonic()
         progress_observation = 0
-        previous_progress_signature: tuple[int, ...] | None = None
-        last_visual_change_at = time.monotonic()
+        last_progress_at = time.monotonic()
+        progress = InstallationProgress()
+        pending_verdict: Future[InstallProgressVerdict] | None = None
+        poll_interval = 0.2
         while time.monotonic() < deadline:
-            response = self._run_unattended_control_command(
+            content = self._retry_unattended_control(
                 ssh,
-                'powershell.exe -NoProfile -NonInteractive -Command "'
-                f"$p='{quoted_status_path}'; "
-                "if (Test-Path -LiteralPath $p -PathType Leaf) { "
-                "$s=Get-Content -LiteralPath $p -Raw | ConvertFrom-Json; "
-                "[Console]::Out.WriteLine(('SEQUENCE={0}' -f [int]$s.sequence)); "
-                "[Console]::Out.WriteLine(('STAGE={0}' -f [string]$s.stage)); "
-                "$m=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("
-                "[string]$s.errorMessage)); "
-                "[Console]::Out.WriteLine(('ERROR_CODE={0}' -f [string]$s.errorCode)); "
-                "[Console]::Out.WriteLine(('ERROR_MESSAGE_BASE64={0}' -f $m)) }\"",
+                lambda: ssh.read_text(
+                    status_path,
+                    step="automation.unattended_status",
+                    timeout=20,
+                ),
                 step="automation.unattended_status",
-                timeout=20,
-                check=False,
             )
-            values = self.validation.parse_powershell_results(
-                response.stdout,
-                prefixes=("SEQUENCE", "STAGE", "ERROR_CODE", "ERROR_MESSAGE_BASE64"),
-            )
-            sequence_text = values.get("SEQUENCE", "")
-            if sequence_text.isdigit() and int(sequence_text) > after_sequence:
+            try:
+                values = json.loads(content) if content is not None else {}
+                if not isinstance(values, dict):
+                    raise ValueError("Unattended status must be a JSON object")
+                if content is not None and (
+                    type(values.get("sequence")) is not int
+                    or values["sequence"] < 1
+                    or not isinstance(values.get("stage"), str)
+                    or not values["stage"]
+                ):
+                    raise ValueError("Unattended status has an invalid sequence or stage")
+            except ValueError as exc:
+                raise WorkflowError(
+                    "automation.unattended_status",
+                    "Invalid unattended status file",
+                    details={"vm": vm.name, "target": vm.host, "error": str(exc)},
+                ) from exc
+            if values.get("sequence", 0) > after_sequence:
                 observed = {
-                    "sequence": int(sequence_text),
-                    "stage": values.get("STAGE", ""),
+                    "sequence": values["sequence"],
+                    "stage": values["stage"],
                 }
                 if observed["stage"] == "failed":
-                    encoded_message = values.get("ERROR_MESSAGE_BASE64", "")
-                    try:
-                        error_message = base64.b64decode(
-                            encoded_message,
-                            validate=True,
-                        ).decode("utf-8")
-                    except (ValueError, UnicodeDecodeError):
-                        error_message = "Libertix reported an unreadable unattended failure."
+                    error_message = values.get("errorMessage")
                     raise WorkflowError(
                         "automation.unattended_failure",
-                        error_message or "Libertix reported an unattended failure.",
+                        error_message
+                        if isinstance(error_message, str) and error_message
+                        else "Libertix reported an unattended failure.",
                         details={
                             "vm": vm.name,
                             "target": vm.host,
-                            "error_code": values.get("ERROR_CODE", "unattended-failure"),
+                            "error_code": values.get("errorCode", "unattended-failure"),
                             **observed,
                         },
                     )
-                break
-
-            if observe_installation_progress and time.monotonic() >= next_progress_observation:
+            if (
+                observe_installation_progress
+                and observed is None
+                and pending_verdict is None
+                and time.monotonic() >= next_progress_observation
+            ):
                 progress_observation += 1
                 capture = self._capture_with_name(
                     vm,
                     f"windows-preparation-progress-{progress_observation:03d}",
                 )
-                signature = self._capture_signature(capture)
-                if signature is not None and signature == previous_progress_signature:
-                    stalled_seconds = time.monotonic() - last_visual_change_at
-                    if stalled_seconds >= self.settings.automation_stall_timeout_seconds:
-                        raise WorkflowError(
-                            "automation.progress_stalled",
-                            "No visible progress during Windows installation preparation",
-                            details={
-                                "vm": vm.name,
-                                "target": vm.vnc,
-                                "phase": "windows-preparation",
-                                "capture": str(capture),
-                                "stalled_seconds": round(stalled_seconds, 3),
-                                "stall_timeout_seconds": (
-                                    self.settings.automation_stall_timeout_seconds
-                                ),
-                            },
-                        )
-                else:
-                    previous_progress_signature = signature
-                    last_visual_change_at = time.monotonic()
                 next_progress_observation = (
                     time.monotonic() + self.settings.automation_monitor_interval_seconds
                 )
+                assert vision_executor is not None
+                pending_verdict = vision_executor.submit(
+                    self.vision_llm.analyze_install_progress,
+                    capture,
+                    vm.name,
+                    vm.os,
+                )
+
+            if pending_verdict is not None and wait((pending_verdict,), timeout=0.2).done:
                 try:
-                    verdict = self.vision_llm.analyze_install_progress(
-                        capture,
-                        vm.name,
-                        vm.os,
-                    )
+                    verdict = pending_verdict.result()
                 except WorkflowError as exc:
                     raise WorkflowError(
                         "automation.windows_preparation_vision_required",
@@ -405,11 +640,26 @@ class WizardAutomationMixin:
                         },
                     ) from exc
 
+                pending_verdict = None
+
+                if progress.observe(verdict.visible_text):
+                    last_progress_at = time.monotonic()
+                assert_installation_progress(
+                    time.monotonic(),
+                    last_progress_at,
+                    self.settings.automation_stall_timeout_seconds,
+                    vm=vm.name,
+                    target=vm.vnc,
+                    phase="windows-preparation",
+                    capture=str(capture),
+                )
                 context = {
                     "vm": vm.name,
                     "target": vm.vnc,
                     "capture": str(capture),
                     **verdict.model_dump(),
+                    "progress_generation": progress.generation,
+                    "progress_phase": progress.phase,
                 }
                 result.ok(
                     "automation.windows_preparation_progress",
@@ -431,7 +681,11 @@ class WizardAutomationMixin:
                         "Visible error during Windows installation preparation",
                         details=context,
                     )
-            time.sleep(0.2)
+            if observed is not None:
+                break
+            # Keep short stage transitions responsive without polling a busy disk continuously.
+            time.sleep(poll_interval)
+            poll_interval = min(5, poll_interval * 2)
 
         expected_stage = " or ".join(accepted_stages)
         if observed is None:
@@ -463,70 +717,95 @@ class WizardAutomationMixin:
         ssh: SSHClient,
         vm: VMConfig,
         result: ResultBuilder,
-        quoted_acknowledgement_path: str,
+        acknowledgement_path: str,
         observed: dict[str, object],
         *,
         capture: Path | None = None,
     ) -> int:
         sequence = int(observed["sequence"])
         stage = str(observed["stage"])
-        capture = capture or self._capture_with_name(
-            vm,
-            f"wizard-{sequence:02d}-{stage}",
-        )
-        acknowledgement = self._run_unattended_control_command(
-            ssh,
-            'powershell.exe -NoProfile -NonInteractive -Command "'
-            f"$p='{quoted_acknowledgement_path}'; "
-            "$deadline=[DateTime]::UtcNow.AddSeconds(5); "
-            "while ($true) { try { "
-            f"[IO.File]::WriteAllText($p, '{sequence}', [Text.Encoding]::ASCII); "
-            "break } catch [IO.IOException] { "
-            "if ([DateTime]::UtcNow -ge $deadline) { throw }; "
-            'Start-Sleep -Milliseconds 50 } }"',
-            step="automation.unattended_acknowledgement",
-            timeout=20,
-        )
-        result.ok(
-            "automation.unattended_stage",
-            f"Unattended wizard stage captured and acknowledged: {stage}",
-            vm=vm.name,
-            target=vm.vnc,
-            stage=stage,
-            sequence=sequence,
-            capture=str(capture),
-            acknowledgement_exit_code=acknowledgement.exit_code,
-        )
+
+        def send_acknowledgement(captured_path: Path) -> None:
+            self._retry_unattended_control(
+                ssh,
+                lambda: ssh.upload_text(
+                    acknowledgement_path,
+                    str(sequence),
+                    step="automation.unattended_acknowledgement",
+                    timeout=20,
+                    replay_safe=True,
+                ),
+                step="automation.unattended_acknowledgement",
+            )
+            result.ok(
+                "automation.unattended_stage",
+                f"Unattended wizard stage captured; acknowledgement sent: {stage}",
+                vm=vm.name,
+                target=vm.vnc,
+                stage=stage,
+                sequence=sequence,
+                capture=str(captured_path),
+                acknowledgement_written=True,
+            )
+
+        if capture is not None:
+            send_acknowledgement(capture)
+        else:
+            self._capture_with_name(
+                vm,
+                f"wizard-{sequence:02d}-{stage}",
+                on_captured=send_acknowledgement,
+            )
         return sequence
 
     @staticmethod
-    def _run_unattended_control_command(
+    def _retry_unattended_control(
         ssh: SSHClient,
-        command: str,
+        operation: Callable[[], _T],
         *,
         step: str,
-        timeout: float,
-        check: bool = True,
-    ) -> CommandResult:
+    ) -> _T:
         """Retry only idempotent unattended coordination after a dead transport."""
 
         last_error: WorkflowError | None = None
-        for attempt in range(1, UNATTENDED_CONTROL_SSH_MAX_ATTEMPTS + 1):
+        max_attempts = (
+            2 if network_recovery.active is not None else UNATTENDED_CONTROL_SSH_MAX_ATTEMPTS
+        )
+        failed_at: float | None = None
+        attempt = 0
+        while attempt < max_attempts:
+            attempt += 1
             try:
                 if attempt > 1:
+                    time.sleep(5)
                     ssh.reconnect()
-                return ssh.run(
-                    command,
-                    step=step,
-                    timeout=timeout,
-                    check=check,
-                )
+                return operation()
             except WorkflowError as exc:
                 last_error = exc
-                if (
-                    not is_reconnectable_transport_error(exc)
-                    or attempt == UNATTENDED_CONTROL_SSH_MAX_ATTEMPTS
-                ):
+                if not is_reconnectable_transport_error(exc):
+                    raise
+                if failed_at is None:
+                    failed_at = time.monotonic()
+                logger.warning(
+                    "Unattended SSH coordination failed (%s/%s)",
+                    attempt,
+                    max_attempts,
+                    extra={
+                        "step": step,
+                        "target": exc.details.get("host"),
+                        "error": exc.details.get("error", exc.message),
+                        **{
+                            key: value
+                            for key, value in exc.details.items()
+                            if key.startswith("sftp_")
+                        },
+                    },
+                )
+                if attempt == max_attempts:
+                    if network_recovery.recover(failed_at):
+                        attempt = 1
+                        failed_at = None
+                        continue
                     raise
         assert last_error is not None
         raise last_error
@@ -627,9 +906,18 @@ class WizardAutomationMixin:
         )
         return path
 
-    def _capture_with_name(self, vm: VMConfig, label: str) -> Path:
+    def _capture_with_name(
+        self,
+        vm: VMConfig,
+        label: str,
+        *,
+        on_captured: Callable[[Path], None] | None = None,
+    ) -> Path:
         path = self._capture_path(vm, label)
-        self.vnc.capture(vm.vnc, path)
+        if on_captured is None:
+            self.vnc.capture(vm.vnc, path)
+        else:
+            self.vnc.capture(vm.vnc, path, on_captured=on_captured)
         return path
 
     def _capture_path(self, vm: VMConfig, label: str) -> Path:

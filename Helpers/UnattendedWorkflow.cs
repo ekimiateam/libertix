@@ -16,11 +16,13 @@ namespace Libertix.Helpers
         public int SchemaVersion { get; set; }
         public string Distribution { get; set; }
         public int LinuxSizeGiB { get; set; }
+        public string InstallationTarget { get; set; } = "windows";
         public string LinuxUsername { get; set; }
         public string LinuxPassword { get; set; }
         public string ComputerName { get; set; }
         public bool ShareWindowsFilesInLinux { get; set; }
         public bool ShareLinuxFilesInWindows { get; set; }
+        public bool MigrateWindowsPreferences { get; set; }
         public string StatusPath { get; private set; }
         public string AcknowledgementPath { get; private set; }
 
@@ -113,6 +115,8 @@ namespace Libertix.Helpers
             error = null;
             if (SchemaVersion != 1)
                 error = "The unattended configuration schemaVersion must be 1.";
+            else if (InstallationTarget != "windows" && InstallationTarget != "secondary")
+                error = "The unattended installation target must be windows or secondary.";
             else if (!Regex.IsMatch(
                 Distribution ?? string.Empty,
                 "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"))
@@ -137,7 +141,8 @@ namespace Libertix.Helpers
 
     public static class UnattendedWorkflow
     {
-        private const int AcknowledgementTimeoutSeconds = 45;
+        // VNC capture retries can exceed 45 seconds before the controller can acknowledge.
+        private const int AcknowledgementTimeoutSeconds = 180;
         private static readonly object Sync = new object();
         private static int _sequence;
 
@@ -169,7 +174,23 @@ namespace Libertix.Helpers
                 ["stage"] = stage,
                 ["updatedAtUtc"] = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)
             };
-            AtomicJsonFile.Write(options.StatusPath, JsonSerializer.Serialize(status));
+            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+            while (true)
+            {
+                try
+                {
+                    await Task.Run(() => AtomicJsonFile.Write(
+                        options.StatusPath, JsonSerializer.Serialize(status))).ConfigureAwait(true);
+                    break;
+                }
+                catch (IOException ex) when (
+                    ((ex.HResult & 0xFFFF) == 32 || (ex.HResult & 0xFFFF) == 33) &&
+                    DateTime.UtcNow < deadline)
+                {
+                    // An SFTP reader can hold the old status open across several network round trips.
+                    await Task.Delay(250).ConfigureAwait(true);
+                }
+            }
             ApplicationLogger.Write(
                 string.Format(
                     CultureInfo.InvariantCulture,
@@ -177,7 +198,6 @@ namespace Libertix.Helpers
                     sequence,
                     stage));
 
-            DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
             while (DateTime.UtcNow < deadline)
             {
                 try

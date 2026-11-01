@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import fcntl
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -97,14 +99,23 @@ def read_manifest(path: Path) -> dict[str, object]:
     return value
 
 
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_json_atomic(path: Path, value: object) -> None:
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with temporary.open("x", encoding="utf-8", newline="\n") as stream:
         json.dump(value, stream, ensure_ascii=True, sort_keys=True, indent=2)
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
+    sync_directory(path.parent)
 
 
 def replace_atomic(source: Path, destination: Path, expected_hash: str) -> None:
@@ -119,6 +130,7 @@ def replace_atomic(source: Path, destination: Path, expected_hash: str) -> None:
         if sha256(temporary) != expected_hash:
             raise PreferredBootPathError(f"staged hash mismatch: {destination}")
         os.replace(temporary, destination)
+        sync_directory(destination.parent)
         if sha256(destination) != expected_hash:
             raise PreferredBootPathError(f"destination hash mismatch: {destination}")
     finally:
@@ -160,6 +172,10 @@ def archive_windows_loader(history_root: Path, loader: Path, digest: str) -> Non
     os.chmod(archived, 0o600)
     if sha256(archived) != digest:
         raise PreferredBootPathError("archived Windows Boot Manager hash mismatch")
+    with archived.open("rb") as stream:
+        os.fsync(stream.fileno())
+    sync_directory(destination)
+    sync_directory(history_root)
 
 
 def preferred_grub_config(source: Path, destination: Path) -> str:
@@ -177,7 +193,135 @@ def preferred_grub_config(source: Path, destination: Path) -> str:
     return sha256(destination)
 
 
+def replay_synchronization(esp: Path, manifest_path: Path) -> None:
+    journal_path = manifest_path.with_name("preferred-boot-path.sync.json")
+    if not journal_path.exists():
+        return
+    if journal_path.is_symlink():
+        raise PreferredBootPathError("pending synchronization journal is a symlink")
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    if not isinstance(journal, dict):
+        raise PreferredBootPathError("pending synchronization journal is invalid")
+    stage_name = journal.get("stage", "")
+    if (
+        journal.get("version") != 1
+        or not isinstance(stage_name, str)
+        or not stage_name.startswith(".preferred-sync-")
+        or len(stage_name) != len(".preferred-sync-") + 32
+        or any(c not in "0123456789abcdef" for c in stage_name[-32:])
+    ):
+        raise PreferredBootPathError("pending synchronization identity is invalid")
+    stage = manifest_path.parent / stage_name
+    if stage.is_symlink() or not stage.is_dir():
+        raise PreferredBootPathError("pending synchronization staging directory is invalid")
+    target_path = stage / "manifest.json"
+    if target_path.is_symlink():
+        raise PreferredBootPathError("pending synchronization manifest is a symlink")
+    target = read_manifest(target_path)
+    if target["runId"] != journal.get("runId"):
+        raise PreferredBootPathError("pending synchronization belongs to another installation")
+    if sha256(manifest_path) not in {journal.get("beforeManifest"), journal.get("afterManifest")}:
+        raise PreferredBootPathError(
+            "preferred manifest changed outside the pending synchronization"
+        )
+    if sha256(target_path) != journal.get("afterManifest"):
+        raise PreferredBootPathError("pending synchronization manifest hash mismatch")
+    microsoft = "EFI/Microsoft/Boot/"
+    reference = "EFI/Libertix/BootGuardianReference/"
+    expected = {
+        microsoft + "bootmgfw.libertix-windows.efi": target["windowsLoader"]["sha256"],
+        microsoft + "bootmgfw.efi": target["preferred"]["shimSha256"],
+        microsoft + "grubx64.efi": target["preferred"]["grubSha256"],
+        microsoft + "mmx64.efi": target["preferred"]["mokManagerSha256"],
+        microsoft + "grub.cfg": target["preferred"]["grubConfigSha256"],
+    }
+    entries = journal.get("entries")
+    if not isinstance(entries, list) or len(entries) not in (5, 9):
+        raise PreferredBootPathError("pending synchronization file list is invalid")
+    if len(entries) == 9:
+        owner = esp / reference / ".libertix-owner"
+        if owner.read_text(encoding="utf-8").strip() != target["runId"]:
+            raise PreferredBootPathError("pending boot guardian reference ownership changed")
+        for name, field in (
+            ("shimx64.efi", "shimSha256"),
+            ("grubx64.efi", "grubSha256"),
+            ("mmx64.efi", "mokManagerSha256"),
+            ("grub.cfg", "grubConfigSha256"),
+        ):
+            expected[reference + name] = target["preferred"][field]
+    paths = [entry.get("target") for entry in entries if isinstance(entry, dict)]
+    if (
+        len(paths) != len(entries)
+        or any(not isinstance(path, str) for path in paths)
+        or set(paths) != set(expected)
+        or len(set(paths)) != len(paths)
+    ):
+        raise PreferredBootPathError("pending synchronization contains unexpected destinations")
+    if paths[-1] != microsoft + "bootmgfw.efi":
+        raise PreferredBootPathError("pending synchronization must publish shim last")
+    # Validate the complete write set before resuming any interrupted replacement.
+    for index, entry in enumerate(entries):
+        source = stage / str(index)
+        destination = esp / entry["target"]
+        if any(parent.is_symlink() for parent in (destination, *destination.parents)):
+            raise PreferredBootPathError("pending synchronization destination is a symlink")
+        if source.is_symlink() or sha256(source) != expected[entry["target"]]:
+            raise PreferredBootPathError("pending synchronization source hash mismatch")
+        current = sha256(destination) if destination.exists() else None
+        if current not in (entry.get("before"), expected[entry["target"]]):
+            raise PreferredBootPathError("EFI file changed outside the pending synchronization")
+    for index, entry in enumerate(entries):
+        replace_atomic(stage / str(index), esp / entry["target"], expected[entry["target"]])
+    replace_atomic(target_path, manifest_path, journal["afterManifest"])
+    journal_path.unlink()
+    sync_directory(journal_path.parent)
+    shutil.rmtree(stage)
+
+
+def publish_synchronization(
+    esp: Path, manifest_path: Path, manifest: dict, updates: list[tuple[Path, Path, str]]
+) -> None:
+    stage = manifest_path.parent / (".preferred-sync-" + uuid.uuid4().hex)
+    stage.mkdir(mode=0o700)
+    entries = []
+    for index, (source, destination, expected_hash) in enumerate(updates):
+        replace_atomic(source, stage / str(index), expected_hash)
+        entries.append(
+            {
+                "target": destination.relative_to(esp).as_posix(),
+                "before": sha256(destination) if destination.exists() else None,
+            }
+        )
+    target = stage / "manifest.json"
+    write_json_atomic(target, manifest)
+    sync_directory(stage.parent)
+    write_json_atomic(
+        manifest_path.with_name("preferred-boot-path.sync.json"),
+        {
+            "version": 1,
+            "runId": manifest["runId"],
+            "stage": stage.name,
+            "beforeManifest": sha256(manifest_path),
+            "afterManifest": sha256(target),
+            "entries": entries,
+        },
+    )
+    replay_synchronization(esp, manifest_path)
+
+
 def synchronize(args: argparse.Namespace) -> None:
+    manifest = Path(args.esp) / "EFI/Libertix/preferred-boot-path.json"
+    if not manifest.is_file():
+        return
+    lock_path = manifest.with_name("preferred-boot-path.lock")
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        replay_synchronization(Path(args.esp), manifest)
+        synchronize_locked(args)
+
+
+def synchronize_locked(args: argparse.Namespace) -> None:
     esp = Path(args.esp)
     libertix = esp / "EFI" / "Libertix"
     microsoft = esp / "EFI" / "Microsoft" / "Boot"
@@ -199,10 +343,11 @@ def synchronize(args: argparse.Namespace) -> None:
     if sha256(backup_loader) != original_hash:
         raise PreferredBootPathError("preferred Windows Boot Manager backup hash mismatch")
 
+    backup_source = backup_loader
     if active_hash not in {original_hash, previous_shim_hash}:
         verify_windows_loader(Path(args.secure_boot_verifier), active_loader)
         archive_windows_loader(libertix / "WindowsBootManagerHistory", backup_loader, original_hash)
-        replace_atomic(active_loader, backup_loader, active_hash)
+        backup_source = active_loader
         original_hash = active_hash
         windows["sha256"] = active_hash
 
@@ -216,17 +361,16 @@ def synchronize(args: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix=".libertix-preferred-", dir=microsoft) as directory:
         config = Path(directory) / "grub.cfg"
         config_hash = preferred_grub_config(libertix / "grub.cfg", config)
-        replace_atomic(
-            sources["grubSha256"],
-            microsoft / "grubx64.efi",
-            source_hashes["grubSha256"],
-        )
-        replace_atomic(
-            sources["mokManagerSha256"],
-            microsoft / "mmx64.efi",
-            source_hashes["mokManagerSha256"],
-        )
-        replace_atomic(config, microsoft / "grub.cfg", config_hash)
+        updates = [
+            (backup_source, backup_loader, original_hash),
+            (sources["grubSha256"], microsoft / "grubx64.efi", source_hashes["grubSha256"]),
+            (
+                sources["mokManagerSha256"],
+                microsoft / "mmx64.efi",
+                source_hashes["mokManagerSha256"],
+            ),
+            (config, microsoft / "grub.cfg", config_hash),
+        ]
         reference = libertix / "BootGuardianReference"
         if reference.exists():
             if not reference.is_dir():
@@ -237,32 +381,35 @@ def synchronize(args: argparse.Namespace) -> None:
                 or owner.read_text(encoding="utf-8").strip() != manifest["runId"]
             ):
                 raise PreferredBootPathError("boot guardian reference ownership is invalid")
-            replace_atomic(
-                sources["grubSha256"],
-                reference / "grubx64.efi",
-                source_hashes["grubSha256"],
+            updates.append(
+                (
+                    sources["grubSha256"],
+                    reference / "grubx64.efi",
+                    source_hashes["grubSha256"],
+                )
             )
-            replace_atomic(
-                sources["mokManagerSha256"],
-                reference / "mmx64.efi",
-                source_hashes["mokManagerSha256"],
+            updates.append(
+                (
+                    sources["mokManagerSha256"],
+                    reference / "mmx64.efi",
+                    source_hashes["mokManagerSha256"],
+                )
             )
-            replace_atomic(config, reference / "grub.cfg", config_hash)
-            replace_atomic(
-                sources["shimSha256"],
-                reference / "shimx64.efi",
-                source_hashes["shimSha256"],
+            updates.append((config, reference / "grub.cfg", config_hash))
+            updates.append(
+                (
+                    sources["shimSha256"],
+                    reference / "shimx64.efi",
+                    source_hashes["shimSha256"],
+                )
             )
-        # The first-stage loader is published last so a failed synchronization
-        # always leaves either the previous complete chain or the new one.
-        replace_atomic(sources["shimSha256"], active_loader, source_hashes["shimSha256"])
-
-    preferred.update(source_hashes)
-    preferred["grubConfigSha256"] = config_hash
-    windows["sha256"] = original_hash
-    manifest["status"] = "installed"
-    manifest["synchronizedUtc"] = datetime.now(UTC).isoformat()
-    write_json_atomic(manifest_path, manifest)
+        updates.append((sources["shimSha256"], active_loader, source_hashes["shimSha256"]))
+        preferred.update(source_hashes)
+        preferred["grubConfigSha256"] = config_hash
+        windows["sha256"] = original_hash
+        manifest["status"] = "installed"
+        manifest["synchronizedUtc"] = datetime.now(UTC).isoformat()
+        publish_synchronization(esp, manifest_path, manifest, updates)
 
 
 def parse_args() -> argparse.Namespace:

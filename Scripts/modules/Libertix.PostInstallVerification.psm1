@@ -3,6 +3,10 @@ Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot "Libertix.AtomicFile.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.InstallationState.psm1") -Force -ErrorAction Stop
 Import-Module (Join-Path $PSScriptRoot "Libertix.Process.psm1") -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.Rollback.psm1") -Force -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.StorageTargets.psm1") -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.StorageBaseline.psm1") -ErrorAction Stop
+Import-Module (Join-Path $PSScriptRoot "Libertix.WindowsProfiles.psm1") -ErrorAction Stop
 
 function Set-LibertixShutdownVerificationPriority {
     if (-not ("LibertixShutdownControl" -as [type])) {
@@ -31,6 +35,30 @@ function Test-LibertixProperty {
     )
 
     return $null -ne $Object -and $Object.PSObject.Properties.Name -contains $Name
+}
+
+function Test-LibertixFileHasReadableContent {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite,
+            4096,
+            $true)
+        $buffer = New-Object byte[] 1
+        $readTask = $stream.ReadAsync($buffer, 0, $buffer.Length)
+        return $readTask.GetAwaiter().GetResult() -gt 0
+    } catch {
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        throw "Cannot read '$Path': nativeCode=$($failure.HResult -band 0xffff) hresult=$($failure.HResult) error=$($failure.Message)"
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
 }
 
 function Get-LibertixNativeProgramFilesPath {
@@ -257,11 +285,14 @@ function Start-LibertixPostInstallAttempt {
         $Result.interruptionCount = [int]$Result.interruptionCount + $interruptedAttempts
         & $WriteLog (
             "Resuming post-install verification after $interruptedAttempts " +
-            "interrupted attempt(s); durable successful checks will not be repeated."
+            "interrupted attempt(s); current system state will be checked again."
         )
     }
 
     $attemptId = [Guid]::NewGuid().ToString("N")
+    $previousChecks = if (Test-LibertixProperty -Object $Result -Name "checks") {
+        @($Result.checks)
+    } else { @() }
     $Result.attempts = @($Result.attempts) + @(
         [pscustomobject][ordered]@{
             attemptId = $attemptId
@@ -269,8 +300,10 @@ function Start-LibertixPostInstallAttempt {
             startedAtUtc = $now
             completedAtUtc = $null
             outcome = "running"
+            previousChecks = @($previousChecks)
         }
     )
+    $Result | Add-Member -NotePropertyName checks -NotePropertyValue @() -Force
     $Result | Add-Member `
         -NotePropertyName activeAttemptId `
         -NotePropertyValue $attemptId `
@@ -396,6 +429,194 @@ function Set-LibertixPostInstallFailure {
     return $result
 }
 
+function Assert-LibertixInstalledFilesystemIdentity {
+    param(
+        [Parameter(Mandatory = $true)]$Partition,
+        [Parameter(Mandatory = $true)][string]$RecoveryRoot
+    )
+    $evidence = Read-LibertixJsonObject -Path (Join-Path $RecoveryRoot 'installed-linux-boot.json') `
+        -Description 'installed Linux boot evidence'
+    $plan = Read-LibertixJsonObject -Path (Join-Path $RecoveryRoot 'installation-plan.json') `
+        -Description 'installation plan'
+    if ([string]$evidence.planId -cne [string]$plan.planId -or
+        [string]$evidence.recoveryRunId -cne [string]$plan.planId -or
+        [string]$evidence.root.filesystem -cne 'ext4' -or
+        [string]$evidence.root.uuid -notmatch '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' -or
+        [long]$evidence.root.offsetBytes -ne [long]$Partition.Offset -or
+        [long]$evidence.root.sizeBytes -ne [long]$Partition.Size) {
+        throw 'The current Linux partition does not match the archived filesystem evidence.'
+    }
+    [byte[]]$header = Read-LibertixPartitionHeader -Partition $Partition
+    $uuid = [BitConverter]::ToString($header, 1128, 16).Replace('-', '')
+    if ($header[1080] -ne 0x53 -or $header[1081] -ne 0xef -or
+        $uuid -ine ([string]$evidence.root.uuid).Replace('-', '')) {
+        throw 'The Linux filesystem was replaced; refusing to delete this partition.'
+    }
+}
+
+function Read-LibertixPartitionHeader {
+    param([Parameter(Mandatory = $true)]$Partition)
+    $stream = [IO.File]::Open("\\.\PhysicalDrive$([int]$Partition.DiskNumber)",
+        [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        # Read an aligned block; the ext superblock begins 1024 bytes into the partition.
+        $null = $stream.Seek([long]$Partition.Offset, [IO.SeekOrigin]::Begin)
+        $header = New-Object byte[] 4096
+        $read = 0
+        while ($read -lt $header.Length) {
+            $count = $stream.Read($header, $read, $header.Length - $read)
+            if ($count -eq 0) { throw 'The Linux filesystem header could not be read completely.' }
+            $read += $count
+        }
+        return ,$header
+    } finally { $stream.Dispose() }
+}
+
+function Assert-LibertixUninstallComplete {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RecoveryRoot,
+        [Parameter(Mandatory = $true)][string[]]$RecoveryTaskNames,
+        [Parameter(Mandatory = $true)][scriptblock]$VerifyBoot,
+        [Parameter(Mandatory = $true)][scriptblock]$WriteLog
+    )
+
+    $plan = Read-LibertixJsonObject -Path (Join-Path $RecoveryRoot 'installation-plan.json') `
+        -Description 'installation plan'
+    $execution = Read-LibertixExecutionState -Path (Join-Path $RecoveryRoot 'installation-state.json')
+    $report = [pscustomobject]@{
+        schemaVersion = 1; planId = [string]$plan.planId; firmware = [string]$plan.firmware
+        rollbackExecutionRevision = [int]$execution.revision
+        status = 'in-progress'; updatedAtUtc = ''; checks = @(); error = $null
+    }
+    $path = Join-Path $RecoveryRoot 'uninstall-verification.json'
+    Write-LibertixPostInstallResult -Path $path -Result $report
+    try {
+        # Always observe the machine again; a previous attempt's checks are not current evidence.
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'execution-ledger' `
+            -WriteLog $WriteLog -Test {
+                if ([string]$execution.planId -cne [string]$plan.planId -or
+                    [string]$execution.status -cne 'rolled-back') {
+                    throw 'The installation ledger does not prove a completed rollback.'
+                }
+                'All recorded installation operations are compensated.'
+            }
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'restored-storage' `
+            -WriteLog $WriteLog -Test {
+                Assert-LibertixUninstallStorageBaseline -RecoveryRoot $RecoveryRoot -Restored
+                $targets = @([pscustomobject]@{
+                    Disk = $plan.disk; Partition = $plan.disk.windows
+                    Drive = [string]$plan.disk.systemDrive; VolumeId = ''
+                })
+                $allocation = Get-LibertixPlannedLinuxDisk -Plan $plan
+                if ([int]$allocation.number -ne [int]$plan.disk.number) {
+                    $targets += [pscustomobject]@{
+                        Disk = $allocation; Partition = $allocation.sourcePartition
+                        Drive = [string]$allocation.sourceDrive; VolumeId = [string]$allocation.sourceVolumeId
+                    }
+                }
+                foreach ($target in $targets) {
+                    $letter = $target.Drive.TrimEnd(':')
+                    $partition = Get-Partition -DriveLetter $letter -ErrorAction Stop
+                    Assert-LibertixSourceVolumeIdentity -Partition $partition -PlanDisk $target.Disk `
+                        -SourcePartition $target.Partition -DriveLetter $letter -ExpectedVolumeId $target.VolumeId
+                    if ([long]$partition.Size -ne [long]$target.Partition.sizeBytes) {
+                        throw 'The source volume has not returned to its original size.'
+                    }
+                }
+                if ([long]$plan.disk.recovery.sizeBytes -gt 0) {
+                    $recovery = @(Get-Partition -DiskNumber $plan.disk.number -ErrorAction Stop | Where-Object {
+                        [long]$_.Offset -eq [long]$plan.disk.recovery.offsetBytes -and
+                        [long]$_.Size -eq [long]$plan.disk.recovery.sizeBytes
+                    })
+                    if ($recovery.Count -ne 1) { throw 'Windows Recovery geometry changed.' }
+                }
+                'Windows, allocation source and Recovery geometry verified.'
+            }
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'boot-restored' `
+            -WriteLog $WriteLog -Test $VerifyBoot
+        Add-LibertixPostInstallCheck -Result $report -ResultPath $path -Name 'maintenance-removed' `
+            -WriteLog $WriteLog -Test {
+                $tasks = @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object {
+                    $_.TaskName -in $RecoveryTaskNames -or $_.TaskName -eq 'LibertixLinuxReadOnly' -or
+                    $_.TaskName -like 'LibertixLinuxReadOnlyPin_*'
+                })
+                if ($tasks.Count -ne 0) { throw 'An installation or sharing task remains after uninstall.' }
+                if (@(Get-Service -ErrorAction Stop | Where-Object Name -EQ 'LibertixBootGuardian').Count -ne 0) {
+                    throw 'BootGuardian remains installed after uninstall.'
+                }
+                'Installation, sharing and boot-maintenance tasks/services are absent.'
+            }
+        $report.status = 'succeeded'
+        Write-LibertixPostInstallResult -Path $path -Result $report
+        & $WriteLog "Final uninstall verification succeeded: $path"
+    } catch {
+        $report.status = 'failed'
+        $report.error = $_.Exception.Message
+        Write-LibertixPostInstallResult -Path $path -Result $report
+        throw
+    }
+}
+
+function Set-LibertixPostInstallRolledBack {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$RecoveryRoot)
+
+    $plan = Read-LibertixJsonObject `
+        -Path (Join-Path $RecoveryRoot "installation-plan.json") `
+        -Description "installation plan"
+    $execution = Read-LibertixExecutionState `
+        -Path (Join-Path $RecoveryRoot "installation-state.json")
+    if (
+        [string]$execution.planId -ne [string]$plan.planId -or
+        [string]$execution.status -ne "rolled-back"
+    ) {
+        throw "Post-install result cannot be closed before the execution ledger proves rollback."
+    }
+
+    $resultPath = Join-Path $RecoveryRoot "post-install-verification.json"
+    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+        # Rollback can complete before the post-install verifier has ever started.
+        return $null
+    }
+    $result = Read-LibertixJsonObject `
+        -Path $resultPath `
+        -Description "post-install verification result"
+    if (
+        [int]$result.schemaVersion -ne 1 -or
+        [string]$result.planId -ne [string]$plan.planId -or
+        [string]$result.firmware -ne [string]$plan.firmware -or
+        [string]$result.status -notin @(
+            "in-progress", "waiting-linux-boot", "waiting-windows-filesystem-repair",
+            "succeeded", "failed", "rolled-back"
+        )
+    ) {
+        throw "Post-install verification result belongs to another recovery state."
+    }
+
+    $rolledBackAtUtc = if (
+        (Test-LibertixProperty -Object $result -Name "rolledBackAtUtc") -and
+        -not [string]::IsNullOrWhiteSpace([string]$result.rolledBackAtUtc)
+    ) {
+        [string]$result.rolledBackAtUtc
+    } else {
+        [DateTime]::UtcNow.ToString("o")
+    }
+    $result.status = "rolled-back"
+    $result.rollbackAvailable = $false
+    $result.updatedAtUtc = [DateTime]::UtcNow.ToString("o")
+    $result | Add-Member `
+        -NotePropertyName rolledBackAtUtc `
+        -NotePropertyValue $rolledBackAtUtc `
+        -Force
+    $result | Add-Member `
+        -NotePropertyName rollbackExecutionRevision `
+        -NotePropertyValue ([int]$execution.revision) `
+        -Force
+    Write-LibertixPostInstallResult -Path $resultPath -Result $result
+    return $result
+}
+
 function Add-LibertixPostInstallCheck {
     param(
         [Parameter(Mandatory = $true)][object]$Result,
@@ -449,15 +670,6 @@ function Add-LibertixPostInstallCheck {
     }
 }
 
-function Get-LibertixPlannedLinuxOffset {
-    param([Parameter(Mandatory = $true)][object]$Plan)
-
-    if ([string]$Plan.disk.installer.resizeMode -eq "live-offline") {
-        return [int64]$Plan.disk.installer.finalOffsetBytes
-    }
-    return [int64]$Plan.disk.installer.offsetBytes
-}
-
 function Get-LibertixWindowsBootIdentity {
     $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
     if ($null -eq $operatingSystem.LastBootUpTime) {
@@ -499,45 +711,23 @@ function Register-LibertixWindowsBootVolumeCheck {
     if (-not (Test-Path -LiteralPath $chkdskPath -PathType Leaf)) {
         throw "Windows CHKDSK executable is missing."
     }
-    $startInfo = New-Object Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $chkdskPath
-    $startInfo.Arguments = "$SystemDrive /F"
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $startInfo
-    try {
-        if (-not $process.Start()) {
-            throw "CHKDSK process could not start."
+    # CHKDSK localizes its confirmation; these letters cover all product languages.
+    $result = Invoke-LibertixNativeCommand -FilePath $chkdskPath `
+        -ArgumentList @($SystemDrive, "/F") -TimeoutSeconds 120 `
+        -StandardInputText "Y`r`nO`r`nS`r`n"
+    $stdout = $result.StandardOutput
+    $stderr = $result.StandardError
+    foreach ($line in @($stdout -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            & $WriteLog "CHKDSK stdout: $line"
         }
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
-        # CHKDSK localizes its boot-volume confirmation. These are the accepted
-        # first letters for the product languages: English, French and Spanish.
-        foreach ($answer in @("Y", "O", "S")) {
-            $process.StandardInput.WriteLine($answer)
-        }
-        $process.StandardInput.Close()
-        $process.WaitForExit()
-        $stdout = $stdoutTask.Result
-        $stderr = $stderrTask.Result
-        foreach ($line in @($stdout -split "`r?`n")) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                & $WriteLog "CHKDSK stdout: $line"
-            }
-        }
-        foreach ($line in @($stderr -split "`r?`n")) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                & $WriteLog "CHKDSK stderr: $line"
-            }
-        }
-        & $WriteLog "CHKDSK scheduling process exited with rc=$($process.ExitCode)."
-    } finally {
-        $process.Dispose()
     }
+    foreach ($line in @($stderr -split "`r?`n")) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            & $WriteLog "CHKDSK stderr: $line"
+        }
+    }
+    & $WriteLog "CHKDSK scheduling process exited with rc=$($result.ExitCode)."
 
     $bootExecute = @(
         (Get-ItemProperty `
@@ -615,6 +805,7 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
         }
     }
 
+    $sourceDrive = Get-LibertixAllocationSourceDrive -Plan $plan
     $repairPath = Join-Path $RecoveryRoot "windows-filesystem-repair.json"
     $repair = if (Test-Path -LiteralPath $repairPath -PathType Leaf) {
         $saved = Read-LibertixJsonObject `
@@ -623,11 +814,20 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
         if ([int]$saved.schemaVersion -ne 1 -or [string]$saved.planId -ne [string]$plan.planId) {
             throw "Windows filesystem repair state belongs to another installation plan."
         }
+        if ((Test-LibertixProperty -Object $saved -Name 'sourceDrive') -and
+            [string]$saved.sourceDrive -cne $sourceDrive) {
+            throw 'Filesystem repair state refers to a different source volume.'
+        }
+        if ([int]$plan.schemaVersion -eq 5 -and
+            -not (Test-LibertixProperty -Object $saved -Name 'sourceDrive')) {
+            throw 'Separate-disk filesystem repair state has no source volume identity.'
+        }
         $saved
     } else {
         [pscustomobject][ordered]@{
             schemaVersion = 1
             planId = [string]$plan.planId
+            sourceDrive = $sourceDrive
             status = "pending"
             attemptCount = 0
             scheduledFromBootId = $null
@@ -638,7 +838,7 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
         }
     }
     $bootId = Get-LibertixWindowsBootIdentity
-    $health = Get-LibertixWindowsVolumeHealth -SystemDrive ([string]$plan.disk.systemDrive)
+    $health = Get-LibertixWindowsVolumeHealth -SystemDrive $sourceDrive
     $repair.lastHealth = $health
     & $WriteLog "Windows filesystem repair assessment: $($health.Detail) boot=$bootId."
 
@@ -670,11 +870,11 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
     if ([int]$repair.attemptCount -ge 2) {
         $repair.status = "failed"
         Write-LibertixPostInstallResult -Path $repairPath -Result $repair
-        throw "Windows system volume remains unhealthy after two verified boot-time repair attempts."
+        throw "Source volume $sourceDrive remains unhealthy after two verified boot-time repair attempts."
     }
 
     Register-LibertixWindowsBootVolumeCheck `
-        -SystemDrive ([string]$plan.disk.systemDrive) `
+        -SystemDrive $sourceDrive `
         -WriteLog $WriteLog
     $repair.attemptCount = [int]$repair.attemptCount + 1
     $repair.status = "waiting-reboot"
@@ -847,23 +1047,72 @@ function Assert-LibertixLinuxBootEvidence {
     return "plan=$($Evidence.planId) boot=$($Evidence.bootId) kernel=$($Evidence.grub.runningKernel)"
 }
 
+function Get-LibertixPlannedLinuxDisk {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    if ([int]$Plan.schemaVersion -eq 4 -and
+        -not (Test-LibertixProperty -Object $Plan -Name 'allocation')) {
+        return $Plan.disk
+    }
+    if ([int]$Plan.schemaVersion -eq 5 -and
+        (Test-LibertixProperty -Object $Plan -Name 'allocation') -and
+        $null -ne $Plan.allocation -and
+        [int]$Plan.allocation.number -ne [int]$Plan.disk.number -and
+        [string]$Plan.allocation.partitionTableId -ne [string]$Plan.disk.partitionTableId) {
+        return $Plan.allocation
+    }
+    throw 'The installation plan disk allocation is invalid.'
+}
+
+function Get-LibertixAllocationSourceDrive {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    $allocation = Get-LibertixPlannedLinuxDisk -Plan $Plan
+    $separate = [int]$Plan.schemaVersion -eq 5
+    $drive = if ($separate) { [string]$allocation.sourceDrive } else { [string]$Plan.disk.systemDrive }
+    $source = if ($separate) { $allocation.sourcePartition } else { $Plan.disk.windows }
+    if ($drive -cnotmatch '^[A-Z]:$') { throw 'The allocation source drive is invalid.' }
+    $partitions = @(Get-Partition -DriveLetter $drive.Substring(0, 1) -ErrorAction Stop)
+    if ($partitions.Count -ne 1) { throw 'The allocation source drive is ambiguous.' }
+    $partition = $partitions[0]
+    $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $allocation
+    if ([long]$partition.Offset -ne [long]$source.offsetBytes -or
+        [long]$partition.Size -le 0 -or [long]$partition.Size -gt [long]$source.sizeBytes) {
+        throw 'The allocation source volume extent no longer matches its plan.'
+    }
+    if ($separate) {
+        $volumes = @($partition | Get-Volume -ErrorAction Stop)
+        if ($volumes.Count -ne 1 -or
+            [string]$volumes[0].UniqueId -cne [string]$allocation.sourceVolumeId -or
+            [string]$volumes[0].FileSystem -ne 'NTFS' -or
+            (Get-LibertixNtfsVolumeSerial -Drive $drive) -cne [string]$allocation.sourceNtfsUuid) {
+            throw 'The allocation source volume identity changed.'
+        }
+    }
+    return $drive
+}
+
 function Test-LibertixDiskGeometry {
     param(
         [Parameter(Mandatory = $true)][object]$Plan,
         [Parameter(Mandatory = $true)][int64]$AlignmentBytes
     )
 
-    $disk = Get-Disk -Number ([int]$Plan.disk.number) -ErrorAction Stop
-    if (([string]$disk.UniqueId).Trim() -ne ([string]$Plan.disk.uniqueId).Trim()) {
-        throw "System disk identity differs from the installation plan."
+    $allocation = Get-LibertixPlannedLinuxDisk -Plan $Plan
+    $windowsDisk = Get-Disk -Number ([int]$Plan.disk.number) -ErrorAction Stop
+    Assert-LibertixDiskMatchesPlan -Disk $windowsDisk -PlanDisk $Plan.disk
+    $windowsPartitions = @(Get-Partition -DiskNumber ([int]$windowsDisk.Number) -ErrorAction Stop)
+    $disk = $windowsDisk
+    $partitions = $windowsPartitions
+    $source = $Plan.disk.windows
+    $separate = [int]$allocation.number -ne [int]$Plan.disk.number
+    if ($separate) {
+        $disk = Get-Disk -Number ([int]$allocation.number) -ErrorAction Stop
+        Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $allocation
+        $partitions = @(Get-Partition -DiskNumber ([int]$disk.Number) -ErrorAction Stop)
+        $source = $allocation.sourcePartition
     }
-    if ([int64]$disk.Size -ne [int64]$Plan.disk.sizeBytes) {
-        throw "System disk size differs from the installation plan."
-    }
-    if ([string]$disk.PartitionStyle -ne [string]$Plan.disk.partitionStyle) {
-        throw "System disk partition style differs from the installation plan."
-    }
-    $partitions = @(Get-Partition -DiskNumber ([int]$disk.Number) -ErrorAction Stop)
     [int64]$plannedLinuxSize = [int64]$Plan.disk.installer.finalSizeBytes
     [int64]$plannedLinuxOffset = Get-LibertixPlannedLinuxOffset -Plan $Plan
     $linux = @($partitions | Where-Object {
@@ -874,19 +1123,32 @@ function Test-LibertixDiskGeometry {
     if ($linux.Count -ne 1) {
         throw "Expected Linux partition geometry is absent or ambiguous."
     }
-    $windows = @($partitions | Where-Object {
+    $windows = @($windowsPartitions | Where-Object {
         [int64]$_.Offset -eq [int64]$Plan.disk.windows.offsetBytes
     })
     if ($windows.Count -ne 1) {
         throw "Expected Windows partition geometry is absent or ambiguous."
     }
+    if ($separate -and [int64]$windows[0].Size -ne [int64]$Plan.disk.windows.sizeBytes) {
+        throw 'Windows size changed during separate-disk installation.'
+    }
+    $sourcePartitions = @($partitions | Where-Object {
+        [int64]$_.Offset -eq [int64]$source.offsetBytes
+    })
+    if ($sourcePartitions.Count -ne 1) {
+        throw 'The allocation source partition is absent or ambiguous.'
+    }
     $gap = $plannedLinuxOffset -
-        ([int64]$windows[0].Offset + [int64]$windows[0].Size)
+        ([int64]$sourcePartitions[0].Offset + [int64]$sourcePartitions[0].Size)
     if ($gap -lt 0 -or $gap -gt 1MB) {
-        throw "Windows and Linux partitions have an unexpected gap."
+        throw 'The allocation source and Linux partitions have an unexpected gap.'
+    }
+    $shrink = [int64]$source.sizeBytes - [int64]$sourcePartitions[0].Size
+    if ($shrink -lt $plannedLinuxSize -or $shrink -gt ($plannedLinuxSize + 2MB)) {
+        throw 'The allocation source shrink differs from the installation plan.'
     }
     if ([int64]$Plan.disk.recovery.sizeBytes -gt 0) {
-        $recovery = @($partitions | Where-Object {
+        $recovery = @($windowsPartitions | Where-Object {
             [int64]$_.Offset -eq [int64]$Plan.disk.recovery.offsetBytes -and
             [int64]$_.Size -eq [int64]$Plan.disk.recovery.sizeBytes
         })
@@ -894,7 +1156,7 @@ function Test-LibertixDiskGeometry {
             throw "Windows Recovery partition geometry changed."
         }
     }
-    return "disk=$($disk.Number) linuxPartition=$($linux[0].PartitionNumber)"
+    return "windowsDisk=$($windowsDisk.Number) linuxDisk=$($disk.Number) linuxPartition=$($linux[0].PartitionNumber)"
 }
 
 function Test-LibertixWindowsHealth {
@@ -1056,7 +1318,7 @@ function Test-LibertixBootGuardian {
             throw "Boot guardian preferred Windows boot entry contract differs from its manifest."
         }
         $firmwareModule = Join-Path $PSScriptRoot "Libertix.Firmware.psm1"
-        $firmwareReadModule = Join-Path $PSScriptRoot "Libertix.FirmwareRead.psm1"
+        $firmwareReadModule = Join-Path $PSScriptRoot "Libertix.FirmwareVariables.psm1"
         Import-Module -Name $firmwareModule -Force -ErrorAction Stop
         Import-Module -Name $firmwareReadModule -Force -ErrorAction Stop
         try {
@@ -1140,6 +1402,9 @@ function Test-LibertixRecoveryArchive {
             "payload\Libertix.BootGuardian.exe",
             "payload\Scripts\modules\Libertix.InstallationState.psm1",
             "payload\Scripts\modules\Libertix.PostInstallVerification.psm1",
+            "payload\Scripts\modules\Libertix.WindowsProfiles.psm1",
+            "payload\Scripts\modules\Libertix.Rollback.psm1",
+            "payload\Scripts\modules\Libertix.StorageTargets.psm1",
             "payload\Scripts\modules\Libertix.PreferredBootPath.psm1",
             "payload\Scripts\modules\Libertix.BootGuardian.psm1",
             "payload\Scripts\libertix-uefi-recovery-agent.ps1",
@@ -1150,6 +1415,9 @@ function Test-LibertixRecoveryArchive {
         @(
             "Libertix.InstallationState.psm1",
             "Libertix.PostInstallVerification.psm1",
+            "Libertix.WindowsProfiles.psm1",
+            "Libertix.Rollback.psm1",
+            "Libertix.StorageTargets.psm1",
             "recover.ps1",
             "libertix-post-install-result.ps1",
             "Images\icon.ico"
@@ -1215,6 +1483,7 @@ function Test-LibertixWindowsReadOnlyShare {
     if (-not [bool]$Plan.features.shareLinuxFilesInWindows) {
         return "Linux-to-Windows sharing was not requested"
     }
+    $allocation = Get-LibertixPlannedLinuxDisk -Plan $Plan
     $shareRoot = Join-Path $env:ProgramData "Libertix\WindowsShare"
     $config = Read-LibertixJsonObject `
         -Path (Join-Path $shareRoot "config.json") `
@@ -1223,8 +1492,9 @@ function Test-LibertixWindowsReadOnlyShare {
         throw "Windows read-only Linux sharing is disabled despite the installation plan."
     }
     if (
-        [int]$config.SystemDiskNumber -ne [int]$Plan.disk.number -or
-        ([string]$config.SystemDiskUniqueId).Trim() -ne ([string]$Plan.disk.uniqueId).Trim() -or
+        [int]$config.SystemDiskNumber -ne [int]$allocation.number -or
+        ([string]$config.SystemDiskUniqueId).Trim() -ne ([string]$allocation.uniqueId).Trim() -or
+        [string]$config.SystemDiskPartitionTableId -cne [string]$allocation.partitionTableId -or
         [int64]$config.ExpectedLinuxPartitionOffset -ne
             (Get-LibertixPlannedLinuxOffset -Plan $Plan) -or
         [int64]$config.ExpectedLinuxPartitionSize -ne [int64]$Plan.disk.installer.finalSizeBytes -or
@@ -1233,9 +1503,7 @@ function Test-LibertixWindowsReadOnlyShare {
         throw "Windows sharing configuration does not match the installation plan partition."
     }
     $disk = Get-Disk -Number ([int]$config.SystemDiskNumber) -ErrorAction Stop
-    if (([string]$disk.UniqueId).Trim() -ne ([string]$config.SystemDiskUniqueId).Trim()) {
-        throw "Windows sharing disk identity does not match the current disk."
-    }
+    Assert-LibertixDiskMatchesPlan -Disk $disk -PlanDisk $allocation
     $partitions = @(
         Get-Partition -DiskNumber ([int]$config.SystemDiskNumber) -ErrorAction Stop |
             Where-Object {
@@ -1337,8 +1605,13 @@ function Test-LibertixWindowsReadOnlyShare {
         Set-Content -LiteralPath $writeProbe -Value "write must be refused" -ErrorAction Stop
         $writeAccepted = $true
     } catch {
-        # A denied probe is the expected proof for this security boundary.
-        $writeAccepted = $false
+        $failure = $_.Exception
+        while ($null -ne $failure.InnerException) { $failure = $failure.InnerException }
+        $nativeCode = $failure.HResult -band 0xffff
+        # The pinned WinFsp driver reports ERROR_WRITE_PROTECT for its read-only gate.
+        if ($nativeCode -ne 19) {
+            throw "The write probe was inconclusive: type=$($failure.GetType().FullName) hresult=$($failure.HResult) nativeCode=$nativeCode error=$($failure.Message)"
+        }
     } finally {
         if ($writeAccepted) {
             Remove-Item -LiteralPath $writeProbe -Force -ErrorAction SilentlyContinue
@@ -1347,12 +1620,13 @@ function Test-LibertixWindowsReadOnlyShare {
     if ($writeAccepted) {
         throw "SECURITY ERROR: the Windows ext4 mount accepted a write."
     }
+    # The pinned ext4 driver cannot read the /etc/os-release symlink; read its regular target.
+    if (-not (Test-LibertixFileHasReadableContent -Path "$drive\usr\lib\os-release")) {
+        throw 'The verified Linux mount is no longer readable after the write probe.'
+    }
 
     $shortcutPaths = @(
-        Get-ChildItem `
-            -Path "$env:SystemDrive\Users\*\Links\Linux_$($config.LinuxUsername)_read-only.lnk" `
-            -File `
-            -ErrorAction SilentlyContinue
+        Get-LibertixLinuxShortcutFiles -LinuxUsername ([string]$config.LinuxUsername)
     )
     if ($shortcutPaths.Count -eq 0) {
         throw "No Windows user profile contains the Linux read-only shortcut."
@@ -1386,6 +1660,7 @@ function Invoke-LibertixPostInstallVerification {
         throw "Installation plan identifier is invalid."
     }
     [int64]$alignmentBytes = Get-LibertixPartitionAlignmentBytes -RecoveryRoot $RecoveryRoot
+    $windowsBootId = Get-LibertixWindowsBootIdentity
     $result = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
         $saved = Read-LibertixJsonObject `
             -Path $resultPath `
@@ -1400,7 +1675,9 @@ function Invoke-LibertixPostInstallVerification {
         if ([string]$saved.status -eq "rolled-back") {
             throw "Post-install verification cannot resume after rollback."
         }
-        if ([string]$saved.status -eq "succeeded") {
+        if ([string]$saved.status -eq "succeeded" -and
+            (Test-LibertixProperty -Object $saved -Name "windowsBootId") -and
+            [string]$saved.windowsBootId -eq $windowsBootId) {
             return $saved
         }
         $saved.status = "in-progress"
@@ -1414,6 +1691,7 @@ function Invoke-LibertixPostInstallVerification {
             -Firmware ([string]$plan.firmware) `
             -LogPath $LogPath
     }
+    $result | Add-Member -NotePropertyName windowsBootId -NotePropertyValue $windowsBootId -Force
     $attemptId = Start-LibertixPostInstallAttempt `
         -Result $result `
         -ResultPath $resultPath `
@@ -1517,10 +1795,13 @@ function Invoke-LibertixPostInstallVerification {
 }
 
 Export-ModuleMember -Function `
+    Assert-LibertixInstalledFilesystemIdentity, `
+    Assert-LibertixUninstallComplete, `
     Assert-LibertixLinuxBootEvidence, `
     Invoke-LibertixWindowsFilesystemRepairIfRequired, `
     Invoke-LibertixPostInstallVerification, `
     Set-LibertixPostInstallFailure, `
+    Set-LibertixPostInstallRolledBack, `
     Set-LibertixPostInstallWaitingForLinux, `
     Set-LibertixShutdownVerificationPriority, `
     Test-LibertixDiskGeometry, `

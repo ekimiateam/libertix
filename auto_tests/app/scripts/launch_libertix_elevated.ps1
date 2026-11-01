@@ -31,6 +31,45 @@ function Test-VisibleMainWindow {
     return $bounds.Width -ge 100 -and $bounds.Height -ge 100
 }
 
+function Confirm-LocalFilepoolChoice {
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+
+    # Native message-box controls can expose only Pane through UI Automation.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class FilepoolDialogNative {
+    public const uint BM_CLICK = 0x00F5;
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+}
+'@
+    $window = [Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+    if ($window.Current.ClassName -ne '#32770') { throw 'Expected the local filepool choice dialog' }
+    $children = $window.FindAll([Windows.Automation.TreeScope]::Descendants,
+        [Windows.Automation.Condition]::TrueCondition)
+    $yes = @($children | Where-Object {
+        $_.Current.AutomationId -eq '6' -and $_.Current.ClassName -eq 'Button'
+    })
+    $no = @($children | Where-Object {
+        $_.Current.AutomationId -eq '7' -and $_.Current.ClassName -eq 'Button'
+    })
+    $prompt = @($children | Where-Object {
+        $_.Current.AutomationId -eq '65535' -and $_.Current.ClassName -eq 'Static' -and
+        $_.Current.Name -match '(?i)filepool'
+    })
+    if ($yes.Count -ne 1 -or $no.Count -ne 1 -or $prompt.Count -ne 1) {
+        throw ("The expected filepool Yes/No prompt was not identified; yes={0}, no={1}, prompt={2}" -f
+            $yes.Count, $no.Count, $prompt.Count)
+    }
+    if (-not [FilepoolDialogNative]::PostMessage(
+        [IntPtr]$yes[0].Current.NativeWindowHandle, [FilepoolDialogNative]::BM_CLICK,
+        [IntPtr]::Zero, [IntPtr]::Zero)) {
+        throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+    }
+}
+
 function Write-AtomicJson {
     param(
         [Parameter(Mandatory = $true)]
@@ -73,6 +112,9 @@ function Invoke-InteractiveWorker {
         [string]$WorkerResultPath
     )
 
+    $launcherProcess = $null
+    $runtimeWindowVerified = $false
+    $lastWindowObservation = $null
     try {
         $workerConfig = Get-Content -LiteralPath $WorkerConfigPath -Raw |
             ConvertFrom-Json
@@ -91,7 +133,11 @@ function Invoke-InteractiveWorker {
         ).TrimEnd('\') + '\'
         $runtimeProcess = $null
         $runtimeGraphicalProcess = $null
-        $windowDeadline = [DateTime]::UtcNow.AddSeconds(60)
+        # A cold standalone extraction can take several minutes on lab HDDs.
+        # The window has a separate deadline once its verified child exists.
+        $windowDeadline = [DateTime]::UtcNow.AddSeconds(300)
+        $runtimeDetected = $false
+        $localFilepoolSelected = $false
         do {
             $launcherProcess.Refresh()
             if ($launcherProcess.HasExited) {
@@ -116,15 +162,40 @@ function Invoke-InteractiveWorker {
                 Sort-Object CreationDate -Descending |
                 Select-Object -First 1
             if ($runtimeProcess) {
+                if (-not $runtimeDetected) {
+                    $runtimeDetected = $true
+                    $windowDeadline = [DateTime]::UtcNow.AddSeconds(300)
+                }
                 $runtimeGraphicalProcess = Get-Process `
                     -Id $runtimeProcess.ProcessId `
                     -ErrorAction SilentlyContinue
             }
             if ($runtimeGraphicalProcess) {
                 $runtimeGraphicalProcess.Refresh()
+                $lastWindowObservation = [ordered]@{
+                    observed_at = [DateTime]::UtcNow.ToString("o")
+                    pid = $runtimeGraphicalProcess.Id
+                    session_id = $runtimeGraphicalProcess.SessionId
+                    window_handle = $runtimeGraphicalProcess.MainWindowHandle.ToInt64()
+                    window_title = $runtimeGraphicalProcess.MainWindowTitle
+                }
             }
             if ($runtimeGraphicalProcess -and
                 (Test-VisibleMainWindow -Process $runtimeGraphicalProcess)) {
+                if ([bool]$workerConfig.local_filepool -and -not $localFilepoolSelected) {
+                    Confirm-LocalFilepoolChoice -Process $runtimeGraphicalProcess
+                    $localFilepoolSelected = $true
+                    Start-Sleep -Milliseconds 200
+                    continue
+                }
+                if ([bool]$workerConfig.local_filepool) {
+                    $visibleWindow = [Windows.Automation.AutomationElement]::FromHandle(
+                        $runtimeGraphicalProcess.MainWindowHandle)
+                    if ($visibleWindow.Current.ClassName -eq '#32770') {
+                        Start-Sleep -Milliseconds 200
+                        continue
+                    }
+                }
                 break
             }
             Start-Sleep -Milliseconds 200
@@ -137,7 +208,12 @@ function Invoke-InteractiveWorker {
         $runtimeGraphicalProcess.Refresh()
         $element = [Windows.Automation.AutomationElement]::FromHandle(
             $runtimeGraphicalProcess.MainWindowHandle)
+        if ([bool]$workerConfig.local_filepool -and
+            (-not $localFilepoolSelected -or $element.Current.ClassName -eq '#32770')) {
+            throw 'The local filepool choice did not lead to the Libertix main window'
+        }
         $bounds = $element.Current.BoundingRectangle
+        $runtimeWindowVerified = $true
         Write-AtomicJson -Path $WorkerResultPath -Value ([ordered]@{
                 status = "ok"
                 pid = $runtimeGraphicalProcess.Id
@@ -150,6 +226,7 @@ function Invoke-InteractiveWorker {
                 window_visible = $true
                 window_width = [int]$bounds.Width
                 window_height = [int]$bounds.Height
+                local_filepool_selected = $localFilepoolSelected
             })
 
         # Keep the scheduled action alive with the installer. Some Task
@@ -158,11 +235,27 @@ function Invoke-InteractiveWorker {
         exit $launcherProcess.ExitCode
     }
     catch {
+        $launchError = $_
+        $processesStopped = $false
+        if (-not $runtimeWindowVerified -and $null -ne $launcherProcess) {
+            $launcherProcess.Refresh()
+            if (-not $launcherProcess.HasExited) {
+                # Stop only this launcher's tree before deleting its one-use config.
+                $stop = Start-Process -FilePath "$env:SystemRoot\System32\taskkill.exe" `
+                    -ArgumentList @('/PID', [string]$launcherProcess.Id, '/T', '/F') `
+                    -WindowStyle Hidden -PassThru
+                if ($stop.WaitForExit(10000) -and $stop.ExitCode -eq 0) {
+                    $processesStopped = $true
+                }
+            }
+        }
         Write-AtomicJson -Path $WorkerResultPath -Value ([ordered]@{
                 status = "error"
-                error = $_.Exception.Message
-                exception_type = $_.Exception.GetType().FullName
-                script_stack = $_.ScriptStackTrace
+                error = $launchError.Exception.Message
+                exception_type = $launchError.Exception.GetType().FullName
+                script_stack = $launchError.ScriptStackTrace
+                processes_stopped = $processesStopped
+                last_window_observation = $lastWindowObservation
             })
         exit 1
     }
@@ -354,6 +447,8 @@ if ($forceOfflineNtfsResize) {
     ([ordered]@{
             executable = $exe
             argument_string = $applicationArguments.Trim()
+            local_filepool = ($config.PSObject.Properties.Name -contains 'local_filepool' -and
+                [bool]$config.local_filepool)
         } | ConvertTo-Json -Compress),
     [System.Text.UTF8Encoding]::new($false)
 )
@@ -390,7 +485,7 @@ if ($runResult.ExitCode -ne 0) {
 }
 
 $workerResult = $null
-for ($i = 0; $i -lt 700 -and -not $workerResult; $i++) {
+for ($i = 0; $i -lt 6800 -and -not $workerResult; $i++) {
     Start-Sleep -Milliseconds 100
     if (Test-Path -LiteralPath $workerResultPath -PathType Leaf) {
         try {
@@ -404,9 +499,6 @@ for ($i = 0; $i -lt 700 -and -not $workerResult; $i++) {
 }
 
 if (-not $workerResult) {
-    if ($unattendedConfigPath) {
-        Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
-    }
     $taskState = (Invoke-ScheduledTaskCommand -Arguments @(
             "/Query", "/TN", $taskName, "/V", "/FO", "LIST"
         )).Output
@@ -417,12 +509,14 @@ if (-not $workerResult) {
 }
 
 if ([string]$workerResult.status -ne "ok") {
-    if ($unattendedConfigPath) {
+    if ($unattendedConfigPath -and $workerResult.processes_stopped) {
         Remove-Item -LiteralPath $unattendedConfigPath -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $workerConfigPath, $workerResultPath, $workerScriptPath `
+    # Preserve the credential-free worker report until the campaign archives it.
+    Remove-Item -LiteralPath $workerConfigPath, $workerScriptPath `
         -Force -ErrorAction SilentlyContinue
-    throw ("The interactive Libertix worker failed: " + [string]$workerResult.error)
+    throw ("The interactive Libertix worker failed: " + [string]$workerResult.error +
+        "; diagnostic=" + $workerResultPath)
 }
 
 $process = Get-Process -Id ([int]$workerResult.pid) -ErrorAction Stop
@@ -486,6 +580,7 @@ Write-Result -Name "RUNTIME_EXECUTABLE" -Value $runtimeExecutable
 Write-Result -Name "WINDOW_HANDLE" -Value ([long]$workerResult.window_handle)
 Write-Result -Name "WINDOW_TITLE" -Value ([string]$workerResult.window_title)
 Write-Result -Name "WINDOW_VISIBLE" -Value "True"
+Write-Result -Name "LOCAL_FILEPOOL_SELECTED" -Value ([bool]$workerResult.local_filepool_selected)
 Write-Result -Name "WINDOW_WIDTH" -Value ([int]$workerResult.window_width)
 Write-Result -Name "WINDOW_HEIGHT" -Value ([int]$workerResult.window_height)
 if ($unattendedStatusPath) {

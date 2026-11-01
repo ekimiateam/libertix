@@ -54,7 +54,8 @@ namespace Libertix.Installation
                 { "00011009", Mapping("ca", "multix") },
                 { "0000100C", Mapping("ch", "fr") },
                 { "0000040A", Mapping("es", "winkeys") },
-                { "0000080A", Mapping("latam") }
+                { "0000080A", Mapping("latam") },
+                { "00000412", Mapping("kr") }
             };
 
         private static readonly IReadOnlyDictionary<int, LinuxKeyboardConfiguration> LanguageFallbacks =
@@ -69,7 +70,8 @@ namespace Libertix.Installation
                 { 0x1109, Mapping("ca", "multix") },
                 { 0x100C, Mapping("ch", "fr") },
                 { 0x040A, Mapping("es", "winkeys") },
-                { 0x080A, Mapping("latam") }
+                { 0x080A, Mapping("latam") },
+                { 0x0412, Mapping("kr") }
             };
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]

@@ -1,0 +1,326 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using Libertix.Helpers;
+
+namespace Libertix.Installation
+{
+    internal partial class InstallationEngine
+    {
+        private readonly CancellationTokenSource _installationCancellation =
+            new CancellationTokenSource();
+        private readonly object _activeProcessLock = new object();
+        private readonly object _persistentLogLock = new object();
+        private Process _activeStreamingProcess;
+        private FirmwareType _activeFirmware = FirmwareType.Unknown;
+        private UefiRecoveryState _activeUefiRecovery;
+        private bool _cancellationHandled;
+        private bool _cancellationDisposed;
+        private string _persistentLogPath;
+
+        private void InitializePersistentLog()
+        {
+            try
+            {
+                string logRoot = Path.Combine(
+                    WindowsSystemDrive,
+                    RuntimeNames.InstallationLogDirectory,
+                    RuntimeNames.WindowsLogDirectory);
+                Security.ProtectedFiles.CreateDirectory(logRoot);
+                _persistentLogPath = Path.Combine(
+                    logRoot,
+                    $"windows-preparation-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+                File.WriteAllText(
+                    _persistentLogPath,
+                    $"===== Libertix Windows preparation {DateTime.Now:O} ====={Environment.NewLine}",
+                    new UTF8Encoding(false));
+            }
+            catch
+            {
+                _persistentLogPath = null;
+            }
+        }
+
+        private void SetInstallationRunning(bool running)
+        {
+            _isRunning = running;
+            _installationState.SetInstallationRunning(running);
+            _view.SetCancellationAvailable(running);
+        }
+
+        private void FinishInstallation(bool allowRetry)
+        {
+            PublishUnattendedFailure(
+                "installation-preparation-failed",
+                "Installation preparation did not reach the verified reboot-ready state.");
+            _view.SetRetryEnabled(CanRetryAfterFailure(
+                allowRetry, _processTerminationUnverified, _rollbackVerificationPending));
+            SetInstallationRunning(false);
+        }
+
+        internal static bool CanRetryAfterFailure(bool requested, bool processStateUnknown, bool rollbackPending)
+        {
+            return requested && !processStateUnknown && !rollbackPending;
+        }
+
+        private void PublishUnattendedFailure(string errorCode, string errorMessage)
+        {
+            if (!UnattendedWorkflow.IsEnabled ||
+                _unattendedRebootReady ||
+                _unattendedFailurePublished)
+                return;
+
+            _unattendedFailurePublished = true;
+            UnattendedWorkflow.TryPublishFailure(errorCode, errorMessage);
+        }
+
+        private async Task PublishUnattendedRebootReadyAsync()
+        {
+            _unattendedRebootReady = true;
+            FinishInstallation(allowRetry: false);
+            _view.SetRebootEnabled(false);
+            try
+            {
+                await UnattendedWorkflow.PublishStageAndWaitAsync("reboot-ready");
+                _view.SetRebootEnabled(true);
+            }
+            catch (Exception ex)
+            {
+                _unattendedRebootReady = false;
+                UnattendedWorkflow.TryPublishFailure("reboot-acknowledgement-failed", ex.Message);
+                throw;
+            }
+        }
+
+        private void ThrowIfCancellationRequested()
+        {
+            _installationCancellation.Token.ThrowIfCancellationRequested();
+        }
+
+        private async Task HandleCancellationAsync()
+        {
+            if (_cancellationHandled)
+                return;
+
+            _cancellationHandled = true;
+            _view.DisableCancellation();
+            Log("Cancellation acknowledged; starting controlled rollback.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesRollbackInProgress",
+                    "Cancellation in progress. Restoring Windows..."));
+
+            if (_activeFirmware == FirmwareType.Bios && _biosRecoveryGuardInstalled)
+            {
+                await FailBiosPreparationAndRollbackAsync(
+                    "Installation cancelled by the user",
+                    Localized(
+                        "ApplyChangesCancelledRestored",
+                        "Installation cancelled. Windows has been restored."));
+                return;
+            }
+
+            if (_activeFirmware == FirmwareType.Uefi && _activeUefiRecovery != null)
+            {
+                await RollbackUefiCancellationAsync();
+                return;
+            }
+
+            CleanupPendingWindowsSharePayload();
+            CleanupPendingWindowsPreferenceMigrationBundle();
+            CleanupTransactionDownloadsBestEffort();
+            Log("Installation cancelled before any disk change.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesCancelledBeforeDiskChange",
+                    "Installation cancelled before any disk change."));
+            PublishUnattendedFailure(
+                "installation-cancelled-before-disk-change",
+                "Installation cancelled before any disk change.");
+            FinishInstallation(allowRetry: true);
+        }
+
+        private async Task RollbackUefiCancellationAsync()
+        {
+            _rollbackVerificationPending = true;
+            string scriptPath = ApplicationFiles.Resolve(
+                "Scripts",
+                "libertix-uefi-install.ps1");
+            string powershell = WindowsProcessRunner.ResolvePowerShell();
+
+            // PowerShell owns the UEFI state while it runs. Reload its latest
+            // durable snapshot before recording the cancellation transition so
+            // the GUI never overwrites newer completed steps with stale data.
+            ReloadExecutionState();
+            RecordExecutionFailure(
+                "UEFI_INSTALLATION_CANCELLED",
+                "Installation cancelled by the user.",
+                InstallationPhase.Windows);
+            BeginExecutionRollback();
+
+            StreamingProcessResult processResult = await RunStreamingProcessAsync(
+                powershell,
+                $"{WindowsProcessRunner.PowerShellFileArguments(scriptPath)} -Revert " +
+                $"-ExpectedRecoveryRunId {QuoteArgument(_activeUefiRecovery.RunId)}",
+                WindowsProcessTimeouts.DiskImageOperation,
+                line => Log($"ROLLBACK: {line}"),
+                observeCancellation: false);
+
+            CleanupPendingWindowsSharePayload();
+
+            if (
+                processResult.Completion == StreamingProcessCompletion.Exited &&
+                processResult.ExitCode == 0
+            )
+            {
+                if (!await BitLockerMatchesInitialPreflightStateAfterRollbackAsync())
+                {
+                    CleanupTransactionDownloadsBestEffort();
+                    ShowBitLockerRollbackIncomplete();
+                    return;
+                }
+
+                // Preserve diagnostics in the log archive before removing the
+                // temporary recovery payload from the completed transaction.
+                CompleteExecutionRollback();
+                CleanupTransactionDownloadsBestEffort();
+                await FinalizeUefiRecoveryAfterVerifiedRollbackAsync();
+                Log("UEFI cancellation rollback completed and verified.");
+                UpdateProgress(
+                    0,
+                    Localized(
+                        "ApplyChangesCancelledRestored",
+                        "Installation cancelled. Windows has been restored."));
+                PublishUnattendedFailure(
+                    "uefi-installation-cancelled",
+                    "Installation cancelled. Windows was restored and the rollback was verified.");
+                _rollbackVerificationPending = false;
+                FinishInstallation(allowRetry: true);
+                return;
+            }
+
+            Log($"CRITICAL: UEFI cancellation rollback failed with rc={processResult.ExitCode} ({processResult.Completion}).");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesRollbackIncomplete",
+                    "Rollback incomplete. Manual intervention is required."));
+            PublishUnattendedFailure(
+                "uefi-cancellation-rollback-incomplete",
+                "Installation cancellation rollback could not be verified.");
+            FinishInstallation(allowRetry: false);
+            _view.ShowBlockingMessage(
+                Localized("ApplyChangesRollbackIncompleteTitle", "Libertix - Incomplete rollback"),
+                LocalizedFormat(
+                    "ApplyChangesUefiRollbackIncompleteDetails",
+                    "The installation was cancelled, but the UEFI rollback could not be verified. " +
+                    "Do not restart; review {0}.",
+                    Path.Combine(WindowsSystemDrive, RuntimeNames.InstallationLogDirectory)),
+                isError: true);
+        }
+
+        private async Task<bool> BitLockerMatchesInitialPreflightStateAfterRollbackAsync()
+        {
+            StoragePreflightInfo initial = _storagePreflight;
+            if (initial == null)
+                return true;
+
+            StoragePreflightInfo current;
+            try
+            {
+                current = await RunStoragePreflightAsync(
+                    initial.Firmware,
+                    decryptBitLocker: false,
+                    observeCancellation: false);
+            }
+            catch (Exception ex)
+            {
+                Log($"CRITICAL: BitLocker state verification failed after rollback: {ex.Message}");
+                return false;
+            }
+
+            bool matches =
+                current.BitLockerConversionStatus == initial.InitialBitLockerConversionStatus &&
+                current.BitLockerEncryptionPercentage == initial.InitialBitLockerEncryptionPercentage &&
+                current.BitLockerProtectionStatus == initial.InitialBitLockerProtectionStatus;
+            bool allocationMatches = initial.Allocation == null
+                ? current.Allocation == null && current.AllocationEncryption == null
+                : current.Allocation != null && initial.AllocationEncryption != null &&
+                    initial.Allocation.SourceNtfsUuid == current.Allocation.SourceNtfsUuid &&
+                    initial.AllocationEncryption.Matches(current.AllocationEncryption);
+            if (!allocationMatches)
+                Log("BitLocker state or identity of the selected source volume does not match its initial state after rollback.");
+            if (!matches)
+            {
+                Log(
+                    "BitLocker state mismatch after rollback: " +
+                    $"initial conversion={initial.InitialBitLockerConversionStatus}, " +
+                    $"encrypted={initial.InitialBitLockerEncryptionPercentage}%, " +
+                    $"protection={initial.InitialBitLockerProtectionStatus}; " +
+                    $"current conversion={current.BitLockerConversionStatus}, " +
+                    $"encrypted={current.BitLockerEncryptionPercentage}%, " +
+                    $"protection={current.BitLockerProtectionStatus}.");
+            }
+            return matches && allocationMatches;
+        }
+
+        private void ShowBitLockerRollbackIncomplete()
+        {
+            Log(
+                "CRITICAL: Disk and boot rollback completed, but BitLocker did not " +
+                "return to its initial state.");
+            UpdateProgress(
+                0,
+                Localized(
+                    "ApplyChangesBitLockerReenable",
+                    "Disk and boot restored, but BitLocker must be re-enabled in Windows."));
+            FinishInstallation(allowRetry: false);
+            _view.ShowBlockingMessage(
+                Localized(
+                    "ApplyChangesBitLockerReenableTitle",
+                    "Libertix - Re-enable BitLocker"),
+                Localized(
+                    "ApplyChangesBitLockerReenableDetails",
+                    "Disk and boot changes were restored, but BitLocker continued or completed " +
+                    "decryption and cannot be re-enabled automatically on this Windows edition. " +
+                    "Re-enable encryption in Windows settings before considering recovery complete."),
+                isError: false);
+        }
+
+        private void SetActiveStreamingProcess(Process process)
+        {
+            lock (_activeProcessLock)
+                _activeStreamingProcess = process;
+        }
+
+        private void ClearActiveStreamingProcess(Process process)
+        {
+            lock (_activeProcessLock)
+            {
+                if (ReferenceEquals(_activeStreamingProcess, process))
+                    _activeStreamingProcess = null;
+            }
+        }
+
+        private void AppendPersistentLog(string line)
+        {
+            if (string.IsNullOrWhiteSpace(_persistentLogPath))
+                return;
+
+            try
+            {
+                lock (_persistentLogLock)
+                    File.AppendAllText(_persistentLogPath, line + Environment.NewLine, new UTF8Encoding(false));
+            }
+            catch
+            {
+                // The GUI log remains available even if Windows refuses the persistent log write.
+            }
+        }
+    }
+}

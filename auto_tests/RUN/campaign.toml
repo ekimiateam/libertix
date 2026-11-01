@@ -1,0 +1,14 @@
+# Campaign settings read by RUN/run-test-auto.sh. Only logical lab names and test parameters
+# belong here; addresses and credentials stay in the untracked .env file.
+
+api_url = "http://127.0.0.1:8000"
+vms = ["vm1", "vm2", "vm3"]
+linux_username = "test"
+linux_size_gib = 20
+
+# A restricted launcher mode refuses to start unless .env selects these snapshots.
+[modes.clean2-only]
+reset_snapshot = "clean2"
+
+[modes.clean3-only]
+secondary_disk_reset_snapshot = "clean3"

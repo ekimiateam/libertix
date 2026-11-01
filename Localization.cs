@@ -223,8 +223,7 @@ namespace Libertix
 
         private static TranslationCatalog LoadTranslations()
         {
-            string path = Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory,
+            string path = ApplicationFiles.Resolve(
                 "Resources",
                 "Libertix.Translations.json");
             var options = new JsonSerializerOptions

@@ -6,10 +6,11 @@ import ssl
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote
 
 import httpx
 
+from app.clients import network_recovery
 from app.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
@@ -75,9 +76,43 @@ class ProxmoxClient:
         step: str,
         data: dict[str, object] | None = None,
     ) -> object:
+        network_recovery.checkpoint()
         logger.info("Proxmox request", extra={"step": step, "target": path})
         try:
-            response = self.client.request(method, f"{self.base_url}{path}", data=data)
+            max_attempts = 2 if network_recovery.active is not None else 3
+            failed_at: float | None = None
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    response = self.client.request(method, f"{self.base_url}{path}", data=data)
+                    break
+                except (
+                    httpx.NetworkError,
+                    httpx.TimeoutException,
+                    httpx.RemoteProtocolError,
+                ) as exc:
+                    if failed_at is None:
+                        failed_at = time.monotonic()
+                    # Retrying a status read is safe; a lost mutation reply is ambiguous.
+                    safe_to_retry = method == "GET" or (
+                        network_recovery.active is not None
+                        and isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+                    )
+                    if not safe_to_retry:
+                        network_recovery.recover(failed_at, replay_safe=False)
+                        raise
+                    if attempt == max_attempts:
+                        if network_recovery.recover(failed_at):
+                            attempt = 0
+                            failed_at = None
+                            continue
+                        raise
+                    logger.warning(
+                        "Transient Proxmox transport failure; retrying in five seconds",
+                        extra={"step": step, "target": path, "attempt": attempt},
+                    )
+                    time.sleep(5)
             response.raise_for_status()
             return response.json()["data"]
         except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -105,32 +140,19 @@ class ProxmoxClient:
             path = f"/nodes/{node}/qemu/{vmid}/status/current"
             logger.info("Looking up target VM", extra={"step": "proxmox.locate_vm", "target": path})
             try:
-                response = self.client.get(f"{self.base_url}{path}")
-            except httpx.HTTPError as exc:
-                raise WorkflowError(
-                    "proxmox.locate_vm",
-                    "Network failure while locating target VM",
-                    details={"vmid": vmid, "node": node, "error": str(exc)},
-                ) from exc
-            if response.status_code == 200:
-                return node
-            if response.status_code in (401, 403):
-                raise WorkflowError(
-                    "proxmox.permissions",
-                    "The Proxmox token lacks VM.Audit on the target VM",
-                    details={
-                        "vmid": vmid,
-                        "node": node,
-                        "http_status": response.status_code,
-                        "response_body": response.text[-2000:],
-                    },
-                )
-            if response.status_code != 404:
-                raise WorkflowError(
-                    "proxmox.locate_vm",
-                    "Unexpected target VM response",
-                    details={"vmid": vmid, "node": node, "http_status": response.status_code},
-                )
+                self._request("GET", path, step="proxmox.locate_vm")
+            except WorkflowError as exc:
+                if exc.details.get("http_status") == 404:
+                    continue
+                if exc.details.get("http_status") in (401, 403):
+                    raise WorkflowError(
+                        "proxmox.permissions",
+                        "The Proxmox token lacks VM.Audit on the target VM",
+                        details={**exc.details, "vmid": vmid, "node": node},
+                    ) from exc
+                exc.details.update(vmid=vmid, node=node)
+                raise
+            return node
         raise WorkflowError("proxmox.locate_vm", "Target VM not found", details={"vmid": vmid})
 
     def assert_snapshot(self, node: str, vmid: int, snapshot: str) -> None:
@@ -158,6 +180,18 @@ class ProxmoxClient:
                 details={"vmid": vmid, "node": node},
             )
         return data
+
+    def has_serial_console(self, node: str, vmid: int) -> bool:
+        data = self._request(
+            "GET", f"/nodes/{node}/qemu/{vmid}/config", step="proxmox.serial_preflight"
+        )
+        if not isinstance(data, dict):
+            raise WorkflowError(
+                "proxmox.serial_preflight",
+                "Invalid Proxmox VM configuration response",
+                details={"vmid": vmid, "node": node},
+            )
+        return bool(data.get("serial0"))
 
     def create_serial_terminal_proxy(
         self,
@@ -249,25 +283,15 @@ class ProxmoxClient:
 
         path = f"/nodes/{node}/qemu/{vmid}/agent/exec"
         try:
-            response = self.client.post(
-                f"{self.base_url}{path}",
-                content=urlencode([("command", argument) for argument in command]).encode("ascii"),
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            response.raise_for_status()
-            data = response.json()["data"]
-        except (httpx.HTTPError, ValueError, KeyError) as exc:
-            response = getattr(exc, "response", None)
+            data = self._request("POST", path, step=step, data={"command": command})
+        except WorkflowError as exc:
             raise WorkflowError(
                 step,
                 "QEMU guest-agent command could not be started",
                 details={
                     "vmid": vmid,
                     "node": node,
-                    "http_status": getattr(response, "status_code", None),
-                    "response_body": getattr(response, "text", "")[-2000:],
-                    "exception_type": type(exc).__name__,
-                    "error": str(exc),
+                    **exc.details,
                 },
             ) from exc
 
@@ -283,24 +307,19 @@ class ProxmoxClient:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                response = self.client.get(
-                    f"{self.base_url}/nodes/{node}/qemu/{vmid}/agent/exec-status",
-                    params={"pid": pid},
+                data = self._request(
+                    "GET",
+                    f"/nodes/{node}/qemu/{vmid}/agent/exec-status?pid={pid}",
+                    step=step,
                 )
-                response.raise_for_status()
-                data = response.json()["data"]
-            except (httpx.HTTPError, ValueError, KeyError) as exc:
-                response = getattr(exc, "response", None)
+            except WorkflowError as exc:
                 raise WorkflowError(
                     step,
                     "QEMU guest-agent command status could not be read",
                     details={
                         "vmid": vmid,
                         "node": node,
-                        "http_status": getattr(response, "status_code", None),
-                        "response_body": getattr(response, "text", "")[-2000:],
-                        "exception_type": type(exc).__name__,
-                        "error": str(exc),
+                        **exc.details,
                     },
                 ) from exc
             result = data.get("result", data) if isinstance(data, dict) else data
@@ -397,6 +416,64 @@ class ProxmoxClient:
         if not isinstance(data, str) or not data.startswith("UPID:"):
             raise WorkflowError("proxmox.start_vm", "Invalid Proxmox UPID", details={"vmid": vmid})
         self._wait_task(node, data, vmid, action="start")
+
+    def configure_test_boot_order(self, node: str, vmid: int, devices: tuple[str, ...]) -> None:
+        if (
+            not devices
+            or len(set(devices)) != len(devices)
+            or any(
+                re.fullmatch(r"(?:sata|scsi|ide|virtio|net)\d+", item) is None for item in devices
+            )
+        ):
+            raise ValueError("An explicit, valid test boot order is required")
+        path = f"/nodes/{node}/qemu/{vmid}/config"
+        before = self._request("GET", path, step="proxmox.boot_order_preflight")
+        if (
+            not isinstance(before, dict)
+            or not before.get("digest")
+            or any(not before.get(device) for device in devices)
+        ):
+            raise WorkflowError(
+                "proxmox.boot_order_preflight",
+                "A configured boot device is missing",
+                details={"vmid": vmid, "devices": devices},
+            )
+        desired = "order=" + ";".join(devices)
+        self._request(
+            "PUT",
+            path,
+            step="proxmox.boot_order_update",
+            data={"boot": desired, "digest": before["digest"]},
+        )
+        after = self._request("GET", path, step="proxmox.boot_order_verify")
+        if (
+            not isinstance(after, dict)
+            or after.get("boot") != desired
+            or any(
+                before.get(key) != after.get(key)
+                for key in set(before) | set(after)
+                if key not in {"boot", "digest"}
+            )
+        ):
+            raise WorkflowError(
+                "proxmox.boot_order_verify",
+                "The boot-order update was not isolated",
+                details={"vmid": vmid},
+            )
+
+    def shutdown_vm(self, node: str, vmid: int) -> None:
+        data = self._request(
+            "POST",
+            f"/nodes/{node}/qemu/{vmid}/status/shutdown",
+            step="proxmox.shutdown_vm",
+            data={"timeout": 180, "forceStop": 0},
+        )
+        if not isinstance(data, str) or not data.startswith("UPID:"):
+            raise WorkflowError(
+                "proxmox.shutdown_vm", "Invalid Proxmox UPID", details={"vmid": vmid}
+            )
+        self._wait_task(node, data, vmid, action="shutdown")
+        self.wait_for_vm_status(node, vmid, "stopped", timeout=30, step="proxmox.shutdown_verify")
 
     def wait_for_vm_status(
         self,

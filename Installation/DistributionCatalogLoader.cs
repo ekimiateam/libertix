@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -27,10 +29,111 @@ namespace Libertix.Installation
             if (filepool == null)
                 throw new ArgumentNullException(nameof(filepool));
 
+            byte[] manifest = filepool.LocalDirectory == null
+                ? await DownloadCatalogAsync(filepool)
+                : ReadLocalCatalog(filepool);
+            DistributionCatalogJson catalog = ParseCatalog(manifest);
+            return CreateDistributions(catalog, filepool);
+        }
+
+        public static async Task VerifyLocalFilepoolAsync(
+            FilepoolConfig filepool,
+            Action<string> onProgress)
+        {
+            if (filepool == null || filepool.LocalDirectory == null)
+                throw new ArgumentException("A local filepool must be selected.", nameof(filepool));
+
+            byte[] localManifest = ReadLocalCatalog(filepool);
+            DistributionCatalogJson catalog = ParseCatalog(localManifest);
+            if (!filepool.SkipWebCatalogComparison)
+            {
+                byte[] onlineManifest = await DownloadCatalogAsync(filepool);
+                if (!localManifest.SequenceEqual(onlineManifest))
+                    throw new InvalidDataException(
+                        "The local catalog.json differs from the signed online catalog.json.");
+            }
+
+            foreach (DistroInfoJson distribution in catalog.Distributions)
+                ValidateDistribution(distribution);
+            var artifacts = CatalogFiles.GetAll(catalog);
+            // Missing distribution ISOs are downloaded only if selected.
+            var optionalFileNames = new HashSet<string>(
+                catalog.Distributions.Select(distribution => distribution.IsoInstallerFileName),
+                StringComparer.OrdinalIgnoreCase);
+            // The lab builds and deploys the executable independently of the filepool.
+            if (filepool.IsDevelopmentMode)
+                optionalFileNames.Add(catalog.Artifacts.Wpf.FileName);
+
+            await Task.Run(() =>
+            {
+                foreach (CatalogArtifactJson artifact in artifacts)
+                {
+                    if (!Regex.IsMatch(
+                        artifact.FileName ?? string.Empty,
+                        "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
+                        throw new InvalidDataException("A local artifact filename is invalid.");
+
+                    string path = Path.Combine(filepool.LocalDirectory, artifact.FileName);
+                    var file = new FileInfo(path);
+                    if (!file.Exists && optionalFileNames.Contains(artifact.FileName))
+                    {
+                        onProgress?.Invoke(
+                            "CHECK=LOCAL_FILEPOOL: " + artifact.FileName +
+                            (filepool.IsDevelopmentMode && artifact == catalog.Artifacts.Wpf
+                                ? " absent; executable built separately"
+                                : " absent; download if selected"));
+                        continue;
+                    }
+                    if (!file.Exists || file.Length != artifact.SizeBytes ||
+                        (file.Attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidDataException(
+                            "A local filepool artifact is missing or has the wrong size: " +
+                            artifact.FileName);
+
+                    onProgress?.Invoke("CHECK=LOCAL_FILEPOOL: " + artifact.FileName);
+                    using (var stream = file.OpenRead())
+                    using (var sha256 = SHA256.Create())
+                    {
+                        string actual = BitConverter.ToString(sha256.ComputeHash(stream))
+                            .Replace("-", string.Empty);
+                        if (!string.Equals(
+                            actual, artifact.Sha256, StringComparison.OrdinalIgnoreCase))
+                            throw new InvalidDataException(
+                                "A local filepool artifact has the wrong SHA-256: " +
+                                artifact.FileName);
+                    }
+                }
+            });
+        }
+
+        private static byte[] ReadLocalCatalog(FilepoolConfig filepool)
+        {
+            string manifestPath = Path.Combine(filepool.LocalDirectory, "catalog.json");
+            string signaturePath = manifestPath + ".sig";
+            var manifest = new FileInfo(manifestPath);
+            var signature = new FileInfo(signaturePath);
+            if (!manifest.Exists || manifest.Length > MaximumCatalogBytes ||
+                (manifest.Attributes & FileAttributes.ReparsePoint) != 0 ||
+                (filepool.RequiresCatalogSignature &&
+                    (!signature.Exists || signature.Length > MaximumCatalogSignatureBytes ||
+                    (signature.Attributes & FileAttributes.ReparsePoint) != 0)))
+                throw new InvalidDataException(
+                    "The local catalog.json or catalog.json.sig is missing or too large.");
+            byte[] bytes = File.ReadAllBytes(manifestPath);
+            if (filepool.RequiresCatalogSignature)
+                DistributionCatalogTrust.VerifyWithApplicationKey(
+                    bytes,
+                    File.ReadAllText(signaturePath, Encoding.UTF8));
+            return bytes;
+        }
+
+        private static async Task<byte[]> DownloadCatalogAsync(FilepoolConfig filepool)
+        {
             using (var timeoutCancellation =
                 new CancellationTokenSource(TimeSpan.FromSeconds(30)))
             using (var response = await SharedHttpClient.GetAsync(
                 filepool.CatalogUrl,
+                HttpCompletionOption.ResponseHeadersRead,
                 timeoutCancellation.Token))
             {
                 response.EnsureSuccessStatusCode();
@@ -42,6 +145,7 @@ namespace Libertix.Installation
                 {
                     using (var signatureResponse = await SharedHttpClient.GetAsync(
                         filepool.CatalogSignatureUrl,
+                        HttpCompletionOption.ResponseHeadersRead,
                         timeoutCancellation.Token))
                     {
                         signatureResponse.EnsureSuccessStatusCode();
@@ -55,16 +159,21 @@ namespace Libertix.Installation
                     }
                 }
 
-                var options = new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                };
-                var catalog = JsonSerializer.Deserialize<DistributionCatalogJson>(
-                    Encoding.UTF8.GetString(manifest),
-                    options);
-                ValidateCatalog(catalog);
-                return CreateDistributions(catalog, filepool);
+                return manifest;
             }
+        }
+
+        private static DistributionCatalogJson ParseCatalog(byte[] manifest)
+        {
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+            var catalog = JsonSerializer.Deserialize<DistributionCatalogJson>(
+                Encoding.UTF8.GetString(manifest),
+                options);
+            ValidateCatalog(catalog);
+            return catalog;
         }
 
         private static void ValidateCatalog(DistributionCatalogJson catalog)
@@ -123,12 +232,15 @@ namespace Libertix.Installation
                     SecureBootMicrosoftAuthorities =
                         source.SecureBootMicrosoftAuthorities.ToList(),
                     Description = source.Description ?? "No description available",
-                    ImageUrl = source.ImageUrl,
-                    IsoUrl = filepool.ResolveUrl(biosMiniIso.Url),
-                    IsoInstaller = filepool.ResolveUrl(source.IsoInstaller),
+                    // Catalog illustrations have no signed artifact hash. Do not fetch
+                    // them from external sites when the local server is selected.
+                    ImageUrl = filepool.LocalServer == null ? source.ImageUrl : null,
+                    IsoUrl = filepool.ResolveArtifactUrl(biosMiniIso.Url, biosMiniIso.FileName, biosMiniIso.Sha256),
+                    IsoInstaller = filepool.ResolveArtifactUrl(source.IsoInstaller,
+                        source.IsoInstallerFileName, source.IsoInstallerSha256),
                     IsoInstallerFileName = source.IsoInstallerFileName,
                     IsoSha256 = biosMiniIso.Sha256,
-                    UefiIsoUrl = filepool.ResolveUrl(uefiMiniIso.Url),
+                    UefiIsoUrl = filepool.ResolveArtifactUrl(uefiMiniIso.Url, uefiMiniIso.FileName, uefiMiniIso.Sha256),
                     UefiIsoSha256 = uefiMiniIso.Sha256,
                     IsoInstallerSha256 = source.IsoInstallerSha256,
                     IsoInstallerSizeBytes = source.IsoInstallerSizeBytes,

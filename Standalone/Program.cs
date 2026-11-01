@@ -8,9 +8,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
-using System.Security.AccessControl;
 using System.Security.Cryptography;
-using System.Security.Principal;
 using System.Text;
 using System.Windows.Forms;
 
@@ -28,10 +26,16 @@ namespace Libertix.Standalone
             {
                 string runtimeRoot = EnsureRuntime();
                 string executable = Path.Combine(runtimeRoot, "Libertix.exe");
+                string adjacentFilepool = Path.Combine(
+                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    "filepool");
+                IEnumerable<string> launchArgs = args;
+                if (Directory.Exists(adjacentFilepool))
+                    launchArgs = args.Concat(new[] { "--local-filepool-dir", adjacentFilepool });
                 var start = new ProcessStartInfo
                 {
                     FileName = executable,
-                    Arguments = string.Join(" ", args.Select(QuoteArgument)),
+                    Arguments = string.Join(" ", launchArgs.Select(QuoteArgument)),
                     WorkingDirectory = runtimeRoot,
                     UseShellExecute = false
                 };
@@ -43,6 +47,10 @@ namespace Libertix.Standalone
                     return process.ExitCode;
                 }
             }
+            catch (OperationCanceledException)
+            {
+                return 1;
+            }
             catch (Exception error)
             {
                 string language = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
@@ -51,11 +59,7 @@ namespace Libertix.Standalone
                     : language == "es"
                         ? "Libertix no pudo preparar su entorno interno verificado."
                         : "Libertix could not prepare its verified runtime.";
-                MessageBox.Show(
-                    message + "\r\n\r\n" + error,
-                    "Libertix",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                Support.SupportReportDialog.Show("Libertix", message + "\r\n\r\n" + error);
                 return 1;
             }
         }
@@ -72,9 +76,30 @@ namespace Libertix.Standalone
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 "Libertix",
                 "Runtime");
-            ProtectDirectory(parent);
+            var acceptedWarnings = new HashSet<string>(StringComparer.Ordinal);
+            Func<string, bool> confirm = warning => ConfirmUnsafePermissions(warning, acceptedWarnings);
+            bool refreshRuntime = Security.ProtectedFiles.RepairDirectory(parent, confirmUnsafePermissions: confirm);
             using (FileStream runtimeLock = AcquireRuntimeLock(parent))
-                return EnsureRuntimeLocked(assembly, manifest, identity, parent);
+                return EnsureRuntimeLocked(assembly, manifest, identity, parent, confirm, refreshRuntime);
+        }
+
+        private static bool ConfirmUnsafePermissions(string warning, HashSet<string> acceptedWarnings)
+        {
+            if (acceptedWarnings.Contains(warning))
+                return true;
+            string language = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
+            string message = language == "fr"
+                ? "Les permissions de ce chemin ne garantissent pas la sécurité de Libertix. Un autre utilisateur pourrait modifier ou remplacer du code exécuté en administrateur. Continuer malgré ce risque ?"
+                : language == "es"
+                    ? "Los permisos de esta ruta no garantizan la seguridad de Libertix. Otro usuario podría modificar o reemplazar código ejecutado como administrador. ¿Continuar a pesar de este riesgo?"
+                    : language == "ko"
+                        ? "이 경로의 권한은 Libertix의 보안을 보장하지 않습니다. 다른 사용자가 관리자 권한으로 실행되는 코드를 수정하거나 바꿀 수 있습니다. 이 위험을 감수하고 계속하시겠습니까?"
+                        : "The permissions on this path do not guarantee Libertix's security. Another user could modify or replace code run as administrator. Continue despite this risk?";
+            if (MessageBox.Show(message + "\r\n\r\n" + warning, "Libertix",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return false;
+            acceptedWarnings.Add(warning);
+            return true;
         }
 
         private static FileStream AcquireRuntimeLock(string parent)
@@ -103,15 +128,17 @@ namespace Libertix.Standalone
             Assembly assembly,
             PayloadManifest manifest,
             string identity,
-            string parent)
+            string parent,
+            Func<string, bool> confirm,
+            bool refreshRuntime)
         {
             string destination = Path.Combine(parent, identity);
-            if (ValidateRuntime(destination, manifest))
+            if (!refreshRuntime && ValidateRuntime(destination, manifest))
                 return destination;
 
             string staging = Path.Combine(parent, ".staging-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(staging);
-            ProtectDirectory(staging);
+            ProtectDirectory(staging, confirm);
             try
             {
                 ExtractVerifiedPayload(assembly, staging, manifest);
@@ -232,22 +259,9 @@ namespace Libertix.Standalone
             catch (UnauthorizedAccessException) { return false; }
         }
 
-        private static void ProtectDirectory(string path)
+        private static void ProtectDirectory(string path, Func<string, bool> confirm)
         {
-            Directory.CreateDirectory(path);
-            var security = new DirectorySecurity();
-            security.SetAccessRuleProtection(true, false);
-            var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-            foreach (string sidValue in new[] { "S-1-5-18", "S-1-5-32-544" })
-            {
-                security.AddAccessRule(new FileSystemAccessRule(
-                    new SecurityIdentifier(sidValue),
-                    FileSystemRights.FullControl,
-                    inheritance,
-                    PropagationFlags.None,
-                    AccessControlType.Allow));
-            }
-            Directory.SetAccessControl(path, security);
+            Security.ProtectedFiles.CreateDirectory(path, confirmUnsafePermissions: confirm);
         }
 
         private static string ResolveUnderRoot(string root, string relative)

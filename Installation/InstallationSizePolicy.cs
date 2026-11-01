@@ -29,6 +29,21 @@ namespace Libertix.Installation
         public const long BytesPerGiB = 1024L * 1024L * 1024L;
         public const long MebibytesPerGiB = 1024L;
 
+        public static long GetFinalInstallerOffset(PartitionIdentity source, long finalSizeBytes)
+        {
+            if (source == null)
+                throw new ArgumentNullException(nameof(source));
+            if (source.OffsetBytes <= 0 || source.SizeBytes <= 0 ||
+                source.OffsetBytes > long.MaxValue - source.SizeBytes)
+                throw new ArgumentOutOfRangeException(nameof(source));
+            long originalEnd = source.OffsetBytes + source.SizeBytes;
+            long padding = originalEnd % PartitionAlignmentBytes;
+            if (finalSizeBytes <= 0 || finalSizeBytes % PartitionAlignmentBytes != 0 ||
+                finalSizeBytes >= source.SizeBytes - padding)
+                throw new ArgumentOutOfRangeException(nameof(finalSizeBytes));
+            return originalEnd - padding - finalSizeBytes;
+        }
+
         public static InstallationSizes FromRequestedGigabytes(double requestedGigabytes)
         {
             if (double.IsNaN(requestedGigabytes) || double.IsInfinity(requestedGigabytes))
@@ -47,17 +62,24 @@ namespace Libertix.Installation
             double shrinkAvailableGiB,
             double installerIsoGiB)
         {
-            double windowsBudget =
+            if (shrinkAvailableGiB < StagingSizeGiB)
+                return 0;
+
+            double downloadBudget =
                 initialWindowsFreeGiB - installerIsoGiB - MinimumWindowsFreeSpaceGiB;
-            return Math.Max(0, Math.Min(windowsBudget, shrinkAvailableGiB));
+            if (downloadBudget < 0)
+                return 0;
+
+            // The final free-space budget credits the transaction ISO reclaimed
+            // by cleanup; the live installer still needs it during installation.
+            return Math.Max(0, initialWindowsFreeGiB - MinimumWindowsFreeSpaceGiB);
         }
 
         public static double RemainingWindowsFreeSpaceGiB(
             double initialWindowsFreeGiB,
-            double installerIsoGiB,
             double linuxSizeGiB)
         {
-            return initialWindowsFreeGiB - installerIsoGiB - linuxSizeGiB;
+            return initialWindowsFreeGiB - linuxSizeGiB;
         }
 
     }

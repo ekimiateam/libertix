@@ -11,12 +11,13 @@ import json
 import ntpath
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlparse
 
 from libertix_installation_policy import load_installation_policy
 from libertix_json_schema import validate_json_schema
+from libertix_windows_sharing import validate_sharing
 
 GIB = 1024**3
 INSTALLATION_POLICY = load_installation_policy()
@@ -42,6 +43,20 @@ SAFE_GRUB_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$")
 
 class PlanValidationError(ValueError):
     """Raised when a plan cannot safely drive an installation."""
+
+
+def require_safe_absolute_windows_path(value: Any, path: str) -> str:
+    text = require_text(value, path)
+    windows_path = PureWindowsPath(text)
+    if (
+        "/" in text
+        or not windows_path.drive
+        or not windows_path.is_absolute()
+        or any(part in {"", ".", ".."} or ":" in part for part in windows_path.parts[1:])
+        or ntpath.normcase(ntpath.normpath(text)) != ntpath.normcase(text.rstrip("\\"))
+    ):
+        raise PlanValidationError(f"{path} must be an absolute safe Windows path")
+    return text
 
 
 def project_windows_profiles(encoded_profiles: str) -> str:
@@ -88,6 +103,12 @@ def require_positive_integer(value: Any, path: str) -> int:
     return value
 
 
+def require_nonnegative_integer(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PlanValidationError(f"{path} must be a non-negative integer")
+    return value
+
+
 def require_microsoft_uefi_authorities(value: Any, path: str, *, allow_empty: bool) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise PlanValidationError(f"{path} must be a string array")
@@ -116,15 +137,74 @@ def validate_partition(value: Any, path: str, logical_sector_size: int) -> dict[
     return partition
 
 
+def validate_allocation(allocation: dict[str, Any], windows_disk: dict[str, Any]) -> dict[str, Any]:
+    number = require_nonnegative_integer(allocation.get("number"), "allocation.number")
+    if number > 2**31 - 1 or number == windows_disk["number"]:
+        raise PlanValidationError("allocation must use a distinct physical disk")
+    require_text(allocation.get("uniqueId"), "allocation.uniqueId")
+    require_text(allocation.get("sourceVolumeId"), "allocation.sourceVolumeId")
+    ntfs_uuid = require_text(allocation.get("sourceNtfsUuid"), "allocation.sourceNtfsUuid")
+    if not re.fullmatch(r"[0-9A-F]{16}", ntfs_uuid) or ntfs_uuid == "0000000000000000":
+        raise PlanValidationError(
+            "allocation.sourceNtfsUuid must identify the recorded NTFS filesystem"
+        )
+    style = allocation.get("partitionStyle")
+    table_id = require_text(allocation.get("partitionTableId"), "allocation.partitionTableId")
+    pattern = (
+        r"gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        if style == "GPT"
+        else r"mbr:[0-9a-f]{8}"
+    )
+    if (
+        style not in {"GPT", "MBR"}
+        or not re.fullmatch(pattern, table_id)
+        or table_id == "gpt:00000000-0000-0000-0000-000000000000"
+        or table_id == windows_disk["partitionTableId"]
+    ):
+        raise PlanValidationError(
+            "allocation.partitionTableId must identify a distinct partition table"
+        )
+    drive = require_text(allocation.get("sourceDrive"), "allocation.sourceDrive")
+    if not re.fullmatch(r"[A-Z]:", drive) or drive == windows_disk["systemDrive"]:
+        raise PlanValidationError(
+            "allocation.sourceDrive must be a distinct uppercase Windows drive"
+        )
+    if allocation.get("sourceBitLockerState") not in {
+        "FullyDecrypted",
+        "NotEncryptable",
+        "EncryptedOrProtected",
+    }:
+        raise PlanValidationError("allocation.sourceBitLockerState is invalid")
+    size = require_positive_integer(allocation.get("sizeBytes"), "allocation.sizeBytes")
+    sector = require_positive_integer(
+        allocation.get("logicalSectorSizeBytes"), "allocation.logicalSectorSizeBytes"
+    )
+    if size > 2**63 - 1 or sector not in {512, 4096} or size % sector:
+        raise PlanValidationError("allocation disk size and sector size are invalid")
+    source = validate_partition(
+        allocation.get("sourcePartition"), "allocation.sourcePartition", sector
+    )
+    if (
+        source["offsetBytes"] + source["sizeBytes"] > size
+        or source["number"] > 2**31 - 1
+        or (style == "MBR" and source["number"] > 4)
+    ):
+        raise PlanValidationError(
+            "allocation.sourcePartition must be a primary extent inside its disk"
+        )
+    return source
+
+
 def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, Any]:
     try:
         validate_json_schema("installation-plan.schema.json", plan)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise PlanValidationError(f"installation plan schema validation failed: {error}") from error
 
+    # The schema already enforced structure, types and enumerations. JSON Schema patterns
+    # use re.search, where "$" still accepts a trailing newline, so values that reach
+    # paths or commands are re-checked with fullmatch. The rest are cross-field rules.
     root = require_mapping(plan, "plan")
-    if root.get("schemaVersion") != 3:
-        raise PlanValidationError("unsupported installation plan schemaVersion")
     if not HEX_ID_PATTERN.fullmatch(str(root.get("planId", ""))):
         raise PlanValidationError("planId must contain 32 lowercase hexadecimal characters")
     created_at = require_text(root.get("createdAtUtc"), "createdAtUtc")
@@ -135,9 +215,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     if parsed_created_at.utcoffset() != dt.timedelta(0):
         raise PlanValidationError("createdAtUtc must use UTC")
 
-    firmware = root.get("firmware")
-    if firmware not in {"bios", "uefi"}:
-        raise PlanValidationError("firmware must be 'bios' or 'uefi'")
+    firmware = root["firmware"]
 
     distribution = require_mapping(root.get("distribution"), "distribution")
     for name in (
@@ -165,10 +243,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     )
     if "/" in distribution["installerIsoFileName"] or "\\" in distribution["installerIsoFileName"]:
         raise PlanValidationError("distribution.installerIsoFileName must not contain a path")
-    if not re.match(r"^[A-Za-z]:[\\/]", distribution["installerIsoWindowsPath"]):
-        raise PlanValidationError(
-            "distribution.installerIsoWindowsPath must be an absolute Windows drive path"
-        )
+    distribution["installerIsoWindowsPath"] = require_safe_absolute_windows_path(
+        distribution["installerIsoWindowsPath"],
+        "distribution.installerIsoWindowsPath",
+    )
     for name in ("installerIsoSha256", "liveIsoSha256"):
         if not SHA256_PATTERN.fullmatch(str(distribution.get(name, ""))):
             raise PlanValidationError(f"distribution.{name} must be a lowercase SHA-256 hash")
@@ -178,9 +256,6 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
             raise PlanValidationError(f"distribution.{name} must be an absolute HTTP(S) URL")
 
     locale = require_mapping(root.get("locale"), "locale")
-    language_code = require_text(locale.get("languageCode"), "locale.languageCode")
-    if language_code not in {"en", "fr", "es"}:
-        raise PlanValidationError("locale.languageCode must be one of: en, fr, es")
     for name in ("systemLanguage", "keyboardLayout", "keyboardModel", "timezone"):
         require_text(require_property(locale, name, "locale"), f"locale.{name}")
     for name in ("keyboardLayout", "keyboardModel"):
@@ -200,13 +275,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError("account.username is invalid")
     if username.casefold() in INSTALLATION_POLICY.account.reserved_usernames:
         raise PlanValidationError("account.username is reserved by the operating system")
-    password_hash_windows_path = str(account.get("passwordHashWindowsPath", ""))
-    if not re.fullmatch(r"[A-Za-z]:\\.+", password_hash_windows_path) or any(
-        part == ".." for part in password_hash_windows_path[3:].split("\\")
-    ):
-        raise PlanValidationError(
-            "account.passwordHashWindowsPath must be an absolute safe Windows path"
-        )
+    password_hash_windows_path = require_safe_absolute_windows_path(
+        account.get("passwordHashWindowsPath"),
+        "account.passwordHashWindowsPath",
+    )
     computer_name = require_text(account.get("computerName"), "account.computerName")
     if not re.fullmatch(r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?", computer_name):
         raise PlanValidationError("account.computerName is not a valid Linux hostname")
@@ -230,8 +302,6 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     logical_sector_size = require_positive_integer(
         disk.get("logicalSectorSizeBytes"), "disk.logicalSectorSizeBytes"
     )
-    if logical_sector_size not in (512, 4096):
-        raise PlanValidationError("disk.logicalSectorSizeBytes must be either 512 or 4096")
     if disk_size % logical_sector_size != 0:
         raise PlanValidationError("disk.sizeBytes must align to disk.logicalSectorSizeBytes")
     system_drive = require_text(disk.get("systemDrive"), "disk.systemDrive")
@@ -261,14 +331,33 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     ):
         left_start, left_end = fixed_extents[left]
         right_start, right_end = fixed_extents[right]
-        if left_start < right_end and right_start < left_end:
+        same_bios_windows_boot_partition = (
+            firmware == "bios"
+            and (left, right) == ("windows", "boot")
+            and fixed_partitions[left]["number"] == fixed_partitions[right]["number"]
+            and (left_start, left_end) == (right_start, right_end)
+        )
+        if (
+            left_start < right_end
+            and right_start < left_end
+            and not same_bios_windows_boot_partition
+        ):
             raise PlanValidationError(f"disk.{left} and disk.{right} overlap")
     windows_end = fixed_extents["windows"][1]
     recovery_offset = fixed_extents["recovery"][0]
-    if windows_end > recovery_offset:
+    if firmware == "bios" and windows_end > recovery_offset:
         raise PlanValidationError(
             "disk.recovery must start at or after the original Windows partition end"
         )
+
+    allocation = root.get("allocation")
+    source = disk["windows"]
+    source_disk = disk
+    if allocation is not None:
+        source_disk = require_mapping(allocation, "allocation")
+        source = validate_allocation(source_disk, disk)
+    source_end = int(source["offsetBytes"]) + int(source["sizeBytes"])
+    allocation_sector_size = int(source_disk["logicalSectorSizeBytes"])
 
     installer = require_mapping(disk.get("installer"), "disk.installer")
     number = require_property(installer, "number", "disk.installer")
@@ -280,7 +369,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     if number is not None:
         require_positive_integer(number, "disk.installer.number")
         parsed_offset = require_positive_integer(offset, "disk.installer.offsetBytes")
-        if parsed_offset % logical_sector_size != 0:
+        if parsed_offset % allocation_sector_size != 0:
             raise PlanValidationError(
                 "disk.installer.offsetBytes must align to disk.logicalSectorSizeBytes"
             )
@@ -296,11 +385,7 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     final_offset = require_positive_integer(
         installer.get("finalOffsetBytes"), "disk.installer.finalOffsetBytes"
     )
-    resize_mode = installer.get("resizeMode")
-    if resize_mode not in {"windows-online", "live-offline"}:
-        raise PlanValidationError(
-            "disk.installer.resizeMode must be windows-online or live-offline"
-        )
+    resize_mode = installer["resizeMode"]
     if final_size % GIB != 0 or staging_size % GIB != 0:
         raise PlanValidationError("installer sizes must be whole numbers of GiB")
     final_size_gib = final_size // GIB
@@ -316,23 +401,25 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     if staging_size != expected_staging_gib * GIB:
         raise PlanValidationError("stagingSizeBytes does not match the shared FAT32 staging policy")
     alignment_bytes = INSTALLATION_POLICY.storage.partition_alignment_bytes
-    alignment_padding = windows_end % alignment_bytes
-    expected_final_offset = windows_end - alignment_padding - final_size
-    if expected_final_offset <= 0 or final_offset != expected_final_offset:
+    alignment_padding = source_end % alignment_bytes
+    expected_final_offset = source_end - alignment_padding - final_size
+    if expected_final_offset <= int(source["offsetBytes"]) or final_offset != expected_final_offset:
         raise PlanValidationError(
             "disk.installer.finalOffsetBytes does not match the aligned final geometry"
         )
-    if final_offset + final_size > recovery_offset:
-        raise PlanValidationError("disk.installer final extent would overlap disk.recovery")
+    if final_offset + final_size > source_end:
+        raise PlanValidationError(
+            "disk.installer final extent exceeds the original Windows partition"
+        )
     if offset is not None:
         expected_observed_offset = (
-            windows_end - alignment_padding - staging_size
+            source_end - alignment_padding - staging_size
             if resize_mode == "live-offline"
             else expected_final_offset
         )
         primary_mbr_offset = expected_observed_offset - alignment_bytes
         offset_matches = parsed_offset == expected_observed_offset or (
-            firmware == "bios" and parsed_offset == primary_mbr_offset
+            source_disk["partitionStyle"] == "MBR" and parsed_offset == primary_mbr_offset
         )
         if not offset_matches:
             raise PlanValidationError(
@@ -348,6 +435,70 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         "features.windowsProfilesJsonBase64",
     )
     project_windows_profiles(profiles)
+    if "windowsSharing" in features:
+        if features.get("shareWindowsFilesInLinux") is not True:
+            raise PlanValidationError("Disabled Windows sharing must not contain an inventory")
+        validate_sharing(features["windowsSharing"])
+    migration = require_mapping(
+        features.get("windowsPreferenceMigration"),
+        "features.windowsPreferenceMigration",
+    )
+    migration_enabled = migration.get("enabled")
+    if not isinstance(migration_enabled, bool):
+        raise PlanValidationError("features.windowsPreferenceMigration.enabled must be a boolean")
+    bundle_file_name = require_property(
+        migration,
+        "bundleFileName",
+        "features.windowsPreferenceMigration",
+    )
+    bundle_sha256 = require_property(
+        migration,
+        "bundleSha256",
+        "features.windowsPreferenceMigration",
+    )
+    bundle_size = require_nonnegative_integer(
+        require_property(
+            migration,
+            "bundleSizeBytes",
+            "features.windowsPreferenceMigration",
+        ),
+        "features.windowsPreferenceMigration.bundleSizeBytes",
+    )
+    wifi_profile_count = require_nonnegative_integer(
+        require_property(
+            migration,
+            "wifiProfileCount",
+            "features.windowsPreferenceMigration",
+        ),
+        "features.windowsPreferenceMigration.wifiProfileCount",
+    )
+    if not migration_enabled:
+        if (
+            bundle_file_name is not None
+            or bundle_sha256 is not None
+            or bundle_size != 0
+            or wifi_profile_count != 0
+        ):
+            raise PlanValidationError(
+                "disabled Windows preference migration must not describe a bundle"
+            )
+    else:
+        if bundle_file_name != "windows-preferences.secret.json":
+            raise PlanValidationError(
+                "Windows preference migration must use the fixed transaction bundle name"
+            )
+        if not SHA256_PATTERN.fullmatch(str(bundle_sha256 or "")):
+            raise PlanValidationError(
+                "Windows preference migration bundle hash must be a lowercase SHA-256 value"
+            )
+        if bundle_size <= 0 or bundle_size > 128 * 1024 * 1024:
+            raise PlanValidationError(
+                "Windows preference migration bundle size is outside the supported range"
+            )
+        if wifi_profile_count > 256:
+            raise PlanValidationError(
+                "Windows preference migration Wi-Fi profile count is outside the supported range"
+            )
 
     runtime = require_mapping(root.get("runtime"), "runtime")
     if runtime.get("windowsBitLockerState") not in {"FullyDecrypted", "NotEncryptable"}:
@@ -380,13 +531,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
             "recoveryRootWindows and recoveryRunId must both be set or both be null"
         )
     if recovery_root is not None:
-        require_text(recovery_root, "runtime.recoveryRootWindows")
-        if not re.fullmatch(r"[A-Za-z]:\\.+", recovery_root) or any(
-            part == ".." for part in recovery_root[3:].split("\\")
-        ):
-            raise PlanValidationError(
-                "runtime.recoveryRootWindows must be an absolute safe Windows path"
-            )
+        recovery_root = require_safe_absolute_windows_path(
+            recovery_root,
+            "runtime.recoveryRootWindows",
+        )
         if not HEX_ID_PATTERN.fullmatch(str(recovery_id)):
             raise PlanValidationError("runtime.recoveryRunId is invalid")
 
@@ -399,6 +547,13 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     for path_name, windows_path in windows_paths.items():
         if windows_path[:2].upper() != system_drive:
             raise PlanValidationError(f"{path_name} must be located on disk.systemDrive")
+    if recovery_root is not None and ntpath.normcase(password_hash_windows_path) != ntpath.normcase(
+        ntpath.join(recovery_root, "account-secret.env")
+    ):
+        raise PlanValidationError(
+            "account.passwordHashWindowsPath must be the plan-owned account-secret.env "
+            "under runtime.recoveryRootWindows"
+        )
 
     expected_installer_iso_path = ntpath.join(
         system_drive + "\\",
@@ -512,7 +667,11 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
     disk = plan["disk"]
     installer = disk["installer"]
     runtime = plan["runtime"]
+    allocation = plan.get("allocation")
+    allocation_disk = allocation or disk
+    allocation_source = allocation["sourcePartition"] if allocation else disk["windows"]
     features = plan["features"]
+    migration = features["windowsPreferenceMigration"]
     development = plan.get("development")
 
     final_size = int(installer["finalSizeBytes"])
@@ -547,6 +706,17 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "TARGET_DISK_PARTITION_TABLE_ID": disk["partitionTableId"],
         "TARGET_DISK_SIZE_BYTES": str(disk["sizeBytes"]),
         "TARGET_LOGICAL_SECTOR_SIZE_BYTES": str(disk["logicalSectorSizeBytes"]),
+        "SEPARATE_ALLOCATION_DISK": str(allocation is not None).lower(),
+        "ALLOCATION_DISK_PARTITION_TABLE_ID": allocation_disk["partitionTableId"],
+        "ALLOCATION_DISK_SIZE_BYTES": str(allocation_disk["sizeBytes"]),
+        "ALLOCATION_DISK_SECTOR_SIZE_BYTES": str(allocation_disk["logicalSectorSizeBytes"]),
+        "ALLOCATION_PARTITION_STYLE": allocation_disk["partitionStyle"],
+        "ALLOCATION_SOURCE_OFFSET_BYTES": str(allocation_source["offsetBytes"]),
+        "ALLOCATION_SOURCE_SIZE_BYTES": str(allocation_source["sizeBytes"]),
+        "ALLOCATION_SOURCE_NTFS_UUID": allocation["sourceNtfsUuid"] if allocation else "",
+        "ALLOCATION_SOURCE_BITLOCKER_STATE": (
+            allocation["sourceBitLockerState"] if allocation else runtime["windowsBitLockerState"]
+        ),
         "WINDOWS_PARTITION_NUMBER": str(disk["windows"]["number"]),
         "WINDOWS_PARTITION_OFFSET_BYTES": str(disk["windows"]["offsetBytes"]),
         "WINDOWS_PARTITION_SIZE_BYTES": str(disk["windows"]["sizeBytes"]),
@@ -575,6 +745,11 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "WINDOWS_PROFILES_JSON_BASE64": project_windows_profiles(
             features["windowsProfilesJsonBase64"]
         ),
+        "WINDOWS_PREFERENCE_MIGRATION_ENABLED": str(migration["enabled"]).lower(),
+        "WINDOWS_PREFERENCE_BUNDLE_FILE_NAME": migration["bundleFileName"] or "",
+        "WINDOWS_PREFERENCE_BUNDLE_SHA256": migration["bundleSha256"] or "",
+        "WINDOWS_PREFERENCE_BUNDLE_SIZE_BYTES": str(migration["bundleSizeBytes"]),
+        "WINDOWS_PREFERENCE_WIFI_PROFILE_COUNT": str(migration["wifiProfileCount"]),
         "DEVELOPMENT_SSH_ENABLED": str(development is not None).lower(),
         "DEVELOPMENT_STATIC_IPV4_ADDRESS": (
             development["staticIpv4Address"] if development else ""

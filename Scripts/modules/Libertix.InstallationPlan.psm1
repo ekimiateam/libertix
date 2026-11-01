@@ -9,7 +9,7 @@ $script:BytesPerGiB = 1GB
 $script:InstallationPlanPropertySets = [ordered]@{
     root = @(
         "schemaVersion", "planId", "createdAtUtc", "firmware", "distribution",
-        "locale", "account", "disk", "features", "runtime", "development"
+        "locale", "account", "disk", "allocation", "features", "runtime", "development"
     )
     distribution = @(
         "id", "name", "osReleaseId", "grubDisplayName", "grubIcon",
@@ -27,13 +27,25 @@ $script:InstallationPlanPropertySets = [ordered]@{
         "systemDrive", "windows", "boot", "recovery", "installer"
     )
     partition = @("number", "offsetBytes", "sizeBytes")
+    allocation = @(
+        "number", "uniqueId", "partitionTableId", "sizeBytes", "logicalSectorSizeBytes",
+        "partitionStyle", "sourceDrive", "sourcePartition", "sourceVolumeId", "sourceNtfsUuid", "sourceBitLockerState"
+    )
     installer = @(
         "number", "offsetBytes", "finalOffsetBytes", "resizeMode",
         "finalSizeBytes", "stagingSizeBytes"
     )
     features = @(
         "shareWindowsFilesInLinux", "shareLinuxFilesInWindows",
-        "windowsProfilesJsonBase64"
+        "windowsProfilesJsonBase64", "windowsPreferenceMigration", "windowsSharing"
+    )
+    windowsSharing = @("version", "volumes", "folders")
+    sharingVolume = @("ntfsUuid", "disk", "offsetBytes", "sizeBytes", "windowsVolumeId", "windowsDrive")
+    sharingDisk = @("partitionTableId", "partitionStyle", "sizeBytes", "logicalSectorSizeBytes")
+    sharingFolder = @("shortcut", "profileSid", "ntfsUuid", "relativePath")
+    windowsPreferenceMigration = @(
+        "enabled", "bundleFileName", "bundleSha256", "bundleSizeBytes",
+        "wifiProfileCount"
     )
     runtime = @(
         "windowsBitLockerState",
@@ -97,6 +109,32 @@ function Assert-LibertixPlanProperty {
     return $Object.$Name
 }
 
+function Test-LibertixSafeAbsoluteWindowsPath {
+    param([AllowNull()][string]$Value)
+
+    if (
+        [string]::IsNullOrWhiteSpace($Value) -or
+        $Value -notmatch '^[A-Za-z]:\\[^/]+$'
+    ) {
+        return $false
+    }
+
+    try {
+        $canonical = [IO.Path]::GetFullPath($Value).TrimEnd('\')
+        $supplied = $Value.TrimEnd('\')
+        if (-not $canonical.Equals($supplied, [StringComparison]::OrdinalIgnoreCase)) {
+            return $false
+        }
+    } catch {
+        return $false
+    }
+
+    $segments = @($Value.Substring(3) -split '\\')
+    return @($segments | Where-Object {
+        [string]::IsNullOrEmpty($_) -or $_ -in @('.', '..') -or $_.Contains(':')
+    }).Count -eq 0
+}
+
 function Assert-LibertixMicrosoftUefiAuthorities {
     param(
         [AllowNull()][object]$Value,
@@ -104,7 +142,7 @@ function Assert-LibertixMicrosoftUefiAuthorities {
         [switch]$AllowEmpty
     )
 
-    if ($null -eq $Value) {
+    if ($null -eq $Value -or $Value -isnot [Array]) {
         throw "Installation plan field $Path must be an array."
     }
     $values = @($Value)
@@ -278,33 +316,118 @@ function Assert-LibertixDevelopmentNetwork {
     }
 }
 
-function Assert-LibertixInstallationPlan {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][object]$Plan)
+function Assert-LibertixAllocationPlan {
+    param(
+        [Parameter(Mandatory = $true)][object]$Allocation,
+        [Parameter(Mandatory = $true)][object]$WindowsDisk
+    )
 
-    Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
-
-    $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
-    if ([int]$schemaVersion -ne 3) {
-        throw "Unsupported installation plan schemaVersion: $schemaVersion."
+    Assert-LibertixExactPlanProperties -Object $Allocation -Path 'allocation' -PropertySet 'allocation'
+    foreach ($name in $script:InstallationPlanPropertySets.allocation) {
+        Assert-LibertixPlanProperty -Object $Allocation -Name $name -Path "allocation.$name" | Out-Null
     }
-
-    $planId = [string](Assert-LibertixPlanProperty -Object $Plan -Name "planId" -Path "planId")
-    if ($planId -notmatch '^[0-9a-f]{32}$') {
-        throw "Installation plan planId must contain 32 lowercase hexadecimal characters."
+    [int]$number = -1
+    if (-not [int]::TryParse([string]$Allocation.number, [ref]$number) -or
+        $number -lt 0 -or $number -eq [int]$WindowsDisk.number) {
+        throw 'Installation allocation must use a distinct physical disk.'
     }
-    $createdAtUtc = [string](Assert-LibertixPlanProperty -Object $Plan -Name "createdAtUtc" -Path "createdAtUtc")
-    [DateTimeOffset]$createdAt = [DateTimeOffset]::MinValue
-    if (-not [DateTimeOffset]::TryParse($createdAtUtc, [ref]$createdAt) -or $createdAt.Offset -ne [TimeSpan]::Zero) {
-        throw "Installation plan createdAtUtc must be a valid UTC date-time."
+    foreach ($name in @('uniqueId', 'partitionTableId', 'sourceDrive', 'sourceVolumeId', 'sourceBitLockerState')) {
+        if ($Allocation.$name -isnot [string] -or [string]::IsNullOrWhiteSpace($Allocation.$name) -or
+            $Allocation.$name -match '[\x00-\x1f]') { throw "Invalid allocation.$name." }
     }
-
-    $firmware = [string](Assert-LibertixPlanProperty -Object $Plan -Name "firmware" -Path "firmware")
-    if ($firmware -notin @("bios", "uefi")) {
-        throw "Installation plan firmware must be 'bios' or 'uefi'."
+    $style = [string]$Allocation.partitionStyle
+    if ($Allocation.sourceNtfsUuid -isnot [string] -or
+        $Allocation.sourceNtfsUuid -cnotmatch '\A[0-9A-F]{16}\z' -or
+        $Allocation.sourceNtfsUuid -eq '0000000000000000') {
+        throw 'allocation.sourceNtfsUuid must identify the recorded NTFS filesystem.'
     }
+    $tablePattern = if ($style -ceq 'GPT') {
+        '^gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    } else { '^mbr:[0-9a-f]{8}$' }
+    if ($style -cnotin @('GPT', 'MBR') -or [string]$Allocation.partitionTableId -cnotmatch $tablePattern -or
+        $Allocation.partitionTableId -eq 'gpt:00000000-0000-0000-0000-000000000000' -or
+        $Allocation.partitionTableId -eq $WindowsDisk.partitionTableId) {
+        throw 'allocation.partitionTableId must identify a distinct partition table.'
+    }
+    if ([string]$Allocation.sourceDrive -cnotmatch '^[A-Z]:$' -or
+        $Allocation.sourceDrive -eq $WindowsDisk.systemDrive) {
+        throw 'allocation.sourceDrive must be a distinct uppercase Windows drive.'
+    }
+    if ($Allocation.sourceBitLockerState -cnotin @('FullyDecrypted', 'NotEncryptable', 'EncryptedOrProtected')) {
+        throw 'allocation.sourceBitLockerState is invalid.'
+    }
+    Assert-LibertixPositiveInteger -Value $Allocation.sizeBytes -Path 'allocation.sizeBytes'
+    Assert-LibertixPositiveInteger -Value $Allocation.logicalSectorSizeBytes -Path 'allocation.logicalSectorSizeBytes'
+    [long]$sector = $Allocation.logicalSectorSizeBytes
+    if ($sector -notin @(512, 4096) -or [long]$Allocation.sizeBytes % $sector -ne 0) {
+        throw 'allocation disk size and sector size are invalid.'
+    }
+    Assert-LibertixPartitionIdentity -Partition $Allocation.sourcePartition `
+        -Path 'allocation.sourcePartition' -LogicalSectorSizeBytes $sector
+    $source = $Allocation.sourcePartition
+    if ([long]$source.sizeBytes -gt [long]$Allocation.sizeBytes -or
+        [long]$source.offsetBytes -gt [long]$Allocation.sizeBytes - [long]$source.sizeBytes -or
+        [long]$source.number -gt [int]::MaxValue -or ($style -eq 'MBR' -and [long]$source.number -gt 4)) {
+        throw 'allocation.sourcePartition must be a primary extent inside its disk.'
+    }
+}
 
-    $distribution = Assert-LibertixPlanProperty -Object $Plan -Name "distribution" -Path "distribution"
+function Assert-LibertixWindowsSharingPlan {
+    param([Parameter(Mandatory = $true)]$Sharing)
+
+    Assert-LibertixExactPlanProperties -Object $Sharing -Path 'features.windowsSharing' -PropertySet windowsSharing
+    if ($Sharing.version -ne 1 -or $Sharing.volumes -isnot [Array] -or $Sharing.folders -isnot [Array] -or
+        $Sharing.volumes.Count -gt 64 -or $Sharing.folders.Count -gt 256) {
+        throw 'Windows sharing inventory is incomplete or unsupported.'
+    }
+    $ids = @{}
+    foreach ($volume in $Sharing.volumes) {
+        Assert-LibertixExactPlanProperties -Object $volume -Path 'sharing volume' -PropertySet sharingVolume
+        Assert-LibertixExactPlanProperties -Object $volume.disk -Path 'sharing disk' -PropertySet sharingDisk
+        foreach ($field in @('offsetBytes', 'sizeBytes')) {
+            Assert-LibertixPositiveInteger -Value $volume.$field -Path "sharing volume.$field"
+        }
+        Assert-LibertixPositiveInteger -Value $volume.disk.sizeBytes -Path 'sharing disk size'
+        if ($volume.ntfsUuid -isnot [string] -or $volume.ntfsUuid -cnotmatch '^[A-F0-9]{16}$' -or
+            $volume.ntfsUuid -eq '0000000000000000' -or $ids.ContainsKey($volume.ntfsUuid) -or
+            [long]$volume.offsetBytes -gt [long]$volume.disk.sizeBytes - [long]$volume.sizeBytes -or
+            $volume.disk.logicalSectorSizeBytes -notin @(512, 4096) -or
+            [string]$volume.windowsDrive -cnotmatch '^[A-Z]:$' -or
+            [string]$volume.windowsVolumeId -notmatch '^\\\\\?\\Volume\{[0-9a-fA-F-]{36}\}\\$') {
+            throw 'Windows sharing volume identity is invalid or duplicated.'
+        }
+        $pattern = switch ([string]$volume.disk.partitionStyle) {
+            'GPT' { '^gpt:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' }
+            'MBR' { '^mbr:[0-9a-f]{8}$' }
+            default { throw 'Windows sharing partition style is unsupported.' }
+        }
+        if ([string]$volume.disk.partitionTableId -cnotmatch $pattern) { throw 'Windows sharing disk identity is invalid.' }
+        $ids[$volume.ntfsUuid] = $false
+    }
+    $names = @{}
+    foreach ($folder in $Sharing.folders) {
+        Assert-LibertixExactPlanProperties -Object $folder -Path 'sharing folder' -PropertySet sharingFolder
+        if ($folder.shortcut -isnot [string] -or $folder.shortcut -cnotmatch '^User_.+' -or
+            $folder.shortcut.Length -gt 180 -or $folder.shortcut -match '[\x00-\x1f/\\]' -or
+            $names.ContainsKey($folder.shortcut) -or
+            [string]$folder.profileSid -cnotmatch '^S-1-5-21-(?:\d+-){3}\d+$' -or
+            -not $ids.ContainsKey([string]$folder.ntfsUuid) -or $folder.relativePath -isnot [string] -or
+            [string]::IsNullOrEmpty($folder.relativePath) -or $folder.relativePath.Length -gt 32767 -or
+            $folder.relativePath -match '[\x00-\x1f\\:]' -or
+            @($folder.relativePath.Split('/') | Where-Object { $_ -in @('', '.', '..') }).Count -gt 0) {
+            throw 'Windows sharing folder path, identity or shortcut is invalid.'
+        }
+        $names[$folder.shortcut] = $true
+        $ids[$folder.ntfsUuid] = $true
+    }
+    if (@($ids.Values | Where-Object { -not $_ }).Count -gt 0) {
+        throw 'Windows sharing must not include unrelated volumes.'
+    }
+}
+
+function Assert-LibertixPlanDistribution {
+    param([Parameter(Mandatory = $true)][object]$Distribution)
+
     Assert-LibertixExactPlanProperties `
         -Object $distribution `
         -Path "distribution" `
@@ -329,11 +452,10 @@ function Assert-LibertixInstallationPlan {
     if ([string]$distribution.grubDisplayName -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$') {
         throw "Installation plan field distribution.grubDisplayName contains unsupported GRUB label characters."
     }
+    Assert-LibertixPlanProperty -Object $distribution -Name 'secureBootMicrosoftAuthorities' `
+        -Path 'distribution.secureBootMicrosoftAuthorities' | Out-Null
     $null = Assert-LibertixMicrosoftUefiAuthorities `
-        -Value (Assert-LibertixPlanProperty `
-            -Object $distribution `
-            -Name "secureBootMicrosoftAuthorities" `
-            -Path "distribution.secureBootMicrosoftAuthorities") `
+        -Value $distribution.secureBootMicrosoftAuthorities `
         -Path "distribution.secureBootMicrosoftAuthorities"
     foreach ($name in @("installerIsoUrl", "liveIsoUrl")) {
         [Uri]$uri = $null
@@ -348,8 +470,8 @@ function Assert-LibertixInstallationPlan {
     if ([string]$distribution.installerIsoFileName -match '[/\\]') {
         throw "Installation plan distribution.installerIsoFileName must be a file name, not a path."
     }
-    if ([string]$distribution.installerIsoWindowsPath -notmatch '^[A-Za-z]:[\\/]') {
-        throw "Installation plan distribution.installerIsoWindowsPath must be an absolute Windows drive path."
+    if (-not (Test-LibertixSafeAbsoluteWindowsPath -Value ([string]$distribution.installerIsoWindowsPath))) {
+        throw "Installation plan distribution.installerIsoWindowsPath must be an absolute safe Windows path."
     }
     Assert-LibertixSha256 `
         -Value (Assert-LibertixPlanProperty -Object $distribution -Name "installerIsoSha256" -Path "distribution.installerIsoSha256") `
@@ -357,12 +479,15 @@ function Assert-LibertixInstallationPlan {
     Assert-LibertixSha256 `
         -Value (Assert-LibertixPlanProperty -Object $distribution -Name "liveIsoSha256" -Path "distribution.liveIsoSha256") `
         -Path "distribution.liveIsoSha256"
+}
 
-    $locale = Assert-LibertixPlanProperty -Object $Plan -Name "locale" -Path "locale"
+function Assert-LibertixPlanLocale {
+    param([Parameter(Mandatory = $true)][object]$Locale)
+
     Assert-LibertixExactPlanProperties -Object $locale -Path "locale" -PropertySet "locale"
     $languageCode = [string](Assert-LibertixPlanProperty -Object $locale -Name "languageCode" -Path "locale.languageCode")
-    if ($languageCode -notin @("en", "fr", "es")) {
-        throw "Installation plan field locale.languageCode must be one of: en, fr, es."
+    if ($languageCode -notin @("en", "fr", "es", "ko")) {
+        throw "Installation plan field locale.languageCode must be one of: en, fr, es, ko."
     }
     foreach ($name in @("systemLanguage", "keyboardLayout", "keyboardModel", "timezone")) {
         $value = [string](Assert-LibertixPlanProperty -Object $locale -Name $name -Path "locale.$name")
@@ -386,8 +511,11 @@ function Assert-LibertixInstallationPlan {
     if ($keyboardVariant -notmatch '^[a-z0-9_-]*$') {
         throw "Installation plan field locale.keyboardVariant is not a valid XKB variant name."
     }
+}
 
-    $account = Assert-LibertixPlanProperty -Object $Plan -Name "account" -Path "account"
+function Assert-LibertixPlanAccount {
+    param([Parameter(Mandatory = $true)][object]$Account)
+
     Assert-LibertixExactPlanProperties -Object $account -Path "account" -PropertySet "account"
     $username = [string](Assert-LibertixPlanProperty -Object $account -Name "username" -Path "account.username")
     $passwordHashWindowsPath = [string](Assert-LibertixPlanProperty -Object $account -Name "passwordHashWindowsPath" -Path "account.passwordHashWindowsPath")
@@ -398,12 +526,50 @@ function Assert-LibertixInstallationPlan {
     if (@($script:InstallationPolicy.account.reservedUsernames) -icontains $username) {
         throw "Installation plan account.username is reserved by the operating system."
     }
-    if ($passwordHashWindowsPath -notmatch '^[A-Za-z]:\\' -or $passwordHashWindowsPath -match '(^|\\)\.\.(\\|$)') {
+    if (-not (Test-LibertixSafeAbsoluteWindowsPath -Value $passwordHashWindowsPath)) {
         throw "Installation plan account.passwordHashWindowsPath must be an absolute safe Windows path."
     }
     if ($computerName -notmatch '^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$') {
         throw "Installation plan account.computerName is not a valid Linux hostname."
     }
+}
+
+function Assert-LibertixInstallationPlan {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    Assert-LibertixExactPlanProperties -Object $Plan -Path "root" -PropertySet "root"
+
+    $schemaVersion = Assert-LibertixPlanProperty -Object $Plan -Name "schemaVersion" -Path "schemaVersion"
+    $hasAllocation = Test-LibertixPlanProperty -Object $Plan -Name 'allocation'
+    if (([int]$schemaVersion -eq 4 -and $hasAllocation) -or
+        ([int]$schemaVersion -eq 5 -and -not $hasAllocation) -or [int]$schemaVersion -notin @(4, 5)) {
+        throw "Unsupported installation plan schemaVersion: $schemaVersion."
+    }
+
+    $planId = [string](Assert-LibertixPlanProperty -Object $Plan -Name "planId" -Path "planId")
+    if ($planId -notmatch '^[0-9a-f]{32}$') {
+        throw "Installation plan planId must contain 32 lowercase hexadecimal characters."
+    }
+    $createdAtUtc = [string](Assert-LibertixPlanProperty -Object $Plan -Name "createdAtUtc" -Path "createdAtUtc")
+    [DateTimeOffset]$createdAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($createdAtUtc, [ref]$createdAt) -or $createdAt.Offset -ne [TimeSpan]::Zero) {
+        throw "Installation plan createdAtUtc must be a valid UTC date-time."
+    }
+
+    $firmware = [string](Assert-LibertixPlanProperty -Object $Plan -Name "firmware" -Path "firmware")
+    if ($firmware -notin @("bios", "uefi")) {
+        throw "Installation plan firmware must be 'bios' or 'uefi'."
+    }
+
+    $distribution = Assert-LibertixPlanProperty -Object $Plan -Name "distribution" -Path "distribution"
+    Assert-LibertixPlanDistribution -Distribution $distribution
+    Assert-LibertixPlanLocale -Locale (
+        Assert-LibertixPlanProperty -Object $Plan -Name "locale" -Path "locale"
+    )
+    $account = Assert-LibertixPlanProperty -Object $Plan -Name "account" -Path "account"
+    Assert-LibertixPlanAccount -Account $account
+    $passwordHashWindowsPath = [string]$account.passwordHashWindowsPath
 
     $disk = Assert-LibertixPlanProperty -Object $Plan -Name "disk" -Path "disk"
     Assert-LibertixExactPlanProperties -Object $disk -Path "disk" -PropertySet "disk"
@@ -481,15 +647,31 @@ function Assert-LibertixInstallationPlan {
     )) {
         $left = $fixedExtents[$pair[0]]
         $right = $fixedExtents[$pair[1]]
-        if ($left[0] -lt $right[1] -and $right[0] -lt $left[1]) {
+        $sameBiosWindowsBootPartition = (
+            $firmware -eq 'bios' -and $pair[0] -eq 'windows' -and $pair[1] -eq 'boot' -and
+            [int]$disk.windows.number -eq [int]$disk.boot.number -and
+            $left[0] -eq $right[0] -and $left[1] -eq $right[1]
+        )
+        if ($left[0] -lt $right[1] -and $right[0] -lt $left[1] -and -not $sameBiosWindowsBootPartition) {
             throw "Installation plan disk.$($pair[0]) and disk.$($pair[1]) overlap."
         }
     }
     [int64]$windowsEnd = $fixedExtents["windows"][1]
     [int64]$recoveryOffset = $fixedExtents["recovery"][0]
-    if ($windowsEnd -gt $recoveryOffset) {
+    if ($firmware -eq 'bios' -and $windowsEnd -gt $recoveryOffset) {
         throw "Installation plan disk.recovery must follow the original Windows partition."
     }
+
+    $allocationSource = $disk.windows
+    $allocationStyle = $partitionStyle
+    [long]$allocationSector = $logicalSectorSize
+    if ($hasAllocation) {
+        Assert-LibertixAllocationPlan -Allocation $Plan.allocation -WindowsDisk $disk
+        $allocationSource = $Plan.allocation.sourcePartition
+        $allocationStyle = [string]$Plan.allocation.partitionStyle
+        $allocationSector = [long]$Plan.allocation.logicalSectorSizeBytes
+    }
+    [long]$sourceEnd = [long]$allocationSource.offsetBytes + [long]$allocationSource.sizeBytes
 
     $installer = Assert-LibertixPlanProperty -Object $disk -Name "installer" -Path "disk.installer"
     Assert-LibertixExactPlanProperties `
@@ -504,7 +686,7 @@ function Assert-LibertixInstallationPlan {
     if ($null -ne $installerNumber) {
         Assert-LibertixPositiveInteger -Value $installerNumber -Path "disk.installer.number"
         Assert-LibertixPositiveInteger -Value $installerOffset -Path "disk.installer.offsetBytes"
-        if ([int64]$installerOffset % [int64]$logicalSectorSize -ne 0) {
+        if ([int64]$installerOffset % $allocationSector -ne 0) {
             throw "Installation plan disk.installer.offsetBytes must align to disk.logicalSectorSizeBytes."
         }
     }
@@ -537,31 +719,31 @@ function Assert-LibertixInstallationPlan {
     }
     [int64]$alignmentBytes =
         [int64]$script:InstallationPolicy.storage.partitionAlignmentBytes
-    [int64]$alignmentPadding = $windowsEnd % $alignmentBytes
-    if ([int64]$finalSize -gt $windowsEnd - $alignmentPadding) {
+    [int64]$alignmentPadding = $sourceEnd % $alignmentBytes
+    if ([int64]$finalSize -ge [int64]$allocationSource.sizeBytes - $alignmentPadding) {
         throw "Installation plan finalSizeBytes exceeds the original Windows extent."
     }
     [int64]$expectedFinalOffset = `
-        $windowsEnd - $alignmentPadding - [int64]$finalSize
+        $sourceEnd - $alignmentPadding - [int64]$finalSize
     if ([int64]$finalOffset -ne $expectedFinalOffset) {
         throw "Installation plan finalOffsetBytes does not match the aligned final geometry."
     }
     if (
-        [int64]$finalSize -gt $recoveryOffset -or
-        [int64]$finalOffset -gt $recoveryOffset - [int64]$finalSize
+        [int64]$finalOffset -le [int64]$allocationSource.offsetBytes -or
+        [int64]$finalOffset -gt $sourceEnd - [int64]$finalSize
     ) {
-        throw "Installation plan final installer extent would overlap Recovery."
+        throw 'Installation plan final installer extent must remain inside the original Windows partition.'
     }
     if ($null -ne $installerOffset) {
         [int64]$expectedObservedOffset = if ($resizeMode -eq "live-offline") {
-            $windowsEnd - $alignmentPadding - [int64]$stagingSize
+            $sourceEnd - $alignmentPadding - [int64]$stagingSize
         } else {
             $expectedFinalOffset
         }
         [int64]$primaryMbrOffset = $expectedObservedOffset - $alignmentBytes
         $offsetMatches = (
             [int64]$installerOffset -eq $expectedObservedOffset -or
-            ($partitionStyle -eq "MBR" -and [int64]$installerOffset -eq $primaryMbrOffset)
+            ($allocationStyle -eq "MBR" -and [int64]$installerOffset -eq $primaryMbrOffset)
         )
         if (-not $offsetMatches) {
             throw "Installation plan installer offset does not match the selected Windows shrink geometry."
@@ -590,6 +772,75 @@ function Assert-LibertixInstallationPlan {
     }
     if ($decodedProfiles.Length -eq 0) {
         throw "Installation plan features.windowsProfilesJsonBase64 must not decode to an empty value."
+    }
+    if (Test-LibertixPlanProperty -Object $features -Name windowsSharing) {
+        if (-not $features.shareWindowsFilesInLinux) { throw 'Disabled Windows sharing must not include an inventory.' }
+        Assert-LibertixWindowsSharingPlan -Sharing $features.windowsSharing
+    }
+
+    $preferenceMigration = Assert-LibertixPlanProperty `
+        -Object $features `
+        -Name "windowsPreferenceMigration" `
+        -Path "features.windowsPreferenceMigration"
+    Assert-LibertixExactPlanProperties `
+        -Object $preferenceMigration `
+        -Path "features.windowsPreferenceMigration" `
+        -PropertySet "windowsPreferenceMigration"
+    $migrationEnabled = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "enabled" `
+        -Path "features.windowsPreferenceMigration.enabled"
+    if ($migrationEnabled -isnot [bool]) {
+        throw "Installation plan field features.windowsPreferenceMigration.enabled must be a boolean."
+    }
+    $bundleFileName = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleFileName" `
+        -Path "features.windowsPreferenceMigration.bundleFileName"
+    $bundleSha256 = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleSha256" `
+        -Path "features.windowsPreferenceMigration.bundleSha256"
+    $bundleSizeBytes = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "bundleSizeBytes" `
+        -Path "features.windowsPreferenceMigration.bundleSizeBytes"
+    $wifiProfileCount = Assert-LibertixPlanProperty `
+        -Object $preferenceMigration `
+        -Name "wifiProfileCount" `
+        -Path "features.windowsPreferenceMigration.wifiProfileCount"
+    [int64]$parsedBundleSize = 0
+    [int]$parsedWifiCount = 0
+    if (-not $migrationEnabled) {
+        if (
+            $null -ne $bundleFileName -or
+            $null -ne $bundleSha256 -or
+            [int64]$bundleSizeBytes -ne 0 -or
+            [int]$wifiProfileCount -ne 0
+        ) {
+            throw "Disabled Windows preference migration must not describe a bundle."
+        }
+    } else {
+        if ([string]$bundleFileName -cne "windows-preferences.secret.json") {
+            throw "Windows preference migration must use the fixed transaction bundle name."
+        }
+        if ([string]$bundleSha256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw "Windows preference migration bundle hash must be a lowercase SHA-256 value."
+        }
+        if (
+            -not [int64]::TryParse([string]$bundleSizeBytes, [ref]$parsedBundleSize) -or
+            $parsedBundleSize -le 0 -or
+            $parsedBundleSize -gt 134217728
+        ) {
+            throw "Windows preference migration bundle size is outside the supported range."
+        }
+        if (
+            -not [int]::TryParse([string]$wifiProfileCount, [ref]$parsedWifiCount) -or
+            $parsedWifiCount -lt 0 -or
+            $parsedWifiCount -gt 256
+        ) {
+            throw "Windows preference migration Wi-Fi profile count is outside the supported range."
+        }
     }
 
     $runtime = Assert-LibertixPlanProperty -Object $Plan -Name "runtime" -Path "runtime"
@@ -632,11 +883,11 @@ function Assert-LibertixInstallationPlan {
     if ($bootStrategy -notin $allowedStrategies) {
         throw "Installation plan bootStrategy '$bootStrategy' is incompatible with firmware '$firmware'."
     }
+    Assert-LibertixPlanProperty -Object $runtime -Name 'trustedMicrosoftUefiAuthorities' `
+        -Path 'runtime.trustedMicrosoftUefiAuthorities' | Out-Null
+    # Passing the property itself preserves an empty array; function output would enumerate it to null.
     $trustedMicrosoftUefiAuthorities = @(Assert-LibertixMicrosoftUefiAuthorities `
-        -Value (Assert-LibertixPlanProperty `
-            -Object $runtime `
-            -Name "trustedMicrosoftUefiAuthorities" `
-            -Path "runtime.trustedMicrosoftUefiAuthorities") `
+        -Value $runtime.trustedMicrosoftUefiAuthorities `
         -Path "runtime.trustedMicrosoftUefiAuthorities" `
         -AllowEmpty)
     if ($firmware -eq "bios" -and $trustedMicrosoftUefiAuthorities.Count -ne 0) {
@@ -659,8 +910,7 @@ function Assert-LibertixInstallationPlan {
     if (
         $hasRecoveryRoot -and
         (
-            [string]$recoveryRoot -notmatch '^[A-Za-z]:\\' -or
-            [string]$recoveryRoot -match '(^|\\)\.\.(\\|$)'
+            -not (Test-LibertixSafeAbsoluteWindowsPath -Value ([string]$recoveryRoot))
         )
     ) {
         throw "Installation plan runtime.recoveryRootWindows must be an absolute safe Windows path."
@@ -679,6 +929,18 @@ function Assert-LibertixInstallationPlan {
     foreach ($entry in $windowsPaths.GetEnumerator()) {
         if ($entry.Value.Substring(0, 2).ToUpperInvariant() -ne ([string]$disk.systemDrive)) {
             throw "Installation plan $($entry.Key) must be located on disk.systemDrive."
+        }
+    }
+    if ($hasRecoveryRoot) {
+        $expectedPasswordHashPath = Join-Path ([string]$recoveryRoot) "account-secret.env"
+        if (
+            [IO.Path]::GetFullPath($passwordHashWindowsPath) -ne
+            [IO.Path]::GetFullPath($expectedPasswordHashPath)
+        ) {
+            throw (
+                "Installation plan account.passwordHashWindowsPath must be the plan-owned " +
+                "account-secret.env under runtime.recoveryRootWindows."
+            )
         }
     }
     $expectedInstallerIsoPath = Join-Path `

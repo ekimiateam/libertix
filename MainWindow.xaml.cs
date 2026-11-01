@@ -25,9 +25,15 @@ namespace Libertix
             _installationState = application.InstallationState;
             InitializeComponent();
             if (application.Filepool.IsDevelopmentMode ||
+                application.RuntimeOptions.DevelopmentMode ||
                 application.RuntimeOptions.Unattended != null)
             {
                 DevelopmentModeBanner.Visibility = Visibility.Visible;
+                if (application.RuntimeOptions.DevelopmentMode)
+                {
+                    DevelopmentModeBannerText.Text =
+                        "DEVELOPMENT MODE - online filepool comparison skipped.";
+                }
                 if (application.RuntimeOptions.Unattended != null)
                 {
                     DevelopmentModeBanner.Background =
@@ -198,11 +204,42 @@ namespace Libertix
 
         private Welcome CreateWelcomePage()
         {
+            InstalledLinuxRecoveryDetection recovery = InstalledLinuxRecoveryLocator.Find();
+            if (recovery.Status == InstalledLinuxRecoveryStatus.Blocked)
+            {
+                ApplicationLogger.Write(
+                    "Installed Linux recovery detection blocked: " + recovery.Diagnostic);
+            }
             return new Welcome(
                 _selectedLanguageCode,
                 StartInstallation,
                 OpenAbout,
-                ChangeLanguage);
+                ChangeLanguage,
+                recovery,
+                ConfirmUninstallLinux);
+        }
+
+        private void ConfirmUninstallLinux(InstalledLinuxRecoveryCandidate candidate)
+        {
+            if (candidate == null)
+                return;
+            bool confirmed = LocalizedConfirmationDialog.Show(
+                this,
+                ResourceText("UninstallLinuxConfirmTitle", "Uninstall Linux"),
+                string.Format(
+                    ResourceText(
+                        "UninstallLinuxConfirmMessage",
+                        "Uninstall {0} and restore the Windows disk and boot configuration recorded by Libertix?"),
+                    candidate.DistributionName),
+                ResourceText("UninstallLinuxConfirmYes", "Uninstall Linux"),
+                ResourceText("ConfirmationNo", "No"));
+            if (!confirmed)
+                return;
+
+            NavigationHelper.NavigateWithAnimationInFrame(
+                MainFrame,
+                new UninstallLinux(_installationState, candidate),
+                TimeSpan.FromSeconds(0.3));
         }
 
         private void ChangeLanguage(string cultureName)

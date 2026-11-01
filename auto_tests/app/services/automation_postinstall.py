@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import time
 import uuid
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -16,7 +18,13 @@ from app.clients.ssh import CommandResult, SSHClient, is_reconnectable_transport
 from app.config import VMConfig
 from app.distributions import DistributionProfile
 from app.errors import WorkflowError
-from app.models import STAGING_VOLUME_LABELS
+from app.models import (
+    BOOT_GUARDIAN_REPAIR_FAULTS,
+    BOOTNEXT_FAULTS,
+    CANCELLED_INSTALLATION_FAULTS,
+    PREFERRED_PATH_FAULTS,
+    STAGING_VOLUME_LABELS,
+)
 from app.services.automation_types import AutomationOptions
 from app.services.automation_windows_checks import (
     CrossOsArtifacts,
@@ -27,8 +35,18 @@ from app.services.common import ResultBuilder
 
 EXPECTED_GRUB_ROOT_ENTRY_COUNT = 4
 REMOTE_CHECK_SSH_MAX_ATTEMPTS = 6
-WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS = 2
-LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 3
+WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS = 5
+LINUX_SCRIPT_RECONNECT_DELAY_SECONDS = 5
+PACKAGE_MANAGER_RETRY_DELAY_SECONDS = 5
+PACKAGE_TIMER_TIMEOUT_SECONDS = 30
+WINDOWS_READY_MARKER = "LIBERTIX_WINDOWS_READY"
+LINUX_READY_MARKER = "LIBERTIX_LINUX_READY"
+LINUX_CHECK_HELPER_SOURCE = (
+    Path(__file__).resolve().parents[1] / "scripts" / "linux_check_helper.py"
+)
+# /tmp is emptied by the reboot to Windows that ends the first Linux session.
+LINUX_CHECK_HELPER = "/tmp/libertix-auto-tests-linux-check-helper.py"
+LINUX_CHECK = f"python3 {LINUX_CHECK_HELPER}"
 
 
 @dataclass(frozen=True)
@@ -51,13 +69,16 @@ class BootGuardianFaultEvidence:
 class PostInstallValidationMixin:
     """Validate both installed operating systems after the installer exits."""
 
+    @staticmethod
     def _run_linux_command_resiliently(
-        self,
         ssh: SSHClient,
         *,
         command: str,
         step: str,
         timeout: float,
+        check: bool = True,
+        sensitive: bool = False,
+        stdin_data: str | None = None,
     ) -> CommandResult:
         """Retry an idempotent Linux command after a proven transport failure."""
 
@@ -66,7 +87,15 @@ class PostInstallValidationMixin:
             try:
                 if attempt > 1:
                     ssh.reconnect()
-                return ssh.run(command, step=step, timeout=timeout)
+                return ssh.run(
+                    command,
+                    step=step,
+                    timeout=timeout,
+                    check=check,
+                    replay_safe=True,
+                    sensitive=sensitive,
+                    stdin_data=stdin_data,
+                )
             except WorkflowError as exc:
                 last_error = exc
                 if (
@@ -74,6 +103,8 @@ class PostInstallValidationMixin:
                     or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
                 ):
                     raise
+
+                time.sleep(LINUX_SCRIPT_RECONNECT_DELAY_SECONDS)
 
         assert last_error is not None
         raise last_error
@@ -100,6 +131,7 @@ class PostInstallValidationMixin:
                     arguments=arguments,
                     step=step,
                     timeout=timeout,
+                    replay_safe=True,
                 )
             except WorkflowError as exc:
                 last_error = exc
@@ -135,6 +167,7 @@ class PostInstallValidationMixin:
                     config=config,
                     step=step,
                     timeout=timeout,
+                    replay_safe=True,
                 )
             except WorkflowError as exc:
                 last_error = exc
@@ -155,65 +188,18 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
         monitor_outcome: str,
     ) -> None:
+        fault = options.boot_guardian_fault
         guardian_fault_evidence: BootGuardianFaultEvidence | None = None
         preferred_loader_fault_evidence: BootGuardianFaultEvidence | None = None
-        if options.boot_guardian_fault == "bios-rollback":
-            if monitor_outcome != "installation-rollback":
-                raise WorkflowError(
-                    "automation.bios_rollback",
-                    "The controlled BIOS cancellation did not return the expected outcome",
-                    details={"vm": vm.name, "monitor_outcome": monitor_outcome},
-                )
-            baseline = options.rollback_baseline
-            if baseline is None:
-                raise WorkflowError(
-                    "automation.bios_rollback",
-                    "The pre-installation rollback baseline was not retained",
-                    details={"vm": vm.name, "target": vm.host},
-                )
-            ssh = self._wait_for_ssh(
-                vm,
-                result=result,
-                username=vm.username,
-                password=self.settings.windows_ssh_password.get_secret_value(),
-                trust_on_first_use=False,
-                probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-                expected="LIBERTIX_WINDOWS_READY",
-                phase="bios_rollback_verify",
-                distribution=options.distribution,
-            )
-            try:
-                self._verify_exact_windows_rollback(
-                    ssh,
-                    vm,
-                    baseline,
-                    result,
-                    step="automation.bios_rollback.verify",
-                    failure_message=(
-                        "The BIOS cancellation did not restore the exact Windows baseline"
-                    ),
-                )
-            finally:
-                ssh.__exit__(None, None, None)
+        if fault in CANCELLED_INSTALLATION_FAULTS:
+            self._verify_cancelled_installation(vm, options, result, monitor_outcome)
             return
-        if options.boot_guardian_fault in {"bootnext-fallback", "bootnext-rollback"}:
-            if monitor_outcome != "bootnext-fallback":
-                raise WorkflowError(
-                    "automation.bootnext_rollback",
-                    "The controlled BootNext failure did not return the expected monitor outcome",
-                    details={"vm": vm.name, "monitor_outcome": monitor_outcome},
-                )
-            if options.boot_guardian_fault == "bootnext-rollback":
-                self._rollback_bootnext_failure(vm, options, result)
-                return
-            self._accept_bootnext_firmware_fallback(vm, options, result)
-            monitor_outcome = self._monitor_until_live_boot(
-                vm,
-                result,
-                vm.firmware,
-                options.distribution,
-                reboot_requested=True,
+        if fault in BOOTNEXT_FAULTS:
+            monitor_outcome = self._continue_after_bootnext_fault(
+                vm, options, result, monitor_outcome
             )
+            if monitor_outcome is None:
+                return
         if monitor_outcome != "boot-menu":
             raise WorkflowError(
                 "automation.windows_before_linux",
@@ -236,19 +222,21 @@ class PostInstallValidationMixin:
                 target=vm.host,
                 phase="windows-before-linux-ssh",
             )
-            waiting_windows_ssh = self._wait_for_ssh(
-                vm,
-                result=result,
-                username=vm.username,
-                password=self.settings.windows_ssh_password.get_secret_value(),
-                trust_on_first_use=False,
-                probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-                expected="LIBERTIX_WINDOWS_READY",
-                phase="windows_before_linux",
-                grub_entry="windows",
-                distribution=options.distribution,
-            )
-            try:
+            with closing(
+                self._wait_for_windows_ssh(
+                    vm,
+                    result,
+                    "windows_before_linux",
+                    grub_entry="windows",
+                    distribution=options.distribution,
+                )
+            ) as waiting_windows_ssh:
+                result.ok(
+                    "automation.check_started",
+                    "Windows SSH is ready; checking the agent waiting for Linux",
+                    vm=vm.name,
+                    test="windows.waiting_for_linux",
+                )
                 response = self._run_windows_script_resiliently(
                     waiting_windows_ssh,
                     script_name="post_install_windows_check.ps1",
@@ -269,27 +257,13 @@ class PostInstallValidationMixin:
                     stdout=response.stdout,
                     stderr=response.stderr,
                 )
-                if options.boot_guardian_fault == "boot-order":
-                    guardian_fault_evidence = self._inject_boot_guardian_boot_order_fault(
-                        waiting_windows_ssh,
-                        vm,
-                        result,
-                    )
-                elif options.boot_guardian_fault in {
-                    "preferred-path",
-                    "preferred-path-rollback",
-                }:
-                    self._inject_boot_guardian_preferred_bypass(
-                        waiting_windows_ssh,
-                        vm,
-                        result,
-                    )
+                guardian_fault_evidence = self._inject_fault_before_linux_boot(
+                    waiting_windows_ssh, vm, result, fault
+                )
                 self._request_linux_boot_from_windows(waiting_windows_ssh, vm, result)
-            finally:
-                waiting_windows_ssh.__exit__(None, None, None)
-            if options.boot_guardian_fault == "preferred-path":
+            if fault == "preferred-path":
                 self._accept_preferred_path_fallback(vm, options, result)
-            elif options.boot_guardian_fault == "preferred-path-rollback":
+            elif fault == "preferred-path-rollback":
                 self._rollback_preferred_path_fallback(vm, options, result)
                 return
 
@@ -300,21 +274,7 @@ class PostInstallValidationMixin:
             target=vm.host,
             phase="linux-first-ssh",
         )
-        linux_ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=options.linux_username,
-            password=options.linux_password,
-            trust_on_first_use=True,
-            probe=(
-                "test -e /var/lib/libertix/development-ssh-ready && printf LIBERTIX_LINUX_READY"
-            ),
-            expected="LIBERTIX_LINUX_READY",
-            phase="linux_first",
-            grub_entry="linux",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(self._wait_for_linux_ssh(vm, result, options, "linux_first")) as linux_ssh:
             result.ok(
                 "automation.test.linux",
                 "Linux SSH authentication succeeded",
@@ -322,6 +282,12 @@ class PostInstallValidationMixin:
                 target=vm.host,
                 test="linux.ssh",
                 server_key_sha256=linux_ssh.server_key_sha256,
+            )
+            linux_ssh.upload_text(
+                LINUX_CHECK_HELPER,
+                LINUX_CHECK_HELPER_SOURCE.read_text(encoding="utf-8"),
+                step="automation.test.linux.upload_check_helper",
+                replay_safe=True,
             )
             self._wait_for_first_boot_verification(linux_ssh, vm, result)
             self._prepare_linux_graphical_session(
@@ -337,12 +303,12 @@ class PostInstallValidationMixin:
                 result,
                 "linux",
                 RemoteCheck(
-                    "linux.post_install_result_ui",
-                    'i=0; while [ "$i" -lt 60 ]; do '
+                    "linux.post_install_result_process",
+                    'i=0; while [ "$i" -lt 300 ]; do '
                     "pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
                     ">/dev/null && exit 0; "
                     "i=$((i + 1)); sleep 1; done; exit 1",
-                    timeout=75,
+                    timeout=315,
                 ),
             )
             self._capture_and_dismiss_post_install_result(
@@ -352,10 +318,10 @@ class PostInstallValidationMixin:
                 linux_ssh,
             )
             self._run_linux_checks(linux_ssh, vm, options, result)
+            self._verify_linux_redirected_documents(linux_ssh, vm, options, result)
+            self._verify_windows_preference_migration(linux_ssh, vm, options, result)
             artifacts = self._create_cross_os_artifacts(linux_ssh, vm, options, result)
             self._request_windows_boot(linux_ssh, vm, options, result)
-        finally:
-            linux_ssh.__exit__(None, None, None)
 
         result.ok(
             "automation.post_install_phase",
@@ -364,62 +330,52 @@ class PostInstallValidationMixin:
             target=vm.host,
             phase="windows-ssh",
         )
-        windows_ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="windows",
-            grub_entry="windows",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "windows", grub_entry="windows", distribution=options.distribution
+            )
+        ) as first_windows_ssh:
             result.ok(
                 "automation.test.windows",
                 "Windows SSH authentication succeeded",
                 vm=vm.name,
                 target=vm.host,
                 test="windows.ssh",
-                server_key_sha256=windows_ssh.server_key_sha256,
+                server_key_sha256=first_windows_ssh.server_key_sha256,
             )
-            windows_ssh = self._wait_for_windows_filesystem_repair(
-                windows_ssh,
-                vm,
-                options,
-                result,
-            )
-            self._prepare_windows_graphical_session(windows_ssh, vm, result)
-            try:
-                self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
-                if options.boot_guardian_fault == "boot-order":
-                    self._verify_boot_guardian_boot_order_repair(
-                        windows_ssh,
-                        vm,
-                        result,
-                        guardian_fault_evidence,
-                    )
-                self._capture_and_dismiss_post_install_result(
-                    vm,
-                    result,
-                    "windows",
-                    windows_ssh,
-                )
-                if options.boot_guardian_fault == "preferred-path":
-                    preferred_loader_fault_evidence = (
-                        self._inject_boot_guardian_preferred_loader_fault(
+            # A boot-volume repair can reboot Windows and return a new connection.
+            with closing(
+                self._wait_for_windows_filesystem_repair(first_windows_ssh, vm, options, result)
+            ) as windows_ssh:
+                self._prepare_windows_graphical_session(windows_ssh, vm, result)
+                try:
+                    self._run_windows_checks(windows_ssh, vm, options, artifacts, result)
+                    if fault == "boot-order":
+                        self._verify_boot_guardian_boot_order_repair(
                             windows_ssh,
                             vm,
                             result,
+                            guardian_fault_evidence,
                         )
+                    self._capture_and_dismiss_post_install_result(
+                        vm,
+                        result,
+                        "windows",
+                        windows_ssh,
                     )
-            finally:
-                self._cleanup_windows_cross_os_artifact(windows_ssh, vm, options, artifacts, result)
-            self._request_linux_boot_from_windows(windows_ssh, vm, result)
-        finally:
-            windows_ssh.__exit__(None, None, None)
+                    if fault == "preferred-path":
+                        preferred_loader_fault_evidence = (
+                            self._inject_boot_guardian_preferred_loader_fault(
+                                windows_ssh,
+                                vm,
+                                result,
+                            )
+                        )
+                finally:
+                    self._cleanup_windows_cross_os_artifact(
+                        windows_ssh, vm, options, artifacts, result
+                    )
+                self._request_linux_boot_from_windows(windows_ssh, vm, result)
 
         result.ok(
             "automation.post_install_phase",
@@ -428,19 +384,9 @@ class PostInstallValidationMixin:
             target=vm.host,
             phase="linux-return-ssh",
         )
-        returned_linux_ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=options.linux_username,
-            password=options.linux_password,
-            trust_on_first_use=True,
-            probe="test -e /var/lib/libertix/development-ssh-ready && printf LIBERTIX_LINUX_READY",
-            expected="LIBERTIX_LINUX_READY",
-            phase="linux_return",
-            grub_entry="linux",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(
+            self._wait_for_linux_ssh(vm, result, options, "linux_return")
+        ) as returned_linux_ssh:
             try:
                 firmware_test = (
                     "test -d /sys/firmware/efi"
@@ -472,8 +418,6 @@ class PostInstallValidationMixin:
                 result,
                 test_name="linux.final_windows_reboot",
             )
-        finally:
-            returned_linux_ssh.__exit__(None, None, None)
 
         result.ok(
             "automation.post_install_phase",
@@ -482,19 +426,11 @@ class PostInstallValidationMixin:
             target=vm.host,
             phase="windows-final-ssh",
         )
-        final_windows_ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="windows_final",
-            grub_entry="windows",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "windows_final", grub_entry="windows", distribution=options.distribution
+            )
+        ) as final_windows_ssh:
             self._prepare_windows_graphical_session(final_windows_ssh, vm, result)
             try:
                 response = self._run_windows_script_resiliently(
@@ -529,22 +465,441 @@ class PostInstallValidationMixin:
                     test="windows.final_state",
                     **exc.details,
                 )
-            if options.boot_guardian_fault == "preferred-path":
-                self._verify_boot_guardian_preferred_loader_repair(
-                    final_windows_ssh,
-                    vm,
-                    result,
-                    preferred_loader_fault_evidence,
-                )
-            if options.boot_guardian_fault in {"boot-order", "preferred-path"}:
-                self._exercise_boot_guardian_shutdown_repair(
+            self._finish_fault_scenario(
+                final_windows_ssh, vm, options, result, preferred_loader_fault_evidence
+            )
+            if options.verify_uninstall:
+                self._exercise_installed_linux_uninstall(
                     final_windows_ssh,
                     vm,
                     options,
                     result,
                 )
-        finally:
-            final_windows_ssh.__exit__(None, None, None)
+
+    def _verify_cancelled_installation(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+        monitor_outcome: str,
+    ) -> None:
+        if monitor_outcome != "installation-rollback":
+            raise WorkflowError(
+                "automation.bios_rollback",
+                "The controlled BIOS cancellation did not return the expected outcome",
+                details={"vm": vm.name, "monitor_outcome": monitor_outcome},
+            )
+        baseline = options.rollback_baseline
+        if baseline is None:
+            raise WorkflowError(
+                "automation.bios_rollback",
+                "The pre-installation rollback baseline was not retained",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "bios_rollback_verify", distribution=options.distribution
+            )
+        ) as ssh:
+            self._verify_exact_windows_rollback(
+                ssh,
+                vm,
+                baseline,
+                result,
+                step="automation.bios_rollback.verify",
+                storage_fixture_receipt=options.storage_fixture_receipt,
+                failure_message=(
+                    "The BIOS cancellation did not restore the exact Windows baseline"
+                ),
+            )
+
+    def _continue_after_bootnext_fault(
+        self,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+        monitor_outcome: str,
+    ) -> str | None:
+        """Return the monitor outcome after the accepted fallback; None ends the scenario."""
+
+        if monitor_outcome != "bootnext-fallback":
+            raise WorkflowError(
+                "automation.bootnext_rollback",
+                "The controlled BootNext failure did not return the expected monitor outcome",
+                details={"vm": vm.name, "monitor_outcome": monitor_outcome},
+            )
+        if options.boot_guardian_fault == "bootnext-rollback":
+            self._rollback_bootnext_failure(vm, options, result)
+            return None
+        self._accept_bootnext_firmware_fallback(vm, options, result)
+        return self._monitor_until_live_boot(
+            vm,
+            result,
+            vm.firmware,
+            options.distribution,
+            reboot_requested=True,
+        )
+
+    def _inject_fault_before_linux_boot(
+        self, ssh: SSHClient, vm: VMConfig, result: ResultBuilder, fault: str
+    ) -> BootGuardianFaultEvidence | None:
+        if fault == "boot-order":
+            return self._inject_boot_guardian_boot_order_fault(ssh, vm, result)
+        if fault in PREFERRED_PATH_FAULTS:
+            self._inject_boot_guardian_preferred_bypass(ssh, vm, result)
+        return None
+
+    def _finish_fault_scenario(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+        preferred_loader_fault_evidence: BootGuardianFaultEvidence | None,
+    ) -> None:
+        fault = options.boot_guardian_fault
+        if fault == "preferred-path":
+            self._verify_boot_guardian_preferred_loader_repair(
+                ssh, vm, result, preferred_loader_fault_evidence
+            )
+        if fault in BOOT_GUARDIAN_REPAIR_FAULTS:
+            self._exercise_boot_guardian_shutdown_repair(ssh, vm, options, result)
+        if fault == "bios-postinstall-rollback":
+            self._rollback_completed_bios_installation(ssh, vm, options, result)
+        if fault == "uefi-postinstall-rollback":
+            self._rollback_completed_uefi_installation(ssh, vm, options, result)
+
+    def _exercise_installed_linux_uninstall(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        if (
+            options.rollback_baseline is None
+            or options.deployed_executable is None
+            or options.boot_guardian_fault != "none"
+            or any(step.status == "error" for step in result.steps)
+        ):
+            raise WorkflowError(
+                "automation.installed_linux_uninstall",
+                "Interactive uninstall requires successful nominal checks, its executable, "
+                "and the original Windows baseline",
+                details={"vm": vm.name, "target": vm.host},
+            )
+
+        task_name = f"LibertixVerifiedUninstall_{vm.name}"
+        launch = self.validation.launch_elevated_process(
+            vm,
+            options.deployed_executable,
+            task_name=task_name,
+            step="automation.installed_linux_uninstall.launch",
+            use_default_filepool=options.use_default_filepool,
+            local_filepool=options.local_filepool,
+        )
+        process_id = int(launch["PID"])
+        result.ok(
+            "automation.installed_linux_uninstall.launch",
+            "Libertix was relaunched without unattended installation arguments",
+            vm=vm.name,
+            target=vm.host,
+            process_id=process_id,
+            window_handle=launch["WINDOW_HANDLE"],
+        )
+
+        inspect = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "inspect", timeout=90
+        )
+        detected_capture = self._capture_with_name(vm, "verified-install-uninstall-detected")
+        result.ok(
+            "automation.installed_linux_uninstall.detected",
+            "The language selector and installed-Linux uninstall action were visible",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(detected_capture),
+            language=inspect.get("LANGUAGE", ""),
+            uninstall_caption=inspect.get("UNINSTALL_CAPTION", ""),
+        )
+
+        confirmation = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "request", timeout=90
+        )
+        confirmation_capture = self._capture_with_name(vm, "verified-install-uninstall-confirm")
+        result.ok(
+            "automation.installed_linux_uninstall.confirmation",
+            "The localized uninstall confirmation was displayed through the product UI",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(confirmation_capture),
+            confirmation_caption=confirmation.get("CONFIRMATION_CAPTION", ""),
+        )
+
+        completed = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "confirm", timeout=960
+        )
+        completed_capture = self._capture_with_name(vm, "verified-install-uninstall-complete")
+        result.ok(
+            "automation.installed_linux_uninstall.progress",
+            "The product UI reported verified uninstall completion",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(completed_capture),
+            progress=completed.get("PROGRESS", ""),
+        )
+
+        self._verify_exact_windows_rollback(
+            ssh,
+            vm,
+            options.rollback_baseline,
+            result,
+            step="automation.installed_linux_uninstall.verify",
+            storage_fixture_receipt=options.storage_fixture_receipt,
+            failure_message="The interactive uninstall did not restore the exact Windows baseline",
+            require_closed_post_install_result=True,
+        )
+
+        returned = self._drive_installed_linux_uninstall_ui(
+            ssh, vm, process_id, "complete", timeout=90
+        )
+        welcome_capture = self._capture_with_name(vm, "verified-install-uninstall-welcome")
+        result.ok(
+            "automation.installed_linux_uninstall.completed",
+            "Libertix returned to the language page without an installed-Linux action",
+            vm=vm.name,
+            target=vm.vnc,
+            capture=str(welcome_capture),
+            language=returned.get("LANGUAGE", ""),
+        )
+
+        previous_boot_id = self._read_windows_boot_id(ssh, vm)
+        self._request_windows_power_transition(
+            ssh,
+            vm,
+            "shutdown.exe /r /t 0 /d p:0:0",
+            "automation.installed_linux_uninstall.reboot",
+        )
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "uninstall_windows_return", previous_windows_boot_id=previous_boot_id
+            )
+        ) as restarted:
+            result.ok(
+                "automation.installed_linux_uninstall.unassisted_boot",
+                "Windows SSH returned in a new boot session without selecting an OS",
+                vm=vm.name,
+                target=vm.host,
+            )
+            self._verify_exact_windows_rollback(
+                restarted,
+                vm,
+                options.rollback_baseline,
+                result,
+                step="automation.installed_linux_uninstall.after_reboot",
+                storage_fixture_receipt=options.storage_fixture_receipt,
+                failure_message="Windows did not retain the restored baseline after reboot",
+                require_closed_post_install_result=True,
+            )
+
+    def _drive_installed_linux_uninstall_ui(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        process_id: int,
+        action: Literal["inspect", "request", "confirm", "complete"],
+        *,
+        timeout: int,
+    ) -> dict[str, str]:
+        # A dropped reply does not prove that an interactive click was not sent.
+        # Only the read-only inspection can be replayed after an ambiguous failure.
+        run_script = (
+            self._run_windows_script_resiliently
+            if action == "inspect"
+            else self.validation.run_windows_script
+        )
+        response = run_script(
+            ssh,
+            script_name="drive_installed_linux_uninstall.ps1",
+            config={
+                "process_id": process_id,
+                "action": action,
+                "timeout_seconds": timeout,
+            },
+            step=f"automation.installed_linux_uninstall.{action}",
+            timeout=timeout + 90,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=(
+                "ACTION",
+                "WINDOW_HANDLE",
+                "SESSION_ID",
+                "LANGUAGE",
+                "UNINSTALL_CAPTION",
+                "CONFIRMATION_CAPTION",
+                "FOCUSED_CONTROL",
+                "PROGRESS",
+                "RESULT",
+            ),
+        )
+        if (
+            values.get("ACTION") != action
+            or values.get("RESULT") != "OK"
+            or not values.get("WINDOW_HANDLE", "").isdigit()
+            or int(values["WINDOW_HANDLE"]) <= 0
+        ):
+            raise WorkflowError(
+                f"automation.installed_linux_uninstall.{action}",
+                "The interactive uninstall UI action was not proven",
+                details={"vm": vm.name, "target": vm.host, **values},
+            )
+        return values
+
+    def _rollback_completed_uefi_installation(
+        self, ssh: SSHClient, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
+    ) -> None:
+        if (
+            vm.firmware != "uefi"
+            or options.rollback_baseline is None
+            or any(step.status == "error" for step in result.steps)
+        ):
+            raise WorkflowError(
+                "automation.uefi_postinstall_rollback",
+                "Post-install UEFI rollback requires successful checks and its Windows baseline",
+                details={"vm": vm.name},
+            )
+        self._run_windows_script_resiliently(
+            ssh,
+            script_name="request_uefi_postinstall_rollback.ps1",
+            config={"expected_firmware": "uefi"},
+            step="automation.uefi_postinstall_rollback.request",
+            timeout=960,
+        )
+        self._verify_exact_windows_rollback(
+            ssh,
+            vm,
+            options.rollback_baseline,
+            result,
+            step="automation.uefi_postinstall_rollback.verify",
+            storage_fixture_receipt=options.storage_fixture_receipt,
+            failure_message="The installed UEFI Linux partition was not fully rolled back",
+        )
+
+    def _rollback_completed_bios_installation(
+        self, ssh: SSHClient, vm: VMConfig, options: AutomationOptions, result: ResultBuilder
+    ) -> None:
+        if (
+            vm.firmware != "bios"
+            or options.rollback_baseline is None
+            or any(step.status == "error" for step in result.steps)
+        ):
+            raise WorkflowError(
+                "automation.bios_postinstall_rollback",
+                "Post-install BIOS rollback requires successful checks and its Windows baseline",
+                details={"vm": vm.name},
+            )
+        self._run_windows_script_resiliently(
+            ssh,
+            script_name="request_bios_postinstall_rollback.ps1",
+            config={"expected_firmware": "bios"},
+            step="automation.bios_postinstall_rollback.request",
+            timeout=960,
+        )
+        self._verify_exact_windows_rollback(
+            ssh,
+            vm,
+            options.rollback_baseline,
+            result,
+            step="automation.bios_postinstall_rollback.verify",
+            storage_fixture_receipt=options.storage_fixture_receipt,
+            failure_message="The installed BIOS Linux partition was not fully rolled back",
+        )
+
+    def _verify_linux_redirected_documents(self, ssh, vm, options, result) -> None:
+        receipt = (options.storage_fixture_receipt or {}).get("user_documents")
+        if receipt is None or not options.share_windows_files_in_linux:
+            return
+        step = "automation.test.redirected_documents"
+        witnesses = [
+            item
+            for item in receipt["files"]
+            if re.fullmatch(r"libertix-user-data-[0-9a-f]{32}\.txt", item["relative"])
+        ]
+        if len(witnesses) != 1:
+            raise WorkflowError(step, "The Windows-only Documents witness is missing or ambiguous")
+        evidence = {key: receipt[key] for key in ("volume_id", "user_sid", "destination")}
+        evidence["witness"] = witnesses[0]
+        response = self._run_linux_script_resiliently(
+            ssh,
+            script_name="check_linux_redirected_documents.py",
+            arguments=("--receipt", json.dumps(evidence)),
+            step=step,
+            timeout=60,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout, prefixes=("REDIRECTED_DOCUMENTS",)
+        )
+        if values.get("REDIRECTED_DOCUMENTS") != "OK":
+            raise WorkflowError(
+                step, "Linux could not prove access to redirected Windows Documents"
+            )
+        result.ok(
+            step,
+            "Linux read the Windows-only witness through the redirected Documents shortcut",
+            vm=vm.name,
+        )
+
+    def _verify_windows_preference_migration(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+    ) -> None:
+        if not options.migrate_windows_preferences:
+            return
+        fixture = options.preference_fixture
+        if fixture is None:
+            raise WorkflowError(
+                "automation.test.preference_migration",
+                "The Windows preference fixture evidence is missing",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        response = self._run_linux_script_resiliently(
+            ssh,
+            script_name="check_linux_preference_migration.py",
+            arguments=(
+                "--distribution",
+                options.distribution.id,
+                "--username",
+                options.linux_username,
+                "--wallpaper-sha256",
+                fixture["WALLPAPER_SHA256"],
+                "--wallpaper-mode",
+                options.preference_wallpaper,
+                "--account-image-sha256",
+                fixture["ACCOUNT_IMAGE_SHA256"],
+            ),
+            step="automation.test.preference_migration",
+            timeout=90,
+        )
+        values = self.validation.parse_powershell_results(
+            response.stdout,
+            prefixes=("MIGRATED_WIFI_PROFILE_COUNT", "PREFERENCE_MIGRATION_RESULT"),
+        )
+        if values.get("PREFERENCE_MIGRATION_RESULT") != "OK":
+            raise WorkflowError(
+                "automation.test.preference_migration",
+                "Windows preference migration verification did not return OK",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        result.ok(
+            "automation.test.preference_migration",
+            "Windows preferences and supported Wi-Fi profiles were migrated and verified",
+            vm=vm.name,
+            target=vm.host,
+            wifi_profile_count=values.get("MIGRATED_WIFI_PROFILE_COUNT", "0"),
+        )
 
     @staticmethod
     def _parse_windows_repair_state(stdout: str) -> dict[str, str]:
@@ -582,17 +937,12 @@ class PostInstallValidationMixin:
             except WorkflowError as exc:
                 if not is_reconnectable_transport_error(exc):
                     raise
-                current_ssh.__exit__(None, None, None)
+                current_ssh.close()
                 time.sleep(10)
-                current_ssh = self._wait_for_ssh(
+                current_ssh = self._wait_for_windows_ssh(
                     vm,
-                    result=result,
-                    username=vm.username,
-                    password=self.settings.windows_ssh_password.get_secret_value(),
-                    trust_on_first_use=False,
-                    probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-                    expected="LIBERTIX_WINDOWS_READY",
-                    phase="windows_filesystem_repair",
+                    result,
+                    "windows_filesystem_repair",
                     grub_entry="windows",
                     distribution=options.distribution,
                 )
@@ -640,17 +990,12 @@ class PostInstallValidationMixin:
                     target=vm.host,
                     attempt=repair_reboots,
                 )
-                current_ssh.__exit__(None, None, None)
+                current_ssh.close()
                 time.sleep(10)
-                current_ssh = self._wait_for_ssh(
+                current_ssh = self._wait_for_windows_ssh(
                     vm,
-                    result=result,
-                    username=vm.username,
-                    password=self.settings.windows_ssh_password.get_secret_value(),
-                    trust_on_first_use=False,
-                    probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-                    expected="LIBERTIX_WINDOWS_READY",
-                    phase="windows_filesystem_repair",
+                    result,
+                    "windows_filesystem_repair",
                     grub_entry="windows",
                     distribution=options.distribution,
                 )
@@ -671,24 +1016,8 @@ class PostInstallValidationMixin:
     ) -> None:
         state_path = "/var/lib/libertix/first-boot-verification.json"
         log_path = "/var/log/libertix/first-boot-resize.log"
-        command = (
-            'i=0; status=""; while [ "$i" -lt 120 ]; do '
-            "status=$(python3 -c 'import json,sys; "
-            'print(json.load(open(sys.argv[1], encoding="utf-8")).get("status", ""))\' '
-            f"{shlex.quote(state_path)} 2>/dev/null || true); "
-            'case "$status" in succeeded|failed) break;; esac; '
-            "i=$((i + 1)); sleep 2; done; "
-            "python3 -c 'import json,sys; "
-            'p=json.load(open(sys.argv[1], encoding="utf-8")); '
-            'failed=[{"name": c.get("name"), "message": c.get("message")} '
-            'for c in p.get("checks", []) if not c.get("passed")]; '
-            'print(json.dumps({"status": p.get("status"), "error": p.get("error"), '
-            '"failedChecks": failed}, ensure_ascii=True)); '
-            'raise SystemExit(0 if p.get("status") == "succeeded" else 1)\' '
-            f"{shlex.quote(state_path)}"
-        )
         response = ssh.run(
-            f"sh -eu -c {shlex.quote(command)}",
+            f"{LINUX_CHECK} wait-first-boot-verification {shlex.quote(state_path)}",
             step="automation.test.linux",
             timeout=270,
             check=False,
@@ -760,14 +1089,22 @@ class PostInstallValidationMixin:
             focus = self._run_linux_script_resiliently(
                 guest_ssh,
                 script_name="focus_linux_post_install_result.py",
-                arguments=("--pid", process_id, "--timeout", "15"),
+                arguments=("--pid", process_id, "--ready-timeout", "90", "--timeout", "15"),
                 step="automation.linux_post_install_result_focused",
-                timeout=30,
+                timeout=120,
             )
             values = self.validation.parse_powershell_results(
                 focus.stdout,
-                prefixes=("PROCESS_ID", "WINDOW_ID", "ACTIVE_WINDOW_PROVEN", "RESULT"),
+                prefixes=(
+                    "PROCESS_ID",
+                    "WINDOW_ID",
+                    "ACTIVE_WINDOW_PROVEN",
+                    "FINGERPRINT",
+                    "RESULT",
+                ),
             )
+            if values.get("RESULT") == "NEEDS_USER_ACTIVATION":
+                values = self._activate_wayland_result(vm, guest_ssh, process_id, values)
             if (
                 values.get("PROCESS_ID") != process_id
                 or values.get("ACTIVE_WINDOW_PROVEN") != "True"
@@ -800,11 +1137,45 @@ class PostInstallValidationMixin:
                     "The Windows post-install result process ID is missing",
                     details={"vm": vm.name, "target": vm.host},
                 )
-            self._run_windows_script_resiliently(
+            focus = self._run_windows_script_resiliently(
                 guest_ssh,
                 script_name="focus_post_install_result.ps1",
                 config={"process_id": int(process_id_text)},
                 step="automation.windows_post_install_result_focused",
+                timeout=60,
+            )
+            locale = self.validation.parse_powershell_results(
+                focus.stdout,
+                prefixes=(
+                    "ACTIVE_KEYBOARD_IDENTIFIER",
+                    "INTERACTIVE_UI_CULTURE",
+                    "INTERACTIVE_SESSION_ID",
+                ),
+            )
+            if not all(
+                locale.get(key)
+                for key in (
+                    "ACTIVE_KEYBOARD_IDENTIFIER",
+                    "INTERACTIVE_UI_CULTURE",
+                    "INTERACTIVE_SESSION_ID",
+                )
+            ):
+                raise WorkflowError(
+                    "automation.windows_interactive_locale",
+                    "The focused Windows result did not provide interactive keyboard evidence",
+                    details={"vm": vm.name, "target": vm.host},
+                )
+            self._run_windows_script_resiliently(
+                guest_ssh,
+                script_name="post_install_windows_check.ps1",
+                config={
+                    "check": "locale",
+                    "expected_firmware": vm.firmware,
+                    "interactive_keyboard_identifier": locale["ACTIVE_KEYBOARD_IDENTIFIER"],
+                    "interactive_ui_culture": locale["INTERACTIVE_UI_CULTURE"],
+                    "interactive_session_id": locale["INTERACTIVE_SESSION_ID"],
+                },
+                step="automation.windows_interactive_locale",
                 timeout=60,
             )
         capture = self._capture_with_name(vm, f"post-install-{platform}-success")
@@ -821,12 +1192,8 @@ class PostInstallValidationMixin:
                 command=(
                     'i=0; while [ "$i" -lt 30 ]; do '
                     "if ! pgrep -af '/usr/local/lib/libertix/[l]ibertix-first-boot-result.py' "
-                    ">/dev/null && "
-                    "python3 -c 'import json,pathlib; "
-                    'p=pathlib.Path.home()/".local/state/libertix/first-boot-result-ack.json"; '
-                    'v=json.loads(p.read_text(encoding="utf-8")); '
-                    'assert v["schemaVersion"] == 1; assert len(v["fingerprint"]) == 64\' '
-                    "; then exit 0; fi; i=$((i + 1)); sleep 1; done; exit 1"
+                    f">/dev/null && {LINUX_CHECK} result-acknowledged; "
+                    "then exit 0; fi; i=$((i + 1)); sleep 1; done; exit 1"
                 ),
                 step="automation.linux_post_install_result_dismissed",
                 timeout=45,
@@ -853,6 +1220,52 @@ class PostInstallValidationMixin:
             dismissal_exit_code=dismissal.exit_code,
         )
 
+    def _activate_wayland_result(
+        self, vm: VMConfig, guest_ssh: SSHClient, process_id: str, initial: dict[str, str]
+    ) -> dict[str, str]:
+        fingerprint = initial.get("FINGERPRINT", "")
+        if initial.get("PROCESS_ID") != process_id or not re.fullmatch(
+            r"[0-9a-f]{64}", fingerprint
+        ):
+            raise WorkflowError(
+                "automation.linux_post_install_result_focused",
+                "The Wayland result identity is invalid",
+                details={"vm": vm.name, "target": vm.host},
+            )
+        values = initial
+        for count in range(1, 7):
+            client = self.vnc.connect(vm.vnc)
+            try:
+                client.keyDown("alt")
+                try:
+                    for _ in range(count):
+                        client.keyPress("tab")
+                finally:
+                    client.keyUp("alt")
+            finally:
+                client.disconnect()
+            time.sleep(0.5)
+            probe = self._run_linux_script_resiliently(
+                guest_ssh,
+                script_name="focus_linux_post_install_result.py",
+                arguments=("--pid", process_id, "--timeout", "2", "--check-only"),
+                step="automation.linux_post_install_result_focused",
+                timeout=10,
+            )
+            values = self.validation.parse_powershell_results(
+                probe.stdout,
+                prefixes=("PROCESS_ID", "FINGERPRINT", "ACTIVE_WINDOW_PROVEN", "RESULT"),
+            )
+            if values.get("PROCESS_ID") != process_id or values.get("FINGERPRINT") != fingerprint:
+                raise WorkflowError(
+                    "automation.linux_post_install_result_focused",
+                    "The Wayland result identity changed during activation",
+                    details={"vm": vm.name, "target": vm.host},
+                )
+            if values.get("ACTIVE_WINDOW_PROVEN") == "True" and values.get("RESULT") == "OK":
+                return values
+        return values
+
     def _prepare_linux_graphical_session(
         self,
         linux_ssh: SSHClient,
@@ -868,37 +1281,69 @@ class PostInstallValidationMixin:
             'type=$(loginctl show-session "$sid" -p Type --value); '
             'active=$(loginctl show-session "$sid" -p Active --value); '
             'case "$type:$active" in x11:yes|wayland:yes) '
+            'if [ "$(loginctl show-session "$sid" -p LockedHint --value)" != no ]; then '
+            'case "$(systemctl show display-manager.service -p Id --value)" in '
+            "gdm.service|gdm3.service) printf LIBERTIX_GDM_LOCKED;; "
+            "*) printf LIBERTIX_DESKTOP_LOCKED;; esac; exit 0; fi; "
             "printf LIBERTIX_DESKTOP_READY; exit 0;; esac; done; "
             "for sid in $(loginctl list-sessions --no-legend | awk '{print $1}'); do "
             'class=$(loginctl show-session "$sid" -p Class --value); '
             'type=$(loginctl show-session "$sid" -p Type --value); '
             'active=$(loginctl show-session "$sid" -p Active --value); '
             'case "$class:$type:$active" in greeter:x11:yes|greeter:wayland:yes) '
-            "printf LIBERTIX_GREETER_READY; exit 0;; esac; done; exit 1"
+            'case "$(systemctl show display-manager.service -p Id --value)" in '
+            "gdm.service|gdm3.service) printf LIBERTIX_GDM_GREETER_READY;; "
+            "*) printf LIBERTIX_GREETER_READY;; esac; exit 0;; esac; done; exit 1"
         )
-        for attempt in range(1, 6):
-            response = linux_ssh.run(
-                graphical_session_probe,
+
+        def finish_if_desktop(response: CommandResult, attempt: int) -> bool:
+            if response.exit_code != 0 or "LIBERTIX_DESKTOP_READY" not in response.stdout:
+                return False
+            capture = self._capture_with_name(
+                vm,
+                f"post-install-linux-session-ready-{attempt:02d}",
+            )
+            result.ok(
+                "automation.linux_graphical_session",
+                "The active Linux graphical session was proven by loginctl",
+                vm=vm.name,
+                target=vm.vnc,
+                attempt=attempt,
+                capture=str(capture),
+            )
+            return True
+
+        def probe() -> CommandResult:
+            return self._run_linux_command_resiliently(
+                linux_ssh,
+                command=graphical_session_probe,
                 step="automation.linux_graphical_session",
                 timeout=30,
                 check=False,
             )
-            if response.exit_code == 0 and "LIBERTIX_DESKTOP_READY" in response.stdout:
-                capture = self._capture_with_name(
-                    vm,
-                    f"post-install-linux-session-ready-{attempt:02d}",
-                )
-                result.ok(
-                    "automation.linux_graphical_session",
-                    "The active Linux graphical session was proven by loginctl",
-                    vm=vm.name,
-                    target=vm.vnc,
-                    attempt=attempt,
-                    capture=str(capture),
-                )
+
+        def settled_to_desktop(attempt: int) -> bool:
+            # Leave authentication undisturbed for five minutes before deciding.
+            for _ in range(60):
+                time.sleep(5)
+                if finish_if_desktop(probe(), attempt):
+                    return True
+            return False
+
+        for attempt in range(1, 6):
+            if attempt > 1 and settled_to_desktop(attempt - 1):
+                return
+            response = probe()
+            if finish_if_desktop(response, attempt):
                 return
 
-            if "LIBERTIX_GREETER_READY" not in response.stdout:
+            gdm_account_selection = "LIBERTIX_GDM_GREETER_READY" in response.stdout
+            gdm_locked_session = "LIBERTIX_GDM_LOCKED" in response.stdout
+            if (
+                "LIBERTIX_GREETER_READY" not in response.stdout
+                and not gdm_account_selection
+                and not gdm_locked_session
+            ):
                 result.ok(
                     "automation.linux_graphical_session_wait",
                     "No active Linux desktop or login greeter is proven yet",
@@ -906,66 +1351,186 @@ class PostInstallValidationMixin:
                     target=vm.vnc,
                     attempt=attempt,
                 )
-                time.sleep(10)
                 continue
-
-            client = None
-            capture_error: WorkflowError | None = None
-            try:
-                client = self.vnc.connect(vm.vnc)
-                self._capture_from_client(
-                    client,
-                    vm,
-                    f"post-install-linux-login-{attempt:02d}-ready",
-                    result,
-                )
-                # LightDM already focuses the password entry for the selected
-                # user. Pressing Enter here would submit the empty field and
-                # discard the real password while authentication is pending.
-                client.keyDown("ctrl")
-                client.keyPress("q" if vm.vnc_keyboard_layout == "fr" else "a")
-                client.keyUp("ctrl")
-                client.keyPress("bsp")
-                self._type_text(client, password, vm.vnc_keyboard_layout)
-                self._capture_from_client(
-                    client,
-                    vm,
-                    f"post-install-linux-login-{attempt:02d}-password-entered",
-                    result,
-                )
-                client.keyPress("enter")
-            except WorkflowError as exc:
-                if exc.step != "automation.capture":
-                    raise
-                capture_error = exc
-            finally:
-                if client is not None:
-                    client.disconnect()
-            if capture_error is not None:
+            if self._submit_linux_graphical_login(
+                linux_ssh,
+                vm,
+                result,
+                username,
+                password,
+                attempt,
+                gdm_account_selection=gdm_account_selection,
+                gdm_locked_session=gdm_locked_session,
+            ):
                 result.ok(
-                    "automation.linux_graphical_capture_retry",
-                    "The Linux login VNC capture failed; reconnecting before retry",
+                    "automation.linux_graphical_login",
+                    "Linux graphical credentials were submitted after loginctl found no "
+                    "active desktop",
                     vm=vm.name,
                     target=vm.vnc,
                     attempt=attempt,
-                    error=capture_error.message,
                 )
-                time.sleep(10)
-                continue
-            result.ok(
-                "automation.linux_graphical_login",
-                "Linux graphical credentials were submitted after loginctl found no active desktop",
-                vm=vm.name,
-                target=vm.vnc,
-                attempt=attempt,
-            )
-            time.sleep(10)
+
+        # Give the final submission the same settling time as earlier attempts.
+        if settled_to_desktop(5):
+            return
 
         raise WorkflowError(
             "automation.linux_graphical_session",
             "The Linux graphical session did not become active after five attempts",
             details={"vm": vm.name, "target": vm.vnc},
         )
+
+    def _submit_linux_graphical_login(
+        self,
+        linux_ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        username: str,
+        password: str,
+        attempt: int,
+        *,
+        gdm_account_selection: bool,
+        gdm_locked_session: bool,
+    ) -> bool:
+        """Type the password into the proven greeter; False means retry this attempt."""
+
+        client = None
+        try:
+            if gdm_account_selection or gdm_locked_session:
+                self._assert_single_gdm_account(linux_ssh, username)
+            client = self.vnc.connect(vm.vnc)
+            # Move without clicking or changing focus to wake a blanked display.
+            client.mouseMove(1, 1)
+            client.mouseMove(2, 1)
+            time.sleep(1)
+            self._capture_from_client(
+                client,
+                vm,
+                f"post-install-linux-login-{attempt:02d}-ready",
+                result,
+            )
+            if gdm_account_selection:
+                # GDM can leave the account list without keyboard focus after
+                # cancelling authentication. Home/Enter alone then do nothing.
+                client.keyPress("esc")
+                if not self._wait_for_gdm_password_worker(linux_ssh, present=False):
+                    return False
+                client.keyPress("home")
+                client.keyPress("enter")
+                if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                    client.keyPress("tab")
+                    client.keyPress("enter")
+                    if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                        return False
+            elif gdm_locked_session:
+                if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                    client.keyPress("enter")
+                    if not self._wait_for_gdm_password_worker(linux_ssh, present=True):
+                        return False
+            # LightDM already focuses the password entry for the selected
+            # user. Pressing Enter here would submit the empty field and
+            # discard the real password while authentication is pending.
+            client.keyDown("ctrl")
+            client.keyPress("q" if vm.vnc_keyboard_layout == "fr" else "a")
+            client.keyUp("ctrl")
+            client.keyPress("bsp")
+            self._type_text(client, password, vm.vnc_keyboard_layout)
+            client.keyPress("enter")
+            self._capture_from_client(
+                client,
+                vm,
+                f"post-install-linux-login-{attempt:02d}-submitted",
+                result,
+            )
+        except WorkflowError as exc:
+            if exc.step != "automation.capture":
+                raise
+            result.ok(
+                "automation.linux_graphical_capture_retry",
+                "The Linux login VNC capture failed; reconnecting before retry",
+                vm=vm.name,
+                target=vm.vnc,
+                attempt=attempt,
+                error=exc.message,
+                capture_details=exc.details,
+            )
+            return False
+        finally:
+            if client is not None:
+                client.disconnect()
+        return True
+
+    @staticmethod
+    def _wait_for_gdm_password_worker(linux_ssh: SSHClient, *, present: bool) -> bool:
+        # A submitted GDM session retains its PAM worker. Only a worker not
+        # leading an existing loginctl session proves a new password conversation.
+        # The "Not listed" username field starts no such conversation.
+        probe = (
+            "sessions=$(loginctl list-sessions --no-legend) || exit 2; "
+            "leaders=' '; for sid in $(printf '%s\\n' \"$sessions\" | awk '{print $1}'); do "
+            'leader=$(loginctl show-session "$sid" -p Leader --value) || exit 2; '
+            'case "$leader" in ""|*[!0-9]*) exit 2;; esac; '
+            'leaders="$leaders$leader "; done; '
+            "workers=$(pgrep -u 0 -f '^gdm-session-worker \\[pam/gdm-password\\]$'); "
+            'status=$?; [ "$status" -le 1 ] || exit 2; '
+            'for worker in $workers; do case "$leaders" in *" $worker "*) continue;; esac; '
+            "printf LIBERTIX_GDM_PASSWORD_PENDING; exit 0; done; "
+            "printf LIBERTIX_GDM_PASSWORD_ABSENT"
+        )
+        expected = "LIBERTIX_GDM_PASSWORD_PENDING" if present else "LIBERTIX_GDM_PASSWORD_ABSENT"
+        for _ in range(5):
+            response = PostInstallValidationMixin._run_linux_command_resiliently(
+                linux_ssh,
+                command=probe,
+                step="automation.gdm_password_state",
+                timeout=15,
+                check=False,
+            )
+            if response.exit_code != 0 or response.stdout.strip() not in {
+                "LIBERTIX_GDM_PASSWORD_PENDING",
+                "LIBERTIX_GDM_PASSWORD_ABSENT",
+            }:
+                raise WorkflowError(
+                    "automation.gdm_password_state", "Could not establish the GDM password state"
+                )
+            if response.stdout.strip() == expected:
+                return True
+            time.sleep(1)
+        return False
+
+    def _assert_single_gdm_account(self, linux_ssh: SSHClient, username: str) -> None:
+        account_uid = self._run_linux_command_resiliently(
+            linux_ssh,
+            command=f"id -u -- {shlex.quote(username)}",
+            step="automation.gdm_account_identity",
+            timeout=15,
+        ).stdout.strip()
+        if not account_uid.isdigit() or int(account_uid) < 1000:
+            raise WorkflowError("automation.gdm_account_identity", "Invalid GDM test account UID")
+        account_path = f"/org/freedesktop/Accounts/User{account_uid}"
+        reply = self._run_linux_command_resiliently(
+            linux_ssh,
+            command="busctl --system call org.freedesktop.Accounts /org/freedesktop/Accounts "
+            "org.freedesktop.Accounts ListCachedUsers && "
+            f"busctl --system get-property org.freedesktop.Accounts {account_path} "
+            "org.freedesktop.Accounts.User UserName && "
+            f"busctl --system get-property org.freedesktop.Accounts {account_path} "
+            "org.freedesktop.Accounts.User SystemAccount",
+            step="automation.gdm_account_identity",
+            timeout=15,
+        )
+        try:
+            values = [shlex.split(line) for line in reply.stdout.splitlines() if line.strip()]
+        except ValueError as error:
+            raise WorkflowError(
+                "automation.gdm_account_identity", "Malformed GDM account inventory"
+            ) from error
+        if values != [["ao", "1", account_path], ["s", username], ["b", "false"]]:
+            raise WorkflowError(
+                "automation.gdm_account_identity",
+                "GDM account selection requires exactly the expected non-system test account",
+            )
 
     def _prepare_windows_graphical_session(
         self,
@@ -974,7 +1539,8 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
     ) -> None:
         password = self.settings.windows_ssh_password.get_secret_value()
-        for attempt in range(1, 6):
+
+        def inspect(attempt: int, phase: str):
             inspection = self._run_windows_script_resiliently(
                 windows_ssh,
                 script_name="inspect_windows_graphical_session.ps1",
@@ -991,7 +1557,9 @@ class PostInstallValidationMixin:
                     "SESSION_ID",
                 ),
             )
-            capture = self._capture_with_name(vm, f"post-install-windows-login-{attempt:02d}")
+            capture = self._capture_with_name(
+                vm, f"post-install-windows-login-{attempt:02d}-{phase}"
+            )
             context = {
                 "vm": vm.name,
                 "target": vm.vnc,
@@ -999,6 +1567,15 @@ class PostInstallValidationMixin:
                 "attempt": attempt,
                 "session_id": values.get("SESSION_ID", "-1"),
             }
+            return values, context
+
+        for attempt in range(1, 4):
+            client = self.vnc.connect(vm.vnc)
+            try:
+                client.mouseMove(1, 1)
+            finally:
+                client.disconnect()
+            values, context = inspect(attempt, "before")
             if values.get("SETUP_EXPERIENCE_PRESENT") == "True":
                 response = self._run_windows_script_resiliently(
                     windows_ssh,
@@ -1027,7 +1604,7 @@ class PostInstallValidationMixin:
                     **context,
                 )
                 time.sleep(5)
-                continue
+                values, context = inspect(attempt, "after-setup")
             if values.get("EXPLORER_SESSION_READY") == "True":
                 result.ok(
                     "automation.windows_graphical_session",
@@ -1042,7 +1619,8 @@ class PostInstallValidationMixin:
                     "Windows has not exposed an Explorer desktop or a proven login screen yet",
                     **context,
                 )
-                time.sleep(10)
+                if attempt < 3:
+                    time.sleep(300)
                 continue
 
             client = None
@@ -1056,7 +1634,7 @@ class PostInstallValidationMixin:
                 time.sleep(0.75)
                 client.keyPress("enter")
                 # Keep the transport alive while LogonUI consumes the submit
-                # event; the next loop iteration proves Explorer, not the key.
+                # event; the following inspection proves Explorer, not the key.
                 time.sleep(2)
             finally:
                 if client is not None:
@@ -1067,10 +1645,67 @@ class PostInstallValidationMixin:
                 **context,
             )
             time.sleep(12)
+            values, context = inspect(attempt, "after-submit")
+            if values.get("EXPLORER_SESSION_READY") == "True":
+                result.ok(
+                    "automation.windows_graphical_session",
+                    "Windows Explorer confirmed the interactive session",
+                    **context,
+                )
+                return
+            if attempt < 3:
+                time.sleep(300)
         raise WorkflowError(
             "automation.windows_graphical_session",
-            "The Windows interactive session was not proven available after five attempts",
-            details={"vm": vm.name, "target": vm.vnc},
+            "The Windows interactive session was not proven after three attempts "
+            "spaced five minutes apart",
+            details=context,
+        )
+
+    def _wait_for_windows_ssh(
+        self,
+        vm: VMConfig,
+        result: ResultBuilder,
+        phase: str,
+        *,
+        grub_entry: Literal["linux", "windows"] | None = None,
+        distribution: DistributionProfile | None = None,
+        previous_windows_boot_id: str | None = None,
+    ) -> SSHClient:
+        """Return a connected client once Windows answers its readiness probe."""
+
+        return self._wait_for_ssh(
+            vm,
+            result=result,
+            username=vm.username,
+            password=self.settings.windows_ssh_password.get_secret_value(),
+            trust_on_first_use=False,
+            probe=f"cmd.exe /d /c echo {WINDOWS_READY_MARKER}",
+            expected=WINDOWS_READY_MARKER,
+            phase=phase,
+            grub_entry=grub_entry,
+            distribution=distribution,
+            previous_windows_boot_id=previous_windows_boot_id,
+        )
+
+    def _wait_for_linux_ssh(
+        self, vm: VMConfig, result: ResultBuilder, options: AutomationOptions, phase: str
+    ) -> SSHClient:
+        """Select Linux in GRUB and return a connected client once it answers its probe."""
+
+        return self._wait_for_ssh(
+            vm,
+            result=result,
+            username=options.linux_username,
+            password=options.linux_password,
+            trust_on_first_use=True,
+            probe=(
+                f"test -e /var/lib/libertix/development-ssh-ready && printf {LINUX_READY_MARKER}"
+            ),
+            expected=LINUX_READY_MARKER,
+            phase=phase,
+            grub_entry="linux",
+            distribution=options.distribution,
         )
 
     def _wait_for_ssh(
@@ -1086,6 +1721,7 @@ class PostInstallValidationMixin:
         phase: str,
         grub_entry: Literal["linux", "windows"] | None = None,
         distribution: DistributionProfile | None = None,
+        previous_windows_boot_id: str | None = None,
     ) -> SSHClient:
         deadline = time.monotonic() + self.settings.post_install_boot_timeout_seconds
         last_error: WorkflowError | None = None
@@ -1125,12 +1761,28 @@ class PostInstallValidationMixin:
                     probe,
                     step=f"automation.{phase}_ssh_probe",
                     timeout=30,
+                    replay_safe=True,
                 )
                 if response.stdout.strip() == expected:
+                    if previous_windows_boot_id is not None:
+                        boot_id = self._read_windows_boot_id(client, vm)
+                        if boot_id == previous_windows_boot_id:
+                            raise WorkflowError(
+                                f"automation.{phase}_boot_identity",
+                                "Windows is still running the pre-reboot session",
+                                details={"vm": vm.name, "boot_id": boot_id},
+                            )
+                        result.ok(
+                            f"automation.{phase}_boot_identity",
+                            "A new Windows boot session was proven",
+                            vm=vm.name,
+                            previous_boot_id=previous_windows_boot_id,
+                            boot_id=boot_id,
+                        )
                     return client
             except WorkflowError as exc:
                 last_error = exc
-            client.__exit__(None, None, None)
+            client.close()
             time.sleep(self.settings.post_install_poll_interval_seconds)
 
         details = {"vm": vm.name, "host": vm.host, "phase": phase}
@@ -1258,6 +1910,81 @@ class PostInstallValidationMixin:
         options: AutomationOptions,
         result: ResultBuilder,
     ) -> None:
+        timers = ("apt-daily.timer", "apt-daily-upgrade.timer")
+        timer_list = self._run_linux_command_resiliently(
+            ssh,
+            command="sh -eu -c "
+            + shlex.quote(
+                "systemctl list-units --type=timer --state=active "
+                "--no-legend --plain --no-pager " + " ".join(timers)
+            ),
+            step="automation.package_manager_timers",
+            timeout=PACKAGE_TIMER_TIMEOUT_SECONDS,
+        )
+        active_timers = tuple(
+            line.split()[0]
+            for line in timer_list.stdout.splitlines()
+            if line.split() and line.split()[0] in timers
+        )
+        checks = self._linux_checks(vm, options)
+        package_checks = ("linux.package_dependencies", "linux.package_database")
+        ordered_checks = tuple(check for check in checks if check.name in package_checks) + tuple(
+            check for check in checks if check.name not in package_checks
+        )
+        try:
+            if active_timers:
+                self._set_linux_update_timers(ssh, vm, options, result, active_timers, "stop")
+            # Let an existing update finish before checking files it may still replace.
+            for check in ordered_checks:
+                response = self._run_remote_check(
+                    ssh,
+                    vm,
+                    result,
+                    "linux",
+                    check,
+                    sudo_password=options.linux_password,
+                )
+                if check.name == "linux.package_dependencies" and (
+                    response is None or response.exit_code != 0
+                ):
+                    raise WorkflowError(
+                        "automation.package_manager_wait",
+                        "The Linux package manager is not ready; "
+                        "post-install checks cannot continue",
+                        details={"vm": vm.name, "test": check.name},
+                    )
+        finally:
+            if active_timers:
+                self._set_linux_update_timers(ssh, vm, options, result, active_timers, "start")
+
+    def _set_linux_update_timers(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        options: AutomationOptions,
+        result: ResultBuilder,
+        timers: tuple[str, ...],
+        action: str,
+    ) -> None:
+        self._run_linux_command_resiliently(
+            ssh,
+            command="sudo -S -p '' sh -eu -c "
+            + shlex.quote(f"systemctl {action} " + " ".join(timers)),
+            step="automation.package_manager_timers",
+            timeout=PACKAGE_TIMER_TIMEOUT_SECONDS,
+            sensitive=True,
+            stdin_data=options.linux_password + "\n",
+        )
+        result.ok(
+            "automation.package_manager_timers",
+            "Paused automatic APT timers during Linux checks"
+            if action == "stop"
+            else "Restored automatic APT timers after Linux checks",
+            vm=vm.name,
+            timers=timers,
+        )
+
+    def _linux_checks(self, vm: VMConfig, options: AutomationOptions) -> tuple[RemoteCheck, ...]:
         username = shlex.quote(options.linux_username)
         expected_os_release_id = shlex.quote(options.distribution.os_release_id)
         expected_grub_entry = shlex.quote(
@@ -1268,6 +1995,7 @@ class PostInstallValidationMixin:
             + " --class "
         )
         windows_grub_entry_pattern = shlex.quote("""menuentry ['\"]Windows( Boot Manager)?['\"]""")
+
         firmware_test = (
             "test -d /sys/firmware/efi" if vm.firmware == "uefi" else "test ! -d /sys/firmware/efi"
         )
@@ -1280,6 +2008,7 @@ class PostInstallValidationMixin:
         dns_checks = "; ".join(
             f"resolvectl dns | grep -Fq -- {shlex.quote(server)}" for server in dns_servers
         )
+
         boot_mode_test = (
             "findmnt /boot/efi; "
             'test "$(findmnt -n -o FSTYPE /boot/efi)" = vfat; '
@@ -1287,14 +2016,18 @@ class PostInstallValidationMixin:
             if vm.firmware == "uefi"
             else "test -s /boot/grub/i386-pc/core.img"
         )
+
         windows_mount_test = (
             "findmnt /mnt/windows; findmnt -n -o FSTYPE /mnt/windows | "
             "grep -Eq '^(fuseblk|ntfs3)$'; "
             "findmnt -n -o OPTIONS /mnt/windows | grep -qw rw"
             if options.share_windows_files_in_linux
-            else "! findmnt /mnt/windows; "
-            "! grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
+            else "status=0; findmnt --mountpoint /mnt/windows || status=$?; "
+            'test "$status" -eq 1; '
+            "status=0; grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' "
+            '/etc/fstab || status=$?; test "$status" -eq 1'
         )
+
         sharing_policy_test = (
             ("grep -Fx true" if options.share_linux_files_in_windows else "grep -Fx false")
             + " /etc/libertix/share-linux-in-windows; "
@@ -1304,6 +2037,9 @@ class PostInstallValidationMixin:
                 else "! grep -Eq '^[^#].*[[:space:]]+/mnt/windows[[:space:]]+' /etc/fstab"
             )
         )
+
+        # A failed regeneration must leave grub.cfg untouched before the
+        # ordinary regeneration proves the installed boot hooks still work.
         grub_regeneration_test = (
             "for generator in 10_linux 30_uefi-firmware 20_memtest86+ 20_memtest86; do "
             "source=/etc/grub.d/$generator; "
@@ -1342,25 +2078,17 @@ class PostInstallValidationMixin:
                 else ""
             )
         )
+
         profile_shortcut_test = (
-            "profiles=$(python3 -c 'import base64,json,sys; "
-            'p=json.load(open(sys.argv[1], encoding="utf-8")); '
-            'print("\\n".join(json.loads(base64.b64decode('
-            'p["features"]["windowsProfilesJsonBase64"], validate=True))))\' '
-            "/etc/libertix/installation-plan.json); "
-            f"home=/home/{username}; bookmarks=$home/.config/gtk-3.0/bookmarks; "
-            "printf '%s\\n' \"$profiles\" | while IFS= read -r profile; do "
-            'test -n "$profile" || continue; shortcut=$home/User_$profile; '
-            'test -L "$shortcut"; '
-            'test "$(readlink "$shortcut")" = "/mnt/windows/Users/$profile"; '
-            'grep -Fqx "file://$shortcut User_$profile" "$bookmarks"; done'
+            "python3 /usr/local/lib/libertix/libertix-first-boot-verify.py --verify-windows-sharing"
             if options.share_windows_files_in_linux
             else (
-                f"! find /home/{username} -maxdepth 1 -type l -name 'User_*' "
+                f"! find /home/{username} -maxdepth 1 \\( -name 'User_*' -o -name 'Win_*' \\) "
                 "-print -quit | grep -q ."
             )
         )
-        checks = (
+
+        return (
             RemoteCheck("linux.identity", f'test "$(id -un)" = {username}; id'),
             RemoteCheck(
                 "linux.os_release",
@@ -1377,12 +2105,8 @@ class PostInstallValidationMixin:
             RemoteCheck(
                 "linux.locale",
                 "set -eu; plan=/etc/libertix/installation-plan.json; "
-                "expected_locale=$(python3 -c 'import json,sys; "
-                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
-                '["systemLanguage"])\' "$plan"); '
-                "expected_language=$(python3 -c 'import json,sys; "
-                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
-                '["languageCode"])\' "$plan"); '
+                f'expected_locale=$({LINUX_CHECK} json-value "$plan" locale.systemLanguage); '
+                f'expected_language=$({LINUX_CHECK} json-value "$plan" locale.languageCode); '
                 ". /etc/default/locale; "
                 'test "${LANG:-}" = "$expected_locale"; '
                 'test "${LC_ALL:-}" = "$expected_locale"; '
@@ -1398,28 +2122,17 @@ class PostInstallValidationMixin:
                 "linux.keyboard",
                 "set -eu; plan=/etc/libertix/installation-plan.json; "
                 f"marker=/home/{username}/.config/libertix/keyboard-initialized.json; "
-                "expected_layout=$(python3 -c 'import json,sys; "
-                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
-                '["keyboardLayout"])\' "$plan"); '
-                "expected_variant=$(python3 -c 'import json,sys; "
-                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
-                '.get("keyboardVariant", ""))\' "$plan"); '
-                "expected_model=$(python3 -c 'import json,sys; "
-                'print(json.load(open(sys.argv[1], encoding="utf-8"))["locale"]'
-                '["keyboardModel"])\' "$plan"); '
+                f'expected_layout=$({LINUX_CHECK} json-value "$plan" locale.keyboardLayout); '
+                f"expected_variant=$({LINUX_CHECK} json-value "
+                '"$plan" locale.keyboardVariant --optional); '
+                f'expected_model=$({LINUX_CHECK} json-value "$plan" locale.keyboardModel); '
                 ". /etc/default/keyboard; "
                 'test "${XKBLAYOUT:-}" = "$expected_layout"; '
                 'test "${XKBVARIANT:-}" = "$expected_variant"; '
                 'test "${XKBMODEL:-}" = "$expected_model"; '
                 "test -x /usr/local/bin/libertix-apply-keyboard-once; "
                 'test -s /etc/xdg/autostart/libertix-keyboard.desktop; test -s "$marker"; '
-                'python3 -c \'import json,sys; p=json.load(open(sys.argv[1], encoding="utf-8")); '
-                'm=json.load(open(sys.argv[2], encoding="utf-8")); l=p["locale"]; '
-                's=l["keyboardLayout"]+("+"+l.get("keyboardVariant", "") '
-                'if l.get("keyboardVariant") else ""); '
-                'assert m["status"] == "succeeded" and '
-                'm["sessionLanguage"] == l["systemLanguage"] and '
-                'm["desktopSource"] == s\' "$plan" "$marker"; '
+                f'{LINUX_CHECK} keyboard-marker "$plan" "$marker"; '
                 'source="$expected_layout"; '
                 '[ -z "$expected_variant" ] || source="$source+$expected_variant"; '
                 "expected_sources=\"[('xkb', '$source')]\"; "
@@ -1513,7 +2226,7 @@ class PostInstallValidationMixin:
             RemoteCheck(
                 "linux.grub_regeneration",
                 grub_regeneration_test,
-                timeout=180,
+                timeout=900 if options.installation_target == "secondary" else 180,
                 requires_sudo=True,
             ),
             RemoteCheck("linux.boot_mode_files", boot_mode_test, requires_sudo=True),
@@ -1540,6 +2253,7 @@ class PostInstallValidationMixin:
                 "printf '%s\\n' \"$contents\" | grep -Eq '(^|/)init$'; "
                 "! printf '%s\\n' \"$contents\" | "
                 "grep -Eq '(^|/)conf/uuid$|default-boot-to-casper'",
+                timeout=600 if options.installation_target == "secondary" else 120,
                 requires_sudo=True,
             ),
             RemoteCheck(
@@ -1554,6 +2268,7 @@ class PostInstallValidationMixin:
             RemoteCheck(
                 "linux.windows_profile_shortcuts",
                 profile_shortcut_test,
+                requires_sudo=True,
             ),
             RemoteCheck(
                 "linux.desktop_stack",
@@ -1564,49 +2279,14 @@ class PostInstallValidationMixin:
             ),
             RemoteCheck(
                 "linux.first_boot_verification",
-                "python3 -c 'import hashlib,json,sys; "
-                's=json.load(open(sys.argv[1], encoding="utf-8")); '
-                'p=json.load(open(sys.argv[2], encoding="utf-8")); '
-                'a=json.load(open(sys.argv[3], encoding="utf-8")); '
-                'assert s["schemaVersion"] == 1 and s["status"] == "succeeded"; '
-                'assert s["planId"] == p["planId"] and not s.get("error"); '
-                'assert s["distribution"]["id"] == sys.argv[4]; '
-                'assert s["distribution"]["osReleaseId"] == sys.argv[5]; '
-                'assert s["root"]["filesystem"] == "ext4"; '
-                'assert s["system"]["username"] == sys.argv[6]; '
-                'assert s["system"]["rootReadWrite"] is True; '
-                'assert s["system"]["sudoMember"] is True; '
-                'assert s["system"]["passwordActive"] is True; '
-                'assert s["system"]["dpkgAuditClean"] is True; '
-                'assert s["system"]["failedSystemdUnits"] == 0; '
-                'l=p["locale"]; z=s["localization"]; '
-                'source=l["keyboardLayout"]+("+"+l.get("keyboardVariant", "") '
-                'if l.get("keyboardVariant") else ""); '
-                'expected_locales=sorted({l["systemLanguage"].casefold().replace('
-                '"utf-8","utf8"),"en_us.utf8"}); '
-                'assert z["verified"] is True; '
-                'assert z["languageCode"] == l["languageCode"]; '
-                'assert z["systemLocale"] == l["systemLanguage"]; '
-                'assert z["compiledUtf8Locales"] == expected_locales; '
-                'assert z["keyboardLayout"] == l["keyboardLayout"]; '
-                'assert z["keyboardVariant"] == l.get("keyboardVariant", ""); '
-                'assert z["keyboardModel"] == l["keyboardModel"]; '
-                'assert z["desktopSource"] == source; '
-                'assert s["grub"]["bootChain"]["verified"] is True; '
-                'assert s.get("windowsEvidencePath"); '
-                "fields={k:s.get(k) for k in "
-                '("planId","status","updatedAtUtc","error")}; '
-                "fingerprint=hashlib.sha256("
-                "json.dumps(fields, sort_keys=True).encode()).hexdigest(); "
-                'assert a["fingerprint"] == fingerprint\' '
+                f"{LINUX_CHECK} first-boot-evidence "
                 "/var/lib/libertix/first-boot-verification.json "
                 "/etc/libertix/installation-plan.json "
                 f"/home/{username}/.local/state/libertix/first-boot-result-ack.json "
                 f"{shlex.quote(options.distribution.id)} "
                 f"{expected_os_release_id} {username}; "
-                "test \"$(python3 -c 'import json; "
-                'print(json.load(open("/var/lib/libertix/first-boot-verification.json", '
-                'encoding="utf-8"))["logPath"])\')" = '
+                f'test "$({LINUX_CHECK} json-value '
+                '/var/lib/libertix/first-boot-verification.json logPath)" = '
                 '"/var/log/libertix/first-boot-resize.log"; '
                 "test -s /var/log/libertix/first-boot-resize.log; "
                 "test -s /etc/xdg/autostart/libertix-first-boot-result.desktop; "
@@ -1641,14 +2321,21 @@ class PostInstallValidationMixin:
                 timeout=150,
             ),
             RemoteCheck(
-                "linux.package_database",
-                'test -z "$(dpkg --audit)"; dpkg --audit',
+                "linux.package_dependencies",
+                "while :; do "
+                "states=$(systemctl show apt-daily.service apt-daily-upgrade.service "
+                "--property=ActiveState --value); "
+                "if ! printf '%s\\n' \"$states\" | "
+                "grep -Eq '^(active|activating|deactivating|reloading)$'; then break; fi; "
+                "printf 'Waiting for automatic APT services to finish.\\n'; "
+                f"sleep {PACKAGE_MANAGER_RETRY_DELAY_SECONDS}; done; "
+                "apt-get -o DPkg::Lock::Timeout=300 check",
+                timeout=360,
                 requires_sudo=True,
             ),
             RemoteCheck(
-                "linux.package_dependencies",
-                "apt-get check",
-                timeout=180,
+                "linux.package_database",
+                'audit=$(dpkg --audit); printf "%s\\n" "$audit"; test -z "$audit"',
                 requires_sudo=True,
             ),
             RemoteCheck(
@@ -1656,15 +2343,6 @@ class PostInstallValidationMixin:
                 "getent ahostsv4 ekimia.fr | head -1 | grep -q .",
             ),
         )
-        for check in checks:
-            self._run_remote_check(
-                ssh,
-                vm,
-                result,
-                "linux",
-                check,
-                sudo_password=options.linux_password,
-            )
 
     def _create_cross_os_artifacts(
         self,
@@ -1674,7 +2352,9 @@ class PostInstallValidationMixin:
         result: ResultBuilder,
     ) -> CrossOsArtifacts:
         run_id = uuid.uuid4().hex
-        windows_relative = f"Users/Public/Documents/libertix-auto-test-{run_id}.bin"
+        # The public profile can be relocated or absent. This fixture belongs to the
+        # mounted system volume, independently of the user-folder sharing checks.
+        windows_relative = f"libertix-auto-test-{run_id}.bin"
         windows_linux_path = f"/mnt/windows/{windows_relative}"
         linux_relative = f"libertix-auto-test-{run_id}.bin"
         linux_path = f"/home/{options.linux_username}/{linux_relative}"
@@ -1811,35 +2491,81 @@ class PostInstallValidationMixin:
     ) -> CommandResult | None:
         # Every semicolon-separated assertion is part of the contract. Without
         # errexit, a later successful diagnostic could hide an earlier failure.
-        command = f"sh -eu -c {shlex.quote(check.command)}"
+        result.ok(
+            "automation.check_started", "Post-install check started", vm=vm.name, test=check.name
+        )
+        package_check = check.name == "linux.package_dependencies"
+        check_command = "export LC_ALL=C; " + check.command if package_check else check.command
+        command = f"sh -eu -c {shlex.quote(check_command)}"
         stdin_data = None
         sensitive = check.sensitive
         if check.requires_sudo:
             if sudo_password is None:
                 raise ValueError(f"{check.name} requires a sudo password")
-            command = f"sudo -S -p '' sh -eu -c {shlex.quote(check.command)}"
+            command = f"sudo -S -p '' sh -eu -c {shlex.quote(check_command)}"
             stdin_data = sudo_password + "\n"
             sensitive = True
         last_error: WorkflowError | None = None
         response: CommandResult | None = None
+        busy = False
+        package_attempt = 0
+        package_deadline = time.monotonic() + self.settings.post_install_package_timeout_seconds
         for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            response = None
             try:
                 if attempt > 1:
                     ssh.reconnect()
-                response = ssh.run(
-                    command,
-                    step=f"automation.test.{platform}",
-                    timeout=check.timeout,
-                    check=False,
-                    sensitive=sensitive,
-                    stdin_data=stdin_data,
-                )
+                while True:
+                    remaining = package_deadline - time.monotonic()
+                    if package_check and remaining <= PACKAGE_MANAGER_RETRY_DELAY_SECONDS:
+                        break
+                    package_attempt += 1
+                    response = None
+                    response = ssh.run(
+                        command,
+                        step=f"automation.test.{platform}",
+                        timeout=min(check.timeout, max(1, remaining))
+                        if package_check
+                        else check.timeout,
+                        check=False,
+                        sensitive=sensitive,
+                        stdin_data=stdin_data,
+                    )
+                    output = f"{response.stdout}\n{response.stderr}"
+                    busy = (
+                        package_check
+                        and response.exit_code in {100, 124}
+                        and any(
+                            text in output
+                            for text in (
+                                "Could not get lock",
+                                "Unable to acquire the dpkg frontend lock",
+                                "Waiting for automatic APT services to finish.",
+                            )
+                        )
+                    )
+                    remaining = package_deadline - time.monotonic()
+                    if not busy or remaining <= PACKAGE_MANAGER_RETRY_DELAY_SECONDS:
+                        break
+                    result.ok(
+                        "automation.package_manager_wait",
+                        "APT is busy; dependency verification is pending. "
+                        "Retrying within its deadline",
+                        vm=vm.name,
+                        test=check.name,
+                        sequence=package_attempt,
+                        exit_code=response.exit_code,
+                        stdout=response.stdout,
+                        stderr=response.stderr,
+                    )
+                    time.sleep(min(PACKAGE_MANAGER_RETRY_DELAY_SECONDS, remaining))
                 break
             except WorkflowError as exc:
                 last_error = exc
                 if (
                     not is_reconnectable_transport_error(exc)
                     or attempt == REMOTE_CHECK_SSH_MAX_ATTEMPTS
+                    or (package_check and time.monotonic() >= package_deadline)
                 ):
                     break
 
@@ -1867,6 +2593,8 @@ class PostInstallValidationMixin:
         if response.exit_code == 0:
             result.ok(f"automation.test.{platform}", f"{check.name}: OK", **context)
         else:
+            if busy:
+                context["failure_kind"] = "package_manager_busy"
             result.error(f"automation.test.{platform}", f"{check.name}: FAILED", **context)
         return response
 
@@ -1933,43 +2661,17 @@ class PostInstallValidationMixin:
         vm: VMConfig,
         result: ResultBuilder,
     ) -> None:
-        try:
-            response = ssh.run(
-                "shutdown.exe /r /t 0 /d p:0:0",
-                step="automation.linux_return_boot",
-                timeout=30,
-                check=False,
-            )
-        except WorkflowError as exc:
-            raise WorkflowError(
-                "automation.linux_return_boot",
-                "Windows could not request the Linux return reboot",
-                details={
-                    "vm": vm.name,
-                    "target": vm.host,
-                    "test": "windows.linux_reboot",
-                    **exc.details,
-                },
-            ) from exc
-        if response.exit_code not in {0, -1}:
-            raise WorkflowError(
-                "automation.linux_return_boot",
-                "Windows rejected the Linux return reboot request",
-                details={
-                    "vm": vm.name,
-                    "target": vm.host,
-                    "test": "windows.linux_reboot",
-                    "exit_code": response.exit_code,
-                    "stdout": response.stdout,
-                    "stderr": response.stderr,
-                },
-            )
+        acknowledged = self._request_windows_power_transition(
+            ssh, vm, "shutdown.exe /r /t 0 /d p:0:0", "automation.linux_return_boot"
+        )
         result.ok(
             "automation.test.windows",
-            "windows.linux_reboot: OK",
+            "Windows reboot requested; the installed Linux boot must still be proven",
             vm=vm.name,
             target=vm.host,
             test="windows.linux_reboot",
+            request_acknowledged=acknowledged,
+            reboot_verified=False,
         )
 
     def _inject_boot_guardian_boot_order_fault(
@@ -2197,47 +2899,23 @@ class PostInstallValidationMixin:
             vm=vm.name,
             target=vm.host,
         )
-        ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="preferred_path_prompt",
-            distribution=options.distribution,
-        )
-        try:
-            self._prepare_windows_graphical_session(ssh, vm, result)
-            first_prompt = self._run_windows_script_resiliently(
-                ssh,
-                script_name="focus_unattended_warning.ps1",
-                config={"mode": "preferred-accept"},
-                step="automation.preferred_path_prompt.focus_before_reboot",
-                timeout=210,
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "preferred_path_prompt", distribution=options.distribution
             )
-            first_prompt_values = self.validation.parse_powershell_results(
-                first_prompt.stdout,
-                prefixes=(
-                    "PROCESS_ID",
-                    "WINDOW_HANDLE",
-                    "FOCUSED_CONTROL",
-                    "STATE_PATH",
-                    "STATE_PHASE",
-                    "RESULT",
+        ) as ssh:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            first_prompt_values = self._focus_consent_control(
+                ssh,
+                vm,
+                mode="preferred-accept",
+                expected_control="UefiFallbackAcceptButton",
+                expected_phase="PreferredPathPrompted",
+                step="automation.preferred_path_prompt.focus_before_reboot",
+                failure_message=(
+                    "The initial translated preferred-path consent was not proven visible"
                 ),
             )
-            if (
-                first_prompt_values.get("FOCUSED_CONTROL") != "UefiFallbackAcceptButton"
-                or first_prompt_values.get("STATE_PHASE") != "PreferredPathPrompted"
-                or first_prompt_values.get("RESULT") != "OK"
-            ):
-                raise WorkflowError(
-                    "automation.preferred_path_prompt.focus_before_reboot",
-                    "The initial translated preferred-path consent was not proven visible",
-                    details={"vm": vm.name, "target": vm.host, **first_prompt_values},
-                )
             first_capture = self._capture_with_name(
                 vm,
                 "preferred-path-consent-before-unanswered-reboot",
@@ -2250,52 +2928,30 @@ class PostInstallValidationMixin:
                 capture=str(first_capture),
                 **first_prompt_values,
             )
-            self._request_unanswered_prompt_reboot(ssh, vm, result)
-        finally:
-            ssh.__exit__(None, None, None)
+            previous_boot_id = self._request_unanswered_prompt_reboot(ssh, vm, result)
 
-        ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="preferred_path_prompt_after_reboot",
-            grub_entry="windows",
-            distribution=options.distribution,
-        )
-        try:
-            self._prepare_windows_graphical_session(ssh, vm, result)
-            restored = self._run_windows_script_resiliently(
-                ssh,
-                script_name="focus_unattended_warning.ps1",
-                config={"mode": "preferred-accept"},
-                step="automation.preferred_path_prompt.focus_restored_after_reboot",
-                timeout=210,
+        with closing(
+            self._wait_for_windows_ssh(
+                vm,
+                result,
+                "preferred_path_prompt_after_reboot",
+                grub_entry="windows",
+                distribution=options.distribution,
+                previous_windows_boot_id=previous_boot_id,
             )
-            restored_values = self.validation.parse_powershell_results(
-                restored.stdout,
-                prefixes=(
-                    "PROCESS_ID",
-                    "WINDOW_HANDLE",
-                    "FOCUSED_CONTROL",
-                    "STATE_PATH",
-                    "STATE_PHASE",
-                    "RESULT",
+        ) as ssh:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            restored_values = self._focus_consent_control(
+                ssh,
+                vm,
+                mode="preferred-accept",
+                expected_control="UefiFallbackAcceptButton",
+                expected_phase="PreferredPathPrompted",
+                step="automation.preferred_path_prompt.focus_restored_after_reboot",
+                failure_message=(
+                    "The unanswered preferred-path consent did not return after reboot"
                 ),
             )
-            if (
-                restored_values.get("FOCUSED_CONTROL") != "UefiFallbackAcceptButton"
-                or restored_values.get("STATE_PHASE") != "PreferredPathPrompted"
-                or restored_values.get("RESULT") != "OK"
-            ):
-                raise WorkflowError(
-                    "automation.preferred_path_prompt.focus_restored_after_reboot",
-                    "The unanswered preferred-path consent did not return after reboot",
-                    details={"vm": vm.name, "target": vm.host, **restored_values},
-                )
             restored_capture = self._capture_with_name(
                 vm,
                 "preferred-path-consent-restored-after-reboot",
@@ -2309,51 +2965,29 @@ class PostInstallValidationMixin:
                 **restored_values,
             )
             self._inject_boot_guardian_preferred_bypass(ssh, vm, result)
-            self._request_unanswered_prompt_reboot(ssh, vm, result)
-        finally:
-            ssh.__exit__(None, None, None)
+            previous_boot_id = self._request_unanswered_prompt_reboot(ssh, vm, result)
 
-        ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="preferred_path_prompt_after_proven_bypass",
-            distribution=options.distribution,
-        )
-        try:
-            self._prepare_windows_graphical_session(ssh, vm, result)
-            accept = self._run_windows_script_resiliently(
-                ssh,
-                script_name="focus_unattended_warning.ps1",
-                config={"mode": "preferred-accept"},
-                step="automation.preferred_path_prompt.focus_accept_after_proven_bypass",
-                timeout=210,
+        with closing(
+            self._wait_for_windows_ssh(
+                vm,
+                result,
+                "preferred_path_prompt_after_proven_bypass",
+                distribution=options.distribution,
+                previous_windows_boot_id=previous_boot_id,
             )
-            accept_values = self.validation.parse_powershell_results(
-                accept.stdout,
-                prefixes=(
-                    "PROCESS_ID",
-                    "WINDOW_HANDLE",
-                    "FOCUSED_CONTROL",
-                    "STATE_PATH",
-                    "STATE_PHASE",
-                    "RESULT",
+        ) as ssh:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            accept_values = self._focus_consent_control(
+                ssh,
+                vm,
+                mode="preferred-accept",
+                expected_control="UefiFallbackAcceptButton",
+                expected_phase="PreferredPathPrompted",
+                step="automation.preferred_path_prompt.focus_accept_after_proven_bypass",
+                failure_message=(
+                    "The preferred-path consent did not return after the proven firmware bypass"
                 ),
             )
-            if (
-                accept_values.get("FOCUSED_CONTROL") != "UefiFallbackAcceptButton"
-                or accept_values.get("STATE_PHASE") != "PreferredPathPrompted"
-                or accept_values.get("RESULT") != "OK"
-            ):
-                raise WorkflowError(
-                    "automation.preferred_path_prompt.focus_accept_after_proven_bypass",
-                    "The preferred-path consent did not return after the proven firmware bypass",
-                    details={"vm": vm.name, "target": vm.host, **accept_values},
-                )
             accept_capture = self._capture_with_name(
                 vm,
                 "preferred-path-consent-after-proven-bypass",
@@ -2369,27 +3003,17 @@ class PostInstallValidationMixin:
                 **accept_values,
             )
 
-            reboot = self._run_windows_script_resiliently(
+            reboot_values = self._focus_consent_control(
                 ssh,
-                script_name="focus_unattended_warning.ps1",
-                config={"mode": "preferred-reboot"},
+                vm,
+                mode="preferred-reboot",
+                expected_control="UefiFallbackRebootButton",
+                expected_phase="AwaitingPreferredPathReboot",
                 step="automation.preferred_path_prompt.focus_reboot",
-                timeout=210,
+                failure_message=(
+                    "The verified preferred-path reboot button was not proven focused"
+                ),
             )
-            reboot_values = self.validation.parse_powershell_results(
-                reboot.stdout,
-                prefixes=("FOCUSED_CONTROL", "STATE_PHASE", "RESULT"),
-            )
-            if (
-                reboot_values.get("FOCUSED_CONTROL") != "UefiFallbackRebootButton"
-                or reboot_values.get("STATE_PHASE") != "AwaitingPreferredPathReboot"
-                or reboot_values.get("RESULT") != "OK"
-            ):
-                raise WorkflowError(
-                    "automation.preferred_path_prompt.focus_reboot",
-                    "The verified preferred-path reboot button was not proven focused",
-                    details={"vm": vm.name, "target": vm.host, **reboot_values},
-                )
             reboot_capture = self._capture_with_name(vm, "preferred-path-reboot-ready")
             self._send_focused_enter(vm)
             result.ok(
@@ -2400,8 +3024,6 @@ class PostInstallValidationMixin:
                 capture=str(reboot_capture),
                 **reboot_values,
             )
-        finally:
-            ssh.__exit__(None, None, None)
 
     def _rollback_preferred_path_fallback(
         self,
@@ -2416,47 +3038,23 @@ class PostInstallValidationMixin:
                 "The pre-installation rollback baseline was not retained",
                 details={"vm": vm.name, "target": vm.host},
             )
-        ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="preferred_path_rollback_prompt",
-            distribution=options.distribution,
-        )
-        try:
-            self._prepare_windows_graphical_session(ssh, vm, result)
-            focus = self._run_windows_script_resiliently(
-                ssh,
-                script_name="focus_unattended_warning.ps1",
-                config={"mode": "preferred-rollback"},
-                step="automation.preferred_path_rollback.focus",
-                timeout=210,
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "preferred_path_rollback_prompt", distribution=options.distribution
             )
-            values = self.validation.parse_powershell_results(
-                focus.stdout,
-                prefixes=(
-                    "PROCESS_ID",
-                    "WINDOW_HANDLE",
-                    "FOCUSED_CONTROL",
-                    "STATE_PATH",
-                    "STATE_PHASE",
-                    "RESULT",
+        ) as ssh:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            values = self._focus_consent_control(
+                ssh,
+                vm,
+                mode="preferred-rollback",
+                expected_control="UefiFallbackRollbackButton",
+                expected_phase="PreferredPathPrompted",
+                step="automation.preferred_path_rollback.focus",
+                failure_message=(
+                    "The translated preferred-path rollback button was not proven focused"
                 ),
             )
-            if (
-                values.get("FOCUSED_CONTROL") != "UefiFallbackRollbackButton"
-                or values.get("STATE_PHASE") != "PreferredPathPrompted"
-                or values.get("RESULT") != "OK"
-            ):
-                raise WorkflowError(
-                    "automation.preferred_path_rollback.focus",
-                    "The translated preferred-path rollback button was not proven focused",
-                    details={"vm": vm.name, "target": vm.host, **values},
-                )
             capture = self._capture_with_name(vm, "preferred-path-rollback-ready")
             self._send_focused_enter(vm)
             result.ok(
@@ -2474,12 +3072,11 @@ class PostInstallValidationMixin:
                 baseline,
                 result,
                 step="automation.preferred_path_rollback.verify",
+                storage_fixture_receipt=options.storage_fixture_receipt,
                 failure_message=(
                     "The preferred-path rollback did not restore the exact Windows baseline"
                 ),
             )
-        finally:
-            ssh.__exit__(None, None, None)
 
     def _rollback_bootnext_failure(
         self,
@@ -2494,47 +3091,21 @@ class PostInstallValidationMixin:
                 "The pre-installation rollback baseline was not retained",
                 details={"vm": vm.name, "target": vm.host},
             )
-        ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="bootnext_rollback_prompt",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "bootnext_rollback_prompt", distribution=options.distribution
+            )
+        ) as ssh:
             self._prepare_windows_graphical_session(ssh, vm, result)
-            focus = self._run_windows_script_resiliently(
+            values = self._focus_consent_control(
                 ssh,
-                script_name="focus_unattended_warning.ps1",
-                config={"mode": "bootnext-rollback"},
+                vm,
+                mode="bootnext-rollback",
+                expected_control="UefiFallbackRollbackButton",
+                expected_phase="FallbackPrompted",
                 step="automation.bootnext_rollback.focus",
-                timeout=210,
+                failure_message=("The translated BootNext rollback button was not proven focused"),
             )
-            values = self.validation.parse_powershell_results(
-                focus.stdout,
-                prefixes=(
-                    "PROCESS_ID",
-                    "WINDOW_HANDLE",
-                    "FOCUSED_CONTROL",
-                    "STATE_PATH",
-                    "STATE_PHASE",
-                    "RESULT",
-                ),
-            )
-            if (
-                values.get("FOCUSED_CONTROL") != "UefiFallbackRollbackButton"
-                or values.get("STATE_PHASE") != "FallbackPrompted"
-                or values.get("RESULT") != "OK"
-            ):
-                raise WorkflowError(
-                    "automation.bootnext_rollback.focus",
-                    "The translated BootNext rollback button was not proven focused",
-                    details={"vm": vm.name, "target": vm.host, **values},
-                )
             capture = self._capture_with_name(vm, "bootnext-failure-rollback-ready")
             self._send_focused_enter(vm)
             result.ok(
@@ -2551,12 +3122,11 @@ class PostInstallValidationMixin:
                 baseline,
                 result,
                 step="automation.bootnext_rollback.verify",
+                storage_fixture_receipt=options.storage_fixture_receipt,
                 failure_message=(
                     "The BootNext fallback rollback did not restore the exact Windows baseline"
                 ),
             )
-        finally:
-            ssh.__exit__(None, None, None)
 
     def _accept_bootnext_firmware_fallback(
         self,
@@ -2564,23 +3134,15 @@ class PostInstallValidationMixin:
         options: AutomationOptions,
         result: ResultBuilder,
     ) -> None:
-        ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="bootnext_fallback_prompt",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(
+            self._wait_for_windows_ssh(
+                vm, result, "bootnext_fallback_prompt", distribution=options.distribution
+            )
+        ) as ssh:
             self._prepare_windows_graphical_session(ssh, vm, result)
-            initial = self._focus_bootnext_fallback_control(
+            initial = self._focus_consent_control(
                 ssh,
                 vm,
-                result,
                 mode="bootnext-accept",
                 expected_control="UefiFallbackAcceptButton",
                 expected_phase="FallbackPrompted",
@@ -2598,28 +3160,22 @@ class PostInstallValidationMixin:
                 capture=str(capture),
                 **initial,
             )
-            self._request_unanswered_prompt_reboot(ssh, vm, result)
-        finally:
-            ssh.__exit__(None, None, None)
+            previous_boot_id = self._request_unanswered_prompt_reboot(ssh, vm, result)
 
-        ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="bootnext_fallback_prompt_after_reboot",
-            grub_entry="windows",
-            distribution=options.distribution,
-        )
-        try:
-            self._prepare_windows_graphical_session(ssh, vm, result)
-            restored = self._focus_bootnext_fallback_control(
-                ssh,
+        with closing(
+            self._wait_for_windows_ssh(
                 vm,
                 result,
+                "bootnext_fallback_prompt_after_reboot",
+                grub_entry="windows",
+                distribution=options.distribution,
+                previous_windows_boot_id=previous_boot_id,
+            )
+        ) as ssh:
+            self._prepare_windows_graphical_session(ssh, vm, result)
+            restored = self._focus_consent_control(
+                ssh,
+                vm,
                 mode="bootnext-accept",
                 expected_control="UefiFallbackAcceptButton",
                 expected_phase="FallbackPrompted",
@@ -2635,10 +3191,9 @@ class PostInstallValidationMixin:
                 capture=str(capture),
                 **restored,
             )
-            ready = self._focus_bootnext_fallback_control(
+            ready = self._focus_consent_control(
                 ssh,
                 vm,
-                result,
                 mode="bootnext-reboot",
                 expected_control="UefiFallbackRebootButton",
                 expected_phase="AwaitingFallbackReboot",
@@ -2654,20 +3209,22 @@ class PostInstallValidationMixin:
                 capture=str(capture),
                 **ready,
             )
-        finally:
-            ssh.__exit__(None, None, None)
 
-    def _focus_bootnext_fallback_control(
+    def _focus_consent_control(
         self,
         ssh: SSHClient,
         vm: VMConfig,
-        result: ResultBuilder,
         *,
         mode: str,
         expected_control: str,
         expected_phase: str,
         step: str,
+        failure_message: str = (
+            "The expected translated BootNext fallback control was not proven focused"
+        ),
     ) -> dict[str, str]:
+        """Focus one consent-dialog control and prove the dialog reached the expected phase."""
+
         response = self._run_windows_script_resiliently(
             ssh,
             script_name="focus_unattended_warning.ps1",
@@ -2693,7 +3250,7 @@ class PostInstallValidationMixin:
         ):
             raise WorkflowError(
                 step,
-                "The expected translated BootNext fallback control was not proven focused",
+                failure_message,
                 details={"vm": vm.name, "target": vm.host, **values},
             )
         return values
@@ -2707,6 +3264,8 @@ class PostInstallValidationMixin:
         *,
         step: str,
         failure_message: str,
+        storage_fixture_receipt: dict[str, object] | None = None,
+        require_closed_post_install_result: bool = False,
     ) -> None:
         verification = self._run_windows_script_resiliently(
             ssh,
@@ -2717,7 +3276,15 @@ class PostInstallValidationMixin:
                 "system_partition_number": int(baseline["SYSTEM_PARTITION_NUMBER"]),
                 "system_partition_offset": int(baseline["SYSTEM_PARTITION_OFFSET"]),
                 "system_partition_size": int(baseline["SYSTEM_PARTITION_SIZE"]),
+                "partition_layout": json.loads(baseline["PARTITION_LAYOUT_JSON"]),
+                "storage_layout": json.loads(baseline["STORAGE_LAYOUT_JSON"]),
+                "baseline_plan_ids": json.loads(baseline["EXECUTION_PLAN_IDS_JSON"]),
+                "windows_boot_loaders": json.loads(baseline["WINDOWS_BOOT_LOADERS_JSON"]),
+                "windows_boot_loader_partitions": json.loads(
+                    baseline["WINDOWS_BOOT_LOADER_PARTITIONS_JSON"]
+                ),
                 "wait_timeout_seconds": 900,
+                "require_closed_post_install_result": require_closed_post_install_result,
             },
             step=step,
             timeout=960,
@@ -2732,12 +3299,28 @@ class PostInstallValidationMixin:
                 "ROLLBACK_WINDOWS_BOOT_MANAGER_PRESENT",
                 "ROLLBACK_BOOT_GUARDIAN_PRESENT",
                 "ROLLBACK_VERIFIED",
+                "ROLLBACK_LEDGER_VERIFIED",
+                "ROLLBACK_PLAN_ID",
+                "ROLLBACK_POST_INSTALL_RESULT_VERIFIED",
+                "ROLLBACK_PARTITION_LAYOUT_MATCHES",
+                "ROLLBACK_STORAGE_LAYOUT_MATCHES",
+                "ROLLBACK_WINDOWS_BOOT_LOADERS_MATCH",
+                "ROLLBACK_WINDOWS_BOOT_LOADER_PARTITIONS_MATCH",
                 "RESULT",
             ),
         )
         if (
             verified.get("ROLLBACK_VERIFIED") != "True"
+            or verified.get("ROLLBACK_LEDGER_VERIFIED") != "True"
+            or verified.get("ROLLBACK_PARTITION_LAYOUT_MATCHES") != "True"
+            or verified.get("ROLLBACK_STORAGE_LAYOUT_MATCHES") != "True"
+            or verified.get("ROLLBACK_WINDOWS_BOOT_LOADERS_MATCH") != "True"
+            or verified.get("ROLLBACK_WINDOWS_BOOT_LOADER_PARTITIONS_MATCH") != "True"
             or verified.get("ROLLBACK_BOOT_GUARDIAN_PRESENT") != "False"
+            or (
+                require_closed_post_install_result
+                and verified.get("ROLLBACK_POST_INSTALL_RESULT_VERIFIED") != "True"
+            )
             or verified.get("RESULT") != "OK"
         ):
             raise WorkflowError(
@@ -2753,44 +3336,121 @@ class PostInstallValidationMixin:
             target=vm.host,
             **verified,
         )
+        self._verify_windows_storage_fixture(ssh, vm, result, storage_fixture_receipt)
+
+    @staticmethod
+    def _read_windows_boot_id(ssh: SSHClient, vm: VMConfig) -> str:
+        command = (
+            "powershell.exe -NoProfile -NonInteractive -Command "
+            '"(Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).'
+            'LastBootUpTime.ToUniversalTime().Ticks"'
+        )
+        for attempt in range(2):
+            try:
+                if attempt:
+                    time.sleep(WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS)
+                    ssh.reconnect()
+                response = ssh.run(
+                    command,
+                    step="automation.windows_boot_identity",
+                    timeout=30,
+                    replay_safe=True,
+                )
+                break
+            except WorkflowError as exc:
+                if attempt or not is_reconnectable_transport_error(exc):
+                    raise
+        value = response.stdout.strip()
+        if (
+            response.exit_code != 0
+            or not value.isascii()
+            or not value.isdigit()
+            or len(value) != 18
+        ):
+            raise WorkflowError(
+                "automation.windows_boot_identity",
+                "Windows boot identity is unavailable",
+                details={"vm": vm.name, "exit_code": response.exit_code},
+            )
+        return value
+
+    @staticmethod
+    def _request_windows_power_transition(
+        ssh: SSHClient,
+        vm: VMConfig,
+        command: str,
+        step: str,
+    ) -> bool:
+        for attempt in range(1, REMOTE_CHECK_SSH_MAX_ATTEMPTS + 1):
+            try:
+                if attempt > 1:
+                    ssh.reconnect()
+                # A reboot may close SSH normally; the caller verifies a new boot identity.
+                response = ssh.run(
+                    command, step=step, timeout=30, check=False, expect_disconnect=True
+                )
+                break
+            except WorkflowError as exc:
+                if exc.details.get("exception_type") == "MissingExitStatus":
+                    return False
+                if (
+                    exc.details.get("exception_type") == "TimeoutError"
+                    and exc.details.get("transport_error") is True
+                ):
+                    # Shutdown can strand the SSH channel without an exit status.
+                    # Do not resend it; callers must prove the actual power transition.
+                    return False
+                # Paramiko raises this before creating the exec channel, so the
+                # shutdown command was never sent. Other failures are ambiguous.
+                channel_not_opened = (
+                    exc.details.get("exception_type") == "SSHException"
+                    and exc.details.get("error") == "Timeout opening channel."
+                )
+                if channel_not_opened and attempt < REMOTE_CHECK_SSH_MAX_ATTEMPTS:
+                    time.sleep(WINDOWS_SCRIPT_RECONNECT_DELAY_SECONDS)
+                    continue
+                raise WorkflowError(
+                    step,
+                    "Windows could not request the power transition",
+                    details={"vm": vm.name, "target": vm.host, **exc.details},
+                ) from exc
+        if response.exit_code == -1:
+            return False
+        if response.exit_code != 0:
+            raise WorkflowError(
+                step,
+                "Windows rejected the power transition request",
+                details={
+                    "vm": vm.name,
+                    "exit_code": response.exit_code,
+                    "stdout": response.stdout,
+                    "stderr": response.stderr,
+                },
+            )
+        return True
 
     def _request_unanswered_prompt_reboot(
         self,
         ssh: SSHClient,
         vm: VMConfig,
         result: ResultBuilder,
-    ) -> None:
-        try:
-            response = ssh.run(
-                "shutdown.exe /r /t 0 /d p:0:0",
-                step="automation.preferred_path_prompt.unanswered_reboot",
-                timeout=30,
-                check=False,
-            )
-        except WorkflowError as exc:
-            raise WorkflowError(
-                "automation.preferred_path_prompt.unanswered_reboot",
-                "Windows could not request the unanswered-consent reboot",
-                details={"vm": vm.name, "target": vm.host, **exc.details},
-            ) from exc
-        if response.exit_code not in {0, -1}:
-            raise WorkflowError(
-                "automation.preferred_path_prompt.unanswered_reboot",
-                "Windows rejected the unanswered-consent reboot request",
-                details={
-                    "vm": vm.name,
-                    "target": vm.host,
-                    "exit_code": response.exit_code,
-                    "stdout": response.stdout,
-                    "stderr": response.stderr,
-                },
-            )
+    ) -> str:
+        previous_boot_id = self._read_windows_boot_id(ssh, vm)
+        acknowledged = self._request_windows_power_transition(
+            ssh,
+            vm,
+            "shutdown.exe /r /t 0 /d p:0:0",
+            "automation.preferred_path_prompt.unanswered_reboot",
+        )
         result.ok(
             "automation.preferred_path_prompt.unanswered_reboot",
-            "Windows accepted a reboot while the preferred-path consent stayed unanswered",
+            "Reboot requested with unanswered consent; a new Windows boot must still be proven",
             vm=vm.name,
             target=vm.host,
+            request_acknowledged=acknowledged,
+            reboot_verified=False,
         )
+        return previous_boot_id
 
     def _send_focused_enter(self, vm: VMConfig) -> None:
         client = None
@@ -2962,31 +3622,9 @@ class PostInstallValidationMixin:
         else:
             raise ValueError("shutdown repair requires a BootGuardian fault mode")
 
-        try:
-            response = ssh.run(
-                "shutdown.exe /s /t 0 /d p:0:0",
-                step="automation.boot_guardian_shutdown.request",
-                timeout=30,
-                check=False,
-            )
-        except WorkflowError as exc:
-            raise WorkflowError(
-                "automation.boot_guardian_shutdown.request",
-                "Windows could not request the BootGuardian shutdown test",
-                details={"vm": vm.name, "target": vm.host, **exc.details},
-            ) from exc
-        if response.exit_code not in {0, -1}:
-            raise WorkflowError(
-                "automation.boot_guardian_shutdown.request",
-                "Windows rejected the BootGuardian shutdown test",
-                details={
-                    "vm": vm.name,
-                    "target": vm.host,
-                    "exit_code": response.exit_code,
-                    "stdout": response.stdout,
-                    "stderr": response.stderr,
-                },
-            )
+        self._request_windows_power_transition(
+            ssh, vm, "shutdown.exe /s /t 0 /d p:0:0", "automation.boot_guardian_shutdown.request"
+        )
 
         with self._proxmox() as proxmox:
             node = proxmox.locate_vm(vm.vmid)
@@ -3022,19 +3660,9 @@ class PostInstallValidationMixin:
                 qmpstatus=str(started.get("qmpstatus") or ""),
             )
 
-        linux_ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=options.linux_username,
-            password=options.linux_password,
-            trust_on_first_use=True,
-            probe="test -e /var/lib/libertix/development-ssh-ready && printf LIBERTIX_LINUX_READY",
-            expected="LIBERTIX_LINUX_READY",
-            phase="boot_guardian_shutdown_linux",
-            grub_entry="linux",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(
+            self._wait_for_linux_ssh(vm, result, options, "boot_guardian_shutdown_linux")
+        ) as linux_ssh:
             result.ok(
                 "automation.boot_guardian_shutdown.linux",
                 "The repaired boot path reached the installed Linux system after power-on",
@@ -3049,22 +3677,16 @@ class PostInstallValidationMixin:
                 result,
                 test_name="linux.boot_guardian_shutdown_windows_reboot",
             )
-        finally:
-            linux_ssh.__exit__(None, None, None)
 
-        windows_ssh = self._wait_for_ssh(
-            vm,
-            result=result,
-            username=vm.username,
-            password=self.settings.windows_ssh_password.get_secret_value(),
-            trust_on_first_use=False,
-            probe="cmd.exe /d /c echo LIBERTIX_WINDOWS_READY",
-            expected="LIBERTIX_WINDOWS_READY",
-            phase="boot_guardian_shutdown_windows",
-            grub_entry="windows",
-            distribution=options.distribution,
-        )
-        try:
+        with closing(
+            self._wait_for_windows_ssh(
+                vm,
+                result,
+                "boot_guardian_shutdown_windows",
+                grub_entry="windows",
+                distribution=options.distribution,
+            )
+        ) as windows_ssh:
             if mode == "boot-order":
                 self._verify_boot_guardian_boot_order_repair(
                     windows_ssh,
@@ -3086,8 +3708,43 @@ class PostInstallValidationMixin:
                 target=vm.host,
                 server_key_sha256=windows_ssh.server_key_sha256,
             )
-        finally:
-            windows_ssh.__exit__(None, None, None)
+
+    def _verify_windows_storage_fixture(
+        self,
+        ssh: SSHClient,
+        vm: VMConfig,
+        result: ResultBuilder,
+        receipt: dict[str, object] | None,
+        installation_target: str | None = None,
+    ) -> None:
+        if receipt is not None:
+            config = {"phase": "verify", "receipt": receipt}
+            if installation_target is not None:
+                config["installation_target"] = installation_target
+            response = self._run_windows_script_resiliently(
+                ssh,
+                script_name="storage_fixture.ps1",
+                config=config,
+                step="automation.storage_fixture.preserved",
+                timeout=120,
+            )
+            values = self.validation.parse_powershell_results(
+                response.stdout,
+                prefixes=("STORAGE_FIXTURE_VERIFIED",),
+            )
+            if values.get("STORAGE_FIXTURE_VERIFIED") != "True":
+                raise WorkflowError(
+                    "automation.storage_fixture.preserved",
+                    "Storage fixture preservation was not verified",
+                    details={"vm": vm.name},
+                )
+            result.ok(
+                "automation.storage_fixture.preserved",
+                "Storage fixture partition identities, geometry and data witnesses preserved",
+                vm=vm.name,
+            )
+            if "user_documents" in receipt:
+                self._verify_storage_documents_fixture(ssh, vm, receipt["user_documents"], result)
 
     def _run_windows_checks(
         self,
@@ -3097,8 +3754,17 @@ class PostInstallValidationMixin:
         artifacts: CrossOsArtifacts,
         result: ResultBuilder,
     ) -> None:
+        self._verify_windows_storage_fixture(
+            ssh, vm, result, options.storage_fixture_receipt, options.installation_target
+        )
         plan = build_windows_validation_plan(vm, options, artifacts)
         for name in plan.check_names:
+            result.ok(
+                "automation.check_started",
+                "Post-install check started",
+                vm=vm.name,
+                test=f"windows.{name}",
+            )
             try:
                 response = self._run_windows_script_resiliently(
                     ssh,

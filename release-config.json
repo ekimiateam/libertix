@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "mainRelease": {
-    "version": "0.3",
-    "title": "Libertix 0.3",
-    "notes": "Adds unattended installation, offline NTFS resize fallback, persistent UEFI boot repair, stronger rollback and post-install verification, safer file sharing, standalone delivery, and expanded automated validation."
+    "version": "0.4",
+    "title": "Libertix 0.4",
+    "notes": "Adds Korean, optional migration of Windows settings and saved Wi-Fi, experimental installation on a second internal disk, verified Linux uninstall, local file reuse and install-party server, reuse of an ISO left by a failed run, support reports, safer startup permissions, Secure Boot signer checks and many reliability fixes."
   },
   "distributions": [
     {
