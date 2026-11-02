@@ -5044,6 +5044,59 @@ def test_functional_grub_icons_match_their_recorded_mingcute_sources() -> None:
             assert (png.size, png.mode) == ((48, 48), "RGBA")
 
 
+@pytest.mark.parametrize(
+    ("declaration", "expected"),
+    [
+        pytest.param(
+            "\tmenuentry 'Mint, with Linux 6.8' --class linux --class os "
+            "$menuentry_id_option 'gnulinux-6.8-advanced-u1' {",
+            "\tmenuentry 'Mint, with Linux 6.8' --class linuxmint --class linux --class os "
+            "$menuentry_id_option 'gnulinux-6.8-advanced-u1' --class find.none {",
+            id="generated-kernel-entry",
+        ),
+        pytest.param(
+            "submenu 'Options avanc'\\''ees' $menuentry_id_option 'gnulinux-advanced-u1' {",
+            "submenu 'Options avanc'\\''ees' --class submenu "
+            "$menuentry_id_option 'gnulinux-advanced-u1' --class find.none {",
+            id="concatenated-single-quoted-title",
+        ),
+        pytest.param(
+            'menuentry "Say \\"{hi}\\" now" --id "custom" {',
+            'menuentry "Say \\"{hi}\\" now" --id "custom" --class find.none {',
+            id="escaped-double-quoted-title-with-braces",
+        ),
+        pytest.param(
+            "menuentry 'Tool {beta}' --class tool --id 'custom' {",
+            "menuentry 'Tool {beta}' --class tool --id 'custom' --class find.none {",
+            id="quoted-brace-in-title",
+        ),
+        pytest.param(
+            "menuentry 'Custom tool' --id 'custom' { echo hello; }",
+            "menuentry 'Custom tool' --id 'custom' --class find.none { echo hello; }",
+            id="single-line-body",
+        ),
+        pytest.param(
+            "menuentry 'Memory test' --class memtest --id 'memtest86+' { # memtest86+ 7.00",
+            "menuentry 'Memory test' --class memtest --id 'memtest86+' "
+            "--class find.none { # memtest86+ 7.00",
+            id="trailing-comment-after-brace",
+        ),
+        pytest.param(
+            "menuentry 'Custom tool' --id 'custom' {  # two spaces kept",
+            "menuentry 'Custom tool' --id 'custom' --class find.none {  # two spaces kept",
+            id="spacing-before-comment",
+        ),
+        pytest.param("\techo 'menuentry {'", "\techo 'menuentry {'", id="not-a-declaration"),
+    ],
+)
+def test_grub_icon_classes_stay_in_the_declaration(declaration: str, expected: str) -> None:
+    add_icon_classes = runpy.run_path(str(ROOT / "grub/render-libertix-menu.py"))[
+        "add_icon_classes"
+    ]
+
+    assert add_icon_classes([declaration], "linuxmint") == [expected]
+
+
 def test_grub_fallback_icon_is_transparent_and_last_on_every_advanced_entry(
     tmp_path: Path,
 ) -> None:

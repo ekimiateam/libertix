@@ -47,11 +47,38 @@ def indent(lines: list[str]) -> list[str]:
     return [f"\t{line}" if line else "" for line in lines]
 
 
-# A title may be several quoted pieces, e.g. grub_quote's 'l'\''OS'.
-MENU_ENTRY = re.compile(
-    r"^(\s*(?:menuentry|submenu)\s+(?:'[^']*'|\"[^\"]*\"|\\.)+)(.*?)(\s*\{)?\s*$"
-)
+MENU_ENTRY = re.compile(r"^\s*(?:menuentry|submenu)\s+")
 MENU_ENTRY_ID = re.compile(r"(?:\$menuentry_id_option|--id)\s+(?:'([^']*)'|\"([^\"]*)\")")
+
+
+def find_unquoted(text: str, start: int, word_separators: str, word_starts: str) -> int:
+    """Return the first index from start that is outside GRUB quoting and is either
+    one of word_separators or one of word_starts at the beginning of a word.
+
+    Single quotes are literal, double quotes allow backslash escapes, and an
+    unquoted backslash escapes the next character, as in GRUB script.
+    """
+    quote = ""
+    index = start
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif quote == '"':
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quote = ""
+        elif char == "\\":
+            index += 1
+        elif char in "'\"":
+            quote = char
+        elif char in word_separators or (
+            char in word_starts and (index == 0 or text[index - 1].isspace())
+        ):
+            return index
+        index += 1
+    return len(text)
 
 
 def add_icon_classes(lines: list[str], distribution_icon: str) -> list[str]:
@@ -81,13 +108,22 @@ def add_icon_classes(lines: list[str], distribution_icon: str) -> list[str]:
         if entry is None:
             result.append(line)
             continue
-        head, options, brace = entry.groups()
+        # The title is one word, possibly several quoted pieces ('l'\''OS'). The
+        # declaration ends at the body's opening brace or a comment, whichever
+        # comes first; a brace or # inside quotes or inside a word does not count.
+        title_end = find_unquoted(line, entry.end(), " \t", "")
+        options_end = find_unquoted(line, title_end, "", "{#")
+        options = line[title_end:options_end].rstrip()
+        gap = line[title_end + len(options) : options_end] or " "
+        rest = line[options_end:]
         entry_id = MENU_ENTRY_ID.search(options)
         menu_id = (entry_id[1] or entry_id[2] or "") if entry_id else ""
         icon = next((icon for prefix, icon in functions if re.match(prefix, menu_id)), None)
-        if icon:
-            head += f" --class {icon}"
-        result.append(f"{head}{options} --class find.none{brace or ''}")
+        first_class = re.search(r"--class\s+(\S+)", options)
+        if first_class and first_class[1] == icon:
+            icon = None
+        head = line[:title_end] + (f" --class {icon}" if icon else "")
+        result.append(f"{head}{options} --class find.none{gap + rest if rest else ''}")
     return result
 
 
