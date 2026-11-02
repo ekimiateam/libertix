@@ -221,7 +221,9 @@
                     </Grid>
                 </Border>
 
-                <Grid Visibility="{Binding CanAllocateLinux, Converter={StaticResource BoolToVisibilityConverter}}">
+                <!-- Margin matches the bar border, so both grids share one inner width. -->
+                <Grid x:Name="BoundaryRange" Margin="1,0"
+                      Visibility="{Binding CanAllocateLinux, Converter={StaticResource BoolToVisibilityConverter}}">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="{Binding FixedVolumePercentage}"/>
                         <ColumnDefinition Width="{Binding AdjustableRangePercentage}"/>
@@ -239,6 +241,7 @@
                             Value="{Binding SelectedSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                             IsEnabled="{Binding CanAllocateLinux}"
                             IsDirectionReversed="True"
+                            PreviewKeyDown="PartitionSlider_PreviewKeyDown"
                             IsMoveToPointEnabled="True"
                             TabIndex="0"
                             TickFrequency="1"

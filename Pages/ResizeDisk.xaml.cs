@@ -430,6 +430,27 @@ namespace Libertix.Pages
             }
         }
 
+        // The slider is reversed so Left/Right move the drawn divider the way they point.
+        // WPF also reverses Up/Down and PageUp/PageDown then; keep those meaning more or
+        // less Linux, as they did before the slider moved onto the bar.
+        private void PartitionSlider_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (Keyboard.Modifiers != ModifierKeys.None)
+                return;
+            var slider = (Slider)sender;
+            double change;
+            switch (e.Key)
+            {
+                case Key.Up: change = slider.SmallChange; break;
+                case Key.Down: change = -slider.SmallChange; break;
+                case Key.PageUp: change = slider.LargeChange; break;
+                case Key.PageDown: change = -slider.LargeChange; break;
+                default: return;
+            }
+            SelectedSize = Math.Max(MinimumSize, Math.Min(MaximumSize, SelectedSize + change));
+            e.Handled = true;
+        }
+
         private void SaveState()
         {
             _installationState.SelectedLinuxSizeGiB = SelectedSize;

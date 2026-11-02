@@ -34,6 +34,7 @@ namespace Libertix.Tests
                     Localization.SetLanguage("en");
                     VerifyResizeSelectionIsPreserved();
                     VerifySeparateDiskSelection();
+                    VerifyFixedAndUnavailableAllocation();
                     InstallationTargetTests.FullWindowsMbrRefusesOnlyTheWindowsDestination();
                     string root = Path.Combine(Path.GetTempPath(), "Libertix-fallback-test-" + Guid.NewGuid().ToString("N"));
                     string scripts = Path.Combine(root, "Scripts");
@@ -119,7 +120,8 @@ namespace Libertix.Tests
             Assert.AreEqual("37", page.ManualSize);
             Assert.AreNotEqual(page.RecommendedSize, page.SelectedSize);
             Assert.IsFalse(page.HasSizeError);
-            AssertBoundaryHandleIsOnTheBar(page);
+            AssertBoundaryModelIsConsistent(page);
+            AssertThumbFollowsBoundary(page, "Windows volume, no inventory");
             page.SelectedSize = 37;
 
             page.ManualSize = "42";
@@ -141,9 +143,10 @@ namespace Libertix.Tests
             Assert.IsFalse(fresh.HasSizeError, "Recommendation must not round above the available budget.");
         }
 
-        // The slider covers only Minimum..Maximum, laid over the bar with three star
-        // columns. Its thumb must land on the drawn Windows/Linux boundary at every value.
-        private static void AssertBoundaryHandleIsOnTheBar(ResizeDisk page)
+        // Model check only: the three range columns and the two bar columns are two
+        // formulas over the same properties, and must agree on where the boundary is.
+        // It does not measure anything rendered; AssertThumbCentreIsOnRenderedBoundary does.
+        private static void AssertBoundaryModelIsConsistent(ResizeDisk page)
         {
             Assert.IsTrue(page.MaximumSize > page.MinimumSize);
             foreach (double size in new[] { page.MinimumSize, Math.Floor((page.MinimumSize + page.MaximumSize) / 2), page.MaximumSize })
@@ -155,9 +158,80 @@ namespace Libertix.Tests
                     (fixedPart + range + page.MinimumLinuxPercentage.Value);
                 double boundary = page.WindowsPartitionPercentage.Value /
                     (page.WindowsPartitionPercentage.Value + page.LinuxPartitionPercentage.Value);
-                Assert.AreEqual(boundary, handle, 1e-9, $"Handle is off the boundary at {size} GiB.");
+                Assert.AreEqual(boundary, handle, 1e-9, $"Model boundary mismatch at {size} GiB.");
                 Assert.IsFalse(page.HasSizeError);
             }
+        }
+
+        // Layout check: lays the page out at the window's client size and compares the
+        // rendered Thumb's centre with the right edge of the rendered Windows column, both
+        // transformed into page coordinates. Layout rounding is off, so 0.5 DIP is ample.
+        private static void AssertThumbCentreIsOnRenderedBoundary(ResizeDisk page, double size, string label)
+        {
+            page.SelectedSize = size;
+            page.Measure(new Size(1054, 591));
+            page.Arrange(new Rect(0, 0, 1054, 591));
+            page.UpdateLayout();
+            var slider = (Slider)page.FindName("PartitionSlider");
+            var bar = (Grid)page.FindName("DiskVisualization");
+            var track = (System.Windows.Controls.Primitives.Track)slider.Template.FindName("PART_Track", slider);
+            Assert.IsNotNull(track, label);
+            var thumb = track.Thumb;
+            Assert.IsTrue(thumb.ActualWidth > 0 && bar.ActualWidth > 0, label);
+            double thumbCentre = thumb.TransformToAncestor(page).Transform(new Point(thumb.ActualWidth / 2, 0)).X;
+            double boundary = bar.TransformToAncestor(page).Transform(
+                new Point(bar.ColumnDefinitions[0].ActualWidth, 0)).X;
+            Assert.AreEqual(boundary, thumbCentre, 0.5,
+                $"{label}: thumb centre {thumbCentre:F2} vs boundary {boundary:F2} DIP at {size} GiB.");
+            Assert.AreEqual(size, page.SelectedSize, label);
+            Assert.AreEqual(size, slider.Value, label);
+        }
+
+        private static void AssertThumbFollowsBoundary(ResizeDisk page, string label)
+        {
+            double middle = Math.Floor((page.MinimumSize + page.MaximumSize) / 2);
+            foreach (double size in new[] { page.MinimumSize, middle, page.MaximumSize })
+                AssertThumbCentreIsOnRenderedBoundary(page, size, label);
+            // Typed sizes move the same boundary.
+            page.ManualSize = middle.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            Assert.IsFalse(page.HasSizeError, label);
+            AssertThumbCentreIsOnRenderedBoundary(page, middle, label + " typed");
+        }
+
+        private static void VerifyFixedAndUnavailableAllocation()
+        {
+            const long gib = 1024L * 1024 * 1024;
+            var state = new InstallationState
+            {
+                SelectedDistro = new DistroInfo { IsoInstallerSizeBytes = gib },
+                Compatibility = new CompatibilityInfo { ShrinkAvailableBytes = 50 * gib }
+            };
+            // 28.5 GiB free leaves 20.5 GiB after the Windows reserve: exactly the minimum.
+            long fixedFree = (long)((Libertix.Installation.InstallationSizePolicy.MinimumFinalSizeGiB + 0.5 +
+                Libertix.Installation.InstallationSizePolicy.MinimumWindowsFreeSpaceGiB) * gib);
+            var fixedPage = new ResizeDisk(state, 100 * gib, fixedFree);
+            Assert.IsTrue(fixedPage.CanAllocateLinux);
+            Assert.AreEqual(fixedPage.MinimumSize, fixedPage.MaximumSize);
+            AssertThumbCentreIsOnRenderedBoundary(fixedPage, fixedPage.MinimumSize, "minimum equals maximum");
+            fixedPage.ManualSize = "21";
+            Assert.IsTrue(fixedPage.HasSizeError, "One GiB over the only possible size must be refused.");
+            fixedPage.ManualSize = "20";
+            Assert.IsFalse(fixedPage.HasSizeError);
+
+            long tooLittle = (long)((Libertix.Installation.InstallationSizePolicy.MinimumFinalSizeGiB - 1 +
+                Libertix.Installation.InstallationSizePolicy.MinimumWindowsFreeSpaceGiB) * gib);
+            var unavailable = new ResizeDisk(state, 100 * gib, tooLittle);
+            unavailable.Measure(new Size(1054, 591));
+            unavailable.Arrange(new Rect(0, 0, 1054, 591));
+            unavailable.UpdateLayout();
+            Assert.IsFalse(unavailable.CanAllocateLinux);
+            Assert.IsTrue(unavailable.HasError);
+            Assert.AreEqual(Visibility.Collapsed, ((Grid)unavailable.FindName("BoundaryRange")).Visibility,
+                "No handle may be offered when Linux cannot be allocated.");
+            Assert.IsFalse(((Slider)unavailable.FindName("PartitionSlider")).IsEnabled);
+            Assert.IsFalse(((TextBox)unavailable.FindName("ManualSizeBox")).IsEnabled);
+            Assert.IsFalse(((Button)unavailable.FindName("NextButton")).IsEnabled);
+            Assert.AreEqual(0d, ((Grid)unavailable.FindName("DiskVisualization")).ColumnDefinitions[1].ActualWidth, 0.01);
         }
 
         private static void VerifySeparateDiskSelection()
@@ -191,6 +265,7 @@ namespace Libertix.Tests
             Assert.AreEqual(string.Empty, page.SecondaryDiskWarning);
             Assert.AreEqual(30d, page.WindowsFreeSpace,
                 "The transaction ISO is removed before the final Windows free-space state.");
+            AssertThumbFollowsBoundary(page, "C: before switching");
             page.SelectedTarget = data;
             Assert.AreSame(data, state.SelectedInstallationTarget);
             Assert.IsFalse(page.IsWindowsTarget);
@@ -203,7 +278,9 @@ namespace Libertix.Tests
                 "The ISO stays on Windows and must not consume the donor volume budget.");
             Assert.IsTrue(page.CanAllocateLinux);
             Assert.IsFalse(page.HasSizeError);
-            AssertBoundaryHandleIsOnTheBar(page);
+            AssertBoundaryModelIsConsistent(page);
+            AssertThumbFollowsBoundary(page, "D: after switching");
+            page.SelectedSize = 20;
             StringAssert.Contains(page.AllocationSummary, "D:");
             StringAssert.Contains(page.AllocationSummary, page.SelectedSize.ToString("N0"));
             string language = Localization.CurrentLanguage;
