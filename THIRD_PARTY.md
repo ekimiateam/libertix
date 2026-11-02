@@ -56,5 +56,24 @@ reviewed files; upstream license terms remain authoritative.
 - `Terminus_16.pf2` and `Terminus_24.pf2` are generated GRUB font forms kept for the static theme;
   the ISO build also generates its runtime sizes from `Terminus.ttf`.
 
+## MingCute Icons 3.1.0
+
+- Files: `assets/grub-theme/icons/source/mingcute/*.svg` (unmodified sources) and the derived
+  `shutdown.png`, `efi.png`, `submenu.png`, `recovery-mode.png`, `memtest.png` and `firmware.png`
+  in `assets/grub-theme/icons`
+- Upstream: <https://github.com/mingcute-design/mingcute-icons>, tag `v3.1.0`, commit
+  `ef58b7d49487627a1e55b14eca8f0bf5586516f5`, Core Filled style
+- License: Apache-2.0; `assets/grub-theme/icons/source/LICENSE.MingCute.txt` is shipped with the
+  theme source and copied into each generated theme
+- Modifications: recoloured and placed on a 48 px badge; the original file names, the conversion
+  command and the per-icon mapping are in `assets/grub-theme/icons/source/README.md`
+- Source SVG SHA-256:
+  - `power.svg`: `debb19d9773e8c4f7db98f2b1ab351ba49ee11a5cd3b2e93041dc71703f04729`
+  - `settings_5.svg`: `8c086f8079cfe97e62e7be6005f11efef181bc8f9b1f7f43c02d5e59af55f590`
+  - `list_expansion.svg`: `56785d6d75ce1d2800503880b24ca451ccc2b100643360900d934f2b1a4f447c`
+  - `first_aid_kit.svg`: `c78db5460cd34de808b55d2640680aabbeb250d5f231c601243a3808271bfe02`
+  - `memory_stick.svg`: `db389a01413e42a1fead3def5bf26d2fe69658d93f12926fa1a671c0f5bf5da0`
+  - `chip.svg`: `34605716cbb023ed068db9f982e1bb47269dd8d37be713f728aab80b4bb92eb8`
+
 The remaining GRUB theme layout and artwork under `assets/grub-theme` are maintained as Libertix
 project assets. They are not represented here as upstream binaries.

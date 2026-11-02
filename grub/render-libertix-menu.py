@@ -47,15 +47,84 @@ def indent(lines: list[str]) -> list[str]:
     return [f"\t{line}" if line else "" for line in lines]
 
 
-def add_invisible_icon_class(lines: list[str]) -> list[str]:
-    """Give submenu entries a valid transparent icon for GRUB gfxmenu.
+MENU_ENTRY = re.compile(r"^\s*(?:menuentry|submenu)\s+")
+MENU_ENTRY_ID = re.compile(r"(?:\$menuentry_id_option|--id)\s+(?:'([^']*)'|\"([^\"]*)\")")
 
-    The theme reserves icon space. Entries without any loadable class icon can
-    make GRUB attempt to scale a null bitmap when a submenu is first painted.
-    ``find.none.png`` is the theme's transparent 48x48 icon.
+
+def find_unquoted(text: str, start: int, word_separators: str, word_starts: str) -> int:
+    """Return the first index from start that is outside GRUB quoting and is either
+    one of word_separators or one of word_starts at the beginning of a word.
+
+    Single quotes are literal, double quotes allow backslash escapes, and an
+    unquoted backslash escapes the next character, as in GRUB script.
     """
-    entry = re.compile(r"^(\s*(?:menuentry|submenu)\s+(?:'[^']*'|\"[^\"]*\"))(.*)$")
-    return [entry.sub(r"\1 --class find.none\2", line) for line in lines]
+    quote = ""
+    index = start
+    while index < len(text):
+        char = text[index]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif quote == '"':
+            if char == "\\":
+                index += 1
+            elif char == '"':
+                quote = ""
+        elif char == "\\":
+            index += 1
+        elif char in "'\"":
+            quote = char
+        elif char in word_separators or (
+            char in word_starts and (index == 0 or text[index - 1].isspace())
+        ):
+            return index
+        index += 1
+    return len(text)
+
+
+def add_icon_classes(lines: list[str], distribution_icon: str) -> list[str]:
+    """Give generated advanced entries an icon for what they do.
+
+    GRUB shows the icon of the first class that has one, so a known function
+    goes first. Menu ids are matched instead of titles because titles are
+    translated. Ids follow the Ubuntu 24.04 10_linux, 20_memtest86+ and
+    30_uefi-firmware generators.
+
+    Every entry also ends with ``find.none``, a transparent icon. The theme
+    reserves icon space, and an entry with no loadable class icon can make GRUB
+    try to scale a null bitmap when a submenu is first painted. Putting it last
+    keeps that guard without hiding the generator's own classes.
+    """
+    functions = (
+        ("gnulinux-advanced-", "submenu"),
+        # "recovery" is also used by the live installer menu, for diagnostics.
+        ("gnulinux-.+-recovery-", "recovery-mode"),
+        ("gnulinux-.+-advanced-", distribution_icon),
+        ("memtest86", "memtest"),
+        ("uefi-firmware$", "firmware"),
+    )
+    result = []
+    for line in lines:
+        entry = MENU_ENTRY.match(line)
+        if entry is None:
+            result.append(line)
+            continue
+        # The title is one word, possibly several quoted pieces ('l'\''OS'). The
+        # declaration ends at the body's opening brace or a comment, whichever
+        # comes first; a brace or # inside quotes or inside a word does not count.
+        title_end = find_unquoted(line, entry.end(), " \t", "")
+        options_end = find_unquoted(line, title_end, "", "{#")
+        options = line[title_end:options_end].rstrip()
+        gap = line[title_end + len(options) : options_end] or " "
+        rest = line[options_end:]
+        entry_id = MENU_ENTRY_ID.search(options)
+        menu_id = (entry_id[1] or entry_id[2] or "") if entry_id else ""
+        icon = next((icon for prefix, icon in functions if re.match(prefix, menu_id)), None)
+        first_class = re.search(r"--class\s+(\S+)", options)
+        if first_class and first_class[1] == icon:
+            icon = None
+        head = line[:title_end] + (f" --class {icon}" if icon else "")
+        result.append(f"{head}{options} --class find.none{gap + rest if rest else ''}")
+    return result
 
 
 def read_distribution_presentation(path: Path) -> tuple[str, str, dict[str, str]]:
@@ -109,10 +178,10 @@ def main() -> int:
         raise ValueError("Linux GRUB entry title could not be replaced")
     simple[0] = simple[0].replace("--class ", f"--class {icon} --class ", 1)
 
-    advanced = add_invisible_icon_class(linux[advanced_start:advanced_end])
+    advanced = add_icon_classes(linux[advanced_start:advanced_end], icon)
     windows = read_lines(args.windows)
     firmware = (
-        add_invisible_icon_class(read_lines(args.firmware))
+        add_icon_classes(read_lines(args.firmware), icon)
         if args.firmware and args.firmware.exists()
         else []
     )
@@ -120,7 +189,7 @@ def main() -> int:
         line
         for path in args.extra
         if path.exists()
-        for line in add_invisible_icon_class(read_lines(path))
+        for line in add_icon_classes(read_lines(path), icon)
     ]
 
     output: list[str] = []
