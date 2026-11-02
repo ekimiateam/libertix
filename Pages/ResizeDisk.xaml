@@ -13,56 +13,64 @@
 
     <Page.Resources>
         <BooleanToVisibilityConverter x:Key="TargetVisibility"/>
-        <Style x:Key="SliderRepeatButton" TargetType="RepeatButton">
+        <!-- The track is the part of the disk bar the boundary can move over. It is
+             transparent but hit-testable, so clicking the bar moves the boundary. -->
+        <Style x:Key="BoundaryRepeatButton" TargetType="RepeatButton">
+            <Setter Property="Focusable" Value="False"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="RepeatButton">
-                        <Border Height="8"
-                                CornerRadius="4"
-                                VerticalAlignment="Center"
-                                Background="{TemplateBinding Background}"/>
+                        <Border Background="Transparent"/>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
         </Style>
 
-        <Style x:Key="SliderThumb" TargetType="Thumb">
+        <Style x:Key="BoundaryThumb" TargetType="Thumb">
+            <Setter Property="Width" Value="14"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Thumb">
                         <Grid>
-                            <Ellipse Width="28" Height="28" Fill="{DynamicResource AccentColor}"/>
-                            <Ellipse Width="20" Height="20" Fill="{DynamicResource PrimaryBackground}"/>
+                            <Rectangle Width="2" Fill="{DynamicResource TextPrimary}"/>
+                            <Border x:Name="Grip" Width="14" Height="44" CornerRadius="7"
+                                    Background="{DynamicResource TextPrimary}"
+                                    BorderBrush="{DynamicResource HighlightColor}" BorderThickness="0">
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <Rectangle Width="1.5" Height="14" Margin="1,0" Fill="{DynamicResource TextSecondary}"/>
+                                    <Rectangle Width="1.5" Height="14" Margin="1,0" Fill="{DynamicResource TextSecondary}"/>
+                                </StackPanel>
+                            </Border>
                         </Grid>
+                        <ControlTemplate.Triggers>
+                            <DataTrigger Binding="{Binding IsKeyboardFocused, RelativeSource={RelativeSource AncestorType=Slider}}" Value="True">
+                                <Setter TargetName="Grip" Property="BorderThickness" Value="3"/>
+                            </DataTrigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Grip" Property="Height" Value="50"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
         </Style>
 
-        <Style x:Key="CustomSlider" TargetType="Slider">
+        <Style x:Key="BoundarySlider" TargetType="Slider">
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Slider">
-                        <Grid>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="Auto" MinHeight="{TemplateBinding MinHeight}"/>
-                                <RowDefinition Height="Auto"/>
-                            </Grid.RowDefinitions>
-                            <Track Grid.Row="1"
-                                   x:Name="PART_Track"
-                                   VerticalAlignment="Center">
-                                <Track.DecreaseRepeatButton>
-                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="{DynamicResource AccentColor}"/>
-                                </Track.DecreaseRepeatButton>
-                                <Track.IncreaseRepeatButton>
-                                    <RepeatButton Style="{StaticResource SliderRepeatButton}" Background="{DynamicResource PanelBorder}"/>
-                                </Track.IncreaseRepeatButton>
-                                <Track.Thumb>
-                                    <Thumb Style="{StaticResource SliderThumb}"/>
-                                </Track.Thumb>
-                            </Track>
-                        </Grid>
+                        <Track x:Name="PART_Track">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton Style="{StaticResource BoundaryRepeatButton}"/>
+                            </Track.DecreaseRepeatButton>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton Style="{StaticResource BoundaryRepeatButton}"/>
+                            </Track.IncreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb Style="{StaticResource BoundaryThumb}"/>
+                            </Track.Thumb>
+                        </Track>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -134,137 +142,174 @@
             </Border>
         </StackPanel>
 
-        <Border Grid.Row="1"
-                Height="100"
-                Margin="40,20"
-                BorderThickness="1"
-                BorderBrush="{DynamicResource TextSecondary}"
-                CornerRadius="4"
-                ClipToBounds="True">
-            <Grid x:Name="DiskVisualization">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="{Binding WindowsPartitionPercentage}"/>
-                    <ColumnDefinition Width="{Binding LinuxPartitionPercentage}"/>
-                </Grid.ColumnDefinitions>
-
-                <Border Grid.Column="0" Background="{DynamicResource WindowsPartitionColor}" CornerRadius="3" Padding="6">
-                    <Grid>
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="{Binding WindowsUsedPercentage}"/>
-                                <ColumnDefinition Width="{Binding WindowsFreeInPartitionPercentage}"/>
-                            </Grid.ColumnDefinitions>
-                            <Rectangle Grid.Column="0" Fill="{DynamicResource WindowsPartitionDetailColor}" RadiusX="2" RadiusY="2"/>
-                            <Rectangle Grid.Column="1" Fill="{DynamicResource AccentColor}" RadiusX="2" RadiusY="2"/>
-                        </Grid>
-
-                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                            <TextBlock Text="{Binding RetainedVolumeName}"
-                                       Foreground="{DynamicResource TextPrimary}"
-                                       FontWeight="SemiBold"
-                                       HorizontalAlignment="Center"/>
-                            <TextBlock Text="{Binding WindowsFreeInsideLabel}"
-                                       Foreground="{DynamicResource TextPrimary}"
-                                       FontSize="12"
-                                       Opacity="0.8"
-                                       HorizontalAlignment="Center"/>
-                        </StackPanel>
-                    </Grid>
-                </Border>
-
-                <Grid Grid.Column="1">
-                    <Rectangle Fill="{DynamicResource ErrorColor}" RadiusX="3" RadiusY="3"/>
-                    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                        <TextBlock Text="{DynamicResource Linux}"
-                                   Foreground="{DynamicResource PrimaryBackground}"
-                                   FontWeight="SemiBold"
-                                   HorizontalAlignment="Center"/>
-                        <TextBlock Text="{Binding LinuxSizeLabel}"
-                                   Foreground="{DynamicResource PrimaryBackground}"
-                                   FontSize="12"
-                                   HorizontalAlignment="Center"/>
-                    </StackPanel>
-                </Grid>
-            </Grid>
-        </Border>
-
-        <StackPanel Grid.Row="1"
-                    Orientation="Horizontal"
-                    HorizontalAlignment="Center"
-                    VerticalAlignment="Bottom"
-                    Margin="0,0,0,-5">
-            <StackPanel Orientation="Horizontal" Margin="10,0">
-                <Rectangle Width="16" Height="16" Fill="{DynamicResource WindowsPartitionColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
-                <TextBlock Text="{Binding WindowsUsedLegend}"
-                           Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="10,0">
-                <Rectangle Width="16" Height="16" Fill="{DynamicResource AccentColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
-                <TextBlock Text="{Binding WindowsFreeLegend}"
-                           Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Margin="10,0">
-                <Rectangle Width="16" Height="16" Fill="{DynamicResource ErrorColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
-                <TextBlock Text="{Binding LinuxLegend}"
-                           Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
-            </StackPanel>
-        </StackPanel>
-
-        <StackPanel Grid.Row="2" Margin="40,20">
-            <Grid>
+        <StackPanel Grid.Row="1" Margin="40,8,40,0">
+            <Grid Margin="0,0,0,8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
+                <TextBlock x:Name="AllocationSummaryText"
+                           Text="{Binding AllocationSummary}"
+                           Foreground="{DynamicResource TextPrimary}"
+                           FontSize="18"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Bottom"/>
+                <TextBlock Grid.Column="1"
+                           Text="{DynamicResource ResizeDiskDragHint}"
+                           Foreground="{DynamicResource TextSecondary}"
+                           FontSize="12"
+                           MaxWidth="320"
+                           Margin="16,0,0,2"
+                           TextWrapping="Wrap"
+                           TextAlignment="Right"
+                           VerticalAlignment="Bottom"
+                           Visibility="{Binding CanAllocateLinux, Converter={StaticResource BoolToVisibilityConverter}}"/>
+            </Grid>
 
-                <Slider x:Name="PartitionSlider"
-                        Style="{StaticResource CustomSlider}"
-                        MinHeight="32"
-                        Minimum="{Binding MinimumSize}"
-                        Maximum="{Binding MaximumSize}"
-                        Value="{Binding SelectedSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                        IsEnabled="{Binding CanAllocateLinux}"
-                        IsMoveToPointEnabled="True"
-                        TabIndex="0"
-                        TickFrequency="1"
-                        SmallChange="1"
-                        LargeChange="5"
-                        Delay="250"
-                        Interval="40"
-                        IsSnapToTickEnabled="True"
-                        AutoToolTipPlacement="TopLeft"
-                        AutoToolTipPrecision="0"
-                        Cursor="Hand"/>
+            <!-- The bar is drawn to the scale of the selected volume. The slider on top of it
+                 covers only the range the boundary may take: everything left of it must stay
+                 with the volume, everything right of it is the Linux minimum. -->
+            <Grid Height="100">
+                <Border BorderThickness="1"
+                        BorderBrush="{DynamicResource TextSecondary}"
+                        CornerRadius="4"
+                        ClipToBounds="True">
+                    <Grid x:Name="DiskVisualization">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="{Binding WindowsPartitionPercentage}"/>
+                            <ColumnDefinition Width="{Binding LinuxPartitionPercentage}"/>
+                        </Grid.ColumnDefinitions>
 
+                        <Border Grid.Column="0" Background="{DynamicResource WindowsPartitionColor}" CornerRadius="3" Padding="6">
+                            <Grid>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="{Binding WindowsUsedPercentage}"/>
+                                        <ColumnDefinition Width="{Binding WindowsFreeInPartitionPercentage}"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Rectangle Grid.Column="0" Fill="{DynamicResource WindowsPartitionDetailColor}" RadiusX="2" RadiusY="2"/>
+                                    <Rectangle Grid.Column="1" Fill="{DynamicResource AccentColor}" RadiusX="2" RadiusY="2"/>
+                                </Grid>
+
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding RetainedVolumeName}"
+                                               Foreground="{DynamicResource TextPrimary}"
+                                               FontWeight="SemiBold"
+                                               HorizontalAlignment="Center"/>
+                                    <TextBlock Text="{Binding WindowsFreeInsideLabel}"
+                                               Foreground="{DynamicResource TextPrimary}"
+                                               FontSize="12"
+                                               Opacity="0.8"
+                                               HorizontalAlignment="Center"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <Grid Grid.Column="1">
+                            <Rectangle Fill="{DynamicResource HighlightColor}" RadiusX="3" RadiusY="3"/>
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <TextBlock Text="{DynamicResource Linux}"
+                                           Foreground="{DynamicResource PrimaryBackground}"
+                                           FontWeight="SemiBold"
+                                           HorizontalAlignment="Center"/>
+                                <TextBlock Text="{Binding LinuxSizeLabel}"
+                                           Foreground="{DynamicResource PrimaryBackground}"
+                                           FontSize="12"
+                                           HorizontalAlignment="Center"/>
+                            </StackPanel>
+                        </Grid>
+                    </Grid>
+                </Border>
+
+                <!-- Margin matches the bar border, so both grids share one inner width. -->
+                <Grid x:Name="BoundaryRange" Margin="1,0"
+                      Visibility="{Binding CanAllocateLinux, Converter={StaticResource BoolToVisibilityConverter}}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="{Binding FixedVolumePercentage}"/>
+                        <ColumnDefinition Width="{Binding AdjustableRangePercentage}"/>
+                        <ColumnDefinition Width="{Binding MinimumLinuxPercentage}"/>
+                    </Grid.ColumnDefinitions>
+                    <!-- The negative margin is half the thumb width, so the thumb centre
+                         travels exactly over the column and lands on the boundary. -->
+                    <Slider x:Name="PartitionSlider"
+                            Grid.Column="1"
+                            Margin="-7,0"
+                            Style="{StaticResource BoundarySlider}"
+                            AutomationProperties.Name="{DynamicResource ResizeDiskSizeLabel}"
+                            Minimum="{Binding MinimumSize}"
+                            Maximum="{Binding MaximumSize}"
+                            Value="{Binding SelectedSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                            IsEnabled="{Binding CanAllocateLinux}"
+                            IsDirectionReversed="True"
+                            PreviewKeyDown="PartitionSlider_PreviewKeyDown"
+                            IsMoveToPointEnabled="True"
+                            TabIndex="0"
+                            TickFrequency="1"
+                            SmallChange="1"
+                            LargeChange="5"
+                            Delay="250"
+                            Interval="40"
+                            IsSnapToTickEnabled="True"
+                            AutoToolTipPlacement="TopLeft"
+                            AutoToolTipPrecision="0"
+                            Cursor="SizeWE"/>
+                </Grid>
+            </Grid>
+
+            <WrapPanel HorizontalAlignment="Center" Margin="0,8,0,0">
+                <StackPanel Orientation="Horizontal" Margin="10,0">
+                    <Rectangle Width="16" Height="16" Fill="{DynamicResource WindowsPartitionDetailColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                    <TextBlock Text="{Binding WindowsUsedLegend}"
+                               Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="10,0">
+                    <Rectangle Width="16" Height="16" Fill="{DynamicResource AccentColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                    <TextBlock Text="{Binding WindowsFreeLegend}"
+                               Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="10,0">
+                    <Rectangle Width="16" Height="16" Fill="{DynamicResource HighlightColor}" RadiusX="2" RadiusY="2" Margin="0,0,5,0"/>
+                    <TextBlock Text="{Binding LinuxLegend}"
+                               Foreground="{DynamicResource TextSecondary}" FontSize="11" VerticalAlignment="Center"/>
+                </StackPanel>
+            </WrapPanel>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Margin="40,16,40,20">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock x:Name="ManualSizeLabel"
+                           VerticalAlignment="Center"
+                           Margin="0,0,10,0"
+                           Foreground="{DynamicResource TextPrimary}"
+                           Text="{DynamicResource ResizeDiskSizeLabel}"/>
                 <TextBox x:Name="ManualSizeBox"
-                         Grid.Column="1"
                          Width="80"
                          Height="30"
-                         Margin="20,0,5,0"
+                         Margin="0,0,5,0"
                          Background="{DynamicResource SecondaryBackground}"
                          Foreground="{DynamicResource TextPrimary}"
                          BorderBrush="{DynamicResource PanelBorder}"
                          TextAlignment="Center"
                          VerticalContentAlignment="Center"
+                         AutomationProperties.LabeledBy="{Binding ElementName=ManualSizeLabel}"
                          Text="{Binding ManualSize, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          IsEnabled="{Binding CanAllocateLinux}"
                          TabIndex="1"
                          PreviewTextInput="NumberValidationTextBox"
                          DataObject.Pasting="ManualSize_Pasting"/>
 
-                <TextBlock Grid.Column="2"
-                          VerticalAlignment="Center"
-                          Foreground="{DynamicResource TextPrimary}"
-                          Text="{DynamicResource ResizeDiskSizeUnit}"/>
-            </Grid>
+                <TextBlock VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextPrimary}"
+                           Text="{DynamicResource ResizeDiskSizeUnit}"/>
+            </StackPanel>
 
             <TextBlock Margin="0,5,0,0"
                        Foreground="{DynamicResource ErrorColor}"
+                       TextWrapping="Wrap"
                        Text="{Binding SizeErrorMessage}"
                        Visibility="{Binding HasSizeError, Converter={StaticResource BoolToVisibilityConverter}}"/>
 
-            <Grid Margin="0,20,0,0">
+            <Grid Margin="0,16,0,0">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="*"/>
@@ -280,8 +325,11 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1">
-                    <TextBlock Foreground="{DynamicResource ErrorColor}" FontWeight="SemiBold"
+                    <TextBlock Foreground="{DynamicResource HighlightColor}" FontWeight="SemiBold"
                                Text="{Binding LinuxLegend}"/>
+                    <TextBlock Foreground="{DynamicResource TextSecondary}" FontSize="12" Margin="10,2,0,0"
+                               TextWrapping="Wrap"
+                               Text="{Binding StagingDetail}"/>
                 </StackPanel>
             </Grid>
         </StackPanel>

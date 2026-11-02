@@ -561,8 +561,18 @@ def test_resize_slider_supports_direct_precise_track_interaction() -> None:
     assert 'IsSnapToTickEnabled="True"' in slider
     assert 'AutoToolTipPlacement="TopLeft"' in slider
     assert 'AutoToolTipPrecision="0"' in slider
-    assert '<Border Height="8"' in resize
-    assert '<Ellipse Width="28" Height="28"' in resize
+    # The slider is the bar's boundary handle: moving it left gives Linux more space,
+    # and its margin is half the thumb width so the thumb centre reaches both ends.
+    assert 'IsDirectionReversed="True"' in slider
+    # Up/Down and PageUp/PageDown keep meaning more/less Linux despite the reversal.
+    assert 'PreviewKeyDown="PartitionSlider_PreviewKeyDown"' in slider
+    assert 'Margin="-7,0"' in slider
+    assert '<Setter Property="Width" Value="14"/>' in resize
+    assert 'AutomationProperties.Name="{DynamicResource ResizeDiskSizeLabel}"' in slider
+    assert 'AutomationProperties.LabeledBy="{Binding ElementName=ManualSizeLabel}"' in resize
+    bar = resize.split('x:Name="DiskVisualization"', 1)[1].split('x:Name="BoundaryRange"', 1)
+    assert len(bar) == 2, "the boundary range must follow the bar"
+    assert "ErrorColor" not in bar[0], "Linux must not use the error colour in the normal state"
 
 
 def test_unattended_warning_has_dedicated_localized_copy() -> None:
