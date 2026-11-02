@@ -34,6 +34,7 @@ namespace Libertix.Tests
                     Localization.SetLanguage("en");
                     VerifyResizeSelectionIsPreserved();
                     VerifySeparateDiskSelection();
+                    VerifyDistributionCardsFitAndAreNamed();
                     InstallationTargetTests.FullWindowsMbrRefusesOnlyTheWindowsDestination();
                     string root = Path.Combine(Path.GetTempPath(), "Libertix-fallback-test-" + Guid.NewGuid().ToString("N"));
                     string scripts = Path.Combine(root, "Scripts");
@@ -137,6 +138,40 @@ namespace Libertix.Tests
             var fresh = new ResizeDisk(state, 500 * gib, reducedFree);
             Assert.AreEqual(fresh.RecommendedSize, fresh.SelectedSize);
             Assert.IsFalse(fresh.HasSizeError, "Recommendation must not round above the available budget.");
+        }
+
+        private static void VerifyDistributionCardsFitAndAreNamed()
+        {
+            Assert.IsTrue(Libertix.Helpers.FilepoolConfig.TryCreate("https://example.invalid/", out var filepool, out _));
+            var state = new InstallationState { Compatibility = new CompatibilityInfo() };
+            var page = new ChooseDistro(state, filepool);
+            var list = (ListBox)page.FindName("DistrosListBox");
+            var distributions = new[]
+            {
+                new DistroInfo { Id = "mint", Name = "Linux Mint 22.3 Cinnamon", Description = new string('m', 240) },
+                new DistroInfo { Id = "zorin", Name = "Zorin OS 18.1 Core", Description = new string('z', 240) }
+            };
+            list.ItemsSource = distributions;
+            list.SelectedItem = distributions[1];
+            foreach (string language in new[] { "en", "fr", "es", "ko" })
+            {
+                Localization.SetLanguage(language);
+                // The window's client area, less the development-mode banner.
+                page.Measure(new Size(1054, 559));
+                page.Arrange(new Rect(0, 0, 1054, 559));
+                page.UpdateLayout();
+                foreach (DistroInfo distribution in distributions)
+                {
+                    var card = (ListBoxItem)list.ItemContainerGenerator.ContainerFromItem(distribution);
+                    Assert.AreEqual(distribution.Name, System.Windows.Automation.AutomationProperties.GetName(card));
+                    Rect bounds = card.TransformToAncestor(list).TransformBounds(new Rect(card.RenderSize));
+                    Assert.IsTrue(bounds.Bottom <= list.ActualHeight,
+                        $"{distribution.Id} card must be visible without scrolling ({language}).");
+                }
+            }
+            Assert.IsTrue(distributions[1].IsSelected);
+            Assert.IsFalse(distributions[0].IsSelected);
+            Localization.SetLanguage("en");
         }
 
         private static void VerifySeparateDiskSelection()
