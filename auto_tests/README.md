@@ -143,7 +143,7 @@ GitHub Pages `dev` channel.
 | Field | Type and default | Meaning |
 |---|---|---|
 | `apply` | literal `true`, required | Explicitly authorize the destructive unattended installation. |
-| `distribution` | `mint` or `zorin`, default `mint` | Select the catalogue entry; both use the same generic mini-ISOs. |
+| `distribution` | `mint`, `zorin` or `cachyos`, default `mint` | Select the catalogue entry; all use the same generic mini-ISOs. `cachyos` installs online and needs a VM with Secure Boot off and DHCP on its wired network. |
 | `linux_username` | string, default `test` | Account created in the installed Linux system. |
 | `linux_password` | string, required, 4-128 characters | Linux account and sudo password. |
 | `linux_size_gib` | integer, default `100` | Requested final Linux partition size in GiB. |
@@ -367,8 +367,10 @@ The available automation targets and unattended profiles come from `.env`. The a
 accepts only an explicit `apply=true` request and always runs the complete unattended installation.
 Use the validation endpoint to compile, test, deploy and launch Libertix without installing.
 
-`distribution` selects the signed catalogue id and accepts `mint` (default) or `zorin`. The same
-generic BIOS and UEFI mini-ISOs are used for both choices.
+`distribution` selects the signed catalogue id and accepts `mint` (default), `zorin` or `cachyos`.
+The same generic BIOS and UEFI mini-ISOs are used for every choice. A `cachyos` run downloads its
+packages from the internet during the live phase, so the VM needs a wired DHCP network and
+Secure Boot disabled.
 
 With `monitor_iso=true`, automation continues past the installer: it confirms the installed GRUB
 menu, validates the system selected by `first_boot`, then validates the other system. It runs the

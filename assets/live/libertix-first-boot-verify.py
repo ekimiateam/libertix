@@ -19,6 +19,7 @@ import uuid
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path, PureWindowsPath
+from typing import NamedTuple
 
 PLAN_PATH = Path("/etc/libertix/installation-plan.json")
 POLICY_PATH = Path("/etc/libertix/Libertix.InstallationPolicy.json")
@@ -37,6 +38,40 @@ EFI_GLOBAL_VARIABLE_GUID = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
 BLOCK_CLASS_PATH = Path("/sys/class/block")
 BLOCK_DEVICE_PATH = Path("/dev")
 WINDOWS_PERMISSIONS_HELPER = Path(__file__).with_name("libertix-ntfs-permissions.py")
+
+
+class DistributionFamilyProfile(NamedTuple):
+    """What the installed system looks like for one installation family."""
+
+    administrator_group: str
+    uefi_loader_path: str
+    uefi_boot_files: tuple[str, ...]
+    locale_path: Path
+    locale_keys: tuple[str, ...]
+    keyboard_path: Path
+
+
+# Plans written before distribution families existed carry no family and mean
+# debian. Arch-family systems boot GRUB directly because no Microsoft-signed
+# shim exists for them, and they configure locale and keyboard through systemd.
+DISTRIBUTION_FAMILY_PROFILES = {
+    "debian": DistributionFamilyProfile(
+        administrator_group="sudo",
+        uefi_loader_path=r"\EFI\Libertix\shimx64.efi",
+        uefi_boot_files=("shimx64.efi", "grubx64.efi", "grub.cfg", ".libertix-owner"),
+        locale_path=DEFAULT_LOCALE_PATH,
+        locale_keys=("LANG", "LC_ALL", "LANGUAGE"),
+        keyboard_path=DEFAULT_KEYBOARD_PATH,
+    ),
+    "arch": DistributionFamilyProfile(
+        administrator_group="wheel",
+        uefi_loader_path=r"\EFI\Libertix\grubx64.efi",
+        uefi_boot_files=("grubx64.efi", "grub.cfg", ".libertix-owner"),
+        locale_path=Path("/etc/locale.conf"),
+        locale_keys=("LANG", "LANGUAGE"),
+        keyboard_path=Path("/etc/vconsole.conf"),
+    ),
+}
 
 
 class VerificationError(RuntimeError):
@@ -64,6 +99,18 @@ def run(*arguments: str, timeout_seconds: float | None = None) -> str:
             f"command failed with rc={result.returncode}: {' '.join(arguments)}: {diagnostic}"
         )
     return result.stdout.strip()
+
+
+def distribution_family(plan: dict[str, object]) -> str:
+    distribution = plan.get("distribution")
+    family = distribution.get("family", "debian") if isinstance(distribution, dict) else "debian"
+    if family not in DISTRIBUTION_FAMILY_PROFILES:
+        raise VerificationError("installation plan distribution family is invalid")
+    return str(family)
+
+
+def family_profile(plan: dict[str, object]) -> DistributionFamilyProfile:
+    return DISTRIBUTION_FAMILY_PROFILES[distribution_family(plan)]
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -145,10 +192,13 @@ def normalize_locale_name(value: str) -> str:
 def verify_localization(
     plan: dict[str, object],
     *,
-    locale_path: Path = DEFAULT_LOCALE_PATH,
-    keyboard_path: Path = DEFAULT_KEYBOARD_PATH,
+    locale_path: Path | None = None,
+    keyboard_path: Path | None = None,
     available_locales: str | None = None,
 ) -> dict[str, object]:
+    profile = family_profile(plan)
+    locale_path = locale_path or profile.locale_path
+    keyboard_path = keyboard_path or profile.keyboard_path
     expected = require_mapping(plan, "locale")
     expected_language = require_text(expected, "languageCode")
     expected_system_locale = require_text(expected, "systemLanguage")
@@ -164,7 +214,8 @@ def verify_localization(
         "LC_ALL": expected_system_locale,
         "LANGUAGE": expected_language,
     }
-    for name, expected_value in required_locale_values.items():
+    for name in profile.locale_keys:
+        expected_value = required_locale_values[name]
         if configured_locale.get(name) != expected_value:
             raise VerificationError(f"configured {name} differs from the installation plan")
 
@@ -388,17 +439,24 @@ def verify_installed_system(
     account = require_mapping(plan, "account")
     username = require_text(account, "username")
     run("getent", "passwd", username)
+    profile = family_profile(plan)
     groups = run("id", "-nG", username).split()
-    if "sudo" not in groups:
-        raise VerificationError("the installed user is not a member of sudo")
+    if profile.administrator_group not in groups:
+        raise VerificationError(
+            f"the installed user is not a member of {profile.administrator_group}"
+        )
     password_status = run("passwd", "-S", username).split()
     if len(password_status) < 2 or password_status[1] != "P":
         raise VerificationError("the installed user does not have an active password")
     run("visudo", "-cf", "/etc/sudoers")
 
-    dpkg_audit = run("dpkg", "--audit")
-    if dpkg_audit:
-        raise VerificationError(f"dpkg reports an incomplete package state: {dpkg_audit}")
+    if distribution_family(plan) == "arch":
+        # pacman -Dk exits non-zero when the local database is inconsistent.
+        run("pacman", "-Dk")
+    else:
+        dpkg_audit = run("dpkg", "--audit")
+        if dpkg_audit:
+            raise VerificationError(f"dpkg reports an incomplete package state: {dpkg_audit}")
     failed_units = run("systemctl", "--failed", "--no-legend", "--plain")
     if failed_units:
         raise VerificationError(f"systemd reports failed units: {failed_units}")
@@ -407,9 +465,10 @@ def verify_installed_system(
         "fstabRootUuid": root_uuid,
         "machineIdSha256": hashlib.sha256(machine_id.encode("ascii")).hexdigest(),
         "username": username,
-        "sudoMember": True,
+        "administratorGroup": profile.administrator_group,
+        "administratorGroupMember": True,
         "passwordActive": True,
-        "dpkgAuditClean": True,
+        "packageDatabaseClean": True,
         "failedSystemdUnits": 0,
     }
 
@@ -507,7 +566,7 @@ def verify_uefi_boot_current(
     expected_boot_number: str | None = None,
     expected_partition_number: int | None = None,
     expected_partition_guid: str | None = None,
-    expected_loader_path: str = r"\EFI\Libertix\shimx64.efi",
+    expected_loader_path: str = DISTRIBUTION_FAMILY_PROFILES["debian"].uefi_loader_path,
     preferred_path: dict[str, object] | None = None,
 ) -> dict[str, object]:
     current_path = efivars / f"BootCurrent-{EFI_GLOBAL_VARIABLE_GUID}"
@@ -537,7 +596,7 @@ def verify_uefi_boot_current(
         and boot_number == str(preferred_path.get("bootNumber", "")).casefold()
     )
     if not normal_libertix_path and not preferred_windows_path:
-        raise VerificationError("UEFI BootCurrent does not identify the installed Libertix shim")
+        raise VerificationError("UEFI BootCurrent does not identify the installed Libertix loader")
     if (
         normal_libertix_path
         and expected_boot_number is not None
@@ -667,7 +726,11 @@ def verify_preferred_uefi_boot_path(
     }
 
 
-def read_uefi_owner_marker(path: Path, plan_id: str) -> dict[str, object]:
+def read_uefi_owner_marker(
+    path: Path,
+    plan_id: str,
+    expected_loader_path: str = DISTRIBUTION_FAMILY_PROFILES["debian"].uefi_loader_path,
+) -> dict[str, object]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError) as error:
@@ -685,7 +748,7 @@ def read_uefi_owner_marker(path: Path, plan_id: str) -> dict[str, object]:
     except (ValueError, AttributeError) as error:
         raise VerificationError("installed UEFI boot ownership partition is invalid") from error
     loader_path = lines[4].strip()
-    if partition_number <= 0 or loader_path.casefold() != r"\EFI\Libertix\shimx64.efi".casefold():
+    if partition_number <= 0 or loader_path.casefold() != expected_loader_path.casefold():
         raise VerificationError("installed UEFI boot ownership target is invalid")
     return {
         "bootNumber": boot_number,
@@ -728,6 +791,25 @@ def verify_boot_chain(
     }
 
 
+def installed_kernel_images(
+    plan: dict[str, object],
+    kernel_release: str,
+    boot: Path = Path("/boot"),
+    modules: Path = Path("/usr/lib/modules"),
+) -> tuple[Path, Path]:
+    if distribution_family(plan) != "arch":
+        return boot / f"vmlinuz-{kernel_release}", boot / f"initrd.img-{kernel_release}"
+    # Arch names boot images after the kernel package, which each module tree
+    # records in its pkgbase file.
+    try:
+        pkgbase = (modules / kernel_release / "pkgbase").read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as error:
+        raise VerificationError(f"cannot identify the running kernel package: {error}") from error
+    if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*", pkgbase):
+        raise VerificationError("the running kernel package name is invalid")
+    return boot / f"vmlinuz-{pkgbase}", boot / f"initramfs-{pkgbase}.img"
+
+
 def verify_grub(plan: dict[str, object], firmware: str, disk_device: Path) -> dict[str, object]:
     distribution = require_mapping(plan, "distribution")
     display_name = require_text(distribution, "grubDisplayName")
@@ -747,8 +829,7 @@ def verify_grub(plan: dict[str, object], firmware: str, disk_device: Path) -> di
         raise VerificationError(f"GRUB configuration is missing: {missing[0]}")
 
     kernel_release = run("uname", "-r")
-    kernel_image = Path("/boot") / f"vmlinuz-{kernel_release}"
-    initrd_image = Path("/boot") / f"initrd.img-{kernel_release}"
+    kernel_image, initrd_image = installed_kernel_images(plan, kernel_release)
     if not kernel_image.is_file() or not initrd_image.is_file():
         raise VerificationError("the running kernel or its initramfs is missing from /boot")
 
@@ -758,12 +839,14 @@ def verify_grub(plan: dict[str, object], firmware: str, disk_device: Path) -> di
         if not Path("/sys/firmware/efi").is_dir():
             raise VerificationError("the installed system did not boot in UEFI mode")
         efi_root = Path("/boot/efi/EFI/Libertix")
-        for relative in ("shimx64.efi", "grubx64.efi", "grub.cfg", ".libertix-owner"):
+        profile = family_profile(plan)
+        for relative in profile.uefi_boot_files:
             if not (efi_root / relative).is_file():
                 raise VerificationError(f"installed UEFI boot file is missing: {relative}")
         uefi_owner = read_uefi_owner_marker(
             efi_root / ".libertix-owner",
             require_text(plan, "planId"),
+            profile.uefi_loader_path,
         )
         preferred_path = verify_preferred_uefi_boot_path(
             efi_root,

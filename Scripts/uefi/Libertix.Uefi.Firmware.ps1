@@ -888,6 +888,13 @@ function Test-LibertixSecureBootCompatibility {
         Write-Log "Secure Boot is disabled; signed-chain check is not required." "Yellow"
         return
     }
+    if (-not (Test-LibertixPlanDistributionHasSignedBootChain -Distribution $InstallationPlan.distribution)) {
+        throw (
+            "Secure Boot is enabled, but the selected distribution has no Microsoft-signed " +
+            "installed-system bootloader. Disable Secure Boot before installing it. " +
+            "Refusing before disk mutation."
+        )
+    }
 
     $subjects = @(Get-SecureBootDbCertificates | ForEach-Object { $_.Subject })
     $trustedAuthorities = @(Get-TrustedMicrosoftUefiAuthorities)

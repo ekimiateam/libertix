@@ -240,7 +240,15 @@ namespace Libertix.Pages
             // Compatibility is completed on the preceding page and the full
             // storage preflight is repeated immediately before disk mutation.
             // Re-running PowerShell here made a visible selection appear frozen.
-            bool canProceed = _selectedDistro != null && _partitionConfigValid;
+            // A distribution without a Microsoft-signed boot chain cannot boot
+            // while Secure Boot is on; say so here instead of after disk preparation.
+            bool secureBootBlocks = _selectedDistro != null &&
+                !_selectedDistro.HasSignedBootChain &&
+                _installationState.Compatibility?.SecureBootEnabled == true;
+            SecureBootBlockedText.Visibility = secureBootBlocks
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            bool canProceed = _selectedDistro != null && _partitionConfigValid && !secureBootBlocks;
             NextButton.IsEnabled = canProceed;
         }
     }

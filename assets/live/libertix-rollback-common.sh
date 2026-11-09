@@ -13,6 +13,10 @@ cleanup_live_mounts_best_effort() {
 
     cd / 2>/dev/null || true
     sync || true
+    # The online bootstrap reads the ISO and may hold the target open.
+    if declare -F release_arch_bootstrap_best_effort >/dev/null; then
+        release_arch_bootstrap_best_effort
+    fi
     umount /mnt/iso 2>/dev/null || true
     umount /mnt/target/dev/pts 2>/dev/null || true
     umount /mnt/target/dev 2>/dev/null || true

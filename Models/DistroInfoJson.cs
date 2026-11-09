@@ -74,6 +74,9 @@ namespace Libertix.Models
         [JsonPropertyName("name")]
         public string Name { get; set; }
 
+        [JsonPropertyName("family")]
+        public string Family { get; set; }
+
         [JsonPropertyName("osReleaseId")]
         public string OsReleaseId { get; set; }
 

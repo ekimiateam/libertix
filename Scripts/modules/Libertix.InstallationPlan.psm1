@@ -12,7 +12,7 @@ $script:InstallationPlanPropertySets = [ordered]@{
         "locale", "account", "disk", "allocation", "features", "runtime", "development"
     )
     distribution = @(
-        "id", "name", "osReleaseId", "grubDisplayName", "grubIcon",
+        "id", "name", "family", "osReleaseId", "grubDisplayName", "grubIcon",
         "secureBootMicrosoftAuthorities",
         "installerIsoFileName", "installerIsoUrl", "installerIsoWindowsPath",
         "installerIsoSha256", "liveIsoUrl", "liveIsoSha256"
@@ -425,6 +425,42 @@ function Assert-LibertixWindowsSharingPlan {
     }
 }
 
+# Plans written before distribution families existed carry no family and were
+# always installed from a Debian/Ubuntu squashfs.
+$script:DistributionFamilies = @("debian", "arch")
+$script:UnsignedBootDistributionFamilies = @("arch")
+
+function Get-LibertixPlanDistributionFamily {
+    param([Parameter(Mandatory = $true)][object]$Distribution)
+
+    if (-not (Test-LibertixPlanProperty -Object $Distribution -Name "family")) {
+        return "debian"
+    }
+    $family = $Distribution.family
+    if ($family -isnot [string] -or $family -cnotin $script:DistributionFamilies) {
+        throw "Installation plan field distribution.family is not a supported distribution family."
+    }
+    return $family
+}
+
+function Test-LibertixPlanDistributionHasSignedBootChain {
+    param([Parameter(Mandatory = $true)][object]$Distribution)
+
+    return (Get-LibertixPlanDistributionFamily -Distribution $Distribution) -cnotin `
+        $script:UnsignedBootDistributionFamilies
+}
+
+# Firmware starts the distribution's Microsoft-signed shim, or GRUB itself for a
+# family without a signed boot chain.
+function Get-LibertixPlanUefiLoaderPath {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    if (Test-LibertixPlanDistributionHasSignedBootChain -Distribution $Plan.distribution) {
+        return "\EFI\Libertix\shimx64.efi"
+    }
+    return "\EFI\Libertix\grubx64.efi"
+}
+
 function Assert-LibertixPlanDistribution {
     param([Parameter(Mandatory = $true)][object]$Distribution)
 
@@ -454,9 +490,17 @@ function Assert-LibertixPlanDistribution {
     }
     Assert-LibertixPlanProperty -Object $distribution -Name 'secureBootMicrosoftAuthorities' `
         -Path 'distribution.secureBootMicrosoftAuthorities' | Out-Null
-    $null = Assert-LibertixMicrosoftUefiAuthorities `
+    $signedBootChain = Test-LibertixPlanDistributionHasSignedBootChain -Distribution $distribution
+    $authorities = @(Assert-LibertixMicrosoftUefiAuthorities `
         -Value $distribution.secureBootMicrosoftAuthorities `
-        -Path "distribution.secureBootMicrosoftAuthorities"
+        -Path "distribution.secureBootMicrosoftAuthorities" `
+        -AllowEmpty:(-not $signedBootChain))
+    if (-not $signedBootChain -and $authorities.Count -ne 0) {
+        throw (
+            "Installation plan field distribution.secureBootMicrosoftAuthorities must be empty " +
+            "for a distribution without a Microsoft-signed boot chain."
+        )
+    }
     foreach ($name in @("installerIsoUrl", "liveIsoUrl")) {
         [Uri]$uri = $null
         $value = [string]$distribution.$name
@@ -793,6 +837,9 @@ function Assert-LibertixInstallationPlan {
     if ($migrationEnabled -isnot [bool]) {
         throw "Installation plan field features.windowsPreferenceMigration.enabled must be a boolean."
     }
+    if ($migrationEnabled -and (Get-LibertixPlanDistributionFamily -Distribution $distribution) -ne "debian") {
+        throw "Windows preference migration is supported only for Debian-family distributions."
+    }
     $bundleFileName = Assert-LibertixPlanProperty `
         -Object $preferenceMigration `
         -Name "bundleFileName" `
@@ -895,6 +942,9 @@ function Assert-LibertixInstallationPlan {
     }
     if ($firmware -eq "bios" -and $secureBootEnabled) {
         throw "A BIOS installation plan must not enable Secure Boot."
+    }
+    if ($secureBootEnabled -and -not (Test-LibertixPlanDistributionHasSignedBootChain -Distribution $distribution)) {
+        throw "Secure Boot must be disabled for a distribution without a Microsoft-signed boot chain."
     }
 
     $recoveryRoot = Assert-LibertixPlanProperty -Object $runtime -Name "recoveryRootWindows" -Path "runtime.recoveryRootWindows"
@@ -1053,5 +1103,8 @@ function Write-LibertixInstallationPlanAtomic {
 
 Export-ModuleMember -Function `
     Assert-LibertixInstallationPlan, `
+    Get-LibertixPlanDistributionFamily, `
+    Get-LibertixPlanUefiLoaderPath, `
     Read-LibertixInstallationPlan, `
+    Test-LibertixPlanDistributionHasSignedBootChain, `
     Write-LibertixInstallationPlanAtomic

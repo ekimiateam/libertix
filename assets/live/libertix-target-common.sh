@@ -60,6 +60,12 @@ install_target_configuration_payload() {
         /mnt/target/tmp/libertix-configure-target.sh
     install -m 0755 /usr/local/lib/libertix/configure-target-main.sh \
         /mnt/target/tmp/configure-target-main.sh
+    if [ "$DISTRIBUTION_FAMILY" = arch ]; then
+        install -m 0755 /usr/local/lib/libertix/configure-target-arch.sh \
+            /mnt/target/tmp/configure-target-arch.sh
+        install -m 0755 /usr/local/lib/libertix/libertix-grub-maintenance.sh \
+            /mnt/target/usr/local/lib/libertix/libertix-grub-maintenance.sh
+    fi
     install -m 0755 /usr/local/lib/libertix/libertix-apply-windows-preferences.py \
         /mnt/target/tmp/libertix-apply-windows-preferences.py
     install -m 0755 /usr/local/lib/libertix/libertix-storage-common.sh \
@@ -123,14 +129,39 @@ install_target_configuration_payload() {
     fi
 }
 
+# Arch-family configuration downloads hardware drivers with pacman. Lend the
+# target the live resolver for that step only; NetworkManager owns the file
+# once the installed system boots.
+lend_target_resolver() {
+    local resolver=/mnt/target/etc/resolv.conf backup=/mnt/target/etc/.libertix-resolv.conf.saved
+
+    [ "$DISTRIBUTION_FAMILY" = arch ] || return 0
+    if [ -e "$resolver" ] || [ -L "$resolver" ]; then
+        mv -f -- "$resolver" "$backup"
+    fi
+    install -m 0644 "$LIVE_RESOLV_CONF" "$resolver"
+}
+
+return_target_resolver() {
+    local resolver=/mnt/target/etc/resolv.conf backup=/mnt/target/etc/.libertix-resolv.conf.saved
+
+    [ "$DISTRIBUTION_FAMILY" = arch ] || return 0
+    rm -f -- "$resolver"
+    if [ -e "$backup" ] || [ -L "$backup" ]; then
+        mv -f -- "$backup" "$resolver"
+    fi
+}
+
 run_target_configuration() {
     local result=0
 
+    lend_target_resolver
     chroot /mnt/target /usr/bin/env \
         INSTALLATION_PLAN_ID="$INSTALLATION_PLAN_ID" \
         LANGUAGE_CODE="$LANGUAGE_CODE" \
         DISTRIBUTION_ID="$DISTRIBUTION_ID" \
         DISTRIBUTION_NAME="$DISTRIBUTION_NAME" \
+        DISTRIBUTION_FAMILY="$DISTRIBUTION_FAMILY" \
         DISTRIBUTION_OS_RELEASE_ID="$DISTRIBUTION_OS_RELEASE_ID" \
         DISTRIBUTION_GRUB_DISPLAY_NAME="$DISTRIBUTION_GRUB_DISPLAY_NAME" \
         DISTRIBUTION_GRUB_ICON="$DISTRIBUTION_GRUB_ICON" \
@@ -159,9 +190,11 @@ run_target_configuration() {
         GRUB_RESOLUTION="$GRUB_RESOLUTION" \
         LIBERTIX_FIRMWARE_MODE="$LIBERTIX_FIRMWARE_MODE" \
         /tmp/libertix-configure-target.sh || result=$?
+    return_target_resolver || result=1
 
     rm -f /mnt/target/tmp/libertix-configure-target.sh \
         /mnt/target/tmp/configure-target-main.sh \
+        /mnt/target/tmp/configure-target-arch.sh \
         /mnt/target/tmp/libertix-apply-windows-preferences.py \
         /mnt/target/tmp/windows-preferences.secret.json \
         /mnt/target/tmp/libertix-storage-common.sh \
@@ -176,6 +209,30 @@ run_target_configuration() {
         unset WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH
     fi
     return "$result"
+}
+
+# Final verification of the read-only mounted installed system: the parts that
+# depend on the package manager and the initramfs generator of each family.
+verify_installed_distribution_or_die() {
+    local root="$1" dpkg_audit
+
+    case "$DISTRIBUTION_FAMILY" in
+        arch)
+            find "$root/boot" -maxdepth 1 -type f -name 'initramfs-*.img' -print -quit | grep -q . || \
+                die "final verify: initramfs missing"
+            chroot "$root" id -nG "$USERNAME" | tr ' ' '\n' | grep -Fxq wheel || \
+                die "final verify: user is not in wheel group"
+            chroot "$root" pacman -Dk >/dev/null || die "final verify: pacman database check failed"
+            ;;
+        *)
+            find "$root/boot" -maxdepth 1 -type f -name 'initrd.img-*' -print -quit | grep -q . || \
+                die "final verify: initramfs missing"
+            chroot "$root" id "$USERNAME" | grep -q 'groups=.*sudo' || \
+                die "final verify: user is not in sudo group"
+            dpkg_audit=$(chroot "$root" dpkg --audit)
+            [ -z "$dpkg_audit" ] || die "final verify: dpkg audit failed: $dpkg_audit"
+            ;;
+    esac
 }
 
 configure_target_system() {

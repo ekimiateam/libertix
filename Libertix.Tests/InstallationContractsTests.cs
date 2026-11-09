@@ -745,6 +745,89 @@ namespace Libertix.Tests
             InstallationPlanValidator.Validate(CreateValidPlan());
         }
 
+        [TestMethod]
+        public void DistributionFamilyTreatsMissingFamilyAsDebian()
+        {
+            Assert.AreEqual(DistributionFamily.Debian, DistributionFamily.Normalize(null));
+            Assert.IsTrue(DistributionFamily.IsSupported(null));
+            Assert.IsTrue(DistributionFamily.HasSignedBootChain(null));
+            Assert.IsFalse(DistributionFamily.RequiresNetwork(null));
+            Assert.IsTrue(DistributionFamily.SupportsWindowsPreferenceMigration(null));
+            Assert.IsFalse(DistributionFamily.HasSignedBootChain(DistributionFamily.Arch));
+            Assert.IsTrue(DistributionFamily.RequiresNetwork(DistributionFamily.Arch));
+            Assert.IsFalse(
+                DistributionFamily.SupportsWindowsPreferenceMigration(DistributionFamily.Arch));
+            Assert.IsFalse(DistributionFamily.IsSupported("nixos"));
+        }
+
+        private static InstallationPlan CreateValidArchPlan()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Distribution.Family = DistributionFamily.Arch;
+            plan.Distribution.SecureBootMicrosoftAuthorities = new string[0];
+            plan.Runtime.SecureBootEnabled = false;
+            return plan;
+        }
+
+        [TestMethod]
+        public void InstallationPlanAcceptsArchFamilyWithoutSignedBootChain()
+        {
+            InstallationPlanValidator.Validate(CreateValidArchPlan());
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsArchFamilyClaimingASignedShim()
+        {
+            InstallationPlan plan = CreateValidArchPlan();
+            plan.Distribution.SecureBootMicrosoftAuthorities = new[] { "2011" };
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "must be empty");
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsArchFamilyWithSecureBootEnabled()
+        {
+            InstallationPlan plan = CreateValidArchPlan();
+            plan.Runtime.SecureBootEnabled = true;
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "Secure Boot must be disabled");
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsUnknownDistributionFamily()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Distribution.Family = "nixos";
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "distribution.family");
+        }
+
+        [TestMethod]
+        public void InstallationPlanRejectsDebianFamilyWithoutShimAuthority()
+        {
+            InstallationPlan plan = CreateValidPlan();
+            plan.Distribution.Family = DistributionFamily.Debian;
+            plan.Distribution.SecureBootMicrosoftAuthorities = new string[0];
+
+            InstallationPlanValidationException exception =
+                Assert.ThrowsException<InstallationPlanValidationException>(
+                    () => InstallationPlanValidator.Validate(plan));
+
+            StringAssert.Contains(exception.Message, "distribution.secureBootMicrosoftAuthorities");
+        }
+
         private static InstallationPlan CreateSeparateAllocationPlan(bool bios, bool gptAllocation)
         {
             InstallationPlan plan = CreateValidPlan();

@@ -18,6 +18,10 @@ packages=(
     psmisc lsof xserver-xorg-core xserver-xorg-input-libinput xserver-xorg-video-vesa
     xserver-xorg-video-fbdev x11-xserver-utils python3-tk kbd
     fonts-dejavu-core fonts-noto-cjk imagemagick grub-common plymouth firmware-intel-graphics
+    # Online distribution families download packages over a wired connection.
+    # systemd-networkd ships with systemd; firmware-realtek covers the most
+    # common consumer Ethernet controllers that need firmware.
+    systemd-resolved ca-certificates iproute2 firmware-realtek
 )
 if [ "$firmware_mode" = "uefi" ]; then
     packages+=(efibootmgr shim-signed grub-efi-amd64-bin grub-efi-amd64-signed)
@@ -46,6 +50,12 @@ apt autoremove -y 2>/dev/null || true
 # with the first fallback frame and briefly expose a root prompt.
 ln -sf /dev/null /etc/systemd/system/getty@tty1.service
 rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service
+
+# Networking starts only when the validated plan selects an online distribution
+# family. Offline installations keep the live environment without network access.
+systemctl disable systemd-networkd.service systemd-networkd.socket \
+    systemd-networkd-wait-online.service systemd-resolved.service 2>/dev/null || true
+ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
 
 # Keep kernel messages available on ttyS0, but do not start a login prompt on
 # machines that advertise a serial console without a usable serial terminal.

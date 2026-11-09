@@ -13,6 +13,7 @@ readonly grub_signed_directory="${LIBERTIX_GRUB_SIGNED_DIRECTORY:-/usr/lib/grub/
 readonly secure_boot_verifier="${LIBERTIX_SECURE_BOOT_VERIFIER:-/usr/local/lib/libertix/libertix-secure-boot-chain.py}"
 readonly preferred_boot_sync="${LIBERTIX_PREFERRED_BOOT_SYNC:-/usr/local/lib/libertix/libertix-preferred-boot-path.py}"
 readonly secure_boot_evidence="$efi_directory/secure-boot-chain.json"
+readonly secure_boot_variable="${LIBERTIX_SECURE_BOOT_VARIABLE:-/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c}"
 allow_missing=false
 
 case "${1:-}" in
@@ -37,6 +38,8 @@ if plan.get("firmware") != "uefi":
     print("bios")
     print("")
     print("")
+    print("")
+    print("")
     raise SystemExit(0)
 runtime = plan.get("runtime")
 distribution = plan.get("distribution")
@@ -45,12 +48,19 @@ if not isinstance(runtime, dict) or not isinstance(distribution, dict):
 recovery_run_id = runtime.get("recoveryRunId")
 trusted = runtime.get("trustedMicrosoftUefiAuthorities")
 supported = distribution.get("secureBootMicrosoftAuthorities")
+# Plans written before families existed omit the family and mean debian.
+family = distribution.get("family", "debian")
+if family not in {"debian", "arch"}:
+    raise SystemExit("installation plan distribution family is invalid")
+signed_boot_chain = family != "arch"
 if not isinstance(recovery_run_id, str) or len(recovery_run_id) != 32:
     raise SystemExit("installation plan recovery id is invalid")
 if not isinstance(trusted, list) or any(item not in {"2011", "2023"} for item in trusted):
     raise SystemExit("installation plan firmware authority list is invalid")
-if not isinstance(supported, list) or not supported or any(
-    item not in {"2011", "2023"} for item in supported
+if (
+    not isinstance(supported, list)
+    or bool(supported) != signed_boot_chain
+    or any(item not in {"2011", "2023"} for item in supported)
 ):
     raise SystemExit("installation plan distribution authority list is invalid")
 print("uefi")
@@ -60,6 +70,7 @@ if not isinstance(secure_boot_enabled, bool):
     raise SystemExit("installation plan Secure Boot state is invalid")
 print("true" if secure_boot_enabled else "false")
 print(";".join(supported))
+print(family)
 PY
 )"; then
     echo "Libertix installation plan boot metadata could not be parsed" >&2
@@ -70,6 +81,7 @@ mapfile -t plan_values <<< "$plan_values_output"
 recovery_run_id="${plan_values[1]:-}"
 secure_boot_enabled="${plan_values[2]:-}"
 plan_supported_authorities="${plan_values[3]:-}"
+distribution_family="${plan_values[4]:-}"
 
 install -d -m 0755 "$(dirname "$log")" "$history_root" "$(dirname "$lock_path")"
 touch "$log"
@@ -83,11 +95,15 @@ flock -w 120 9 || {
 
 mounted_here=false
 staged_paths=()
+grub_staging_directory=""
 cleanup_efi_sync() {
     local status=$? path
     for path in "${staged_paths[@]}"; do
         [ ! -e "$path" ] || rm -f -- "$path" || status=1
     done
+    if [ -n "$grub_staging_directory" ] && [ -e "$grub_staging_directory" ]; then
+        rm -rf -- "$grub_staging_directory" || status=1
+    fi
     # A mount opened by an update hook must not leak into the live installer.
     if [ "$mounted_here" = true ]; then
         umount "$esp_mount" || status=1
@@ -120,6 +136,84 @@ fi
     echo "EFI/Libertix belongs to another Libertix recovery run" >&2
     exit 1
 }
+
+efi_secure_boot_active() {
+    local state
+
+    [ -r "$secure_boot_variable" ] || return 1
+    state="$(od -An -t u1 -j 4 -N 1 "$secure_boot_variable" | tr -d '[:space:]')"
+    [ "$state" = 1 ]
+}
+
+archive_efi_directory() {
+    local current="$1" current_hash history_directory name
+
+    [ -f "$efi_directory/$current" ] || return 0
+    current_hash="$(sha256sum "$efi_directory/$current" | cut -d' ' -f1)"
+    history_directory="$(mktemp -d \
+        "$history_root/$(date -u +%Y%m%dT%H%M%SZ)-${current_hash:0:16}-XXXXXX")"
+    chmod 0700 "$history_directory"
+    for name in shimx64.efi grubx64.efi mmx64.efi grub.cfg .libertix-owner secure-boot-chain.json; do
+        [ -f "$efi_directory/$name" ] || continue
+        cp -a "$efi_directory/$name" "$history_directory/$name"
+    done
+    sha256sum "$history_directory"/* > "$history_directory/SHA256SUMS"
+    chmod 0600 "$history_directory/SHA256SUMS"
+    echo "[$(date -u +%FT%TZ)] Archived previous EFI chain in $history_directory"
+}
+
+# Arch-family distributions ship no Microsoft-signed shim, so there is no
+# signed binary to select. Their GRUB core image is rebuilt from the installed
+# grub package in a staging directory on the ESP and swapped in atomically.
+sync_unsigned_grub_efi() {
+    local staged_image temporary expected
+
+    if [ "$secure_boot_enabled" != false ] || efi_secure_boot_active; then
+        echo "Secure Boot must stay disabled for a distribution without a Microsoft-signed boot chain" >&2
+        exit 1
+    fi
+    command -v grub-install >/dev/null 2>&1 || {
+        echo "grub-install is required to install the unsigned GRUB core image" >&2
+        exit 1
+    }
+    grub_staging_directory="$(mktemp -d "$efi_directory/.grub-staging.XXXXXX")"
+    # --no-nvram: the firmware entry belongs to the Libertix transaction and is
+    # created and verified by the installer, not by grub-install.
+    grub-install --target=x86_64-efi --efi-directory="$grub_staging_directory" \
+        --bootloader-id=Libertix --no-nvram --recheck
+    staged_image="$grub_staging_directory/EFI/Libertix/grubx64.efi"
+    [ -s "$staged_image" ] || {
+        echo "grub-install did not produce an EFI core image" >&2
+        exit 1
+    }
+    if [ -f "$efi_directory/grubx64.efi" ] && cmp -s "$staged_image" "$efi_directory/grubx64.efi"; then
+        echo "[$(date -u +%FT%TZ)] EFI/Libertix already matches the installed GRUB package"
+        exit 0
+    fi
+
+    archive_efi_directory grubx64.efi
+    temporary="$efi_directory/.grubx64.efi.new.$$"
+    staged_paths+=("$temporary")
+    install -m 0644 "$staged_image" "$temporary"
+    expected="$(sha256sum "$staged_image" | cut -d' ' -f1)"
+    [ "$(sha256sum "$temporary" | cut -d' ' -f1)" = "$expected" ] || {
+        echo "Staged EFI hash mismatch for grubx64.efi" >&2
+        exit 1
+    }
+    sync -f "$temporary" 2>/dev/null || sync
+    mv -f "$temporary" "$efi_directory/grubx64.efi"
+    sync -f "$efi_directory/grubx64.efi" 2>/dev/null || sync
+    [ "$(sha256sum "$efi_directory/grubx64.efi" | cut -d' ' -f1)" = "$expected" ] || {
+        echo "Installed GRUB core image verification failed" >&2
+        exit 1
+    }
+    echo "[$(date -u +%FT%TZ)] EFI/Libertix GRUB core image rebuilt from the installed grub package"
+}
+
+if [ "$distribution_family" = arch ]; then
+    sync_unsigned_grub_efi
+    exit 0
+fi
 
 for command_name in sbverify dpkg-query sha256sum python3 openssl; do
     command -v "$command_name" >/dev/null 2>&1 || {
@@ -347,19 +441,7 @@ if [ "$changed" = false ]; then
     exit 0
 fi
 
-if [ -f "$efi_directory/shimx64.efi" ]; then
-    current_hash="$(sha256sum "$efi_directory/shimx64.efi" | cut -d' ' -f1)"
-    history_directory="$(mktemp -d \
-        "$history_root/$(date -u +%Y%m%dT%H%M%SZ)-${current_hash:0:16}-XXXXXX")"
-    chmod 0700 "$history_directory"
-    for name in shimx64.efi grubx64.efi mmx64.efi grub.cfg .libertix-owner secure-boot-chain.json; do
-        [ -f "$efi_directory/$name" ] || continue
-        cp -a "$efi_directory/$name" "$history_directory/$name"
-    done
-    sha256sum "$history_directory"/* > "$history_directory/SHA256SUMS"
-    chmod 0600 "$history_directory/SHA256SUMS"
-    echo "[$(date -u +%FT%TZ)] Archived previous EFI chain in $history_directory"
-fi
+archive_efi_directory shimx64.efi
 
 stage_and_replace() {
     local source="$1" destination="$2" temporary expected actual

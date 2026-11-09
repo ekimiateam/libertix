@@ -39,6 +39,11 @@ USERNAME_PATTERN = re.compile(r"^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$")
 XKB_NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
 SAFE_IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
 SAFE_GRUB_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$")
+# Plans written before distribution families existed carry no family and were
+# always installed from a Debian/Ubuntu squashfs.
+DISTRIBUTION_FAMILIES = ("debian", "arch")
+DEFAULT_DISTRIBUTION_FAMILY = "debian"
+UNSIGNED_BOOT_FAMILIES = frozenset({"arch"})
 
 
 class PlanValidationError(ValueError):
@@ -107,6 +112,13 @@ def require_nonnegative_integer(value: Any, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise PlanValidationError(f"{path} must be a non-negative integer")
     return value
+
+
+def distribution_family(distribution: dict[str, Any]) -> str:
+    family = distribution.get("family", DEFAULT_DISTRIBUTION_FAMILY)
+    if family not in DISTRIBUTION_FAMILIES:
+        raise PlanValidationError("distribution.family is not a supported distribution family")
+    return family
 
 
 def require_microsoft_uefi_authorities(value: Any, path: str, *, allow_empty: bool) -> list[str]:
@@ -236,11 +248,17 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError(
             "distribution.grubDisplayName contains unsupported GRUB label characters"
         )
-    require_microsoft_uefi_authorities(
+    family = distribution_family(distribution)
+    distribution_authorities = require_microsoft_uefi_authorities(
         distribution.get("secureBootMicrosoftAuthorities"),
         "distribution.secureBootMicrosoftAuthorities",
-        allow_empty=False,
+        allow_empty=family in UNSIGNED_BOOT_FAMILIES,
     )
+    if family in UNSIGNED_BOOT_FAMILIES and distribution_authorities:
+        raise PlanValidationError(
+            "distribution.secureBootMicrosoftAuthorities must be empty for a distribution "
+            "without a Microsoft-signed boot chain"
+        )
     if "/" in distribution["installerIsoFileName"] or "\\" in distribution["installerIsoFileName"]:
         raise PlanValidationError("distribution.installerIsoFileName must not contain a path")
     distribution["installerIsoWindowsPath"] = require_safe_absolute_windows_path(
@@ -446,6 +464,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
     migration_enabled = migration.get("enabled")
     if not isinstance(migration_enabled, bool):
         raise PlanValidationError("features.windowsPreferenceMigration.enabled must be a boolean")
+    if migration_enabled and family != DEFAULT_DISTRIBUTION_FAMILY:
+        raise PlanValidationError(
+            "features.windowsPreferenceMigration is supported only for Debian-family distributions"
+        )
     bundle_file_name = require_property(
         migration,
         "bundleFileName",
@@ -524,6 +546,10 @@ def validate_plan(plan: Any, *, require_installer: bool = False) -> dict[str, An
         raise PlanValidationError("a BIOS plan must not contain trusted Microsoft UEFI authorities")
     if firmware == "bios" and runtime["secureBootEnabled"]:
         raise PlanValidationError("a BIOS plan must not enable Secure Boot")
+    if family in UNSIGNED_BOOT_FAMILIES and runtime["secureBootEnabled"]:
+        raise PlanValidationError(
+            "Secure Boot must be disabled for a distribution without a Microsoft-signed boot chain"
+        )
     recovery_root = require_property(runtime, "recoveryRootWindows", "runtime")
     recovery_id = require_property(runtime, "recoveryRunId", "runtime")
     if (recovery_root is None) != (recovery_id is None):
@@ -681,6 +707,7 @@ def shell_values(plan: dict[str, Any]) -> dict[str, str]:
         "INSTALLATION_FIRMWARE": plan["firmware"],
         "DISTRIBUTION_ID": distribution["id"],
         "DISTRIBUTION_NAME": distribution["name"],
+        "DISTRIBUTION_FAMILY": distribution_family(distribution),
         "DISTRIBUTION_OS_RELEASE_ID": distribution["osReleaseId"],
         "DISTRIBUTION_GRUB_DISPLAY_NAME": distribution["grubDisplayName"],
         "DISTRIBUTION_GRUB_ICON": distribution["grubIcon"],

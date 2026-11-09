@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Libertix.Installation;
 
 namespace Libertix.Models
 {
@@ -13,6 +14,10 @@ namespace Libertix.Models
         public string UefiIsoUrl { get; set; }
 
         public string UefiIsoSha256 { get; set; }
+
+        public bool HasSignedBootChain => DistributionFamily.HasSignedBootChain(Family);
+
+        public bool RequiresNetworkInstall => DistributionFamily.RequiresNetwork(Family);
 
         public bool IsSelected
         {

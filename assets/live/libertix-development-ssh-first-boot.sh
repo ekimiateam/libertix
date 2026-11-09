@@ -66,7 +66,12 @@ find /etc/ssh -maxdepth 1 -type f -name 'ssh_host_*_key' -size +0c \
 # RuntimeDirectory. sshd refuses even a configuration check without this path.
 install -d -m 0755 /run/sshd
 /usr/sbin/sshd -t
-systemctl enable ssh.service
-systemctl restart ssh.service
+# Debian names the server unit ssh.service; Arch-family systems ship sshd.service.
+ssh_unit=sshd.service
+if systemctl cat ssh.service >/dev/null 2>&1; then
+    ssh_unit=ssh.service
+fi
+systemctl enable "$ssh_unit"
+systemctl restart "$ssh_unit"
 install -d -m 0755 "$(dirname "$marker")"
 touch "$marker"

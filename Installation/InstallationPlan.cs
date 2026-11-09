@@ -95,6 +95,11 @@ namespace Libertix.Installation
         [JsonPropertyName("name")]
         public string Name { get; set; }
 
+        // Plans written before families existed omit the field and mean Debian.
+        [JsonPropertyName("family")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Family { get; set; }
+
         [JsonPropertyName("osReleaseId")]
         public string OsReleaseId { get; set; }
 

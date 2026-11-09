@@ -422,3 +422,165 @@ def test_efi_sync_releases_only_its_own_mount(
     assert state.exists() == (initially_mounted or unmount_fails)
     if owner != "valid":
         assert (efi / "shimx64.efi").read_text(encoding="ascii") == "old-shimx64.efi\n"
+
+
+def create_unsigned_efi_sync_fixture(
+    tmp_path: Path,
+    *,
+    supported: list[str] | None = None,
+    secure_boot_variable: bytes | None = None,
+) -> tuple[dict[str, str], Path]:
+    commands = tmp_path / "commands"
+    esp = tmp_path / "esp"
+    efi = esp / "EFI" / "Libertix"
+    for directory in (commands, efi):
+        directory.mkdir(parents=True, exist_ok=True)
+    run_id = "e" * 32
+    (efi / ".libertix-owner").write_text(run_id + "\n", encoding="ascii")
+    (efi / "grubx64.efi").write_text("old-grub\n", encoding="ascii")
+    plan = {
+        "firmware": "uefi",
+        "distribution": {"family": "arch", "secureBootMicrosoftAuthorities": supported or []},
+        "runtime": {
+            "recoveryRunId": run_id,
+            "secureBootEnabled": False,
+            "trustedMicrosoftUefiAuthorities": [],
+        },
+    }
+    plan_path = tmp_path / "installation-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    # grub-install writes <efi-directory>/EFI/<bootloader-id>/grubx64.efi.
+    write_executable(
+        commands / "grub-install",
+        """#!/bin/sh
+efi_directory=
+for argument in "$@"; do
+  case "$argument" in
+    --efi-directory=*) efi_directory="${argument#--efi-directory=}" ;;
+  esac
+done
+[ -n "$efi_directory" ]
+mkdir -p "$efi_directory/EFI/Libertix"
+printf 'rebuilt-grub\\n' > "$efi_directory/EFI/Libertix/grubx64.efi"
+""",
+    )
+    write_executable(commands / "mountpoint", "#!/bin/sh\nexit 0\n")
+    variable = tmp_path / "SecureBoot"
+    if secure_boot_variable is not None:
+        variable.write_bytes(secure_boot_variable)
+    environment = {
+        **os.environ,
+        "PATH": f"{commands}:{os.environ['PATH']}",
+        "LIBERTIX_PLAN_PATH": str(plan_path),
+        "LIBERTIX_ESP_MOUNT": str(esp),
+        "LIBERTIX_EFI_HISTORY_ROOT": str(tmp_path / "history"),
+        "LIBERTIX_BOOT_MAINTENANCE_LOG": str(tmp_path / "logs" / "boot.log"),
+        "LIBERTIX_EFI_SYNC_LOCK": str(tmp_path / "locks" / "efi.lock"),
+        "LIBERTIX_SECURE_BOOT_VARIABLE": str(variable),
+    }
+    return environment, efi
+
+
+def test_efi_sync_rebuilds_unsigned_grub_for_an_arch_family_plan(tmp_path: Path) -> None:
+    environment, efi = create_unsigned_efi_sync_fixture(tmp_path)
+
+    subprocess.run(
+        ["bash", str(ROOT / "assets/live/libertix-sync-efi.sh")],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert (efi / "grubx64.efi").read_text(encoding="ascii") == "rebuilt-grub\n"
+    assert not (efi / "shimx64.efi").exists()
+    assert not list(efi.glob(".grub-staging.*"))
+    histories = list((tmp_path / "history").iterdir())
+    assert len(histories) == 1
+    assert (histories[0] / "grubx64.efi").read_text(encoding="ascii") == "old-grub\n"
+
+
+def test_efi_sync_refuses_unsigned_grub_while_secure_boot_is_enforced(tmp_path: Path) -> None:
+    # efivarfs prefixes the one-byte value with four attribute bytes.
+    environment, efi = create_unsigned_efi_sync_fixture(
+        tmp_path, secure_boot_variable=b"\x06\x00\x00\x00\x01"
+    )
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "assets/live/libertix-sync-efi.sh")],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    # The script logs through tee, so diagnostics arrive on stdout.
+    assert "Secure Boot must stay disabled" in result.stdout + result.stderr
+    assert (efi / "grubx64.efi").read_text(encoding="ascii") == "old-grub\n"
+
+
+def test_efi_sync_rejects_an_arch_family_plan_that_claims_a_signed_shim(tmp_path: Path) -> None:
+    environment, efi = create_unsigned_efi_sync_fixture(tmp_path, supported=["2011"])
+
+    result = subprocess.run(
+        ["bash", str(ROOT / "assets/live/libertix-sync-efi.sh")],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "boot metadata could not be parsed" in result.stderr
+    assert (efi / "grubx64.efi").read_text(encoding="ascii") == "old-grub\n"
+
+
+def run_grub_maintenance(tmp_path: Path, action: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(ROOT / "assets/live/libertix-grub-maintenance.sh"), action],
+        env={
+            **os.environ,
+            "LIBERTIX_GRUB_SCRIPTS": str(tmp_path / "grub.d"),
+            "LIBERTIX_GRUB_GENERATOR_DIRECTORY": str(tmp_path / "generators"),
+            "LIBERTIX_BOOT_MAINTENANCE_LOG": str(tmp_path / "logs" / "boot.log"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_grub_maintenance_moves_package_restored_generators_aside(tmp_path: Path) -> None:
+    scripts = tmp_path / "grub.d"
+    generators = tmp_path / "generators"
+    scripts.mkdir()
+    generators.mkdir()
+    write_executable(generators / "10_linux", "#!/bin/sh\necho old\n")
+    # A grub package update restores executable copies beside 10_libertix.
+    write_executable(scripts / "10_linux", "#!/bin/sh\necho new\n")
+    write_executable(scripts / "30_uefi-firmware", "#!/bin/sh\necho firmware\n")
+    write_executable(scripts / "10_libertix", "#!/bin/sh\necho libertix\n")
+
+    result = run_grub_maintenance(tmp_path, "generators")
+
+    assert result.returncode == 0, result.stderr
+    assert (generators / "10_linux").read_text(encoding="utf-8") == "#!/bin/sh\necho new\n"
+    assert os.access(generators / "10_linux", os.X_OK)
+    assert os.access(generators / "30_uefi-firmware", os.X_OK)
+    assert not os.access(scripts / "10_linux", os.X_OK)
+    assert not os.access(scripts / "30_uefi-firmware", os.X_OK)
+    assert os.access(scripts / "10_libertix", os.X_OK)
+
+    # A second run without a package update keeps the synchronized copies.
+    assert run_grub_maintenance(tmp_path, "generators").returncode == 0
+    assert (generators / "10_linux").read_text(encoding="utf-8") == "#!/bin/sh\necho new\n"
+
+
+def test_grub_maintenance_requires_the_linux_generator(tmp_path: Path) -> None:
+    (tmp_path / "grub.d").mkdir()
+
+    result = run_grub_maintenance(tmp_path, "generators")
+
+    assert result.returncode != 0
+    assert "Required GRUB generator is missing" in result.stdout + result.stderr

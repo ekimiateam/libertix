@@ -73,6 +73,7 @@ namespace Libertix.Installation
                 {
                     Id = options.Distribution.Id,
                     Name = options.Distribution.Name,
+                    Family = DistributionFamily.Normalize(options.Distribution.Family),
                     OsReleaseId = options.Distribution.OsReleaseId,
                     GrubDisplayName = options.Distribution.GrubDisplayName,
                     GrubIcon = options.Distribution.GrubIcon,

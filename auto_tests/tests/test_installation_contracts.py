@@ -11,7 +11,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 ROOT = Path(__file__).resolve().parents[2]
 GIB = 1024**3
@@ -1381,3 +1381,108 @@ def test_state_schema_rejects_contradictory_lifecycle_fields(
 def validate_schema_document(schema_name: str, document: dict[str, object]) -> None:
     schema = json.loads((ROOT / "schemas" / schema_name).read_text(encoding="utf-8"))
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(document)
+
+
+def make_arch_plan(firmware: str = "uefi") -> dict[str, object]:
+    """A CachyOS plan: online pacstrap installation without a signed boot chain."""
+
+    plan = make_plan(firmware, 30)
+    plan["distribution"].update(  # type: ignore[union-attr]
+        {
+            "id": "cachyos",
+            "name": "CachyOS KDE Plasma",
+            "family": "arch",
+            "osReleaseId": "cachyos",
+            "grubDisplayName": "CachyOS",
+            "grubIcon": "arch",
+            "secureBootMicrosoftAuthorities": [],
+            "installerIsoFileName": "cachyos.iso",
+            "installerIsoUrl": "https://example.test/cachyos.iso",
+            "installerIsoWindowsPath": (
+                "C:\\ProgramData\\Libertix\\Downloads\\" + "a" * 32 + "\\cachyos.iso"
+            ),
+        }
+    )
+    plan["runtime"]["secureBootEnabled"] = False  # type: ignore[index]
+    return plan
+
+
+@pytest.mark.parametrize("firmware", ["bios", "uefi"])
+def test_arch_family_plan_is_accepted_and_exports_its_family(
+    plan_module: ModuleType, firmware: str
+) -> None:
+    plan = make_arch_plan(firmware)
+
+    validate_schema_document("installation-plan.schema.json", plan)
+    validated = plan_module.validate_plan(plan, require_installer=True)
+
+    exported = plan_module.shell_values(validated)
+    assert exported["DISTRIBUTION_FAMILY"] == "arch"
+    assert exported["DISTRIBUTION_SECURE_BOOT_MICROSOFT_AUTHORITIES"] == ""
+
+
+def test_plan_written_before_families_is_a_debian_plan(plan_module: ModuleType) -> None:
+    plan = make_plan("uefi", 40)
+    assert "family" not in plan["distribution"]  # type: ignore[operator]
+
+    validate_schema_document("installation-plan.schema.json", plan)
+    exported = plan_module.shell_values(plan_module.validate_plan(plan, require_installer=True))
+
+    assert exported["DISTRIBUTION_FAMILY"] == "debian"
+
+
+def enable_preference_migration(plan: dict[str, object]) -> None:
+    plan["features"]["windowsPreferenceMigration"] = {  # type: ignore[index]
+        "enabled": True,
+        "bundleFileName": "windows-preferences.secret.json",
+        "bundleSha256": "e" * 64,
+        "bundleSizeBytes": 1024,
+        "wifiProfileCount": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda plan: plan["distribution"].update(secureBootMicrosoftAuthorities=["2011"]),
+            id="claims-a-signed-shim",
+        ),
+        pytest.param(
+            lambda plan: plan["runtime"].update(secureBootEnabled=True),
+            id="secure-boot-enabled",
+        ),
+        pytest.param(enable_preference_migration, id="desktop-preference-migration"),
+        pytest.param(
+            lambda plan: plan["distribution"].update(family="nixos"),
+            id="unknown-family",
+        ),
+    ],
+)
+def test_arch_family_plan_rejects_signed_boot_and_debian_desktop_assumptions(
+    plan_module: ModuleType, mutate: object
+) -> None:
+    plan = make_arch_plan()
+    mutate(plan)  # type: ignore[operator]
+
+    with pytest.raises(ValidationError):
+        validate_schema_document("installation-plan.schema.json", plan)
+    with pytest.raises(plan_module.PlanValidationError):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_debian_plan_still_requires_a_signed_shim_authority(plan_module: ModuleType) -> None:
+    plan = make_plan("uefi", 40)
+    plan["distribution"]["secureBootMicrosoftAuthorities"] = []  # type: ignore[index]
+
+    with pytest.raises(ValidationError):
+        validate_schema_document("installation-plan.schema.json", plan)
+    with pytest.raises(plan_module.PlanValidationError):
+        plan_module.validate_plan(plan, require_installer=True)
+
+
+def test_debian_plan_accepts_preference_migration(plan_module: ModuleType) -> None:
+    plan = make_plan("uefi", 40)
+    enable_preference_migration(plan)
+
+    validate_schema_document("installation-plan.schema.json", plan)

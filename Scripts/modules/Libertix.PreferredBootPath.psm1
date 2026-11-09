@@ -554,6 +554,17 @@ function Install-LibertixPreferredBootPath {
         [Parameter(Mandatory = $true)][scriptblock]$WriteLog
     )
 
+    # The preferred path places the distribution shim at the Windows loader
+    # path, where shim then finds GRUB. A distribution without a signed boot
+    # chain installs no shim, so there is no equivalent chain to place and the
+    # recorded rollback stays the remedy.
+    if (-not (Test-Path -LiteralPath (Join-Path $EspRoot "EFI\Libertix\shimx64.efi") -PathType Leaf)) {
+        throw (
+            "The preferred Windows boot path requires a distribution with a Microsoft-signed " +
+            "boot chain. Remove Linux with Libertix to restore Windows."
+        )
+    }
+
     $secureBoot = Get-LibertixPreferredPathSecureBootEvidence `
         -State $State `
         -EspRoot $EspRoot

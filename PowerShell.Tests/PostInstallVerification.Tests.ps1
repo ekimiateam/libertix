@@ -102,9 +102,10 @@ Describe "Post-install Linux boot evidence" {
                 fstabRootUuid = "11111111-2222-3333-4444-555555555555"
                 machineIdSha256 = "c" * 64
                 username = "test"
-                sudoMember = $true
+                administratorGroup = "sudo"
+                administratorGroupMember = $true
                 passwordActive = $true
-                dpkgAuditClean = $true
+                packageDatabaseClean = $true
                 failedSystemdUnits = 0
             }
             grub = [pscustomobject]@{
@@ -208,13 +209,43 @@ Describe "Post-install Linux boot evidence" {
     }
 
     It "rejects evidence from an unhealthy installed system" {
-        $script:Evidence.system.dpkgAuditClean = $false
+        $script:Evidence.system.packageDatabaseClean = $false
         {
             Assert-LibertixLinuxBootEvidence `
                 -Evidence $script:Evidence `
                 -Plan $script:Plan `
                 -AlignmentBytes 1048576
         } | Should -Throw "*healthy installed system*"
+    }
+
+    It "accepts system evidence written before distribution families existed" {
+        $legacy = $script:Evidence.system
+        foreach ($name in @("administratorGroup", "administratorGroupMember", "packageDatabaseClean")) {
+            $legacy.PSObject.Properties.Remove($name)
+        }
+        $legacy | Add-Member -NotePropertyName sudoMember -NotePropertyValue $true
+        $legacy | Add-Member -NotePropertyName dpkgAuditClean -NotePropertyValue $true
+
+        Assert-LibertixLinuxBootEvidence `
+            -Evidence $script:Evidence `
+            -Plan $script:Plan `
+            -AlignmentBytes 1048576 | Should -Match "^plan="
+    }
+
+    It "requires the GRUB loader for a distribution without a signed boot chain" {
+        $script:Plan.distribution | Add-Member -NotePropertyName family -NotePropertyValue "arch"
+        {
+            Assert-LibertixLinuxBootEvidence `
+                -Evidence $script:Evidence `
+                -Plan $script:Plan `
+                -AlignmentBytes 1048576
+        } | Should -Throw
+
+        $script:Evidence.grub.bootChain.entry.loaderPath = "\EFI\Libertix\grubx64.efi"
+        Assert-LibertixLinuxBootEvidence `
+            -Evidence $script:Evidence `
+            -Plan $script:Plan `
+            -AlignmentBytes 1048576 | Should -Match "^plan="
     }
 }
 

@@ -66,6 +66,7 @@ namespace Libertix.Installation
             ValidateDisk(plan.Firmware, plan.Disk, plan.Allocation, errors);
             ValidateFeatures(plan.Features, errors);
             ValidateRuntime(plan.Firmware, plan.Runtime, errors);
+            ValidateDistributionFamilyRequirements(plan, errors);
             ValidateDevelopment(plan.Development, errors);
             ValidateWindowsPathDrives(plan, errors);
             ValidateTransactionArtifactPath(plan, errors);
@@ -73,6 +74,23 @@ namespace Libertix.Installation
 
             if (errors.Count > 0)
                 throw new InstallationPlanValidationException(errors);
+        }
+
+        private static void ValidateDistributionFamilyRequirements(
+            InstallationPlan plan,
+            ICollection<string> errors)
+        {
+            string family = plan.Distribution?.Family;
+            if (plan.Features?.WindowsPreferenceMigration?.Enabled == true)
+            {
+                Require(DistributionFamily.SupportsWindowsPreferenceMigration(family), errors,
+                    "Windows preference migration is supported only for Debian-family distributions.");
+            }
+            if (plan.Runtime?.SecureBootEnabled == true)
+            {
+                Require(DistributionFamily.HasSignedBootChain(family), errors,
+                    "Secure Boot must be disabled for a distribution without a Microsoft-signed boot chain.");
+            }
         }
 
         private static void ValidateTransactionArtifactPath(
@@ -239,11 +257,19 @@ namespace Libertix.Installation
                 distribution.GrubIcon,
                 "distribution.grubIcon",
                 errors);
+            Require(DistributionFamily.IsSupported(distribution.Family), errors,
+                "distribution.family is not a supported distribution family.");
+            bool signedBootChain = DistributionFamily.HasSignedBootChain(distribution.Family);
             ValidateMicrosoftUefiAuthorities(
                 distribution.SecureBootMicrosoftAuthorities,
                 "distribution.secureBootMicrosoftAuthorities",
-                requireAtLeastOne: true,
+                requireAtLeastOne: signedBootChain,
                 errors);
+            Require(
+                signedBootChain || distribution.SecureBootMicrosoftAuthorities?.Length == 0,
+                errors,
+                "distribution.secureBootMicrosoftAuthorities must be empty for a distribution " +
+                "without a Microsoft-signed boot chain.");
             RequireNotBlank(distribution.InstallerIsoFileName, "distribution.installerIsoFileName", errors);
             Require(
                 !string.IsNullOrEmpty(distribution.InstallerIsoFileName) &&
