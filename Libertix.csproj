@@ -74,6 +74,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Compile Include="Installation\CatalogFiles.cs" />
+    <Compile Include="Installation\DistributionFamily.cs" />
     <Compile Include="Helpers\ApplicationBuild.cs" />
     <Compile Include="Helpers\ApplicationFiles.cs" />
     <Compile Include="Helpers\ProtectedFiles.cs" />

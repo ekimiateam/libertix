@@ -46,6 +46,7 @@
       "required": [
         "id",
         "name",
+        "family",
         "osReleaseId",
         "grubDisplayName",
         "grubIcon",
@@ -68,6 +69,10 @@
           "minLength": 1,
           "maxLength": 120
         },
+        "family": {
+          "description": "debian: the ISO squashfs is copied. arch: the ISO bootstraps an online pacstrap installation.",
+          "enum": ["debian", "arch"]
+        },
         "osReleaseId": {
           "type": "string",
           "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
@@ -82,7 +87,6 @@
         },
         "secureBootMicrosoftAuthorities": {
           "type": "array",
-          "minItems": 1,
           "uniqueItems": true,
           "items": {
             "enum": ["2011", "2023"]
@@ -119,7 +123,10 @@
           "type": "number",
           "minimum": 20
         }
-      }
+      },
+      "if": { "properties": { "family": { "const": "arch" } }, "required": ["family"] },
+      "then": { "properties": { "secureBootMicrosoftAuthorities": { "maxItems": 0 } } },
+      "else": { "properties": { "secureBootMicrosoftAuthorities": { "minItems": 1 } } }
     }
   }
 }

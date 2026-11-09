@@ -155,6 +155,7 @@ on_exit() {
 . /usr/local/lib/libertix/libertix-install-runtime-common.sh
 . /usr/local/lib/libertix/libertix-offline-ntfs-resize.sh
 . /usr/local/lib/libertix/libertix-distribution-common.sh
+. /usr/local/lib/libertix/libertix-arch-family.sh
 . /usr/local/lib/libertix/libertix-target-common.sh
 . /usr/local/lib/libertix/libertix-rollback-common.sh
 . /usr/local/lib/libertix/libertix-installation-plan.sh
@@ -174,6 +175,9 @@ wait_for_prereqs
 # disk identities, sizes, hashes, locale, and recovery transaction.
 mark "010-read-config"
 load_libertix_live_context "$LIBERTIX_FIRMWARE_MODE" || die "installation plan could not be loaded"
+if [ "$LIBERTIX_FIRMWARE_MODE" = "uefi" ]; then
+    select_libertix_boot_loader
+fi
 
 if [ "$WINDOWS_PREFERENCE_MIGRATION_ENABLED" = true ]; then
     WINDOWS_PREFERENCE_BUNDLE_RUNTIME_PATH="${LOG_DIR}-private/$WINDOWS_PREFERENCE_BUNDLE_FILE_NAME"
@@ -282,6 +286,14 @@ esac
 [[ "$PASSWORD_HASH" != *$'\r'* && "$PASSWORD_HASH" != *$'\n'* && "$PASSWORD_HASH" != *$'\t'* ]] || \
     die "protected account secret contains an invalid control character"
 export PASSWORD_HASH
+
+# Online families need the network and their mirrors. Prove both while Linux
+# storage is still untouched, so a missing cable only rolls back Windows.
+if [ "$DISTRIBUTION_FAMILY" = arch ]; then
+    assert_secure_boot_disabled_or_die
+    mkdir -p /mnt/iso
+    verify_online_installation_preflight_or_die "$ISO_SOURCE"
+fi
 
 retire_account_secret_or_die() {
     local mountpoint="/mnt/libertix-account-secret-retirement"
@@ -396,17 +408,23 @@ verify_file_sha256 "$ISO_SOURCE" "$ISO_SHA256" || \
 echo "Mounting installer ISO from Windows workspace..."
 mark "110-loop-mount-installer-iso"
 run_logged mount -o loop,ro "$ISO_SOURCE" /mnt/iso
-distribution_rootfs="$(resolve_distribution_rootfs_or_die /mnt/iso)" || \
+distribution_rootfs="$(resolve_distribution_rootfs_or_die /mnt/iso "$DISTRIBUTION_FAMILY")" || \
     die "installer ISO does not expose one unambiguous squashfs root filesystem"
 assert_distribution_rootfs_compatible_or_die \
-    "$distribution_rootfs" "$DISTRIBUTION_OS_RELEASE_ID" || \
+    "$distribution_rootfs" "$DISTRIBUTION_OS_RELEASE_ID" "$DISTRIBUTION_FAMILY" || \
     die "installer ISO payload is incompatible with the signed distribution plan"
-echo "Extracting system..."
-mark "120-unsquashfs"
-if command -v stdbuf >/dev/null 2>&1; then
-    run_logged stdbuf -oL -eL unsquashfs -f -d /mnt/target "$distribution_rootfs"
+if [ "$DISTRIBUTION_FAMILY" = arch ]; then
+    echo "Installing system packages..."
+    mark "120-pacstrap"
+    install_arch_family_system_or_die /mnt/iso
 else
-    run_logged unsquashfs -f -d /mnt/target "$distribution_rootfs"
+    echo "Extracting system..."
+    mark "120-unsquashfs"
+    if command -v stdbuf >/dev/null 2>&1; then
+        run_logged stdbuf -oL -eL unsquashfs -f -d /mnt/target "$distribution_rootfs"
+    else
+        run_logged unsquashfs -f -d /mnt/target "$distribution_rootfs"
+    fi
 fi
 umount /mnt/iso
 umount /mnt/windows

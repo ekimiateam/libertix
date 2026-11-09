@@ -11,7 +11,18 @@ readonly UEFI_BOOTENTRY_HELPER="/usr/local/lib/libertix/libertix-uefi-bootentrie
 readonly WINDOWS_BOOT_DESCRIPTION="Windows Boot Manager"
 readonly WINDOWS_BOOT_LOADER='\EFI\Microsoft\Boot\bootmgfw.efi'
 readonly LIBERTIX_BOOT_DESCRIPTION="Libertix"
-readonly LIBERTIX_BOOT_LOADER='\EFI\Libertix\shimx64.efi'
+readonly LIBERTIX_SIGNED_BOOT_LOADER='\EFI\Libertix\shimx64.efi'
+readonly LIBERTIX_UNSIGNED_BOOT_LOADER='\EFI\Libertix\grubx64.efi'
+# select_libertix_boot_loader sets the loader from the validated plan. The
+# shim default keeps the established path for plans written before families.
+LIBERTIX_BOOT_LOADER="$LIBERTIX_SIGNED_BOOT_LOADER"
+
+select_libertix_boot_loader() {
+    case "${DISTRIBUTION_FAMILY:-debian}" in
+        arch) LIBERTIX_BOOT_LOADER="$LIBERTIX_UNSIGNED_BOOT_LOADER" ;;
+        *) LIBERTIX_BOOT_LOADER="$LIBERTIX_SIGNED_BOOT_LOADER" ;;
+    esac
+}
 
 
 firmware_retire_completed_transaction_best_effort() {
@@ -32,7 +43,7 @@ final_verify_or_die() {
     local target_verify="/mnt/libertix-final-verify"
     local windows_verify="/mnt/libertix-windows-final-verify"
     local fs uuid primary_slot_count part_table esp_part esp_num esp_guid esp_verify esp_uuid
-    local dpkg_audit bootnumbers owner_bootnum current_order first_bootnum
+    local bootnumbers owner_bootnum current_order first_bootnum
 
     mark "150-final-verify"
     echo "FINAL VERIFY: checking installed system before success"
@@ -72,13 +83,10 @@ final_verify_or_die() {
     grep -q "menuentry" "$target_verify/boot/grub/grub.cfg" || die "final verify: grub menu missing"
     [ -d "$target_verify/home/$USERNAME" ] || die "final verify: user home missing"
     find "$target_verify/boot" -maxdepth 1 -type f -name 'vmlinuz-*' -print -quit | grep -q . || die "final verify: kernel missing"
-    find "$target_verify/boot" -maxdepth 1 -type f -name 'initrd.img-*' -print -quit | grep -q . || die "final verify: initramfs missing"
-    chroot "$target_verify" id "$USERNAME" | grep -q 'groups=.*sudo' || die "final verify: user is not in sudo group"
+    verify_installed_distribution_or_die "$target_verify"
     chroot "$target_verify" passwd -S "$USERNAME" | grep -Eq "^[^ ]+ P " || die "final verify: user password is not set"
     chroot "$target_verify" visudo -cf /etc/sudoers >/dev/null || die "final verify: sudoers is invalid"
     chroot "$target_verify" grub-script-check /boot/grub/grub.cfg || die "final verify: grub.cfg syntax is invalid"
-    dpkg_audit=$(chroot "$target_verify" dpkg --audit)
-    [ -z "$dpkg_audit" ] || die "final verify: dpkg audit failed: $dpkg_audit"
     verify_fstab_or_die "$target_verify"
     umount "$target_verify"
 
@@ -89,8 +97,12 @@ final_verify_or_die() {
     esp_verify="/mnt/libertix-esp-final-verify"
     mkdir -p "$esp_verify"
     mount -t vfat -o ro "$esp_part" "$esp_verify"
-    [ -f "$esp_verify/EFI/Libertix/shimx64.efi" ] || die "final verify: Libertix shim missing"
-    [ -f "$esp_verify/EFI/Libertix/grubx64.efi" ] || die "final verify: Libertix signed GRUB missing"
+    if [ "$LIBERTIX_BOOT_LOADER" = "$LIBERTIX_SIGNED_BOOT_LOADER" ]; then
+        [ -f "$esp_verify/EFI/Libertix/shimx64.efi" ] || die "final verify: Libertix shim missing"
+        [ -f "$esp_verify/EFI/Libertix/grubx64.efi" ] || die "final verify: Libertix signed GRUB missing"
+    else
+        [ -f "$esp_verify/EFI/Libertix/grubx64.efi" ] || die "final verify: Libertix GRUB missing"
+    fi
     [ -f "$esp_verify/EFI/Libertix/grub.cfg" ] || die "final verify: Libertix EFI grub.cfg missing"
     [ -f "$esp_verify/EFI/Libertix/.libertix-owner" ] || \
         die "final verify: Libertix EFI ownership marker missing"
@@ -366,7 +378,7 @@ remove_owned_temporary_efi_files() {
 }
 
 cleanup_final_uefi_bootloader_best_effort() (
-    local bootnum entry_line esp_part esp_mount owner_file owner_run_id
+    local bootnum entry_line esp_part esp_mount owner_file owner_run_id owner_loader
 
     cleanup_rollback_esp_mount() {
         if mountpoint -q "$esp_mount"; then
@@ -395,9 +407,15 @@ cleanup_final_uefi_bootloader_best_effort() (
             printf '%s\n' "$bootnum" | grep -Eq '^[0-9A-Fa-f]{4}$' || return 1
             command -v efibootmgr >/dev/null 2>&1 || return 1
             entry_line="$(efibootmgr -v 2>/dev/null | grep -Ei "^Boot${bootnum}[* ]" || true)"
+            owner_loader="$(sed -n '5p' "$owner_file" | tr -d '\r\n')"
+            case "$owner_loader" in
+                "$LIBERTIX_SIGNED_BOOT_LOADER"|"$LIBERTIX_UNSIGNED_BOOT_LOADER") ;;
+                "") owner_loader="$LIBERTIX_SIGNED_BOOT_LOADER" ;;
+                *) return 1 ;;
+            esac
             if [ -n "$entry_line" ]; then
                 printf '%s\n' "$entry_line" | grep -Fqi ' Libertix' || return 1
-                printf '%s\n' "$entry_line" | grep -Fqi 'File(\EFI\Libertix\shimx64.efi)' || return 1
+                printf '%s\n' "$entry_line" | grep -Fqi "File($owner_loader)" || return 1
                 echo "ROLLBACK: deleting owned final UEFI entry Boot$bootnum"
                 efibootmgr -b "$bootnum" -B || return 1
             fi
@@ -575,6 +593,8 @@ install_signed_uefi_bootloader_or_die() {
 
     # The target-owned synchronizer inspects the actual Microsoft signature,
     # package ownership, and firmware trust before replacing any EFI binary.
+    # For a family without a signed chain it installs the distribution's own
+    # GRUB core image, which Secure Boot must not be enforcing.
     chroot /mnt/target /usr/local/sbin/libertix-sync-efi
 
     cat > "$efi_dir/grub.cfg" <<EOF

@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using Libertix.Helpers;
+using Libertix.Installation;
 using Libertix.Models;
 
 namespace Libertix.Pages
@@ -23,6 +24,12 @@ namespace Libertix.Pages
             WindowsToLinuxCheckBox.IsChecked = options.ShareWindowsFilesInLinux;
             LinuxToWindowsCheckBox.IsChecked = options.ShareLinuxFilesInWindows;
             MigrateWindowsPreferencesCheckBox.IsChecked = options.MigrateWindowsPreferences;
+            if (!DistributionFamily.SupportsWindowsPreferenceMigration(
+                    _installationState.SelectedDistro?.Family))
+            {
+                MigrateWindowsPreferencesCheckBox.IsChecked = false;
+                MigrateWindowsPreferencesCheckBox.Visibility = Visibility.Collapsed;
+            }
         }
 
         private void SaveOptions()
@@ -31,7 +38,9 @@ namespace Libertix.Pages
             {
                 ShareWindowsFilesInLinux = WindowsToLinuxCheckBox.IsChecked == true,
                 ShareLinuxFilesInWindows = LinuxToWindowsCheckBox.IsChecked == true,
-                MigrateWindowsPreferences = MigrateWindowsPreferencesCheckBox.IsChecked == true
+                MigrateWindowsPreferences =
+                    MigrateWindowsPreferencesCheckBox.Visibility == Visibility.Visible &&
+                    MigrateWindowsPreferencesCheckBox.IsChecked == true
             };
         }
 

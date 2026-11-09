@@ -1,5 +1,7 @@
 Set-StrictMode -Version Latest
 
+Import-Module (Join-Path $PSScriptRoot "Libertix.InstallationPlan.psm1") -ErrorAction Stop
+
 $script:GuardianServiceName = "LibertixBootGuardian"
 $script:GuardianRoot = Join-Path $env:ProgramData "Libertix\BootGuardian"
 $script:GuardianConfigPath = Join-Path $script:GuardianRoot "config.json"
@@ -186,13 +188,15 @@ function Get-LibertixBootGuardianOwnerMarker {
     }
     $lines = @(Get-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop)
     $guid = ([Guid]$EspPartition.Guid).ToString("D").ToLowerInvariant()
+    $plan = Read-LibertixInstallationPlan -Path (Join-Path $State.RecoveryRoot 'installation-plan.json')
+    $loaderPath = Get-LibertixPlanUefiLoaderPath -Plan $plan
     if (
         $lines.Count -ne 5 -or
         ([string]$lines[0]).Trim() -ne [string]$State.RunId -or
         ([string]$lines[1]).Trim() -notmatch '^[0-9a-fA-F]{4}$' -or
         ([string]$lines[2]).Trim() -ne [string]$EspPartition.PartitionNumber -or
         ([string]$lines[3]).Trim().ToLowerInvariant() -ne $guid -or
-        ([string]$lines[4]).Trim() -ne "\EFI\Libertix\shimx64.efi"
+        ([string]$lines[4]).Trim() -ne $loaderPath
     ) {
         throw "The installed Libertix ESP ownership marker is invalid."
     }
@@ -200,6 +204,7 @@ function Get-LibertixBootGuardianOwnerMarker {
         Text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
         BootNumber = [Convert]::ToUInt16(([string]$lines[1]).Trim(), 16)
         PartitionGuid = $guid
+        LoaderPath = $loaderPath
     }
 }
 
@@ -309,7 +314,7 @@ function Install-LibertixBootGuardian {
             (Get-EfiLoadOptionDescription -Bytes $entryBytes) -ne "Libertix" -or
             -not (Test-EfiLoadOptionLoaderPath `
                 -Bytes $entryBytes `
-                -ExpectedPath "\EFI\Libertix\shimx64.efi")
+                -ExpectedPath ([string]$owner.LoaderPath))
         ) {
             throw "The owned Libertix firmware entry is missing or invalid."
         }

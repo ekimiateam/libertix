@@ -12,8 +12,9 @@ preparation, the live installer, the installed system, and rollback. The JSON sc
    creates the staging partition, copies verified media, and selects the live environment for the
    next boot.
 3. The live installer validates both the plan and current hardware again. It expands or reformats
-   only the transaction-owned staging partition, discovers and extracts the selected distribution,
-   configures the target, installs the firmware-specific bootloader, and verifies the final system.
+   only the transaction-owned staging partition, installs the selected distribution as its
+   distribution family requires, configures the target, installs the firmware-specific
+   bootloader, and verifies the final system.
 4. The installed system boots through GRUB, verifies its running kernel, root filesystem, account,
    package state and firmware-specific boot chain, then publishes transaction-owned evidence into
    the Windows recovery session before returning to Windows.
@@ -128,6 +129,32 @@ suppresses retry UI; if Windows terminates it before a terminal result is durabl
 registered and resumes the missing checks at the next boot. The interactive task does not create a
 window until the result is either successful or failed.
 
+## Distribution families
+
+The signed catalogue gives every distribution a `family`, copied into the plan. Plans written
+before families existed have none and mean `debian`. The family, never the distribution name,
+selects the installation code path:
+
+| | `debian` (Mint, Zorin) | `arch` (CachyOS) |
+|---|---|---|
+| ISO payload | `filesystem.squashfs`, extracted as the installed system | archiso `airootfs.sfs`, mounted read-only as a bootstrap root |
+| Installation | `unsquashfs` from the verified ISO | `pacstrap` from the verified ISO's pacman, keyrings and mirrors, packages downloaded online |
+| Network in the live system | never started | wired DHCP, proven before any Linux storage mutation |
+| UEFI loader | `\EFI\Libertix\shimx64.efi` from `shim-signed` | `\EFI\Libertix\grubx64.efi` built by `grub-install` |
+| Secure Boot | allowed when firmware trusts the shim authority | must be disabled; plan, Windows and live all refuse otherwise |
+| Package and boot checks | `dpkg --audit`, `sudo`, `initrd.img-*` | `pacman -Dk`, `wheel`, `initramfs-*.img` |
+| GRUB maintenance | `dpkg-divert`, `update-grub` wrapper, APT hook | generators moved aside and validated menu rebuilt by pacman hooks |
+| Windows preference migration | available | refused by every plan validator |
+
+For the `arch` family the ISO hash is verified once before the online preflight, so nothing from
+the ISO runs as root unverified, and again before `pacstrap`. The preflight mounts the bootstrap
+root, starts `systemd-networkd`, initializes the keyrings and runs `pacman -Sy`. Its failure is an
+ordinary rollback before the staging partition is reformatted. Packages are authenticated by
+pacman signatures against keyrings from the hash-verified ISO rather than by one ISO hash.
+
+Evidence from the installed system uses family-neutral names (`administratorGroupMember`,
+`packageDatabaseClean`). Windows still accepts the Debian names written by earlier releases.
+
 ## Firmware boundaries
 
 The shared live runtime owns validation, extraction, target configuration, state transitions, and
@@ -143,7 +170,8 @@ same shared runtime.
 ## Secure Boot and boot-package updates
 
 The catalogue records which Microsoft third-party UEFI authorities sign the installed-system shim
-provided by each distribution image. The Windows preflight records the 2011 and 2023 authorities
+provided by each distribution image. A family without a signed boot chain records none and cannot
+be installed while Secure Boot is enabled; the rest of this section applies to signed families. The Windows preflight records the 2011 and 2023 authorities
 actually present in the firmware trust database. When Secure Boot is enabled, Libertix requires an
 intersection before disk mutation and repeats that check immediately before Windows storage work.
 The dual-signed mini-ISO is not treated as proof that the distribution's final shim can boot.

@@ -52,6 +52,8 @@ compare_rootfs_file usr/local/lib/libertix/libertix-install-runtime-common.sh \
     /workspace/assets/live/libertix-install-runtime-common.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-distribution-common.sh \
     /workspace/assets/live/libertix-distribution-common.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-arch-family.sh \
+    /workspace/assets/live/libertix-arch-family.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-installation-plan.py \
     /workspace/assets/live/libertix-installation-plan.py
 compare_rootfs_file usr/local/lib/libertix/libertix_windows_sharing.py \
@@ -124,6 +126,10 @@ compare_rootfs_file usr/local/lib/libertix/configure-target.sh \
     "$source_dir/target/configure-target.sh"
 compare_rootfs_file usr/local/lib/libertix/configure-target-main.sh \
     /workspace/assets/live/configure-target-main.sh
+compare_rootfs_file usr/local/lib/libertix/configure-target-arch.sh \
+    /workspace/assets/live/configure-target-arch.sh
+compare_rootfs_file usr/local/lib/libertix/libertix-grub-maintenance.sh \
+    /workspace/assets/live/libertix-grub-maintenance.sh
 compare_rootfs_file usr/local/lib/libertix/libertix-apply-windows-preferences.py \
     /workspace/assets/live/libertix-apply-windows-preferences.py
 compare_rootfs_file usr/local/lib/libertix/libertix-preferred-boot-path.py \

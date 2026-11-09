@@ -110,6 +110,10 @@
           "type": "string",
           "minLength": 1
         },
+        "family": {
+          "description": "Installation method. Plans written before families existed omit it and mean debian.",
+          "enum": ["debian", "arch"]
+        },
         "osReleaseId": {
           "type": "string",
           "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
@@ -148,7 +152,10 @@
         "liveIsoSha256": {
           "$ref": "#/$defs/sha256"
         }
-      }
+      },
+      "if": { "properties": { "family": { "const": "arch" } }, "required": ["family"] },
+      "then": { "properties": { "secureBootMicrosoftAuthorities": { "maxItems": 0 } } },
+      "else": { "properties": { "secureBootMicrosoftAuthorities": { "minItems": 1 } } }
     },
     "locale": {
       "type": "object",
@@ -507,7 +514,6 @@
     },
     "microsoftUefiAuthorities": {
       "type": "array",
-      "minItems": 1,
       "uniqueItems": true,
       "items": {
         "enum": ["2011", "2023"]
@@ -632,6 +638,31 @@
                 ]
               }
             }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "distribution": {
+            "properties": { "family": { "const": "arch" } },
+            "required": ["family"]
+          }
+        },
+        "required": ["distribution"]
+      },
+      "then": {
+        "properties": {
+          "features": {
+            "properties": {
+              "windowsPreferenceMigration": {
+                "properties": { "enabled": { "const": false } }
+              }
+            }
+          },
+          "runtime": {
+            "properties": { "secureBootEnabled": { "const": false } }
           }
         }
       }

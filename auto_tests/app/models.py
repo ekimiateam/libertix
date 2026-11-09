@@ -27,7 +27,7 @@ STAGING_VOLUME_LABELS = (
 )
 
 SourceMode = Literal["remote", "local", "published"]
-DistributionId = Literal["mint", "zorin"]
+DistributionId = Literal["mint", "zorin", "cachyos"]
 FirstBoot = Literal["windows", "linux"]
 BootGuardianFault = Literal[
     "none",

@@ -3,6 +3,12 @@ set -Eeuo pipefail
 
 LOG="/var/log/libertix/first-boot-resize.log"
 VERIFIER="/usr/local/lib/libertix/libertix-first-boot-verify.py"
+# Plans written before distribution families existed mean debian. The
+# verifier validates the plan itself; this only selects the package manager.
+DISTRIBUTION_FAMILY="$(
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8-sig"))["distribution"].get("family", "debian"))' \
+        /etc/libertix/installation-plan.json 2>/dev/null || echo debian
+)"
 CURRENT_STAGE="initialization"
 FAILURE_DETAIL=""
 mkdir -p "$(dirname "$LOG")"
@@ -19,7 +25,11 @@ ATTEMPT_ID="$("$VERIFIER" --record-service-start "$CURRENT_STAGE")"
     lsblk -o NAME,TYPE,SIZE,FSTYPE,PARTTYPENAME,MOUNTPOINTS
     localectl status
     systemctl --failed --no-pager --plain
-    dpkg --audit
+    if [ "$DISTRIBUTION_FAMILY" = arch ]; then
+        pacman -Dk
+    else
+        dpkg --audit
+    fi
     echo "===== END SYSTEM CONTEXT ====="
 } >> "$LOG" 2>&1 || true
 
@@ -62,6 +72,18 @@ recover_interrupted_package_state() {
     )"
     [[ "$interruption_count" =~ ^[0-9]+$ ]]
     [ "$interruption_count" -gt 0 ] || return 0
+
+    if [ "$DISTRIBUTION_FAMILY" = arch ]; then
+        # pacman has no deferred configuration step. An interrupted
+        # transaction leaves only its lock, which no running pacman holds.
+        if [ -e /var/lib/pacman/db.lck ] && ! pgrep -x pacman >/dev/null; then
+            echo "Removing the stale pacman lock left by an interrupted transaction." >> "$LOG"
+            rm -f /var/lib/pacman/db.lck
+        fi
+        pacman -Dk >> "$LOG" 2>&1 || \
+            fail_stage "The package database is inconsistent after interruption recovery."
+        return 0
+    fi
 
     echo "A previous first-boot attempt was interrupted; resuming pending package configuration." \
         >> "$LOG"

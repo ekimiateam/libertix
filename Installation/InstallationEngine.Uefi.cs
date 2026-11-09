@@ -88,6 +88,16 @@ namespace Libertix.Installation
 
             DistroInfo distribution = _installationState.SelectedDistro ??
                 throw new InvalidOperationException("A distribution must be selected.");
+            if (!distribution.HasSignedBootChain)
+            {
+                throw new InvalidOperationException(
+                    LocalizedFormat(
+                        "ApplyChangesSecureBootMustBeDisabled",
+                        "Secure Boot is enabled, but {0} does not provide a Microsoft-signed " +
+                        "bootloader. Turn off Secure Boot in the firmware settings, then start " +
+                        "Libertix again. No disk change was made.",
+                        distribution.Name));
+            }
             string[] trusted = compatibility.TrustedMicrosoftUefiAuthorities ?? new string[0];
             string[] supported = distribution.SecureBootMicrosoftAuthorities?.ToArray() ??
                 new string[0];

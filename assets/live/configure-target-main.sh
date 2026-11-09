@@ -35,7 +35,13 @@ configure_user() {
 }
 
 assert_target_distribution_identity() {
-    local actual_id id_like token compatible=false
+    local actual_id id_like token compatible=false family_pattern
+
+    case "${DISTRIBUTION_FAMILY:-debian}" in
+        debian) family_pattern='^(debian|ubuntu)$' ;;
+        arch) family_pattern='^arch$' ;;
+        *) echo "Unsupported distribution family: $DISTRIBUTION_FAMILY" >&2; exit 2 ;;
+    esac
 
     [ -r /etc/os-release ] || { echo "Target os-release is missing" >&2; exit 1; }
     # os-release is part of the hash-verified squashfs and defines shell-safe
@@ -48,12 +54,10 @@ assert_target_distribution_identity() {
         exit 1
     }
     for token in $actual_id $id_like; do
-        case "$token" in
-            debian|ubuntu) compatible=true ;;
-        esac
+        [[ "$token" =~ $family_pattern ]] && compatible=true
     done
     [ "$compatible" = true ] || {
-        echo "Target distribution is not in the Debian/Ubuntu family" >&2
+        echo "Target distribution is not in the ${DISTRIBUTION_FAMILY:-debian} family" >&2
         exit 1
     }
 }
@@ -477,7 +481,7 @@ enable_first_boot_resize() {
     systemctl enable first-boot-resize.service
 }
 
-main() {
+main_debian() {
     assert_target_distribution_identity
     configure_user
     configure_windows_mount
@@ -492,6 +496,18 @@ main() {
     refresh_installed_initramfs
     configure_grub
     enable_first_boot_resize
+}
+
+main() {
+    case "${DISTRIBUTION_FAMILY:-debian}" in
+        debian) main_debian ;;
+        arch)
+            # Arch-family steps reuse the family-neutral functions above.
+            . /tmp/configure-target-arch.sh
+            main_arch
+            ;;
+        *) echo "Unsupported distribution family: $DISTRIBUTION_FAMILY" >&2; exit 2 ;;
+    esac
 }
 
 main "$@"

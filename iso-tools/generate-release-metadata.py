@@ -19,6 +19,8 @@ SHA7_PATTERN = re.compile(r"^[0-9a-f]{7}$")
 VERSION_PATTERN = re.compile(r"^(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,2}(?:-[0-9A-Za-z.-]+)?$")
 HEX_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$")
+DISTRIBUTION_FAMILIES = frozenset({"debian", "arch"})
+SIGNED_BOOT_FAMILIES = frozenset({"debian"})
 GRUB_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,79}$")
 ISO_FILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.iso$")
 
@@ -66,6 +68,7 @@ def load_config(path: Path) -> dict[str, object]:
     expected_keys = {
         "id",
         "name",
+        "family",
         "osReleaseId",
         "grubDisplayName",
         "grubIcon",
@@ -107,15 +110,24 @@ def load_config(path: Path) -> dict[str, object]:
         )
         if not GRUB_NAME_PATTERN.fullmatch(grub_name):
             raise ValueError(f"{prefix}.grubDisplayName is invalid")
+        family = distribution["family"]
+        if family not in DISTRIBUTION_FAMILIES:
+            raise ValueError(f"{prefix}.family is not a supported distribution family")
         authorities = distribution["secureBootMicrosoftAuthorities"]
         if (
             not isinstance(authorities, list)
-            or not authorities
             or len(authorities) != len(set(authorities))
             or any(authority not in {"2011", "2023"} for authority in authorities)
         ):
             raise ValueError(
                 f"{prefix}.secureBootMicrosoftAuthorities must contain unique 2011/2023 values"
+            )
+        # A family without a signed boot chain installs unsigned GRUB and cannot
+        # boot under Secure Boot; claiming an authority would mislead Windows.
+        if bool(authorities) != (family in SIGNED_BOOT_FAMILIES):
+            raise ValueError(
+                f"{prefix}.secureBootMicrosoftAuthorities must name the shim authorities "
+                "of a signed family and be empty otherwise"
             )
         filename = _require_string(
             distribution["isoInstallerFileName"],

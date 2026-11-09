@@ -226,6 +226,7 @@ namespace Libertix.Installation
                 {
                     Id = source.Id,
                     Name = source.Name,
+                    Family = DistributionFamily.Normalize(source.Family),
                     OsReleaseId = source.OsReleaseId,
                     GrubDisplayName = source.GrubDisplayName,
                     GrubIcon = source.GrubIcon,
@@ -266,8 +267,12 @@ namespace Libertix.Installation
                 !Regex.IsMatch(
                     distribution.GrubIcon ?? string.Empty,
                     "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$") ||
+                !DistributionFamily.IsSupported(distribution.Family) ||
                 distribution.SecureBootMicrosoftAuthorities == null ||
-                distribution.SecureBootMicrosoftAuthorities.Count == 0 ||
+                // A signed family names the Microsoft CAs that sign its shim. A family
+                // without a signed boot chain must not claim any.
+                (distribution.SecureBootMicrosoftAuthorities.Count == 0) ==
+                    DistributionFamily.HasSignedBootChain(distribution.Family) ||
                 distribution.SecureBootMicrosoftAuthorities.Any(
                     authority => authority != "2011" && authority != "2023") ||
                 distribution.SecureBootMicrosoftAuthorities

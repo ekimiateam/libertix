@@ -2317,11 +2317,14 @@ def test_uefi_recovery_proves_firmware_bypass_before_offering_preferred_path() -
         "BootCurrent",
         "BootOrder",
         "\\EFI\\Microsoft\\Boot\\bootmgfw.efi",
-        "\\EFI\\Libertix\\shimx64.efi",
+        "Get-LibertixPlanUefiLoaderPath -Plan $recoveryPlan",
+        "-ExpectedLoaderPath $libertixLoaderPath",
         "Test-EfiLoadOptionTargetsPartition",
         "firmware-retained-windows-first",
     ):
         assert required in evidence
+    # The owned entry follows the plan family: shim, or GRUB without a signed chain.
+    assert "\\EFI\\Libertix\\shimx64.efi" not in evidence
     assert "$currentBootNumber -ne $firstBootNumber" in evidence
     assert "$firstBootNumber -eq $ownedBootNumber" in evidence
     assert "firmware-boot-bypass.json" in agent
@@ -5088,6 +5091,72 @@ def test_distribution_payload_validation_is_capability_driven(tmp_path: Path) ->
     assert "zorin" not in source.casefold()
 
 
+def test_arch_family_payload_validation_requires_the_pacstrap_bootstrap(tmp_path: Path) -> None:
+    iso_root = tmp_path / "iso"
+    rootfs = iso_root / "arch/x86_64/airootfs.sfs"
+    rootfs.parent.mkdir(parents=True)
+    rootfs.write_bytes(b"test rootfs")
+    # A Debian payload beside it must not be picked for the arch family.
+    (iso_root / "casper").mkdir()
+    (iso_root / "casper/filesystem.squashfs").write_bytes(b"other rootfs")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_unsquashfs = fake_bin / "unsquashfs"
+    fake_unsquashfs.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = -ll ]; then\n'
+        '  [ "$3" = usr/bin/pacstrap ] && [ -n "$NO_PACSTRAP" ] && exit 0\n'
+        "  printf '%s\\n' \"squashfs-root/$3\"; exit 0\n"
+        "fi\n"
+        'if [ "$1" = -cat ] && [ "$3" = etc/os-release ]; then\n'
+        "  printf '%s\\n' 'ID=cachyos' 'ID_LIKE=arch'; exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_unsquashfs.chmod(0o755)
+    module = ROOT / "assets/live/libertix-distribution-common.sh"
+    command = (
+        f"PATH={str(fake_bin)!r}:$PATH; . {str(module)!r}; "
+        f"resolved=$(resolve_distribution_rootfs_or_die {str(iso_root)!r} arch); "
+        'test "$resolved" = ' + repr(str(rootfs)) + "; "
+        'assert_distribution_rootfs_compatible_or_die "$resolved" cachyos arch; '
+        'if assert_distribution_rootfs_compatible_or_die "$resolved" cachyos debian; '
+        "then exit 8; fi; "
+        'if NO_PACSTRAP=1 assert_distribution_rootfs_compatible_or_die "$resolved" cachyos arch; '
+        "then exit 9; fi"
+    )
+
+    result = subprocess.run(["bash", "-c", command], check=False, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "family=arch" in result.stdout
+    assert "missing required capability: usr/bin/pacstrap" in result.stderr
+
+
+def test_online_family_proves_network_and_mirrors_before_disk_mutation() -> None:
+    install = read("assets/live/libertix-install-main.sh")
+    arch = read("assets/live/libertix-arch-family.sh")
+    rollback = read("assets/live/libertix-rollback-common.sh")
+
+    preflight = install.index('verify_online_installation_preflight_or_die "$ISO_SOURCE"')
+    assert install.index("assert_secure_boot_disabled_or_die") < preflight
+    assert preflight < install.index('mark "035-umount-windows"')
+    assert preflight < install.index('run_logged wipefs -a "$NEW_PART"')
+    assert install.index('mark "120-pacstrap"') < install.index("configure_target_system\n")
+    body = arch.split("verify_online_installation_preflight_or_die() {", 1)[1].split("\n}\n", 1)[0]
+    # The ISO is hash-verified before anything from it runs as root.
+    assert body.index("verify_file_sha256") < body.index("mount_arch_bootstrap_or_die")
+    assert "pacman --config" in body and "-Sy" in body
+    assert "release_arch_bootstrap ||" in body
+    assert (
+        "release_arch_bootstrap_best_effort"
+        in rollback.split("cleanup_live_mounts_best_effort() {", 1)[1].split("umount /mnt/iso", 1)[
+            0
+        ]
+    )
+
+
 def test_target_rebuilds_initramfs_without_live_boot_markers() -> None:
     target = read("assets/live/configure-target-main.sh")
     distribution = read("assets/live/libertix-distribution-common.sh")
@@ -5993,3 +6062,34 @@ def test_rollback_exceptions_cannot_reenable_retry_navigation() -> None:
         assert body.index("_rollbackVerificationPending = false;") < body.index(
             "FinishInstallation(allowRetry: true);"
         )
+
+
+def test_every_runtime_maps_distribution_families_to_the_same_uefi_loader() -> None:
+    """The flat BIOS recovery directory forces some runtimes to restate the mapping."""
+
+    shim = "\\EFI\\Libertix\\shimx64.efi"
+    grub = "\\EFI\\Libertix\\grubx64.efi"
+    plan_module = read("Scripts/modules/Libertix.InstallationPlan.psm1")
+    plan_loader = plan_module.split("function Get-LibertixPlanUefiLoaderPath", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    evidence = read("Scripts/modules/Libertix.PostInstallVerification.psm1")
+    evidence_loader = evidence.split("function Get-LibertixEvidenceUefiLoaderPath", 1)[1].split(
+        "\nfunction ", 1
+    )[0]
+    adapter = read("assets/live/libertix-uefi-adapter.sh")
+    verifier = read("assets/live/libertix-first-boot-verify.py")
+    families = read("assets/live/libertix-installation-plan.py")
+
+    assert f'return "{shim}"' in plan_loader and f'return "{grub}"' in plan_loader
+    assert '"debian" { return "' + shim + '" }' in evidence_loader
+    assert '"arch" { return "' + grub + '" }' in evidence_loader
+    assert "readonly LIBERTIX_SIGNED_BOOT_LOADER='" + shim + "'" in adapter
+    assert "readonly LIBERTIX_UNSIGNED_BOOT_LOADER='" + grub + "'" in adapter
+    assert 'arch) LIBERTIX_BOOT_LOADER="$LIBERTIX_UNSIGNED_BOOT_LOADER"' in adapter
+    assert f'uefi_loader_path=r"{shim}"' in verifier
+    assert f'uefi_loader_path=r"{grub}"' in verifier
+    assert 'UNSIGNED_BOOT_FAMILIES = frozenset({"arch"})' in families
+    # BIOS recovery imports PostInstallVerification from a flat directory
+    # without the plan module, so it must not import it.
+    assert not re.search(r"Import-Module[^\n]*Libertix\.InstallationPlan\.psm1", evidence)

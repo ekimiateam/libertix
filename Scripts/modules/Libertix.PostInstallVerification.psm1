@@ -893,6 +893,39 @@ function Invoke-LibertixWindowsFilesystemRepairIfRequired {
     }
 }
 
+# The BIOS recovery directory carries only the modules this file imports, so
+# the family-to-loader mapping is restated here rather than imported from
+# Libertix.InstallationPlan.psm1. Plans without a family mean debian.
+function Get-LibertixEvidenceUefiLoaderPath {
+    param([Parameter(Mandatory = $true)][object]$Plan)
+
+    $family = "debian"
+    if (Test-LibertixProperty -Object $Plan.distribution -Name "family") {
+        $family = [string]$Plan.distribution.family
+    }
+    switch -CaseSensitive ($family) {
+        "debian" { return "\EFI\Libertix\shimx64.efi" }
+        "arch" { return "\EFI\Libertix\grubx64.efi" }
+        default { throw "Installation plan distribution family is not supported: $family" }
+    }
+}
+
+# Evidence written before distribution families existed names the checks after
+# Debian tools (sudoMember, dpkgAuditClean); newer evidence is family-neutral.
+function Get-LibertixEvidenceFlag {
+    param(
+        [Parameter(Mandatory = $true)][object]$Object,
+        [Parameter(Mandatory = $true)][string[]]$Names
+    )
+
+    foreach ($name in $Names) {
+        if (Test-LibertixProperty -Object $Object -Name $name) {
+            return [bool]$Object.$name
+        }
+    }
+    return $false
+}
+
 function Assert-LibertixLinuxBootEvidence {
     param(
         [Parameter(Mandatory = $true)][object]$Evidence,
@@ -944,9 +977,11 @@ function Assert-LibertixLinuxBootEvidence {
         [string]$Evidence.system.fstabRootUuid -ne [string]$Evidence.root.uuid -or
         [string]$Evidence.system.machineIdSha256 -notmatch '^[0-9a-f]{64}$' -or
         [string]$Evidence.system.username -ne [string]$Plan.account.username -or
-        -not [bool]$Evidence.system.sudoMember -or
+        -not (Get-LibertixEvidenceFlag -Object $Evidence.system `
+            -Names @("administratorGroupMember", "sudoMember")) -or
         -not [bool]$Evidence.system.passwordActive -or
-        -not [bool]$Evidence.system.dpkgAuditClean -or
+        -not (Get-LibertixEvidenceFlag -Object $Evidence.system `
+            -Names @("packageDatabaseClean", "dpkgAuditClean")) -or
         [int]$Evidence.system.failedSystemdUnits -ne 0
     ) {
         throw "Linux boot evidence does not prove a healthy installed system."
@@ -986,7 +1021,7 @@ function Assert-LibertixLinuxBootEvidence {
             $commonEntryValid -and
             $bootChainType -eq "uefi-boot-current" -and
             [string]$uefiEntry.description -eq "Libertix" -and
-            [string]$uefiEntry.loaderPath -eq "\EFI\Libertix\shimx64.efi"
+            [string]$uefiEntry.loaderPath -eq (Get-LibertixEvidenceUefiLoaderPath -Plan $Plan)
         )
         $preferredWindowsPath = $false
         if ($commonEntryValid -and $bootChainType -eq "uefi-preferred-windows-path") {

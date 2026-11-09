@@ -1,7 +1,12 @@
 #!/bin/bash
 
 # Discover and validate the payload by filesystem capabilities. Distribution
-# names are presentation metadata and never select an extraction code path.
+# names are presentation metadata and never select an extraction code path;
+# only the signed plan's distribution family does.
+#
+#   debian  the ISO's filesystem.squashfs is extracted as the installed system.
+#   arch    the ISO's archiso airootfs.sfs is a read-only bootstrap root that
+#           installs the system with pacstrap (libertix-arch-family.sh).
 
 distribution_squashfs_path_exists() {
     local rootfs="$1" path="$2"
@@ -26,37 +31,80 @@ read_distribution_os_release_value() {
         '
 }
 
+distribution_rootfs_name() {
+    case "$1" in
+        debian) printf '%s\n' filesystem.squashfs ;;
+        arch) printf '%s\n' airootfs.sfs ;;
+        *) echo "Unsupported distribution family: $1" >&2; return 1 ;;
+    esac
+}
+
+distribution_required_capabilities() {
+    case "$1" in
+        debian)
+            printf '%s\n' \
+                etc/os-release \
+                var/lib/dpkg/status \
+                usr/sbin/update-grub \
+                usr/sbin/update-initramfs \
+                usr/bin/lsinitramfs
+            ;;
+        arch)
+            # pacman-more.conf is the target pacman.conf an archiso installer
+            # image ships; the online preflight proves its repositories work.
+            printf '%s\n' \
+                etc/os-release \
+                etc/pacman-more.conf \
+                etc/pacman.d/mirrorlist \
+                usr/bin/pacman \
+                usr/bin/pacman-key \
+                usr/bin/pacstrap \
+                usr/share/pacman/keyrings/archlinux.gpg
+            ;;
+        *) echo "Unsupported distribution family: $1" >&2; return 1 ;;
+    esac
+}
+
+distribution_family_tokens() {
+    case "$1" in
+        debian) printf '%s\n' debian ubuntu ;;
+        arch) printf '%s\n' arch ;;
+        *) echo "Unsupported distribution family: $1" >&2; return 1 ;;
+    esac
+}
+
 resolve_distribution_rootfs_or_die() {
-    local iso_root="$1" candidate
+    local iso_root="$1" family="${2:-debian}" candidate name
     local -a candidates=()
 
+    name="$(distribution_rootfs_name "$family")" || return 1
     while IFS= read -r -d '' candidate; do
         candidates+=("$candidate")
     done < <(
         find -L "$iso_root" -mindepth 2 -maxdepth 3 -type f \
-            -name filesystem.squashfs -print0
+            -name "$name" -print0
     )
 
     if [ "${#candidates[@]}" -ne 1 ]; then
-        echo "Expected exactly one filesystem.squashfs payload, found ${#candidates[@]}" >&2
+        echo "Expected exactly one $name payload, found ${#candidates[@]}" >&2
         return 1
     fi
     printf '%s\n' "${candidates[0]}"
 }
 
 assert_distribution_rootfs_compatible_or_die() {
-    local rootfs="$1" expected_id="$2" actual_id id_like token compatible=false
+    local rootfs="$1" expected_id="$2" family="${3:-debian}"
+    local actual_id id_like token compatible=false required
+    local -a required_paths family_tokens
 
     [ -f "$rootfs" ] || {
         echo "Distribution root filesystem is missing: $rootfs" >&2
         return 1
     }
-    for required in \
-        etc/os-release \
-        var/lib/dpkg/status \
-        usr/sbin/update-grub \
-        usr/sbin/update-initramfs \
-        usr/bin/lsinitramfs; do
+    mapfile -t required_paths < <(distribution_required_capabilities "$family")
+    mapfile -t family_tokens < <(distribution_family_tokens "$family")
+    [ "${#required_paths[@]}" -gt 0 ] && [ "${#family_tokens[@]}" -gt 0 ] || return 1
+    for required in "${required_paths[@]}"; do
         distribution_squashfs_path_exists "$rootfs" "$required" || {
             echo "Distribution payload is missing required capability: $required" >&2
             return 1
@@ -75,14 +123,14 @@ assert_distribution_rootfs_compatible_or_die() {
     }
 
     for token in $actual_id $id_like; do
-        case "$token" in
-            debian|ubuntu) compatible=true ;;
-        esac
+        if printf '%s\n' "${family_tokens[@]}" | grep -Fxq -- "$token"; then
+            compatible=true
+        fi
     done
     [ "$compatible" = true ] || {
-        echo "Distribution payload is not in the Debian/Ubuntu family" >&2
+        echo "Distribution payload is not in the $family family" >&2
         return 1
     }
 
-    echo "Distribution payload verified: ID=$actual_id ID_LIKE=${id_like:-none} rootfs=$rootfs"
+    echo "Distribution payload verified: ID=$actual_id ID_LIKE=${id_like:-none} rootfs=$rootfs family=$family"
 }

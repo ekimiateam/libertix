@@ -9,6 +9,7 @@
     {
       "id": "mint",
       "name": "Linux Mint 22.3 Cinnamon",
+      "family": "debian",
       "osReleaseId": "linuxmint",
       "grubDisplayName": "Linux Mint 22.3 Cinnamon",
       "grubIcon": "linuxmint",
@@ -26,6 +27,7 @@
     {
       "id": "zorin",
       "name": "Zorin OS 18.1 Core",
+      "family": "debian",
       "osReleaseId": "zorin",
       "grubDisplayName": "Zorin OS 18.1 Core",
       "grubIcon": "zorin",
@@ -38,6 +40,22 @@
       "isoInstallerFileName": "zorin.iso",
       "isoInstallerSha256": "44649b97bd307fc4c8529205d098ebbf98575a1e1ba2ee7d7005b697af1721d5",
       "isoInstallerSizeBytes": 3909091328,
+      "sizeInGB": 20
+    },
+    {
+      "id": "cachyos",
+      "name": "CachyOS KDE Plasma",
+      "family": "arch",
+      "osReleaseId": "cachyos",
+      "grubDisplayName": "CachyOS",
+      "grubIcon": "arch",
+      "secureBootMicrosoftAuthorities": [],
+      "description": "CachyOS is a fast, Arch Linux-based desktop with KDE Plasma, installed from its official online repositories.",
+      "imageUrl": "https://raw.githubusercontent.com/CachyOS/website/525771696470754a54e806d8d1260e7fc70a3e99/src/assets/images/kde.png",
+      "isoInstaller": "https://mirror.cachyos.org/ISO/desktop/260809/cachyos-desktop-linux-260809.iso",
+      "isoInstallerFileName": "cachyos.iso",
+      "isoInstallerSha256": "959f6577f45e25ee9fd8c220fd221b08e4ea79412c7315c0f922dd6d86d5e33c",
+      "isoInstallerSizeBytes": 3188850688,
       "sizeInGB": 20
     }
   ]

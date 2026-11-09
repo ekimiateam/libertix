@@ -589,6 +589,9 @@ function Get-FirmwareBootBypassEvidence {
         }
         Import-Module -Name $modulePath -Force -ErrorAction Stop
     }
+    # Reading the plan imports the module that maps its family to a loader.
+    $recoveryPlan = Read-ValidatedRecoveryPlan -State $State
+    $libertixLoaderPath = Get-LibertixPlanUefiLoaderPath -Plan $recoveryPlan
 
     return Invoke-WithVerifiedEsp -State $State -Action {
         param($espPartition, $espRoot)
@@ -608,7 +611,7 @@ function Get-FirmwareBootBypassEvidence {
             $ownedBootText -notmatch '^[0-9a-fA-F]{4}$' -or
             ([string]$ownerLines[2]).Trim() -ne [string]$espPartition.PartitionNumber -or
             ([string]$ownerLines[3]).Trim().ToLowerInvariant() -ne $espGuid -or
-            ([string]$ownerLines[4]).Trim() -ne "\EFI\Libertix\shimx64.efi"
+            ([string]$ownerLines[4]).Trim() -ne $libertixLoaderPath
         ) {
             throw "Installed Libertix ESP ownership marker does not match the recorded transaction."
         }
@@ -670,7 +673,7 @@ function Get-FirmwareBootBypassEvidence {
             -Bytes $libertixBytes `
             -Partition $espPartition `
             -Disk $disk `
-            -ExpectedLoaderPath "\EFI\Libertix\shimx64.efi")) {
+            -ExpectedLoaderPath $libertixLoaderPath)) {
             throw "Owned Libertix firmware entry does not target the recorded ESP loader."
         }
         if ($ownedBootNumber -notin @($bootOrder)) {
@@ -686,7 +689,7 @@ function Get-FirmwareBootBypassEvidence {
             windowsBootNumber = ("Boot{0:X4}" -f $currentBootNumber)
             windowsLoaderPath = "\EFI\Microsoft\Boot\bootmgfw.efi"
             libertixBootNumber = ("Boot{0:X4}" -f $ownedBootNumber)
-            libertixLoaderPath = "\EFI\Libertix\shimx64.efi"
+            libertixLoaderPath = $libertixLoaderPath
             esp = [ordered]@{
                 diskNumber = [int]$espPartition.DiskNumber
                 partitionNumber = [int]$espPartition.PartitionNumber

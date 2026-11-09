@@ -42,6 +42,10 @@ namespace Libertix.Installation
             await UnattendedWorkflow.PublishStageAndWaitAsync(
                 "configuration-disk-size-applied");
 
+            if (options.MigrateWindowsPreferences &&
+                !DistributionFamily.SupportsWindowsPreferenceMigration(distribution.Family))
+                throw new InvalidOperationException(
+                    "Windows preference migration is not supported for the unattended distribution.");
             state.Sharing = new SharingOptions
             {
                 ShareWindowsFilesInLinux = options.ShareWindowsFilesInLinux,

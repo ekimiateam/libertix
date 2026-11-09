@@ -364,8 +364,104 @@ def test_installed_system_proof_checks_account_packages_and_services(
 
     assert proof["rootReadWrite"] is True
     assert proof["username"] == "test"
-    assert proof["dpkgAuditClean"] is True
+    assert proof["administratorGroup"] == "sudo"
+    assert proof["administratorGroupMember"] is True
+    assert proof["packageDatabaseClean"] is True
     assert proof["failedSystemdUnits"] == 0
+
+
+def test_arch_installed_system_proof_uses_wheel_and_pacman(
+    verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_uuid = "11111111-2222-3333-4444-555555555555"
+    fstab = tmp_path / "fstab"
+    machine_id = tmp_path / "machine-id"
+    fstab.write_text(f"UUID={root_uuid} / ext4 defaults 0 1\n", encoding="utf-8")
+    machine_id.write_text("a" * 32 + "\n", encoding="ascii")
+    # No dpkg entry: an Arch-family proof must never call dpkg.
+    outputs = {
+        ("findmnt", "-n", "-o", "OPTIONS", "/"): "rw,relatime",
+        ("getent", "passwd", "test"): "test:x:1000:1000::/home/test:/bin/bash",
+        ("id", "-nG", "test"): "test wheel rfkill sys users",
+        ("passwd", "-S", "test"): "test P 2026-08-11 0 99999 7 -1",
+        ("visudo", "-cf", "/etc/sudoers"): "/etc/sudoers: parsed OK",
+        ("pacman", "-Dk"): "No database errors have been found!",
+        ("systemctl", "--failed", "--no-legend", "--plain"): "",
+    }
+
+    monkeypatch.setattr(verifier, "run", lambda *args: outputs[args])
+    proof = verifier.verify_installed_system(
+        {"distribution": {"family": "arch"}, "account": {"username": "test"}},
+        root_uuid,
+        fstab_path=fstab,
+        machine_id_path=machine_id,
+    )
+
+    assert proof["administratorGroup"] == "wheel"
+    assert proof["packageDatabaseClean"] is True
+
+
+def test_arch_installed_system_proof_rejects_a_user_outside_wheel(
+    verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_uuid = "11111111-2222-3333-4444-555555555555"
+    fstab = tmp_path / "fstab"
+    machine_id = tmp_path / "machine-id"
+    fstab.write_text(f"UUID={root_uuid} / ext4 defaults 0 1\n", encoding="utf-8")
+    machine_id.write_text("a" * 32 + "\n", encoding="ascii")
+    outputs = {
+        ("findmnt", "-n", "-o", "OPTIONS", "/"): "rw,relatime",
+        ("getent", "passwd", "test"): "test:x:1000:1000::/home/test:/bin/bash",
+        ("id", "-nG", "test"): "test sudo",
+    }
+
+    monkeypatch.setattr(verifier, "run", lambda *args: outputs[args])
+    with pytest.raises(verifier.VerificationError, match="not a member of wheel"):
+        verifier.verify_installed_system(
+            {"distribution": {"family": "arch"}, "account": {"username": "test"}},
+            root_uuid,
+            fstab_path=fstab,
+            machine_id_path=machine_id,
+        )
+
+
+def test_unknown_distribution_family_is_rejected(verifier: ModuleType) -> None:
+    with pytest.raises(verifier.VerificationError, match="family is invalid"):
+        verifier.distribution_family({"distribution": {"family": "nixos"}})
+
+
+def test_arch_kernel_images_follow_the_running_kernel_package(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    modules = tmp_path / "modules"
+    (modules / "7.1.6-1-cachyos").mkdir(parents=True)
+    (modules / "7.1.6-1-cachyos" / "pkgbase").write_text("linux-cachyos\n", encoding="utf-8")
+    boot = tmp_path / "boot"
+    plan = {"distribution": {"family": "arch"}}
+
+    assert verifier.installed_kernel_images(
+        plan, "7.1.6-1-cachyos", boot=boot, modules=modules
+    ) == (boot / "vmlinuz-linux-cachyos", boot / "initramfs-linux-cachyos.img")
+    assert verifier.installed_kernel_images(
+        {"distribution": {"family": "debian"}}, "6.8.0-1", boot=boot, modules=modules
+    ) == (boot / "vmlinuz-6.8.0-1", boot / "initrd.img-6.8.0-1")
+    with pytest.raises(verifier.VerificationError, match="running kernel package"):
+        verifier.installed_kernel_images(plan, "missing", boot=boot, modules=modules)
+
+
+def test_arch_uefi_owner_marker_requires_the_grub_loader(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    marker = tmp_path / ".libertix-owner"
+    plan_id = "0123456789abcdef0123456789abcdef"
+    grub_loader = verifier.DISTRIBUTION_FAMILY_PROFILES["arch"].uefi_loader_path
+    marker.write_text(f"{plan_id}\n0007\n1\n{ESP_GUID}\n{grub_loader}\n", encoding="utf-8")
+
+    assert verifier.read_uefi_owner_marker(marker, plan_id, grub_loader)["loaderPath"] == (
+        r"\EFI\Libertix\grubx64.efi"
+    )
+    with pytest.raises(verifier.VerificationError, match="ownership target"):
+        verifier.read_uefi_owner_marker(marker, plan_id)
 
 
 @pytest.mark.parametrize(
@@ -498,6 +594,40 @@ def test_localization_proof_rejects_an_unrequested_compiled_locale(
         )
 
 
+def test_arch_localization_proof_reads_systemd_locale_without_lc_all(
+    verifier: ModuleType, tmp_path: Path
+) -> None:
+    locale_file = tmp_path / "locale.conf"
+    keyboard_file = tmp_path / "vconsole.conf"
+    # systemd rejects LC_ALL in locale.conf, so the Arch profile does not require it.
+    locale_file.write_text("LANG=fr_FR.UTF-8\nLANGUAGE=fr\n", encoding="utf-8")
+    keyboard_file.write_text(
+        "KEYMAP=fr\nXKBLAYOUT=fr\nXKBMODEL=pc105\nXKBVARIANT=\nXKBOPTIONS=\n",
+        encoding="utf-8",
+    )
+    plan = {
+        "distribution": {"family": "arch"},
+        "locale": {
+            "languageCode": "fr",
+            "systemLanguage": "fr_FR.UTF-8",
+            "keyboardLayout": "fr",
+            "keyboardVariant": "",
+            "keyboardModel": "pc105",
+        },
+    }
+
+    proof = verifier.verify_localization(
+        plan,
+        locale_path=locale_file,
+        keyboard_path=keyboard_file,
+        available_locales="C\nC.utf8\nen_US.utf8\nfr_FR.utf8\nPOSIX\n",
+    )
+
+    assert proof["verified"] is True
+    assert verifier.DISTRIBUTION_FAMILY_PROFILES["arch"].locale_path == Path("/etc/locale.conf")
+    assert verifier.DISTRIBUTION_FAMILY_PROFILES["arch"].keyboard_path == Path("/etc/vconsole.conf")
+
+
 def test_local_success_status_retains_detailed_proofs(
     verifier: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -509,7 +639,7 @@ def test_local_success_status_retains_detailed_proofs(
     evidence = {
         "distribution": {"id": "zorin"},
         "root": {"filesystem": "ext4"},
-        "system": {"dpkgAuditClean": True},
+        "system": {"packageDatabaseClean": True},
         "grub": {"syntaxValid": True},
     }
 
@@ -524,7 +654,7 @@ def test_local_success_status_retains_detailed_proofs(
     assert status["status"] == "succeeded"
     assert status["attemptId"] == "a" * 32
     assert status["root"]["filesystem"] == "ext4"
-    assert status["system"]["dpkgAuditClean"] is True
+    assert status["system"]["packageDatabaseClean"] is True
     assert status["grub"]["syntaxValid"] is True
     assert status_path.stat().st_mode & 0o777 == 0o644
 

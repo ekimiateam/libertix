@@ -367,6 +367,59 @@ Describe "Installation plan contract" {
             Should -Throw "*secureBootMicrosoftAuthorities may contain only 2011 and 2023*"
     }
 
+    It "accepts an Arch-family plan without a signed boot chain" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution | Add-Member -NotePropertyName family -NotePropertyValue "arch"
+        $plan.distribution.secureBootMicrosoftAuthorities = @()
+        $plan.runtime.secureBootEnabled = $false
+        { Assert-LibertixInstallationPlan -Plan $plan } | Should -Not -Throw
+        Get-LibertixPlanUefiLoaderPath -Plan $plan | Should -Be "\EFI\Libertix\grubx64.efi"
+    }
+
+    It "treats a plan without a family as a Debian plan" {
+        $plan = New-ValidInstallationPlan
+        Get-LibertixPlanDistributionFamily -Distribution $plan.distribution | Should -Be "debian"
+        Get-LibertixPlanUefiLoaderPath -Plan $plan | Should -Be "\EFI\Libertix\shimx64.efi"
+    }
+
+    It "rejects an Arch-family plan that claims a signed shim" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution | Add-Member -NotePropertyName family -NotePropertyValue "arch"
+        $plan.runtime.secureBootEnabled = $false
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*must be empty for a distribution without a Microsoft-signed boot chain*"
+    }
+
+    It "rejects an Arch-family plan while Secure Boot is enabled" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution | Add-Member -NotePropertyName family -NotePropertyValue "arch"
+        $plan.distribution.secureBootMicrosoftAuthorities = @()
+        $plan.runtime.secureBootEnabled = $true
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*Secure Boot must be disabled*"
+    }
+
+    It "rejects Windows preference migration for an Arch-family plan" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution | Add-Member -NotePropertyName family -NotePropertyValue "arch"
+        $plan.distribution.secureBootMicrosoftAuthorities = @()
+        $plan.runtime.secureBootEnabled = $false
+        $plan.features.windowsPreferenceMigration.enabled = $true
+        $plan.features.windowsPreferenceMigration.bundleFileName = `
+            "windows-preferences.secret.json"
+        $plan.features.windowsPreferenceMigration.bundleSha256 = ("e" * 64)
+        $plan.features.windowsPreferenceMigration.bundleSizeBytes = 4096
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*supported only for Debian-family distributions*"
+    }
+
+    It "rejects an unknown distribution family" {
+        $plan = New-ValidInstallationPlan
+        $plan.distribution | Add-Member -NotePropertyName family -NotePropertyValue "nixos"
+        { Assert-LibertixInstallationPlan -Plan $plan } |
+            Should -Throw "*distribution.family is not a supported distribution family*"
+    }
+
     It "rejects a Debian or Ubuntu reserved Linux username" {
         $plan = New-ValidInstallationPlan
         $plan.account.username = "admin"

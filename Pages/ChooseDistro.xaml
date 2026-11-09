@@ -140,6 +140,22 @@
                                     <TextBlock Text="{Binding Description}"
                                                Foreground="{DynamicResource TextPrimary}"
                                                TextWrapping="Wrap"/>
+                                    <TextBlock Text="{DynamicResource ChooseDistroOnlineInstallNote}"
+                                               Foreground="{DynamicResource WarningColor}"
+                                               FontSize="12"
+                                               Margin="0,6,0,0"
+                                               TextWrapping="Wrap">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding RequiresNetworkInstall}" Value="True">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
                                 </StackPanel>
 
                                 <Border Grid.Row="2"
@@ -216,6 +232,16 @@
                 </StackPanel>
             </Border>
         </Border>
+
+        <TextBlock Grid.Row="3"
+                   x:Name="SecureBootBlockedText"
+                   Text="{DynamicResource ChooseDistroSecureBootMustBeDisabled}"
+                   Foreground="{DynamicResource WarningColor}"
+                   FontSize="14"
+                   Margin="20,20,240,20"
+                   VerticalAlignment="Center"
+                   TextWrapping="Wrap"
+                   Visibility="Collapsed"/>
 
         <Button Grid.Row="3"
                 x:Name="NextButton"

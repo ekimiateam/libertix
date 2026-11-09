@@ -16,7 +16,7 @@
   <a href="https://ekimia.fr/donations/campagne-libertix/"><b>Donate</b></a>
 </p>
 
-**Libertix** is a Windows application that installs a supported Debian/Ubuntu-family desktop system
+**Libertix** is a Windows application that installs a supported Linux desktop system
 alongside an existing Windows system. You choose a distribution, a size and an account in a simple
 wizard; Libertix prepares Windows, boots a purpose-built live environment, installs Linux for you and
 configures a dual-boot menu for either BIOS/MBR or UEFI/GPT machines. There is no USB stick to
@@ -48,7 +48,8 @@ https://github.com/user-attachments/assets/d0b94e3b-0c9c-406e-9ee4-da1cb0888cdc
 - **Works for install parties.** Distribution files can be shared from an adjacent folder or a local
   server, so several PCs do not each download the same ISO.
 
-Supported distributions: **Linux Mint 22.3 Cinnamon** and **Zorin OS 18.1 Core**.
+Supported distributions: **Linux Mint 22.3 Cinnamon**, **Zorin OS 18.1 Core** and
+**CachyOS KDE Plasma** (see [CachyOS](#cachyos) for what differs).
 
 ### New in Libertix 0.4
 
@@ -91,7 +92,9 @@ verifies that Windows boots as before.
 - BIOS with an MBR disk, or UEFI with a GPT disk
 - .NET Framework 4.8
 - Administrator privileges
-- Linux Mint 22.3 Cinnamon or Zorin OS 18.1 Core
+- Linux Mint 22.3 Cinnamon, Zorin OS 18.1 Core, or CachyOS KDE Plasma
+- For CachyOS only: Secure Boot turned off in the firmware settings, and a wired internet
+  connection while the live installer runs
 - Enough free space for at least 20 GiB of Linux, the installer media and the Windows free-space reserve
 - At least 10 GiB reported shrinkable by Windows for initial preparation
 - A storage layout accepted by the compatibility preflight
@@ -120,6 +123,31 @@ The current free-space reserve is 8 GiB after accounting for installer media and
 BitLocker or Device Encryption must be fully decrypted before the live installer boots. Libertix
 can request decryption and waits for it to finish. The detected Windows Recovery partition is kept
 outside the Linux allocation and is checked again before the live environment writes to disk.
+
+### CachyOS
+
+Mint and Zorin are copied from their ISO. CachyOS, an Arch Linux-based distribution, no longer
+ships an offline installer, so Libertix installs it the way CachyOS's own installer does:
+
+- The CachyOS ISO is downloaded and verified with its SHA-256 hash like the others. Its live
+  system is used only as a read-only toolbox: it provides `pacstrap`, the CachyOS and Arch
+  keyrings and the mirror lists. Every package is then downloaded from the official
+  repositories and checked against those keys.
+- The live installer needs a **wired internet connection** (DHCP). Before it touches any Linux
+  storage, it verifies the ISO, brings up the network and loads the signed package databases.
+  If that fails, Windows is restored by the normal rollback.
+- CachyOS has no Microsoft-signed bootloader, so **Secure Boot must be turned off**. Libertix
+  says so when CachyOS is selected, refuses the plan while Secure Boot is on, and checks the
+  firmware again in the live system. Libertix's own GRUB menu is used, as for Mint and Zorin.
+- The installed system is KDE Plasma with CachyOS's base, hardware detection (`chwd`) and
+  settings. It uses the generic x86-64 CachyOS repository, which runs on every 64-bit CPU.
+  CPU-optimized repositories can be enabled later with CachyOS's own tools.
+- Pacman hooks keep the validated Libertix boot menu and GRUB core image in sync after GRUB or
+  kernel updates, the role `dpkg-divert` and the GRUB packages play on Mint and Zorin.
+- The optional migration of Windows preferences writes Cinnamon/GNOME settings and is not
+  offered for CachyOS. The "preferred Windows boot path" workaround for firmware that ignores
+  the Libertix boot entry needs a signed shim, so on such firmware the remedy is to remove
+  Linux with Libertix.
 
 ## Getting started
 
